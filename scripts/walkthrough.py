@@ -206,109 +206,134 @@ def run_phase_oak_intercept(drv: WalkthroughDriver) -> None:
         drv.press("right", note="pallet → intercept row")
     for _ in range(5):
         drv.press("up", note="pallet → intercept (10, 1)")
-    # Drive the script: A when locked (to skip text), idle when freed.
-    for _ in range(200):
+    # Drive Oak's intercept: mash A with enough time between presses
+    # for the sprite animations to play out. Exit when we're inside
+    # OAKS_LAB and input is unlocked.
+    for _ in range(120):
         gs = drv.session.read_game_state()
-        if gs.overworld.map_id == MAP_OAKS_LAB and not drv.input_locked():
-            # Extra patience: give a bit more idle for Oak to finish
-            # walking to his spot, then check again.
-            drv.idle(60, render=False)
-            if drv.session.read_game_state().overworld.map_id == MAP_OAKS_LAB:
-                return
-        if drv.input_locked():
-            # Sprite animation: just idle
-            drv.idle(30, render=False)
-        else:
-            # Dialog: advance with A
-            drv.press("a", note="Oak intercept dialog", step_ticks=30)
+        if gs.overworld.map_id == MAP_OAKS_LAB:
+            # Give a few more ticks for Oak to finish his walk-in
+            # animation, then verify input is unlocked.
+            for _ in range(10):
+                drv.idle(60, render=False)
+                if not drv.input_locked():
+                    return
+            return
+        drv.press("a", note="Oak intercept", step_ticks=60)
 
 
 def run_phase_pick_starter(drv: WalkthroughDriver) -> None:
     """Inside Oak's lab: clear his speech, walk to Bulbasaur at (8, 3),
     press A, confirm, skip nickname.
 
-    Precondition: player is inside OAKS_LAB. Bails out immediately if
-    not, so we don't pollute other maps with rogue A/UP/RIGHT presses.
+    Oak's speech in the lab uses ``wOaksLabCurScript`` to gate player
+    input. Control is granted when the script reaches the "choose
+    your Pokémon" phase. We detect that by checking whether a sustained
+    movement attempt actually moves the player.
     """
     if drv.session.read_game_state().overworld.map_id != MAP_OAKS_LAB:
         print("WARN: pick_starter called outside OAKS_LAB", file=sys.stderr)
         return
 
-    # Mash A through Oak's "here are 3 Pokéballs" speech. Control is
-    # restored when the player can move (probed by trying DOWN and
-    # checking position change). Try at least 40 A presses first.
-    for _ in range(40):
+    # Phase 1: mash A to advance Oak's speech. Test control AFTER each
+    # A by trying DOWN with enough step_ticks for the animation to
+    # register (30 ticks). Require multiple consecutive moves to
+    # confirm we've escaped dialog (dialog pressing DOWN is a no-op,
+    # but cursor in a menu moves with DOWN too — a second press moves
+    # the player).
+    control_attempts = 0
+    for iteration in range(80):
         drv.press("a", note="lab: Oak speech", step_ticks=30)
-        if not drv.input_locked():
-            # Try movement probe
-            gs_before = drv.session.read_game_state()
-            drv.press("down", note="lab: control probe", step_ticks=20)
-            gs_after = drv.session.read_game_state()
-            if (gs_after.overworld.x, gs_after.overworld.y) != (
-                gs_before.overworld.x, gs_before.overworld.y
+        gs_before = drv.session.read_game_state()
+        drv.press("down", note="lab: probe", step_ticks=30)
+        gs_after = drv.session.read_game_state()
+        if (gs_after.overworld.x, gs_after.overworld.y) != (
+            gs_before.overworld.x, gs_before.overworld.y
+        ):
+            # Movement happened — we have control (or it's a menu).
+            # Verify with another DOWN — if that ALSO moves, overworld.
+            gs_before2 = drv.session.read_game_state()
+            drv.press("down", note="lab: probe 2", step_ticks=30)
+            gs_after2 = drv.session.read_game_state()
+            if (gs_after2.overworld.x, gs_after2.overworld.y) != (
+                gs_before2.overworld.x, gs_before2.overworld.y
             ):
                 break
 
-    # Walk to (8, 4) — one south of Bulbasaur ball at (8, 3).
-    for _ in range(6):
+    # Phase 2: navigate from current position to (8, 4) then face UP.
+    gs = drv.session.read_game_state()
+    # Walk right to x=8
+    for _ in range(8):
         gs = drv.session.read_game_state()
         if gs.overworld.x >= 8: break
         drv.press("right", note="lab → Bulbasaur row")
-    # Adjust y if needed (want y=4).
-    for _ in range(3):
+    # Set y to 4
+    for _ in range(4):
         gs = drv.session.read_game_state()
-        if gs.overworld.y <= 4: break
-        drv.press("up", note="lab → Bulbasaur col")
-    for _ in range(3):
-        gs = drv.session.read_game_state()
-        if gs.overworld.y >= 4: break
-        drv.press("down", note="lab → Bulbasaur col")
+        if gs.overworld.y == 4: break
+        drv.press("up" if gs.overworld.y > 4 else "down", note="lab → ball col")
     # Face UP toward ball.
     drv.press("up", note="lab: face Bulbasaur")
-    # Interact.
     drv.press("a", note="pick Bulbasaur", step_ticks=60)
 
-    # Starter pickup: ~13 A presses trigger party[0] = Bulbasaur.
-    for _ in range(25):
+    # Phase 3: starter dialog. Wait for party.count to become 1.
+    for _ in range(30):
         drv.press("a", note="starter dialog", step_ticks=30)
         if drv.session.read_game_state().party.count > 0:
             break
-    # "Give a nickname?" prompt: DOWN + A selects "NO".
+    if drv.session.read_game_state().party.count == 0:
+        print("WARN: starter not acquired", file=sys.stderr)
+        return
+    # "Nickname?" prompt: DOWN + A → NO.
     drv.press("down", note="no nickname")
     drv.press("a", note="no nickname confirm", step_ticks=60)
-    # Post-starter chatter.
-    for _ in range(40):
-        drv.press("a", note="post-starter", step_ticks=30)
-        gs = drv.session.read_game_state()
-        if not drv.input_locked():
-            # Probe: pressing A during dialog advances; during control
-            # it does nothing. Try DOWN to detect.
-            before = (gs.overworld.x, gs.overworld.y)
-            drv.press("down", note="probe DOWN", step_ticks=20)
-            after = drv.session.read_game_state()
-            if (after.overworld.x, after.overworld.y) != before:
-                break
+    # Post-starter: Oak speech + rival picks his Pokéball. Mash A
+    # until wOaksLabCurScript reaches 10 (RivalChallengesPlayer, the
+    # state where walking to y=6 fires the battle). Script state is
+    # the authoritative signal; movement probes don't work here
+    # because the player's input is still gated until the challenge
+    # actually triggers.
+    sym = drv.session.symbols
+    mem = drv.session._pyboy.memory  # type: ignore[attr-defined]
+    for _ in range(100):
+        if "wOaksLabCurScript" in sym:
+            if sym.read_u8(mem, "wOaksLabCurScript") >= 10:
+                return
+        drv.press("a", note="post-starter dialog", step_ticks=30)
 
 
 def run_phase_rival_battle(drv: WalkthroughDriver) -> None:
-    """Walk to (5, 6) in the lab to trigger rival challenge, then
-    mash A through the battle."""
-    # From (8, 4) after probe: DOWN LEFT×3 DOWN → (5, 6).
+    """Walk to (5, 6) to trigger the rival challenge, mash A through
+    the pre-battle dialog, then spam A in the battle.
+
+    Precondition: ``wOaksLabCurScript >= 10`` (handled by the
+    preceding ``run_phase_pick_starter``). Starting position is
+    (8, 4) — the tile south of the Bulbasaur ball.
+    """
+    # Walk from (8, 4) to (5, 6) via verified path: DOWN LEFT×3 DOWN.
     for d in ["down", "left", "left", "left", "down"]:
-        drv.press(d, note=f"rival-trigger {d}")
-    # Wait for battle to start.
-    for _ in range(20):
         gs = drv.session.read_game_state()
         if gs.battle.active:
             break
-        drv.idle(60, render=False)
-    # Battle loop.
+        drv.press(d, note="rival-trigger")
+
+    # At y=6 the challenge script fires: "GARY: Wait, ASH!" dialog
+    # plays, then rival sprite walks toward us, then battle starts.
+    # We need to mash A to advance the pre-battle dialog.
+    for i in range(50):
+        if drv.session.read_game_state().battle.active:
+            break
+        drv.press("a", note=f"rival challenge dialog ~{i}", step_ticks=30)
+
+    # Battle loop: mash A for Tackle.
     for i in range(400):
         gs = drv.session.read_game_state()
         if not gs.battle.active:
             break
         drv.press("a", note=f"rival battle ~{i}", step_ticks=30)
-    # Post-battle: Oak's "Go talk to your rival" etc. Walk DOWN to exit.
+
+    # Post-battle: Oak's dialog, rival walks out. Advance with A and
+    # attempt to walk DOWN toward lab exit.
     for _ in range(80):
         gs = drv.session.read_game_state()
         if gs.overworld.map_id == MAP_PALLET_TOWN:
@@ -330,7 +355,13 @@ def run_phase_pallet_to_route1(drv: WalkthroughDriver) -> None:
         print(f"WARN: not in Pallet, map=0x{gs.overworld.map_id:02x}",
               file=sys.stderr)
         return
-    path = ["left"] * 3 + ["up"] * 10 + ["right"] + ["up"] * 3
+    # Post-lab-exit lands on tile (12, 11) = the lab door. Pressing UP
+    # from (12, 11) re-enters the lab. Step DOWN first to get off the
+    # door threshold, then take the BFS-verified path from (12, 12).
+    # Note: after warp-in the player faces DOWN, so the first LEFT
+    # press only *turns* the player; we need one extra to compensate.
+    drv.press("down", note="pallet: clear lab door")
+    path = ["left"] * 4 + ["up"] * 11 + ["right"] + ["up"] * 3
     for d in path:
         gs = drv.session.read_game_state()
         if gs.overworld.map_id == MAP_ROUTE_1:
@@ -351,22 +382,50 @@ def run_phase_route1_to_viridian(drv: WalkthroughDriver) -> None:
         ["up"] * 6 + ["right"] * 5 + ["up"] * 11 +
         ["left"] * 3 + ["up"] * 3
     )
-    for d in path:
+
+    def _handle_intr() -> bool:
         gs = drv.session.read_game_state()
-        if gs.overworld.map_id == MAP_VIRIDIAN_CITY:
-            return
         if gs.battle.active:
-            # Mash A to use Tackle; Bulbasaur usually OHKOs Route 1 mons.
             for _ in range(100):
                 g = drv.session.read_game_state()
                 if not g.battle.active:
                     break
                 drv.press("a", note="wild battle", step_ticks=30)
-            continue
+            return True
         if drv.input_locked():
             drv.press("a", note="route locked dialog", step_ticks=30)
+            return True
+        return False
+
+    for d in path:
+        gs = drv.session.read_game_state()
+        if gs.overworld.map_id == MAP_VIRIDIAN_CITY:
+            return
+        if _handle_intr():
             continue
         drv.press(d, note=f"Route 1 → Viridian ({d})")
+
+    # Fallback: bump-walk UP with LEFT/RIGHT detours if blocked.
+    # Each direction change burns an extra press on turn-only, so the
+    # pre-computed path may leave us 1-2 tiles short.
+    for _ in range(40):
+        gs = drv.session.read_game_state()
+        if gs.overworld.map_id == MAP_VIRIDIAN_CITY:
+            return
+        if _handle_intr():
+            continue
+        prev = (gs.overworld.x, gs.overworld.y)
+        drv.press("up", note="Route 1 → Viridian (finish up)")
+        after = drv.session.read_game_state()
+        if (after.overworld.x, after.overworld.y) == prev:
+            # UP blocked — try LEFT then RIGHT
+            drv.press("left", note="Route 1 → Viridian (detour left)")
+            drv.press("up", note="Route 1 → Viridian (detour up)")
+            after2 = drv.session.read_game_state()
+            if (after2.overworld.x, after2.overworld.y) == (after.overworld.x, after.overworld.y):
+                drv.press("right", note="Route 1 → Viridian (detour right)")
+                drv.press("right", note="Route 1 → Viridian (detour right)")
+                drv.press("up", note="Route 1 → Viridian (detour up)")
 
 
 # ---------------------------------------------------------------------------
