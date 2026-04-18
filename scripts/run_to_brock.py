@@ -367,44 +367,54 @@ class Driver:
                 if (self.gs().overworld.x, self.gs().overworld.y) == before:
                     self.press("right"); self.press("right"); self.press("up")
 
-    def run_route2_to_forest(self) -> None:
-        """Route 2 (8, 71) → Viridian Forest south gate at (3, 42).
+    def _step_up_with_left_detour(self, max_left: int = 6) -> bool:
+        """Try to move UP one tile, detouring LEFT as needed.
 
-        The main Route 2 dirt path runs north along x~8 through the grass.
-        The forest south gate building is on the WEST side — you have to
-        go north first, then west near y~55 once the path widens. Going
-        west too early bumps into the tree wall at x<8.
+        Route 2's tree-wall forces a zig-zag: at each latitude only one
+        specific x has a northbound opening, and that x drifts further
+        west the further north you go. Empirically (see probe_route2.py):
+          (8,62) UP blocked → LEFT → (7,62) UP opens for 5 tiles
+          (7,57) UP blocked → LEFT×3 → (4,57) UP opens for 9 tiles
+          (4,48) UP blocked → LEFT×? → next opening
+        So: try UP; if blocked, step LEFT once and retry, up to `max_left`.
+        Returns True if we advanced north, False if boxed in.
         """
-        # Phase A: head straight UP on x=8 until y~55 (below the bend).
-        for _ in range(200):
+        before = (self.gs().overworld.x, self.gs().overworld.y)
+        self.press("up")
+        if (self.gs().overworld.x, self.gs().overworld.y) != before:
+            return True
+        for _ in range(max_left):
+            self.press("left")
             gs = self.gs()
-            if gs.overworld.map_id != M_ROUTE_2: break
-            if gs.battle.active: self.resolve_battle(); continue
-            if self.joy_locked(): self.press("a"); continue
-            if gs.overworld.y <= 55: break
+            if (gs.overworld.x, gs.overworld.y) == before:
+                # west also blocked — give up for this call
+                return False
             before = (gs.overworld.x, gs.overworld.y)
             self.press("up")
-            if (self.gs().overworld.x, self.gs().overworld.y) == before:
-                # Detour around an obstacle but keep mostly on x=8
-                self.press("right"); self.press("up"); self.press("left")
+            if (self.gs().overworld.x, self.gs().overworld.y) != before:
+                return True
+        return False
 
-        # Phase B: now head WEST to x=3, then UP to the forest gate.
-        for _ in range(400):
+    def run_route2_to_forest(self) -> None:
+        """Route 2 (8, 71) → Viridian Forest (either via south gate or
+        direct edge transition at the north end of Route 2's south half).
+
+        Pattern: repeatedly call `_step_up_with_left_detour`. When the
+        map changes (0x32 south gate, or 0x33 forest interior), stop.
+        """
+        for _ in range(300):
             gs = self.gs()
-            if gs.overworld.map_id == M_VIRIDIAN_FOREST_SOUTH_GATE: break
-            if gs.overworld.map_id == M_VIRIDIAN_FOREST: break
+            if gs.overworld.map_id in (M_VIRIDIAN_FOREST_SOUTH_GATE,
+                                       M_VIRIDIAN_FOREST):
+                break
             if gs.battle.active: self.resolve_battle(); continue
             if self.joy_locked(): self.press("a"); continue
-            before = (gs.overworld.x, gs.overworld.y)
-            if gs.overworld.x > 3:
-                self.press("left")
-                if (self.gs().overworld.x, self.gs().overworld.y) == before:
-                    # west blocked — try going up a row first
-                    self.press("up"); self.press("left")
-            else:
-                self.press("up")
-                if (self.gs().overworld.x, self.gs().overworld.y) == before:
-                    self.press("right"); self.press("up"); self.press("left")
+            if not self._step_up_with_left_detour(max_left=6):
+                # Fully boxed in — try a wider swing (maybe the gap is
+                # east instead of west for this row).
+                self.press("right"); self.press("right")
+                if not self._step_up_with_left_detour(max_left=8):
+                    break  # stuck
         # Through south gate into forest proper
         for _ in range(20):
             if self.gs().overworld.map_id == M_VIRIDIAN_FOREST: break
@@ -510,7 +520,9 @@ def main():
         raise SystemExit("need POKERED_ROM_PATH, POKERED_SYM_PATH")
 
     session = Session.from_files(rom, sym,
-        expected_rom_sha1="ea9bcae617fdf159b045185467ae58b2e4a48b9a")
+        expected_rom_sha1=os.environ.get(
+            "POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
+        ))
     register_default_hooks(session)
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)

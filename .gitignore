@@ -23,6 +23,7 @@ venv/
 
 # Walkthrough artifacts (derived from ROM — never commit)
 walkthrough_output/
+walkthrough_*/
 
 # Tooling
 .idea/
