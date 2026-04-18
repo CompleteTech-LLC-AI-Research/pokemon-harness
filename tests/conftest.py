@@ -1,0 +1,82 @@
+"""Shared fixtures for the test suite."""
+
+from __future__ import annotations
+
+import pytest
+
+from pokered_harness.symbols.loader import SymbolTable, load_sym_text
+
+
+class DictMemory:
+    """Sparse dict-backed MemoryLike — defaults to 0 for unset addresses."""
+
+    def __init__(self, initial: dict[int, int] | None = None) -> None:
+        self._m: dict[int, int] = dict(initial or {})
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            start, stop, step = key.start, key.stop, key.step or 1
+            return [self._m.get(a, 0) for a in range(start, stop, step)]
+        return self._m.get(int(key), 0)
+
+    def __setitem__(self, key: int, value: int) -> None:
+        self._m[int(key)] = int(value) & 0xFF
+
+    def write_word_le(self, addr: int, value: int) -> None:
+        self[addr] = value & 0xFF
+        self[addr + 1] = (value >> 8) & 0xFF
+
+
+# Addresses chosen to match real pokered conventions where known, but the
+# parsers only care about the *names*, so the test suite remains valid
+# even if real-build addresses shift.
+CANONICAL_SYM = """\
+00:D35E wCurMap
+00:D361 wYCoord
+00:D362 wXCoord
+00:D46A wWalkCounter
+00:C109 wSpritePlayerStateData1FacingDirection
+00:D5AB wCurrentMapScriptFlags
+00:D5A6 wCurMapScript
+00:D7D4 wStatusFlags5
+00:CC26 wCurrentMenuItem
+00:CC28 wMaxMenuItem
+00:CC29 wMenuWatchedKeys
+00:CC36 wListScrollOffset
+00:CC2B wPartyAndBillsPCSavedMenuItem
+00:CC2C wBagSavedMenuItem
+00:CC2D wBattleAndStartSavedMenuItem
+00:CC3A wTextDest
+00:CC3C wDoNotWaitForButtonPressAfterDisplayingText
+00:D057 wIsInBattle
+00:D05A wBattleType
+00:D058 wEngagedTrainerClass
+00:D059 wEngagedTrainerSet
+00:CC2F wMoveMenuType
+00:CCDC wPlayerSelectedMove
+00:CCDD wEnemySelectedMove
+00:CCD5 wPlayerMonNumber
+00:D05E wActionResultOrTookBattleTurn
+00:D163 wPartyCount
+00:D16B wPartyMons
+00:D356 wObtainedBadges
+00:D359 wPlayerID
+00:D347 wPlayerMoney
+00:DA40 wPlayTimeHours
+00:DA41 wPlayTimeMaxed
+00:DA42 wPlayTimeMinutes
+00:DA43 wPlayTimeSeconds
+00:D747 wEventFlags
+00:D31D wNumBagItems
+00:D31E wBagItems
+"""
+
+
+@pytest.fixture
+def symbols() -> SymbolTable:
+    return load_sym_text(CANONICAL_SYM)
+
+
+@pytest.fixture
+def mem() -> DictMemory:
+    return DictMemory()
