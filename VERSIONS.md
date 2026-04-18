@@ -24,6 +24,23 @@ PyBoy version does not match.
 
 > BYO-ROM. This repo ships neither the ROM nor any build-derived artifact.
 
+### Optional: Pokémon Red Full Color Hack (vanilla variant)
+
+For authentic colorized playback (Charmander orange, grass green, etc.)
+the harness also accepts the **Full Color Hack v1.2** vanilla IPS patch
+applied to the stock ROM. Patch source: `romhacking.net/hacks/1385/`.
+The patch explicitly avoids data shifting, so WRAM addresses and the
+pret-generated `.sym` are unchanged — the harness's memory reads work
+against this variant too (verified end-to-end: reaches Viridian City
+with matching map/xy/party state).
+
+| Field | Value |
+|---|---|
+| SHA-1 | `e1deed63080bc24cad5fba18ecb3184f905d16d4` |
+| Size | 1,048,576 bytes (1 MiB, unchanged) |
+| Base ROM | Stock Red UE + `pokered_color_vanilla.ips` |
+| `.sym` file | Same `pokered.sym` as stock |
+
 ### Local dev-machine path (not committed)
 
 For the dev laptop that authored this repo:
