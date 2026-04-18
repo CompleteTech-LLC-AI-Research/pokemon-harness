@@ -59,6 +59,19 @@ Early harness calls live under `src/pokered_harness/`.
 
 - Stock English Pokémon Red (UE) only.
 - Blue, Yellow, JP Red, colorized forks, and ROM hacks are out of scope.
+- Stock Red is booted through PyBoy in Game Boy Color mode so the CGB
+  built-in auto-palette colors the framebuffer. The ROM is unmodified — this
+  is the same behavior a real Game Boy Color gives a DMG cart, not a ROM hack
+  or a colorized fork.
+
+## Color rendering
+
+The harness constructs `PyBoy(..., cgb=True)` so stock Red renders through
+the CGB auto-palette and the framebuffer comes out in RGB. The default
+window driver is `null` (headless) for tests and MCP. Pass `view=True` to
+`Session` (or `--view` to `scripts/walkthrough.py`) to open PyBoy's SDL2
+viewer and watch the game live. PNGs written by the walkthrough script
+inherit the colored framebuffer automatically — no extra flag needed.
 
 ## License
 

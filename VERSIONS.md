@@ -9,7 +9,7 @@ PyBoy version does not match.
 
 | Component | Pin | Notes |
 |---|---|---|
-| PyBoy | `2.7.0` | v2 API — `window="null"`, `tick(n, render=...)`, `memory[...]`, `hook_register`, `symbol_lookup`. |
+| PyBoy | `2.7.0` | v2 API — `window="null"`, `tick(n, render=...)`, `memory[...]`, `hook_register`, `symbol_lookup`. CGB mode is used to enable color rendering for stock DMG Red. |
 
 ## Target ROM
 

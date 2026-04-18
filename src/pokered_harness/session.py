@@ -50,6 +50,7 @@ class Session:
         pyboy: PyBoyLike,
         symbols: SymbolTable,
         event_bus: EventBus | None = None,
+        view: bool = False,
     ) -> None:
         self._pyboy = pyboy
         self._symbols = symbols
@@ -57,6 +58,9 @@ class Session:
         # bus is falsy and ``event_bus or EventBus()`` would drop it.
         self._events = event_bus if event_bus is not None else EventBus()
         self._tick: int = 0
+        # ``view`` is stashed for introspection; the actual wiring into the
+        # PyBoy factory happens in ``from_files`` where the ROM is loaded.
+        self._view = view
 
     # --- construction --------------------------------------------------
 
@@ -69,6 +73,7 @@ class Session:
         expected_rom_sha1: str | None = None,
         expected_pyboy_version: str | None = None,
         pyboy_factory: Callable[[str], PyBoyLike] | None = None,
+        view: bool = False,
     ) -> "Session":
         rom_path = Path(rom_path)
         sym_path = Path(sym_path)
@@ -92,8 +97,16 @@ class Session:
                 )
 
         symbols = load_sym_file(sym_path)
-        pyboy = (pyboy_factory or _default_pyboy_factory)(str(rom_path))
-        return cls(pyboy=pyboy, symbols=symbols)
+        if pyboy_factory is not None:
+            # Injected factory (tests, custom wrappers) is called with just
+            # the ROM path — it's responsible for its own window/cgb config.
+            pyboy = pyboy_factory(str(rom_path))
+        else:
+            # The built-in factory accepts window/cgb kwargs; ``view`` picks
+            # SDL2 for a visible window, otherwise stays headless ("null").
+            window = "SDL2" if view else "null"
+            pyboy = _default_pyboy_factory(str(rom_path), window=window, cgb=True)
+        return cls(pyboy=pyboy, symbols=symbols, view=view)
 
     # --- lifecycle -----------------------------------------------------
 
@@ -235,8 +248,13 @@ def sha1_of_file(path: str | Path, *, chunk_size: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def _default_pyboy_factory(rom_path: str) -> PyBoyLike:
+def _default_pyboy_factory(
+    rom_path: str, *, window: str = "null", cgb: bool = True
+) -> PyBoyLike:
     from pyboy import PyBoy
 
-    # Headless, no rendering — matches ADR's "window=null" choice.
-    return PyBoy(rom_path, window="null")  # type: ignore[return-value]
+    # ``window`` is configurable: "null" (headless, ADR default — MCP/tests
+    # stay fast and windowless) vs "SDL2" (visible window for local viewing).
+    # ``cgb=True`` enables Game Boy Color mode so Pokemon Red renders with
+    # its stock CGB auto-palette instead of the DMG grayscale fallback.
+    return PyBoy(rom_path, window=window, cgb=cgb)  # type: ignore[return-value]

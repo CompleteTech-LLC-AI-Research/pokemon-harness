@@ -392,6 +392,8 @@ def main() -> int:
     parser.add_argument("--outdir", default="walkthrough_output")
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--stop-after", choices=list(STOP_AFTER), default="route1_to_viridian")
+    parser.add_argument("--view", action="store_true", default=False,
+                        help="Open an SDL2 window so the game is visible in color while running.")
     args = parser.parse_args()
 
     rom = os.environ.get("POKERED_ROM_PATH")
@@ -409,6 +411,7 @@ def main() -> int:
         expected_rom_sha1=os.environ.get(
             "POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
         ),
+        view=args.view,
     )
     register_default_hooks(session)
     drv = WalkthroughDriver(session=session, outdir=outdir)

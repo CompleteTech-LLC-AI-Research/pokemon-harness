@@ -9,6 +9,7 @@ from pokered_harness.input import Button
 from pokered_harness.session import (
     Session,
     VersionMismatch,
+    _default_pyboy_factory,
     sha1_of_file,
 )
 from pokered_harness.symbols.loader import load_sym_text
@@ -241,6 +242,83 @@ def test_sha1_helper_and_mismatch_path(tmp_path):
             expected_rom_sha1="0" * 40,
             pyboy_factory=lambda path: FakePyBoy(DictMemory()),
         )
+
+
+# -- view flag -----------------------------------------------------------
+
+
+def test_session_view_defaults_false():
+    s, _, _ = _session()
+    assert s._view is False
+
+
+def test_session_view_can_be_set_true():
+    mem = DictMemory()
+    pb = FakePyBoy(mem)
+    sym = load_sym_text("00:D35E wCurMap\n")
+    s = Session(pyboy=pb, symbols=sym, view=True)
+    assert s._view is True
+
+
+def test_from_files_threads_view_into_session(tmp_path):
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_text("00:D35E wCurMap\n", encoding="utf-8")
+
+    # Record how the injected factory was called; the Session should still
+    # carry ``view=True`` in its own state even though injected factories
+    # only receive the path (the harness picks window/cgb itself only on
+    # the default factory path).
+    calls: list[str] = []
+
+    def recording_factory(path: str) -> FakePyBoy:
+        calls.append(path)
+        return FakePyBoy(DictMemory())
+
+    s = Session.from_files(
+        rom,
+        sym,
+        pyboy_factory=recording_factory,
+        view=True,
+    )
+    assert s._view is True
+    assert calls == [str(rom)]
+
+    # And ``view=False`` (the default) lands on False.
+    s2 = Session.from_files(
+        rom,
+        sym,
+        pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+    )
+    assert s2._view is False
+
+
+def test_default_pyboy_factory_passes_window_and_cgb(monkeypatch):
+    """``_default_pyboy_factory`` should forward ``window`` and ``cgb`` into
+    ``pyboy.PyBoy(...)`` — this lets the view flag reach the real emulator
+    without instantiating one in tests."""
+    import pyboy as _pyboy_module
+
+    captured: list[tuple[tuple, dict]] = []
+
+    class _PyBoyStub:
+        def __init__(self, *args, **kwargs) -> None:
+            captured.append((args, kwargs))
+
+    monkeypatch.setattr(_pyboy_module, "PyBoy", _PyBoyStub)
+
+    # Default: headless + CGB on.
+    _default_pyboy_factory("rom.gb")
+    assert captured[-1] == (("rom.gb",), {"window": "null", "cgb": True})
+
+    # Explicit SDL2 view + CGB still on.
+    _default_pyboy_factory("rom.gb", window="SDL2")
+    assert captured[-1] == (("rom.gb",), {"window": "SDL2", "cgb": True})
+
+    # cgb can be overridden.
+    _default_pyboy_factory("rom.gb", window="null", cgb=False)
+    assert captured[-1] == (("rom.gb",), {"window": "null", "cgb": False})
 
 
 def test_close_stops_pyboy():
