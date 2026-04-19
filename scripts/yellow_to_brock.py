@@ -311,6 +311,84 @@ def run_receive_pikachu(session: Session) -> None:
                        "300 A-presses")
 
 
+# --- Phase: rival battle -------------------------------------------------
+
+def run_rival_battle(session: Session) -> None:
+    """From post-Pikachu state (script=12 RIVAL_CHALLENGES_PLAYER), walk
+    down to y=6 and mash A to trigger the Eevee fight, then resolve it
+    via the smart battle AI. Losing to the rival is harmless — blackout
+    auto-heals and dumps us back at (5, 6) in the lab, which is fine
+    for the next phase.
+    """
+    drv = rtb.Driver(session)
+    # Walk to y=6 (the challenge-trigger row).
+    for _ in range(6):
+        if drv.gs().overworld.y >= 6:
+            break
+        drv.press("down")
+    # Mash A until battle kicks off.
+    for _ in range(40):
+        if drv.gs().battle.active:
+            break
+        drv.press("a")
+    if not drv.gs().battle.active:
+        print("  rival_battle: WARN battle never triggered", flush=True)
+        return
+    drv.resolve_battle(max_turns=40)
+    # Post-battle: advance any rival-post-loss / Pokedex-assignment
+    # dialogs. Stop once we're out of the lab or clearly in control
+    # with no pending battle.
+    for _ in range(200):
+        gs = drv.gs()
+        if gs.overworld.map_id != M_OAKS_LAB:
+            break
+        if gs.battle.active:
+            drv.resolve_battle(max_turns=30)
+            continue
+        drv.press("a")
+    gs = drv.gs()
+    m = gs.party.mons[0] if gs.party.mons else None
+    print(f"  rival_battle: map=0x{gs.overworld.map_id:02x} "
+          f"xy=({gs.overworld.x},{gs.overworld.y})"
+          + (f" L={m.level} HP={m.hp}/{m.max_hp}" if m else ""),
+          flush=True)
+
+
+# --- Phase: exit lab → Viridian -----------------------------------------
+
+def run_pallet_to_viridian(session: Session, outdir: Path,
+                            rom: str, sym: str, sha1: str) -> None:
+    """Exit Oak's lab, cross Pallet, traverse Route 1 to Viridian City.
+
+    Reuses the Blue harness's ``navigate_to_viridian_with_retry`` —
+    same Kanto layout, same Repel-and-A* strategy. First we need to
+    walk the player out of the lab through the south door warp to
+    Pallet (5, 6).
+    """
+    drv = rtb.Driver(session)
+    # Walk out of the lab: south door warps at (4, 11)/(5, 11).
+    for _ in range(15):
+        gs = drv.gs()
+        if gs.overworld.map_id != M_OAKS_LAB:
+            break
+        if drv.joy_locked():
+            drv.press("a"); continue
+        drv.press("down")
+    # Lab dumps us at PALLET (5, 12). Nudge up so navigate_to_viridian_
+    # with_retry's "step off lab door threshold" heuristic applies.
+    session.step(60, render=True)
+    gs = drv.gs()
+    print(f"  lab_exit: map=0x{gs.overworld.map_id:02x} "
+          f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
+    ok = ftb.navigate_to_viridian_with_retry(
+        drv, outdir, rom, sym, sha1, session, max_attempts=20,
+    )
+    if not ok:
+        gs = drv.gs()
+        raise RuntimeError(
+            f"pallet_to_viridian: failed (map=0x{gs.overworld.map_id:02x})")
+
+
 # --- Main ----------------------------------------------------------------
 
 def save_state(session: Session, outdir: Path, name: str) -> Path:
@@ -326,9 +404,10 @@ def save_state(session: Session, outdir: Path, name: str) -> Path:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--outdir", default="walkthrough_yellow")
-    p.add_argument("--stop-after", default="receive_pikachu",
+    p.add_argument("--stop-after", default="pallet_to_viridian",
                    choices=["intro", "exit_house", "oak_intercept",
-                            "receive_pikachu"])
+                            "receive_pikachu", "rival_battle",
+                            "pallet_to_viridian"])
     args = p.parse_args()
 
     rom = os.environ["POKERED_ROM_PATH"]
@@ -347,6 +426,9 @@ def main() -> int:
         ("exit_house", lambda: run_exit_house(session)),
         ("oak_intercept", lambda: run_oak_intercept(session)),
         ("receive_pikachu", lambda: run_receive_pikachu(session)),
+        ("rival_battle", lambda: run_rival_battle(session)),
+        ("pallet_to_viridian",
+         lambda: run_pallet_to_viridian(session, outdir, rom, sym, sha1)),
     ]
     for name, fn in phases:
         print(f"\n=== phase: {name} ===", flush=True)
