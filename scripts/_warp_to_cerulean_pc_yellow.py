@@ -84,6 +84,11 @@ def main() -> int:
 
     add_second_party_mon(s)
 
+    # Set EVENT_GOT_POKEDEX (bit 37 = byte +4, bit 5) so the Cable Club
+    # attendant will actually attempt a link connection.
+    ev_addr = sym.addr_of("wEventFlags") + 4
+    mem[ev_addr] = mem[ev_addr] | (1 << 5)
+
     OUT_STATE.write_bytes(s.save_state())
     FIXTURE.parent.mkdir(parents=True, exist_ok=True)
     FIXTURE.write_bytes(OUT_STATE.read_bytes())

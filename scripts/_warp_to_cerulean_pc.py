@@ -167,6 +167,15 @@ def main() -> int:
         mem[base + 2] = max_hp & 0xFF
 
     add_second_party_mon(s)
+
+    # Set EVENT_GOT_POKEDEX (bit 37 of wEventFlags = byte +4, bit 5).
+    # Without it the Cable Club attendant refuses to link, printing
+    # "Please wait. We're making preparations" and exiting without
+    # attempting a serial handshake.
+    ev_addr = sym.addr_of("wEventFlags") + 4
+    mem[ev_addr] = mem[ev_addr] | (1 << 5)
+    print(f"set EVENT_GOT_POKEDEX bit; wEventFlags+4 = 0x{mem[ev_addr]:02x}")
+
     # Re-restore HP for slot 1
     for i in range(mem[sym.addr_of("wPartyCount")]):
         base = mons_base + i * STRUCT

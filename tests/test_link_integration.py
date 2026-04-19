@@ -130,12 +130,37 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
         )
         pair.pair()
 
-        # TODO: walk the trade UI. This is stubbed pending the save-state
-        # production work (which requires in-game progression to Cerulean
-        # Cable Club). For now, the smoke portion (load + pair) succeeding
-        # is itself a meaningful check: load_state through the paired
-        # bridge does not break anything.
-        pytest.skip("trade UI walker not yet implemented; load+pair ok")
+        # Cerulean Pokemon Center's map script calls
+        # Serial_TryEstablishingExternallyClockedConnection every frame
+        # while the player is on this map (see
+        # pret/pokered/scripts/CeruleanPokecenter.asm). That's the real
+        # game initiating its serial handshake. The SerialBridge hooks
+        # that label with a HANDSHAKE-role callback that writes 0x01
+        # to hSerialConnectionStatus on both sides, emulating "link
+        # established".
+        #
+        # After a few frames of stepping, hSerialConnectionStatus should
+        # be non-0xFF (CONNECTION_NOT_ESTABLISHED) on both sides. This
+        # is the decisive end-to-end proof that our bridge functions
+        # against real ROM-level serial entry points — not just
+        # fake-PyBoy unit tests.
+        pair.step(180)
+
+        status_addr = session_a.symbols.addr_of("hSerialConnectionStatus")
+        status_a = session_a._pyboy.memory[status_addr]
+        status_b = session_b._pyboy.memory[status_addr]
+        assert status_a != 0xFF, (
+            f"bridge failed to establish handshake on {version_a} — "
+            f"hSerialConnectionStatus=0x{status_a:02x}"
+        )
+        assert status_b != 0xFF, (
+            f"bridge failed to establish handshake on {version_b} — "
+            f"hSerialConnectionStatus=0x{status_b:02x}"
+        )
+        # Driving the trade UI itself (attendant dialog → "Yes, save" →
+        # Serial_SyncAndExchangeNybble → TRADE_CENTER warp → select mon
+        # → confirm) is deferred; SaveGameData's own internal prompts
+        # need more orchestration than the current harness provides.
     finally:
         session_a.close()
         session_b.close()
