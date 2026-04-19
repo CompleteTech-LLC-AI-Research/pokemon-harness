@@ -30,6 +30,7 @@ import walkthrough as wt
 import run_to_brock as rtb
 import level_up as lu
 import brock_gym as bg
+import grind
 
 
 def run_pathfinder(state_path: Path, goal: str, out_path: Path,
@@ -263,6 +264,11 @@ def main() -> int:
     p.add_argument("--skip-to", choices=[
         "start", "viridian", "grind", "forest", "pewter", "brock"
     ], default="start", help="resume from a specific phase")
+    p.add_argument(
+        "--legacy-grind", action="store_true",
+        help="Use the old level_up.py grinder instead of the heal-loop "
+             "grinder in grind.py (diagnostic fallback).",
+    )
     args = p.parse_args()
 
     rom = os.environ["POKERED_ROM_PATH"]
@@ -308,7 +314,18 @@ def main() -> int:
     # Phase 2: grind Bulba to Lv 13 with periodic heals.
     if args.skip_to in ("start", "viridian", "grind"):
         print("\n=== phase: grind_to_level_13 ===", flush=True)
-        lu.grind_to_level(session, target_level=13, max_battles=60)
+        if args.legacy_grind:
+            lu.grind_to_level(session, target_level=13, max_battles=60)
+        else:
+            grind.grind_to(
+                session,
+                outdir=outdir,
+                rom=rom, sym=sym, sha1=sha1,
+                target_level=13,
+                target_move_id=grind.MOVE_VINE_WHIP,
+                max_battles=80,
+                max_wall_seconds=900.0,
+            )
         save_milestone(session, outdir, "grind_complete")
 
     # Phase 3: Route 2 → Forest South Gate.

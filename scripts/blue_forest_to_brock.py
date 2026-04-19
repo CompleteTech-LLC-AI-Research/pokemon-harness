@@ -1,11 +1,11 @@
-"""Blue-only: resume from viridian_to_route2.state with a RAM-boosted
-Bulbasaur and run forest → Pewter → Brock. This exists to validate that
-the downstream phases behave identically on Blue as on Red. The level
-boost skips a grinding-loop gap that Blue's RNG currently exposes (L5
-Bulbasaur can't safely grind on Route 2 without a heal-between-battles
-flow in ``level_up.py``).
+"""Blue end-to-end: resume from viridian_to_route2.state and drive
+through Route 2 grind → forest → Pewter → Brock badge.
 
-Not a shipping path — delete once the heal-loop is in place.
+By default Bulbasaur is grinded honestly on Route 2 with a heal-loop
+back to Viridian's Pokecenter between battles (see :mod:`grind`). The
+legacy RAM-boost hack that L50s the starter survives behind a
+``--option-b`` flag as a diagnostic when downstream phases need
+debugging.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from pokered_harness.state.party import (
 import run_to_brock as rtb
 import brock_gym as bg
 import full_to_brock as ftb
+import grind
 
 
 def boost_bulbasaur(session: Session) -> None:
@@ -103,10 +104,22 @@ def run_pathfinder(state_path, goal, out_path, rom, sym, sha1):
 
 
 def main() -> int:
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--outdir", default="walkthrough_blue")
+    p.add_argument(
+        "--option-b", action="store_true",
+        help="RAM-boost Bulbasaur to L50 instead of grinding on Route 2. "
+             "Diagnostic fallback for when the honest grind is broken or "
+             "too slow — downstream forest/Pewter/Brock phases are not "
+             "exercised by the grinder itself.",
+    )
+    args = p.parse_args()
+
     rom = os.environ["POKERED_ROM_PATH"]
     sym = os.environ["POKERED_SYM_PATH"]
     sha1 = os.environ["POKERED_ROM_SHA1"]
-    outdir = Path("walkthrough_blue")
+    outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     session = Session.from_files(rom, sym, expected_rom_sha1=sha1)
@@ -115,12 +128,25 @@ def main() -> int:
     session.load_state(state_path.read_bytes())
     session.step(60, render=True)
 
-    print("\n=== RAM boost Bulbasaur → L13 + Vine Whip ===", flush=True)
-    boost_bulbasaur(session)
+    if args.option_b:
+        print("\n=== RAM boost Bulbasaur -> L50 + Vine Whip (Option-B) ===",
+              flush=True)
+        boost_bulbasaur(session)
+    else:
+        print("\n=== phase: grind_to_level_13 (heal-loop) ===", flush=True)
+        grind.grind_to(
+            session,
+            outdir=outdir,
+            rom=rom, sym=sym, sha1=sha1,
+            target_level=13,
+            target_move_id=grind.MOVE_VINE_WHIP,
+            max_battles=80,
+            max_wall_seconds=900.0,
+        )
 
     drv = rtb.Driver(session)
 
-    # Save boosted state as a proxy grind-complete milestone.
+    # Save post-level (boosted or grinded) state as the grind-complete milestone.
     (outdir / "milestones" / "grind_boosted.state").write_bytes(session.save_state())
 
     # Phase: Route 2 → Forest South Gate — A* from current position

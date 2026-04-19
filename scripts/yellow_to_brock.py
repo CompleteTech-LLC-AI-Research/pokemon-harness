@@ -40,6 +40,7 @@ from pokered_harness.state.party import (
 import run_to_brock as rtb
 import full_to_brock as ftb
 import brock_gym as bg
+import grind
 
 
 # --- Yellow-specific map constants (identical to pokered — Kanto maps
@@ -502,9 +503,24 @@ def run_viridian_to_route2(session: Session, outdir: Path,
 
 
 def run_option_b_boost(session: Session) -> None:
-    print("\n=== RAM boost Pikachu → L50 + Thunderbolt + Double Kick ===",
+    print("\n=== RAM boost Pikachu -> L50 + Thunderbolt + Double Kick ===",
           flush=True)
     boost_pikachu(session)
+
+
+def run_route2_grind(session: Session, outdir: Path,
+                     rom: str, sym: str, sha1: str) -> None:
+    """Honest Pikachu grind on Route 2 up to Double Kick (L15)."""
+    print("\n=== phase: grind_to_level_15 (heal-loop) ===", flush=True)
+    grind.grind_to(
+        session,
+        outdir=outdir,
+        rom=rom, sym=sym, sha1=sha1,
+        target_level=15,
+        target_move_id=grind.MOVE_DOUBLE_KICK,
+        max_battles=100,
+        max_wall_seconds=1200.0,
+    )
 
 
 def run_route2_to_forest(session: Session, outdir: Path,
@@ -736,9 +752,15 @@ def main() -> int:
                    choices=["intro", "exit_house", "oak_intercept",
                             "receive_pikachu", "rival_battle",
                             "pallet_to_viridian", "viridian_to_route2",
-                            "option_b_boost", "route2_to_forest",
+                            "grind", "option_b_boost", "route2_to_forest",
                             "forest_traversal", "pewter_approach",
                             "pewter_to_gym", "gym_interior", "brock_badge"])
+    p.add_argument(
+        "--option-b", action="store_true",
+        help="RAM-boost Pikachu to L50 instead of grinding Route 2. "
+             "Diagnostic fallback for when the heal-loop grinder is "
+             "broken or too slow.",
+    )
     args = p.parse_args()
 
     rom = os.environ["POKERED_ROM_PATH"]
@@ -762,7 +784,12 @@ def main() -> int:
          lambda: run_pallet_to_viridian(session, outdir, rom, sym, sha1)),
         ("viridian_to_route2",
          lambda: run_viridian_to_route2(session, outdir, rom, sym, sha1)),
-        ("option_b_boost", lambda: run_option_b_boost(session)),
+        # Either honest grind (default) or RAM-boost diagnostic. We keep
+        # both phase names in the stop-after choices for backward compat
+        # and let the CLI flag pick which body runs.
+        ("grind" if not args.option_b else "option_b_boost",
+         lambda: (run_option_b_boost(session) if args.option_b
+                  else run_route2_grind(session, outdir, rom, sym, sha1))),
         ("route2_to_forest",
          lambda: run_route2_to_forest(session, outdir, rom, sym, sha1)),
         ("forest_traversal",
