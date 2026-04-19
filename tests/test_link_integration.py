@@ -36,7 +36,11 @@ FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "link"
 
 
 ROM_PATHS = {
-    "blue": (ROM_ROOT / "blue" / "pokemon-blue.gb", ROM_ROOT / "blue" / "pokemon-blue.sym"),
+    # Blue Cable-Club fixture was captured against the color-patched Blue
+    # (pokeblue_color_vanilla.ips). Loading it into stock Blue silently
+    # corrupts WRAM on the first tick — the state requires the CGB color
+    # ROM as its paired cartridge.
+    "blue": (ROM_ROOT / "blue" / "pokemon-blue-color.gb", ROM_ROOT / "blue" / "pokemon-blue.sym"),
     "yellow": (ROM_ROOT / "yellow" / "pokemon-yellow.gbc", ROM_ROOT / "yellow" / "pokemon-yellow.sym"),
     "red": (ROM_ROOT / "red" / "pokemon-red.gb", ROM_ROOT / "red" / "pokemon-red.sym"),
 }
@@ -136,14 +140,7 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
         # pret/pokered/scripts/CeruleanPokecenter.asm). That's the real
         # game initiating its serial handshake. The SerialBridge hooks
         # that label with a HANDSHAKE-role callback that writes 0x01
-        # to hSerialConnectionStatus on both sides, emulating "link
-        # established".
-        #
-        # After a few frames of stepping, hSerialConnectionStatus should
-        # be non-0xFF (CONNECTION_NOT_ESTABLISHED) on both sides. This
-        # is the decisive end-to-end proof that our bridge functions
-        # against real ROM-level serial entry points — not just
-        # fake-PyBoy unit tests.
+        # to hSerialConnectionStatus on both sides.
         pair.step(180)
 
         status_addr = session_a.symbols.addr_of("hSerialConnectionStatus")
@@ -157,10 +154,43 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
             f"bridge failed to establish handshake on {version_b} — "
             f"hSerialConnectionStatus=0x{status_b:02x}"
         )
-        # Driving the trade UI itself (attendant dialog → "Yes, save" →
-        # Serial_SyncAndExchangeNybble → TRADE_CENTER warp → select mon
-        # → confirm) is deferred; SaveGameData's own internal prompts
-        # need more orchestration than the current harness provides.
+
+        # Stronger proof (Blue only — Yellow's fixture uses the weaker
+        # EnterMap hook-warp which leaves the player un-walkable, so they
+        # can't navigate to the attendant):
+        # Press A to talk to the Cable Club attendant. The dialog should
+        # trigger CableClubNPC → Yes → SaveGameData. If our LinkPair
+        # hardware-serial tick is working, the game engages the full
+        # link-attempt flow. If the bridge is broken, the dialog never
+        # opens and SaveGameData never fires.
+        if version_a == version_b == "blue":
+            save_count = [0, 0]
+            for idx, session in enumerate((session_a, session_b)):
+                bank, addr = session.symbols.bank_addr("SaveGameData")
+
+                def _make_cb(i):
+                    def _cb(_ctx):
+                        save_count[i] += 1
+
+                    return _cb
+
+                session._pyboy.hook_register(bank, addr, _make_cb(idx), None)
+
+            for _ in range(3):
+                session_a.press("up", duration=6)
+                session_b.press("up", duration=6)
+                pair.step(18)
+            for _ in range(300):
+                session_a.press("a", duration=4)
+                session_b.press("a", duration=4)
+                pair.step(20)
+                if save_count[0] > 0 and save_count[1] > 0:
+                    break
+            assert save_count[0] > 0 and save_count[1] > 0, (
+                f"{version_a}/{version_b} — attendant dialog never reached "
+                f"SaveGameData (save_count={save_count}); link-attempt flow "
+                f"did not engage"
+            )
     finally:
         session_a.close()
         session_b.close()

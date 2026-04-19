@@ -219,7 +219,11 @@ def test_step_with_large_n_interleaves_in_chunks():
     # Each side ends at 10 ticks total.
     assert s_a.current_tick() == 10
     assert s_b.current_tick() == 10
-    # CHUNK_SIZE = 4 → slices of 4, 4, 2 on each side.
+    # Un-paired (no bridge): stepping uses CHUNK_SIZE=4 slice granularity,
+    # giving tick_calls == [4, 4, 2] on each side. When paired, the hardware
+    # serial tick runs per single emulator frame so tick_calls becomes
+    # ones. `_make_pair` does not call pair.pair(), so we exercise the
+    # chunk-slice path.
     assert [c for c, _ in pb_a.tick_calls] == [4, 4, 2]
     assert [c for c, _ in pb_b.tick_calls] == [4, 4, 2]
 

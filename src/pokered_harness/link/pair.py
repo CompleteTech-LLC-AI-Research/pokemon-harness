@@ -129,6 +129,43 @@ class LinkPair:
 
     # --- stepping ------------------------------------------------------
 
+    #: Hardware-level serial IO register addresses (Game Boy common).
+    _RSB_ADDR = 0xFF01      # serial data
+    _RSC_ADDR = 0xFF02      # serial control (bit 7 = START, bit 0 = INTERNAL)
+    _IF_ADDR = 0xFF0F       # interrupt flag; bit 3 = serial
+    _SC_START = 0x80
+    _IF_SERIAL = 0x08
+
+    def _hardware_serial_tick(self) -> None:
+        """Emulate one cycle of a physical link cable between the two peers.
+
+        If either side has SC_START set in its serial-control register, we:
+          1. Swap the outgoing rSB bytes between sides.
+          2. Clear SC_START on both (signalling transfer complete).
+          3. Raise the serial interrupt-flag bit on both so each side's
+             own Serial ISR fires, consumes the byte, and updates
+             hSerialReceiveData / hSerialConnectionStatus via the game's
+             own code — no symbol hooks required.
+
+        This is the cheapest faithful emulation of a GB link cable: PyBoy
+        2.7.0 has no native serial peering, so we supply the missing
+        hardware integration at the HRAM layer.
+        """
+        mem_a = self._primary._pyboy.memory
+        mem_b = self._peer._pyboy.memory
+        sc_a = mem_a[self._RSC_ADDR]
+        sc_b = mem_b[self._RSC_ADDR]
+        if not ((sc_a & self._SC_START) or (sc_b & self._SC_START)):
+            return
+        sb_a = mem_a[self._RSB_ADDR]
+        sb_b = mem_b[self._RSB_ADDR]
+        mem_a[self._RSB_ADDR] = sb_b
+        mem_b[self._RSB_ADDR] = sb_a
+        mem_a[self._RSC_ADDR] = sc_a & ~self._SC_START
+        mem_b[self._RSC_ADDR] = sc_b & ~self._SC_START
+        mem_a[self._IF_ADDR] = mem_a[self._IF_ADDR] | self._IF_SERIAL
+        mem_b[self._IF_ADDR] = mem_b[self._IF_ADDR] | self._IF_SERIAL
+
     def step(self, count: int = 1, *, render: bool = False) -> None:
         """Advance BOTH sessions by ``count`` ticks each, interleaved.
 
@@ -136,14 +173,27 @@ class LinkPair:
         peer.current_tick() each advanced by N, with the two sides
         interleaved in :data:`CHUNK_SIZE`-sized slices so hooks can fire
         near-simultaneously. (It is NOT 2N ticks combined.)
+
+        When paired, each tick runs the hardware serial exchange so the
+        two peers' serial ports behave like a physical link cable.
         """
         if count <= 0:
             raise ValueError(f"count must be positive, got {count}")
         remaining = count
+        paired = self._bridge is not None
         while remaining > 0:
             slice_len = min(self.CHUNK_SIZE, remaining)
-            self._primary.step(slice_len, render=render)
-            self._peer.step(slice_len, render=render)
+            if paired:
+                # Per-frame interleave so the hardware-serial tick can run
+                # between each emulator frame on both sides.
+                for _ in range(slice_len):
+                    self._primary.step(1, render=render)
+                    self._peer.step(1, render=render)
+                    self._hardware_serial_tick()
+            else:
+                # Unpaired: chunk ticks for less per-frame Python overhead.
+                self._primary.step(slice_len, render=render)
+                self._peer.step(slice_len, render=render)
             remaining -= slice_len
 
     def run_until_event_pair(
