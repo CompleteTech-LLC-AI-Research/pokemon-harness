@@ -377,6 +377,10 @@ def walk_to_viridian_and_heal(
     #    further on the way back to heal.
     if start_map == M_ROUTE_2:
         ftb._activate_repel(drv)
+        # Settle the emulator before saving state for A* — a race between
+        # the grinder press loop and subprocess state read occasionally
+        # serialises a partial wTilesetCollisionPtr on Yellow.
+        session.step(60, render=True)
         try:
             path = _pathfind(drv, session, outdir, "8,71", "grind_r2_south",
                               rom, sym, sha1)
@@ -384,7 +388,18 @@ def walk_to_viridian_and_heal(
             _safe_walk(drv, path, label="grind_r2_south",
                         stop_map_ids=(M_VIRIDIAN,))
         except RuntimeError as e:
-            print(f"  [heal] route2 pathfind failed: {e}", flush=True)
+            print(f"  [heal] route2 pathfind failed: {e}; "
+                  f"falling back to mash-DOWN", flush=True)
+            # A* couldn't plan — just mash DOWN with detours. We're
+            # already on Route 2 south half; enough DOWN eventually
+            # hits the warp tile.
+            for _ in range(80):
+                if drv.gs().overworld.map_id == M_VIRIDIAN:
+                    break
+                before = (drv.gs().overworld.x, drv.gs().overworld.y)
+                drv.press("down")
+                if (drv.gs().overworld.x, drv.gs().overworld.y) == before:
+                    drv.press("right")
         # Step DOWN to cross the south border warp.
         for _ in range(4):
             if drv.gs().overworld.map_id == M_VIRIDIAN:
