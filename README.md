@@ -17,7 +17,7 @@ canonical target but Blue (v1.0, UE) also works unchanged — see
 | Pokémon Red + Full Color Hack | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
 | Pokémon Blue (UE) | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
 | Pokémon Blue + pokeblue_color_vanilla.ips | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
-| Pokémon Yellow | 🚧 In progress | — | — |
+| Pokémon Yellow (UE) | 🧩 Infra ready, walkthrough pending | [`VERSIONS.md`](VERSIONS.md) | Boots + `read_game_state` works |
 | JP Red, other localisations, ROM hacks | ❌ Out of scope | — | — |
 
 Red and Blue share pokered's WRAM layout, so the state parsers and event
@@ -48,25 +48,31 @@ manager refuses to run without a match.
 
 1. **Python 3.11+**.
 2. **PyBoy 2.7.0** — pinned in `pyproject.toml`.
-3. **Symbol files** generated from [`pret/pokered`](https://github.com/pret/pokered)
-   (covers both Red and Blue) built with `DEBUG=1`. Place as:
-   - `rom/red/pokemon-red.sym`
-   - `rom/blue/pokemon-blue.sym`
+3. **Symbol files** built with `DEBUG=1` from:
+   - [`pret/pokered`](https://github.com/pret/pokered) — produces both `pokered.sym` and `pokeblue.sym`. Place at `rom/red/pokemon-red.sym` and `rom/blue/pokemon-blue.sym`.
+   - [`pret/pokeyellow`](https://github.com/pret/pokeyellow) — produces `pokeyellow.sym`. Place at `rom/yellow/pokemon-yellow.sym`.
 
 ### Generating the symbol files
 
-You need [RGBDS](https://rgbds.gbdev.io/) installed, then:
+You need [RGBDS](https://rgbds.gbdev.io/), GNU make, and a C compiler
+(gcc or clang-with-gcc-alias) on `PATH`. Then:
 
 ```bash
+# Red + Blue share a source tree
 git clone https://github.com/pret/pokered.git
 cd pokered
-make DEBUG=1                           # produces pokered.sym / pokered.map
-make clean && make blue DEBUG=1        # produces pokeblue.sym / pokeblue.map
+make DEBUG=1                           # produces pokered.sym / pokered.map / pokered.gbc
+make clean && make blue DEBUG=1        # produces pokeblue.sym / pokeblue.map / pokeblue.gbc
+cd ..
+
+# Yellow is a separate tree
+git clone https://github.com/pret/pokeyellow.git
+cd pokeyellow
+make DEBUG=1                           # produces pokeyellow.sym / pokeyellow.map / pokeyellow.gbc
 ```
 
-Copy `pokered.sym` to `rom/red/pokemon-red.sym`, `pokeblue.sym` to
-`rom/blue/pokemon-blue.sym`, and record the `pret/pokered` commit SHA in
-[`VERSIONS.md`](VERSIONS.md).
+Copy the `.sym` files into the corresponding `rom/<version>/` dirs and
+record the upstream commit SHAs in [`VERSIONS.md`](VERSIONS.md).
 
 ## Install
 
@@ -97,6 +103,11 @@ POKERED_ROM_SHA1=<see VERSIONS.md>
 # Blue
 POKERED_ROM_PATH=rom/blue/pokemon-blue-color.gb \
 POKERED_SYM_PATH=rom/blue/pokemon-blue.sym \
+POKERED_ROM_SHA1=<see VERSIONS.md>
+
+# Yellow (native CGB, no color patch needed)
+POKERED_ROM_PATH=rom/yellow/pokemon-yellow.gbc \
+POKERED_SYM_PATH=rom/yellow/pokemon-yellow.sym \
 POKERED_ROM_SHA1=<see VERSIONS.md>
 ```
 

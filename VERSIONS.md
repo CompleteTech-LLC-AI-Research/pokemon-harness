@@ -71,14 +71,13 @@ PyBoy rejects. Output is emulator-ready.
 | Base | Stock Blue UE + `pokeblue_color_vanilla.ips` (+ checksum fix) |
 | `.sym` | Same `pokeblue.sym` as stock Blue |
 
-### Pokémon Yellow — in progress (2026-04-19)
+### Pokémon Yellow — infra validated, walkthrough pending (2026-04-19)
 
-Not yet supported by the harness. Adding this is the current work
-stream. Yellow is a native Game Boy Color cartridge (`.gbc`) built from
-the separate [`pret/pokeyellow`](https://github.com/pret/pokeyellow)
-repo, which shares most of its WRAM layout with pokered but not all —
-the parsers will need a symbol-driven audit pass when we stand up
-Yellow support.
+Yellow is a native Game Boy Color cartridge (`.gbc`) built from the
+separate [`pret/pokeyellow`](https://github.com/pret/pokeyellow) repo.
+Adding Yellow in two phases: **infra** (this section — done) and
+**walkthrough** (Pikachu-starter, no-menu-pick intro, Brock strategy
+with non-electric mons — not yet started).
 
 | Field | Value |
 |---|---|
@@ -86,7 +85,25 @@ Yellow support.
 | Size | 1,048,576 bytes (1 MiB) |
 | Path | `rom/yellow/pokemon-yellow.gbc` |
 | Release | Yellow UE v1.0 |
-| `.sym` | Pending — needs `pret/pokeyellow` checkout + `make DEBUG=1` |
+| `.sym` | `rom/yellow/pokemon-yellow.sym` (built from `pret/pokeyellow`, 24,470 lines) |
+| Color patch | Not needed — native CGB cartridge already has per-sprite palettes |
+
+**Yellow symbol audit (2026-04-19):** All 52 WRAM symbols the harness
+reads are present in `pokeyellow.sym` under unchanged names. Yellow
+shifts most WRAM addresses down by 1 byte (extra Pikachu-follower
+state inserted early in the block) — e.g. `wCurMap` is at `0xd35d` on
+Yellow vs `0xd35e` on Red/Blue. Since our readers are name-driven via
+`symbols.addr_of(...)`, no parser code changes are required. All
+hook labels (`DisplayTextID`, `YesNoChoice`, `TryEvolvingMon`,
+`SetLastBlackoutMap`) resolve on Yellow too (at Yellow-specific
+offsets, handled identically).
+
+**Build notes:** The dev machine currently uses
+`ezwinports.make` and `MartinStorsjo.LLVM-MinGW.UCRT` (both winget
+packages, user-scope) for the `pret/pokeyellow` build, with a
+`clang.exe` → `gcc.exe` copy in the LLVM bin dir because pokeyellow's
+`tools/Makefile` hardcodes `gcc`. Built ROM SHA-1 matches stock Yellow
+byte-for-byte.
 
 ### Local dev-machine paths (not committed)
 
@@ -97,7 +114,7 @@ For the laptop that authored this repo:
 - Vendored pokered source: `G:\project\pokemon\_vendor\pokered\`
   - Produces `pokered.sym`, `pokeblue.sym`, `pokeblue_debug.sym`.
 
-Yellow-related paths will be added here once the Yellow symbol build lands.
+- Vendored pokeyellow source: `G:\project\pokemon\_vendor\pokeyellow\` (cloned 2026-04-19, depth 1).
 
 These live in a parallel workspace on a different drive and are **not**
 part of this repo — record them in your personal `.env` or a local-only
@@ -108,7 +125,7 @@ config file, never in a committed file.
 | Field | Value |
 |---|---|
 | pret/pokered | `https://github.com/pret/pokered` — produces both `pokered.sym` (Red) and `pokeblue.sym` (Blue). Commit SHA: `<FILL-IN from: git -C G:/project/pokemon/_vendor/pokered rev-parse HEAD>` |
-| pret/pokeyellow | `https://github.com/pret/pokeyellow` — Yellow only. Not yet vendored; add commit SHA when Yellow support lands. |
+| pret/pokeyellow | `https://github.com/pret/pokeyellow` — Yellow only. Vendored at `G:\project\pokemon\_vendor\pokeyellow\`. Commit SHA: `bfa7170107eea23b89febb60bfb2ce39173bf2e1` (fetched 2026-04-19, `--depth=1`). |
 | Build flag | `make DEBUG=1` (produces `.sym` and `.map`) |
 | Toolchain | rgbds — bundled at `_vendor/rgbds-1.0.1-src/` on the dev machine. |
 
@@ -138,8 +155,9 @@ Progress/bag: `wObtainedBadges`, `wPlayerID`, `wPlayerMoney`,
 Hooks: `DisplayTextID` (bank 0, $2920), `YesNoChoice` (bank 0, $35ec),
 `TryEvolvingMon` (bank 0x0e, $6d0e), `SetLastBlackoutMap` (bank 1, $7078).
 
-Yellow symbol coverage will be audited against `pokeyellow.sym` before
-adding it to this table.
+Yellow symbol coverage: **all 52 WRAM symbols + 4 hook labels present
+in `pokeyellow.sym`** under unchanged names (verified 2026-04-19).
+Addresses differ from Red/Blue but the name-based resolver masks that.
 
 ## Performance floor (measured on dev machine)
 
