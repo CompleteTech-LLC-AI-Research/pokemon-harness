@@ -3,6 +3,23 @@
 producing ``tests/fixtures/link/blue/cable_club.state`` for the link-cable
 trade integration test.
 
+STATUS (2026-04-19): **not yet producing a valid Cable Club state.**
+The scaffold runs end-to-end without crashing but the leg navigators are
+buggy — after Option-B boost and gym exit the player sits at Pewter
+City (17, 20) and ``bump_walk(right, down)`` doesn't find a path through
+Pewter's east edge to the Route 3 gate house. The Mt. Moon legs are
+untested guesses. Each leg needs to be developed and verified
+interactively; the full Pewter → Cable Club navigation is a
+multi-session task comparable to ``run_to_brock.py`` (700 lines).
+
+**Root-cause note from the first attempt**: the state file
+``walkthrough_blue/milestones/after_brock.state`` was produced against
+the color-patched ``pokemon-blue-color.gb`` ROM, not stock
+``pokemon-blue.gb``. Loading it into the stock ROM succeeds silently but
+the very next ``tick()`` corrupts WRAM into a repeating 0x00/0x39
+pattern. The default ROM path/SHA in ``main()`` is therefore pinned to
+the color-patched Blue.
+
 Mirrors the idiom of ``blue_forest_to_brock.py``:
 
 * Loads the upstream milestone (``walkthrough_blue/milestones/after_brock.state``).
@@ -466,12 +483,21 @@ LEG_FNS = {
 
 
 def main() -> int:
-    rom = os.environ["POKERED_ROM_PATH"]
-    sym = os.environ["POKERED_SYM_PATH"]
-    # Blue (UE) ROM SHA-1 — differs from Red; Red = e1de...ce2 is not this
-    # file. Override via POKERED_ROM_SHA1 if your ROM is Blue JP / different.
+    # IMPORTANT: `after_brock.state` was produced against the color-patched
+    # Blue ROM (pokeblue_color_vanilla.ips applied). Loading it into stock
+    # Blue appears to succeed but the very next tick() corrupts WRAM into
+    # the repeating 0x00/0x39 pattern — root-caused 2026-04-19. Default to
+    # the patched ROM so reruns work out of the box.
+    rom = os.environ.get(
+        "POKERED_ROM_PATH",
+        "C:/Users/timot/Documents/projects/pokemon/rom/blue/pokemon-blue-color.gb",
+    )
+    sym = os.environ.get(
+        "POKERED_SYM_PATH",
+        "C:/Users/timot/Documents/projects/pokemon/rom/blue/pokemon-blue.sym",
+    )
     sha1 = os.environ.get(
-        "POKERED_ROM_SHA1", "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
+        "POKERED_ROM_SHA1", "5f4b05725a860e04077045462176d3e2771c5022"
     )
 
     # Milestones live in the main repo under walkthrough_blue/milestones/
