@@ -395,30 +395,45 @@ class Driver:
                 return True
         return False
 
-    def run_route2_to_forest(self) -> None:
-        """Route 2 (8, 71) → Viridian Forest (either via south gate or
-        direct edge transition at the north end of Route 2's south half).
+    # BFS-verified path from Route 2 south entry (8, 71) to Forest South
+    # Gate door at (3, 43). Discovered via scripts/bfs_route.py. 41 steps.
+    ROUTE2_TO_FOREST_GATE_PATH = (
+        ["up"] * 9 + ["left"] +           # (8,71) → (8,62) → (7,62)
+        ["up"] * 5 + ["left"] * 2 +       # (7,62) → (7,57) → (5,57)
+        ["up"] + ["left"] +               # (5,57) → (5,56) → (4,56)
+        ["up"] * 7 + ["right"] * 4 +      # (4,56) → (4,49) → (8,49)
+        ["up"] * 4 + ["left"] * 5 +       # (8,49) → (8,45) → (3,45)
+        ["up"]                             # (3,45) → (3,44) warp to 0x32
+    )
 
-        Pattern: repeatedly call `_step_up_with_left_detour`. When the
-        map changes (0x32 south gate, or 0x33 forest interior), stop.
+    def run_route2_to_forest(self) -> None:
+        """Route 2 (8, 71) → Viridian Forest south gate (map 0x32).
+
+        Uses the BFS-verified 41-step path in :attr:`ROUTE2_TO_FOREST_GATE_PATH`.
+        Handles wild-battle interrupts by running the existing battle resolver.
         """
-        for _ in range(300):
+        DIR_NAMES = {"up", "down", "left", "right"}
+        for d in self.ROUTE2_TO_FOREST_GATE_PATH:
+            # check for map transition — we're done
             gs = self.gs()
             if gs.overworld.map_id in (M_VIRIDIAN_FOREST_SOUTH_GATE,
                                        M_VIRIDIAN_FOREST):
                 break
-            if gs.battle.active: self.resolve_battle(); continue
-            if self.joy_locked(): self.press("a"); continue
-            if not self._step_up_with_left_detour(max_left=6):
-                # Fully boxed in — try a wider swing (maybe the gap is
-                # east instead of west for this row).
-                self.press("right"); self.press("right")
-                if not self._step_up_with_left_detour(max_left=8):
-                    break  # stuck
-        # Through south gate into forest proper
-        for _ in range(20):
+            if gs.battle.active:
+                self.resolve_battle()
+            if self.joy_locked():
+                # advance any dialog (shouldn't happen on Route 2, but safe)
+                for _ in range(5):
+                    self.press("a")
+                    if not self.joy_locked(): break
+            assert d in DIR_NAMES
+            self.press(d)
+        # Push through the gate interior (map 0x32) into forest (0x33).
+        # BFS-verified: gate entry (4,1) → RIGHT then UP → forest.
+        for d in ["right", "up"] + ["up"] * 3:
             if self.gs().overworld.map_id == M_VIRIDIAN_FOREST: break
-            self.press("up")
+            if self.gs().battle.active: self.resolve_battle(); continue
+            self.press(d)
 
     def run_forest_traversal(self) -> None:
         """Forest is 17x24 blocks = 34x48 tiles. Enter at bottom, exit at top via north gate."""
