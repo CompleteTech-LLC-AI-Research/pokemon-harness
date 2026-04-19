@@ -510,15 +510,21 @@ def run_option_b_boost(session: Session) -> None:
 
 def run_route2_grind(session: Session, outdir: Path,
                      rom: str, sym: str, sha1: str) -> None:
-    """Honest Pikachu grind on Route 2 up to Double Kick (L15)."""
+    """Honest Pikachu grind on Route 2 to L15 (Brock-viable level).
+
+    Yellow's Pikachu does **not** learn Double Kick by level-up — the
+    move is a one-off teach from the girl NPC at Cerulean after beating
+    Misty. L15 gives Pikachu Quick Attack (L11) + higher base stats,
+    enough to chip Onix with Thunder Shock supplemented by Quick Attack.
+    """
     print("\n=== phase: grind_to_level_15 (heal-loop) ===", flush=True)
     grind.grind_to(
         session,
         outdir=outdir,
         rom=rom, sym=sym, sha1=sha1,
         target_level=15,
-        target_move_id=grind.MOVE_DOUBLE_KICK,
-        max_battles=100,
+        target_move_id=None,
+        max_battles=120,
         max_wall_seconds=1200.0,
     )
 

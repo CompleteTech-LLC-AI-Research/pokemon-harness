@@ -303,6 +303,63 @@ def main() -> int:
                 break
             drv.press("up")
 
+    # Phase: Heal at Pewter Pokécenter if HP is below full before gym.
+    # The forest walk and Jr. Trainer's Sandshrew can chip a L13 Bulba
+    # enough to lose to Brock's Onix. PC door at (13, 25).
+    if drv.gs().overworld.map_id == 0x02:
+        session.step(60, render=True)
+        m = drv.gs().party.mons[0] if drv.gs().party.mons else None
+        if m and m.hp < m.max_hp:
+            print(f"\n=== phase: pewter_heal ===", flush=True)
+            print(f"  HP {m.hp}/{m.max_hp} — routing to Pewter PC",
+                  flush=True)
+            ftb._activate_repel(drv)
+            seed = outdir / "_pewter_to_pc.state"
+            seed.write_bytes(session.save_state())
+            try:
+                path = run_pathfinder(seed, "13,25",
+                                      outdir / "_pewter_to_pc.txt",
+                                      rom, sym, sha1)
+                print(f"  pewter→PC A*: {len(path)} steps", flush=True)
+                ftb.walk_path(drv, path, label="pewter_pc",
+                              stop_map_ids=(0x3a,))
+            except RuntimeError as e:
+                print(f"  pewter→PC pathfind failed: {e}", flush=True)
+            for _ in range(4):
+                if drv.gs().overworld.map_id == 0x3a:
+                    break
+                drv.press("up")
+            session.step(60, render=True)
+            if drv.gs().overworld.map_id == 0x3a:
+                for _ in range(6):
+                    drv.press("up")
+                drv.press("a")
+                for _ in range(30):
+                    mx = drv.sym.read_u8(drv.mem, "wMaxMenuItem")
+                    if (mx == 1 and not drv.gs().text
+                            .dest_in_vram_tilemap):
+                        break
+                    drv.press("a")
+                drv.press("a", step=60)
+                for _ in range(60):
+                    try:
+                        m = drv.gs().party.mons[0]
+                        if m.hp == m.max_hp:
+                            break
+                    except IndexError:
+                        pass
+                    drv.press("a")
+                for _ in range(15):
+                    drv.press("b", step=60)
+                for _ in range(8):
+                    if drv.gs().overworld.map_id == 0x02:
+                        break
+                    drv.press("down")
+                session.step(60, render=True)
+                m = drv.gs().party.mons[0]
+                print(f"  pewter heal done: HP={m.hp}/{m.max_hp}",
+                      flush=True)
+
     # Phase: Walk to Pewter Gym door via A* (bypasses brock_gym's naive
     # deadlock handler, which presses DOWN at (19, 35) and warps us
     # back into Route 2).

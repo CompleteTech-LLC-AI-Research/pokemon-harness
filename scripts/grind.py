@@ -274,9 +274,16 @@ def _battle_turn(drv: "rtb.Driver", *, flee_below_hp_frac: float = 0.55,
         mx = drv.sym.read_u8(drv.mem, "wMaxMenuItem")
         if not drv.joy_locked() and mx == 3:
             return False
-        # Yes/No on "should a move be forgotten?" — decline.
+        # Yes/No on "$mon is trying to learn $move. Delete a move to
+        # make room?" — mx==1 is the 2-item YES/NO menu. Press A to
+        # accept YES (needed for Pikachu's Double Kick / Bulbasaur's
+        # Vine Whip).  A subsequent mx==3 "which move to forget?"
+        # menu shows the 4 moves — cursor defaults to slot 0 but we
+        # send DOWN to land on slot 1 (usually Growl / Tail Whip)
+        # before confirming, so we don't overwrite the strong damaging
+        # move the mon was given at creation.
         if not drv.joy_locked() and mx == 1:
-            drv.press("b", step=20)
+            drv.press("a", step=20)
             continue
         drv.press("a", step=20)
     return False
@@ -289,19 +296,58 @@ def _resolve_battle_no_blackout_mash(drv: "rtb.Driver",
 
     Caps flee attempts at 2 per battle — after a third failed RUN, we
     should just attack (Gen 1 run-chance is Speed-based; if it's failing
-    consistently more tries won't help)."""
+    consistently more tries won't help).
+
+    After the battle ends, drives any level-up / move-learn dialogs by
+    mashing A and selecting slot 1 (usually Growl / Tail Whip) on the
+    "which move should be forgotten?" prompt so the strong damaging
+    move in slot 0 stays untouched.
+    """
     flee_attempts = 0
     for _ in range(max_turns):
         gs = drv.gs()
         if not gs.battle.active:
-            return False
+            break
         if gs.party.mons and gs.party.mons[0].hp == 0:
+            _drive_post_battle_dialogs(drv)
             return True
         force_fight = flee_attempts >= 2
         fled = _battle_turn(drv, force_fight=force_fight)
         if fled:
             flee_attempts += 1
+    _drive_post_battle_dialogs(drv)
     return False
+
+
+def _drive_post_battle_dialogs(drv: "rtb.Driver") -> None:
+    """After the battle ends, advance any level-up / EXP / move-learn
+    dialogs. Exits once joyIgnore clears AND no text box is rendering.
+
+    Gen 1's move-learn flow:
+      1. "$mon wants to learn $move" — A.
+      2. "Delete a move?" (mx==1 YES/NO) — A for YES.
+      3. "Which move should be forgotten?" (mx==3 4-item list) —
+         DOWN×2 then A overwrites slot 2 (usually the status move
+         Growl/Tail Whip), keeping slot 0's damaging move intact.
+    """
+    for _ in range(80):
+        gs = drv.gs()
+        if gs.battle.active:
+            return
+        joy_locked = drv.joy_locked()
+        in_text = gs.text.dest_in_vram_tilemap
+        if not joy_locked and not in_text:
+            return
+        mx = drv.sym.read_u8(drv.mem, "wMaxMenuItem") if "wMaxMenuItem" in drv.sym else 0
+        if not joy_locked and in_text and mx == 1:
+            drv.press("a", step=30)  # YES to learn
+            continue
+        if not joy_locked and in_text and mx == 3:
+            drv.press("down")
+            drv.press("down")
+            drv.press("a", step=30)
+            continue
+        drv.press("a", step=20)
 
 
 # --- Heal-loop primitive ---------------------------------------------------
@@ -509,8 +555,17 @@ def _ensure_in_grass(drv: "rtb.Driver",
 
 
 def _walk_until_battle(drv: "rtb.Driver", max_steps: int = 40) -> bool:
-    """Bounce the player UP/DOWN within the grass patch until a wild
-    encounter fires. Returns True if battle active after the walk."""
+    """Bounce the player within the Route 2 grass patch until a wild
+    encounter fires. Returns True if battle active after the walk.
+
+    Cycles deterministically through UP / RIGHT / DOWN / LEFT so we
+    always explore away from grass-edge corners even when two axes are
+    blocked by trees. Encounters in Gen 1 can only fire on grass tiles
+    (tile id 0x52), so we intentionally take every movement direction
+    in sequence to maximise grass-stepping probability."""
+    rotation = ["up", "right", "down", "left"]
+    last_xy = None
+    stuck_count = 0
     for i in range(max_steps):
         gs = drv.gs()
         if gs.battle.active:
@@ -521,21 +576,38 @@ def _walk_until_battle(drv: "rtb.Driver", max_steps: int = 40) -> bool:
             drv.press("a")
             continue
         y = gs.overworld.y
+        # Prefer staying inside grass. When already there, step
+        # through all four directions in rotation — each step is a
+        # grass-or-adjacent candidate.
         if y < GRASS_Y_MIN:
             d = "down"
         elif y > GRASS_Y_MAX:
             d = "up"
         else:
-            d = "up" if (i % 2 == 0) else "down"
+            d = rotation[i % 4]
         before = (gs.overworld.x, gs.overworld.y)
         drv.press(d)
         if drv.gs().battle.active:
             return True
         after = (drv.gs().overworld.x, drv.gs().overworld.y)
+        # Track persistent stalls: if we've stayed at the same tile
+        # for 6 presses in a row, try every direction once to escape.
         if after == before:
-            drv.press("up" if d == "down" else "down")
-            if drv.gs().battle.active:
-                return True
+            if last_xy == before:
+                stuck_count += 1
+            else:
+                stuck_count = 1
+            if stuck_count >= 4:
+                for altd in rotation:
+                    drv.press(altd)
+                    if drv.gs().battle.active:
+                        return True
+                    if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
+                        break
+                stuck_count = 0
+        else:
+            stuck_count = 0
+        last_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
     return drv.gs().battle.active
 
 
