@@ -42,7 +42,16 @@ HRAM_SERIAL_SEND = "hSerialSendData"
 HRAM_SERIAL_RECEIVE = "hSerialReceiveData"
 HRAM_SERIAL_STATUS = "hSerialConnectionStatus"
 
-_STATUS_CONNECTED = 0x01
+# pret/pokered/constants/serial_constants.asm:
+#   USING_EXTERNAL_CLOCK  = 0x01  (slave - peer drives the clock)
+#   USING_INTERNAL_CLOCK  = 0x02  (master - drives the clock)
+# In pokered's link protocol the two peers must have opposite clock
+# roles so the sync-nybble counter logic converges. Our bridge assigns
+# the primary as external clock (slave) and the peer as internal clock
+# (master); this matches the real Game Boy convention where the cable
+# is symmetrically connected but the two carts negotiate roles.
+_STATUS_PRIMARY_EXTERNAL = 0x01
+_STATUS_PEER_INTERNAL = 0x02
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +163,7 @@ class SerialBridge:
             if link_sym.role is LinkRole.BRIDGE:
                 cb = self._make_bridge_cb(side, peer, is_a=is_a)
             elif link_sym.role is LinkRole.HANDSHAKE:
-                cb = self._make_handshake_cb(side, peer)
+                cb = self._make_handshake_cb(side, peer, is_a=is_a)
             else:
                 continue
             label = _label_on(side.session, link_sym)
@@ -173,11 +182,26 @@ class SerialBridge:
         *,
         is_a: bool,
     ) -> Callable[[object], None]:
+        """Callback that fires when the game enters a serial-byte-exchange
+        routine (e.g. ``Serial_ExchangeBytes``).
+
+        Exchanges a pair of bytes via the transport and writes the
+        receive cells so the game sees the transport's peer-byte even
+        if PyBoy's interrupt-driven serial transfer doesn't complete.
+        Also reinforces the clock-role status (primary = external slave,
+        peer = internal master) which the nybble-sync protocol reads.
+
+        ``LinkPair.step()`` also runs a per-frame hardware-serial tick
+        that drives the real Serial ISR path via IF-bit manipulation;
+        this symbol-level callback is a cooperating belt-and-braces
+        layer so the transport still sees byte traffic even before the
+        ISR cycle completes.
+        """
         transport = self._transport
+        side_status = _STATUS_PRIMARY_EXTERNAL if is_a else _STATUS_PEER_INTERNAL
+        peer_status = _STATUS_PEER_INTERNAL if is_a else _STATUS_PRIMARY_EXTERNAL
 
         def _cb(_ctx: object) -> None:
-            # Access via session._pyboy.memory — Session has no public memory
-            # accessor and adding one just for the bridge would be scope creep.
             side_mem = side.session._pyboy.memory
             peer_mem = peer.session._pyboy.memory
             this_send = int(side_mem[side.send_addr]) & 0xFF
@@ -187,26 +211,27 @@ class SerialBridge:
             else:
                 from_a, from_b = peer_send, this_send
             to_a, to_b = transport.exchange(from_a, from_b)
-            # Write A's result to A's receive cell, B's to B's — regardless
-            # of which side fired the hook.
             if is_a:
                 side_mem[side.receive_addr] = to_a
                 peer_mem[peer.receive_addr] = to_b
             else:
                 side_mem[side.receive_addr] = to_b
                 peer_mem[peer.receive_addr] = to_a
-            side_mem[side.status_addr] = _STATUS_CONNECTED
-            peer_mem[peer.status_addr] = _STATUS_CONNECTED
+            side_mem[side.status_addr] = side_status
+            peer_mem[peer.status_addr] = peer_status
 
         return _cb
 
     @staticmethod
     def _make_handshake_cb(
-        side: BridgeEndpoint, peer: BridgeEndpoint
+        side: BridgeEndpoint, peer: BridgeEndpoint, *, is_a: bool
     ) -> Callable[[object], None]:
+        side_status = _STATUS_PRIMARY_EXTERNAL if is_a else _STATUS_PEER_INTERNAL
+        peer_status = _STATUS_PEER_INTERNAL if is_a else _STATUS_PRIMARY_EXTERNAL
+
         def _cb(_ctx: object) -> None:
-            side.session._pyboy.memory[side.status_addr] = _STATUS_CONNECTED
-            peer.session._pyboy.memory[peer.status_addr] = _STATUS_CONNECTED
+            side.session._pyboy.memory[side.status_addr] = side_status
+            peer.session._pyboy.memory[peer.status_addr] = peer_status
 
         return _cb
 

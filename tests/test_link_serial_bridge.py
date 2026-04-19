@@ -110,8 +110,10 @@ def test_exchange_from_side_a_swaps_bytes_and_sets_status():
     assert ma[HRAM_RECEIVE] == 0x55
     assert mb[HRAM_RECEIVE] == 0xAA
     # Both sides' connection-status bytes flip to the "linked" marker.
+    # Primary gets 0x01 (EXTERNAL clock / slave), peer gets 0x02
+    # (INTERNAL clock / master). See pret/pokered serial_constants.asm.
     assert ma[HRAM_STATUS] == 0x01
-    assert mb[HRAM_STATUS] == 0x01
+    assert mb[HRAM_STATUS] == 0x02
 
 
 def test_exchange_from_side_b_uses_same_mapping():
@@ -128,8 +130,10 @@ def test_exchange_from_side_b_uses_same_mapping():
 
     assert ma[HRAM_RECEIVE] == 0x22
     assert mb[HRAM_RECEIVE] == 0x11
+    # Primary gets 0x01 (EXTERNAL clock / slave), peer gets 0x02
+    # (INTERNAL clock / master). See pret/pokered serial_constants.asm.
     assert ma[HRAM_STATUS] == 0x01
-    assert mb[HRAM_STATUS] == 0x01
+    assert mb[HRAM_STATUS] == 0x02
 
 
 def test_exchange_drives_the_transport():
@@ -169,8 +173,10 @@ def test_handshake_writes_connected_marker_on_both_sides():
 
     pa.fire(SERIAL_HANDSHAKE_BANK, SERIAL_HANDSHAKE_ADDR)
 
+    # Primary gets 0x01 (EXTERNAL clock / slave), peer gets 0x02
+    # (INTERNAL clock / master). See pret/pokered serial_constants.asm.
     assert ma[HRAM_STATUS] == 0x01
-    assert mb[HRAM_STATUS] == 0x01
+    assert mb[HRAM_STATUS] == 0x02
     # Receive cells untouched — handshake doesn't exchange bytes.
     assert ma[HRAM_RECEIVE] == 0xEE
     assert mb[HRAM_RECEIVE] == 0xEE
