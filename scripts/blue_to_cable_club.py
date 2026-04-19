@@ -468,8 +468,10 @@ LEG_FNS = {
 def main() -> int:
     rom = os.environ["POKERED_ROM_PATH"]
     sym = os.environ["POKERED_SYM_PATH"]
+    # Blue (UE) ROM SHA-1 — differs from Red; Red = e1de...ce2 is not this
+    # file. Override via POKERED_ROM_SHA1 if your ROM is Blue JP / different.
     sha1 = os.environ.get(
-        "POKERED_ROM_SHA1", "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+        "POKERED_ROM_SHA1", "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
     )
 
     # Milestones live in the main repo under walkthrough_blue/milestones/
