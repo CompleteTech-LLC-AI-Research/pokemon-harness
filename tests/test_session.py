@@ -321,6 +321,54 @@ def test_default_pyboy_factory_passes_window_and_cgb(monkeypatch):
     assert captured[-1] == (("rom.gb",), {"window": "null", "cgb": False})
 
 
+# -- serial_hook ---------------------------------------------------------
+
+
+def test_serial_hook_fires_callback_on_known_symbol():
+    s, pb, _ = _session()
+    calls: list[object] = []
+
+    def cb(ctx: object) -> None:
+        calls.append(ctx)
+
+    s.serial_hook("DisplayTextID", cb)
+    assert pb.fire(0x02, 0x4A12) == 1
+    assert calls == [None]
+
+
+def test_serial_hook_passes_context_through():
+    s, pb, _ = _session()
+    sentinel = object()
+    received: list[object] = []
+
+    s.serial_hook("DisplayTextID", lambda ctx: received.append(ctx), context=sentinel)
+    pb.fire(0x02, 0x4A12)
+    assert received == [sentinel]
+
+
+def test_serial_hook_unknown_symbol_matches_register_hook_error():
+    s, _, _ = _session()
+
+    with pytest.raises(KeyError) as serial_exc:
+        s.serial_hook("NoSuchSymbol", lambda _ctx: None)
+
+    with pytest.raises(KeyError) as register_exc:
+        s.register_hook("NoSuchSymbol", "evt")
+
+    # Document parity: both raise the same error type for unknown symbols.
+    assert type(serial_exc.value) is type(register_exc.value)
+
+
+def test_serial_hook_multiple_callbacks_at_same_symbol_all_fire():
+    s, pb, _ = _session()
+    calls: list[str] = []
+
+    s.serial_hook("DisplayTextID", lambda _ctx: calls.append("a"))
+    s.serial_hook("DisplayTextID", lambda _ctx: calls.append("b"))
+    assert pb.fire(0x02, 0x4A12) == 2
+    assert calls == ["a", "b"]
+
+
 def test_close_stops_pyboy():
     s, pb, _ = _session()
     s.close()

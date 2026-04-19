@@ -5,6 +5,8 @@ import pytest
 from pokered_harness.config import (
     VersionsConfig,
     VersionsConfigError,
+    load_peer_env,
+    load_primary_env,
     load_versions,
 )
 
@@ -82,3 +84,69 @@ def test_repo_versions_md_parses():
     cfg = load_versions("VERSIONS.md")
     assert cfg.pyboy_version == "2.7.0"
     assert cfg.rom_sha1 == "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
+
+
+# -- per-session env vars --------------------------------------------------
+
+
+_PEER_VARS = (
+    "POKERED_PEER_ROM_PATH",
+    "POKERED_PEER_SYM_PATH",
+    "POKERED_PEER_ROM_SHA1",
+    "POKERED_PEER_ROM_VERSION",
+)
+_PRIMARY_VARS = (
+    "POKERED_ROM_PATH",
+    "POKERED_SYM_PATH",
+    "POKERED_ROM_SHA1",
+    "POKERED_ROM_VERSION",
+)
+
+
+def _clear_env(monkeypatch, names):
+    for n in names:
+        monkeypatch.delenv(n, raising=False)
+
+
+def test_load_peer_env_unset_returns_none_fields(monkeypatch):
+    _clear_env(monkeypatch, _PEER_VARS)
+    env = load_peer_env()
+    assert env.rom_path is None
+    assert env.sym_path is None
+    assert env.rom_sha1 is None
+    # Version still resolves to a heuristic default even when rom_path is None.
+    assert env.version == "red"
+
+
+def test_load_peer_env_reads_all_three(monkeypatch):
+    monkeypatch.setenv("POKERED_PEER_ROM_PATH", "rom/blue/pokemon-blue.gb")
+    monkeypatch.setenv("POKERED_PEER_SYM_PATH", "rom/blue/pokemon-blue.sym")
+    monkeypatch.setenv(
+        "POKERED_PEER_ROM_SHA1", "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
+    )
+    monkeypatch.delenv("POKERED_PEER_ROM_VERSION", raising=False)
+    env = load_peer_env()
+    assert env.rom_path == "rom/blue/pokemon-blue.gb"
+    assert env.sym_path == "rom/blue/pokemon-blue.sym"
+    assert env.rom_sha1 == "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
+    # Version auto-derived from filename heuristic.
+    assert env.version == "blue"
+
+
+def test_load_peer_env_version_explicit_override(monkeypatch):
+    monkeypatch.setenv("POKERED_PEER_ROM_PATH", "rom/ambiguous/cartridge.gb")
+    monkeypatch.setenv("POKERED_PEER_SYM_PATH", "rom/ambiguous/cartridge.sym")
+    monkeypatch.delenv("POKERED_PEER_ROM_SHA1", raising=False)
+    monkeypatch.setenv("POKERED_PEER_ROM_VERSION", "yellow")
+    env = load_peer_env()
+    assert env.version == "yellow"
+
+
+def test_load_primary_env_version_yellow_heuristic(monkeypatch):
+    monkeypatch.setenv("POKERED_ROM_PATH", "rom/yellow/pokemon-yellow.gbc")
+    monkeypatch.setenv("POKERED_SYM_PATH", "rom/yellow/pokemon-yellow.sym")
+    monkeypatch.delenv("POKERED_ROM_SHA1", raising=False)
+    monkeypatch.delenv("POKERED_ROM_VERSION", raising=False)
+    env = load_primary_env()
+    assert env.rom_path == "rom/yellow/pokemon-yellow.gbc"
+    assert env.version == "yellow"

@@ -125,6 +125,61 @@ End-to-end scripts live under `scripts/`:
   Double Kick) to clear Brock's Rock/Ground team; replace with real
   Route 2 grind when the heal-loop lands.
 
+## Link cable
+
+PyBoy has no hardware-level link-cable emulation (see
+[PyBoy #29](https://github.com/Baekalfen/PyBoy/issues/29)). The harness
+works around this by running two `Session` instances and installing
+execution hooks at pret serial-routine labels
+(`Serial_ExchangeBytes`,
+`Serial_TryEstablishingExternallyClockedConnection`, ...); when the
+game enters one of those helpers, a `SerialBridge` swaps the pending
+HRAM bytes between sides and forces the connection-status cell to
+"linked". The two sessions are stepped in lockstep by `LinkPair`.
+
+Label set is validated against real `pokeblue.sym` and `pokeyellow.sym`
+by `tests/test_link_symbols_real_roms.py` (skipped when the matching
+ROM's `.sym` is absent). Pairing install is smoke-tested against real
+ROMs in `tests/test_link_integration.py`.
+
+Peer env vars (all three optional — unset means single-session mode):
+
+```bash
+POKERED_PEER_ROM_PATH=rom/blue/pokemon-blue.gb \
+POKERED_PEER_SYM_PATH=rom/blue/pokemon-blue.sym \
+POKERED_PEER_ROM_SHA1=<see VERSIONS.md>
+```
+
+MCP tools:
+
+- `link_pair` — build the bridge and install hooks.
+- `link_step {"count": 60}` — advance both sides 60 ticks, interleaved.
+- `link_unpair` — drop the bridge (pre-existing session hooks survive).
+
+### Producing Cable Club save states
+
+Actual trade / link-battle testing needs both sides sitting at the
+Cerulean Pokémon Center Cable Club attendant with 2+ Pokémon in party.
+The first accessible Cable Club is in Cerulean City (after Brock →
+Mt. Moon). The repo ships harness scripts through Boulder Badge; Mt.
+Moon → Cerulean progression is not yet automated.
+
+Until that lands, produce each fixture manually:
+
+1. Launch `scripts/walkthrough.py --view` (or any interactive script)
+   with the target ROM.
+2. Play through to Cerulean Pokémon Center, enter the Cable Club,
+   stand in front of the trade attendant.
+3. At a Python prompt (or mid-script), call
+   `open("tests/fixtures/link/<version>/cable_club.state", "wb").write(session.save_state())`.
+4. Repeat for the peer version.
+5. Run `python scripts/link_trade_demo.py --primary blue --peer yellow --view`.
+
+Current limitations: PyBoy 2.7.0 has no `hook_deregister`, so `unpair`
+leaves dormant callbacks in place; Mt. Moon → Cerulean progression is
+not yet scripted so Cable Club fixtures must be produced manually;
+trade-only — link battle is deferred.
+
 ## Color rendering
 
 The harness constructs `PyBoy(..., cgb=True)`. Stock Red/Blue render
