@@ -17,7 +17,7 @@ canonical target but Blue (v1.0, UE) also works unchanged — see
 | Pokémon Red + Full Color Hack | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
 | Pokémon Blue (UE) | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
 | Pokémon Blue + pokeblue_color_vanilla.ips | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
-| Pokémon Yellow (UE) | 🧩 Infra ready, walkthrough pending | [`VERSIONS.md`](VERSIONS.md) | Boots + `read_game_state` works |
+| Pokémon Yellow (UE) | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
 | JP Red, other localisations, ROM hacks | ❌ Out of scope | — | — |
 
 Red and Blue share pokered's WRAM layout, so the state parsers and event
@@ -118,6 +118,12 @@ End-to-end scripts live under `scripts/`:
   harness that RAM-boosts Bulbasaur past the grind gap, then runs
   forest → Pewter → Brock. Will be replaced by a proper Route 2 heal
   loop in a future iteration.
+- `scripts/yellow_to_brock.py` — Yellow: full intro → Pikachu →
+  rival battle → Pallet → Viridian → Route 2 → Forest → Pewter →
+  Brock. Reuses the Blue harness's A* navigation legs unchanged and
+  applies the same Option-B RAM boost (L50 Pikachu with Thunderbolt +
+  Double Kick) to clear Brock's Rock/Ground team; replace with real
+  Route 2 grind when the heal-loop lands.
 
 ## Color rendering
 

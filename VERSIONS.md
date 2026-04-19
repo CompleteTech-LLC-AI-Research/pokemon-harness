@@ -71,13 +71,12 @@ PyBoy rejects. Output is emulator-ready.
 | Base | Stock Blue UE + `pokeblue_color_vanilla.ips` (+ checksum fix) |
 | `.sym` | Same `pokeblue.sym` as stock Blue |
 
-### Pokémon Yellow — infra validated, walkthrough pending (2026-04-19)
+### Pokémon Yellow — end-to-end supported (2026-04-19)
 
 Yellow is a native Game Boy Color cartridge (`.gbc`) built from the
 separate [`pret/pokeyellow`](https://github.com/pret/pokeyellow) repo.
-Adding Yellow in two phases: **infra** (this section — done) and
-**walkthrough** (Pikachu-starter, no-menu-pick intro, Brock strategy
-with non-electric mons — not yet started).
+Full intro → rival battle → Pallet → Viridian → Forest → Pewter →
+Brock pipeline lives at `scripts/yellow_to_brock.py`.
 
 | Field | Value |
 |---|---|

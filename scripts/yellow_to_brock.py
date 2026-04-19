@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -28,9 +29,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from pokered_harness.session import Session
 from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.state.party import (
+    _OFFSET_HP,
+    _OFFSET_LEVEL,
+    _OFFSET_MAX_HP,
+    _OFFSET_MOVES,
+    _OFFSET_PP,
+)
 
 import run_to_brock as rtb
 import full_to_brock as ftb
+import brock_gym as bg
 
 
 # --- Yellow-specific map constants (identical to pokered — Kanto maps
@@ -354,6 +363,69 @@ def run_rival_battle(session: Session) -> None:
           flush=True)
 
 
+# --- Shared: A* pathfinder via subprocess -------------------------------
+
+def run_pathfinder(state_path, goal, out_path, rom, sym, sha1):
+    script = Path(__file__).parent / "path_from_tiles.py"
+    env = dict(os.environ)
+    env.update(
+        POKERED_ROM_PATH=rom, POKERED_SYM_PATH=sym, POKERED_ROM_SHA1=sha1,
+        PYTHONPATH=str(Path(__file__).parent.parent / "src"),
+        PYTHONIOENCODING="utf-8",
+    )
+    kw = ["--state", str(state_path), "--save-path-to", str(out_path),
+          "--goal-xy", goal]
+    r = subprocess.run([sys.executable, "-u", str(script), *kw],
+                       env=env, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"pathfinder failed: {r.stderr}")
+    return out_path.read_text().strip()
+
+
+# --- Option B: RAM-boost Pikachu so Brock is winnable -------------------
+
+def boost_pikachu(session: Session) -> None:
+    """Force lead slot to a comfortably-over-Brock L50 Pikachu. Same
+    purpose as boost_bulbasaur in blue_forest_to_brock.py — validates
+    the downstream phase plumbing without pretending to fix the
+    still-missing heal-between-battles grind. Replace with a proper
+    Route 2 grind once that lands."""
+    mem = session._pyboy.memory  # type: ignore[attr-defined]
+    base = session.symbols.addr_of("wPartyMons")
+
+    def put_be16(off: int, val: int) -> None:
+        mem[base + off] = (val >> 8) & 0xff
+        mem[base + off + 1] = val & 0xff
+
+    mem[base + _OFFSET_LEVEL] = 50
+    put_be16(_OFFSET_HP, 200)
+    put_be16(_OFFSET_MAX_HP, 200)
+    put_be16(36, 255)  # Attack
+    put_be16(38, 255)  # Defense
+    put_be16(40, 200)  # Speed (Pikachu is already fast)
+    put_be16(42, 255)  # Special (for Thunderbolt)
+    # Move set: keep ThunderShock (84) + Growl (45) but add Thunderbolt
+    # (85) and Double Kick (24). Double Kick is Fighting, super-
+    # effective vs Brock's Rock/Ground team; Thunderbolt is strong
+    # STAB against Pidgey/etc in case of wilds.
+    moves = (85, 45, 24, 84)  # Thunderbolt, Growl, Double Kick, T-Shock
+    for i, m in enumerate(moves):
+        mem[base + _OFFSET_MOVES + i] = m
+    for i, pp in enumerate((15, 40, 30, 30)):
+        mem[base + _OFFSET_PP + i] = pp
+    xp = 150000
+    mem[base + 14] = (xp >> 16) & 0xff
+    mem[base + 15] = (xp >> 8) & 0xff
+    mem[base + 16] = xp & 0xff
+
+    gs = session.read_game_state()
+    m = gs.party.mons[0]
+    print(
+        f"  boosted: L{m.level} HP{m.hp}/{m.max_hp} moves={list(m.moves)}",
+        flush=True,
+    )
+
+
 # --- Phase: exit lab → Viridian -----------------------------------------
 
 def run_pallet_to_viridian(session: Session, outdir: Path,
@@ -389,6 +461,262 @@ def run_pallet_to_viridian(session: Session, outdir: Path,
             f"pallet_to_viridian: failed (map=0x{gs.overworld.map_id:02x})")
 
 
+# --- Phase: Viridian → Route 2 → Forest → Pewter → Brock ---------------
+# These phases are ports of blue_forest_to_brock.py with Pikachu-specific
+# boost values and no changes to the navigation — the Kanto map layout
+# is shared across all three mainline Gen 1 titles.
+
+def run_viridian_to_route2(session: Session, outdir: Path,
+                           rom: str, sym: str, sha1: str) -> None:
+    drv = rtb.Driver(session)
+    # Yellow's Viridian has a "sleeping old man" blocking (19, 9) until
+    # the catch-training sequence completes. The rtb helper's RAM-poke
+    # for EVENT_GOT_POKEDEX doesn't disarm this in Yellow. Set
+    # wViridianCityCurScript directly to POST_CATCH_TRAINING (state 2)
+    # which drops the blocking check entirely. Equivalent to watching
+    # the old man's Pokémon-catching demo.
+    if "wViridianCityCurScript" in session.symbols:
+        vs_addr = session.symbols.addr_of("wViridianCityCurScript")
+        session._pyboy.memory[vs_addr] = 2  # type: ignore[attr-defined]
+        print("  viridian: wViridianCityCurScript = 2 (skip old man block)",
+              flush=True)
+    drv.run_viridian_to_route2()
+    session.step(60, render=True)
+    if drv.gs().overworld.map_id != M_ROUTE_2:
+        ftb._activate_repel(drv)
+        seed = outdir / "_viridian_to_r2.state"
+        seed.write_bytes(session.save_state())
+        try:
+            path = run_pathfinder(seed, "17,0",
+                                  outdir / "_viridian_to_r2.txt",
+                                  rom, sym, sha1)
+            print(f"  viridian→r2 A*: {len(path)} steps", flush=True)
+            ftb.walk_path(drv, path, label="vi2r2",
+                          stop_map_ids=(M_ROUTE_2,))
+            for _ in range(4):
+                if drv.gs().overworld.map_id == M_ROUTE_2:
+                    break
+                drv.press("up")
+        except RuntimeError as e:
+            print(f"  viridian→r2 pathfind failed: {e}", flush=True)
+
+
+def run_option_b_boost(session: Session) -> None:
+    print("\n=== RAM boost Pikachu → L50 + Thunderbolt + Double Kick ===",
+          flush=True)
+    boost_pikachu(session)
+
+
+def run_route2_to_forest(session: Session, outdir: Path,
+                         rom: str, sym: str, sha1: str) -> None:
+    drv = rtb.Driver(session)
+    ftb._activate_repel(drv)
+    seed = outdir / "_r2_to_gate.state"
+    seed.write_bytes(session.save_state())
+    path = run_pathfinder(seed, "3,44", outdir / "_r2_to_gate.txt",
+                          rom, sym, sha1)
+    print(f"  route2 A*: {len(path)} steps", flush=True)
+    ftb.walk_path(drv, path, label="route2",
+                  stop_map_ids=(0x32, 0x33))
+    for _ in range(4):
+        if drv.gs().overworld.map_id == 0x32:
+            break
+        drv.press("up")
+    if drv.gs().overworld.map_id == 0x32:
+        gate_seed = outdir / "_gate_cross.state"
+        gate_seed.write_bytes(session.save_state())
+        try:
+            path = run_pathfinder(gate_seed, "5,0",
+                                  outdir / "_gate_cross.txt",
+                                  rom, sym, sha1)
+            print(f"  gate A*: {len(path)} steps", flush=True)
+            ftb.walk_path(drv, path, label="gate",
+                          stop_map_ids=(0x33,))
+        except RuntimeError as e:
+            print(f"  gate pathfind failed: {e}", flush=True)
+        for _ in range(6):
+            if drv.gs().overworld.map_id == rtb.M_VIRIDIAN_FOREST:
+                break
+            drv.press("up")
+
+
+def run_forest_traversal(session: Session, outdir: Path,
+                         rom: str, sym: str, sha1: str) -> None:
+    drv = rtb.Driver(session)
+    # Post-warp xy-staleness — idle before reading.
+    session.step(60, render=True)
+    gs = drv.gs()
+    # Step UP off forest's own warp row y=47.
+    if gs.overworld.map_id == 0x33 and gs.overworld.y >= 45:
+        for _ in range(4):
+            drv.press("up")
+            if drv.gs().overworld.y < 45:
+                break
+    for attempt in range(10):
+        gs = drv.gs()
+        if gs.overworld.map_id == 0x2F:
+            break
+        if gs.overworld.map_id == 0x33 and (gs.overworld.x, gs.overworld.y) in ((1, 0), (2, 0)):
+            for _ in range(4):
+                drv.press("up")
+                if drv.gs().overworld.map_id == 0x2F:
+                    break
+            break
+        ftb._activate_repel(drv)
+        seed = outdir / f"_forest_leg_{attempt}.state"
+        seed.write_bytes(session.save_state())
+        path_file = outdir / f"_forest_leg_{attempt}.txt"
+        try:
+            path = run_pathfinder(seed, "1,0", path_file, rom, sym, sha1)
+        except RuntimeError as e:
+            print(f"  forest pathfind fail: {e}", flush=True)
+            break
+        print(f"  forest leg {attempt}: {len(path)} steps", flush=True)
+        if not path:
+            for _ in range(4):
+                drv.press("up")
+                if drv.gs().overworld.map_id == 0x2F:
+                    break
+            continue
+        ftb.walk_path(drv, path, label=f"forest{attempt}",
+                      stop_map_ids=(0x2F,))
+        gs = drv.gs()
+        if gs.overworld.map_id == 0x33 and gs.overworld.y == 0:
+            for _ in range(3):
+                drv.press("up")
+                if drv.gs().overworld.map_id == 0x2F:
+                    break
+
+
+def run_pewter_approach(session: Session, outdir: Path,
+                        rom: str, sym: str, sha1: str) -> None:
+    drv = rtb.Driver(session)
+    ftb._activate_repel(drv)
+    # Cross the north forest gate the same way as south — target (5, 0).
+    if drv.gs().overworld.map_id == 0x2F:
+        seed = outdir / "_ngate.state"
+        seed.write_bytes(session.save_state())
+        try:
+            path = run_pathfinder(seed, "5,0",
+                                  outdir / "_ngate.txt",
+                                  rom, sym, sha1)
+            print(f"  north gate A*: {len(path)} steps", flush=True)
+            ftb.walk_path(drv, path, label="ngate", stop_map_ids=(0x0d,))
+        except RuntimeError as e:
+            print(f"  north gate pathfind failed: {e}", flush=True)
+        for _ in range(6):
+            if drv.gs().overworld.map_id == 0x0d:
+                break
+            drv.press("up")
+    session.step(60, render=True)
+    # Route 2 north → Pewter border (10, 0).
+    if drv.gs().overworld.map_id == 0x0d:
+        gs = drv.gs()
+        print(f"  at route2 north: xy=({gs.overworld.x},{gs.overworld.y})",
+              flush=True)
+        seed = outdir / "_r2n.state"
+        seed.write_bytes(session.save_state())
+        try:
+            path = run_pathfinder(seed, "10,0", outdir / "_r2n.txt",
+                                  rom, sym, sha1)
+            print(f"  route2 north A*: {len(path)} steps", flush=True)
+            ftb.walk_path(drv, path, label="r2n", stop_map_ids=(0x02,))
+        except RuntimeError as e:
+            print(f"  pewter pathfind failed: {e}", flush=True)
+        for _ in range(4):
+            if drv.gs().overworld.map_id == 0x02:
+                break
+            drv.press("up")
+
+
+def run_pewter_to_gym(session: Session, outdir: Path,
+                      rom: str, sym: str, sha1: str) -> None:
+    drv = rtb.Driver(session)
+    if drv.gs().overworld.map_id == 0x02:
+        session.step(60, render=True)
+        gs = drv.gs()
+        print(f"  at pewter: xy=({gs.overworld.x},{gs.overworld.y})",
+              flush=True)
+        seed = outdir / "_pewter_to_gym.state"
+        seed.write_bytes(session.save_state())
+        try:
+            path = run_pathfinder(seed, "16,18",
+                                  outdir / "_pewter_to_gym.txt",
+                                  rom, sym, sha1)
+            print(f"  pewter→gym A*: {len(path)} steps", flush=True)
+            ftb.walk_path(drv, path, label="pgym",
+                          stop_map_ids=(0x36,))
+            for _ in range(4):
+                if drv.gs().overworld.map_id == 0x36:
+                    break
+                drv.press("up")
+        except RuntimeError as e:
+            print(f"  pewter→gym pathfind failed: {e}", flush=True)
+
+
+def run_gym_interior(session: Session, outdir: Path,
+                     rom: str, sym: str, sha1: str) -> None:
+    drv = rtb.Driver(session)
+    if drv.gs().overworld.map_id == 0x36:
+        session.step(60, render=True)
+        gs = drv.gs()
+        print(f"  in gym: xy=({gs.overworld.x},{gs.overworld.y})",
+              flush=True)
+        seed = outdir / "_gym_interior.state"
+        seed.write_bytes(session.save_state())
+        try:
+            path = run_pathfinder(seed, "4,2",
+                                  outdir / "_gym_interior.txt",
+                                  rom, sym, sha1)
+            print(f"  gym A*: {len(path)} steps", flush=True)
+            ftb.walk_path(drv, path, label="gym")
+        except RuntimeError as e:
+            print(f"  gym pathfind failed: {e}", flush=True)
+
+
+def run_brock_badge(session: Session) -> bool:
+    brock_drv = bg.BrockDriver(session)
+    # Walk to (4, 2) past the Jr Trainer, mashing A through any
+    # intervening dialogs. Direction presses that stall get an A-mash
+    # retry to clear pre-battle text.
+    for _ in range(30):
+        gs = brock_drv.gs()
+        if gs.overworld.x == 4 and gs.overworld.y == 2:
+            break
+        if gs.battle.active:
+            brock_drv.resolve_battle(max_turns=40); continue
+        if brock_drv.joy_locked():
+            brock_drv.press("a"); continue
+        before = (gs.overworld.x, gs.overworld.y)
+        brock_drv.press("up")
+        after = (brock_drv.gs().overworld.x, brock_drv.gs().overworld.y)
+        if after == before and not brock_drv.gs().battle.active:
+            for _ in range(4):
+                brock_drv.press("a")
+                if brock_drv.gs().battle.active:
+                    brock_drv.resolve_battle(max_turns=30)
+                    break
+    print(f"  pre-brock: xy=({brock_drv.gs().overworld.x},"
+          f"{brock_drv.gs().overworld.y})", flush=True)
+    # Brock trigger: press A on him, then mash A through ~30 frames
+    # of pre-battle dialog until wIsInBattle flips on.
+    for i in range(60):
+        if brock_drv.gs().battle.active:
+            print(f"  brock dialog closed after {i} A-presses", flush=True)
+            break
+        brock_drv.press("a")
+    brock_drv.resolve_battle(max_turns=50)
+    # Post-battle: badge-grant dialog.
+    for _ in range(200):
+        gs = brock_drv.gs()
+        if gs.progress.badges_raw & 0x01:
+            break
+        if gs.battle.active:
+            brock_drv.resolve_battle(max_turns=30); continue
+        brock_drv.press("a")
+    return bool(brock_drv.gs().progress.badges_raw & 0x01)
+
+
 # --- Main ----------------------------------------------------------------
 
 def save_state(session: Session, outdir: Path, name: str) -> Path:
@@ -404,10 +732,13 @@ def save_state(session: Session, outdir: Path, name: str) -> Path:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--outdir", default="walkthrough_yellow")
-    p.add_argument("--stop-after", default="pallet_to_viridian",
+    p.add_argument("--stop-after", default="brock_badge",
                    choices=["intro", "exit_house", "oak_intercept",
                             "receive_pikachu", "rival_battle",
-                            "pallet_to_viridian"])
+                            "pallet_to_viridian", "viridian_to_route2",
+                            "option_b_boost", "route2_to_forest",
+                            "forest_traversal", "pewter_approach",
+                            "pewter_to_gym", "gym_interior", "brock_badge"])
     args = p.parse_args()
 
     rom = os.environ["POKERED_ROM_PATH"]
@@ -429,6 +760,20 @@ def main() -> int:
         ("rival_battle", lambda: run_rival_battle(session)),
         ("pallet_to_viridian",
          lambda: run_pallet_to_viridian(session, outdir, rom, sym, sha1)),
+        ("viridian_to_route2",
+         lambda: run_viridian_to_route2(session, outdir, rom, sym, sha1)),
+        ("option_b_boost", lambda: run_option_b_boost(session)),
+        ("route2_to_forest",
+         lambda: run_route2_to_forest(session, outdir, rom, sym, sha1)),
+        ("forest_traversal",
+         lambda: run_forest_traversal(session, outdir, rom, sym, sha1)),
+        ("pewter_approach",
+         lambda: run_pewter_approach(session, outdir, rom, sym, sha1)),
+        ("pewter_to_gym",
+         lambda: run_pewter_to_gym(session, outdir, rom, sym, sha1)),
+        ("gym_interior",
+         lambda: run_gym_interior(session, outdir, rom, sym, sha1)),
+        ("brock_badge", lambda: run_brock_badge(session)),
     ]
     for name, fn in phases:
         print(f"\n=== phase: {name} ===", flush=True)
