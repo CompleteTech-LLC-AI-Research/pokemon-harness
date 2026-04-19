@@ -21,6 +21,34 @@ sys.path.insert(0, str(Path(__file__).parent))
 from pokered_harness.session import Session
 from pokered_harness.mcp_server import register_default_hooks
 import run_to_brock as rtb
+import subprocess
+
+
+def _pathfind(state_bytes: bytes, goal_xy: tuple[int, int]) -> str | None:
+    """Call path_from_tiles.py as a subprocess. Takes the current state
+    as bytes, writes to a temp file, invokes the pathfinder, returns the
+    path string or None if no path found."""
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".state") as tf:
+        tf.write(state_bytes)
+        tf_path = tf.name
+    out_path = tf_path + ".txt"
+    try:
+        env = dict(os.environ)
+        r = subprocess.run(
+            [sys.executable, "-u",
+             str(Path(__file__).parent / "path_from_tiles.py"),
+             "--state", tf_path,
+             "--goal-xy", f"{goal_xy[0]},{goal_xy[1]}",
+             "--save-path-to", out_path],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return None
+        return Path(out_path).read_text().strip() if Path(out_path).exists() else None
+    finally:
+        Path(tf_path).unlink(missing_ok=True)
+        Path(out_path).unlink(missing_ok=True)
 
 
 M_PALLET = 0x00
@@ -122,26 +150,43 @@ def nav_to_route2_grass(drv, max_steps: int = 100) -> bool:
                   file=sys.stderr, flush=True)
             return False
         if gs.overworld.map_id == M_VIRIDIAN:
-            # Walk toward north edge at x=18. Use bump pattern.
-            if gs.overworld.x > 18:
-                drv.press("left")
-            elif gs.overworld.x < 18:
-                drv.press("right")
-            else:
+            # Use the pathfinder to get from current position to the
+            # Viridian north-exit tile (18, 0). Then push UP to trigger
+            # the map-edge transition to Route 2.
+            path = _pathfind(drv.s.save_state(), (18, 0))
+            if path is None:
+                print(f"    pathfinder failed from ({gs.overworld.x},{gs.overworld.y})",
+                      flush=True)
+                return False
+            dir_map = {"u": "up", "d": "down", "l": "left", "r": "right"}
+            for c in path:
+                if drv.gs().overworld.map_id != M_VIRIDIAN:
+                    break
+                if drv.gs().battle.active:
+                    drv.resolve_battle()
+                drv.press(dir_map[c])
+            # Push UP to trigger edge transition
+            for _ in range(5):
+                if drv.gs().overworld.map_id == M_ROUTE_2:
+                    break
                 drv.press("up")
             continue
         if gs.overworld.map_id == M_ROUTE_2:
-            # Walk up to grass row ~y=60
-            if gs.overworld.y > 60:
-                before = (gs.overworld.x, gs.overworld.y)
-                drv.press("up")
-                after = drv.gs()
-                if (after.overworld.x, after.overworld.y) == before:
-                    # Bumped — try L/R
-                    drv.press("left")
-                    drv.press("up")
+            # Walk the BFS-verified path up to the grass patch at (4, 52).
+            # Empirically, only once we're near x=4 y=50-55 do encounters fire.
+            if gs.overworld.y > 52 or gs.overworld.x > 5:
+                # Use the first portion of ROUTE2_TO_FOREST_GATE_PATH
+                # (up×9, left, up×5, left×2, up, left, up×5) lands at (4, 51)
+                short_path = ["up"]*9 + ["left"] + ["up"]*5 + ["left"]*2 + ["up"] + ["left"] + ["up"]*5
+                steps_done = 0
+                for d in short_path:
+                    gs = drv.gs()
+                    if gs.battle.active: drv.resolve_battle(); break
+                    if gs.overworld.y <= 52 and gs.overworld.x <= 5: break
+                    drv.press(d)
+                    steps_done += 1
                 continue
-            # In grass
+            # In grass area
             return True
         # Unknown map
         print(f"    unknown map 0x{gs.overworld.map_id:02x}, pressing A",
@@ -150,14 +195,28 @@ def nav_to_route2_grass(drv, max_steps: int = 100) -> bool:
     return False
 
 
+def _safe_mon(drv):
+    """Read party.mons[0] with retries — during battle transitions and
+    blackouts the party struct can momentarily be empty."""
+    for _ in range(20):
+        gs = drv.gs()
+        if gs.party.mons:
+            return gs.party.mons[0]
+        drv.s.step(24, render=True)
+    return None
+
+
 def grind(drv, target_level: int = 13, max_blackouts: int = 20) -> int:
     blackouts = 0
     battles = 0
-    while drv.gs().party.mons[0].level < target_level:
-        lvl = drv.gs().party.mons[0].level
-        hp = drv.gs().party.mons[0].hp
-        mhp = drv.gs().party.mons[0].max_hp
-        print(f"  L{lvl} HP{hp}/{mhp} battles={battles} blackouts={blackouts}", flush=True)
+    while True:
+        mon = _safe_mon(drv)
+        if mon is None:
+            print("  party empty for >20 frames, aborting", flush=True)
+            return 0
+        if mon.level >= target_level:
+            return mon.level
+        print(f"  L{mon.level} HP{mon.hp}/{mon.max_hp} battles={battles} blackouts={blackouts}", flush=True)
         if not nav_to_route2_grass(drv):
             print("  failed to reach grass", flush=True)
             return drv.gs().party.mons[0].level
