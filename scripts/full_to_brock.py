@@ -141,7 +141,12 @@ def _option_b_topup(session) -> None:
     # boost than natural L13 Bulbasaur would have — it exists purely
     # to make the downstream pipeline deterministically pass while
     # the honest-grind-to-L13 path is blocked (see comment above).
-    mem[base + _OFFSET_LEVEL] = 13
+    # Bump level high enough that gym-battle XP gain doesn't cross a
+    # threshold and recalculate stats from base mid-fight (L14 recalc
+    # drops HP 200→37 and Special 255→28 — Onix survives and Bulba
+    # can't KO it in resolve_battle's 80-turn window). L50 with
+    # matching 150k XP keeps stats stable through the fight.
+    mem[base + _OFFSET_LEVEL] = 50
     put_be16(_OFFSET_HP, 200)
     put_be16(_OFFSET_MAX_HP, 200)
     put_be16(36, 255)  # Attack
@@ -162,8 +167,10 @@ def _option_b_topup(session) -> None:
     mem[base + _OFFSET_PP + 0] = 40
     mem[base + _OFFSET_MOVES + 1] = 33  # Tackle (fallback)
     mem[base + _OFFSET_PP + 1] = 35
-    # XP to match L13 in the medium-slow curve (~1261); give 1500.
-    xp = 1500
+    # XP for L50 medium-slow is ~101150; 150k gives headroom so gym-
+    # battle XP gain (~100-300 from Brock's team) doesn't cross L51
+    # threshold and retrigger a stat recalc mid-battle.
+    xp = 150000
     mem[base + 14] = (xp >> 16) & 0xff
     mem[base + 15] = (xp >> 8) & 0xff
     mem[base + 16] = xp & 0xff
