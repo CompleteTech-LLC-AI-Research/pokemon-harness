@@ -343,6 +343,105 @@ class Driver:
                 if (self.gs().overworld.x, self.gs().overworld.y) == before:
                     self.press("right"); self.press("right"); self.press("up")
 
+    # ---- Healing detour -----------------------------------------------
+
+    # BFS-verified path from Viridian south entry (21, 35) to the
+    # Viridian Pokemon Center door at (23, 25). 16 steps. Discovered via
+    # ``scripts/bfs_route.py --goal-map 0x29``.
+    VIRIDIAN_TO_PC_PATH = (
+        ["up"] * 5 + ["left"] +
+        ["up"] * 2 + ["left"] +
+        ["up"] * 2 + ["right"] * 4 +
+        ["up"]
+    )
+
+    def _hp_full(self) -> bool:
+        """Is party slot 0 at full HP? Safe during heal animation."""
+        try:
+            m = self.gs().party.mons[0]
+            return m.hp == m.max_hp
+        except IndexError:
+            # Party struct is transiently invalid while the heal
+            # animation copies data around; treat as "not yet full".
+            return False
+
+    def heal_at_viridian_pokecenter(self) -> None:
+        """From inside Viridian City, walk to PC, heal, walk back out.
+
+        Preconditions: map_id == VIRIDIAN_CITY (0x01), player near the
+        south entrance around (21, 35). Postcondition: party HP fully
+        restored, player back in Viridian on the PC doorstep (23, 25)
+        which is a fine launch point for :meth:`run_viridian_to_route2`.
+        """
+        gs = self.gs()
+        if gs.overworld.map_id != M_VIRIDIAN:
+            print(f"  WARN: heal_at_viridian_pokecenter called on map="
+                  f"0x{gs.overworld.map_id:02x}, skipping",
+                  file=sys.stderr, flush=True)
+            return
+
+        # 1) Walk to the PC door (warp into map 0x29).
+        for d in self.VIRIDIAN_TO_PC_PATH:
+            if self.gs().overworld.map_id == M_VIRIDIAN_POKECENTER:
+                break
+            self.press(d)
+        # Settle after the map transition so we have fresh RAM to read.
+        self.idle(60)
+        if self.gs().overworld.map_id != M_VIRIDIAN_POKECENTER:
+            print(f"  WARN: failed to enter PC, map="
+                  f"0x{self.gs().overworld.map_id:02x}",
+                  file=sys.stderr, flush=True)
+            return
+
+        # 2) Walk up to the nurse counter. The counter blocks at y=3 so
+        #    we can just mash up — the last presses become no-ops.
+        for _ in range(6):
+            self.press("up")
+
+        # 3) Talk to the nurse — A to open dialog.
+        self.press("a")
+        # Advance intro dialog until the HEAL/CANCEL menu is visible
+        # (wMaxMenuItem == 1 for a 2-item menu). ``dest_in_vram_tilemap``
+        # drops between writes so we wait until both the menu is up and
+        # no text box is actively rendering.
+        for _ in range(30):
+            mx = self.sym.read_u8(self.mem, "wMaxMenuItem")
+            if mx == 1 and not self.gs().text.dest_in_vram_tilemap:
+                break
+            self.press("a")
+
+        # 4) Select HEAL (cursor defaults to slot 0).
+        self.press("a", step=60)
+
+        # 5) Mash A through the heal animation and dialog until HP is
+        #    restored. Party RAM is transiently invalid during the
+        #    animation — ``_hp_full`` swallows IndexError and returns
+        #    False until the restore finishes.
+        for _ in range(60):
+            if self._hp_full():
+                break
+            self.press("a")
+
+        # 6) After HP restoration the nurse still has a farewell line
+        #    and the HEAL/CANCEL menu reappears. Mashing A loops back
+        #    into another heal cycle; B is the only reliable way to
+        #    dismiss both the menu and the final dialog.
+        for _ in range(15):
+            self.press("b", step=60)
+
+        # 7) Walk south through the warp back into Viridian.
+        for _ in range(8):
+            if self.gs().overworld.map_id == M_VIRIDIAN:
+                break
+            self.press("down")
+        self.idle(30)
+        gs = self.gs()
+        m = gs.party.mons[0] if gs.party.mons else None
+        print(f"  heal done: map=0x{gs.overworld.map_id:02x} "
+              f"xy=({gs.overworld.x},{gs.overworld.y}) "
+              f"HP={m.hp}/{m.max_hp}" if m else "no party",
+              file=sys.stderr, flush=True)
+
     def set_pokedex_flag(self) -> None:
         """RAM-write EVENT_GOT_POKEDEX to unblock Viridian Old Man."""
         base = self.sym.addr_of("wEventFlags")
