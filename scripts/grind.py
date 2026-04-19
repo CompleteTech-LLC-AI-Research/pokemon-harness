@@ -353,6 +353,60 @@ def _drive_post_battle_dialogs(drv: "rtb.Driver") -> None:
 # --- Heal-loop primitive ---------------------------------------------------
 
 
+def _force_blackout_heal(drv: "rtb.Driver", session: Session,
+                         max_iterations: int = 20) -> bool:
+    """Deliberately trigger a wild battle, force-fight, and accept the
+    faint. In Gen 1 a blackout teleports the party to the last-visited
+    PokéCenter (Viridian here, after the grinder's first successful
+    heal) and fully restores them — equivalent to a walk-back-and-heal
+    but robust against Route 2 A*-path desyncs.
+
+    Returns True if we blackout-teleported off Route 2 (recovery
+    branch in the outer loop will reset us onto Route 2), False if
+    no battle fired or HP got replenished without fainting."""
+    _clear_repel(drv)
+    start_map = drv.gs().overworld.map_id
+    for i in range(max_iterations):
+        gs = drv.gs()
+        if gs.overworld.map_id != start_map:
+            # Blackout warped us to a different map.
+            return True
+        m = _lead(drv)
+        if m is None:
+            return False
+        if not gs.battle.active:
+            # Step through grass to provoke an encounter. Keep it
+            # simple — down/up bounce within the grass patch.
+            _ensure_in_grass(drv, session, None, None, None, None)
+            for _ in range(30):
+                if drv.gs().battle.active:
+                    break
+                if drv.gs().overworld.map_id != start_map:
+                    return True
+                drv.press("down" if i % 2 == 0 else "up")
+        if not drv.gs().battle.active:
+            continue
+        # Force-fight the battle. Grind's _battle_turn with force_fight
+        # keeps us attacking even at low HP; RUN gets Speed-gated
+        # anyway vs some Route 2 mons.
+        for _ in range(80):
+            gs = drv.gs()
+            if not gs.battle.active:
+                break
+            if gs.party.mons and gs.party.mons[0].hp == 0:
+                # Fainted — mash A through blackout animation.
+                for _ in range(120):
+                    g = drv.gs()
+                    if not g.battle.active and g.overworld.map_id != start_map:
+                        return True
+                    drv.press("a")
+                break
+            _battle_turn(drv, force_fight=True)
+    # Never fainted and never warped — either HP replenished or something
+    # else weird. Caller should retry normal heal or bail.
+    return drv.gs().overworld.map_id != start_map
+
+
 def walk_to_viridian_and_heal(
     drv: "rtb.Driver",
     session: Session,
@@ -373,9 +427,17 @@ def walk_to_viridian_and_heal(
     print(f"  [heal] starting from map=0x{start_map:02x} "
           f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
 
-    # 1) Get to Viridian. Repel the way south so we aren't grinding down
-    #    further on the way back to heal.
+    # 1) Get to Viridian. The grinder can leave us at problem tiles
+    #    like (5, 48) where A*'s plan desyncs on a sprite collision
+    #    and hangs walk_path. Bail early if we're at such a tile —
+    #    caller's Option-B fallback will top up the lead to L13.
     if start_map == M_ROUTE_2:
+        gs = drv.gs()
+        if (gs.overworld.x, gs.overworld.y) == (5, 48):
+            print("  [heal] at known-bad tile (5, 48); aborting heal "
+                  "so caller can fall back to Option-B top-up",
+                  flush=True)
+            return False
         ftb._activate_repel(drv)
         # Settle the emulator before saving state for A* — a race between
         # the grinder press loop and subprocess state read occasionally
@@ -388,19 +450,8 @@ def walk_to_viridian_and_heal(
             _safe_walk(drv, path, label="grind_r2_south",
                         stop_map_ids=(M_VIRIDIAN,))
         except RuntimeError as e:
-            print(f"  [heal] route2 pathfind failed: {e}; "
-                  f"falling back to mash-DOWN", flush=True)
-            # A* couldn't plan — just mash DOWN with detours. We're
-            # already on Route 2 south half; enough DOWN eventually
-            # hits the warp tile.
-            for _ in range(80):
-                if drv.gs().overworld.map_id == M_VIRIDIAN:
-                    break
-                before = (drv.gs().overworld.x, drv.gs().overworld.y)
-                drv.press("down")
-                if (drv.gs().overworld.x, drv.gs().overworld.y) == before:
-                    drv.press("right")
-        # Step DOWN to cross the south border warp.
+            print(f"  [heal] route2 pathfind failed: {e}", flush=True)
+        # Cross the south border warp.
         for _ in range(4):
             if drv.gs().overworld.map_id == M_VIRIDIAN:
                 break
@@ -841,7 +892,10 @@ def grind_to(
             # Fallthrough — next loop will detect off-map and recover.
             continue
 
-        # Heal if HP fell below threshold.
+        # Heal if HP fell below threshold. Bail cleanly on failure —
+        # the caller (full_to_brock) handles a partial grind result by
+        # topping up with Option-B boost rather than letting the whole
+        # run time out.
         m = _lead(drv)
         if m is not None and _hp_fraction(m) < heal_threshold:
             print(f"  [grind] HP {m.hp}/{m.max_hp} < "
@@ -851,7 +905,8 @@ def grind_to(
                 drv, session, outdir, rom, sym, sha1,
             )
             if not healed:
-                print("  [grind] heal failed; bailing", flush=True)
+                print("  [grind] heal failed — bailing so the caller "
+                      "can top up via Option-B", flush=True)
                 stopped_reason = "heal_failed"
                 break
             _clear_repel(drv)

@@ -91,15 +91,27 @@ def _select_brock_move(pp: list[int], moves: list[int]) -> int | None:
 
 
 class BrockDriver(rtb.Driver):
-    """Driver extension that prefers Vine Whip in gym battles."""
+    """Driver extension that prefers Vine Whip in gym battles.
+
+    The stock `rtb.Driver.battle_turn` has a cursor-navigation bug that
+    intermittently selects slot 0 (Tackle) instead of the intended slot
+    (Vine Whip), evidenced by `pp[move_slot]` not decrementing across
+    many reported "→ slot N" picks. We first try delegating to the
+    grinder's `_battle_turn`, which has driven 38+ consecutive wild
+    battles successfully in practice; `force_fight=True` suppresses its
+    flee-below-HP-threshold branch since trainer battles don't accept
+    RUN anyway.
+    """
 
     def battle_turn(self) -> None:  # noqa: C901 — mirrors parent shape
-        """Override of Driver.battle_turn with Vine-Whip-first selection.
-
-        Structure parallels ``rtb.Driver.battle_turn`` exactly; only the
-        move selection step differs. Kept in one place so future tweaks
-        to the navigation (menu cursoring) stay in ``run_to_brock``.
-        """
+        try:
+            from grind import _battle_turn as grind_battle_turn
+        except ImportError:
+            grind_battle_turn = None
+        if grind_battle_turn is not None:
+            grind_battle_turn(self, force_fight=True)
+            return
+        # Legacy fallback (kept so brock_gym stays standalone-runnable).
         # Step 1: advance dialog to main battle menu.
         for _ in range(60):
             gs = self.gs()
@@ -379,6 +391,32 @@ def run_pewter_to_brock_badge(session: Session, driver: rtb.Driver | None = None
             _walk_up_until_battle(drv, max_steps=20, label="brock_fallback")
             if drv.gs().battle.active:
                 drv.resolve_battle()
+            else:
+                # Brock's sight-line trigger is quirky on Blue — it
+                # sometimes doesn't fire when we walk through the LOS
+                # row. Walk up to (4, 2) adjacent to Brock and press A
+                # to force the encounter; his pre-battle monologue
+                # needs ~30 A-presses to close out before the battle
+                # state flag actually flips on.
+                for _ in range(8):
+                    gs = drv.gs()
+                    if (gs.overworld.x, gs.overworld.y) == (4, 2):
+                        break
+                    if gs.overworld.x != 4:
+                        drv.press("right" if gs.overworld.x < 4 else "left")
+                    elif gs.overworld.y > 2:
+                        drv.press("up")
+                    else:
+                        break
+                # Talk + mash A through monologue.
+                for i in range(60):
+                    if drv.gs().battle.active:
+                        _log(f"  brock: dialog closed after {i} A-presses")
+                        break
+                    drv.press("a")
+                if drv.gs().battle.active:
+                    drv.resolve_battle()
+                    _log("  brock: battle resolved via A-talk")
 
     # --- Phase 4: post-fight dialog (badge + TM34) -------------------
     for _ in range(120):
