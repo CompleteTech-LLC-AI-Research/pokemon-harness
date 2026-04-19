@@ -158,38 +158,48 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
         # Stronger proof (Blue only — Yellow's fixture uses the weaker
         # EnterMap hook-warp which leaves the player un-walkable, so they
         # can't navigate to the attendant):
-        # Press A to talk to the Cable Club attendant. The dialog should
-        # trigger CableClubNPC → Yes → SaveGameData. If our LinkPair
-        # hardware-serial tick is working, the game engages the full
-        # link-attempt flow. If the bridge is broken, the dialog never
-        # opens and SaveGameData never fires.
+        # Press A to talk to the Cable Club attendant. The bridge should
+        # take the game through:
+        #   attendant dialog → CableClubNPC → Yes → SaveGameData →
+        #   Serial_SyncAndExchangeNybble → LinkMenu
+        # If the bridge is broken anywhere along this chain, the flow
+        # stalls — most commonly at CloseLinkConnection (sync failed)
+        # or never reaches LinkMenu (nybble protocol didn't converge).
         if version_a == version_b == "blue":
-            save_count = [0, 0]
-            for idx, session in enumerate((session_a, session_b)):
-                bank, addr = session.symbols.bank_addr("SaveGameData")
+            counters = {"SaveGameData": [0, 0], "LinkMenu": [0, 0]}
+            for name, bucket in counters.items():
+                for idx, session in enumerate((session_a, session_b)):
+                    if name not in session.symbols:
+                        continue
+                    bank, addr = session.symbols.bank_addr(name)
 
-                def _make_cb(i):
-                    def _cb(_ctx):
-                        save_count[i] += 1
+                    def _make_cb(b, i=idx):
+                        def _cb(_ctx):
+                            b[i] += 1
 
-                    return _cb
+                        return _cb
 
-                session._pyboy.hook_register(bank, addr, _make_cb(idx), None)
+                    session._pyboy.hook_register(bank, addr, _make_cb(bucket), None)
 
             for _ in range(3):
                 session_a.press("up", duration=6)
                 session_b.press("up", duration=6)
                 pair.step(18)
-            for _ in range(300):
+            for _ in range(400):
                 session_a.press("a", duration=4)
                 session_b.press("a", duration=4)
                 pair.step(20)
-                if save_count[0] > 0 and save_count[1] > 0:
+                if counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0:
                     break
-            assert save_count[0] > 0 and save_count[1] > 0, (
-                f"{version_a}/{version_b} — attendant dialog never reached "
-                f"SaveGameData (save_count={save_count}); link-attempt flow "
-                f"did not engage"
+            assert (counters["SaveGameData"][0] > 0
+                    and counters["SaveGameData"][1] > 0), (
+                f"attendant dialog never reached SaveGameData — "
+                f"counters={counters}"
+            )
+            assert (counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0), (
+                f"nybble sync didn't converge; LinkMenu not reached — "
+                f"counters={counters}. This means the semantic bridge isn't "
+                f"feeding the game valid nybble-exchange bytes."
             )
     finally:
         session_a.close()

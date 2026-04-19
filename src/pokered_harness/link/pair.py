@@ -114,6 +114,69 @@ class LinkPair:
                 except (KeyError, LookupError):
                     pass
 
+        self._install_semantic_bridges()
+
+    def _install_semantic_bridges(self) -> None:
+        """Hook pret-level link protocol routines and bridge their WRAM
+        data cells between the two peers.
+
+        PyBoy 2.7.0 doesn't let us write the serial-data register rSB
+        (0xFF01) — writes at the memory interface are silently dropped —
+        so we cannot emulate the hardware exchange. Instead, for each
+        protocol function we know about, we intercept the entry and
+        copy the *peer*'s send cell into *this* side's receive cell.
+        The game code then reads its receive cell and proceeds as
+        though the real serial exchange completed.
+
+        Cells covered:
+
+        - ``Serial_ExchangeNybble`` →
+          ``wSerialExchangeNybbleSendData`` /
+          ``wSerialExchangeNybbleReceiveData``
+        - ``Serial_ExchangeLinkMenuSelection`` → two-byte
+          ``wLinkMenuSelectionSendBuffer`` /
+          ``wLinkMenuSelectionReceiveBuffer``
+
+        Missing symbols on either side are silently skipped.
+        """
+        pa, pb = self._primary, self._peer
+        mem_a, mem_b = pa._pyboy.memory, pb._pyboy.memory
+
+        def _install_pair(label: str, widths: dict[str, int]) -> None:
+            """Install a 1:1 send→receive copy for a pret serial routine."""
+            for key, width in widths.items():
+                send_tag = f"wSerial{key}SendData"
+                recv_tag = f"wSerial{key}ReceiveData"
+                alt_send = f"wLink{key}SendBuffer"
+                alt_recv = f"wLink{key}ReceiveBuffer"
+                send = None
+                recv = None
+                for s_tag, r_tag in ((send_tag, recv_tag), (alt_send, alt_recv)):
+                    if s_tag in pa.symbols and r_tag in pa.symbols:
+                        send = pa.symbols.addr_of(s_tag)
+                        recv = pa.symbols.addr_of(r_tag)
+                        break
+                if send is None or recv is None:
+                    continue
+                send_b, recv_b = send, recv  # same addr on both versions
+
+                def _copy_to_a(_ctx, _w=width, _s=send_b, _r=recv_b):
+                    for i in range(_w):
+                        mem_a[_r + i] = mem_b[_s + i]
+
+                def _copy_to_b(_ctx, _w=width, _s=send_b, _r=recv_b):
+                    for i in range(_w):
+                        mem_b[_r + i] = mem_a[_s + i]
+
+                try:
+                    pa.serial_hook(label, _copy_to_a)
+                    pb.serial_hook(label, _copy_to_b)
+                except (KeyError, LookupError):
+                    pass
+
+        _install_pair("Serial_ExchangeNybble", {"ExchangeNybble": 1})
+        _install_pair("Serial_ExchangeLinkMenuSelection", {"MenuSelection": 2})
+
     def unpair(self) -> None:
         """Drop the bridge reference and clear the transport.
 
@@ -133,23 +196,34 @@ class LinkPair:
     _RSB_ADDR = 0xFF01      # serial data
     _RSC_ADDR = 0xFF02      # serial control (bit 7 = START, bit 0 = INTERNAL)
     _IF_ADDR = 0xFF0F       # interrupt flag; bit 3 = serial
+    _HRAM_STATUS_ADDR = 0xFFAA  # hSerialConnectionStatus
     _SC_START = 0x80
     _IF_SERIAL = 0x08
+    _STATUS_NOT_ESTABLISHED = 0xFF
+    _STATUS_EXTERNAL = 0x01  # slave (peer drives the clock)
+    _STATUS_INTERNAL = 0x02  # master (drives the clock)
+    _ESTABLISH_INTERNAL = 0x01
+    _ESTABLISH_EXTERNAL = 0x02
 
     def _hardware_serial_tick(self) -> None:
-        """Emulate one cycle of a physical link cable between the two peers.
+        """Clear SC_START and raise the serial-interrupt flag so the game's
+        serial interrupt handler doesn't permanently block on an
+        unserviced transfer.
 
-        If either side has SC_START set in its serial-control register, we:
-          1. Swap the outgoing rSB bytes between sides.
-          2. Clear SC_START on both (signalling transfer complete).
-          3. Raise the serial interrupt-flag bit on both so each side's
-             own Serial ISR fires, consumes the byte, and updates
-             hSerialReceiveData / hSerialConnectionStatus via the game's
-             own code — no symbol hooks required.
+        Historical note: an earlier version of this method also swapped
+        the rSB (0xFF01) bytes between the two peers to emulate the
+        full hardware serial exchange. That approach does not work:
+        PyBoy 2.7.0 silently rejects writes to 0xFF01 at the memory
+        interface, so the swap was cosmetic. The actual byte bridging
+        happens at the semantic WRAM layer: callers install hooks on
+        Serial_ExchangeNybble / Serial_ExchangeLinkMenuSelection that
+        write the peer's send buffer into this side's receive buffer.
+        See the scripts/link_trade_demo.py walker for an example.
 
-        This is the cheapest faithful emulation of a GB link cable: PyBoy
-        2.7.0 has no native serial peering, so we supply the missing
-        hardware integration at the HRAM layer.
+        What this method still contributes: without clearing SC_START
+        and raising IF-bit 3, the game's Serial:: ISR never fires and
+        hSerialReceivedNewData stays 0 — which breaks the sync-nybble
+        protocol's "received-new-data" short-circuit.
         """
         mem_a = self._primary._pyboy.memory
         mem_b = self._peer._pyboy.memory
@@ -157,10 +231,6 @@ class LinkPair:
         sc_b = mem_b[self._RSC_ADDR]
         if not ((sc_a & self._SC_START) or (sc_b & self._SC_START)):
             return
-        sb_a = mem_a[self._RSB_ADDR]
-        sb_b = mem_b[self._RSB_ADDR]
-        mem_a[self._RSB_ADDR] = sb_b
-        mem_b[self._RSB_ADDR] = sb_a
         mem_a[self._RSC_ADDR] = sc_a & ~self._SC_START
         mem_b[self._RSC_ADDR] = sc_b & ~self._SC_START
         mem_a[self._IF_ADDR] = mem_a[self._IF_ADDR] | self._IF_SERIAL
