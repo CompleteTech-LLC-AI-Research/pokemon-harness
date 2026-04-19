@@ -392,24 +392,29 @@ def run_pewter_to_brock_badge(session: Session, driver: rtb.Driver | None = None
             if drv.gs().battle.active:
                 drv.resolve_battle()
             else:
-                # Brock's sight-line trigger is quirky on Blue — it
-                # sometimes doesn't fire when we walk through the LOS
-                # row. Walk up to (4, 2) adjacent to Brock and press A
-                # to force the encounter; his pre-battle monologue
-                # needs ~30 A-presses to close out before the battle
-                # state flag actually flips on.
-                for _ in range(8):
+                # Brock's sight-line trigger is quirky — it sometimes
+                # doesn't fire even when we walk through his LOS row.
+                # Walk up column 4 as close to Brock (4, 1) as we can
+                # (stops at wall/NPC), then press A to force the talk.
+                for _ in range(14):
                     gs = drv.gs()
                     if (gs.overworld.x, gs.overworld.y) == (4, 2):
                         break
+                    before = (gs.overworld.x, gs.overworld.y)
                     if gs.overworld.x != 4:
                         drv.press("right" if gs.overworld.x < 4 else "left")
                     elif gs.overworld.y > 2:
                         drv.press("up")
                     else:
                         break
+                    if (drv.gs().overworld.x, drv.gs().overworld.y) == before:
+                        # wall/NPC blocked. bail.
+                        break
+                gs = drv.gs()
+                _log(f"  brock: A-talk setup at "
+                     f"({gs.overworld.x},{gs.overworld.y})")
                 # Talk + mash A through monologue.
-                for i in range(60):
+                for i in range(80):
                     if drv.gs().battle.active:
                         _log(f"  brock: dialog closed after {i} A-presses")
                         break
@@ -417,9 +422,16 @@ def run_pewter_to_brock_badge(session: Session, driver: rtb.Driver | None = None
                 if drv.gs().battle.active:
                     drv.resolve_battle()
                     _log("  brock: battle resolved via A-talk")
+                else:
+                    _log(f"  brock: A-talk did NOT trigger battle "
+                         f"(map=0x{drv.gs().overworld.map_id:02x} "
+                         f"xy=({drv.gs().overworld.x},"
+                         f"{drv.gs().overworld.y}))")
 
     # --- Phase 4: post-fight dialog (badge + TM34) -------------------
-    for _ in range(120):
+    # Brock's victory sequence is long — "You're strong", badge grant,
+    # TM34 description, Bide explanation. ~300 A-presses in practice.
+    for _ in range(500):
         gs = drv.gs()
         if gs.progress.badges_raw & 0x01:
             break
