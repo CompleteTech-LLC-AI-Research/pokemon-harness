@@ -1,40 +1,72 @@
 # pokered-harness
 
-Memory-first automation harness for **Pokémon Red (UE)** on **PyBoy 2.7.0**,
-exposed over MCP. See [`plans/deep-research-report-glittery-rossum.md`](../.claude/plans/deep-research-report-glittery-rossum.md)
+Memory-first automation harness for **Pokémon Red / Blue (UE)** on
+**PyBoy 2.7.0**, exposed over MCP. See
+[`plans/deep-research-report-glittery-rossum.md`](../.claude/plans/deep-research-report-glittery-rossum.md)
 for the ADR that motivates this architecture.
+
+The package name is `pokered_harness` for historical reasons; Red is the
+canonical target but Blue (v1.0, UE) also works unchanged — see
+[`VERSIONS.md`](VERSIONS.md) for pinned SHA-1s.
+
+## Supported games
+
+| Game | Status | ROM pins | Verified milestone |
+|---|---|---|---|
+| Pokémon Red (UE) | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
+| Pokémon Red + Full Color Hack | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
+| Pokémon Blue (UE) | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
+| Pokémon Blue + pokeblue_color_vanilla.ips | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
+| Pokémon Yellow | 🚧 In progress | — | — |
+| JP Red, other localisations, ROM hacks | ❌ Out of scope | — | — |
+
+Red and Blue share pokered's WRAM layout, so the state parsers and event
+hooks work for both. Blue needs its own symbol file (`pokeblue.sym`) and
+a handful of Blue-specific navigation tweaks live in
+[`scripts/blue_forest_to_brock.py`](scripts/blue_forest_to_brock.py);
+everything else is version-neutral.
 
 ## BYO-ROM
 
-This repo does **not** contain a Pokémon Red ROM and does **not** contain any
-game-derived build artifact (no `.gb`, no `.sym`, no `.map`, no save states
-of commercial game content). You must provide your own legally obtained copy.
+This repo contains no ROMs and no build-derived artifacts (no `.gb`,
+`.gbc`, `.sym`, `.map`, or save states of commercial game content). You
+must supply your own legally obtained copies.
 
-Place your ROM at `rom/pokemon-red.gb` (gitignored). Then record its SHA-1
-in [`VERSIONS.md`](VERSIONS.md) — the session manager refuses to run without
-a match.
+ROMs go under `rom/<version>/` (all gitignored):
+
+```
+rom/
+├── red/pokemon-red.gb
+├── blue/pokemon-blue.gb
+└── yellow/pokemon-yellow.gbc
+```
+
+Record each ROM's SHA-1 in [`VERSIONS.md`](VERSIONS.md) — the session
+manager refuses to run without a match.
 
 ## Prerequisites
 
 1. **Python 3.11+**.
 2. **PyBoy 2.7.0** — pinned in `pyproject.toml`.
-3. **A `pokered.sym` file** generated from a local checkout of
-   [`pret/pokered`](https://github.com/pret/pokered) built with `DEBUG=1`.
-   Place it at `rom/pokemon-red.sym` (also gitignored).
+3. **Symbol files** generated from [`pret/pokered`](https://github.com/pret/pokered)
+   (covers both Red and Blue) built with `DEBUG=1`. Place as:
+   - `rom/red/pokemon-red.sym`
+   - `rom/blue/pokemon-blue.sym`
 
-### Generating `pokered.sym`
+### Generating the symbol files
 
 You need [RGBDS](https://rgbds.gbdev.io/) installed, then:
 
 ```bash
 git clone https://github.com/pret/pokered.git
 cd pokered
-make DEBUG=1
-# produces pokered.sym and pokered.map
+make DEBUG=1                           # produces pokered.sym / pokered.map
+make clean && make blue DEBUG=1        # produces pokeblue.sym / pokeblue.map
 ```
 
-Copy `pokered.sym` into this project's `rom/` directory and record the
-`pret/pokered` commit SHA in [`VERSIONS.md`](VERSIONS.md).
+Copy `pokered.sym` to `rom/red/pokemon-red.sym`, `pokeblue.sym` to
+`rom/blue/pokemon-blue.sym`, and record the `pret/pokered` commit SHA in
+[`VERSIONS.md`](VERSIONS.md).
 
 ## Install
 
@@ -52,26 +84,41 @@ pytest
 
 ## Running
 
-MCP server entry point is not wired yet — see the ADR's action items.
-Early harness calls live under `src/pokered_harness/`.
+The MCP server is wired in [`.mcp.json`](.mcp.json); it reads
+`POKERED_ROM_PATH`, `POKERED_SYM_PATH`, and `POKERED_ROM_SHA1` from the
+environment. Point those at whichever version you're driving:
 
-## Scope (v1)
+```bash
+# Red (default in .mcp.json)
+POKERED_ROM_PATH=rom/red/pokemon-red-color.gb \
+POKERED_SYM_PATH=rom/red/pokemon-red.sym \
+POKERED_ROM_SHA1=<see VERSIONS.md>
 
-- Stock English Pokémon Red (UE) only.
-- Blue, Yellow, JP Red, colorized forks, and ROM hacks are out of scope.
-- Stock Red is booted through PyBoy in Game Boy Color mode so the CGB
-  built-in auto-palette colors the framebuffer. The ROM is unmodified — this
-  is the same behavior a real Game Boy Color gives a DMG cart, not a ROM hack
-  or a colorized fork.
+# Blue
+POKERED_ROM_PATH=rom/blue/pokemon-blue-color.gb \
+POKERED_SYM_PATH=rom/blue/pokemon-blue.sym \
+POKERED_ROM_SHA1=<see VERSIONS.md>
+```
+
+End-to-end scripts live under `scripts/`:
+
+- `scripts/full_to_brock.py` — Red (colorized): intro → Boulder Badge.
+- `scripts/blue_forest_to_brock.py` — Blue (colorized): Option-B
+  harness that RAM-boosts Bulbasaur past the grind gap, then runs
+  forest → Pewter → Brock. Will be replaced by a proper Route 2 heal
+  loop in a future iteration.
 
 ## Color rendering
 
-The harness constructs `PyBoy(..., cgb=True)` so stock Red renders through
-the CGB auto-palette and the framebuffer comes out in RGB. The default
-window driver is `null` (headless) for tests and MCP. Pass `view=True` to
-`Session` (or `--view` to `scripts/walkthrough.py`) to open PyBoy's SDL2
-viewer and watch the game live. PNGs written by the walkthrough script
-inherit the colored framebuffer automatically — no extra flag needed.
+The harness constructs `PyBoy(..., cgb=True)`. Stock Red/Blue render
+through the CGB auto-palette (uniform tint). For authentic per-sprite
+coloring, apply the respective Full Color Hack IPS with
+`scripts/apply_color_patch.py` — it auto-recomputes ROM header and
+global checksums so PyBoy accepts the output.
+
+The default window driver is `null` (headless) for tests and MCP. Pass
+`view=True` to `Session` (or `--view` to `scripts/walkthrough.py`) to
+open PyBoy's SDL2 viewer and watch the game live.
 
 ## License
 

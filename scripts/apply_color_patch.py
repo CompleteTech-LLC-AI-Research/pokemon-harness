@@ -70,7 +70,20 @@ def main() -> int:
 
     rom = Path(args.rom).read_bytes()
     ips = Path(args.ips).read_bytes()
-    patched = apply_ips(rom, ips)
+    patched = bytearray(apply_ips(rom, ips))
+    # Some vanilla IPS hacks (e.g. pokeblue_color_vanilla) rewrite title-region
+    # bytes (CGB flag at 0x143, SGB flag at 0x146) but ship a stale header
+    # checksum at 0x14D, which PyBoy rejects. Recompute both header and global
+    # checksums from the final patched data so any emulator will accept it.
+    s = 0
+    for i in range(0x134, 0x14D):
+        s = (s - patched[i] - 1) & 0xff
+    patched[0x14D] = s
+    gs = sum(patched) & 0xffff
+    gs = (gs - patched[0x14E] - patched[0x14F]) & 0xffff
+    patched[0x14E] = (gs >> 8) & 0xff
+    patched[0x14F] = gs & 0xff
+    patched = bytes(patched)
     sha = hashlib.sha1(patched).hexdigest()
     Path(args.out).write_bytes(patched)
     print(f"wrote {args.out} ({len(patched)} bytes) sha1={sha}", file=sys.stderr)

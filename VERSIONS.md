@@ -9,67 +9,115 @@ PyBoy version does not match.
 
 | Component | Pin | Notes |
 |---|---|---|
-| PyBoy | `2.7.0` | v2 API — `window="null"`, `tick(n, render=...)`, `memory[...]`, `hook_register`, `symbol_lookup`. CGB mode is used to enable color rendering for stock DMG Red. |
+| PyBoy | `2.7.0` | v2 API — `window="null"`, `tick(n, render=...)`, `memory[...]`, `hook_register`, `symbol_lookup`. CGB mode is used to enable color rendering for stock DMG Red/Blue. |
 
-## Target ROM
+## Target ROMs
 
-**Pokémon Red (UE) — "POKEMON RED"** (internal cartridge title).
+BYO-ROM — this repo ships neither any ROM nor any build-derived artifact.
+ROM files live under `rom/<version>/` (gitignored).
+
+### Pokémon Red (UE) — internal title `POKEMON RED`
 
 | Field | Value |
 |---|---|
 | SHA-1 | `ea9bcae617fdf159b045185467ae58b2e4a48b9a` |
 | Size | 1,048,576 bytes (1 MiB) |
-| Internal title (ROM header) | `POKEMON RED` |
+| Path | `rom/red/pokemon-red.gb` |
 | Release | Red UE v1.0 (canonical mainline) |
 
-> BYO-ROM. This repo ships neither the ROM nor any build-derived artifact.
+#### Optional: Pokémon Red Full Color Hack (vanilla variant)
 
-### Optional: Pokémon Red Full Color Hack (vanilla variant)
-
-For authentic colorized playback (Charmander orange, grass green, etc.)
-the harness also accepts the **Full Color Hack v1.2** vanilla IPS patch
-applied to the stock ROM. Patch source: `romhacking.net/hacks/1385/`.
-The patch explicitly avoids data shifting, so WRAM addresses and the
-pret-generated `.sym` are unchanged — the harness's memory reads work
-against this variant too (verified end-to-end: reaches Viridian City
-with matching map/xy/party state).
+For authentic colorized playback the harness also accepts the **Full
+Color Hack v1.2** vanilla IPS applied via `scripts/apply_color_patch.py`.
+Patch source: `romhacking.net/hacks/1385/`. The patch explicitly avoids
+data shifting, so WRAM addresses and the pret-generated `.sym` are
+unchanged — the same memory parsers work against this variant.
 
 | Field | Value |
 |---|---|
 | SHA-1 | `e1deed63080bc24cad5fba18ecb3184f905d16d4` |
 | Size | 1,048,576 bytes (1 MiB, unchanged) |
-| Base ROM | Stock Red UE + `pokered_color_vanilla.ips` |
-| `.sym` file | Same `pokered.sym` as stock |
+| Path | `rom/red/pokemon-red-color.gb` |
+| Base | Stock Red UE + `pokered_color_vanilla.ips` |
+| `.sym` | Same `pokered.sym` as stock |
 
-### Local dev-machine path (not committed)
+### Pokémon Blue (UE) — internal title `POKEMON BLUE`
 
-For the dev laptop that authored this repo:
-
-- ROM: `G:\project\pokemon\PokemonRed.gb`
-- Symbol file: `G:\project\pokemon\PokemonRed.sym` (rgblink-generated,
-  21,137 lines, ~20,213 harness-loadable symbols)
-- Vendored pokered source: `G:\project\pokemon\_vendor\pokered\`
-
-These paths live in a parallel workspace on a different drive and are
-**not** part of this repo — record them in your personal `.env` or a
-local-only config file, never in a committed file.
-
-## pret/pokered (for symbol generation)
+Blue is built from the same `pret/pokered` tree as Red (via
+`make blue DEBUG=1`) and shares WRAM addresses. All harness state
+parsers and event hooks work on Blue unchanged.
 
 | Field | Value |
 |---|---|
-| Repository | `https://github.com/pret/pokered` |
-| Commit SHA | `<FILL-IN from: git -C G:/project/pokemon/_vendor/pokered rev-parse HEAD>` |
-| Build flag | `make DEBUG=1` (produces `pokered.sym` and `pokered.map`) |
+| SHA-1 | `d7037c83e1ae5b39bde3c30787637ba1d4c48ce2` |
+| Size | 1,048,576 bytes (1 MiB) |
+| Path | `rom/blue/pokemon-blue.gb` |
+| Release | Blue UE v1.0 (canonical mainline) |
+| `.sym` | `rom/blue/pokemon-blue.sym` (from `pokeblue.sym`, 21,137 lines) |
+
+#### Optional: Pokémon Blue color IPS (vanilla variant)
+
+`scripts/apply_color_patch.py` applies
+`rom/blue/patch/pokeblue_color/pokeblue_color_vanilla.ips` and
+recomputes the ROM header checksum at `0x14D` and global checksum at
+`0x14E-0x14F` automatically — the shipped IPS leaves both stale, which
+PyBoy rejects. Output is emulator-ready.
+
+| Field | Value |
+|---|---|
+| SHA-1 | `5f4b05725a860e04077045462176d3e2771c5022` |
+| Size | 1,048,576 bytes (1 MiB, unchanged) |
+| Path | `rom/blue/pokemon-blue-color.gb` |
+| Base | Stock Blue UE + `pokeblue_color_vanilla.ips` (+ checksum fix) |
+| `.sym` | Same `pokeblue.sym` as stock Blue |
+
+### Pokémon Yellow — in progress (2026-04-19)
+
+Not yet supported by the harness. Adding this is the current work
+stream. Yellow is a native Game Boy Color cartridge (`.gbc`) built from
+the separate [`pret/pokeyellow`](https://github.com/pret/pokeyellow)
+repo, which shares most of its WRAM layout with pokered but not all —
+the parsers will need a symbol-driven audit pass when we stand up
+Yellow support.
+
+| Field | Value |
+|---|---|
+| SHA-1 | `cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1` |
+| Size | 1,048,576 bytes (1 MiB) |
+| Path | `rom/yellow/pokemon-yellow.gbc` |
+| Release | Yellow UE v1.0 |
+| `.sym` | Pending — needs `pret/pokeyellow` checkout + `make DEBUG=1` |
+
+### Local dev-machine paths (not committed)
+
+For the laptop that authored this repo:
+
+- Red ROM: `G:\project\pokemon\PokemonRed.gb`
+- Red symbol file: `G:\project\pokemon\PokemonRed.sym` (rgblink-generated, 21,137 lines, ~20,213 harness-loadable symbols)
+- Vendored pokered source: `G:\project\pokemon\_vendor\pokered\`
+  - Produces `pokered.sym`, `pokeblue.sym`, `pokeblue_debug.sym`.
+
+Yellow-related paths will be added here once the Yellow symbol build lands.
+
+These live in a parallel workspace on a different drive and are **not**
+part of this repo — record them in your personal `.env` or a local-only
+config file, never in a committed file.
+
+## pret upstream (for symbol generation)
+
+| Field | Value |
+|---|---|
+| pret/pokered | `https://github.com/pret/pokered` — produces both `pokered.sym` (Red) and `pokeblue.sym` (Blue). Commit SHA: `<FILL-IN from: git -C G:/project/pokemon/_vendor/pokered rev-parse HEAD>` |
+| pret/pokeyellow | `https://github.com/pret/pokeyellow` — Yellow only. Not yet vendored; add commit SHA when Yellow support lands. |
+| Build flag | `make DEBUG=1` (produces `.sym` and `.map`) |
 | Toolchain | rgbds — bundled at `_vendor/rgbds-1.0.1-src/` on the dev machine. |
 
-The generated `pokered.sym` (or its `PokemonRed.sym` alias) is **not**
-committed to this repo.
+Generated `.sym` files are **not** committed to this repo.
 
-## Symbol coverage (verified end-to-end)
+## Symbol coverage (verified end-to-end on Red + Blue)
 
 Every symbol the v1 harness reads or plans to hook has been confirmed
-present in the generated `.sym`:
+present in both `pokered.sym` and `pokeblue.sym`:
 
 Overworld/menu/text: `wCurMap`, `wXCoord`, `wYCoord`, `wWalkCounter`,
 `wSpritePlayerStateData1FacingDirection`, `wCurrentMapScriptFlags`,
@@ -85,10 +133,13 @@ Battle/party: `wIsInBattle`, `wBattleType`, `wEngagedTrainerClass`,
 
 Progress/bag: `wObtainedBadges`, `wPlayerID`, `wPlayerMoney`,
 `wPlayTimeHours`, `wPlayTimeMaxed`, `wPlayTimeMinutes`, `wPlayTimeSeconds`,
-`wEventFlags`, `wNumBagItems`, `wBagItems`.
+`wEventFlags`, `wNumBagItems`, `wBagItems`, `wRepelRemainingSteps`.
 
 Hooks: `DisplayTextID` (bank 0, $2920), `YesNoChoice` (bank 0, $35ec),
 `TryEvolvingMon` (bank 0x0e, $6d0e), `SetLastBlackoutMap` (bank 1, $7078).
+
+Yellow symbol coverage will be audited against `pokeyellow.sym` before
+adding it to this table.
 
 ## Performance floor (measured on dev machine)
 
@@ -99,4 +150,4 @@ Hooks: `DisplayTextID` (bank 0, $2920), `YesNoChoice` (bank 0, $35ec),
 ## Startup assertion
 
 `Session.from_files(..., expected_rom_sha1=...)` hashes the provided ROM
-and raises `VersionMismatch` on any deviation from the pin above.
+and raises `VersionMismatch` on any deviation from the pins above.

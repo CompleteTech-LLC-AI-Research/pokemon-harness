@@ -61,21 +61,192 @@ def run_pathfinder(state_path: Path, goal: str, out_path: Path,
 DIR_CHAR = {"u": "up", "d": "down", "l": "left", "r": "right"}
 
 
-def walk_path(drv, path: str, *, label: str, stop_map_ids=()) -> None:
-    """Execute a direction-string path. Auto-resolves battles; re-computes
-    remaining path if a battle interrupts and shifts position."""
+def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
+              blackout_map_ids=(0x25, 0x26)) -> str:
+    """Execute a direction-string path. Auto-resolves battles; aborts if
+    we blackout (map warps to player's house). Returns reason: ``stop``,
+    ``blackout``, ``fainted``, or ``done``.
+
+    If a press doesn't move us, mashes A to clear any trainer dialog /
+    "Hey, wait up!" text that fires when an NPC's sight line catches us
+    — the battle only becomes active after the dialog is dismissed,
+    and before then `joy_locked` is already 0 so callers can't tell a
+    wall from a dialog by the standard flags.
+    """
+    start_map = drv.gs().overworld.map_id
     for i, c in enumerate(path, 1):
         gs = drv.gs()
         if gs.overworld.map_id in stop_map_ids:
             print(f"[{label}] step {i}: reached target map "
                   f"0x{gs.overworld.map_id:02x}", flush=True)
-            return
+            return "stop"
+        if (gs.overworld.map_id in blackout_map_ids
+                and gs.overworld.map_id != start_map):
+            print(f"[{label}] blackout detected at step {i}", flush=True)
+            return "blackout"
         if gs.battle.active:
             drv.resolve_battle()
+            if drv.gs().overworld.map_id in blackout_map_ids:
+                print(f"[{label}] blackout after battle at step {i}",
+                      flush=True)
+                return "blackout"
         if drv.gs().party.mons and drv.gs().party.mons[0].hp == 0:
             print(f"[{label}] FAINTED at step {i}", flush=True)
-            return
+            return "fainted"
+        before = (drv.gs().overworld.x, drv.gs().overworld.y,
+                  drv.gs().overworld.map_id)
         drv.press(DIR_CHAR[c])
+        after = (drv.gs().overworld.x, drv.gs().overworld.y,
+                 drv.gs().overworld.map_id)
+        if after == before and not drv.gs().battle.active:
+            # Stalled. Most likely a trainer pre-battle dialog — those
+            # absorb directional input silently. Mash A until either a
+            # battle kicks off or a few presses pass (after which it's
+            # a real wall and we should give up on this step).
+            for _ in range(6):
+                drv.press("a")
+                if drv.gs().battle.active:
+                    drv.resolve_battle()
+                    break
+                nxt = (drv.gs().overworld.x, drv.gs().overworld.y,
+                       drv.gs().overworld.map_id)
+                if nxt != before:
+                    break
+    return "done"
+
+
+def _activate_repel(drv, steps: int = 255) -> None:
+    """RAM-poke wRepelRemainingSteps so wild encounters are suppressed
+    for the next few hundred overworld steps. This exists because Gen 1
+    Repel only blocks encounters with a level strictly below the lead
+    mon — fine for Route 1 (Pidgey/Rattata L2-5) with a L5+ Bulbasaur,
+    and a no-op for unaffected encounters. Saves us from grinding
+    Bulbasaur up before Viridian Pokécenter exists as a heal option."""
+    try:
+        base = drv.sym.addr_of("wRepelRemainingSteps")
+        drv.mem[base] = steps & 0xff
+        print(f"  [repel] wRepelRemainingSteps = {steps}", flush=True)
+    except Exception as e:
+        print(f"  [repel] failed to set: {e}", flush=True)
+
+
+def _pathfind_and_walk(drv, session, outdir, goal_xy: str, label: str,
+                       rom: str, sym: str, sha1: str,
+                       stop_map_ids=()) -> None:
+    """Save state → run A* pathfinder → walk the returned direction string,
+    resolving battles as they fire. Used by the viridian navigator's
+    Route 1 fallback when the hand-coded zig-zag paths get desynced by
+    wild battles and the simple "UP with L/R detour" finisher can't
+    clear a multi-tile ledge."""
+    tmp_state = outdir / f"_{label}.state"
+    tmp_state.write_bytes(session.save_state())
+    tmp_path = outdir / f"_{label}.txt"
+    path = run_pathfinder(tmp_state, goal_xy, tmp_path, rom, sym, sha1)
+    print(f"  [{label}] A* {len(path)} steps → walking", flush=True)
+    walk_path(drv, path, label=label, stop_map_ids=stop_map_ids)
+
+
+def navigate_to_viridian_with_retry(drv: "rtb.Driver", outdir: Path,
+                                    rom: str, sym: str, sha1: str,
+                                    session: Session,
+                                    max_attempts: int = 20) -> bool:
+    """Drive from wherever we are (lab exit, Pallet, Route 1, or post-
+    blackout Red's House) to Viridian City, retrying after blackouts.
+
+    Each blackout advances the emulator's tick counter and thus the wild-
+    encounter RNG, so retries are *not* deterministically identical —
+    eventually one threads the needle through Route 1 without KOing
+    Bulbasaur.
+    """
+    M_PALLET, M_VIRIDIAN, M_ROUTE_1 = 0x00, 0x01, 0x0c
+    M_REDS_1F, M_REDS_2F = 0x25, 0x26
+    M_OAKS_LAB = 0x28
+
+    for attempt in range(max_attempts):
+        gs = drv.gs()
+        print(f"  [viridian attempt {attempt+1}/{max_attempts}] "
+              f"map=0x{gs.overworld.map_id:02x} "
+              f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
+
+        if gs.overworld.map_id == M_VIRIDIAN:
+            return True
+
+        # Post-blackout recovery: exit Red's House back into Pallet Town.
+        if gs.overworld.map_id in (M_REDS_1F, M_REDS_2F):
+            for _ in range(30):
+                g = drv.gs()
+                if g.overworld.map_id == M_PALLET:
+                    break
+                if g.overworld.y < 7:
+                    drv.press("down")
+                elif g.overworld.x > 3:
+                    drv.press("left")
+                else:
+                    drv.press("down")
+            drv.idle(60)
+
+        map_id = drv.gs().overworld.map_id
+        # If we're inside Oak's Lab (walked back in through the door
+        # warp), step down+left to exit via the front mat.
+        if map_id == M_OAKS_LAB:
+            for _ in range(20):
+                g = drv.gs()
+                if g.overworld.map_id == M_PALLET:
+                    break
+                drv.press("down")
+            drv.idle(30)
+            map_id = drv.gs().overworld.map_id
+
+        # Encounter suppression before every traversal leg (safe to set
+        # repeatedly; the game decrements it per step).
+        _activate_repel(drv)
+        try:
+            if map_id == M_ROUTE_1:
+                # Walk the Route 1 map to its north warp into Viridian.
+                _pathfind_and_walk(
+                    drv, session, outdir,
+                    goal_xy="10,0", label=f"route1_a_star_{attempt}",
+                    rom=rom, sym=sym, sha1=sha1,
+                    stop_map_ids=(M_VIRIDIAN,),
+                )
+                # A* goal at (10, 0) lands ON the northern edge but the
+                # actual map warp only fires when we *step* off the
+                # edge — mash UP until the map id flips.
+                for _ in range(4):
+                    if drv.gs().overworld.map_id != M_ROUTE_1:
+                        break
+                    drv.press("up")
+            elif map_id == M_PALLET:
+                # Step off the lab door threshold (12, 11) first — A*
+                # from (12, 11) toward (10, 0) otherwise routes straight
+                # UP through the door warp back into Oak's Lab.
+                px, py = drv.gs().overworld.x, drv.gs().overworld.y
+                if (px, py) == (12, 11):
+                    drv.press("down")
+                _pathfind_and_walk(
+                    drv, session, outdir,
+                    goal_xy="10,0", label=f"pallet_a_star_{attempt}",
+                    rom=rom, sym=sym, sha1=sha1,
+                    stop_map_ids=(M_ROUTE_1,),
+                )
+                for _ in range(4):
+                    if drv.gs().overworld.map_id != M_PALLET:
+                        break
+                    drv.press("up")
+            else:
+                # Lab-exit case: let the smart driver do its zig-zag.
+                drv.run_pallet_to_viridian()
+        except RuntimeError as e:
+            print(f"  pathfinder failed: {e}", flush=True)
+
+        gs = drv.gs()
+        if gs.overworld.map_id == M_VIRIDIAN:
+            return True
+
+    print("  FAILED: could not reach Viridian after "
+          f"{max_attempts} attempts; last map="
+          f"0x{drv.gs().overworld.map_id:02x}", flush=True)
+    return False
 
 
 def save_milestone(session: Session, outdir: Path, name: str) -> Path:
@@ -119,10 +290,15 @@ def main() -> int:
             ("oak_intercept", lambda: wt.run_phase_oak_intercept(wt_drv)),
             ("pick_starter", lambda: wt.run_phase_pick_starter(wt_drv)),
             ("rival_battle", lambda: wt.run_phase_rival_battle(wt_drv)),
-            ("pallet_to_route1",
-             lambda: wt.run_phase_pallet_to_route1(wt_drv)),
-            ("route1_to_viridian",
-             lambda: wt.run_phase_route1_to_viridian(wt_drv)),
+            # run_pallet_to_viridian uses the smart (PP- and type-aware)
+            # battle AI from run_to_brock.Driver instead of the mash-A path
+            # in walkthrough.py. On Blue the mash-A path blacks out on
+            # Route 1 because RNG-dictated wild encounters grind Bulbasaur
+            # down. The smart AI + blackout retry below survives either
+            # ROM.
+            ("pallet_to_viridian",
+             lambda: navigate_to_viridian_with_retry(
+                 drv, outdir, rom, sym, sha1, session)),
             ("viridian_to_route2", drv.run_viridian_to_route2),
         ]:
             print(f"\n=== phase: {name} ===", flush=True)
