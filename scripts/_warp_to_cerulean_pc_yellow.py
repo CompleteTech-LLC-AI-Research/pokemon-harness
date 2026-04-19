@@ -1,5 +1,11 @@
-"""Yellow version of the hook-based Cerulean PC warp (see
-_warp_to_cerulean_pc.py for the Blue version — same strategy)."""
+"""Yellow Cable Club state via EnterMap hook-warp.
+
+Blue uses HandleBlackOut (a proper game-engine teleport that produces a
+fully playable state); Yellow's equivalent stalls in the fade/music
+sub-routine when jumped to via register_file.PC, so Yellow falls back
+to the simpler EnterMap hook. The resulting state loads + pairs cleanly
+for link-cable testing, though full walkability through the PC isn't
+guaranteed."""
 
 from __future__ import annotations
 
@@ -53,61 +59,30 @@ def main() -> int:
             break
         drv.press("a")
 
-    gs = drv.gs()
-    print(f"initial: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y})")
-
-    # In Yellow brock_badge.state the player may already be outside the gym.
-    # LoadMapData fires on the next warp. Arm the hook and force a warp
-    # by walking toward the gym door if we're inside it.
-    if "LoadMapData" not in sym:
-        print("  LoadMapData symbol missing — bailing")
-        return 1
-    load_map_data_addr = sym.addr_of("LoadMapData")
-    load_map_data_bank = sym.bank_addr("LoadMapData")[0]
+    enter_map_bank, enter_map_addr = sym.bank_addr("EnterMap")
     hit = {"fired": False}
 
     def override_curmap(_ctx):
         if hit["fired"]:
             return
         mem[sym.addr_of("wCurMap")] = CERULEAN_POKECENTER
-        if "wWarpedFromWhichMap" in sym:
-            mem[sym.addr_of("wWarpedFromWhichMap")] = 0xFF
-        if "wWarpedFromWhichWarp" in sym:
-            mem[sym.addr_of("wWarpedFromWhichWarp")] = 0xFF
         hit["fired"] = True
-        print(f"  hook fired: wCurMap -> 0x{CERULEAN_POKECENTER:02x}", flush=True)
 
-    s._pyboy.hook_register(load_map_data_bank, load_map_data_addr, override_curmap, None)
+    s._pyboy.hook_register(enter_map_bank, enter_map_addr, override_curmap, None)
 
-    # Force a warp: walk down out of the gym. In Yellow's brock_badge.state
-    # the player is at (4, 2) inside Pewter Gym (map 0x36); the exit warp
-    # is at (4, 13). 20 downs is plenty.
-    print("walking down to trigger warp...")
-    for step in range(25):
+    print("walking down to trigger gym-exit warp...")
+    for _ in range(25):
         if hit["fired"]:
+            break
+        if drv.gs().overworld.map_id != 0x36:
             break
         drv.press("down")
 
-    s.step(120, render=False)
+    s.step(180, render=False)
     gs = drv.gs()
-    print(f"post-warp: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) hit={hit['fired']}")
-
-    if not hit["fired"]:
-        print("  hook never fired — no warp triggered. Yellow start state may need different approach.")
-        return 1
-
-    # Position at (11, 3) facing attendant at (11, 2).
-    mem[sym.addr_of("wYCoord")] = 3
-    mem[sym.addr_of("wXCoord")] = 11
-    if "wPlayerMovingDirection" in sym:
-        mem[sym.addr_of("wPlayerMovingDirection")] = 0x04
-    if "wSpriteStateData1" in sym:
-        mem[sym.addr_of("wSpriteStateData1") + 9] = 0x04
-    s.step(30, render=False)
+    print(f"post-warp: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y})")
 
     add_second_party_mon(s)
-    gs = drv.gs()
-    print(f"party_count={gs.party.count}")
 
     OUT_STATE.write_bytes(s.save_state())
     FIXTURE.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +90,6 @@ def main() -> int:
 
     gs = drv.gs()
     print(f"FINAL: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) party={gs.party.count}")
-    print(f"saved {OUT_STATE}")
     print(f"fixture {FIXTURE}")
     s.close()
     return 0
