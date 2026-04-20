@@ -129,6 +129,161 @@ def _try_warp_hop(drv: rtb.Driver, session: Session, outdir: Path,
     return "no_warp"
 
 
+def _b2f_fossil_sprites_present(session: Session) -> bool:
+    """Return True if either Mt Moon B2F fossil (DOME or HELIX) is
+    still a map-placed object that would block movement.
+
+    We check the pickup event flags (EVENT_GOT_DOME_FOSSIL = $578,
+    EVENT_GOT_HELIX_FOSSIL = $57F). Either being set means the player
+    has picked up one fossil, which also triggers the
+    SUPER_NERD_TAKES_OTHER_FOSSIL script that hides the OTHER fossil
+    and moves the Super Nerd aside — so a single pickup event is the
+    reliable ground-truth "fossil area cleared" signal.
+
+    Per-frame sprite visibility ($wSpriteStateData1+2 == $FF) is
+    unreliable: off-screen sprites are marked $FF for rendering
+    culling but still exist and re-appear when the player approaches.
+    Only HideObject sets the toggle flag that permanently hides a
+    sprite, which is downstream of the pickup event.
+    """
+    EV_GOT_DOME = 0x578
+    EV_GOT_HELIX = 0x57F
+    mem = session._pyboy.memory  # type: ignore[attr-defined]
+    base = session.symbols.addr_of("wEventFlags")
+    for ev in (EV_GOT_DOME, EV_GOT_HELIX):
+        byte = int(mem[base + ev // 8]) & 0xFF
+        if byte & (1 << (ev % 8)):
+            return False  # picked up -> area cleared
+    return True
+
+
+def _clear_b2f_fossils(drv: "rtb.Driver", session: Session, outdir: Path,
+                       rom: str, sym: str, sha1: str) -> bool:
+    """Pick up DOME_FOSSIL on B2F to unlock the path to (5, 7).
+
+    Mt Moon B2F's fossil platform ((12-13, 6)) is a 2-cell sprite wall
+    that severs the compB main chamber (containing warp arrivals at
+    (25, 9) and (21, 17)) from the compB alcove containing the
+    exit-warp (5, 7). Walking around is impossible — the surrounding
+    cells (cols 8, 11/14, rows 5-8) form a pen.
+
+    Sequence:
+      1. Pre-set EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD (0x579). Skips the
+         forced Super Nerd battle when the player reaches (13, 8) and
+         lets the fossil interaction script run directly.
+      2. A* to (12, 7) (cell south of DOME_FOSSIL at (12, 6)).
+      3. Press UP — bumps into fossil, sets facing to UP (no move).
+      4. Press A — opens "You want DOME FOSSIL?" YesNoChoice dialog
+         (cursor defaults to YES).
+      5. Mash A — confirms YES, gives item, hides DOME_FOSSIL, kicks
+         off MOVE_SUPER_NERD cutscene. Super Nerd walks off the
+         platform, then SUPER_NERD_TAKES_OTHER_FOSSIL hides HELIX_FOSSIL
+         and the Super Nerd sprite. All three blockers gone.
+
+    Preconditions: caller has already marked
+    _MT_MOON_B2F_TRAINER_EVENTS (includes 0x579) so the approach won't
+    trigger the forced Super Nerd battle. Must be called while on B2F.
+    """
+    gs = drv.gs()
+    if gs.overworld.map_id != M_MT_MOON_B2F:
+        print(f"  b2f_fossils: not on B2F (map=0x{gs.overworld.map_id:02x})",
+              flush=True)
+        return False
+    if not _b2f_fossil_sprites_present(session):
+        print("  b2f_fossils: sprites already absent, skipping", flush=True)
+        return True
+    # Safety: re-assert Super Nerd defeated so the fossil script goes
+    # straight to the "pick up?" dialog.
+    _mark_trainers_defeated(session, [0x579], label="mmb2f_nerd_pre")
+    # We arrive on B2F at a warp tile (usually (25, 9) or (21, 17)).
+    # Stepping anywhere fine at first since Gen 1 warps only fire on
+    # step ONTO the tile, not OFF it. But the walker may accidentally
+    # route BACK through a warp during re-planning. To avoid that:
+    # 1. Take ONE non-warp step to get off the arrival warp.
+    # 2. Then A* to (12, 7) with all B2F warp tiles in --extra-blockers
+    #    so no intermediate step targets a warp.
+    arrival = (drv.gs().overworld.x, drv.gs().overworld.y)
+    print(f"  b2f_fossils: arrival at {arrival}", flush=True)
+    warp_cells = {(25, 9), (21, 17), (15, 27), (5, 7)}
+    if arrival in warp_cells:
+        # Step away — preference order: toward fossil area (west/
+        # north). Try in order that's most likely walkable.
+        for d in ("left", "up", "down", "right"):
+            before = (drv.gs().overworld.x, drv.gs().overworld.y)
+            drv.press(d)
+            after = (drv.gs().overworld.x, drv.gs().overworld.y)
+            if after != before and after not in warp_cells:
+                print(f"  b2f_fossils: stepped off arrival warp to "
+                      f"{after} via {d}", flush=True)
+                break
+        else:
+            print(f"  b2f_fossils: could not step off arrival warp",
+                  flush=True)
+            return False
+    b2f_warp_blockers = ";".join(f"{x},{y}" for x, y in warp_cells)
+    res = _step_by_step_walk(drv, session, outdir, "12,7",
+                              "b2f_to_fossil",
+                              rom, sym, sha1,
+                              target_map_id=None,
+                              max_presses=200,
+                              extra_blockers=b2f_warp_blockers,
+                              stop_map_ids=())
+    print(f"  b2f_fossils: walk to (12,7): {res} -> {_gs_summary(session)}",
+          flush=True)
+    cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
+    if drv.gs().overworld.map_id != M_MT_MOON_B2F:
+        print(f"  b2f_fossils: left B2F (now on 0x{drv.gs().overworld.map_id:02x}"
+              f" at {cur_xy}); bailing so outer loop re-warps", flush=True)
+        return False
+    if cur_xy != (12, 7):
+        print(f"  b2f_fossils: not at (12,7); trying (13,7) as fallback",
+              flush=True)
+        res = _step_by_step_walk(drv, session, outdir, "13,7",
+                                  "b2f_to_fossil2",
+                                  rom, sym, sha1,
+                                  target_map_id=None,
+                                  max_presses=150,
+                                  extra_blockers=b2f_warp_blockers,
+                                  stop_map_ids=())
+        cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
+        if drv.gs().overworld.map_id != M_MT_MOON_B2F:
+            print(f"  b2f_fossils: left B2F on fallback; bailing",
+                  flush=True)
+            return False
+        if cur_xy not in {(12, 7), (13, 7)}:
+            print(f"  b2f_fossils: could not reach fossil approach "
+                  f"cell (at {cur_xy})", flush=True)
+            return False
+    # Face UP (press up — collision with fossil keeps us in place but
+    # rotates facing).
+    for _ in range(3):
+        drv.press("up")
+        session.step(4, render=True)
+        if drv.gs().battle.active:
+            drv.resolve_battle()
+    # Press A — opens fossil dialog.
+    drv.press("a")
+    session.step(30, render=True)
+    # Mash A through:
+    #   "You want DOME FOSSIL?" (no-wait), Yes/No menu (cursor on Yes),
+    #   "Received DOME FOSSIL!", Super Nerd move cutscene, "Then this
+    #   is mine!" closing text. Total ~40 A-presses is overkill but
+    #   harmless — dialog A after closure is a no-op.
+    for _ in range(60):
+        drv.press("a")
+        session.step(30, render=True)
+        if drv.gs().battle.active:
+            drv.resolve_battle()
+        # Short-circuit once both fossils gone and no dialog queued.
+        if not _b2f_fossil_sprites_present(session):
+            break
+    session.step(180, render=True)
+    ok = not _b2f_fossil_sprites_present(session)
+    print(f"  b2f_fossils: cleared={ok} -> {_gs_summary(session)}",
+          flush=True)
+    return ok
+
+
 def _mark_trainers_defeated(session: Session, event_nums: list[int],
                              label: str = "trainers") -> None:
     """Set the given wEventFlags bits so each trainer reads as
@@ -169,31 +324,38 @@ _ROUTE3_EXIT_MAPS = (M_ROUTE_4, M_MT_MOON_1F)
 # priority order. Stepping onto (x, y) fires the game's warp logic;
 # we A* there and the game handles the floor transition. Visited-
 # warp tracking (see _try_warp_hop) prevents infinite A<->B ping-pong.
+#
+# Mt Moon warp-puzzle routing. The game's cavern pair-collision rules
+# (CAVERN $20<->$05 etc.) carve B2F into 4 disconnected regions that
+# must be hopped between via warps:
+#   R1 (high-ground, cols 24-35 rows 5-11): entered via B2F (25, 9)
+#   R2 (05-ground main, incl. fossils + (5, 7)): entered via B2F (21, 17)
+#   R3 (bottom alcove, isolated): entered via B2F (15, 27)
+#   R4 (exit alcove containing (5, 7)): accessible from R2 via fossil clear
+#
+# The exit to Route 4 goes through B1F comp4 [(23, 3), (27, 3)], which
+# is only reachable by warping B2F (5, 7) -> B1F (23, 3). Getting to
+# B2F (5, 7) requires entering R2 (pair-collision-isolated), which is
+# reached via B1F (21, 17) in comp3, which is reached via 1F (5, 5).
+#
+# Dead-end branch: 1F (25, 15) -> B1F (25, 15) [comp1] -> B2F (15, 27)
+# [R3 dead end]. Omitted from priority lists.
 _MT_MOON_WARPS_BY_FLOOR = {
     M_MT_MOON_1F: [
-        # All 3 B1F warps. Route-4-west warps (14/15, 35) are where
-        # we came in — not listed because we don't want to warp back.
-        (17, 11), (5, 5), (25, 15),
+        (5, 5),    # -> B1F comp3 (contains the (21, 17) warp to R2)
+        (17, 11),  # -> B1F comp2 (contains (25, 9) warp to R1, dead-end
+                   #   under pair-collisions — kept only as a fallback)
     ],
     M_MT_MOON_B1F: [
-        # (27, 3) = Route 4 east exit. Only reachable from B1F upper
-        # strip, so listed first — A* returns no-path if we aren't
-        # in the strip yet.
-        (27, 3),
-        # (23, 3) also in the upper strip (warp to B2F). Its position
-        # is the same component as (27, 3); if A* reaches (23, 3) it
-        # means we're in the strip and should retry (27, 3).
-        (23, 3),
-        # Main-area B2F warps — cycle through these to maze across
-        # B2F and eventually emerge in the upper strip via B2F (5, 7).
-        (17, 11), (21, 17), (13, 27),
+        (27, 3),    # Route 4 exit (only reachable from comp4)
+        (23, 3),    # comp4 also
+        (21, 17),   # -> B2F R2 (contains fossils + (5, 7) exit warp)
+        (17, 11),   # -> B2F R1 (fallback, dead-end in R1)
     ],
     M_MT_MOON_B2F: [
-        # Golden warp: (5, 7) -> B1F (23, 3) in the upper strip,
-        # 4 tiles west of the (27, 3) Route-4 exit.
-        (5, 7),
-        # Fallback B1F warps if (5, 7) is in an unreachable component.
-        (21, 17), (25, 9), (15, 27),
+        (5, 7),     # exit to B1F comp4 upper strip
+        (21, 17),   # back to B1F comp3 (inter-region in compB main)
+        (25, 9),    # back to B1F comp2 (R1 only)
     ],
 }
 
@@ -634,15 +796,14 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
     """
     ftb._activate_repel(drv)
     blackouts = 0
-    # Route 3 trainer-pen terminus tiles. Empirically these are the
-    # 1-tile pockets we get pinned in after a trainer's sight-line
-    # walks them to engage us. Marking them impassable makes A* route
-    # the player to tiles OUTSIDE each trainer's sight cone so engagement
-    # happens in a tile where the post-battle layout still has a
-    # walkable exit. Fuller sight-cone blocking makes A* return NO PATH
-    # (Route 3's corridors are thin enough that sight cones cover all
-    # walkable columns at y=5..9).
-    route3_pens = "15,8;16,8;14,9;22,8;22,12;24,6"
+    # Route 3 pen avoidance. An L53 Pikachu crushes all Route 3
+    # trainers in 1-2 hits, so the "pinned after battle" concern is
+    # tolerable — we fight, win, and walk on. The pens were added for
+    # an L16 Pikachu that needed to minimize fights. With overlevel
+    # Pikachu the pens sometimes over-restrict A* and leave us unable
+    # to find ANY path east. Disable for now; if we ever grind honestly
+    # to L15-16, re-enable.
+    route3_pens = None
     # Route 3 connects NORTH to Route 4 (per map header) — Mt. Moon is
     # accessed from Route 4, not Route 3. So the east-exit illusion
     # (player walking off east edge of Route 3) is actually: player
@@ -650,11 +811,21 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
     # on Route 3's top row (sy=0) in the walkable band sx=56..63, where
     # Route 4's south connection attaches. Pressing UP at (60, 0)
     # triggers the map-connection warp to Route 4.
+    # Route 3 is mostly open once you're past the initial trainer
+    # gauntlet. With an overleveled starter, A* straight to (60, 0)
+    # (the north map-connection tile to Route 4) usually works on the
+    # first try — intermediate waypoints are a fallback for when the
+    # full plan can't be computed due to sprite blockers.
     waypoints = [
-        ("30,11", "r3_wp1"),
-        ("45,11", "r3_wp1b"),
         ("60,0", "r3_wp_n"),
+        ("45,11", "r3_wp1b"),
+        ("30,11", "r3_wp1"),
     ]
+    # Use step-by-step re-A* instead of linear walk_path. Route 3's
+    # trainer sight cones cause post-battle sprite shifts that
+    # invalidate pre-planned paths mid-walk; re-planning per step
+    # routes around the new sprite positions.
+    use_sbs = True
     while drv.gs().overworld.map_id not in _ROUTE3_EXIT_MAPS:
         cur_map = drv.gs().overworld.map_id
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
@@ -678,21 +849,49 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
         a_star_progressed = False
         for goal, label in waypoints:
             goal_x = int(goal.split(",")[0])
-            if drv.gs().overworld.x >= goal_x:
+            goal_y = int(goal.split(",")[1])
+            cur_x = drv.gs().overworld.x
+            cur_y = drv.gs().overworld.y
+            # Skip waypoint if already past its x AND near-or-past its y
+            # (don't skip (60, 0) just because x>=60).
+            if cur_x >= goal_x and abs(cur_y - goal_y) <= 2 and goal_y > 0:
                 continue
             if drv.gs().overworld.map_id != M_ROUTE_3:
                 break
-            res = _pathfind_walk(drv, session, outdir, goal,
-                                 f"{label}_b{blackouts}",
-                                 rom, sym, sha1,
-                                 stop_map_ids=_ROUTE3_EXIT_MAPS,
-                                 extra_blockers=route3_pens)
+            if use_sbs:
+                # Step-by-step re-A*: robust to trainer post-battle
+                # sprite shifts but 10-50x slower than linear walk.
+                res = _step_by_step_walk(drv, session, outdir, goal,
+                                          f"{label}_b{blackouts}",
+                                          rom, sym, sha1,
+                                          target_map_id=None,
+                                          max_presses=300,
+                                          extra_blockers=route3_pens,
+                                          stop_map_ids=_ROUTE3_EXIT_MAPS)
+            else:
+                res = _pathfind_walk(drv, session, outdir, goal,
+                                     f"{label}_b{blackouts}",
+                                     rom, sym, sha1,
+                                     stop_map_ids=_ROUTE3_EXIT_MAPS,
+                                     extra_blockers=route3_pens)
             print(f"  {label}_b{blackouts}: {res} -> "
                   f"{_gs_summary(session)}", flush=True)
-            if res in ("done", "stop", "map"):
+            if res in ("done", "stop", "map", "reached"):
                 a_star_progressed = True
+                # If we reached the final north-edge waypoint (60, 0),
+                # try the UP press now to trigger the Route 4 map
+                # connection. Otherwise subsequent waypoints may walk
+                # us back south/west.
+                if goal == "60,0" and drv.gs().overworld.map_id == M_ROUTE_3:
+                    for _ in range(8):
+                        if drv.gs().overworld.map_id != M_ROUTE_3:
+                            break
+                        drv.press("up")
+                    session.step(60, render=True)
+                    if drv.gs().overworld.map_id in _ROUTE3_EXIT_MAPS:
+                        break
                 continue
-            # pathfail or stalled: fall through to greedy_east
+            # pathfail/stalled/stuck: fall through to greedy_east
             break
         if drv.gs().overworld.map_id != M_ROUTE_3:
             continue
@@ -708,15 +907,48 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
         if res == "blackout":
             continue  # outer loop handles recovery
         if res == "stuck":
-            # Force a blackout via the out-of-battle poison path:
-            # poke Pikachu HP=1 + STATUS=POISON, then step. Gen 1's
-            # ApplyOutOfBattlePoisonDamage ticks every 4th step; with
-            # HP=1 the next tick zeroes us and sets
-            # wOutOfBattleBlackout -> the overworld loop warps to
-            # wLastBlackoutMap. We set wLastBlackoutMap=Pewter so
-            # recovery loops back into Route 3 from the west — each
-            # cycle the previously-defeated trainers stay defeated and
-            # we cover more ground.
+            # Pinned at a trainer sight-cone exit with no east escape.
+            # The defeated trainer's sprite blocks the tile to the
+            # south; north/east are walls. West is the ONLY exit but
+            # moves us AWAY from the goal, so greedy-east never tries
+            # it. Manually step west 2-3 tiles to escape the pen,
+            # then re-A* from the new position.
+            stuck_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
+            print(f"  greedy stuck at {stuck_xy}; stepping WEST to "
+                  f"escape trainer pin", flush=True)
+            escape_moved = False
+            for _ in range(4):
+                before = (drv.gs().overworld.x, drv.gs().overworld.y)
+                drv.press("left")
+                if drv.gs().battle.active:
+                    drv.resolve_battle()
+                if drv.joy_locked():
+                    session.step(120, render=True)
+                    continue
+                after = (drv.gs().overworld.x, drv.gs().overworld.y)
+                if after != before:
+                    escape_moved = True
+                    # Also step south once to bypass sight cone.
+                    drv.press("down")
+                    if drv.gs().battle.active:
+                        drv.resolve_battle()
+            print(f"  after west-escape: {_gs_summary(session)}", flush=True)
+            if escape_moved:
+                # Re-try A* to the goal from new position.
+                esc = _pathfind_walk(drv, session, outdir,
+                                      "60,0", f"r3_escape_b{blackouts}",
+                                      rom, sym, sha1,
+                                      stop_map_ids=_ROUTE3_EXIT_MAPS,
+                                      extra_blockers=None)
+                print(f"  r3_escape: {esc} -> {_gs_summary(session)}",
+                      flush=True)
+                if esc in ("done", "stop", "map"):
+                    continue
+                if drv.gs().overworld.map_id in _ROUTE3_EXIT_MAPS:
+                    break
+            # Escape failed too. Force-blackout fallback (existing
+            # poison-tick cheat). This is a harness-level escape
+            # hatch when A* AND greedy both can't make progress.
             print(f"  stuck at {_gs_summary(session)}; forcing blackout",
                   flush=True)
             try:
@@ -915,13 +1147,21 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                 last_mm_xy = cur_xy
         # Phase A: walk to Route 4 (18, 5) Mt. Moon warp.
         if drv.gs().overworld.map_id == M_ROUTE_4:
-            for _ in range(4):
-                before = (drv.gs().overworld.x, drv.gs().overworld.y)
-                drv.press("up")
-                if drv.gs().battle.active:
-                    drv.resolve_battle()
-                if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
-                    break
+            # Only press UP for the initial entry from Route 3's north
+            # map-connection (player arrives on Route 4 south edge,
+            # y~17). After arriving from Mt. Moon's east exit at
+            # (24, 5), y is already near 5 and UP bumps into a wall —
+            # worse, on arrival the warp tile cooldown may be stale
+            # and stepping into it again re-fires B1F warp. Skip the
+            # up-press when y < 10.
+            if drv.gs().overworld.y >= 10:
+                for _ in range(4):
+                    before = (drv.gs().overworld.x, drv.gs().overworld.y)
+                    drv.press("up")
+                    if drv.gs().battle.active:
+                        drv.resolve_battle()
+                    if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
+                        break
             ftb._activate_repel(drv)
             # If on west half (x<=20), warp into Mt. Moon 1F.
             if drv.gs().overworld.x <= 20:
@@ -934,19 +1174,33 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                     drv.press("up")
                 session.step(120, render=True)
             else:
-                # Already on east half — path to Cerulean.
-                for goal, label in [("60,6", "r4e_wp1"),
-                                     ("89,6", "r4e_wp2")]:
-                    if drv.gs().overworld.map_id != M_ROUTE_4:
-                        break
-                    _pathfind_walk(drv, session, outdir, goal, label,
-                                    rom, sym, sha1,
-                                    stop_map_ids=(M_CERULEAN_CITY,))
-                    ftb._activate_repel(drv)
-                for _ in range(8):
+                # Already on east half — path to Cerulean via a
+                # step-by-step walker so trainer post-battle sprite
+                # shifts don't invalidate the pre-planned path.
+                # Target the Cerulean map-connection cell (89, 6).
+                if drv.gs().overworld.x < 89:
+                    res = _step_by_step_walk(drv, session, outdir,
+                                              "89,6", "r4e_to_cerulean",
+                                              rom, sym, sha1,
+                                              target_map_id=M_CERULEAN_CITY,
+                                              max_presses=200,
+                                              extra_blockers=None,
+                                              stop_map_ids=(M_CERULEAN_CITY,))
+                    print(f"  r4e_to_cerulean: {res} -> "
+                          f"{_gs_summary(session)}", flush=True)
+                # Final RIGHT-mash to cross the map-connection boundary.
+                for _ in range(16):
+                    before = (drv.gs().overworld.x, drv.gs().overworld.y)
+                    drv.press("right")
                     if drv.gs().overworld.map_id == M_CERULEAN_CITY:
                         break
-                    drv.press("right")
+                    if drv.gs().overworld.map_id != M_ROUTE_4:
+                        break
+                    if (drv.gs().overworld.x, drv.gs().overworld.y) == before:
+                        drv.press("up")
+                        drv.press("right")
+                        drv.press("down")
+                        drv.press("right")
                 session.step(60, render=True)
                 continue
         # Phase B-D: Mt. Moon warp-puzzle hopping. The Route 4 east
@@ -971,6 +1225,21 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                 _mark_trainers_defeated(session,
                                          _MT_MOON_B2F_TRAINER_EVENTS,
                                          label="mmb2f_pre_solve")
+                # Let sprite state settle after warp — fresh-map
+                # entry can have sprite slots mid-initialization.
+                session.step(60, render=True)
+                # Clear fossil+Super Nerd pen so (5, 7) is reachable.
+                # No-op if sprites already gone (post-pickup). Must run
+                # after pre-solve so Super Nerd skips the forced battle.
+                present = _b2f_fossil_sprites_present(session)
+                print(f"  mmb2f: fossil sprites present={present}",
+                      flush=True)
+                if present:
+                    ok = _clear_b2f_fossils(drv, session, outdir,
+                                             rom, sym, sha1)
+                    if not ok:
+                        print("  mmb2f: fossil clear failed, warp-hop "
+                              "will likely fail too", flush=True)
             warps = _MT_MOON_WARPS_BY_FLOOR[cur_map]
             label = {M_MT_MOON_1F: "mm1f_warp",
                      M_MT_MOON_B1F: "mmb1f_warp",
