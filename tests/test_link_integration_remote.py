@@ -1236,6 +1236,17 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
         session_b.close()
 
 
+# Investigation notes: forcing wLinkState = 5 (LINK_STATE_START_TRADE)
+# on both sides after the TRADE_CENTER warp was attempted as a way to
+# align divergent post-exchange branches in CableClub_DoBattleOrTradeAgain.
+# Result: forcing the state STOPPED CableClub_DoBattleOrTradeAgain
+# from running at all (0 exchanges vs. the 2/1 baseline). wLinkState
+# evidently gates earlier in the code path than assumed, so writing
+# it externally prevents the function from being reached. The natural
+# wLinkState progression (whatever the auto-select bypass produces)
+# is closer to "runnable" than any value we can force from outside.
+
+
 # --- T4/T5: full trade and battle completion (KNOWN LIMITATION) ---
 #
 # Attempted but not reliably achievable two-process:
@@ -1373,25 +1384,27 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
                     runner = _SessionRunner(session, endpoint)
                     runner.start()
                     try:
-                        time.sleep(1.0)
+                        time.sleep(1.5)
                         for _ in range(3):
                             runner.press("up", duration=6)
-                            time.sleep(0.3)
+                            time.sleep(0.4)
                         # Press A until LinkMenu entry hook fires.
-                        # Generous timeout — under parallel-test load
-                        # the PyBoy tick rate drops noticeably.
-                        deadline = time.time() + 40.0
+                        # Very generous timeout — full-suite parallel
+                        # load can cut PyBoy tick rate to ~1/4 normal.
+                        deadline = time.time() + 90.0
                         while time.time() < deadline and not menu_evt.is_set():
                             runner.press("a", duration=4)
-                            time.sleep(0.2)
+                            time.sleep(0.25)
                         if not menu_evt.is_set():
                             result["error"] = f"{side}: LinkMenu never reached"
                             return
                         # Rendezvous with peer — blocks until peer
-                        # also reached its menu.
+                        # also reached its menu. Timeout generous
+                        # enough to outlast peer's menu-reach deadline
+                        # under heavy parallel-suite load.
                         tick_bytes = str(session.current_tick()).encode("ascii")
                         peer_tick_bytes = sync.rendezvous(
-                            "about_to_press_a", tick_bytes, timeout_ms=30000
+                            "about_to_press_a", tick_bytes, timeout_ms=120000
                         )
                         result["peer_tick"] = peer_tick_bytes.decode("ascii")
                         result["my_tick"] = session.current_tick()
@@ -1426,8 +1439,8 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
             )
             t_a.start()
             t_b.start()
-            t_a.join(timeout=90.0)
-            t_b.join(timeout=90.0)
+            t_a.join(timeout=180.0)
+            t_b.join(timeout=180.0)
 
             assert "error" not in result_a, result_a.get("error")
             assert "error" not in result_b, result_b.get("error")
