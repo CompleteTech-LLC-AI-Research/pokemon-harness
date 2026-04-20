@@ -565,10 +565,12 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
 
     # Phase B: Mt. Moon 1F → B1F via warp (5, 5). Mt. Moon has
     # wandering NPC trainers so sprite-blocker positions change during
-    # walk, causing mid-path stalls. Re-A* from the stuck position on
-    # each stall, up to 6 retries.
+    # walk, causing mid-path stalls. Re-A* from the stuck position
+    # each time; on repeated same-position stall, take a blind step
+    # to break the NPC-bounce cycle and re-A* again.
     ftb._activate_repel(drv)
-    for retry in range(6):
+    last_stuck_xy = None
+    for retry in range(20):
         if drv.gs().overworld.map_id != M_MT_MOON_1F:
             break
         res = _pathfind_walk(drv, session, outdir, "5,5",
@@ -580,8 +582,17 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         if res in ("done", "stop") or \
                 drv.gs().overworld.map_id == M_MT_MOON_B1F:
             break
+        cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
+        if cur_xy == last_stuck_xy:
+            # Same position two retries in a row — take a blind nudge
+            # in every direction to unstick us from a wandering NPC.
+            for d in ("up", "left", "down", "right"):
+                drv.press(d)
+                if drv.gs().battle.active:
+                    drv.resolve_battle()
+        last_stuck_xy = cur_xy
         ftb._activate_repel(drv)
-        session.step(60, render=True)
+        session.step(120, render=True)
     for _ in range(6):
         if drv.gs().overworld.map_id == M_MT_MOON_B1F:
             break
@@ -593,7 +604,8 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
 
     # Phase C: Mt. Moon B1F east exit at (27, 3) → Route 4 (24, 5).
     ftb._activate_repel(drv)
-    for retry in range(6):
+    last_stuck_xy = None
+    for retry in range(20):
         if drv.gs().overworld.map_id != M_MT_MOON_B1F:
             break
         res = _pathfind_walk(drv, session, outdir, "27,3",
@@ -605,8 +617,15 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         if res in ("done", "stop") or \
                 drv.gs().overworld.map_id == M_ROUTE_4:
             break
+        cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
+        if cur_xy == last_stuck_xy:
+            for d in ("up", "left", "down", "right"):
+                drv.press(d)
+                if drv.gs().battle.active:
+                    drv.resolve_battle()
+        last_stuck_xy = cur_xy
         ftb._activate_repel(drv)
-        session.step(60, render=True)
+        session.step(120, render=True)
     for _ in range(6):
         if drv.gs().overworld.map_id == M_ROUTE_4:
             break
