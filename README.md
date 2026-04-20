@@ -204,8 +204,61 @@ Label set is validated against real `pokered.sym`, `pokeblue.sym`, and
 (skipped when the matching ROM's `.sym` is absent). Mode A handshake is
 smoke-tested in
 [`tests/test_link_integration.py`](tests/test_link_integration.py);
-Mode B is covered end-to-end (including cross-version blue↔yellow) by
+Mode B is covered end-to-end by
 [`tests/test_link_integration_remote.py`](tests/test_link_integration_remote.py).
+
+### Mode B coverage matrix
+
+Listener × connector, with the milestones driven end-to-end over
+localhost TCP. Role matters: listener is the internal-clock master,
+connector the external-clock slave — a reversed pair is a distinct
+wire configuration.
+
+| Listener | Connector | Handshake | Nybble → LinkMenu | RPC-kind observation |
+|---|---|---|---|---|
+| blue | blue | ✅ | ✅ | ✅ |
+| blue | yellow | ✅ | ⏭ fixture gap | — |
+| yellow | blue | ✅ | ⏭ fixture gap | — |
+| yellow | yellow | ✅ | ⏭ fixture gap | — |
+| red | red | ⏭ fixture gap | ⏭ fixture gap | — |
+| red | blue | ⏭ fixture gap | ⏭ fixture gap | — |
+| blue | red | ⏭ fixture gap | ⏭ fixture gap | — |
+| red | yellow | ⏭ fixture gap | ⏭ fixture gap | — |
+| yellow | red | ⏭ fixture gap | ⏭ fixture gap | — |
+
+Fixture gaps:
+
+- **Red** — no `tests/fixtures/link/red/cable_club.state` exists.
+  Mt. Moon → Cerulean progression is not yet scripted in the Red
+  harness, so the fixture has never been produced.
+- **Yellow** — the existing `tests/fixtures/link/yellow/cable_club.state`
+  was captured via a weak `EnterMap` hook-warp that leaves the player
+  un-walkable, so any test that needs to press UP to reach the Cable
+  Club attendant (the nybble test) can't use it. Replacing this fixture
+  with a state produced by walking to the attendant unlocks the three
+  rows currently marked "fixture gap" under Nybble → LinkMenu.
+
+Transport-layer behaviour past LinkMenu
+(`Serial_ExchangeLinkMenuSelection`, `Serial_ExchangeBytes` for the
+three RNG/player-data/patch-list blocks inside `CableClub_DoBattleOrTrade`)
+is covered separately:
+
+- In-process, end-to-end on real ROMs:
+  `test_link_integration.test_link_trade_roundtrip` (blue).
+- Remote, unit-level on `InProcessSerialLink`:
+  `test_remote_endpoint.test_exchange_menu_selection_exchanges_two_bytes`
+  and `test_exchange_bytes_cross_version_translates_via_symbol`.
+- Remote, over actual TCP: the kind-observation test above proves the
+  RPC routing layer is correct; the generic
+  `test_serial_link.test_tcp_exchange_round_trip` and
+  `test_tcp_larger_payload` cover arbitrary byte payloads through the
+  same transport.
+
+Driving the LinkMenu selection + full trade/battle UI *over the remote
+endpoint* is agent-policy work (two MCP-driven Sessions need
+coordinated A-press timing). The transport is proven; producing a
+well-walked fixture and/or writing the coordinated press scripts is
+the next iteration.
 
 ### Producing Cable Club save states
 
