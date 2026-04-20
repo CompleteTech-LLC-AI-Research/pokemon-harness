@@ -260,7 +260,16 @@ def _greedy_east(drv: rtb.Driver, session: Session,
     """Walk east greedily, handling obstacles by trying alternate
     directions. Returns ``"reached"`` if x>=target_x, ``"map"`` if
     target_map_id matched, ``"blackout"`` if we landed on Pewter,
-    ``"stuck"`` if no progress for many tries."""
+    ``"stuck"`` if no progress for many tries.
+
+    Key mechanic: when a trainer's sight-line catches us, the game
+    sets wJoyIgnore and auto-walks the trainer toward our tile. This
+    takes several seconds and our direction/A presses are ignored.
+    We detect joy_locked and idle the emulator instead — letting the
+    trainer-approach animation complete naturally. Once battle fires
+    we resolve it via drv.resolve_battle (which delegates to the
+    grind battle-turn logic with Double Kick + ThunderShock).
+    """
     no_progress = 0
     last_x = drv.gs().overworld.x
     for _ in range(max_steps):
@@ -277,6 +286,12 @@ def _greedy_east(drv: rtb.Driver, session: Session,
             return "map"
         if gs.overworld.x >= target_x and gs.overworld.map_id == M_ROUTE_3:
             return "reached"
+        # Trainer-approach detection: wJoyIgnore locks all input while
+        # the trainer's sprite walks toward us. Just idle the emulator
+        # so that auto-walk completes and a battle eventually fires.
+        if drv.joy_locked():
+            session.step(120, render=True)
+            continue
         # Try directions in priority: east, then alternate UD to dodge
         # sprite blockers, then push through dialog with A.
         before = (gs.overworld.x, gs.overworld.y)
@@ -286,12 +301,15 @@ def _greedy_east(drv: rtb.Driver, session: Session,
             if drv.gs().battle.active:
                 drv.resolve_battle()
                 break
+            if drv.joy_locked():
+                session.step(120, render=True)
+                break
             after = (drv.gs().overworld.x, drv.gs().overworld.y)
             if after != before:
                 break
         # If pressing didn't move us, mash A in case of dialog
         after = (drv.gs().overworld.x, drv.gs().overworld.y)
-        if after == before:
+        if after == before and not drv.joy_locked():
             for _ in range(8):
                 drv.press("a")
                 if drv.gs().battle.active:
@@ -332,6 +350,12 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
     """
     ftb._activate_repel(drv)
     blackouts = 0
+    waypoints = [
+        ("30,11", "r3_wp1"),
+        ("60,11", "r3_wp2"),
+        ("100,11", "r3_wp3"),
+        ("139,4", "r3_wp4"),
+    ]
     while drv.gs().overworld.map_id != M_MT_MOON_1F:
         cur_map = drv.gs().overworld.map_id
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
@@ -349,12 +373,30 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
         if cur_map != M_ROUTE_3:
             print(f"  unexpected map=0x{cur_map:02x}; bailing", flush=True)
             return False
-        # Greedy east-walker — robust against trainer-walks-toward-you
-        # sprite traps, post-fight-trainer-blocks-tile, and pre-battle
-        # dialog. Walks RIGHT preferentially, falls back to UD dodges,
-        # mashes A on pure stall to advance dialog. Returns when we
-        # blackout, hit Mt. Moon, reach x>=target, or get truly stuck.
+        # Try A* waypoints first, then greedy_east as fallback.
         ftb._activate_repel(drv)
+        start_x = drv.gs().overworld.x
+        a_star_progressed = False
+        for goal, label in waypoints:
+            goal_x = int(goal.split(",")[0])
+            if drv.gs().overworld.x >= goal_x:
+                continue
+            if drv.gs().overworld.map_id != M_ROUTE_3:
+                break
+            res = _pathfind_walk(drv, session, outdir, goal,
+                                 f"{label}_b{blackouts}",
+                                 rom, sym, sha1,
+                                 stop_map_ids=(M_MT_MOON_1F,))
+            print(f"  {label}_b{blackouts}: {res} -> "
+                  f"{_gs_summary(session)}", flush=True)
+            if res in ("done", "stop", "map"):
+                a_star_progressed = True
+                continue
+            # pathfail or stalled: fall through to greedy_east
+            break
+        if drv.gs().overworld.map_id != M_ROUTE_3:
+            continue
+        # Greedy fallback from current position.
         res = _greedy_east(drv, session, target_x=139,
                            target_map_id=M_MT_MOON_1F, max_steps=400)
         print(f"  greedy east: {res} -> {_gs_summary(session)}",
