@@ -238,6 +238,21 @@ Fixture gaps:
   with a state produced by walking to the attendant unlocks the three
   rows currently marked "fixture gap" under Nybble → LinkMenu.
 
+  Yellow unlock path (for whoever captures the next fixture):
+  1. A sibling worktree (`walkthrough_to_cerulean/`) produces
+     `milestones/cerulean_pc.state` — player inside Cerulean Pokecenter
+     with correct CGB palette via the nurse-heal trigger. This state
+     uses a blackout-warp shortcut; the honest Route 3 → Cerulean path
+     currently caps at x=65 because `path_from_tiles.py`'s A* graph
+     doesn't model Gen 1 one-way ledges (the `LedgeTiles` data would
+     need to be parsed from pokered and encoded as directional edges).
+  2. From `cerulean_pc.state`, walk UP to the Cable Club counter on
+     the second-floor area, then UP to stand in front of the link
+     receptionist. Save the result as
+     `tests/fixtures/link/yellow/cable_club.state`.
+  3. The nybble test's `_FIXTURES_WITH_WALKABLE_PLAYER` guard picks
+     up the new fixture automatically — add `"yellow"` to that set.
+
 Transport-layer behaviour past LinkMenu
 (`Serial_ExchangeLinkMenuSelection`, `Serial_ExchangeBytes` for the
 three RNG/player-data/patch-list blocks inside `CableClub_DoBattleOrTrade`)
