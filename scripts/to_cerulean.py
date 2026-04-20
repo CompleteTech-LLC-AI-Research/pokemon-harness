@@ -563,12 +563,25 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         print(f"  failed to enter Mt. Moon 1F", flush=True)
         return False
 
-    # Phase B: Mt. Moon 1F → B1F via warp (5, 5).
+    # Phase B: Mt. Moon 1F → B1F via warp (5, 5). Mt. Moon has
+    # wandering NPC trainers so sprite-blocker positions change during
+    # walk, causing mid-path stalls. Re-A* from the stuck position on
+    # each stall, up to 6 retries.
     ftb._activate_repel(drv)
-    res = _pathfind_walk(drv, session, outdir, "5,5", "mm1f_to_b1f",
-                         rom, sym, sha1,
-                         stop_map_ids=(M_MT_MOON_B1F,))
-    print(f"  mm1f_to_b1f: {res} -> {_gs_summary(session)}", flush=True)
+    for retry in range(6):
+        if drv.gs().overworld.map_id != M_MT_MOON_1F:
+            break
+        res = _pathfind_walk(drv, session, outdir, "5,5",
+                              f"mm1f_to_b1f_r{retry}",
+                              rom, sym, sha1,
+                              stop_map_ids=(M_MT_MOON_B1F,))
+        print(f"  mm1f_to_b1f_r{retry}: {res} -> "
+              f"{_gs_summary(session)}", flush=True)
+        if res in ("done", "stop") or \
+                drv.gs().overworld.map_id == M_MT_MOON_B1F:
+            break
+        ftb._activate_repel(drv)
+        session.step(60, render=True)
     for _ in range(6):
         if drv.gs().overworld.map_id == M_MT_MOON_B1F:
             break
@@ -580,10 +593,20 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
 
     # Phase C: Mt. Moon B1F east exit at (27, 3) → Route 4 (24, 5).
     ftb._activate_repel(drv)
-    res = _pathfind_walk(drv, session, outdir, "27,3", "mmb1f_to_r4e",
-                         rom, sym, sha1,
-                         stop_map_ids=(M_ROUTE_4,))
-    print(f"  mmb1f_to_r4e: {res} -> {_gs_summary(session)}", flush=True)
+    for retry in range(6):
+        if drv.gs().overworld.map_id != M_MT_MOON_B1F:
+            break
+        res = _pathfind_walk(drv, session, outdir, "27,3",
+                              f"mmb1f_to_r4e_r{retry}",
+                              rom, sym, sha1,
+                              stop_map_ids=(M_ROUTE_4,))
+        print(f"  mmb1f_to_r4e_r{retry}: {res} -> "
+              f"{_gs_summary(session)}", flush=True)
+        if res in ("done", "stop") or \
+                drv.gs().overworld.map_id == M_ROUTE_4:
+            break
+        ftb._activate_repel(drv)
+        session.step(60, render=True)
     for _ in range(6):
         if drv.gs().overworld.map_id == M_ROUTE_4:
             break
