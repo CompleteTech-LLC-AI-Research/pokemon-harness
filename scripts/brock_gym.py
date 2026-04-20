@@ -394,39 +394,70 @@ def run_pewter_to_brock_badge(session: Session, driver: rtb.Driver | None = None
             else:
                 # Brock's sight-line trigger is quirky — it sometimes
                 # doesn't fire even when we walk through his LOS row.
-                # Walk up column 4 as close to Brock (4, 1) as we can
-                # (stops at wall/NPC), then press A to force the talk.
-                for _ in range(14):
+                # Wrap walk-up + A-talk in a retry loop: stepping onto
+                # Jr. Trainer's LOS row fires HIM instead, eating our
+                # walk budget; after his battle we need to resume
+                # walking up to Brock and try again.
+                for attempt in range(4):
+                    # Clear any lingering post-battle text.
+                    for _ in range(30):
+                        if not drv.gs().text.dest_in_vram_tilemap \
+                                and not drv.joy_locked():
+                            break
+                        drv.press("a")
+                    # Walk toward (4, 2).
+                    stall = 0
+                    for _ in range(40):
+                        gs = drv.gs()
+                        if gs.battle.active:
+                            break
+                        if (gs.overworld.x, gs.overworld.y) == (4, 2):
+                            break
+                        before = (gs.overworld.x, gs.overworld.y)
+                        if gs.overworld.x != 4:
+                            drv.press("right" if gs.overworld.x < 4 else "left")
+                        elif gs.overworld.y > 2:
+                            drv.press("up")
+                        else:
+                            break
+                        drv.press("a")
+                        if (drv.gs().overworld.x, drv.gs().overworld.y) \
+                                == before:
+                            stall += 1
+                            if stall >= 5:
+                                break
+                        else:
+                            stall = 0
                     gs = drv.gs()
-                    if (gs.overworld.x, gs.overworld.y) == (4, 2):
-                        break
-                    before = (gs.overworld.x, gs.overworld.y)
-                    if gs.overworld.x != 4:
-                        drv.press("right" if gs.overworld.x < 4 else "left")
-                    elif gs.overworld.y > 2:
-                        drv.press("up")
-                    else:
-                        break
-                    if (drv.gs().overworld.x, drv.gs().overworld.y) == before:
-                        # wall/NPC blocked. bail.
-                        break
-                gs = drv.gs()
-                _log(f"  brock: A-talk setup at "
-                     f"({gs.overworld.x},{gs.overworld.y})")
-                # Talk + mash A through monologue.
-                for i in range(80):
+                    _log(f"  brock: attempt {attempt+1} setup at "
+                         f"({gs.overworld.x},{gs.overworld.y}) "
+                         f"battle={gs.battle.active}")
+                    # Talk + mash A through monologue.
+                    for i in range(60):
+                        if drv.gs().battle.active:
+                            _log(f"  brock: attempt {attempt+1} dialog "
+                                 f"closed after {i} A-presses")
+                            break
+                        drv.press("a")
                     if drv.gs().battle.active:
-                        _log(f"  brock: dialog closed after {i} A-presses")
+                        drv.resolve_battle()
+                        _log(f"  brock: attempt {attempt+1} battle resolved")
+                    if drv.gs().progress.badges_raw & 0x01:
+                        _log("  brock: badge obtained!")
                         break
-                    drv.press("a")
-                if drv.gs().battle.active:
-                    drv.resolve_battle()
-                    _log("  brock: battle resolved via A-talk")
-                else:
-                    _log(f"  brock: A-talk did NOT trigger battle "
-                         f"(map=0x{drv.gs().overworld.map_id:02x} "
-                         f"xy=({drv.gs().overworld.x},"
-                         f"{drv.gs().overworld.y}))")
+                    # If no badge yet, either the battle was Jr Trainer
+                    # (not Brock) or Brock's post-fight dialog needs
+                    # more A-pressing. Try the post-fight loop briefly,
+                    # then retry walk-up.
+                    for _ in range(80):
+                        if drv.gs().progress.badges_raw & 0x01:
+                            break
+                        if drv.gs().battle.active:
+                            drv.resolve_battle(max_turns=30)
+                        drv.press("a")
+                    if drv.gs().progress.badges_raw & 0x01:
+                        _log("  brock: badge obtained after dialog flush")
+                        break
 
     # --- Phase 4: post-fight dialog (badge + TM34) -------------------
     # Brock's victory sequence is long — "You're strong", badge grant,

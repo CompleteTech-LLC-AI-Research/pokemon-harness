@@ -421,6 +421,21 @@ def main() -> int:
             if not args.skip_grind:
                 print(f"  [grind] applying Option-B top-up to "
                       f"L13 + Vine Whip", flush=True)
+            # Make sure we're out of any lingering battle before RAM-
+            # poking the party struct. If the grinder bailed with
+            # heal_failed the engine can still be sitting on a
+            # SWITCH/STATS/CANCEL party-select menu — DOWN+A cycles the
+            # cursor to CANCEL and confirms, which closes the menu and
+            # typically drops wIsInBattle back to 0.
+            for _ in range(40):
+                gs = session.read_game_state()
+                if not gs.battle.active:
+                    break
+                session.press("b"); session.step(30, render=True)
+                if not session.read_game_state().battle.active:
+                    break
+                session.press("down"); session.step(20, render=True)
+                session.press("a"); session.step(30, render=True)
             _option_b_topup(session)
         save_milestone(session, outdir, "grind_complete")
 
