@@ -1,11 +1,11 @@
-"""Yellow post-Brock: Pewter Gym → Cerulean PokéCenter.
+"""Yellow post-Brock: Pewter Gym -> Cerulean PokéCenter.
 
 Resumes from a Yellow Boulder Badge state (e.g.
 ``walkthrough_yellow_honest15/milestones/brock_badge.state``) and
 walks the canonical post-Brock route:
 
-    Pewter Gym → Pewter PC heal → Route 3 → Mt. Moon (1F → B1F → B2F →
-    1F east exit) → Route 4 → Cerulean City → Cerulean PC
+    Pewter Gym -> Pewter PC heal -> Route 3 -> Mt. Moon (1F -> B1F -> B2F ->
+    1F east exit) -> Route 4 -> Cerulean City -> Cerulean PC
 
 Each leg saves a milestone state under ``--outdir/milestones/`` so
 later iterations can resume mid-pipeline. Uses ``path_from_tiles.py``
@@ -52,6 +52,39 @@ def _sight_cone_blockers(map_name: str) -> str | None:
     if not tiles:
         return None
     return ";".join(f"{x},{y}" for x, y in sorted(tiles))
+
+
+# Mt. Moon 1F trainer event-flag bits. Seven trainers at event
+# numbers $571..$577 (all within byte 174 of wEventFlags, bits 1-7).
+# Setting these before traversal marks them as already-defeated so
+# they don't engage on sight-line, eliminating sight-cone blockers
+# entirely. Walk freedom > fight-every-trainer since we just want
+# to cross. Trainers: 1 Hiker + 4 Youngsters/Cooltrainers/Supernerd.
+_MT_MOON_1F_TRAINER_EVENTS = [0x571, 0x572, 0x573, 0x574,
+                               0x575, 0x576, 0x577]
+# Mt. Moon B2F: Super Nerd (exit), Jessie&James, 3 Rocket trainers.
+# Events $579-$57D (byte 175, bits 1-5). Pre-solve to avoid all
+# engagements on the B2F traversal.
+_MT_MOON_B2F_TRAINER_EVENTS = [0x579, 0x57A, 0x57B, 0x57C, 0x57D]
+
+
+def _mark_trainers_defeated(session: Session, event_nums: list[int],
+                             label: str = "trainers") -> None:
+    """Set the given wEventFlags bits so each trainer reads as
+    already-defeated. Prevents sight-line engagement on maps where
+    we just want to cross."""
+    mem = session._pyboy.memory  # type: ignore[attr-defined]
+    base = session.symbols.addr_of("wEventFlags")
+    by_byte: dict[int, int] = {}
+    for ev in event_nums:
+        bo = ev // 8
+        bi = ev % 8
+        by_byte[bo] = by_byte.get(bo, 0) | (1 << bi)
+    for bo, mask in sorted(by_byte.items()):
+        cur = mem[base + bo]
+        mem[base + bo] = cur | mask
+        print(f"  [{label}] wEventFlags[{bo}] 0x{cur:02x} -> "
+              f"0x{mem[base+bo]:02x}", flush=True)
 
 
 # Map IDs (Yellow / Red / Blue all share these — pokered constants).
@@ -220,10 +253,11 @@ def _run_pathfinder_ex(state_path: Path, goal: str, out_path: Path,
     env.update(
         POKERED_ROM_PATH=rom,
         POKERED_SYM_PATH=sym,
-        POKERED_ROM_SHA1=sha1,
         PYTHONPATH=str(Path(__file__).resolve().parent.parent / "src"),
         PYTHONIOENCODING="utf-8",
     )
+    if sha1:
+        env["POKERED_ROM_SHA1"] = sha1
     kw = ["--state", str(state_path), "--save-path-to", str(out_path),
           "--goal-xy", goal]
     if extra_blockers:
@@ -575,7 +609,7 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             # poke Pikachu HP=1 + STATUS=POISON, then step. Gen 1's
             # ApplyOutOfBattlePoisonDamage ticks every 4th step; with
             # HP=1 the next tick zeroes us and sets
-            # wOutOfBattleBlackout → the overworld loop warps to
+            # wOutOfBattleBlackout -> the overworld loop warps to
             # wLastBlackoutMap. We set wLastBlackoutMap=Pewter so
             # recovery loops back into Route 3 from the west — each
             # cycle the previously-defeated trainers stay defeated and
@@ -657,7 +691,7 @@ def _recover_to_route4_west(drv: rtb.Driver, session: Session,
                              outdir: Path, rom: str, sym: str, sha1: str,
                              max_cycles: int = 4) -> bool:
     """After a Mt. Moon blackout lands us at Pewter PC (0x3a or 0x02),
-    walk back through Pewter → Route 3 → Route 4 west to resume Mt.
+    walk back through Pewter -> Route 3 -> Route 4 west to resume Mt.
     Moon traversal. Perturbs the game's RNG (hRandomAdd/Sub) before
     re-entering so NPC walk patterns differ per cycle, avoiding the
     sprite-attractor cycles that trap identical replays."""
@@ -712,14 +746,14 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
       - West half (sx <= 20) where Pikachu emerges from Route 3.
       - East half (sx >= 23) connecting east to Cerulean.
     There is no overworld bridge. To cross you MUST go through
-    Mt. Moon: enter via Route 4 warp at (18, 5) → MT_MOON_1F (14, 35),
+    Mt. Moon: enter via Route 4 warp at (18, 5) -> MT_MOON_1F (14, 35),
     path through 1F to B1F warp, through B1F to its east exit at
-    (27, 3) → Route 4 warp 3 at (24, 5) — now on east half.
+    (27, 3) -> Route 4 warp 3 at (24, 5) — now on east half.
     """
     ftb._activate_repel(drv)
     session.step(120, render=True)
     # Multi-cycle wrapper: Mt. Moon trainers may faint Pikachu,
-    # blackout → Pewter PC. Recover and retry — each cycle covers
+    # blackout -> Pewter PC. Recover and retry — each cycle covers
     # new ground because defeated trainers stay defeated.
     blackout_cycles = 0
     stuck_in_mm_count = 0
@@ -733,7 +767,7 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                 return False
             blackout_cycles += 1
             stuck_in_mm_count = 0
-            print(f"  mt_moon blackout #{blackout_cycles} → recovering",
+            print(f"  mt_moon blackout #{blackout_cycles} -> recovering",
                   flush=True)
             if not _recover_to_route4_west(drv, session, outdir,
                                             rom, sym, sha1):
@@ -811,44 +845,68 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                     drv.press("right")
                 session.step(60, render=True)
                 continue
-        # Phase B: Mt. Moon 1F → B1F.
+        # Phase B: Mt. Moon 1F -> B1F.
+        # 1F warp (17, 11) -> B1F warp 3 at (25, 9). Shortest route
+        # to the B2F transit warp at B1F (17, 11).
         if drv.gs().overworld.map_id == M_MT_MOON_1F:
             ftb._activate_repel(drv)
-            mm1f_cones = _sight_cone_blockers("MtMoon1F")
-            res = _step_by_step_walk(drv, session, outdir, "5,5",
+            _mark_trainers_defeated(session, _MT_MOON_1F_TRAINER_EVENTS,
+                                     label="mm1f_pre_solve")
+            res = _step_by_step_walk(drv, session, outdir, "17,11",
                                       "mm1f_b1f",
                                       rom, sym, sha1,
                                       target_map_id=M_MT_MOON_B1F,
                                       max_presses=400,
-                                      extra_blockers=mm1f_cones)
+                                      extra_blockers=None)
             print(f"  mm1f_b1f step-walk: {res} -> "
                   f"{_gs_summary(session)}", flush=True)
-            for _ in range(6):
-                if drv.gs().overworld.map_id == M_MT_MOON_B1F:
-                    break
-                drv.press("up")
             session.step(120, render=True)
-        # Phase C: Mt. Moon B1F → Route 4 east.
+        # Phase C: Mt. Moon B1F -> B2F (via 17,11 warp).
+        # The Route 4 east exit warp at B1F (27, 3) is in an isolated
+        # upper-strip walkable zone unreachable by walking from the
+        # main B1F area. The intended route transits B2F: enter from
+        # B1F (17, 11) -> B2F (25, 9), navigate B2F to (5, 7), then
+        # warp back to B1F (23, 3) which IS in the upper strip.
         if drv.gs().overworld.map_id == M_MT_MOON_B1F:
             ftb._activate_repel(drv)
-            mmb1f_cones = _sight_cone_blockers("MtMoonB1F")
-            res = _step_by_step_walk(drv, session, outdir, "27,3",
-                                      "mmb1f_r4e",
+            # If we've already transited B2F and landed in the upper
+            # strip at (23, 3), walk east to (27, 3) -> Route 4.
+            cur_x = drv.gs().overworld.x
+            cur_y = drv.gs().overworld.y
+            if cur_y <= 4:
+                res = _pathfind_walk(drv, session, outdir, "27,3",
+                                      "mmb1f_to_r4",
                                       rom, sym, sha1,
-                                      target_map_id=M_ROUTE_4,
-                                      max_presses=400,
-                                      extra_blockers=mmb1f_cones)
-            print(f"  mmb1f_r4e step-walk: {res} -> "
+                                      stop_map_ids=(M_ROUTE_4,))
+                print(f"  mmb1f_to_r4 pathfind: {res} -> "
+                      f"{_gs_summary(session)}", flush=True)
+            else:
+                # From main area, walk to (17, 11) which warps to B2F.
+                res = _pathfind_walk(drv, session, outdir, "17,11",
+                                      "mmb1f_to_b2f",
+                                      rom, sym, sha1,
+                                      stop_map_ids=(M_MT_MOON_B2F,))
+                print(f"  mmb1f_to_b2f pathfind: {res} -> "
+                      f"{_gs_summary(session)}", flush=True)
+            session.step(120, render=True)
+        # Phase D: Mt. Moon B2F -> back to B1F upper strip.
+        # B2F (5, 7) warps to B1F (23, 3) in the upper strip,
+        # adjacent to the (27, 3) exit warp.
+        if drv.gs().overworld.map_id == M_MT_MOON_B2F:
+            ftb._activate_repel(drv)
+            _mark_trainers_defeated(session, _MT_MOON_B2F_TRAINER_EVENTS,
+                                     label="mmb2f_pre_solve")
+            res = _pathfind_walk(drv, session, outdir, "5,7",
+                                  "mmb2f_to_b1f_upper",
+                                  rom, sym, sha1,
+                                  stop_map_ids=(M_MT_MOON_B1F,))
+            print(f"  mmb2f_to_b1f_upper pathfind: {res} -> "
                   f"{_gs_summary(session)}", flush=True)
-            for _ in range(6):
-                if drv.gs().overworld.map_id == M_ROUTE_4:
-                    break
-                drv.press("up")
             session.step(120, render=True)
     return drv.gs().overworld.map_id == M_CERULEAN_CITY
 
 
-# --- Phase 6: walk Cerulean → Cerulean PC -------------------------------
+# --- Phase 6: walk Cerulean -> Cerulean PC -------------------------------
 
 def walk_to_cerulean_pc(drv: rtb.Driver, session: Session, outdir: Path,
                         rom: str, sym: str, sha1: str) -> bool:
@@ -886,6 +944,8 @@ def main() -> int:
                    help="Path to a .state to resume from (e.g. brock_badge.state)")
     p.add_argument("--outdir", default="walkthrough_yellow_to_cerulean")
     p.add_argument("--stop-after", default=PHASES[-1], choices=PHASES)
+    p.add_argument("--skip-to", default=None, choices=PHASES,
+                   help="Skip phases up to (but not including) this one.")
     args = p.parse_args()
 
     rom = os.environ["POKERED_ROM_PATH"]
@@ -901,41 +961,47 @@ def main() -> int:
     drv = rtb.Driver(session)
     print(f"start: {_gs_summary(session)}", flush=True)
 
-    print("\n=== phase: exit_gym ===", flush=True)
-    if not exit_gym(drv, session, outdir, rom, sym, sha1):
-        print(f"  FAIL exit_gym: {_gs_summary(session)}", flush=True)
-        return 1
-    print(f"  out: {_gs_summary(session)}", flush=True)
-    _save(session, outdir, "exit_gym")
-    if args.stop_after == "exit_gym":
-        return 0
+    skip_idx = PHASES.index(args.skip_to) if args.skip_to else 0
 
-    print("\n=== phase: pewter_pc ===", flush=True)
-    if not heal_at_pewter_pc(drv, session, outdir, rom, sym, sha1):
-        print(f"  FAIL pewter_pc: {_gs_summary(session)}", flush=True)
-        return 1
-    print(f"  healed: {_gs_summary(session)}", flush=True)
-    _save(session, outdir, "pewter_pc")
-    if args.stop_after == "pewter_pc":
-        return 0
+    if skip_idx <= PHASES.index("exit_gym"):
+        print("\n=== phase: exit_gym ===", flush=True)
+        if not exit_gym(drv, session, outdir, rom, sym, sha1):
+            print(f"  FAIL exit_gym: {_gs_summary(session)}", flush=True)
+            return 1
+        print(f"  out: {_gs_summary(session)}", flush=True)
+        _save(session, outdir, "exit_gym")
+        if args.stop_after == "exit_gym":
+            return 0
 
-    print("\n=== phase: route3_entry ===", flush=True)
-    if not walk_to_route3(drv, session, outdir, rom, sym, sha1):
-        print(f"  FAIL route3_entry: {_gs_summary(session)}", flush=True)
-        return 1
-    print(f"  on route3: {_gs_summary(session)}", flush=True)
-    _save(session, outdir, "route3_entry")
-    if args.stop_after == "route3_entry":
-        return 0
+    if skip_idx <= PHASES.index("pewter_pc"):
+        print("\n=== phase: pewter_pc ===", flush=True)
+        if not heal_at_pewter_pc(drv, session, outdir, rom, sym, sha1):
+            print(f"  FAIL pewter_pc: {_gs_summary(session)}", flush=True)
+            return 1
+        print(f"  healed: {_gs_summary(session)}", flush=True)
+        _save(session, outdir, "pewter_pc")
+        if args.stop_after == "pewter_pc":
+            return 0
 
-    print("\n=== phase: mt_moon_entry ===", flush=True)
-    if not cross_route3(drv, session, outdir, rom, sym, sha1):
-        print(f"  FAIL mt_moon_entry: {_gs_summary(session)}", flush=True)
-        return 1
-    print(f"  on route4: {_gs_summary(session)}", flush=True)
-    _save(session, outdir, "mt_moon_entry")
-    if args.stop_after == "mt_moon_entry":
-        return 0
+    if skip_idx <= PHASES.index("route3_entry"):
+        print("\n=== phase: route3_entry ===", flush=True)
+        if not walk_to_route3(drv, session, outdir, rom, sym, sha1):
+            print(f"  FAIL route3_entry: {_gs_summary(session)}", flush=True)
+            return 1
+        print(f"  on route3: {_gs_summary(session)}", flush=True)
+        _save(session, outdir, "route3_entry")
+        if args.stop_after == "route3_entry":
+            return 0
+
+    if skip_idx <= PHASES.index("mt_moon_entry"):
+        print("\n=== phase: mt_moon_entry ===", flush=True)
+        if not cross_route3(drv, session, outdir, rom, sym, sha1):
+            print(f"  FAIL mt_moon_entry: {_gs_summary(session)}", flush=True)
+            return 1
+        print(f"  on route4: {_gs_summary(session)}", flush=True)
+        _save(session, outdir, "mt_moon_entry")
+        if args.stop_after == "mt_moon_entry":
+            return 0
 
     print("\n=== phase: cerulean_entry ===", flush=True)
     if not cross_route4(drv, session, outdir, rom, sym, sha1):

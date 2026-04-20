@@ -441,24 +441,38 @@ def main() -> int:
     w_steps = width_blocks * 2
     h_steps = height_blocks * 2
 
-    # Feet-tile offset within each 2x2 step-cell block. Overworld
-    # tilesets (0) use BOTTOM-LEFT (sx*2, sy*2+1). Cave tilesets
-    # (CAVERN=17, FOREST=3 etc.) empirically use BOTTOM-RIGHT
-    # (sx*2+1, sy*2+1). Verified against Mt. Moon 1F at (10, 22):
-    # with bottom-left offset A* thought (9, 22) was 0x05/walkable
-    # and LEFT press should work — game rejected it. Bottom-right
-    # reads (9, 22) feet as 0x17/blocked, matching game behavior.
-    # List of cave-style tilesets from pret pokeyellow data:
-    _CAVE_TILESETS = {3, 14, 16, 17, 21, 22}  # FOREST, CAVERN, MUSEUM, LOBBY, etc.
-    feet_dx = 1 if tileset_id in _CAVE_TILESETS else 0
+    # Tileset-specific feet-tile collision model:
+    # - Overworld (0): BOTTOM-LEFT (sx*2, sy*2+1). Calibrated for
+    #   Route 2/3/4 walkable paths and verified against real game.
+    # - Cave (CAVERN=17, etc.): AND-BOTH bottom tiles. Mt. Moon has
+    #   asymmetric cells (one feet tile walkable, other wall) that
+    #   require both to pass. Empirically: cell (8, 20) has
+    #   bottom-left 0x31 BLOCKED, bottom-right 0x05 walkable —
+    #   game blocks RIGHT into it.
+    _CAVE_TILESETS = {3, 14, 16, 17, 21, 22}
+    use_and_both = tileset_id in _CAVE_TILESETS
+    if os.environ.get("PATH_CAVE_MODEL") == "single":
+        use_and_both = False  # debug: use overworld single-offset for caves
 
     def step_passable(sx: int, sy: int) -> bool:
         if (sx, sy) in sprite_blockers:
             return False
-        tx, ty = sx * 2 + feet_dx, sy * 2 + 1
-        if not (0 <= tx < w_tiles and 0 <= ty < h_tiles):
+        ty = sy * 2 + 1
+        if not (0 <= ty < h_tiles):
             return False
-        return tile_grid[ty][tx] in passable_tiles
+        if use_and_both:
+            for dx in (0, 1):
+                tx = sx * 2 + dx
+                if not (0 <= tx < w_tiles):
+                    return False
+                if tile_grid[ty][tx] not in passable_tiles:
+                    return False
+            return True
+        else:
+            tx = sx * 2
+            if not (0 <= tx < w_tiles):
+                return False
+            return tile_grid[ty][tx] in passable_tiles
 
     passable_grid = [
         [step_passable(x, y) for x in range(w_steps)]
