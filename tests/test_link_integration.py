@@ -250,6 +250,43 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
                 f"hidden-event trade initiation never fired "
                 f"CableClub_DoBattleOrTrade on primary — counts={cabble_trade_fired}"
             )
+
+            # Deepest layer: after CableClub_DoBattleOrTrade runs its
+            # three Serial_ExchangeBytes blocks (RNG list + player data
+            # + patch list), control flows to CallCurrentTradeCenterFunction
+            # which jumps into TradeCenter_SelectMon — the actual mon-
+            # selection menu. We detect this by counting
+            # TradeCenter_DrawPartyLists (called from inside SelectMon);
+            # reaching it means the full trade protocol + UI has spun up.
+            draw_counts = [0, 0]
+            for idx, session in enumerate((session_a, session_b)):
+                if "TradeCenter_DrawPartyLists" not in session.symbols:
+                    continue
+                bank, addr = session.symbols.bank_addr(
+                    "TradeCenter_DrawPartyLists"
+                )
+
+                def _mk(b, i=idx):
+                    def _cb(_ctx):
+                        b[i] += 1
+
+                    return _cb
+
+                try:
+                    session._pyboy.hook_register(bank, addr, _mk(draw_counts), None)
+                except ValueError:
+                    pass
+
+            for _ in range(150):
+                session_a.press("a", duration=6)
+                session_b.press("a", duration=6)
+                pair.step(60)
+                if draw_counts[0] > 0 and draw_counts[1] > 0:
+                    break
+            assert draw_counts[0] > 0 and draw_counts[1] > 0, (
+                f"TradeCenter_SelectMon never drew its party list — "
+                f"counts={draw_counts}. The protocol didn't reach the UI."
+            )
     finally:
         session_a.close()
         session_b.close()
