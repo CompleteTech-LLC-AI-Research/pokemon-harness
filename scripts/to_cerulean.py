@@ -80,12 +80,15 @@ def _pathfind_walk(drv: rtb.Driver, session: Session, outdir: Path,
                    goal_xy: str, label: str,
                    rom: str, sym: str, sha1: str,
                    stop_map_ids=(),
-                   extra_blockers: str | None = None) -> str:
+                   extra_blockers: str | None = None,
+                   stall_window: int = 12) -> str:
     """Save state, run A* to ``goal_xy``, walk the path. Returns the
     walk_path result code (``done``/``stop``/``stalled``/etc.).
 
     ``extra_blockers`` optional string ``"x,y;x,y;..."`` passed through
-    to path_from_tiles for pen-avoidance."""
+    to path_from_tiles for pen-avoidance.
+    ``stall_window`` forwarded to ftb.walk_path; cave maps with NPCs
+    benefit from a larger window."""
     seed = outdir / f"_{label}.state"
     seed.write_bytes(session.save_state())
     out_txt = outdir / f"_{label}.txt"
@@ -96,7 +99,9 @@ def _pathfind_walk(drv: rtb.Driver, session: Session, outdir: Path,
         print(f"  [{label}] pathfind failed: {e}", flush=True)
         return "pathfail"
     print(f"  [{label}] A* {len(path)} steps -> walking", flush=True)
-    return ftb.walk_path(drv, path, label=label, stop_map_ids=stop_map_ids)
+    return ftb.walk_path(drv, path, label=label,
+                         stop_map_ids=stop_map_ids,
+                         stall_window=stall_window)
 
 
 def _run_pathfinder_ex(state_path: Path, goal: str, out_path: Path,
@@ -576,11 +581,15 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         res = _pathfind_walk(drv, session, outdir, "5,5",
                               f"mm1f_to_b1f_r{retry}",
                               rom, sym, sha1,
-                              stop_map_ids=(M_MT_MOON_B1F,))
+                              stop_map_ids=(M_MT_MOON_B1F,),
+                              stall_window=30)
         print(f"  mm1f_to_b1f_r{retry}: {res} -> "
               f"{_gs_summary(session)}", flush=True)
-        if res in ("done", "stop") or \
-                drv.gs().overworld.map_id == M_MT_MOON_B1F:
+        # Only success is actually transitioning to B1F. "done" from
+        # walk_path means the path string was exhausted, not that the
+        # goal tile was reached — cave NPCs routinely cause silent
+        # no-moves inside the 30-step stall window.
+        if drv.gs().overworld.map_id == M_MT_MOON_B1F:
             break
         cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
         if cur_xy == last_stuck_xy:
@@ -611,11 +620,11 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         res = _pathfind_walk(drv, session, outdir, "27,3",
                               f"mmb1f_to_r4e_r{retry}",
                               rom, sym, sha1,
-                              stop_map_ids=(M_ROUTE_4,))
+                              stop_map_ids=(M_ROUTE_4,),
+                              stall_window=30)
         print(f"  mmb1f_to_r4e_r{retry}: {res} -> "
               f"{_gs_summary(session)}", flush=True)
-        if res in ("done", "stop") or \
-                drv.gs().overworld.map_id == M_ROUTE_4:
+        if drv.gs().overworld.map_id == M_ROUTE_4:
             break
         cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
         if cur_xy == last_stuck_xy:
