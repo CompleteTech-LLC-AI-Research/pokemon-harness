@@ -209,6 +209,47 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
                 f"TRADE_CENTER. map_a=0x{session_a.read_game_state().overworld.map_id:02x} "
                 f"map_b=0x{session_b.read_game_state().overworld.map_id:02x}"
             )
+
+            # Inside TRADE_CENTER: walk A (external/slave) left to face the
+            # trade table, B (internal/master) right. Press A on both to
+            # trigger the hidden events at (5,4)/(4,4) which call
+            # CableClubRightGameboy/CableClubLeftGameboy and jump to
+            # CableClub_DoBattleOrTrade.
+            pair.step(300)  # let TRADE_CENTER init settle
+            for _ in range(2):
+                session_a.press("left", duration=6)
+                session_b.press("right", duration=6)
+                pair.step(20)
+
+            cabble_trade_fired = [0, 0]
+            for idx, session in enumerate((session_a, session_b)):
+                if "CableClub_DoBattleOrTrade" not in session.symbols:
+                    continue
+                bank, addr = session.symbols.bank_addr("CableClub_DoBattleOrTrade")
+
+                def _make_cb(b, i=idx):
+                    def _cb(_ctx):
+                        b[i] += 1
+
+                    return _cb
+
+                try:
+                    session._pyboy.hook_register(
+                        bank, addr, _make_cb(cabble_trade_fired), None
+                    )
+                except ValueError:
+                    pass
+
+            for _ in range(50):
+                session_a.press("a", duration=6)
+                session_b.press("a", duration=6)
+                pair.step(30)
+                if cabble_trade_fired[0] > 0:
+                    break
+            assert cabble_trade_fired[0] > 0, (
+                f"hidden-event trade initiation never fired "
+                f"CableClub_DoBattleOrTrade on primary — counts={cabble_trade_fired}"
+            )
     finally:
         session_a.close()
         session_b.close()
