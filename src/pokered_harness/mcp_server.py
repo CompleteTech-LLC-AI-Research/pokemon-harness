@@ -20,6 +20,7 @@ import asyncio
 import base64
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,12 @@ from mcp.server.stdio import stdio_server
 
 from pokered_harness.events.hooks import GameEvent
 from pokered_harness.link.pair import LinkPair
+from pokered_harness.link.remote import RemoteLinkEndpoint
+from pokered_harness.link.serial_link import (
+    SerialLink,
+    SerialLinkError,
+    TcpSerialLink,
+)
 from pokered_harness.serialize import to_jsonable
 from pokered_harness.session import Session
 
@@ -55,6 +62,7 @@ _URI_GAME_STATE = "pokered://game-state"
 _URI_EVENT_LOG = "pokered://events"
 _URI_PEER_GAME_STATE = "pokered://peer-game-state"
 _URI_LINK_TRANSPORT = "pokered://link-transport"
+_URI_LINK_STATUS = "pokered://link-status"
 
 
 # -- server state container --------------------------------------------------
@@ -63,10 +71,25 @@ _URI_LINK_TRANSPORT = "pokered://link-transport"
 class LinkState:
     """Mutable link-cable state owned by the server.
 
-    Holds an optional peer :class:`Session` (constructed at startup when
-    env vars are set) and an optional :class:`LinkPair` (built lazily on
-    the first ``link_pair`` tool call). When ``peer_session is None`` the
-    server runs in single-session mode and every ``link_*`` tool errors.
+    Holds optional state for two distinct link modes:
+
+    1. **In-process pair** (``pair``) — a :class:`LinkPair` built from the
+       primary + peer :class:`Session` in the same process. Requires
+       ``peer_session`` set at startup via ``POKERED_PEER_*`` env vars.
+       Used for the single-agent trade-simulation flow.
+    2. **Remote endpoint** (``remote_endpoint``) — a :class:`RemoteLinkEndpoint`
+       pointed at a :class:`SerialLink` talking to a peer MCP server over
+       TCP. Used for two-agent trading between independent processes.
+
+    The two modes are mutually exclusive — calling ``link_listen`` /
+    ``link_connect`` while an in-process pair is active (or vice versa)
+    errors. ``remote_mode`` tracks the remote lifecycle:
+
+    - ``"idle"`` — no remote link at all.
+    - ``"listening"`` — :meth:`TcpSerialLink.listen` running on a
+      background thread; no peer yet.
+    - ``"connected"`` — peer attached; ``remote_endpoint`` installed and
+      ready for in-game serial exchanges.
     """
 
     def __init__(
@@ -80,6 +103,14 @@ class LinkState:
         self.primary_version = primary_version
         self.peer_version = peer_version
         self.pair: LinkPair | None = None
+        # Remote (two-process) state.
+        self.remote_link: SerialLink | None = None
+        self.remote_endpoint: RemoteLinkEndpoint | None = None
+        self.remote_mode: str = "idle"
+        self.remote_role: str | None = None  # "listener" | "connector"
+        self.remote_bind_port: int | None = None
+        self._listener_thread: threading.Thread | None = None
+        self._listener_error: Exception | None = None
 
 
 # -- tool definitions --------------------------------------------------------
@@ -230,6 +261,58 @@ def _tool_specs() -> list[mcp_types.Tool]:
             description="Return the current link-cable state (safe to call anytime).",
             inputSchema={"type": "object", "properties": {}},
         ),
+        # -- remote (two-process) link-cable tools ----------------------
+        mcp_types.Tool(
+            name="link_listen",
+            description=(
+                "Bind a TCP port and wait for a peer MCP server to connect. "
+                "Returns immediately; poll `link_status` until mode=='connected'. "
+                "Role: internal-clock master (status byte 0x02)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                    "host": {"type": "string", "default": "127.0.0.1"},
+                    "rom_version": {
+                        "type": "string",
+                        "description": "Local ROM version announced in HELLO; "
+                                       "defaults to primary_version at startup.",
+                    },
+                },
+                "required": ["port"],
+            },
+        ),
+        mcp_types.Tool(
+            name="link_connect",
+            description=(
+                "Open a TCP connection to a peer MCP server's listener. "
+                "Blocks until HELLO completes. Role: external-clock slave "
+                "(status byte 0x01)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string"},
+                    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                    "rom_version": {
+                        "type": "string",
+                        "description": "Local ROM version announced in HELLO; "
+                                       "defaults to primary_version at startup.",
+                    },
+                    "timeout_s": {"type": "number", "default": 10.0},
+                },
+                "required": ["host", "port"],
+            },
+        ),
+        mcp_types.Tool(
+            name="link_disconnect",
+            description=(
+                "Close the current remote link (no-op if idle). "
+                "Does not affect the in-process pair."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
 
 
@@ -365,14 +448,146 @@ def _dispatch_link_tool(
         transport_snapshot: dict[str, Any] = (
             link.pair.transport.snapshot() if link.pair is not None else {"a_to_b": [], "b_to_a": []}
         )
+        # Surface listener-thread failures lazily on status checks so
+        # callers polling for "connected" see the error rather than
+        # hanging forever.
+        _refresh_remote_state(link)
+        peer_rom: str | None = None
+        if link.remote_link is not None and link.remote_mode == "connected":
+            try:
+                peer_rom = link.remote_link.peer_rom_version
+            except SerialLinkError:
+                peer_rom = None
         return {
             "paired": paired,
             "transport": transport_snapshot,
             "primary_tick": session.current_tick(),
             "peer_tick": link.peer_session.current_tick() if link.peer_session else None,
+            "remote_mode": link.remote_mode,
+            "remote_role": link.remote_role,
+            "remote_bind_port": link.remote_bind_port,
+            "remote_peer_rom_version": peer_rom,
+            "remote_error": (
+                f"{type(link._listener_error).__name__}: {link._listener_error}"
+                if link._listener_error is not None
+                else None
+            ),
         }
 
+    if name == "link_listen":
+        _require_remote_idle(link)
+        _require_pair_inactive(link)
+        port = int(arguments["port"])
+        host = str(arguments.get("host", "127.0.0.1"))
+        rom_version = str(arguments.get("rom_version") or link.primary_version)
+        link.remote_mode = "listening"
+        link.remote_role = "listener"
+        link.remote_bind_port = port
+        link._listener_error = None
+
+        def _accept() -> None:
+            try:
+                tcp = TcpSerialLink.listen(port, rom_version, host=host)
+                endpoint = RemoteLinkEndpoint.as_listener(session, tcp)
+                endpoint.install()
+                link.remote_link = tcp
+                link.remote_endpoint = endpoint
+                link.remote_mode = "connected"
+            except Exception as exc:  # noqa: BLE001
+                link._listener_error = exc
+                link.remote_mode = "idle"
+                link.remote_role = None
+                link.remote_bind_port = None
+
+        t = threading.Thread(
+            target=_accept, name="mcp-link-listen", daemon=True
+        )
+        link._listener_thread = t
+        t.start()
+        return {
+            "remote_mode": "listening",
+            "remote_role": "listener",
+            "remote_bind_port": port,
+            "host": host,
+            "rom_version": rom_version,
+        }
+
+    if name == "link_connect":
+        _require_remote_idle(link)
+        _require_pair_inactive(link)
+        host = str(arguments["host"])
+        port = int(arguments["port"])
+        rom_version = str(arguments.get("rom_version") or link.primary_version)
+        timeout_s = float(arguments.get("timeout_s", 10.0))
+        tcp = TcpSerialLink.connect(
+            host, port, rom_version, timeout_s=timeout_s
+        )
+        endpoint = RemoteLinkEndpoint.as_connector(session, tcp)
+        endpoint.install()
+        link.remote_link = tcp
+        link.remote_endpoint = endpoint
+        link.remote_mode = "connected"
+        link.remote_role = "connector"
+        link.remote_bind_port = None
+        return {
+            "remote_mode": "connected",
+            "remote_role": "connector",
+            "host": host,
+            "port": port,
+            "rom_version": rom_version,
+            "peer_rom_version": tcp.peer_rom_version,
+        }
+
+    if name == "link_disconnect":
+        if link.remote_link is not None:
+            try:
+                link.remote_link.close()
+            except Exception:
+                pass
+        link.remote_link = None
+        link.remote_endpoint = None
+        link.remote_mode = "idle"
+        link.remote_role = None
+        link.remote_bind_port = None
+        link._listener_thread = None
+        link._listener_error = None
+        return {"remote_mode": "idle"}
+
     raise ValueError(f"unknown tool: {name!r}")
+
+
+def _require_remote_idle(link: LinkState) -> None:
+    if link.remote_mode != "idle":
+        raise ValueError(
+            f"remote link busy (mode={link.remote_mode!r}); call "
+            f"link_disconnect first"
+        )
+
+
+def _require_pair_inactive(link: LinkState) -> None:
+    if link.pair is not None and link.pair.paired:
+        raise ValueError(
+            "in-process pair is active; call link_unpair before using "
+            "remote link tools"
+        )
+
+
+def _refresh_remote_state(link: LinkState) -> None:
+    """Reflect background-thread state into fields readable from the
+    calling thread. Called by link_status before returning."""
+    # If the peer disconnected, the TCP reader thread marks the link
+    # closed; surface that as mode=idle so callers don't keep polling
+    # a dead endpoint.
+    rl = link.remote_link
+    if (
+        rl is not None
+        and link.remote_mode == "connected"
+        and not rl.connected
+    ):
+        link.remote_mode = "idle"
+        link.remote_role = None
+        link.remote_link = None
+        link.remote_endpoint = None
 
 
 def read_resource(
@@ -394,6 +609,10 @@ def read_resource(
         if link is None or link.pair is None:
             return json.dumps({"a_to_b": [], "b_to_a": []})
         return json.dumps(link.pair.transport.snapshot())
+    if uri == _URI_LINK_STATUS:
+        if link is None:
+            link = LinkState()
+        return json.dumps(dispatch_tool(session, "link_status", {}, link=link))
     raise ValueError(f"unknown resource: {uri!r}")
 
 
@@ -409,6 +628,16 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
             uri=_URI_EVENT_LOG,  # type: ignore[arg-type]
             name="Event Log",
             description="All execution-hook events observed this session.",
+            mimeType="application/json",
+        ),
+        mcp_types.Resource(
+            uri=_URI_LINK_STATUS,  # type: ignore[arg-type]
+            name="Link Status",
+            description=(
+                "Current link-cable state (in-process pair + remote TCP "
+                "link). Equivalent to the `link_status` tool as a pollable "
+                "resource."
+            ),
             mimeType="application/json",
         ),
     ]

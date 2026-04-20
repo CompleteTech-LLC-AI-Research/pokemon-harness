@@ -366,3 +366,194 @@ def test_link_transport_resource_reflects_transport_state():
     link.pair.transport.push_b_to_a(0x17)
     payload = json.loads(read_resource(s_primary, "pokered://link-transport", link=link))
     assert payload == {"a_to_b": [0x42], "b_to_a": [0x17]}
+
+
+# -- remote (two-process) link tools ----------------------------------------
+#
+# These exercise the MCP surface for two-agent trading: link_listen spawns
+# a background accept on a local port; link_connect from another "session"
+# attaches; link_status reports the transitions; link_disconnect tears down.
+#
+# We use real localhost sockets via TcpSerialLink, because the whole point
+# of the tool is to wire up a socket — stubbing it out would prove
+# nothing.
+
+
+import socket as _socket
+import time as _time
+
+
+def _free_port() -> int:
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+def _wait_remote_mode(link: LinkState, mode: str, timeout: float = 2.0) -> None:
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if link.remote_mode == mode:
+            return
+        _time.sleep(0.01)
+    raise AssertionError(
+        f"remote_mode never reached {mode!r} (last={link.remote_mode!r}, "
+        f"error={link._listener_error!r})"
+    )
+
+
+def _endpoint_sym() -> str:
+    """Symbols required by RemoteLinkEndpoint.install(). Addresses are
+    synthetic; the MCP test only needs the install() call to succeed."""
+    return """
+        00:22FA Serial_TryEstablishingExternallyClockedConnection
+        00:216F Serial_ExchangeBytes
+        00:22C3 Serial_ExchangeNybble
+        00:2247 Serial_ExchangeLinkMenuSelection
+        00:FFAA hSerialConnectionStatus
+        00:FFAC hSerialSendData
+        00:FFAD hSerialReceiveData
+        00:CC42 wLinkMenuSelectionSendBuffer
+        00:CC3D wLinkMenuSelectionReceiveBuffer
+        00:CC42 wSerialExchangeNybbleSendData
+        00:CC3E wSerialExchangeNybbleReceiveData
+        00:D141 wSerialRandomNumberListBlock
+        00:D173 wSerialPlayerDataBlock
+    """
+
+
+def _endpoint_session():
+    mem = DictMemory()
+    pb = FakePyBoy(mem)
+    sym = load_sym_text(_endpoint_sym())
+    return Session(pyboy=pb, symbols=sym, event_bus=EventBus()), pb
+
+
+def test_link_listen_then_connect_updates_status():
+    s_listener, _ = _endpoint_session()
+    s_connector, _ = _endpoint_session()
+    link_l = LinkState(primary_version="blue")
+    link_c = LinkState(primary_version="yellow")
+
+    port = _free_port()
+    listen_result = dispatch_tool(
+        s_listener, "link_listen", {"port": port}, link=link_l
+    )
+    assert listen_result["remote_mode"] == "listening"
+    assert listen_result["remote_role"] == "listener"
+    assert listen_result["rom_version"] == "blue"
+
+    # Poll link_status until bind completes (accept() is on a bg thread).
+    for _ in range(100):
+        status = dispatch_tool(s_listener, "link_status", {}, link=link_l)
+        if status["remote_mode"] == "listening":
+            break
+        _time.sleep(0.01)
+    assert status["remote_mode"] == "listening"
+
+    # Connect from the other side.
+    connect_result = dispatch_tool(
+        s_connector,
+        "link_connect",
+        {"host": "127.0.0.1", "port": port, "rom_version": "yellow"},
+        link=link_c,
+    )
+    assert connect_result["remote_mode"] == "connected"
+    assert connect_result["remote_role"] == "connector"
+    assert connect_result["peer_rom_version"] == "blue"
+
+    _wait_remote_mode(link_l, "connected")
+    status_l = dispatch_tool(s_listener, "link_status", {}, link=link_l)
+    status_c = dispatch_tool(s_connector, "link_status", {}, link=link_c)
+    assert status_l["remote_mode"] == "connected"
+    assert status_l["remote_peer_rom_version"] == "yellow"
+    assert status_c["remote_mode"] == "connected"
+    assert status_c["remote_peer_rom_version"] == "blue"
+
+    # Cleanup in the proper order — connector first drops the cable,
+    # then listener notices.
+    dispatch_tool(s_connector, "link_disconnect", {}, link=link_c)
+    assert link_c.remote_mode == "idle"
+    # Listener sees its link drop on the next status poll.
+    for _ in range(100):
+        status_l = dispatch_tool(s_listener, "link_status", {}, link=link_l)
+        if status_l["remote_mode"] == "idle":
+            break
+        _time.sleep(0.01)
+    assert status_l["remote_mode"] == "idle"
+    dispatch_tool(s_listener, "link_disconnect", {}, link=link_l)
+
+
+def test_link_listen_rejects_concurrent_call():
+    s, _ = _endpoint_session()
+    link = LinkState()
+    port = _free_port()
+    dispatch_tool(s, "link_listen", {"port": port}, link=link)
+    try:
+        with pytest.raises(ValueError, match="remote link busy"):
+            dispatch_tool(s, "link_listen", {"port": _free_port()}, link=link)
+    finally:
+        dispatch_tool(s, "link_disconnect", {}, link=link)
+
+
+def test_link_connect_refuses_when_pair_active():
+    s_primary, _, _, _, link, _ = _link_state_with_peer()
+    dispatch_tool(s_primary, "link_pair", {}, link=link)
+    with pytest.raises(ValueError, match="in-process pair is active"):
+        dispatch_tool(
+            s_primary,
+            "link_connect",
+            {"host": "127.0.0.1", "port": _free_port()},
+            link=link,
+        )
+
+
+def test_link_listen_surfaces_bind_failure_via_status():
+    """Binding to a port we know can't succeed (port 0 with a
+    host that rejects outright) ends up with the listener thread
+    storing the exception; link_status surfaces it.
+
+    We reach this by passing an invalid host. Using a non-loopback
+    address like ``1.2.3.4`` guarantees bind() raises OSError on every
+    platform, whereas the "bind same port twice" trick depends on
+    SO_REUSEADDR semantics which differ by OS.
+    """
+    s, _ = _endpoint_session()
+    link = LinkState()
+    dispatch_tool(
+        s,
+        "link_listen",
+        {"port": _free_port(), "host": "1.2.3.4"},
+        link=link,
+    )
+    for _ in range(200):
+        status = dispatch_tool(s, "link_status", {}, link=link)
+        if status["remote_error"] is not None:
+            break
+        _time.sleep(0.01)
+    assert status["remote_error"] is not None
+    assert status["remote_mode"] == "idle"
+
+
+def test_link_disconnect_is_idempotent():
+    s, _ = _endpoint_session()
+    link = LinkState()
+    # No link set up → disconnect should be a safe no-op.
+    result = dispatch_tool(s, "link_disconnect", {}, link=link)
+    assert result == {"remote_mode": "idle"}
+
+
+def test_link_status_resource_returns_same_shape_as_tool():
+    """The `pokered://link-status` resource is intended as a pollable
+    snapshot for clients that don't want to round-trip via a tool call.
+    Its JSON must match the tool's output exactly."""
+    s, _ = _endpoint_session()
+    link = LinkState()
+    tool_payload = dispatch_tool(s, "link_status", {}, link=link)
+    resource_payload = json.loads(
+        read_resource(s, "pokered://link-status", link=link)
+    )
+    assert resource_payload == tool_payload
+    assert resource_payload["remote_mode"] == "idle"

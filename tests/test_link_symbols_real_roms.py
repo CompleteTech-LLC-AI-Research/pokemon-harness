@@ -65,6 +65,96 @@ def test_hram_labels_resolve_on_real_sym(version: str):
         assert table.get(label) is not None, f"missing HRAM label {label!r} on {version}"
 
 
+# Symbols RemoteLinkEndpoint depends on. These MUST resolve on every
+# supported ROM or the two-agent link-cable mode is broken for that
+# version. Unlike LINK_SYMBOLS (which abstracts per-version name drift
+# behind keys like "exchange_bytes"), RemoteLinkEndpoint reads symbols
+# by their literal pret name and translates addresses cross-version via
+# the symbol table directly.
+_REMOTE_ENDPOINT_REQUIRED_SYMBOLS = (
+    "Serial_TryEstablishingExternallyClockedConnection",
+    "Serial_ExchangeBytes",
+    "Serial_ExchangeNybble",
+    "Serial_ExchangeLinkMenuSelection",
+    "hSerialConnectionStatus",
+    "wSerialExchangeNybbleSendData",
+    "wSerialExchangeNybbleReceiveData",
+    "wLinkMenuSelectionSendBuffer",
+    "wLinkMenuSelectionReceiveBuffer",
+)
+
+# Buffer symbols used as the "kind" in cross-version Serial_ExchangeBytes
+# exchanges. At least the trade/battle-setup blocks must resolve so Blue's
+# hl=0xD152 and Yellow's hl=0xD151 both translate to the same wire kind.
+_REMOTE_ENDPOINT_BUFFER_SYMBOLS = (
+    "wSerialPlayerDataBlock",
+    "wSerialRandomNumberListBlock",
+    "wSerialPartyMonsPatchList",
+    "wSerialEnemyDataBlock",
+    "wSerialOtherGameboyRandomNumberListBlock",
+    "wSerialEnemyMonsPatchList",
+)
+
+
+@pytest.mark.parametrize("version", ["blue", "yellow", "red"])
+def test_remote_endpoint_required_symbols_resolve(version: str):
+    """Every symbol RemoteLinkEndpoint looks up at install() time must
+    resolve on Red, Blue, and Yellow — otherwise the endpoint silently
+    skips installing one of its hooks and the peer-to-peer exchange
+    breaks in a hard-to-debug way."""
+    path = SYM_PATHS[version]
+    if not path.exists():
+        pytest.skip(f"symbol file not present: {path}")
+    table = load_sym_file(path)
+    missing = [s for s in _REMOTE_ENDPOINT_REQUIRED_SYMBOLS if s not in table]
+    assert not missing, (
+        f"RemoteLinkEndpoint requires these symbols but they are missing "
+        f"on {version}: {missing}"
+    )
+
+
+@pytest.mark.parametrize("version", ["blue", "yellow", "red"])
+def test_remote_endpoint_buffer_symbols_resolve(version: str):
+    """Every serial-buffer symbol in RemoteLinkEndpoint's
+    ``candidate_symbols`` tuple must resolve so cross-version
+    Serial_ExchangeBytes translation works for every buffer the game
+    passes in hl."""
+    path = SYM_PATHS[version]
+    if not path.exists():
+        pytest.skip(f"symbol file not present: {path}")
+    table = load_sym_file(path)
+    missing = [s for s in _REMOTE_ENDPOINT_BUFFER_SYMBOLS if s not in table]
+    assert not missing, (
+        f"RemoteLinkEndpoint treats these symbols as known exchange-bytes "
+        f"buffers; they must resolve on {version}: {missing}"
+    )
+
+
+@pytest.mark.parametrize("version", ["blue", "yellow", "red"])
+def test_remote_endpoint_cross_version_addresses_differ_where_expected(version: str):
+    """Sanity check: buffer addresses differ between Yellow and Red/Blue
+    for WRAM0 blocks in the ``d000-dfff`` range. This is the whole
+    reason RemoteLinkEndpoint routes Serial_ExchangeBytes via symbol
+    name instead of raw address."""
+    if version != "yellow":
+        pytest.skip("cross-version address divergence check only for yellow")
+    blue_path = SYM_PATHS["blue"]
+    yellow_path = SYM_PATHS["yellow"]
+    if not (blue_path.exists() and yellow_path.exists()):
+        pytest.skip("blue and yellow sym files both required")
+    blue = load_sym_file(blue_path)
+    yellow = load_sym_file(yellow_path)
+    # WRAM0 buffers must differ — proves the symbol-based translation
+    # actually does real work rather than being a no-op.
+    for sym in ("wSerialPlayerDataBlock", "wSerialRandomNumberListBlock"):
+        b = blue[sym].addr
+        y = yellow[sym].addr
+        assert b != y, (
+            f"{sym} at same address on blue (0x{b:04x}) and yellow (0x{y:04x}); "
+            f"cross-version translation test invariant no longer holds"
+        )
+
+
 @pytest.mark.parametrize("version", ["blue", "yellow", "red"])
 def test_bridge_and_handshake_labels_present(version: str):
     """The actual callbacks installed by SerialBridge cover BRIDGE and
