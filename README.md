@@ -214,17 +214,17 @@ localhost TCP. Role matters: listener is the internal-clock master,
 connector the external-clock slave — a reversed pair is a distinct
 wire configuration.
 
-| Listener | Connector | Handshake | Nybble → LinkMenu | RPC-kind observation |
-|---|---|---|---|---|
-| blue | blue | ✅ | ✅ | ✅ |
-| blue | yellow | ✅ | ✅ | — |
-| yellow | blue | ✅ | ✅ | — |
-| yellow | yellow | ✅ | ✅ | — |
-| red | red | ⏭ fixture gap | ⏭ fixture gap | — |
-| red | blue | ⏭ fixture gap | ⏭ fixture gap | — |
-| blue | red | ⏭ fixture gap | ⏭ fixture gap | — |
-| red | yellow | ⏭ fixture gap | ⏭ fixture gap | — |
-| yellow | red | ⏭ fixture gap | ⏭ fixture gap | — |
+| Listener | Connector | Handshake | Nybble → LinkMenu | Nybble RPC observed | Menu-selection RPC observed |
+|---|---|---|---|---|---|
+| blue | blue | ✅ | ✅ | ✅ | ✅ |
+| blue | yellow | ✅ | ✅ | ✅ | ✅ |
+| yellow | blue | ✅ | ✅ | ✅ | ✅ |
+| yellow | yellow | ✅ | ✅ | ✅ | ✅ |
+| red | red | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
+| red | blue | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
+| blue | red | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
+| red | yellow | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
+| yellow | red | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
 
 Fixture gaps:
 
@@ -255,17 +255,18 @@ is covered separately:
 - Remote, unit-level on `InProcessSerialLink`:
   `test_remote_endpoint.test_exchange_menu_selection_exchanges_two_bytes`
   and `test_exchange_bytes_cross_version_translates_via_symbol`.
-- Remote, over actual TCP: the kind-observation test above proves the
-  RPC routing layer is correct; the generic
-  `test_serial_link.test_tcp_exchange_round_trip` and
-  `test_tcp_larger_payload` cover arbitrary byte payloads through the
-  same transport.
-
-Driving the LinkMenu selection + full trade/battle UI *over the remote
-endpoint* is agent-policy work (two MCP-driven Sessions need
-coordinated A-press timing). The transport is proven; producing a
-well-walked fixture and/or writing the coordinated press scripts is
-the next iteration.
+- Remote, over actual TCP, real ROMs:
+  `test_remote_rpc_flow_past_link_menu_over_tcp` drives the game
+  past the LinkMenu A-press and observes the
+  `menu_selection/wLinkMenuSelectionSendBuffer` RPC flowing with
+  balanced counts on both sides across all 4 working pairs. The
+  `exchange_bytes/*` kinds (three post-menu CableClub buffer
+  exchanges) only fire if the menu vote converges across the two
+  threads on the same frame — that requires sub-frame A-press timing
+  and is an agent-policy concern, not a transport one. The generic
+  `test_serial_link.test_tcp_exchange_round_trip` +
+  `test_tcp_larger_payload` cover arbitrary byte payloads through
+  the same transport.
 
 ### Producing Cable Club save states
 

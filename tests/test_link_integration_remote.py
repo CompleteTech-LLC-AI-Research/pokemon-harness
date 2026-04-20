@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import queue
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -532,9 +533,25 @@ def test_remote_trade_reaches_link_menu_via_tcp(
 # the end-to-end transport proof we actually care about.
 
 
-def test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu_blue() -> None:
+@pytest.mark.parametrize(
+    "version_listen,version_connect",
+    [
+        ("red", "red"),
+        ("red", "blue"),
+        ("blue", "red"),
+        ("red", "yellow"),
+        ("yellow", "red"),
+        ("blue", "blue"),
+        ("blue", "yellow"),
+        ("yellow", "blue"),
+        ("yellow", "yellow"),
+    ],
+)
+def test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu(
+    version_listen: str, version_connect: str
+) -> None:
     """Observe every ``link.exchange`` RPC that flows during the
-    blue↔blue Cable Club drive to LinkMenu.
+    Cable Club drive to LinkMenu.
 
     The nybble test proves the game reaches LinkMenu. This test is
     about the transport-layer observation: which symbolic ``kind``
@@ -554,20 +571,33 @@ def test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu_blue() -> None:
     Phase 1 serial-link tests + Phase 2 symbol-translation tests cover
     the transport and kind-encoding separately.
     """
-    if not _roms_present("blue"):
-        pytest.skip("Blue ROM not present")
-    state = _cable_club_state("blue")
-    if not state.exists():
-        pytest.skip(f"Blue Cable Club state missing: {state}")
+    if not (_roms_present(version_listen) and _roms_present(version_connect)):
+        pytest.skip(f"ROMs not present for {version_listen}/{version_connect}")
+    state_listen = _cable_club_state(version_listen)
+    state_connect = _cable_club_state(version_connect)
+    if not (state_listen.exists() and state_connect.exists()):
+        pytest.skip(
+            f"Cable Club save states missing for "
+            f"{version_listen}/{version_connect}"
+        )
+    if not (
+        version_listen in _FIXTURES_WITH_WALKABLE_PLAYER
+        and version_connect in _FIXTURES_WITH_WALKABLE_PLAYER
+    ):
+        pytest.skip(
+            f"Fixture walkability gap: {version_listen}/{version_connect}"
+        )
 
-    session_a = _open_session("blue")
-    session_b = _open_session("blue")
+    session_a = _open_session(version_listen)
+    session_b = _open_session(version_connect)
     try:
-        session_a.load_state(state.read_bytes())
-        session_b.load_state(state.read_bytes())
+        session_a.load_state(state_listen.read_bytes())
+        session_b.load_state(state_connect.read_bytes())
+        _ensure_fixture_is_walkable(version_listen, session_a)
+        _ensure_fixture_is_walkable(version_connect, session_b)
 
         link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(
-            session_a, "blue", session_b, "blue"
+            session_a, version_listen, session_b, version_connect
         )
         try:
             # Wrap the link.exchange methods to record every RPC kind
@@ -631,6 +661,171 @@ def test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu_blue() -> None:
             assert abs(count_a - count_b) <= max(count_a, count_b), (
                 f"nybble RPC count wildly unbalanced: "
                 f"count_a={count_a}, count_b={count_b}"
+            )
+        finally:
+            link_a.close()
+            link_b.close()
+    finally:
+        session_a.close()
+        session_b.close()
+
+
+# --- past-LinkMenu RPC flow observation ---------------------------------
+#
+# The earlier post-LinkMenu attempt using hook counters on
+# Serial_ExchangeLinkMenuSelection hit a PyBoy-hook-collision dead end
+# (RemoteLinkEndpoint registers its own hook there first, and PyBoy 2.7
+# rejects a second hook at the same address). Observing at the
+# link.exchange layer sidesteps that entirely — we see every RPC kind
+# the game asks the endpoint to issue, regardless of hook-registration
+# ordering.
+
+
+@pytest.mark.parametrize(
+    "version_listen,version_connect",
+    [
+        ("red", "red"),
+        ("red", "blue"),
+        ("blue", "red"),
+        ("red", "yellow"),
+        ("yellow", "red"),
+        ("blue", "blue"),
+        ("blue", "yellow"),
+        ("yellow", "blue"),
+        ("yellow", "yellow"),
+    ],
+)
+def test_remote_rpc_flow_past_link_menu_over_tcp(
+    version_listen: str, version_connect: str
+) -> None:
+    """Drive past the LinkMenu A-press and observe the
+    Serial_ExchangeLinkMenuSelection RPC flowing over TCP.
+
+    Pokered's LinkMenu cursor starts on BATTLE (index 0). Pressing A
+    commits that vote. The game then calls
+    ``Serial_ExchangeLinkMenuSelection`` each frame to exchange both
+    sides' votes; once both agree, the game warps to COLOSSEUM and
+    runs ``CableClub_DoBattleOrTradeAgain``'s three
+    ``Serial_ExchangeBytes`` blocks (RNG list + player data + patch
+    list).
+
+    We observe at the RPC layer — the set of ``kind`` values that
+    crossed the TCP boundary. A successful past-LinkMenu run shows::
+
+        exchange_nybble/wSerialExchangeNybbleSendData     (required)
+        menu_selection/wLinkMenuSelectionSendBuffer       (required)
+
+    on both sides. The ``exchange_bytes/*`` kinds (from
+    CableClub_DoBattleOrTradeAgain) are a bonus — they only appear if
+    the menu-selection vote converged across the two threads and the
+    game actually ran the three post-menu buffer exchanges. We record
+    whether that happened but don't require it, because the vote
+    agreement depends on sub-frame A-press timing between independent
+    daemon threads and can flake under heavy load.
+
+    Parametrized over the full 3×3 matrix; red and yellow gaps skip.
+    """
+    if not (_roms_present(version_listen) and _roms_present(version_connect)):
+        pytest.skip(f"ROMs not present for {version_listen}/{version_connect}")
+    state_listen = _cable_club_state(version_listen)
+    state_connect = _cable_club_state(version_connect)
+    if not (state_listen.exists() and state_connect.exists()):
+        pytest.skip(
+            f"Cable Club save states missing for "
+            f"{version_listen}/{version_connect}"
+        )
+    if not (
+        version_listen in _FIXTURES_WITH_WALKABLE_PLAYER
+        and version_connect in _FIXTURES_WITH_WALKABLE_PLAYER
+    ):
+        pytest.skip(
+            f"Fixture walkability gap: {version_listen}/{version_connect}"
+        )
+
+    session_a = _open_session(version_listen)
+    session_b = _open_session(version_connect)
+    try:
+        session_a.load_state(state_listen.read_bytes())
+        session_b.load_state(state_connect.read_bytes())
+        _ensure_fixture_is_walkable(version_listen, session_a)
+        _ensure_fixture_is_walkable(version_connect, session_b)
+
+        link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(
+            session_a, version_listen, session_b, version_connect
+        )
+        try:
+            kinds_a: list[str] = []
+            kinds_b: list[str] = []
+            orig_ex_a = link_a.exchange
+            orig_ex_b = link_b.exchange
+
+            def _wrap(sink, inner):
+                def exchange(kind, my_bytes, *, timeout_ms=5000):
+                    sink.append(kind)
+                    return inner(kind, my_bytes, timeout_ms=timeout_ms)
+                return exchange
+
+            link_a.exchange = _wrap(kinds_a, orig_ex_a)  # type: ignore[method-assign]
+            link_b.exchange = _wrap(kinds_b, orig_ex_b)  # type: ignore[method-assign]
+
+            runner_a = _SessionRunner(session_a, endpoint_a)
+            runner_b = _SessionRunner(session_b, endpoint_b)
+            runner_a.start()
+            runner_b.start()
+            try:
+                time.sleep(1.0)
+                # Walk UP to the receptionist + press A through the
+                # attendant dialog / save / nybble sync until both
+                # sides have issued at least some nybble RPCs.
+                for _ in range(3):
+                    runner_a.press("up", duration=6)
+                    runner_b.press("up", duration=6)
+                    time.sleep(0.2)
+                menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
+                deadline = time.time() + 30.0
+                while time.time() < deadline:
+                    if menu_kind in kinds_a and menu_kind in kinds_b:
+                        break
+                    runner_a.press("a", duration=4)
+                    runner_b.press("a", duration=4)
+                    time.sleep(0.15)
+            finally:
+                runner_a.stop()
+                runner_b.stop()
+
+            assert runner_a.exc is None, runner_a.exc
+            assert runner_b.exc is None, runner_b.exc
+            # Nybble sync (getting us to LinkMenu) must have flowed.
+            nybble_kind = "exchange_nybble/wSerialExchangeNybbleSendData"
+            assert nybble_kind in kinds_a and nybble_kind in kinds_b, (
+                f"nybble RPC never flowed; kinds_a={kinds_a}, kinds_b={kinds_b}"
+            )
+            # The past-LinkMenu milestone: menu-selection RPC flowed on
+            # both sides over TCP.
+            menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
+            assert menu_kind in kinds_a, (
+                f"listener never issued menu-selection RPC — "
+                f"LinkMenu didn't reach its exchange loop. "
+                f"kinds_a tail={kinds_a[-10:]}"
+            )
+            assert menu_kind in kinds_b, (
+                f"connector never issued menu-selection RPC. "
+                f"kinds_b tail={kinds_b[-10:]}"
+            )
+            # Bonus: if the menu vote converged, the three post-menu
+            # Serial_ExchangeBytes blocks would show up as
+            # exchange_bytes/* kinds. Record whether we got that
+            # deep — not required, because sub-frame A-press timing
+            # between independent threads is racey.
+            reached_post_menu = any(
+                k.startswith("exchange_bytes/") for k in kinds_a
+            )
+            # Stash on the test for pytest-level reporting via -rP.
+            sys.stderr.write(
+                f"\n[past-LinkMenu {version_listen}↔{version_connect}] "
+                f"nybble={kinds_a.count(nybble_kind)}/{kinds_b.count(nybble_kind)} "
+                f"menu_sel={kinds_a.count(menu_kind)}/{kinds_b.count(menu_kind)} "
+                f"exchange_bytes_seen={reached_post_menu}\n"
             )
         finally:
             link_a.close()
