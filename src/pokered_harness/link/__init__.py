@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from pokered_harness.link.pair import LinkPair
+from pokered_harness.link.remote import (
+    STATUS_EXTERNAL,
+    STATUS_INTERNAL,
+    RemoteLinkEndpoint,
+)
 from pokered_harness.link.serial_bridge import BridgeEndpoint, SerialBridge
 from pokered_harness.link.serial_link import (
     InProcessSerialLink,
@@ -20,6 +25,9 @@ __all__ = [
     "LinkPair",
     "LinkRole",
     "LinkTransport",
+    "RemoteLinkEndpoint",
+    "STATUS_EXTERNAL",
+    "STATUS_INTERNAL",
     "SerialBridge",
     "SerialLink",
     "SerialLinkClosed",

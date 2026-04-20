@@ -9,6 +9,28 @@ from typing import BinaryIO, Callable
 HookKey = tuple[int, int]
 
 
+class _FakeRegisterFile:
+    """Minimal stand-in for ``pyboy.PyBoy.register_file``.
+
+    The real PyBoy exposes the CPU's 8/16-bit registers as attributes
+    so hooks can read call-convention arguments (``hl``, ``de``, ``bc``)
+    and write ``PC``/``SP`` to simulate a ``ret``. The remote link
+    endpoint relies on this; tests need the same shape."""
+
+    __slots__ = ("A", "B", "C", "D", "E", "F", "HL", "SP", "PC")
+
+    def __init__(self) -> None:
+        self.A = 0
+        self.B = 0
+        self.C = 0
+        self.D = 0
+        self.E = 0
+        self.F = 0
+        self.HL = 0
+        self.SP = 0
+        self.PC = 0
+
+
 class FakePyBoy:
     """Minimum viable stand-in for ``pyboy.PyBoy``.
 
@@ -26,6 +48,7 @@ class FakePyBoy:
         self.button_release_calls: list[str] = []
         self.stopped = False
         self._saved_state: bytes = b""
+        self.register_file = _FakeRegisterFile()
 
     def tick(self, count: int = 1, render: bool = False) -> bool:
         self.tick_calls.append((count, render))
@@ -48,6 +71,11 @@ class FakePyBoy:
 
     def hook_register(self, bank: int, addr: int, callback, context) -> None:
         self._hooks.setdefault((bank, addr), []).append((callback, context))
+
+    def hook_deregister(self, bank: int, addr: int) -> None:
+        """Remove every hook at ``(bank, addr)``. Real PyBoy 2.7 only
+        supports removing by address — we mirror that."""
+        self._hooks.pop((bank, addr), None)
 
     def stop(self, save: bool = False) -> None:
         self.stopped = True
