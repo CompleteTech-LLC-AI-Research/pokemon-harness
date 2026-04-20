@@ -122,7 +122,8 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
         try:
             path = _run_pathfinder_ex(seed, goal_xy,
                                        outdir / f"_{label}_step.txt",
-                                       rom, sym, sha1, None)
+                                       rom, sym, sha1, None,
+                                       expand_npc_neighbors=True)
         except RuntimeError:
             # No path — blind nudge every direction, retry.
             for d in ("up", "left", "down", "right"):
@@ -192,8 +193,10 @@ def _pathfind_walk(drv: rtb.Driver, session: Session, outdir: Path,
 
 def _run_pathfinder_ex(state_path: Path, goal: str, out_path: Path,
                         rom: str, sym: str, sha1: str,
-                        extra_blockers: str | None) -> str:
-    """Wraps ftb.run_pathfinder with optional --extra-blockers arg."""
+                        extra_blockers: str | None,
+                        expand_npc_neighbors: bool = False) -> str:
+    """Wraps ftb.run_pathfinder with optional --extra-blockers and
+    --expand-npc-neighbors args."""
     import subprocess
     script = Path(__file__).resolve().parent / "path_from_tiles.py"
     env = dict(os.environ)
@@ -208,6 +211,8 @@ def _run_pathfinder_ex(state_path: Path, goal: str, out_path: Path,
           "--goal-xy", goal]
     if extra_blockers:
         kw += ["--extra-blockers", extra_blockers]
+    if expand_npc_neighbors:
+        kw += ["--expand-npc-neighbors"]
     r = subprocess.run([sys.executable, "-u", str(script), *kw],
                        env=env, capture_output=True, text=True)
     if r.returncode != 0:

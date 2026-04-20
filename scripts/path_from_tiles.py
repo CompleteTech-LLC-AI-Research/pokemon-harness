@@ -104,7 +104,8 @@ def load_blockset(tileset_id: int, pret_root: Path) -> list[bytes]:
     return [data[i : i + 16] for i in range(0, len(data), 16)]
 
 
-def read_sprite_blockers(session: Session) -> set[tuple[int, int]]:
+def read_sprite_blockers(session: Session,
+                          expand_npc_neighbors: bool = False) -> set[tuple[int, int]]:
     """Return a set of (x, y) step cells occupied by static sprites.
 
     Map-object sprites (NPCs, item balls, etc.) are stored in
@@ -117,17 +118,40 @@ def read_sprite_blockers(session: Session) -> set[tuple[int, int]]:
     Slots with ``(MAPX,MAPY) == (0,0)`` are unused; they're either
     literal (0,0) objects (extremely rare and wouldn't be in the step
     range anyway) or unallocated slots. Slot 0 is the player.
+
+    When ``expand_npc_neighbors`` is True, wandering NPCs'
+    4-directional neighbors are ALSO marked as blockers. NPCs with
+    movement-status ``WALK`` (wSpriteStateData1[i][1] bit 0 set, or
+    by checking movement bytes) can step ±1 into any cardinal
+    neighbor on the next game tick — if we plan a path that merely
+    avoids their CURRENT tile, they may walk into the player's
+    next-tile between frames and block the press. Over-approximating
+    to "any tile adjacent to an NPC is blocked" guarantees no
+    collision but loses some walkable space.
     """
     mem = session._pyboy.memory
     data2 = session.symbols.addr_of("wSpriteStateData2")
+    data1 = session.symbols.addr_of("wSpriteStateData1")
     blockers: set[tuple[int, int]] = set()
     for i in range(1, 16):
-        base = data2 + i * 0x10
-        my_raw = int(mem[base + 4]) & 0xFF
-        mx_raw = int(mem[base + 5]) & 0xFF
+        base2 = data2 + i * 0x10
+        base1 = data1 + i * 0x10
+        my_raw = int(mem[base2 + 4]) & 0xFF
+        mx_raw = int(mem[base2 + 5]) & 0xFF
         if (mx_raw, my_raw) == (0, 0):
             continue
-        blockers.add((mx_raw - 4, my_raw - 4))
+        sx, sy = mx_raw - 4, my_raw - 4
+        blockers.add((sx, sy))
+        if expand_npc_neighbors:
+            # Movement status byte at wSpriteStateData1+1. Non-zero
+            # picture_id sprites (real NPCs) may wander; we don't
+            # distinguish STAY vs WALK here (would require reading
+            # the object_event .movement field from ROM), so be
+            # conservative: expand neighbor tiles for all NPCs.
+            picture_id = int(mem[base1 + 0]) & 0xFF
+            if picture_id != 0:
+                for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                    blockers.add((sx + dx, sy + dy))
     return blockers
 
 
@@ -314,6 +338,12 @@ def main() -> int:
     p.add_argument("--save-path-to", type=str, default=None)
     p.add_argument("--dump-grid", action="store_true",
                    help="also print the walkability grid for debugging")
+    p.add_argument("--expand-npc-neighbors", action="store_true",
+                   help="Conservatively mark tiles adjacent to every "
+                        "NPC as impassable. Avoids plans that pass "
+                        "next to a wandering NPC who could walk into "
+                        "the player's next tile. Over-approximates — "
+                        "loses walkable space in NPC-dense areas.")
     p.add_argument("--extra-blockers", type=str, default=None,
                    help='semicolon-separated list of x,y tiles to treat '
                         'as impassable in addition to the game\'s sprite '
@@ -368,7 +398,9 @@ def main() -> int:
     # NPC / object-event sprite positions in step-grid coords. These
     # block movement into their cell regardless of tile walkability
     # (trainer NPCs, trainers with sight lines, Poke Ball pickups, etc).
-    sprite_blockers = read_sprite_blockers(s)
+    sprite_blockers = read_sprite_blockers(
+        s, expand_npc_neighbors=args.expand_npc_neighbors,
+    )
     # Caller-injected blockers (route-specific trainer-pen avoidance).
     if args.extra_blockers:
         for part in args.extra_blockers.split(";"):
