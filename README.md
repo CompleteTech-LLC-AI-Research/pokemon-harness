@@ -279,12 +279,68 @@ is covered across multiple levels:
   - Generic `test_serial_link.test_tcp_exchange_round_trip` +
     `test_tcp_larger_payload` cover arbitrary byte payloads.
 
-Reaching `CableClub_DoBattleOrTradeAgain` and its three
-`Serial_ExchangeBytes` blocks from the two-process remote setup
-additionally requires the two players to walk onto the hidden-event
-tile and press A in the same game frame; that timing coordination is
-agent-policy rather than transport, and is covered by the
-in-process tests above.
+The `exchange_bytes/wSerialRandomNumberListBlock` round-trip
+(the first of the three post-menu exchanges inside
+`CableClub_DoBattleOrTradeAgain`) is now additionally tested
+two-process on real TCP in
+`test_remote_exchange_bytes_fires_in_trade_center_blue_blue`. It
+uses the same auto-select-TRADE hook the in-process LinkPair relies
+on, driven by a deterministic `LockstepOrchestrator` (one thread per
+session + per-frame barrier + button-inject-at-frame-boundary).
+The 2nd and 3rd exchanges reliably desync after the bypass — see
+the "deployment timing" section below — and are covered
+transitively by the in-process `test_link_trade_roundtrip`.
+
+### Deployment timing for two independent MCP agents
+
+The transport (`TcpSerialLink` + `RemoteLinkEndpoint` + symbol-
+translated RPC `kind`) is proven up to the first post-menu byte
+exchange. Beyond that, completing a full trade or battle between two
+**independent** MCP processes needs an application-layer sync
+mechanism — the game was designed for hardware where both Game Boys
+are locked to a physical 8192 Hz clock. PyBoy has no such external
+clock, so two separate Python processes stepping their own emulators
+drift in game-frame alignment unless one of the following is in
+place:
+
+1. **Shared tick broker (collapses remote → LinkPair).** Wire both
+   processes so a single orchestrator decides when each advances a
+   frame. Defeats the "two truly independent agents" model; equivalent
+   to just running in-process.
+
+2. **Agent-layer ready-tick handshake (recommended).** Each agent's
+   MCP client exchanges a small protocol message before issuing any
+   button press that needs frame-level sync:
+
+   ```
+   agent_a → agent_b: "ready at game_tick=1234, pressing A"
+   agent_b → agent_a: "ready at game_tick=1235, pressing A"
+   both: step until game_tick hits the agreed value, then press_a
+   ```
+
+   Messages travel over whatever channel the two agents already use
+   (same TCP `SerialLink` via a custom `kind`, or a separate sidechannel
+   such as shared filesystem / Redis / HTTP). The transport's
+   per-kind FIFO guarantees ordering within a kind and independence
+   across kinds, so adding an `"agent_sync"` kind costs nothing.
+
+3. **Designated-driver turn-based (simplest).** One agent owns the
+   "I'll press A this tick" decision each turn; the other follows on
+   the same relative tick offset. Essentially turn-based multiplayer
+   where only one side's button-press matters per game phase.
+
+Option 2 is the production-minded answer — it preserves agent
+autonomy, uses the existing transport, and matches how humans
+coordinate over a physical cable ("ready?" "ready" → both press).
+Option 3 is a fallback for simpler use cases.
+
+Until application-layer sync is wired up, two-agent trades complete
+up to the TRADE_CENTER warp (status bytes, nybble sync, menu-vote
+convergence, and first post-menu RNG exchange all verified end-to-
+end over TCP on real ROMs) — from there, the in-process
+`test_link_trade_roundtrip` covers the UI flow, and
+`test_link_integration_remote.py` documents the remote limitations
+alongside the transport tests.
 
 ### Producing Cable Club save states
 

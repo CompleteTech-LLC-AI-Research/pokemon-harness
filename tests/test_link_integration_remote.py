@@ -1232,3 +1232,37 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
     finally:
         session_a.close()
         session_b.close()
+
+
+# --- T4/T5: full trade and battle completion (KNOWN LIMITATION) ---
+#
+# Attempted but not reliably achievable two-process:
+#
+# - Frame-synchronized manual A-press (LockstepOrchestrator.press_both
+#   + manual menu navigation): DEADLOCKS. Even with per-frame barrier
+#   sync, the menu votes don't always match between the two sides
+#   (sub-frame CPU state differs) and one side's
+#   Serial_ExchangeLinkMenuSelection RPC blocks waiting for a matching
+#   exchange that never comes.
+#
+# - Auto-select-TRADE hook (pre-plant 0xD4 in recv buffer): WORKS to
+#   the first exchange only. Both sides warp to TRADE_CENTER and
+#   CableClub_DoBattleOrTradeAgain fires, but the 428-byte
+#   wSerialPlayerDataBlock exchange reliably desyncs between the two
+#   daemon threads after the bypass leaves each side's wLinkState in
+#   a subtly-different shape. Covered by T3 above.
+#
+# The in-process LinkPair avoids both failure modes because both
+# Sessions are stepped by a single lockstep driver with zero timing
+# variance — and test_link_integration.test_link_trade_roundtrip
+# proves end-to-end trade UI reachability in that mode. The remote
+# TCP case would require either:
+#   (a) a shared "tick broker" between the two processes that aligns
+#       frame advancement (converges the remote model to LinkPair), or
+#   (b) agent-layer protocol: each side signals "I'm at frame N" to
+#       its peer and both wait until matching before issuing the next
+#       button press. That's T7 deployment-time work, not test
+#       infrastructure.
+#
+# Trade completion and battle completion therefore remain "proven
+# in-process, partially proven remote (first post-menu exchange)".
