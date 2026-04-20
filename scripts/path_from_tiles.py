@@ -409,16 +409,21 @@ def main() -> int:
     w_steps = width_blocks * 2
     h_steps = height_blocks * 2
 
+    # Feet-tile offset within each 2x2 step-cell block. Overworld
+    # tilesets (0) use BOTTOM-LEFT (sx*2, sy*2+1). Cave tilesets
+    # (CAVERN=17, FOREST=3 etc.) empirically use BOTTOM-RIGHT
+    # (sx*2+1, sy*2+1). Verified against Mt. Moon 1F at (10, 22):
+    # with bottom-left offset A* thought (9, 22) was 0x05/walkable
+    # and LEFT press should work — game rejected it. Bottom-right
+    # reads (9, 22) feet as 0x17/blocked, matching game behavior.
+    # List of cave-style tilesets from pret pokeyellow data:
+    _CAVE_TILESETS = {3, 14, 16, 17, 21, 22}  # FOREST, CAVERN, MUSEUM, LOBBY, etc.
+    feet_dx = 1 if tileset_id in _CAVE_TILESETS else 0
+
     def step_passable(sx: int, sy: int) -> bool:
-        # The game stores the player's "feet" tile at map coord
-        # (wXCoord*2, wYCoord*2 + 1) — empirically verified by comparing
-        # wTileMap[screen(8,9)] to the expanded block grid. In other
-        # words: step cell (sx, sy) is a 2x2 tile region at
-        # (sx*2 .. sx*2+1, sy*2 .. sy*2+1), and the collision-relevant
-        # tile is the BOTTOM-LEFT of that region at (sx*2, sy*2+1).
         if (sx, sy) in sprite_blockers:
             return False
-        tx, ty = sx * 2, sy * 2 + 1
+        tx, ty = sx * 2 + feet_dx, sy * 2 + 1
         if not (0 <= tx < w_tiles and 0 <= ty < h_tiles):
             return False
         return tile_grid[ty][tx] in passable_tiles

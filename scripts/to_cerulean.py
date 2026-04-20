@@ -610,6 +610,53 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
 
 # --- Phase 5: cross Route 4 east -> Cerulean City ------------------------
 
+def _recover_to_route4_west(drv: rtb.Driver, session: Session,
+                             outdir: Path, rom: str, sym: str, sha1: str,
+                             max_cycles: int = 4) -> bool:
+    """After a Mt. Moon blackout lands us at Pewter PC (0x3a or 0x02),
+    walk back through Pewter → Route 3 → Route 4 west to resume Mt.
+    Moon traversal."""
+    # Exit Pewter PC if inside
+    for _ in range(8):
+        if drv.gs().overworld.map_id == M_PEWTER_CITY:
+            break
+        drv.press("down")
+    if drv.gs().overworld.map_id != M_PEWTER_CITY:
+        return False
+    # Clear any bench-guy dialog
+    for _ in range(60):
+        before = (drv.gs().overworld.x, drv.gs().overworld.y)
+        drv.press("a")
+        drv.press("down")
+        if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
+            break
+    # East to Route 3
+    ftb._activate_repel(drv)
+    res = _pathfind_walk(drv, session, outdir, "35,19",
+                         "rec_pewter_east",
+                         rom, sym, sha1, stop_map_ids=(M_ROUTE_3,))
+    for _ in range(8):
+        if drv.gs().overworld.map_id == M_ROUTE_3:
+            break
+        drv.press("right")
+    session.step(120, render=True)
+    # Cross Route 3 via the known waypoints
+    for goal, label in [("30,11", "rec_r3_1"), ("45,11", "rec_r3_2"),
+                         ("60,0", "rec_r3_n")]:
+        if drv.gs().overworld.map_id != M_ROUTE_3:
+            break
+        _pathfind_walk(drv, session, outdir, goal, label,
+                        rom, sym, sha1,
+                        stop_map_ids=(M_ROUTE_4,))
+        ftb._activate_repel(drv)
+    for _ in range(8):
+        if drv.gs().overworld.map_id == M_ROUTE_4:
+            break
+        drv.press("up")
+    session.step(120, render=True)
+    return drv.gs().overworld.map_id == M_ROUTE_4
+
+
 def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                  rom: str, sym: str, sha1: str) -> bool:
     """Walk east across Route 4 to the Cerulean City connection.
@@ -624,80 +671,90 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
     """
     ftb._activate_repel(drv)
     session.step(120, render=True)
-    # Phase A: walk to Route 4 Mt. Moon warp at (18, 5) on west half.
-    for _ in range(4):
-        before = (drv.gs().overworld.x, drv.gs().overworld.y)
-        drv.press("up")
-        if drv.gs().battle.active:
-            drv.resolve_battle()
-        if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
-            break
-    ftb._activate_repel(drv)
-    res = _pathfind_walk(drv, session, outdir, "18,5", "r4w_to_mm",
-                         rom, sym, sha1,
-                         stop_map_ids=(M_MT_MOON_1F,))
-    print(f"  r4w_to_mm: {res} -> {_gs_summary(session)}", flush=True)
-    for _ in range(6):
-        if drv.gs().overworld.map_id == M_MT_MOON_1F:
-            break
-        drv.press("up")
-    session.step(120, render=True)
-    if drv.gs().overworld.map_id != M_MT_MOON_1F:
-        print(f"  failed to enter Mt. Moon 1F", flush=True)
-        return False
-
-    # Phase B: Mt. Moon 1F → B1F via warp (5, 5). Use single-step
-    # re-A* to defeat the wandering-NPC sprite-pocket attractors
-    # that stale 40-step plans kept converging into. Each step
-    # re-queries the game for current NPC positions.
-    ftb._activate_repel(drv)
-    res = _step_by_step_walk(drv, session, outdir, "5,5", "mm1f_b1f",
-                              rom, sym, sha1,
-                              target_map_id=M_MT_MOON_B1F,
-                              max_presses=400)
-    print(f"  mm1f_b1f step-walk: {res} -> {_gs_summary(session)}",
-          flush=True)
-    for _ in range(6):
-        if drv.gs().overworld.map_id == M_MT_MOON_B1F:
-            break
-        drv.press("up")
-    session.step(120, render=True)
-    if drv.gs().overworld.map_id != M_MT_MOON_B1F:
-        print(f"  failed Mt. Moon 1F → B1F", flush=True)
-        return False
-
-    # Phase C: Mt. Moon B1F east exit at (27, 3) → Route 4 (24, 5).
-    ftb._activate_repel(drv)
-    res = _step_by_step_walk(drv, session, outdir, "27,3", "mmb1f_r4e",
-                              rom, sym, sha1,
-                              target_map_id=M_ROUTE_4,
-                              max_presses=400)
-    print(f"  mmb1f_r4e step-walk: {res} -> {_gs_summary(session)}",
-          flush=True)
-    for _ in range(6):
+    # Multi-cycle wrapper: Mt. Moon trainers may faint Pikachu,
+    # blackout → Pewter PC. Recover and retry — each cycle covers
+    # new ground because defeated trainers stay defeated.
+    blackout_cycles = 0
+    while drv.gs().overworld.map_id != M_CERULEAN_CITY:
+        cur_map = drv.gs().overworld.map_id
+        if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
+            if blackout_cycles >= 5:
+                print(f"  mt_moon: too many blackouts; bailing",
+                      flush=True)
+                return False
+            blackout_cycles += 1
+            print(f"  mt_moon blackout #{blackout_cycles} → recovering",
+                  flush=True)
+            if not _recover_to_route4_west(drv, session, outdir,
+                                            rom, sym, sha1):
+                return False
+            continue
+        # Phase A: walk to Route 4 (18, 5) Mt. Moon warp.
         if drv.gs().overworld.map_id == M_ROUTE_4:
-            break
-        drv.press("up")
-    session.step(120, render=True)
-    if drv.gs().overworld.map_id != M_ROUTE_4:
-        print(f"  failed B1F → Route 4 east", flush=True)
-        return False
-
-    # Phase D: Route 4 east → Cerulean map-connection.
-    ftb._activate_repel(drv)
-    for goal, label in [("60,6", "r4e_wp1"), ("89,6", "r4e_wp2")]:
-        if drv.gs().overworld.map_id != M_ROUTE_4:
-            break
-        res = _pathfind_walk(drv, session, outdir, goal, label,
-                              rom, sym, sha1,
-                              stop_map_ids=(M_CERULEAN_CITY,))
-        print(f"  {label}: {res} -> {_gs_summary(session)}", flush=True)
-        ftb._activate_repel(drv)
-    for _ in range(8):
-        if drv.gs().overworld.map_id == M_CERULEAN_CITY:
-            break
-        drv.press("right")
-    session.step(60, render=True)
+            for _ in range(4):
+                before = (drv.gs().overworld.x, drv.gs().overworld.y)
+                drv.press("up")
+                if drv.gs().battle.active:
+                    drv.resolve_battle()
+                if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
+                    break
+            ftb._activate_repel(drv)
+            # If on west half (x<=20), warp into Mt. Moon 1F.
+            if drv.gs().overworld.x <= 20:
+                _pathfind_walk(drv, session, outdir, "18,5", "r4w_to_mm",
+                                rom, sym, sha1,
+                                stop_map_ids=(M_MT_MOON_1F,))
+                for _ in range(6):
+                    if drv.gs().overworld.map_id == M_MT_MOON_1F:
+                        break
+                    drv.press("up")
+                session.step(120, render=True)
+            else:
+                # Already on east half — path to Cerulean.
+                for goal, label in [("60,6", "r4e_wp1"),
+                                     ("89,6", "r4e_wp2")]:
+                    if drv.gs().overworld.map_id != M_ROUTE_4:
+                        break
+                    _pathfind_walk(drv, session, outdir, goal, label,
+                                    rom, sym, sha1,
+                                    stop_map_ids=(M_CERULEAN_CITY,))
+                    ftb._activate_repel(drv)
+                for _ in range(8):
+                    if drv.gs().overworld.map_id == M_CERULEAN_CITY:
+                        break
+                    drv.press("right")
+                session.step(60, render=True)
+                continue
+        # Phase B: Mt. Moon 1F → B1F.
+        if drv.gs().overworld.map_id == M_MT_MOON_1F:
+            ftb._activate_repel(drv)
+            res = _step_by_step_walk(drv, session, outdir, "5,5",
+                                      "mm1f_b1f",
+                                      rom, sym, sha1,
+                                      target_map_id=M_MT_MOON_B1F,
+                                      max_presses=400)
+            print(f"  mm1f_b1f step-walk: {res} -> "
+                  f"{_gs_summary(session)}", flush=True)
+            for _ in range(6):
+                if drv.gs().overworld.map_id == M_MT_MOON_B1F:
+                    break
+                drv.press("up")
+            session.step(120, render=True)
+        # Phase C: Mt. Moon B1F → Route 4 east.
+        if drv.gs().overworld.map_id == M_MT_MOON_B1F:
+            ftb._activate_repel(drv)
+            res = _step_by_step_walk(drv, session, outdir, "27,3",
+                                      "mmb1f_r4e",
+                                      rom, sym, sha1,
+                                      target_map_id=M_ROUTE_4,
+                                      max_presses=400)
+            print(f"  mmb1f_r4e step-walk: {res} -> "
+                  f"{_gs_summary(session)}", flush=True)
+            for _ in range(6):
+                if drv.gs().overworld.map_id == M_ROUTE_4:
+                    break
+                drv.press("up")
+            session.step(120, render=True)
     return drv.gs().overworld.map_id == M_CERULEAN_CITY
 
 
