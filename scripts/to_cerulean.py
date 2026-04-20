@@ -36,6 +36,22 @@ from pokered_harness.mcp_server import register_default_hooks
 
 import run_to_brock as rtb
 import full_to_brock as ftb
+import trainer_sight_cones
+
+
+def _sight_cone_blockers(map_name: str) -> str | None:
+    """Compute sight-cone blockers for a given map. Returns a
+    semicolon-separated "x,y;x,y;..." string suitable for
+    path_from_tiles' --extra-blockers arg, or None if the pret
+    clone isn't available. Uses dev-machine vendored path; adjust
+    if the repo moves."""
+    pret = Path("G:/project/pokemon/_vendor/pokeyellow")
+    if not (pret / "data" / "maps" / "objects").exists():
+        return None
+    tiles = trainer_sight_cones.sight_cone_tiles(map_name, pret)
+    if not tiles:
+        return None
+    return ";".join(f"{x},{y}" for x, y in sorted(tiles))
 
 
 # Map IDs (Yellow / Red / Blue all share these — pokered constants).
@@ -80,7 +96,8 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
                         goal_xy: str, label: str,
                         rom: str, sym: str, sha1: str,
                         target_map_id: int,
-                        max_presses: int = 200) -> str:
+                        max_presses: int = 200,
+                        extra_blockers: str | None = None) -> str:
     """Walk toward ``goal_xy`` one press at a time, re-A*-planning
     from the current position + current NPC sprite layout after
     every single step. This is slow (each step is ~1 s of pathfinder
@@ -122,8 +139,8 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
         try:
             path = _run_pathfinder_ex(seed, goal_xy,
                                        outdir / f"_{label}_step.txt",
-                                       rom, sym, sha1, None,
-                                       expand_npc_neighbors=True)
+                                       rom, sym, sha1, extra_blockers,
+                                       expand_npc_neighbors=False)
         except RuntimeError:
             # No path — blind nudge every direction, retry.
             for d in ("up", "left", "down", "right"):
@@ -797,11 +814,13 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         # Phase B: Mt. Moon 1F → B1F.
         if drv.gs().overworld.map_id == M_MT_MOON_1F:
             ftb._activate_repel(drv)
+            mm1f_cones = _sight_cone_blockers("MtMoon1F")
             res = _step_by_step_walk(drv, session, outdir, "5,5",
                                       "mm1f_b1f",
                                       rom, sym, sha1,
                                       target_map_id=M_MT_MOON_B1F,
-                                      max_presses=400)
+                                      max_presses=400,
+                                      extra_blockers=mm1f_cones)
             print(f"  mm1f_b1f step-walk: {res} -> "
                   f"{_gs_summary(session)}", flush=True)
             for _ in range(6):
@@ -812,11 +831,13 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         # Phase C: Mt. Moon B1F → Route 4 east.
         if drv.gs().overworld.map_id == M_MT_MOON_B1F:
             ftb._activate_repel(drv)
+            mmb1f_cones = _sight_cone_blockers("MtMoonB1F")
             res = _step_by_step_walk(drv, session, outdir, "27,3",
                                       "mmb1f_r4e",
                                       rom, sym, sha1,
                                       target_map_id=M_ROUTE_4,
-                                      max_presses=400)
+                                      max_presses=400,
+                                      extra_blockers=mmb1f_cones)
             print(f"  mmb1f_r4e step-walk: {res} -> "
                   f"{_gs_summary(session)}", flush=True)
             for _ in range(6):
