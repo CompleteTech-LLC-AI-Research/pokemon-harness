@@ -217,9 +217,9 @@ wire configuration.
 | Listener | Connector | Handshake | Nybble → LinkMenu | RPC-kind observation |
 |---|---|---|---|---|
 | blue | blue | ✅ | ✅ | ✅ |
-| blue | yellow | ✅ | ⏭ fixture gap | — |
-| yellow | blue | ✅ | ⏭ fixture gap | — |
-| yellow | yellow | ✅ | ⏭ fixture gap | — |
+| blue | yellow | ✅ | ✅ | — |
+| yellow | blue | ✅ | ✅ | — |
+| yellow | yellow | ✅ | ✅ | — |
 | red | red | ⏭ fixture gap | ⏭ fixture gap | — |
 | red | blue | ⏭ fixture gap | ⏭ fixture gap | — |
 | blue | red | ⏭ fixture gap | ⏭ fixture gap | — |
@@ -231,27 +231,19 @@ Fixture gaps:
 - **Red** — no `tests/fixtures/link/red/cable_club.state` exists.
   Mt. Moon → Cerulean progression is not yet scripted in the Red
   harness, so the fixture has never been produced.
-- **Yellow** — the existing `tests/fixtures/link/yellow/cable_club.state`
-  was captured via a weak `EnterMap` hook-warp that leaves the player
-  un-walkable, so any test that needs to press UP to reach the Cable
-  Club attendant (the nybble test) can't use it. Replacing this fixture
-  with a state produced by walking to the attendant unlocks the three
-  rows currently marked "fixture gap" under Nybble → LinkMenu.
-
-  Yellow unlock path (for whoever captures the next fixture):
-  1. A sibling worktree (`walkthrough_to_cerulean/`) produces
-     `milestones/cerulean_pc.state` — player inside Cerulean Pokecenter
-     with correct CGB palette via the nurse-heal trigger. This state
-     uses a blackout-warp shortcut; the honest Route 3 → Cerulean path
-     currently caps at x=65 because `path_from_tiles.py`'s A* graph
-     doesn't model Gen 1 one-way ledges (the `LedgeTiles` data would
-     need to be parsed from pokered and encoded as directional edges).
-  2. From `cerulean_pc.state`, walk UP to the Cable Club counter on
-     the second-floor area, then UP to stand in front of the link
-     receptionist. Save the result as
-     `tests/fixtures/link/yellow/cable_club.state`.
-  3. The nybble test's `_FIXTURES_WITH_WALKABLE_PLAYER` guard picks
-     up the new fixture automatically — add `"yellow"` to that set.
+- **Yellow** — `tests/fixtures/link/yellow/cable_club.state` (git-
+  ignored along with all `*.state` files per the BYO-ROM policy) is
+  produced locally by running
+  [`scripts/produce_yellow_cable_club_fixture.py`](scripts/produce_yellow_cable_club_fixture.py).
+  That script expects the sibling worktree's
+  `walkthrough_to_cerulean/milestones/cerulean_pc.state` as input —
+  a state the Yellow walkthrough harness produces via a blackout-warp
+  shortcut to the Cerulean Pokecenter with correct CGB palette (via
+  the nurse-heal trigger). From there the script encodes the
+  `up×4, left×2, down, right-until-x=11, up` route that sidesteps the
+  nurse NPC at (4, 3) and lands the player on the only tile where
+  pressing A fires `CableClubNPC` on Yellow (discovered by hooking
+  `01:7035 CableClubNPC` across x=5..12 — only x=11 triggers).
 
 Transport-layer behaviour past LinkMenu
 (`Serial_ExchangeLinkMenuSelection`, `Serial_ExchangeBytes` for the

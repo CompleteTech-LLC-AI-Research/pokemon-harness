@@ -344,18 +344,50 @@ def _tcp_pair(
 #
 # - Blue fixture: player stands in front of the Cable Club attendant,
 #   walkable, can press UP + A to engage dialog.
-# - Yellow fixture: uses a weaker EnterMap hook-warp; player is planted
-#   at the map edge and is NOT walkable. Confirmed in the single-process
-#   integration test — see the "Yellow's fixture uses the weaker
-#   EnterMap hook-warp" guard in test_link_integration.py.
+# - Yellow fixture: produced locally by
+#   scripts/produce_yellow_cable_club_fixture.py from the sibling
+#   walkthrough_to_cerulean harness's cerulean_pc.state. Player ends
+#   at map 0x40, tile (11, 3), one tile south of the Cable Club link
+#   receptionist; pressing UP + A fires CableClubNPC. If the fixture
+#   is the old EnterMap-hookwarp version, the nybble test's
+#   _ensure_fixture_is_walkable precondition below skips the run
+#   rather than hanging until timeout.
 # - Red fixture: not produced — Mt. Moon → Cerulean progression is not
 #   yet scripted in the Red harness.
-#
-# The nybble-exchange test below requires BOTH sides to walk to the
-# attendant, so only the blue↔blue pair runs today. Cross-version
-# (blue↔yellow and yellow↔blue) and yellow↔yellow inherit yellow's
-# walkability gap; they skip rather than silently pass-without-proving.
-_FIXTURES_WITH_WALKABLE_PLAYER = {"blue"}
+_FIXTURES_WITH_WALKABLE_PLAYER = {"blue", "yellow"}
+
+
+# Expected load-time player position per version. Used by the
+# nybble-test precondition so we don't run on a stale / wrong-shape
+# fixture. Keyed by ROM version, value is (map_id, x, y).
+_FIXTURE_EXPECTED_POS = {
+    # All versions share the same Cerulean Pokecenter interior map
+    # (0x40). The receptionist-adjacent tile is (11, 3).
+    "blue": (0x40, 11, 3),
+    "yellow": (0x40, 11, 3),
+}
+
+
+def _ensure_fixture_is_walkable(version: str, session: Session) -> None:
+    """Raise pytest.skip if the loaded state doesn't match the expected
+    load-time position for this version — pytest then reports the skip
+    with a pointer at the regeneration script rather than hanging the
+    test until timeout."""
+    expected = _FIXTURE_EXPECTED_POS.get(version)
+    if expected is None:
+        return
+    gs = session.read_game_state()
+    actual = (gs.overworld.map_id, gs.overworld.x, gs.overworld.y)
+    if actual != expected:
+        em, ex, ey = expected
+        am, ax, ay = actual
+        pytest.skip(
+            f"{version} fixture shape mismatch: expected player at "
+            f"map=0x{em:02x}, ({ex}, {ey}); got map=0x{am:02x}, "
+            f"({ax}, {ay}). Regenerate via "
+            f"scripts/produce_yellow_cable_club_fixture.py (or the "
+            f"version-appropriate equivalent)."
+        )
 
 
 @pytest.mark.parametrize(
@@ -422,6 +454,8 @@ def test_remote_trade_reaches_link_menu_via_tcp(
     try:
         session_a.load_state(state_listen.read_bytes())
         session_b.load_state(state_connect.read_bytes())
+        _ensure_fixture_is_walkable(version_listen, session_a)
+        _ensure_fixture_is_walkable(version_connect, session_b)
 
         link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(
             session_a, version_listen, session_b, version_connect
