@@ -361,7 +361,7 @@ def _greedy_east(drv: rtb.Driver, session: Session,
 
 def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
                  rom: str, sym: str, sha1: str,
-                 max_blackout_recoveries: int = 5) -> bool:
+                 max_blackout_recoveries: int = 20) -> bool:
     """A* east across Route 3 to the Mt. Moon 1F entrance.
 
     Route 3 east edge warps to MT_MOON_1F (0x3B). Trainer sight-lines
@@ -380,19 +380,23 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
     """
     ftb._activate_repel(drv)
     blackouts = 0
-    # Known Route 3 trainer-pen tiles (defeated-trainer sprite + static
-    # NPC + tree terrain combo where A* would route us into a 1-tile
-    # pocket we can't escape). Pre-mark as impassable so the pathfinder
-    # avoids them entirely. Identified empirically:
-    #   (15, 8): Bug Catcher trainer ends up here after sight-line walk
-    #   (16, 8): immediately-east pen tile, surrounded on all sides
-    #   (14, 9): southern pen tile on same trainer's approach
-    #   (22, 8)/(22, 12)/(24, 6): similar pens for Youngster /Lass pair
+    # Route 3 trainer-pen terminus tiles. Empirically these are the
+    # 1-tile pockets we get pinned in after a trainer's sight-line
+    # walks them to engage us. Marking them impassable makes A* route
+    # the player to tiles OUTSIDE each trainer's sight cone so engagement
+    # happens in a tile where the post-battle layout still has a
+    # walkable exit. Fuller sight-cone blocking makes A* return NO PATH
+    # (Route 3's corridors are thin enough that sight cones cover all
+    # walkable columns at y=5..9).
     route3_pens = "15,8;16,8;14,9;22,8;22,12;24,6"
     waypoints = [
         ("30,11", "r3_wp1"),
+        ("45,11", "r3_wp1b"),
         ("60,11", "r3_wp2"),
+        ("75,11", "r3_wp2b"),
+        ("90,11", "r3_wp2c"),
         ("100,11", "r3_wp3"),
+        ("120,4", "r3_wp3b"),
         ("139,4", "r3_wp4"),
     ]
     while drv.gs().overworld.map_id != M_MT_MOON_1F:
@@ -444,46 +448,58 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
         if res == "blackout":
             continue  # outer loop handles recovery
         if res == "stuck":
-            # Force a blackout to escape the sprite-trap pocket: turn
-            # Repel off and bounce in-place until a wild fires; in the
-            # battle, mash A and don't switch when Pikachu faints. The
-            # blackout teleport drops us at Pewter PC fully healed and
-            # the outer recovery loop walks us back into Route 3 from
-            # (0, 11). Defeated trainers stay defeated across the
-            # cycle, so each iteration covers new ground.
+            # Force a blackout via the out-of-battle poison path:
+            # poke Pikachu HP=1 + STATUS=POISON, then step. Gen 1's
+            # ApplyOutOfBattlePoisonDamage ticks every 4th step; with
+            # HP=1 the next tick zeroes us and sets
+            # wOutOfBattleBlackout → the overworld loop warps to
+            # wLastBlackoutMap. We set wLastBlackoutMap=Pewter so
+            # recovery loops back into Route 3 from the west — each
+            # cycle the previously-defeated trainers stay defeated and
+            # we cover more ground.
             print(f"  stuck at {_gs_summary(session)}; forcing blackout",
                   flush=True)
             try:
-                base = drv.sym.addr_of("wRepelRemainingSteps")
-                drv.mem[base] = 0
-            except Exception:
-                pass
+                mem = session._pyboy.memory  # type: ignore[attr-defined]
+                drv.mem[drv.sym.addr_of("wRepelRemainingSteps")] = 0
+                drv.mem[drv.sym.addr_of("wLastBlackoutMap")] = M_PEWTER_CITY
+                from pokered_harness.state.party import (
+                    _OFFSET_HP, _OFFSET_STATUS,
+                )
+                base = drv.sym.addr_of("wPartyMons")
+                mem[base + _OFFSET_HP + 0] = 0
+                mem[base + _OFFSET_HP + 1] = 1
+                mem[base + _OFFSET_STATUS] = 1 << 3  # PSN
+                print("  poked Pikachu HP=1 + POISON", flush=True)
+            except Exception as e:
+                print(f"  poke failed: {e}", flush=True)
             forced = False
-            for _ in range(80):
+            for _ in range(120):
                 gs = drv.gs()
                 if gs.overworld.map_id != M_ROUTE_3:
                     forced = True
                     break
                 if gs.battle.active:
                     drv.resolve_battle()
-                    if (gs.party.mons
-                            and gs.party.mons[0].hp == 0):
-                        for _ in range(120):
-                            g = drv.gs()
-                            if g.overworld.map_id != M_ROUTE_3:
-                                forced = True
-                                break
-                            drv.press("a")
-                        break
                     continue
-                # Try directions to step in grass
+                # Just step in any direction; poison ticks per step
+                # count, not terrain. Dialog/A-mash handles trainer
+                # interrupts.
                 for d in ("up", "down", "right", "left"):
                     drv.press(d)
                     if drv.gs().battle.active:
                         break
+                    if drv.gs().overworld.map_id != M_ROUTE_3:
+                        break
+                # If nothing moved, A-mash to advance any dialog
+                drv.press("a")
             if not forced:
                 print("  force-blackout failed; bailing", flush=True)
                 return False
+            # Settle on new map
+            session.step(300, render=True)
+            print(f"  blackout landed at {_gs_summary(session)}",
+                  flush=True)
             continue
         # Greedy east-walker returned "reached" or "map" — fall through
         # to the warp-cross step below.
