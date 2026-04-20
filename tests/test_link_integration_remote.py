@@ -25,6 +25,12 @@ import threading
 import time
 from pathlib import Path
 
+from tests._link_orchestrator import (
+    LockstepOrchestrator,
+    walk_a_toward,
+    walk_b_toward,
+)
+
 import pytest
 
 from pokered_harness.link.remote import (
@@ -1023,6 +1029,203 @@ def test_remote_menu_vote_converges_and_warps_to_trade_center(
                 f"menu_sel={count_a}/{count_b} map_a=0x{map_a:02x} "
                 f"map_b=0x{map_b:02x}\n"
             )
+        finally:
+            link_a.close()
+            link_b.close()
+    finally:
+        session_a.close()
+        session_b.close()
+
+
+# --- T3: full CableClub_DoBattleOrTrade drive over TCP ------------------
+#
+# Uses the LockstepOrchestrator (per-frame sync across the two sessions)
+# to walk both players onto the TRADE_CENTER hidden-event tiles and
+# press A on the same game frame. When both CableClubLeftGameboy and
+# CableClubRightGameboy fire, the game enters CableClub_DoBattleOrTrade
+# which runs three Serial_ExchangeBytes blocks — the RPC kinds we're
+# observing end-to-end over TCP.
+
+
+def _install_autoselect_trade_hook(session: Session) -> None:
+    """Port of LinkPair._install_linkmenu_autoselect_trade — forces
+    the LinkMenu vote to 'TRADE' by pre-planting 0xD4 in
+    wLinkMenuSelectionReceiveBuffer at the instruction that reads it."""
+    label = "LinkMenu.exchangeMenuSelectionLoop"
+    if label not in session.symbols:
+        return
+    recv_addr = session.symbols.addr_of("wLinkMenuSelectionReceiveBuffer")
+    bank, addr = session.symbols.bank_addr(label)
+    mem = session._pyboy.memory
+
+    def _force(_ctx, _mem=mem, _addr=recv_addr):
+        _mem[_addr] = 0xD4
+        _mem[_addr + 1] = 0xD4
+
+    session._pyboy.hook_register(bank, addr + 3, _force, None)
+
+
+def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
+    """Prove Serial_ExchangeBytes RPCs flow over TCP against real
+    ROM code inside CableClub_DoBattleOrTradeAgain.
+
+    Drives blue↔blue through the full Cable Club protocol over TCP:
+    attendant → menu → auto-select-TRADE → warp to TRADE_CENTER →
+    CableClub_DoBattleOrTradeAgain. Uses the LockstepOrchestrator
+    for per-frame sync across the two daemon threads (so their
+    auto-select hooks fire close in game-time) and observes the
+    link.exchange RPC stream for ``exchange_bytes/*`` kinds.
+
+    Assertion: the first of the three post-menu exchanges
+    (``exchange_bytes/wSerialRandomNumberListBlock``) fires on both
+    sides. That's the strongest milestone we can reliably drive
+    two-process: it proves CableClub_DoBattleOrTradeAgain's
+    ``Serial_ExchangeBytes`` codepath round-trips its
+    symbol-translated kind over TCP with real ROM code issuing the
+    RPC. (The 2nd and 3rd exchanges — PlayerDataBlock at ~428 bytes
+    and PartyMonsPatchList — frequently desync between the two
+    daemon threads after the auto-select bypass leaves each side's
+    wLinkState in slightly different shapes; re-converging the rest
+    is agent-policy work, covered transitively by the in-process
+    trade_roundtrip test.)
+    """
+    if not _roms_present("blue"):
+        pytest.skip("Blue ROM not present")
+    state = _cable_club_state("blue")
+    if not state.exists():
+        pytest.skip(f"Blue Cable Club state missing: {state}")
+
+    session_a = _open_session("blue")
+    session_b = _open_session("blue")
+    try:
+        session_a.load_state(state.read_bytes())
+        session_b.load_state(state.read_bytes())
+        _ensure_fixture_is_walkable("blue", session_a)
+        _ensure_fixture_is_walkable("blue", session_b)
+
+        link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(
+            session_a, "blue", session_b, "blue"
+        )
+        try:
+            # Instrument link.exchange on both sides to record every
+            # RPC kind that crosses TCP.
+            kinds_a: list[str] = []
+            kinds_b: list[str] = []
+
+            # Bump timeout to 30s per exchange — the 428-byte
+            # wSerialPlayerDataBlock exchange is slow over TCP and
+            # causes a 5s-default timeout desync between the two
+            # sides' serial state.
+            def _wrap(sink, inner):
+                def exchange(kind, my_bytes, *, timeout_ms=30000):
+                    sink.append(kind)
+                    return inner(kind, my_bytes, timeout_ms=timeout_ms)
+                return exchange
+
+            link_a.exchange = _wrap(kinds_a, link_a.exchange)  # type: ignore[method-assign]
+            link_b.exchange = _wrap(kinds_b, link_b.exchange)  # type: ignore[method-assign]
+
+            # Force menu vote to TRADE via the auto-select hook on both
+            # sides (same mechanism LinkPair uses for its in-process
+            # trade_roundtrip test).
+            _install_autoselect_trade_hook(session_a)
+            _install_autoselect_trade_hook(session_b)
+
+            ork = LockstepOrchestrator(
+                session_a, endpoint_a, session_b, endpoint_b
+            )
+            ork.start()
+            try:
+                # Phase 1: settle map script, walk UP to receptionist,
+                # press A through attendant dialog → SaveGameData →
+                # nybble sync → LinkMenu entry.
+                ork.step(60)
+                # Press A repeatedly until both sides land in TRADE_CENTER.
+                # Menu auto-select hook forces TRADE when the menu's
+                # exchange-selection-loop reads the receive buffer.
+                TRADE_CENTER = 0xEF
+                for _ in range(120):
+                    if (
+                        session_a.read_game_state().overworld.map_id == TRADE_CENTER
+                        and session_b.read_game_state().overworld.map_id == TRADE_CENTER
+                    ):
+                        break
+                    ork.press_both("a", duration=4)
+                    ork.step(8)
+                assert session_a.read_game_state().overworld.map_id == TRADE_CENTER
+                assert session_b.read_game_state().overworld.map_id == TRADE_CENTER
+
+                # Phase 2: let the TRADE_CENTER map init run (palette
+                # fade, NPC spawn, etc.) before driving the players.
+                ork.step(240)
+                px_a, py_a = (
+                    session_a.read_game_state().overworld.x,
+                    session_a.read_game_state().overworld.y,
+                )
+                px_b, py_b = (
+                    session_b.read_game_state().overworld.x,
+                    session_b.read_game_state().overworld.y,
+                )
+                sys.stderr.write(
+                    f"\n[trade-center-spawn] a=({px_a},{py_a}) b=({px_b},{py_b})\n"
+                )
+
+                # Phase 3: walk both players toward the trade table
+                # (tiles (4,4) and (5,4) on TRADE_CENTER map). Spawn
+                # positions depend on clock role — one side lands at
+                # (3,4) and walks right; the other lands at (6,4) and
+                # walks left.
+                for _ in range(4):
+                    x_a = session_a.read_game_state().overworld.x
+                    x_b = session_b.read_game_state().overworld.x
+                    if x_a < 4:
+                        ork.press_a("right", duration=8)
+                    elif x_a > 5:
+                        ork.press_a("left", duration=8)
+                    if x_b < 4:
+                        ork.press_b("right", duration=8)
+                    elif x_b > 5:
+                        ork.press_b("left", duration=8)
+                    ork.step(24)  # let the tile walk complete
+
+                # Phase 4: press A on both sides (frame-synchronous via
+                # press_both) to trigger the hidden-event tiles →
+                # CableClub_DoBattleOrTradeAgain and its three
+                # Serial_ExchangeBytes blocks.
+                # First-exchange milestone: RandomNumberListBlock is
+                # the first exchange inside CableClub_DoBattleOrTradeAgain.
+                # Its appearance on both sides proves the game reached
+                # the full post-menu data-exchange codepath and at
+                # least the first round-trip completed.
+                rng_kind = "exchange_bytes/wSerialRandomNumberListBlock"
+                for _ in range(200):
+                    seen_a = set(kinds_a)
+                    seen_b = set(kinds_b)
+                    if rng_kind in seen_a and rng_kind in seen_b:
+                        break
+                    ork.press_both("a", duration=4)
+                    ork.step(12)
+            finally:
+                ork.stop()
+
+            bytes_a = [k for k in kinds_a if k.startswith("exchange_bytes/")]
+            bytes_b = [k for k in kinds_b if k.startswith("exchange_bytes/")]
+            map_a = session_a.read_game_state().overworld.map_id
+            map_b = session_b.read_game_state().overworld.map_id
+            diag = (
+                f"map_a=0x{map_a:02x} map_b=0x{map_b:02x} "
+                f"bytes_a={bytes_a} bytes_b={bytes_b}"
+            )
+            assert rng_kind in kinds_a, (
+                f"listener never issued RandomNumberListBlock exchange — "
+                f"CableClub_DoBattleOrTradeAgain didn't run over TCP; "
+                f"{diag}"
+            )
+            assert rng_kind in kinds_b, (
+                f"connector never issued RandomNumberListBlock exchange; "
+                f"{diag}"
+            )
+            sys.stderr.write(f"\n[exchange-bytes blue↔blue] {diag}\n")
         finally:
             link_a.close()
             link_b.close()
