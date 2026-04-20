@@ -353,27 +353,34 @@ def _resolve_battle_no_blackout_mash(drv: "rtb.Driver",
         if not gs.battle.active:
             break
         if gs.party.mons and gs.party.mons[0].hp == 0:
-            _drive_post_battle_dialogs(drv)
+            _drive_post_battle_dialogs(drv, allow_learn=allow_learn)
             return True
         force_fight = flee_attempts >= 2
         fled = _battle_turn(drv, force_fight=force_fight,
                             allow_learn=allow_learn)
         if fled:
             flee_attempts += 1
-    _drive_post_battle_dialogs(drv)
+    _drive_post_battle_dialogs(drv, allow_learn=allow_learn)
     return False
 
 
-def _drive_post_battle_dialogs(drv: "rtb.Driver") -> None:
+def _drive_post_battle_dialogs(drv: "rtb.Driver",
+                                allow_learn: bool = True) -> None:
     """After the battle ends, advance any level-up / EXP / move-learn
     dialogs. Exits once joyIgnore clears AND no text box is rendering.
 
-    Gen 1's move-learn flow:
+    Gen 1's move-learn flow (when ``allow_learn=True``):
       1. "$mon wants to learn $move" — A.
       2. "Delete a move?" (mx==1 YES/NO) — A for YES.
       3. "Which move should be forgotten?" (mx==3 4-item list) —
          DOWN×2 then A overwrites slot 2 (usually the status move
          Growl/Tail Whip), keeping slot 0's damaging move intact.
+
+    With ``allow_learn=False`` we press B on the YES/NO instead, so
+    no forget menu opens. Used by Yellow's grinder where the lead
+    (Pikachu) starts with ThunderShock in slot 0 and any forget-menu
+    misnavigation that lands on slot 0 leaves the lead with only
+    status moves — soft-locking subsequent battles.
     """
     for _ in range(80):
         gs = drv.gs()
@@ -385,9 +392,12 @@ def _drive_post_battle_dialogs(drv: "rtb.Driver") -> None:
             return
         mx = drv.sym.read_u8(drv.mem, "wMaxMenuItem") if "wMaxMenuItem" in drv.sym else 0
         if not joy_locked and in_text and mx == 1:
-            drv.press("a", step=30)  # YES to learn
+            if allow_learn:
+                drv.press("a", step=30)  # YES to learn
+            else:
+                drv.press("b", step=30)  # NO — refuse learn/switch
             continue
-        if not joy_locked and in_text and mx == 3:
+        if not joy_locked and in_text and mx == 3 and allow_learn:
             drv.press("down")
             drv.press("down")
             drv.press("a", step=30)
@@ -512,7 +522,17 @@ def walk_to_viridian_and_heal(
                     if after != before:
                         moved_any = True
                 if not moved_any:
-                    print("  [heal] ledge-escape made no progress; bailing",
+                    # Tile is fully boxed in (e.g. (7, 51) on Route 2 —
+                    # one-way ledge entry plus tree neighbors). Bail
+                    # cleanly — caller's Option-B fallback reloads the
+                    # clean viridian_to_route2 milestone and tops up
+                    # the lead, so end-to-end pipeline still wins. We
+                    # tried _force_blackout_heal here too but it can't
+                    # take a grass-step from a fully-walled tile to
+                    # trigger an encounter, so it just spun for ~100k
+                    # presses before giving up.
+                    print("  [heal] ledge-escape made no progress; "
+                          "bailing — caller will Option-B-recover",
                           flush=True)
                     return False
                 session.step(60, render=True)
@@ -713,6 +733,7 @@ def _walk_until_battle(drv: "rtb.Driver", max_steps: int = 40) -> bool:
             drv.press("a")
             continue
         y = gs.overworld.y
+        x = gs.overworld.x
         # Prefer staying inside grass. When already there, step
         # through all four directions in rotation — each step is a
         # grass-or-adjacent candidate.
@@ -720,6 +741,14 @@ def _walk_until_battle(drv: "rtb.Driver", max_steps: int = 40) -> bool:
             d = "down"
         elif y > GRASS_Y_MAX:
             d = "up"
+        elif x > 6:
+            # Drift east leads to (7, 51) and beyond — a one-way ledge
+            # entry where the heal-path A* fails because the surrounding
+            # tiles are trees. Bias LEFT to stay near the safe grass
+            # corridor x∈[4..6].
+            d = "left"
+        elif x < 4:
+            d = "right"
         else:
             d = rotation[i % 4]
         before = (gs.overworld.x, gs.overworld.y)

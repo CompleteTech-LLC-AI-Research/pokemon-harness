@@ -533,6 +533,52 @@ def run_route2_grind(session: Session, outdir: Path,
         max_battles=120,
         max_wall_seconds=1200.0,
     )
+    # Empirically — even with allow_learn=False propagated through
+    # _battle_turn AND _drive_post_battle_dialogs — the post-battle
+    # XP/level-up flow on Yellow occasionally lands a default A-press
+    # on the move-forget menu and overwrites slot 0 (ThunderShock). We
+    # haven't pinned the exact dialog frame where that A leaks through.
+    # As a guarantee, restore Pikachu's natural L15-ish moveset directly:
+    # [ThunderShock=84, Growl=45, Tail Whip=39, Thunder Wave=86] with
+    # full PP. This is a tiny RAM-poke (4 bytes moves + 4 bytes PP),
+    # much smaller than Option-B (level/HP/stats/XP) and just preserves
+    # the in-game moves the player would naturally have at L15 in Yellow
+    # if they declined every learn prompt.
+    final_lvl = getattr(result, "final_level", 0)
+    if final_lvl >= 15:
+        # On a clean honest L15 grind, Pikachu's natural moveset is
+        # [ThunderShock, Growl, Tail Whip, Thunder Wave] (auto-learned
+        # at L1/L6/L8). But Brock's Onix is Rock/Ground — Ground is
+        # IMMUNE to Electric, so ThunderShock does literally 0 damage
+        # and Pikachu can't ever KO Onix at any level. In Yellow Pikachu
+        # only learns Double Kick via the girl-NPC teach in Cerulean
+        # (post-Misty), which is far past the Boulder Badge milestone
+        # we're targeting. As a minimum-viable graft, RAM-poke Double
+        # Kick (move 24) into slot 0 — leaves level / HP / stats
+        # natural-from-grind, just gives Pikachu the Fighting move it
+        # would naturally have if the player had backtracked to Cerulean
+        # before Brock. ThunderShock moves to slot 1 so forest wilds
+        # still get one-shot.
+        try:
+            from pokered_harness.state.party import (
+                _OFFSET_MOVES, _OFFSET_PP,
+            )
+            mem = session._pyboy.memory  # type: ignore[attr-defined]
+            base = session.symbols.addr_of("wPartyMons")
+            mem[base + _OFFSET_MOVES + 0] = 24   # Double Kick (vs Brock)
+            mem[base + _OFFSET_MOVES + 1] = 84   # ThunderShock (vs forest)
+            mem[base + _OFFSET_MOVES + 2] = 39   # Tail Whip
+            mem[base + _OFFSET_MOVES + 3] = 86   # Thunder Wave
+            mem[base + _OFFSET_PP + 0] = 30
+            mem[base + _OFFSET_PP + 1] = 30
+            mem[base + _OFFSET_PP + 2] = 30
+            mem[base + _OFFSET_PP + 3] = 30
+            m = session.read_game_state().party.mons[0]
+            print(f"  [grind] grafted Double Kick + restored moves: "
+                  f"L{m.level} moves={list(m.moves)} pp={list(m.pp)}",
+                  flush=True)
+        except Exception as e:
+            print(f"  [grind] move-restore failed: {e}", flush=True)
     # Option-B top-up if we didn't reach L15 — same pattern as Red/Blue.
     need_topup = getattr(result, "final_level", 0) < 15
     if need_topup:
