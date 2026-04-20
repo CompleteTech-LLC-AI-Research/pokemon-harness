@@ -610,12 +610,29 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
 
 # --- Phase 5: cross Route 4 east -> Cerulean City ------------------------
 
+def _perturb_rng(session: Session, seed_hash: int) -> None:
+    """Poke hRandomAdd (0xFFD3) / hRandomSub (0xFFD4) to break
+    deterministic NPC-walk cycles across blackout recoveries. Without
+    this, each cycle Pikachu traverses identical NPC patterns and
+    gets pinned at the same sprite-attractor tiles indefinitely."""
+    try:
+        mem = session._pyboy.memory  # type: ignore[attr-defined]
+        mem[0xFFD3] = (seed_hash * 37 + 123) & 0xFF
+        mem[0xFFD4] = (seed_hash * 211 + 17) & 0xFF
+    except Exception:
+        pass
+
+
 def _recover_to_route4_west(drv: rtb.Driver, session: Session,
                              outdir: Path, rom: str, sym: str, sha1: str,
                              max_cycles: int = 4) -> bool:
     """After a Mt. Moon blackout lands us at Pewter PC (0x3a or 0x02),
     walk back through Pewter → Route 3 → Route 4 west to resume Mt.
-    Moon traversal."""
+    Moon traversal. Perturbs the game's RNG (hRandomAdd/Sub) before
+    re-entering so NPC walk patterns differ per cycle, avoiding the
+    sprite-attractor cycles that trap identical replays."""
+    import time as _time
+    _perturb_rng(session, int(_time.time()))
     # Exit Pewter PC if inside
     for _ in range(8):
         if drv.gs().overworld.map_id == M_PEWTER_CITY:
