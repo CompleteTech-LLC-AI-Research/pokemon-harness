@@ -531,17 +531,17 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                  rom: str, sym: str, sha1: str) -> bool:
     """Walk east across Route 4 to the Cerulean City connection.
 
-    Route 4 has EAST connection to Cerulean (per map header). Player
-    enters Route 4 from Route 3's north boundary around x=13, y=17.
-    We need to walk NORTH a few steps (Route 4 has terrain y=17 is
-    grass, y<=10 is walkable path), then EAST across to the city
-    connection. Trainer fight along the way (Lass at (63, 3)).
+    Route 4 is split in two halves by the Mt. Moon mountain range:
+      - West half (sx <= 20) where Pikachu emerges from Route 3.
+      - East half (sx >= 23) connecting east to Cerulean.
+    There is no overworld bridge. To cross you MUST go through
+    Mt. Moon: enter via Route 4 warp at (18, 5) → MT_MOON_1F (14, 35),
+    path through 1F to B1F warp, through B1F to its east exit at
+    (27, 3) → Route 4 warp 3 at (24, 5) — now on east half.
     """
     ftb._activate_repel(drv)
-    # Settle + dialog clear from the warp-in transition.
     session.step(120, render=True)
-    # First step onto Route 4 properly (press UP to get off the
-    # connection-entry tile at y=17).
+    # Phase A: walk to Route 4 Mt. Moon warp at (18, 5) on west half.
     for _ in range(4):
         before = (drv.gs().overworld.x, drv.gs().overworld.y)
         drv.press("up")
@@ -550,19 +550,59 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
             break
     ftb._activate_repel(drv)
-    # A* to the east edge — Cerulean connects east of Route 4.
-    for goal, label in [("30,4", "r4_wp1"), ("50,4", "r4_wp2"),
-                         ("63,6", "r4_wp3")]:
+    res = _pathfind_walk(drv, session, outdir, "18,5", "r4w_to_mm",
+                         rom, sym, sha1,
+                         stop_map_ids=(M_MT_MOON_1F,))
+    print(f"  r4w_to_mm: {res} -> {_gs_summary(session)}", flush=True)
+    for _ in range(6):
+        if drv.gs().overworld.map_id == M_MT_MOON_1F:
+            break
+        drv.press("up")
+    session.step(120, render=True)
+    if drv.gs().overworld.map_id != M_MT_MOON_1F:
+        print(f"  failed to enter Mt. Moon 1F", flush=True)
+        return False
+
+    # Phase B: Mt. Moon 1F → B1F via warp (5, 5).
+    ftb._activate_repel(drv)
+    res = _pathfind_walk(drv, session, outdir, "5,5", "mm1f_to_b1f",
+                         rom, sym, sha1,
+                         stop_map_ids=(M_MT_MOON_B1F,))
+    print(f"  mm1f_to_b1f: {res} -> {_gs_summary(session)}", flush=True)
+    for _ in range(6):
+        if drv.gs().overworld.map_id == M_MT_MOON_B1F:
+            break
+        drv.press("up")
+    session.step(120, render=True)
+    if drv.gs().overworld.map_id != M_MT_MOON_B1F:
+        print(f"  failed Mt. Moon 1F → B1F", flush=True)
+        return False
+
+    # Phase C: Mt. Moon B1F east exit at (27, 3) → Route 4 (24, 5).
+    ftb._activate_repel(drv)
+    res = _pathfind_walk(drv, session, outdir, "27,3", "mmb1f_to_r4e",
+                         rom, sym, sha1,
+                         stop_map_ids=(M_ROUTE_4,))
+    print(f"  mmb1f_to_r4e: {res} -> {_gs_summary(session)}", flush=True)
+    for _ in range(6):
+        if drv.gs().overworld.map_id == M_ROUTE_4:
+            break
+        drv.press("up")
+    session.step(120, render=True)
+    if drv.gs().overworld.map_id != M_ROUTE_4:
+        print(f"  failed B1F → Route 4 east", flush=True)
+        return False
+
+    # Phase D: Route 4 east → Cerulean map-connection.
+    ftb._activate_repel(drv)
+    for goal, label in [("60,6", "r4e_wp1"), ("89,6", "r4e_wp2")]:
         if drv.gs().overworld.map_id != M_ROUTE_4:
             break
         res = _pathfind_walk(drv, session, outdir, goal, label,
                               rom, sym, sha1,
                               stop_map_ids=(M_CERULEAN_CITY,))
         print(f"  {label}: {res} -> {_gs_summary(session)}", flush=True)
-        if res == "blackout":
-            break
         ftb._activate_repel(drv)
-    # Cross east map-connection into Cerulean.
     for _ in range(8):
         if drv.gs().overworld.map_id == M_CERULEAN_CITY:
             break
