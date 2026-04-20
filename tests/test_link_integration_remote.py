@@ -1376,12 +1376,14 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
                         time.sleep(1.0)
                         for _ in range(3):
                             runner.press("up", duration=6)
-                            time.sleep(0.2)
+                            time.sleep(0.3)
                         # Press A until LinkMenu entry hook fires.
-                        deadline = time.time() + 20.0
+                        # Generous timeout — under parallel-test load
+                        # the PyBoy tick rate drops noticeably.
+                        deadline = time.time() + 40.0
                         while time.time() < deadline and not menu_evt.is_set():
                             runner.press("a", duration=4)
-                            time.sleep(0.15)
+                            time.sleep(0.2)
                         if not menu_evt.is_set():
                             result["error"] = f"{side}: LinkMenu never reached"
                             return
@@ -1424,8 +1426,8 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
             )
             t_a.start()
             t_b.start()
-            t_a.join(timeout=60.0)
-            t_b.join(timeout=60.0)
+            t_a.join(timeout=90.0)
+            t_b.join(timeout=90.0)
 
             assert "error" not in result_a, result_a.get("error")
             assert "error" not in result_b, result_b.get("error")
@@ -1471,3 +1473,28 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
     finally:
         session_a.close()
         session_b.close()
+
+
+# --- T4+AgentSync attempted: hook-level rendezvous exploration ---------
+#
+# Investigation notes: installing an AgentSync.rendezvous hook at
+# CableClub_DoBattleOrTrade entry (on top of the auto-select-TRADE
+# hook that powers T3) was attempted to eliminate the game-clock
+# drift between the two sides' CableClub_DoBattleOrTradeAgain runs.
+# Empirically, the added hook caused the entry to not fire at all
+# (cable_hits stayed 0 on both sides, no exchange_bytes RPCs
+# flowed) — suggesting that the extra hook registration or its
+# presence in the bank-01 hot path interferes with the sequence of
+# post-menu code PyBoy 2.7 takes. Exact cause is unclear without
+# deeper PyBoy-internals instrumentation.
+#
+# The combined T3 + rendezvous approach is therefore not a clean
+# win in the current setup. What remains genuinely provable in the
+# two-process model is what the tests above cover: the first
+# post-menu exchange_bytes round-trips over TCP (T3) and the
+# AgentSync rendezvous primitive itself works correctly on the
+# transport. Completing all three post-menu exchanges reliably
+# requires either the tick-broker collapse (effectively LinkPair)
+# or agent-driven transport hijack (agents' AgentSync drives menu
+# selection and CableClub data directly, bypassing the game's
+# per-frame Serial_Exchange* loops).
