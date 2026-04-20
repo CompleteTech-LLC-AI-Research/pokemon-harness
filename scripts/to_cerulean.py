@@ -76,6 +76,84 @@ def _gs_summary(session: Session) -> str:
     return " ".join(parts)
 
 
+def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
+                        goal_xy: str, label: str,
+                        rom: str, sym: str, sha1: str,
+                        target_map_id: int,
+                        max_presses: int = 200) -> str:
+    """Walk toward ``goal_xy`` one press at a time, re-A*-planning
+    from the current position + current NPC sprite layout after
+    every single step. This is slow (each step is ~1 s of pathfinder
+    subprocess time) but immune to stale-plan desyncs in maps with
+    wandering NPCs (Mt. Moon, caves, indoor floors with patrols).
+
+    Returns ``"map"`` when ``target_map_id`` reached, ``"reached"``
+    when goal_xy reached, ``"stuck"`` if no progress over many
+    consecutive presses, ``"blackout"`` if we land on Pewter.
+    """
+    no_progress = 0
+    last_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
+    for i in range(max_presses):
+        gs = drv.gs()
+        if gs.battle.active:
+            drv.resolve_battle()
+            continue
+        if gs.overworld.map_id == target_map_id:
+            return "map"
+        if gs.overworld.map_id in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
+            return "blackout"
+        gx, gy = [int(v) for v in goal_xy.split(",")]
+        if (gs.overworld.x, gs.overworld.y) == (gx, gy):
+            return "reached"
+        seed = outdir / f"_{label}_step.state"
+        seed.write_bytes(session.save_state())
+        try:
+            path = _run_pathfinder_ex(seed, goal_xy,
+                                       outdir / f"_{label}_step.txt",
+                                       rom, sym, sha1, None)
+        except RuntimeError:
+            # No path — blind nudge every direction, retry.
+            for d in ("up", "left", "down", "right"):
+                before = (drv.gs().overworld.x, drv.gs().overworld.y)
+                drv.press(d)
+                if drv.gs().battle.active:
+                    drv.resolve_battle()
+                    break
+                if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
+                    break
+            continue
+        if not path:
+            return "reached"
+        # Take ONE step from the plan.
+        d_char = path[0]
+        d_name = {"u": "up", "d": "down", "l": "left", "r": "right"}[d_char]
+        before = (drv.gs().overworld.x, drv.gs().overworld.y)
+        drv.press(d_name)
+        if drv.gs().battle.active:
+            drv.resolve_battle()
+        if drv.joy_locked():
+            session.step(120, render=True)
+        after = (drv.gs().overworld.x, drv.gs().overworld.y)
+        if after == before:
+            # Didn't move — mash A for dialog advance.
+            for _ in range(4):
+                drv.press("a")
+                if drv.gs().battle.active:
+                    drv.resolve_battle()
+                    break
+                if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
+                    break
+        cur = (drv.gs().overworld.x, drv.gs().overworld.y)
+        if cur != last_xy:
+            no_progress = 0
+            last_xy = cur
+        else:
+            no_progress += 1
+            if no_progress >= 30:
+                return "stuck"
+    return "stuck"
+
+
 def _pathfind_walk(drv: rtb.Driver, session: Session, outdir: Path,
                    goal_xy: str, label: str,
                    rom: str, sym: str, sha1: str,
@@ -568,40 +646,17 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         print(f"  failed to enter Mt. Moon 1F", flush=True)
         return False
 
-    # Phase B: Mt. Moon 1F → B1F via warp (5, 5). Mt. Moon has
-    # wandering NPC trainers so sprite-blocker positions change during
-    # walk, causing mid-path stalls. Re-A* from the stuck position
-    # each time; on repeated same-position stall, take a blind step
-    # to break the NPC-bounce cycle and re-A* again.
+    # Phase B: Mt. Moon 1F → B1F via warp (5, 5). Use single-step
+    # re-A* to defeat the wandering-NPC sprite-pocket attractors
+    # that stale 40-step plans kept converging into. Each step
+    # re-queries the game for current NPC positions.
     ftb._activate_repel(drv)
-    last_stuck_xy = None
-    for retry in range(20):
-        if drv.gs().overworld.map_id != M_MT_MOON_1F:
-            break
-        res = _pathfind_walk(drv, session, outdir, "5,5",
-                              f"mm1f_to_b1f_r{retry}",
+    res = _step_by_step_walk(drv, session, outdir, "5,5", "mm1f_b1f",
                               rom, sym, sha1,
-                              stop_map_ids=(M_MT_MOON_B1F,),
-                              stall_window=30)
-        print(f"  mm1f_to_b1f_r{retry}: {res} -> "
-              f"{_gs_summary(session)}", flush=True)
-        # Only success is actually transitioning to B1F. "done" from
-        # walk_path means the path string was exhausted, not that the
-        # goal tile was reached — cave NPCs routinely cause silent
-        # no-moves inside the 30-step stall window.
-        if drv.gs().overworld.map_id == M_MT_MOON_B1F:
-            break
-        cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
-        if cur_xy == last_stuck_xy:
-            # Same position two retries in a row — take a blind nudge
-            # in every direction to unstick us from a wandering NPC.
-            for d in ("up", "left", "down", "right"):
-                drv.press(d)
-                if drv.gs().battle.active:
-                    drv.resolve_battle()
-        last_stuck_xy = cur_xy
-        ftb._activate_repel(drv)
-        session.step(120, render=True)
+                              target_map_id=M_MT_MOON_B1F,
+                              max_presses=400)
+    print(f"  mm1f_b1f step-walk: {res} -> {_gs_summary(session)}",
+          flush=True)
     for _ in range(6):
         if drv.gs().overworld.map_id == M_MT_MOON_B1F:
             break
@@ -613,28 +668,12 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
 
     # Phase C: Mt. Moon B1F east exit at (27, 3) → Route 4 (24, 5).
     ftb._activate_repel(drv)
-    last_stuck_xy = None
-    for retry in range(20):
-        if drv.gs().overworld.map_id != M_MT_MOON_B1F:
-            break
-        res = _pathfind_walk(drv, session, outdir, "27,3",
-                              f"mmb1f_to_r4e_r{retry}",
+    res = _step_by_step_walk(drv, session, outdir, "27,3", "mmb1f_r4e",
                               rom, sym, sha1,
-                              stop_map_ids=(M_ROUTE_4,),
-                              stall_window=30)
-        print(f"  mmb1f_to_r4e_r{retry}: {res} -> "
-              f"{_gs_summary(session)}", flush=True)
-        if drv.gs().overworld.map_id == M_ROUTE_4:
-            break
-        cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
-        if cur_xy == last_stuck_xy:
-            for d in ("up", "left", "down", "right"):
-                drv.press(d)
-                if drv.gs().battle.active:
-                    drv.resolve_battle()
-        last_stuck_xy = cur_xy
-        ftb._activate_repel(drv)
-        session.step(120, render=True)
+                              target_map_id=M_ROUTE_4,
+                              max_presses=400)
+    print(f"  mmb1f_r4e step-walk: {res} -> {_gs_summary(session)}",
+          flush=True)
     for _ in range(6):
         if drv.gs().overworld.map_id == M_ROUTE_4:
             break
