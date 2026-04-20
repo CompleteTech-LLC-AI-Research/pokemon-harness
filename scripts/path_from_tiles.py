@@ -132,6 +132,14 @@ def read_sprite_blockers(session: Session,
     mem = session._pyboy.memory
     data2 = session.symbols.addr_of("wSpriteStateData2")
     data1 = session.symbols.addr_of("wSpriteStateData1")
+    # Yellow's Pikachu-follow-player sprite occupies slot 15 and uses
+    # image_id $49 (SPRITE_PIKACHU-derived). It trails the player by
+    # 1 tile and the game handles its collision specially — it does
+    # NOT block the player's movement since the game moves it out of
+    # the way as the player walks. Treating it as a static blocker
+    # over-constrains A*, pinning the planner in tight corridors
+    # where Pikachu shadows the step cell the plan wants next.
+    PIKACHU_FOLLOW_IMAGE = 0x49
     blockers: set[tuple[int, int]] = set()
     for i in range(1, 16):
         base2 = data2 + i * 0x10
@@ -139,6 +147,19 @@ def read_sprite_blockers(session: Session,
         my_raw = int(mem[base2 + 4]) & 0xFF
         mx_raw = int(mem[base2 + 5]) & 0xFF
         if (mx_raw, my_raw) == (0, 0):
+            continue
+        pic = int(mem[base1]) & 0xFF
+        if pic == PIKACHU_FOLLOW_IMAGE:
+            continue
+        # visibility byte at wSpriteStateData1+2 is $FF for sprites
+        # the game has hidden (via HideObject or off-screen culling).
+        # Hidden sprites don't participate in IsSpriteInFrontOfPlayer,
+        # so they don't block movement — A* shouldn't treat them as
+        # blockers. (Off-screen culling also sets $FF, but those
+        # sprites re-appear with real visibility when the player
+        # approaches, at which point read is re-invoked per step.)
+        vis = int(mem[base1 + 2]) & 0xFF
+        if vis == 0xFF:
             continue
         sx, sy = mx_raw - 4, my_raw - 4
         blockers.add((sx, sy))
@@ -238,11 +259,42 @@ _LEDGE_TILES_BY_DIR: dict[str, set[int]] = {
 }
 
 
+# Tileset id -> set of frozenset({tileA, tileB}) where moving between a
+# pair of adjacent feet-tiles matching (A, B) is blocked. Parsed from
+# pokeyellow/data/tilesets/pair_collision_tile_ids.asm TilePairCollisionsLand.
+# Each entry represents a 1-tile elevation difference the player cannot
+# cross on foot (ledges inside caves, forest-floor bumps, etc.).
+#
+# CAVERN(17): $20<->$05, $41<->$05, $2A<->$05, $05<->$21
+# FOREST(3): $30<->$2E, $52<->$2E, $55<->$2E, $56<->$2E, $20<->$2E,
+#            $5E<->$2E, $5F<->$2E
+# (Water pair-collisions are listed separately and only apply to surfing;
+#  we only model TilePairCollisionsLand since the harness doesn't surf.)
+_PAIR_COLLISIONS: dict[int, set[frozenset[int]]] = {
+    17: {  # CAVERN
+        frozenset({0x20, 0x05}),
+        frozenset({0x41, 0x05}),
+        frozenset({0x2A, 0x05}),
+        frozenset({0x05, 0x21}),
+    },
+    3: {  # FOREST
+        frozenset({0x30, 0x2E}),
+        frozenset({0x52, 0x2E}),
+        frozenset({0x55, 0x2E}),
+        frozenset({0x56, 0x2E}),
+        frozenset({0x20, 0x2E}),
+        frozenset({0x5E, 0x2E}),
+        frozenset({0x5F, 0x2E}),
+    },
+}
+
+
 def astar(
     passable: list[list[bool]],
     start: tuple[int, int],
     goal: tuple[int, int],
     tile_grid: list[list[int]] | None = None,
+    pair_collisions: set[frozenset[int]] | None = None,
 ) -> str | None:
     """Standard 4-connected A* with Manhattan heuristic. Returns direction
     string or None.
@@ -252,6 +304,13 @@ def astar(
     a ledge tile matching direction d, the player jumps to (x+2dx, y+2dy)
     in a single press. This lets the pathfinder use south-ledge drops
     (Route 3, Route 4, Route 24 etc.) that otherwise read as walls.
+
+    When ``pair_collisions`` is provided (a set of frozenset{t1, t2}),
+    the transition between two adjacent cells is blocked whenever their
+    feet tiles form a pair in the set — even if both cells are
+    individually walkable. This models the Gen 1 elevation-barrier
+    mechanic (cave 1-tile cliffs, forest bumps, etc.) implemented in
+    home/overworld.asm CheckForTilePairCollisions.
     """
     h = len(passable)
     w = len(passable[0]) if h else 0
@@ -300,6 +359,16 @@ def astar(
                 continue
             ng = g + 1
             if passable[ny][nx]:
+                # Check pair-collision: if both current and neighbor
+                # cells' feet tiles form a blocked pair, the game
+                # refuses the transition (Gen 1 elevation barrier).
+                if pair_collisions and tile_grid is not None:
+                    cur_feet = cell_feet_tile(x, y)
+                    nb_feet = cell_feet_tile(nx, ny)
+                    if (cur_feet is not None and nb_feet is not None
+                            and frozenset({cur_feet, nb_feet})
+                                in pair_collisions):
+                        continue
                 key = (nx, ny)
                 if ng < best_g.get(key, 1 << 30):
                     best_g[key] = ng
@@ -541,8 +610,13 @@ def main() -> int:
             )
             passable_grid[gy][gx] = True
 
+    pair_collisions = _PAIR_COLLISIONS.get(tileset_id)
+    if pair_collisions:
+        print(f"pair-collisions active for tileset 0x{tileset_id:02x}: "
+              f"{len(pair_collisions)} rules", flush=True)
     print(f"running A* from ({px},{py}) to {goal}", flush=True)
-    path = astar(passable_grid, (px, py), goal, tile_grid=tile_grid)
+    path = astar(passable_grid, (px, py), goal, tile_grid=tile_grid,
+                  pair_collisions=pair_collisions)
     if path is None:
         print("NO PATH FOUND", flush=True)
         return 1
