@@ -105,6 +105,18 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
         gx, gy = [int(v) for v in goal_xy.split(",")]
         if (gs.overworld.x, gs.overworld.y) == (gx, gy):
             return "reached"
+        # B-mash a few times before re-A*ing to close any stale NPC
+        # dialog. A-mash-on-stall elsewhere can open adjacent-NPC
+        # text which then absorbs all subsequent direction presses —
+        # B-press closes those dialogs and restores overworld input.
+        for _ in range(3):
+            before = (drv.gs().overworld.x, drv.gs().overworld.y)
+            drv.press("b")
+            if drv.gs().battle.active:
+                drv.resolve_battle()
+                break
+            if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
+                break
         seed = outdir / f"_{label}_step.state"
         seed.write_bytes(session.save_state())
         try:
@@ -134,15 +146,11 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
         if drv.joy_locked():
             session.step(120, render=True)
         after = (drv.gs().overworld.x, drv.gs().overworld.y)
-        if after == before:
-            # Didn't move — mash A for dialog advance.
-            for _ in range(4):
-                drv.press("a")
-                if drv.gs().battle.active:
-                    drv.resolve_battle()
-                    break
-                if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
-                    break
+        # No A-mash on stall here — would trigger adjacent-NPC dialog
+        # and absorb subsequent direction presses. If we're genuinely
+        # in dialog we'll clear it via the B-mash at the TOP of the
+        # next iteration. Re-A* will naturally pick an alternate
+        # neighbor if this direction is permanently walled.
         cur = (drv.gs().overworld.x, drv.gs().overworld.y)
         if cur != last_xy:
             no_progress = 0
