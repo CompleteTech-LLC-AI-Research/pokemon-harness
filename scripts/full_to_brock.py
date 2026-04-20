@@ -63,18 +63,29 @@ DIR_CHAR = {"u": "up", "d": "down", "l": "left", "r": "right"}
 
 
 def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
-              blackout_map_ids=(0x25, 0x26)) -> str:
+              blackout_map_ids=(0x25, 0x26),
+              stall_window: int = 12) -> str:
     """Execute a direction-string path. Auto-resolves battles; aborts if
     we blackout (map warps to player's house). Returns reason: ``stop``,
-    ``blackout``, ``fainted``, or ``done``.
+    ``blackout``, ``fainted``, ``stalled``, or ``done``.
 
     If a press doesn't move us, mashes A to clear any trainer dialog /
     "Hey, wait up!" text that fires when an NPC's sight line catches us
     — the battle only becomes active after the dialog is dismissed,
     and before then `joy_locked` is already 0 so callers can't tell a
     wall from a dialog by the standard flags.
+
+    A pre-planned A* path becomes wrong once an NPC walks into it (or
+    once the path-stepper diverges from real game collision): the
+    "stalled" return code triggers once the player's xy hasn't changed
+    across the last ``stall_window`` path steps (counting wall-collisions
+    interspersed with the occasional A-mash-driven micro-move). Caller
+    is expected to re-A* from the current position. Pure consecutive
+    stall counting was insufficient — interleaved successes reset the
+    counter even when net progress was zero.
     """
     start_map = drv.gs().overworld.map_id
+    pos_history: list[tuple[int, int, int]] = []
     for i, c in enumerate(path, 1):
         gs = drv.gs()
         if gs.overworld.map_id in stop_map_ids:
@@ -113,6 +124,27 @@ def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
                        drv.gs().overworld.map_id)
                 if nxt != before:
                     break
+        # Track xy history; if the player has been pinned within a
+        # 1-tile radius for the last ``stall_window`` steps, the
+        # pre-planned path has desynced and we should let the caller
+        # re-A*.
+        cur = (drv.gs().overworld.x, drv.gs().overworld.y,
+               drv.gs().overworld.map_id)
+        pos_history.append(cur)
+        if len(pos_history) > stall_window:
+            pos_history.pop(0)
+        if len(pos_history) == stall_window:
+            xs = {p[0] for p in pos_history}
+            ys = {p[1] for p in pos_history}
+            maps = {p[2] for p in pos_history}
+            if (len(maps) == 1
+                    and max(xs) - min(xs) <= 1
+                    and max(ys) - min(ys) <= 1):
+                print(f"[{label}] step {i}: stuck within "
+                      f"({min(xs)}-{max(xs)},{min(ys)}-{max(ys)}) for "
+                      f"{stall_window} steps — bailing for caller "
+                      f"re-plan", flush=True)
+                return "stalled"
     return "done"
 
 

@@ -538,17 +538,25 @@ def run_route2_grind(session: Session, outdir: Path,
     if need_topup:
         print(f"  [grind] ended at L{getattr(result, 'final_level', '?')}"
               f" < 15; applying Option-B top-up", flush=True)
-        # Ensure we're out of any lingering battle/menu before RAM poke,
-        # same cleanup as full_to_brock._option_b_topup caller.
-        for _ in range(40):
-            gs = session.read_game_state()
-            if not gs.battle.active:
-                break
-            session.press("b"); session.step(30, render=True)
-            if not session.read_game_state().battle.active:
-                break
-            session.press("down"); session.step(20, render=True)
-            session.press("a"); session.step(30, render=True)
+        # The grinder bails on heal_failed at a transient mid-engine
+        # state (often mid-battle-menu, mid-screen-transition). Pressing
+        # B/down/A to clean the menu doesn't restore tileset-collision
+        # WRAM, so a downstream save_state can serialise garbage —
+        # path_from_tiles then sees `passable tile ids: 0x7f, 0xe0`
+        # (2 tiles instead of ~20) and reports `walkable step cells:
+        # 0/1440`. Sidestep the whole transient-state mess by reloading
+        # the clean viridian_to_route2 milestone (player at canonical
+        # (8, 71), no in-flight engine state) and re-applying the
+        # Option-B boost on top of that.
+        milestone = outdir / "milestones" / "viridian_to_route2.state"
+        if milestone.exists():
+            print(f"  [grind] reloading clean {milestone.name} before boost",
+                  flush=True)
+            session.load_state(milestone.read_bytes())
+            session.step(60, render=True)
+        else:
+            print(f"  [grind] WARN milestone {milestone} missing; "
+                  "boost will run on dirty state", flush=True)
         boost_pikachu(session)
 
 
@@ -558,11 +566,19 @@ def run_route2_to_forest(session: Session, outdir: Path,
     ftb._activate_repel(drv)
     seed = outdir / "_r2_to_gate.state"
     seed.write_bytes(session.save_state())
-    path = run_pathfinder(seed, "3,44", outdir / "_r2_to_gate.txt",
-                          rom, sym, sha1)
-    print(f"  route2 A*: {len(path)} steps", flush=True)
-    ftb.walk_path(drv, path, label="route2",
-                  stop_map_ids=(0x32, 0x33))
+    try:
+        path = run_pathfinder(seed, "3,44", outdir / "_r2_to_gate.txt",
+                              rom, sym, sha1)
+        print(f"  route2 A*: {len(path)} steps", flush=True)
+        ftb.walk_path(drv, path, label="route2",
+                      stop_map_ids=(0x32, 0x33))
+    except RuntimeError as e:
+        # A* can return NO PATH if the player is in a ledge-trapped
+        # pocket the model doesn't understand. Blind-nudge south (the
+        # gate direction) — ledges let us drop through.
+        print(f"  route2 pathfind failed: {e}; blind-nudging south",
+              flush=True)
+        _blind_unstick(drv, prefer="down", tries=20, idle_ticks=60)
     for _ in range(4):
         if drv.gs().overworld.map_id == 0x32:
             break
@@ -583,6 +599,50 @@ def run_route2_to_forest(session: Session, outdir: Path,
             if drv.gs().overworld.map_id == rtb.M_VIRIDIAN_FOREST:
                 break
             drv.press("up")
+
+
+def _blind_unstick(drv, prefer: str = "up", tries: int = 12,
+                   idle_ticks: int = 120) -> bool:
+    """Nudge the player when A* can't find a path.
+
+    Two separate failure modes:
+
+    1. **Tile-model mismatch**: A* saw an impassable tile (e.g. feet
+       tile 0x20 forced-walkable at the player's cell but no passable
+       neighbors). Actual game lets us move; we just need to try each
+       direction.
+
+    2. **NPC boxed-in**: a wandering NPC walked into a neighbor tile
+       after we arrived. All 4 directions are temporarily blocked,
+       but the NPC eventually moves. We need to *wait* — idle the
+       emulator so NPC movement scripts can tick.
+
+    Strategy: on each try, press the preferred direction, then rotate
+    through the other three. If nothing moves, idle ``idle_ticks``
+    frames before the next try (gives wandering NPCs time to vacate).
+    Returns True iff the player moved at least one tile.
+    """
+    order: list[str] = [prefer]
+    for d in ("up", "down", "left", "right"):
+        if d not in order:
+            order.append(d)
+    start = (drv.gs().overworld.x, drv.gs().overworld.y)
+    for step in range(tries):
+        for d in order:
+            before = (drv.gs().overworld.x, drv.gs().overworld.y)
+            drv.press(d)
+            if drv.gs().battle.active:
+                drv.resolve_battle()
+            after = (drv.gs().overworld.x, drv.gs().overworld.y)
+            if after != before:
+                if after != start:
+                    return True
+                break
+        if (drv.gs().overworld.x, drv.gs().overworld.y) != start:
+            return True
+        # Give NPCs time to wander off our neighbors before the next try.
+        drv.idle(idle_ticks)
+    return (drv.gs().overworld.x, drv.gs().overworld.y) != start
 
 
 def run_forest_traversal(session: Session, outdir: Path,
@@ -628,9 +688,21 @@ def run_forest_traversal(session: Session, outdir: Path,
                 print(f"  forest pathfind retry {retry+1} fail: {e}",
                       flush=True)
         if path is None:
-            print(f"  forest pathfind gave up after 3 retries: {last_err}",
-                  flush=True)
-            break
+            # A* model says NO PATH (or subprocess crashed). The model's
+            # passable-tile list is stricter than the game's actual
+            # collision check — at certain forest tiles (e.g. (1, 18)
+            # with feet-tile 0x20) A* sees an isolated island even
+            # though the player can walk UP. Blind nudge: press the
+            # goal-direction (UP toward (1,0)) and rotate L/R/D as
+            # escape attempts. If anything moves us, retry the A*.
+            print(f"  forest pathfind gave up after 3 retries: "
+                  f"{last_err}; blind-nudging", flush=True)
+            blind_moved = _blind_unstick(drv, prefer="up")
+            if not blind_moved:
+                print("  forest blind-nudge made no progress; bailing",
+                      flush=True)
+                break
+            continue
         print(f"  forest leg {attempt}: {len(path)} steps", flush=True)
         if not path:
             for _ in range(4):
@@ -638,9 +710,17 @@ def run_forest_traversal(session: Session, outdir: Path,
                 if drv.gs().overworld.map_id == 0x2F:
                     break
             continue
-        ftb.walk_path(drv, path, label=f"forest{attempt}",
-                      stop_map_ids=(0x2F,))
+        result = ftb.walk_path(drv, path, label=f"forest{attempt}",
+                               stop_map_ids=(0x2F,))
         gs = drv.gs()
+        if result == "stalled":
+            # walk_path detected a desync; loop back to re-A* from
+            # the new (stuck) position. If A* fails again we'll hit
+            # the blind-nudge fallback above.
+            print(f"  forest leg {attempt} stalled at "
+                  f"({gs.overworld.x},{gs.overworld.y}); re-planning",
+                  flush=True)
+            continue
         if gs.overworld.map_id == 0x33 and gs.overworld.y == 0:
             for _ in range(3):
                 drv.press("up")

@@ -46,7 +46,12 @@ M_VIRIDIAN_FOREST_NORTH_GATE = 0x2F
 M_PEWTER_POKECENTER = 0x3A  # VIRIDIAN is 0x29, Pewter around 0x3A
 M_PEWTER_GYM = 0x36
 
-# Damaging moves (to prefer over status moves)
+# Damaging moves (to prefer over status moves). Originally a
+# Bulbasaur-only set for Red/Blue, but Yellow Pikachu needs its
+# electric moves here too — without ThunderShock the Driver.battle_turn
+# falls back to "any move with PP" and picks Growl, which loops forever
+# against trainer Pokémon (resolve_battle exhausts max_turns with the
+# enemy at full HP). See: forest Bug Catcher trainer fight at (1, 18).
 DAMAGING_MOVE_IDS = {
     33,  # Tackle
     73,  # Leech Seed (drains HP, counts as damaging for our purposes)
@@ -54,6 +59,15 @@ DAMAGING_MOVE_IDS = {
     77,  # PoisonPowder (minor)
     78,  # Stun Spore
     79,  # Sleep Powder
+    # Yellow Pikachu lead set
+    84,  # ThunderShock
+    85,  # Thunderbolt
+    87,  # Thunder
+    24,  # Double Kick
+    98,  # Quick Attack
+    104,  # Slam (Pikachu learns at L20; included for late-set parity)
+    21,  # Slam alternate?
+    86,  # Skull Bash (rare; included so we never accidentally miss)
 }
 
 # Known moves Bulbasaur gets
@@ -113,6 +127,17 @@ class Driver:
             self.battle_turn()
 
     def battle_turn(self) -> None:
+        # Prefer the grinder's robust implementation when available — it
+        # has a wider DAMAGING_MOVE_IDS set, better dialog flushing, and
+        # has been driven through 95+ wild + several trainer battles
+        # successfully across all three ROMs. Lazy import avoids the
+        # circular dependency at module load (grind imports rtb).
+        try:
+            from grind import _battle_turn as _grind_battle_turn
+            _grind_battle_turn(self, force_fight=True)
+            return
+        except ImportError:
+            pass
         # Step 1: Advance dialog until main menu (max=3, unlocked)
         for _ in range(60):
             gs = self.gs()

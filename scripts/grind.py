@@ -163,7 +163,8 @@ def _safe_walk(drv, path: str, *, label: str, stop_map_ids=()) -> str:
 
 
 def _battle_turn(drv: "rtb.Driver", *, flee_below_hp_frac: float = 0.55,
-                  force_fight: bool = False) -> bool:
+                  force_fight: bool = False,
+                  allow_learn: bool = False) -> bool:
     """Drive one battle menu turn.
 
     If pre-turn HP is below ``flee_below_hp_frac`` * max and this isn't
@@ -282,7 +283,49 @@ def _battle_turn(drv: "rtb.Driver", *, flee_below_hp_frac: float = 0.55,
         # send DOWN to land on slot 1 (usually Growl / Tail Whip)
         # before confirming, so we don't overwrite the strong damaging
         # move the mon was given at creation.
+        #
+        # Exception: in trainer battles, after we KO an enemy mon and
+        # the trainer has more, Gen 1 asks "Would you like to switch
+        # POKÉMON?" as a YES/NO prompt. Pressing YES opens the party
+        # menu (mx==0 for a one-mon party — just "CANCEL"), pressing A
+        # on CANCEL returns to the YES/NO prompt → infinite loop at
+        # step 123 of forest leg 0. Detect by looking at enemy HP: if
+        # enemy is at full HP the prompt is a switch-offer (they just
+        # sent in a fresh mon), not a learn-offer (learn fires on
+        # level-up which happens during the end-of-battle XP flow
+        # where enemy HP has been zeroed for a while). Press B to
+        # refuse. Learn prompts still land here with enemy HP=0 (or
+        # post-battle stale values), so we keep the A-press default.
         if not drv.joy_locked() and mx == 1:
+            if not allow_learn:
+                # Outside of the grinder (forest walk, gym, etc.) a
+                # YES/NO prompt means either "switch POKÉMON?" (trainer
+                # just KO'd our mon's opponent) or "learn new move?"
+                # (level-up). Both are safe to refuse with B; switching
+                # is a no-op we don't need, and we definitely don't
+                # want to accidentally accept a learn-move prompt that
+                # then requires navigating the move-to-forget menu —
+                # the cursor lands on slot 0 and if we confirm with A
+                # we'll overwrite whichever damaging move lives there.
+                # Concrete past bug: Pikachu at L15/16 learned Double
+                # Team, the grinder's A-press confirmed the forget
+                # menu on slot 0 = ThunderShock, leaving Pikachu with
+                # only status moves and soft-locking trainer fights.
+                drv.press("b", step=20)
+                continue
+            # allow_learn=True (grinder phase): accept by default. Before
+            # pressing A, check if this is actually a switch prompt (enemy
+            # at full HP = fresh switched-in mon) and refuse if so.
+            try:
+                base_ehp = drv.sym.addr_of("wEnemyMonHP")
+                base_emhp = drv.sym.addr_of("wEnemyMonMaxHP")
+                ehp = (drv.mem[base_ehp] << 8) | drv.mem[base_ehp + 1]
+                emhp = (drv.mem[base_emhp] << 8) | drv.mem[base_emhp + 1]
+                if emhp > 0 and ehp >= emhp:
+                    drv.press("b", step=20)
+                    continue
+            except Exception:
+                pass
             drv.press("a", step=20)
             continue
         drv.press("a", step=20)
@@ -290,7 +333,8 @@ def _battle_turn(drv: "rtb.Driver", *, flee_below_hp_frac: float = 0.55,
 
 
 def _resolve_battle_no_blackout_mash(drv: "rtb.Driver",
-                                      *, max_turns: int = 80) -> bool:
+                                      *, max_turns: int = 80,
+                                      allow_learn: bool = True) -> bool:
     """Drive battle to completion. Returns True if the lead mon fainted
     (caller should handle blackout), False otherwise.
 
@@ -312,7 +356,8 @@ def _resolve_battle_no_blackout_mash(drv: "rtb.Driver",
             _drive_post_battle_dialogs(drv)
             return True
         force_fight = flee_attempts >= 2
-        fled = _battle_turn(drv, force_fight=force_fight)
+        fled = _battle_turn(drv, force_fight=force_fight,
+                            allow_learn=allow_learn)
         if fled:
             flee_attempts += 1
     _drive_post_battle_dialogs(drv)
@@ -890,7 +935,9 @@ def grind_to(
                 _ensure_in_grass(drv, session, outdir, rom, sym, sha1)
             continue
 
-        fainted = _resolve_battle_no_blackout_mash(drv)
+        fainted = _resolve_battle_no_blackout_mash(
+            drv, allow_learn=(target_move_id is not None),
+        )
         battles += 1
         # Let post-battle animation/map redraw settle so wPartyCount /
         # wPartyMons read back a stable struct.
