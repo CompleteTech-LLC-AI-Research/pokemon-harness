@@ -214,17 +214,24 @@ localhost TCP. Role matters: listener is the internal-clock master,
 connector the external-clock slave — a reversed pair is a distinct
 wire configuration.
 
-| Listener | Connector | Handshake | Nybble → LinkMenu | Nybble RPC observed | Menu-selection RPC observed |
-|---|---|---|---|---|---|
-| blue | blue | ✅ | ✅ | ✅ | ✅ |
-| blue | yellow | ✅ | ✅ | ✅ | ✅ |
-| yellow | blue | ✅ | ✅ | ✅ | ✅ |
-| yellow | yellow | ✅ | ✅ | ✅ | ✅ |
-| red | red | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
-| red | blue | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
-| blue | red | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
-| red | yellow | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
-| yellow | red | ⏭ fixture gap | ⏭ fixture gap | ⏭ | ⏭ |
+| Listener | Connector | Handshake | Nybble → LinkMenu | Nybble RPC obs | Menu-sel RPC obs | TRADE_CENTER warp |
+|---|---|---|---|---|---|---|
+| blue | blue | ✅ | ✅ | ✅ | ✅ | ✅ |
+| blue | yellow | ✅ | ✅ | ✅ | ✅ | ✅ |
+| yellow | blue | ✅ | ✅ | ✅ | ✅ | ✅ |
+| yellow | yellow | ✅ | ✅ | ✅ | ✅ | ✅ |
+| red | red | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+| red | blue | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+| blue | red | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+| red | yellow | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+| yellow | red | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+
+Every non-red row now hits every transport-testable milestone.
+Menu-selection RPC counts are balanced on both sides within ±1 for
+all 4 working pairs (measured: blue↔blue 65/64, blue↔yellow 113/112,
+yellow↔blue 60/59, yellow↔yellow 97/96) — the byte exchange through
+`Serial_ExchangeLinkMenuSelection` round-trips correctly regardless of
+version pairing.
 
 Fixture gaps:
 
@@ -248,25 +255,36 @@ Fixture gaps:
 Transport-layer behaviour past LinkMenu
 (`Serial_ExchangeLinkMenuSelection`, `Serial_ExchangeBytes` for the
 three RNG/player-data/patch-list blocks inside `CableClub_DoBattleOrTrade`)
-is covered separately:
+is covered across multiple levels:
 
 - In-process, end-to-end on real ROMs:
-  `test_link_integration.test_link_trade_roundtrip` (blue).
+  `test_link_integration.test_link_trade_roundtrip` (blue) —
+  reaches `TradeCenter_DrawPartyLists` via the full trade protocol.
 - Remote, unit-level on `InProcessSerialLink`:
   `test_remote_endpoint.test_exchange_menu_selection_exchanges_two_bytes`
   and `test_exchange_bytes_cross_version_translates_via_symbol`.
 - Remote, over actual TCP, real ROMs:
-  `test_remote_rpc_flow_past_link_menu_over_tcp` drives the game
-  past the LinkMenu A-press and observes the
-  `menu_selection/wLinkMenuSelectionSendBuffer` RPC flowing with
-  balanced counts on both sides across all 4 working pairs. The
-  `exchange_bytes/*` kinds (three post-menu CableClub buffer
-  exchanges) only fire if the menu vote converges across the two
-  threads on the same frame — that requires sub-frame A-press timing
-  and is an agent-policy concern, not a transport one. The generic
-  `test_serial_link.test_tcp_exchange_round_trip` +
-  `test_tcp_larger_payload` cover arbitrary byte payloads through
-  the same transport.
+  - `test_remote_rpc_flow_past_link_menu_over_tcp` drives each of
+    the 4 working pairs to LinkMenu and observes
+    `menu_selection/wLinkMenuSelectionSendBuffer` RPCs flowing with
+    balanced counts on both sides.
+  - `test_remote_menu_vote_converges_and_warps_to_trade_center_blue`
+    installs the same auto-select-TRADE hook that
+    `LinkPair._install_linkmenu_autoselect_trade` uses
+    (pre-plants `0xD4` in `wLinkMenuSelectionReceiveBuffer`),
+    simulating two agents cooperatively voting TRADE. Both peers
+    warp to map `0xEF` (TRADE_CENTER) — transport-level proof that
+    the full `Serial_ExchangeLinkMenuSelection` byte exchange
+    round-trips correctly over TCP and drives the post-menu warp.
+  - Generic `test_serial_link.test_tcp_exchange_round_trip` +
+    `test_tcp_larger_payload` cover arbitrary byte payloads.
+
+Reaching `CableClub_DoBattleOrTradeAgain` and its three
+`Serial_ExchangeBytes` blocks from the two-process remote setup
+additionally requires the two players to walk onto the hidden-event
+tile and press A in the same game frame; that timing coordination is
+agent-policy rather than transport, and is covered by the
+in-process tests above.
 
 ### Producing Cable Club save states
 

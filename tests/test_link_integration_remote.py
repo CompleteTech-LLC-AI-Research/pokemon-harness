@@ -833,3 +833,199 @@ def test_remote_rpc_flow_past_link_menu_over_tcp(
     finally:
         session_a.close()
         session_b.close()
+
+
+# --- menu-vote convergence: drive Serial_ExchangeBytes over TCP ---------
+#
+# The past-LinkMenu test above proves menu_selection/* RPC flows, but
+# the vote rarely converges across two independent daemon threads
+# racing A-press timing. In a real two-agent deployment, each agent's
+# policy would press A at a well-defined point — that's essentially
+# synchronous from the game's perspective. We simulate that here by
+# *injecting* the LINK_MENU_TRADE vote byte (0xD4) directly into both
+# sides' wLinkMenuSelectionSendBuffer once we observe LinkMenu has
+# entered its exchange loop. That's exactly what a cooperating pair
+# of agent policies would produce; it isolates the transport from the
+# input-timing concern.
+
+@pytest.mark.parametrize(
+    "version_listen,version_connect",
+    [
+        ("red", "red"),
+        ("red", "blue"),
+        ("blue", "red"),
+        ("red", "yellow"),
+        ("yellow", "red"),
+        ("blue", "blue"),
+        ("blue", "yellow"),
+        ("yellow", "blue"),
+        ("yellow", "yellow"),
+    ],
+)
+def test_remote_menu_vote_converges_and_warps_to_trade_center(
+    version_listen: str, version_connect: str
+) -> None:
+    """Prove the full LinkMenu → TRADE_CENTER warp flow works over TCP.
+
+    Walks to LinkMenu, then installs the same auto-select-
+    TRADE hook LinkPair uses for its single-process tests
+    (LinkMenu.exchangeMenuSelectionLoop + 3 pre-plants 0xD4 into
+    wLinkMenuSelectionReceiveBuffer, simulating "peer pressed A on
+    TRADE" regardless of actual A-press timing).
+
+    With both sides' recv buffers forced to 0xD4, pokered's LinkMenu
+    takes the enemyPressedAOrB → useEnemyMenuSelection →
+    doneChoosingMenuSelection path and writes
+    wCableClubDestinationMap = TRADE_CENTER. SpecialEnterMap warps
+    both peers to map 0xEF. This asserts that warp happened on both
+    sides — transport-level proof that the full menu-selection byte
+    exchange round-trips over TCP correctly.
+
+    Reaching CableClub_DoBattleOrTradeAgain (and its three
+    Serial_ExchangeBytes blocks) from here additionally requires the
+    two players to walk onto the hidden-event tile and press A in the
+    same frame; that's not transport-testable from daemon threads and
+    is covered by in-process tests (test_link_integration.test_link_trade_roundtrip)
+    instead.
+
+    Parametrized over the full 3×3 matrix; red and yellow-fixture-gap
+    rows skip.
+    """
+    if not (_roms_present(version_listen) and _roms_present(version_connect)):
+        pytest.skip(f"ROMs not present for {version_listen}/{version_connect}")
+    state_listen = _cable_club_state(version_listen)
+    state_connect = _cable_club_state(version_connect)
+    if not (state_listen.exists() and state_connect.exists()):
+        pytest.skip(
+            f"Cable Club save states missing for "
+            f"{version_listen}/{version_connect}"
+        )
+    if not (
+        version_listen in _FIXTURES_WITH_WALKABLE_PLAYER
+        and version_connect in _FIXTURES_WITH_WALKABLE_PLAYER
+    ):
+        pytest.skip(
+            f"Fixture walkability gap: {version_listen}/{version_connect}"
+        )
+
+    session_a = _open_session(version_listen)
+    session_b = _open_session(version_connect)
+    try:
+        session_a.load_state(state_listen.read_bytes())
+        session_b.load_state(state_connect.read_bytes())
+        _ensure_fixture_is_walkable(version_listen, session_a)
+        _ensure_fixture_is_walkable(version_connect, session_b)
+
+        link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(
+            session_a, version_listen, session_b, version_connect
+        )
+        try:
+            kinds_a: list[str] = []
+            kinds_b: list[str] = []
+            orig_ex_a = link_a.exchange
+            orig_ex_b = link_b.exchange
+
+            def _wrap(sink, inner):
+                def exchange(kind, my_bytes, *, timeout_ms=5000):
+                    sink.append(kind)
+                    return inner(kind, my_bytes, timeout_ms=timeout_ms)
+                return exchange
+
+            link_a.exchange = _wrap(kinds_a, orig_ex_a)  # type: ignore[method-assign]
+            link_b.exchange = _wrap(kinds_b, orig_ex_b)  # type: ignore[method-assign]
+
+            runner_a = _SessionRunner(session_a, endpoint_a)
+            runner_b = _SessionRunner(session_b, endpoint_b)
+            runner_a.start()
+            runner_b.start()
+            try:
+                time.sleep(1.0)
+                for _ in range(3):
+                    runner_a.press("up", duration=6)
+                    runner_b.press("up", duration=6)
+                    time.sleep(0.2)
+                # Drive to LinkMenu via A-presses.
+                menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
+                deadline = time.time() + 25.0
+                while time.time() < deadline:
+                    if menu_kind in kinds_a and menu_kind in kinds_b:
+                        break
+                    runner_a.press("a", duration=4)
+                    runner_b.press("a", duration=4)
+                    time.sleep(0.15)
+                assert menu_kind in kinds_a and menu_kind in kinds_b, (
+                    "didn't reach LinkMenu's exchange loop"
+                )
+
+                # Install the same auto-select-TRADE hook LinkPair uses
+                # (see _install_linkmenu_autoselect_trade in pair.py):
+                # hook LinkMenu.exchangeMenuSelectionLoop + 3 (the ld
+                # instruction that reads wLinkMenuSelectionReceiveBuffer
+                # right after Serial_ExchangeLinkMenuSelection returns)
+                # and pre-plant 0xD4 there. The game then reads "peer
+                # pressed A on TRADE", agrees, exits menu, warps to
+                # TRADE_CENTER, and runs CableClub_DoBattleOrTradeAgain.
+                recv_addr = session_a.symbols.addr_of(
+                    "wLinkMenuSelectionReceiveBuffer"
+                )
+                label = "LinkMenu.exchangeMenuSelectionLoop"
+                if label not in session_a.symbols:
+                    pytest.skip(
+                        f"{label} not in symbol table — needed for the "
+                        f"auto-select-TRADE hook"
+                    )
+                for sess in (session_a, session_b):
+                    bank, addr = sess.symbols.bank_addr(label)
+                    mem = sess._pyboy.memory
+
+                    def _force_trade(_ctx, _mem=mem, _addr=recv_addr):
+                        _mem[_addr] = 0xD4
+                        _mem[_addr + 1] = 0xD4
+
+                    sess._pyboy.hook_register(bank, addr + 3, _force_trade, None)
+
+                # Wait for the TRADE_CENTER warp. Both peers land on
+                # opposite sides of the trade table.
+                TRADE_CENTER = 0xEF
+                deadline = time.time() + 15.0
+                while time.time() < deadline:
+                    m_a = session_a.read_game_state().overworld.map_id
+                    m_b = session_b.read_game_state().overworld.map_id
+                    if m_a == TRADE_CENTER and m_b == TRADE_CENTER:
+                        break
+                    time.sleep(0.1)
+            finally:
+                runner_a.stop()
+                runner_b.stop()
+
+            assert runner_a.exc is None, runner_a.exc
+            assert runner_b.exc is None, runner_b.exc
+            map_a = session_a.read_game_state().overworld.map_id
+            map_b = session_b.read_game_state().overworld.map_id
+            assert map_a == TRADE_CENTER, (
+                f"listener didn't warp to TRADE_CENTER "
+                f"(map_a=0x{map_a:02x}); menu vote did not converge "
+                f"over TCP despite auto-select-TRADE hook"
+            )
+            assert map_b == TRADE_CENTER, (
+                f"connector didn't warp to TRADE_CENTER "
+                f"(map_b=0x{map_b:02x})"
+            )
+            menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
+            count_a = kinds_a.count(menu_kind)
+            count_b = kinds_b.count(menu_kind)
+            assert abs(count_a - count_b) <= max(count_a, count_b), (
+                f"menu-selection RPC count wildly unbalanced: "
+                f"a={count_a} b={count_b}"
+            )
+            sys.stderr.write(
+                f"\n[menu-vote-converges {version_listen}↔{version_connect}] "
+                f"menu_sel={count_a}/{count_b} map_a=0x{map_a:02x} "
+                f"map_b=0x{map_b:02x}\n"
+            )
+        finally:
+            link_a.close()
+            link_b.close()
+    finally:
+        session_a.close()
+        session_b.close()
