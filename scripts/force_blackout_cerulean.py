@@ -194,6 +194,34 @@ def main() -> int:
     print(f"  at PC attempt: map=0x{gs.overworld.map_id:02x} "
           f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
 
+    # Talk to the nurse to trigger the heal animation. This is the
+    # fix for Yellow's post-blackout palette wash: the heal interaction
+    # runs RunPaletteCommand SET_PAL_OVERWORLD at its end, which
+    # re-derives the correct per-tileset CGB palette (pink floor, red
+    # nurse, etc.). Without this, the save_state would persist the
+    # battle-black palette left over from HandlePlayerBlackOut.
+    # Pikachu is already full-HP from the blackout, so the heal is a
+    # visual-only no-op gameplay-wise.
+    for _ in range(6):
+        drv.press("up")
+    drv.press("a")
+    for _ in range(60):
+        mx = drv.sym.read_u8(drv.mem, "wMaxMenuItem")
+        if mx == 1 and not drv.gs().text.dest_in_vram_tilemap:
+            break
+        drv.press("a")
+    drv.press("a", step=60)
+    for _ in range(120):
+        drv.press("a")
+    for _ in range(8):
+        drv.press("b", step=30)
+    session.step(300, render=True)
+    gs = drv.gs()
+    print(f"  post heal: map=0x{gs.overworld.map_id:02x} "
+          f"xy=({gs.overworld.x},{gs.overworld.y}) "
+          f"HP={gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",
+          flush=True)
+
     # Save milestone.
     out = outdir / "milestones" / "cerulean_pc.state"
     out.write_bytes(session.save_state())
