@@ -427,30 +427,56 @@ def walk_to_viridian_and_heal(
     print(f"  [heal] starting from map=0x{start_map:02x} "
           f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
 
-    # 1) Get to Viridian. The grinder can leave us at problem tiles
-    #    like (5, 48) where A*'s plan desyncs on a sprite collision
-    #    and hangs walk_path. Bail early if we're at such a tile —
-    #    caller's Option-B fallback will top up the lead to L13.
+    # 1) Get to Viridian. From some Route 2 tiles (notably (5, 48)) the
+    #    player sits below a one-way ledge in a small trapped pocket —
+    #    A*'s grid model doesn't see a path out because it doesn't track
+    #    ledge direction, but physically the player can step DOWN through
+    #    the ledge into open terrain. When A* returns NO PATH FOUND, drop
+    #    DOWN a few tiles (ledges always allow southbound) and retry. A
+    #    successful retry is the normal case — the old "bail + Option-B
+    #    fallback" code path is no longer reachable in practice.
     if start_map == M_ROUTE_2:
-        gs = drv.gs()
-        if (gs.overworld.x, gs.overworld.y) == (5, 48):
-            print("  [heal] at known-bad tile (5, 48); aborting heal "
-                  "so caller can fall back to Option-B top-up",
-                  flush=True)
-            return False
         ftb._activate_repel(drv)
         # Settle the emulator before saving state for A* — a race between
         # the grinder press loop and subprocess state read occasionally
         # serialises a partial wTilesetCollisionPtr on Yellow.
         session.step(60, render=True)
-        try:
-            path = _pathfind(drv, session, outdir, "8,71", "grind_r2_south",
-                              rom, sym, sha1)
-            print(f"  [heal] route2→south A* {len(path)} steps", flush=True)
-            _safe_walk(drv, path, label="grind_r2_south",
-                        stop_map_ids=(M_VIRIDIAN,))
-        except RuntimeError as e:
-            print(f"  [heal] route2 pathfind failed: {e}", flush=True)
+        path = None
+        for attempt in range(4):
+            try:
+                path = _pathfind(drv, session, outdir, "8,71",
+                                  f"grind_r2_south_{attempt}",
+                                  rom, sym, sha1)
+                print(f"  [heal] route2→south A* attempt {attempt+1}: "
+                      f"{len(path)} steps", flush=True)
+                break
+            except RuntimeError as e:
+                gs2 = drv.gs()
+                print(f"  [heal] route2 pathfind attempt {attempt+1} "
+                      f"at ({gs2.overworld.x},{gs2.overworld.y}) "
+                      f"failed: {e}", flush=True)
+                # Ledge-pocket escape: step DOWN 3× (one-way safe). If we
+                # didn't move at all, we really are walled — give up.
+                moved_any = False
+                for _ in range(3):
+                    before = (drv.gs().overworld.x, drv.gs().overworld.y)
+                    drv.press("down")
+                    if drv.gs().battle.active:
+                        drv.resolve_battle()
+                    after = (drv.gs().overworld.x, drv.gs().overworld.y)
+                    if after != before:
+                        moved_any = True
+                if not moved_any:
+                    print("  [heal] ledge-escape made no progress; bailing",
+                          flush=True)
+                    return False
+                session.step(60, render=True)
+        if path is None:
+            print("  [heal] no route2 path after 4 attempts; bailing",
+                  flush=True)
+            return False
+        _safe_walk(drv, path, label="grind_r2_south",
+                    stop_map_ids=(M_VIRIDIAN,))
         # Cross the south border warp.
         for _ in range(4):
             if drv.gs().overworld.map_id == M_VIRIDIAN:
