@@ -196,13 +196,39 @@ def expand_to_tile_grid(
     return tiles
 
 
+# Gen 1 ledge tile IDs in the overworld tileset (pokered/pokeyellow
+# data/tilesets/ledge_tiles.asm):
+#   tile 0x27 — west-facing ledge (jump LEFT)
+#   tile 0x36, 0x37 — south-facing ledge (jump DOWN)
+#   tile 0x0D, 0x1D — east-facing ledge (jump RIGHT)
+# When the player presses a direction matching the ledge type while on
+# a walkable tile (e.g. grass 0x2C), they hop OVER the ledge tile,
+# landing two tiles away in that direction. A* models this as a
+# special ledge-hop neighbor: from (x, y) in direction d, if the
+# immediate neighbor is a matching ledge tile, we can reach the tile
+# TWO steps away in direction d with cost 1 (single press).
+_LEDGE_TILES_BY_DIR: dict[str, set[int]] = {
+    "d": {0x36, 0x37},
+    "l": {0x27},
+    "r": {0x0D, 0x1D},
+}
+
+
 def astar(
     passable: list[list[bool]],
     start: tuple[int, int],
     goal: tuple[int, int],
+    tile_grid: list[list[int]] | None = None,
 ) -> str | None:
     """Standard 4-connected A* with Manhattan heuristic. Returns direction
-    string or None."""
+    string or None.
+
+    When ``tile_grid`` is provided, A* also considers Gen 1 ledge hops:
+    from cell (x, y) pressing direction d, if cell (x+dx, y+dy) sits on
+    a ledge tile matching direction d, the player jumps to (x+2dx, y+2dy)
+    in a single press. This lets the pathfinder use south-ledge drops
+    (Route 3, Route 4, Route 24 etc.) that otherwise read as walls.
+    """
     h = len(passable)
     w = len(passable[0]) if h else 0
     sx, sy = start
@@ -214,6 +240,16 @@ def astar(
 
     def heur(x: int, y: int) -> int:
         return abs(x - gx) + abs(y - gy)
+
+    # Step-cell → tile (feet) mapping: cell (sx, sy) has feet tile at
+    # (sx*2, sy*2 + 1) in the tile_grid. Used to check ledge tiles.
+    def cell_feet_tile(sx: int, sy: int) -> int | None:
+        if tile_grid is None:
+            return None
+        tx, ty = sx * 2, sy * 2 + 1
+        if not (0 <= ty < len(tile_grid) and 0 <= tx < len(tile_grid[0])):
+            return None
+        return tile_grid[ty][tx]
 
     # Priority queue entries: (f, g, x, y). Parent tracked in came_from.
     pq: list[tuple[int, int, int, int]] = [(heur(sx, sy), 0, sx, sy)]
@@ -238,14 +274,35 @@ def astar(
             nx, ny = x + dx, y + dy
             if not (0 <= nx < w and 0 <= ny < h):
                 continue
-            if not passable[ny][nx]:
-                continue
             ng = g + 1
-            key = (nx, ny)
+            if passable[ny][nx]:
+                key = (nx, ny)
+                if ng < best_g.get(key, 1 << 30):
+                    best_g[key] = ng
+                    came_from[key] = ((x, y), ch)
+                    heapq.heappush(pq, (ng + heur(nx, ny), ng, nx, ny))
+                continue
+            # Ledge-hop: neighbor is impassable — but if its feet tile is
+            # a ledge of the right direction, we can jump over it to the
+            # cell beyond.
+            if tile_grid is None:
+                continue
+            ledge_tiles = _LEDGE_TILES_BY_DIR.get(ch, set())
+            if not ledge_tiles:
+                continue
+            feet = cell_feet_tile(nx, ny)
+            if feet is None or feet not in ledge_tiles:
+                continue
+            jx, jy = nx + dx, ny + dy
+            if not (0 <= jx < w and 0 <= jy < h):
+                continue
+            if not passable[jy][jx]:
+                continue
+            key = (jx, jy)
             if ng < best_g.get(key, 1 << 30):
                 best_g[key] = ng
                 came_from[key] = ((x, y), ch)
-                heapq.heappush(pq, (ng + heur(nx, ny), ng, nx, ny))
+                heapq.heappush(pq, (ng + heur(jx, jy), ng, jx, jy))
     return None
 
 
@@ -414,7 +471,7 @@ def main() -> int:
             passable_grid[gy][gx] = True
 
     print(f"running A* from ({px},{py}) to {goal}", flush=True)
-    path = astar(passable_grid, (px, py), goal)
+    path = astar(passable_grid, (px, py), goal, tile_grid=tile_grid)
     if path is None:
         print("NO PATH FOUND", flush=True)
         return 1

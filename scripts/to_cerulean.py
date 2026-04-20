@@ -50,6 +50,10 @@ M_MT_MOON_1F = 0x3B
 M_MT_MOON_B1F = 0x3C
 M_MT_MOON_B2F = 0x3D
 
+# Maps the cross_route3 loop treats as "left Route 3 by map connection".
+# Route 3 connects north to Route 4, so Route 4 (0x0f) is a success exit.
+_ROUTE3_EXIT_MAPS = (M_ROUTE_4, M_MT_MOON_1F)
+
 
 def _save(session: Session, outdir: Path, name: str) -> Path:
     p = outdir / "milestones" / f"{name}.state"
@@ -389,17 +393,19 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
     # (Route 3's corridors are thin enough that sight cones cover all
     # walkable columns at y=5..9).
     route3_pens = "15,8;16,8;14,9;22,8;22,12;24,6"
+    # Route 3 connects NORTH to Route 4 (per map header) — Mt. Moon is
+    # accessed from Route 4, not Route 3. So the east-exit illusion
+    # (player walking off east edge of Route 3) is actually: player
+    # walking UP off the north edge into Route 4. Target a step cell
+    # on Route 3's top row (sy=0) in the walkable band sx=56..63, where
+    # Route 4's south connection attaches. Pressing UP at (60, 0)
+    # triggers the map-connection warp to Route 4.
     waypoints = [
         ("30,11", "r3_wp1"),
         ("45,11", "r3_wp1b"),
-        ("60,11", "r3_wp2"),
-        ("75,11", "r3_wp2b"),
-        ("90,11", "r3_wp2c"),
-        ("100,11", "r3_wp3"),
-        ("120,4", "r3_wp3b"),
-        ("139,4", "r3_wp4"),
+        ("60,0", "r3_wp_n"),
     ]
-    while drv.gs().overworld.map_id != M_MT_MOON_1F:
+    while drv.gs().overworld.map_id not in _ROUTE3_EXIT_MAPS:
         cur_map = drv.gs().overworld.map_id
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
             if blackouts >= max_blackout_recoveries:
@@ -429,7 +435,7 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             res = _pathfind_walk(drv, session, outdir, goal,
                                  f"{label}_b{blackouts}",
                                  rom, sym, sha1,
-                                 stop_map_ids=(M_MT_MOON_1F,),
+                                 stop_map_ids=_ROUTE3_EXIT_MAPS,
                                  extra_blockers=route3_pens)
             print(f"  {label}_b{blackouts}: {res} -> "
                   f"{_gs_summary(session)}", flush=True)
@@ -441,8 +447,12 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
         if drv.gs().overworld.map_id != M_ROUTE_3:
             continue
         # Greedy fallback from current position.
+        # For Route 3, the "east exit" is actually the NORTH map-
+        # connection to Route 4. Set target_x very high and rely on
+        # target_map_id to detect the transition once A* drops us
+        # onto sy=0 and the next UP press wraps to Route 4.
         res = _greedy_east(drv, session, target_x=139,
-                           target_map_id=M_MT_MOON_1F, max_steps=400)
+                           target_map_id=M_ROUTE_4, max_steps=400)
         print(f"  greedy east: {res} -> {_gs_summary(session)}",
               flush=True)
         if res == "blackout":
@@ -503,15 +513,16 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             continue
         # Greedy east-walker returned "reached" or "map" — fall through
         # to the warp-cross step below.
-        if drv.gs().overworld.map_id == M_MT_MOON_1F:
+        if drv.gs().overworld.map_id in _ROUTE3_EXIT_MAPS:
             break
-    # Cross the east warp
+    # Cross the north map-connection warp (press UP off the top row
+    # of Route 3 into Route 4).
     for _ in range(8):
-        if drv.gs().overworld.map_id == M_MT_MOON_1F:
+        if drv.gs().overworld.map_id in _ROUTE3_EXIT_MAPS:
             break
-        drv.press("right")
+        drv.press("up")
     session.step(60, render=True)
-    return drv.gs().overworld.map_id == M_MT_MOON_1F
+    return drv.gs().overworld.map_id in _ROUTE3_EXIT_MAPS
 
 
 # --- Main -----------------------------------------------------------------
