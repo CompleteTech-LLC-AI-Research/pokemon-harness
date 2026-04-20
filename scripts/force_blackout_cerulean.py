@@ -12,6 +12,26 @@ as we've visited the destination's PC once it's a valid blackout anchor,
 but we cheat by RAM-poking the anchor directly.
 
 Produces ``walkthrough_to_cerulean/milestones/cerulean_warp.state``.
+
+**Known visual quirk on Yellow:** Yellow is a native-CGB cartridge that
+loads per-tileset color palettes from RAM-resident tables via
+``LoadTilesetHeader``. The poison-triggered blackout goes through the
+normal map-load code, which SHOULD re-init those tables, but in
+practice the post-warp state ends up with a uniform blue palette (the
+``SET_PAL_BATTLE_BLACK`` fade that ``HandlePlayerBlackOut`` applies
+during the blackout animation never gets overwritten by the overworld
+palette command for the new tileset). Red/Blue don't see this because
+their color support comes from the ``pokered_color_vanilla.ips`` patch
+which re-derives colors from patched ROM on every render frame, not
+from RAM-cached palette data — the modded-CGB path is insensitive to
+whatever WRAM state our exploit leaves inconsistent.
+
+The gameplay state is correct after the warp (wCurMap, xy, HP, party,
+badges are all valid); only the on-screen color tint is off. A proper
+fix requires implementing honest navigation through Route 3 / Mt. Moon
+/ Route 4 so the exploit isn't needed on Yellow. Until then, the
+``cerulean_pc.state`` milestone is visually blue-washed but
+functionally placed on the PC warp tile.
 """
 from __future__ import annotations
 
