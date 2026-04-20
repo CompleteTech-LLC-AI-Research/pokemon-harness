@@ -1236,6 +1236,33 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
         session_b.close()
 
 
+# Investigation notes (continued): forced-cursor + AgentSync rendezvous
+# — forcing wCurrentMenuItem = 1 on both sides before a coordinated
+# A-press, expecting the natural menu exchange to converge on TRADE.
+# Result: the menu did NOT converge. Diagnostics showed menu_selection
+# RPC counts perfectly balanced at 5365/5365 on both sides — both
+# sides were exchanging bytes FIFO-correctly — but neither side's
+# vote ever agreed with the peer's. Forcing wCurrentMenuItem evidently
+# doesn't persist through the menu's input handling, or the A-press
+# didn't register within the menu's active frame window. Documented
+# as another dead end.
+#
+# Summary of all attempted bypass strategies for full-trade completion:
+#
+#   | Approach                            | Result                            |
+#   |-------------------------------------|-----------------------------------|
+#   | auto-select-TRADE (T3)              | 2/1 exchanges; exchange #2 desyncs|
+#   | frame-synced manual press           | Deadlock on menu vote mismatch    |
+#   | hook rendezvous at CableClub entry  | Hook doesn't fire                 |
+#   | force wLinkState = 5                | 0 exchanges (worse than baseline) |
+#   | forced cursor + AgentSync press     | Menu never converges (5365 RPCs)  |
+#
+# The transport works end-to-end (T3 proves the first exchange_bytes
+# round-trip); what stays unresolved is the cross-process game-state
+# synchronization needed to complete all three post-menu exchanges.
+# The README's "Deployment timing" section covers the two production
+# paths (tick-broker collapse or agent-driven transport hijack).
+
 # Investigation notes: forcing wLinkState = 5 (LINK_STATE_START_TRADE)
 # on both sides after the TRADE_CENTER warp was attempted as a way to
 # align divergent post-exchange branches in CableClub_DoBattleOrTradeAgain.
