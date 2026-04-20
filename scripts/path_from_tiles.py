@@ -257,6 +257,12 @@ def main() -> int:
     p.add_argument("--save-path-to", type=str, default=None)
     p.add_argument("--dump-grid", action="store_true",
                    help="also print the walkability grid for debugging")
+    p.add_argument("--extra-blockers", type=str, default=None,
+                   help='semicolon-separated list of x,y tiles to treat '
+                        'as impassable in addition to the game\'s sprite '
+                        'blockers (e.g. "15,8;16,9;17,8"). Useful for '
+                        'known trainer-pen tiles the pathfinder would '
+                        'otherwise route us into.')
     args = p.parse_args()
 
     if not args.goal_xy:
@@ -306,6 +312,18 @@ def main() -> int:
     # block movement into their cell regardless of tile walkability
     # (trainer NPCs, trainers with sight lines, Poke Ball pickups, etc).
     sprite_blockers = read_sprite_blockers(s)
+    # Caller-injected blockers (route-specific trainer-pen avoidance).
+    if args.extra_blockers:
+        for part in args.extra_blockers.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                ex, ey = part.split(",")
+                sprite_blockers.add((int(ex), int(ey)))
+            except ValueError:
+                print(f"  WARN bad --extra-blockers entry: {part!r}",
+                      flush=True)
     if sprite_blockers:
         print(
             "sprite blockers: "

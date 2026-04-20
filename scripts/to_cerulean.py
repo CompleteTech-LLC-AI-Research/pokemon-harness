@@ -75,19 +75,49 @@ def _gs_summary(session: Session) -> str:
 def _pathfind_walk(drv: rtb.Driver, session: Session, outdir: Path,
                    goal_xy: str, label: str,
                    rom: str, sym: str, sha1: str,
-                   stop_map_ids=()) -> str:
+                   stop_map_ids=(),
+                   extra_blockers: str | None = None) -> str:
     """Save state, run A* to ``goal_xy``, walk the path. Returns the
-    walk_path result code (``done``/``stop``/``stalled``/etc.)."""
+    walk_path result code (``done``/``stop``/``stalled``/etc.).
+
+    ``extra_blockers`` optional string ``"x,y;x,y;..."`` passed through
+    to path_from_tiles for pen-avoidance."""
     seed = outdir / f"_{label}.state"
     seed.write_bytes(session.save_state())
     out_txt = outdir / f"_{label}.txt"
     try:
-        path = ftb.run_pathfinder(seed, goal_xy, out_txt, rom, sym, sha1)
+        path = _run_pathfinder_ex(seed, goal_xy, out_txt,
+                                  rom, sym, sha1, extra_blockers)
     except RuntimeError as e:
         print(f"  [{label}] pathfind failed: {e}", flush=True)
         return "pathfail"
     print(f"  [{label}] A* {len(path)} steps -> walking", flush=True)
     return ftb.walk_path(drv, path, label=label, stop_map_ids=stop_map_ids)
+
+
+def _run_pathfinder_ex(state_path: Path, goal: str, out_path: Path,
+                        rom: str, sym: str, sha1: str,
+                        extra_blockers: str | None) -> str:
+    """Wraps ftb.run_pathfinder with optional --extra-blockers arg."""
+    import subprocess
+    script = Path(__file__).resolve().parent / "path_from_tiles.py"
+    env = dict(os.environ)
+    env.update(
+        POKERED_ROM_PATH=rom,
+        POKERED_SYM_PATH=sym,
+        POKERED_ROM_SHA1=sha1,
+        PYTHONPATH=str(Path(__file__).resolve().parent.parent / "src"),
+        PYTHONIOENCODING="utf-8",
+    )
+    kw = ["--state", str(state_path), "--save-path-to", str(out_path),
+          "--goal-xy", goal]
+    if extra_blockers:
+        kw += ["--extra-blockers", extra_blockers]
+    r = subprocess.run([sys.executable, "-u", str(script), *kw],
+                       env=env, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"pathfinder failed: {r.stderr}")
+    return out_path.read_text().strip()
 
 
 # --- Phase 1: exit gym + heal at Pewter PC --------------------------------
@@ -350,6 +380,15 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
     """
     ftb._activate_repel(drv)
     blackouts = 0
+    # Known Route 3 trainer-pen tiles (defeated-trainer sprite + static
+    # NPC + tree terrain combo where A* would route us into a 1-tile
+    # pocket we can't escape). Pre-mark as impassable so the pathfinder
+    # avoids them entirely. Identified empirically:
+    #   (15, 8): Bug Catcher trainer ends up here after sight-line walk
+    #   (16, 8): immediately-east pen tile, surrounded on all sides
+    #   (14, 9): southern pen tile on same trainer's approach
+    #   (22, 8)/(22, 12)/(24, 6): similar pens for Youngster /Lass pair
+    route3_pens = "15,8;16,8;14,9;22,8;22,12;24,6"
     waypoints = [
         ("30,11", "r3_wp1"),
         ("60,11", "r3_wp2"),
@@ -386,7 +425,8 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             res = _pathfind_walk(drv, session, outdir, goal,
                                  f"{label}_b{blackouts}",
                                  rom, sym, sha1,
-                                 stop_map_ids=(M_MT_MOON_1F,))
+                                 stop_map_ids=(M_MT_MOON_1F,),
+                                 extra_blockers=route3_pens)
             print(f"  {label}_b{blackouts}: {res} -> "
                   f"{_gs_summary(session)}", flush=True)
             if res in ("done", "stop", "map"):

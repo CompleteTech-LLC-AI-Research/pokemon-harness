@@ -107,6 +107,13 @@ def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
             return "fainted"
         before = (drv.gs().overworld.x, drv.gs().overworld.y,
                   drv.gs().overworld.map_id)
+        # Trainer sight-line approach locks joypad while the trainer
+        # sprite walks toward us. Pressing directions during that
+        # window is wasted; idle the emulator so the approach can
+        # complete and the battle dialog + battle start fire.
+        if drv.joy_locked():
+            drv.idle(120)
+            continue
         drv.press(DIR_CHAR[c])
         after = (drv.gs().overworld.x, drv.gs().overworld.y,
                  drv.gs().overworld.map_id)
@@ -119,6 +126,9 @@ def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
                 drv.press("a")
                 if drv.gs().battle.active:
                     drv.resolve_battle()
+                    break
+                if drv.joy_locked():
+                    drv.idle(120)
                     break
                 nxt = (drv.gs().overworld.x, drv.gs().overworld.y,
                        drv.gs().overworld.map_id)
