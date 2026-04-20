@@ -181,15 +181,19 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
 
                     session._pyboy.hook_register(bank, addr, _make_cb(bucket), None)
 
+            TRADE_CENTER = 0xEF
             for _ in range(3):
                 session_a.press("up", duration=6)
                 session_b.press("up", duration=6)
                 pair.step(18)
+            reached_trade_center = False
             for _ in range(400):
                 session_a.press("a", duration=4)
                 session_b.press("a", duration=4)
                 pair.step(20)
-                if counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0:
+                if (session_a.read_game_state().overworld.map_id == TRADE_CENTER
+                        and session_b.read_game_state().overworld.map_id == TRADE_CENTER):
+                    reached_trade_center = True
                     break
             assert (counters["SaveGameData"][0] > 0
                     and counters["SaveGameData"][1] > 0), (
@@ -198,8 +202,12 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
             )
             assert (counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0), (
                 f"nybble sync didn't converge; LinkMenu not reached — "
-                f"counters={counters}. This means the semantic bridge isn't "
-                f"feeding the game valid nybble-exchange bytes."
+                f"counters={counters}."
+            )
+            assert reached_trade_center, (
+                f"LinkMenu's auto-trade selection didn't warp peers to "
+                f"TRADE_CENTER. map_a=0x{session_a.read_game_state().overworld.map_id:02x} "
+                f"map_b=0x{session_b.read_game_state().overworld.map_id:02x}"
             )
     finally:
         session_a.close()

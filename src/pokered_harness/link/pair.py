@@ -177,6 +177,72 @@ class LinkPair:
         _install_pair("Serial_ExchangeNybble", {"ExchangeNybble": 1})
         _install_pair("Serial_ExchangeLinkMenuSelection", {"MenuSelection": 2})
 
+        self._install_linkmenu_autoselect_trade()
+
+    def _install_linkmenu_autoselect_trade(self) -> None:
+        """Auto-select TRADE in the Cable Club LinkMenu.
+
+        LinkMenu's ``.exchangeMenuSelectionLoop`` calls
+        ``Serial_ExchangeLinkMenuSelection`` then reads
+        ``wLinkMenuSelectionReceiveBuffer``. The handshake byte format
+        is ``0xd0 | (keys_A_B << 2) | menu_item``; a value of ``0xd4``
+        means "enemy pressed A while cursor was on TRADE" which takes
+        the game through
+        ``.enemyPressedAOrB`` → ``.useEnemyMenuSelection`` →
+        ``.doneChoosingMenuSelection`` → ``.updateCursorPosition`` →
+        ``wCableClubDestinationMap = TRADE_CENTER`` → ``SpecialEnterMap``.
+        Both peers follow this path in parallel and warp into
+        ``TRADE_CENTER`` (map 0xef).
+
+        Hook location: ``LinkMenu.exchangeMenuSelectionLoop + 3`` bytes
+        (past the ``call`` instruction) — the first instruction that
+        reads the receive buffer after the serial exchange returns.
+        Writing ``0xd4`` there races ahead of every other game read.
+
+        If the game is driven via some other path that needs BATTLE
+        instead of TRADE this hook would select wrong; a future
+        knob could expose per-pair menu-item choice.
+        """
+        pa, pb = self._primary, self._peer
+        mem_a, mem_b = pa._pyboy.memory, pb._pyboy.memory
+
+        for session, mem, label in (
+            (pa, mem_a, "wLinkMenuSelectionReceiveBuffer"),
+            (pb, mem_b, "wLinkMenuSelectionReceiveBuffer"),
+        ):
+            if label not in session.symbols:
+                return
+        recv_addr = pa.symbols.addr_of("wLinkMenuSelectionReceiveBuffer")
+
+        # Locate the post-exchange read instruction. Both Blue and Yellow
+        # label ``LinkMenu.exchangeMenuSelectionLoop`` — the first
+        # instruction at that label is the ``call``, so +3 bytes is the
+        # following ``ld a, [wLinkMenuSelectionReceiveBuffer]``.
+        label = "LinkMenu.exchangeMenuSelectionLoop"
+        if label not in pa.symbols or label not in pb.symbols:
+            return
+        bank_a, addr_a = pa.symbols.bank_addr(label)
+        bank_b, addr_b = pb.symbols.bank_addr(label)
+        addr_a += 3
+        addr_b += 3
+
+        def force_trade_a(_ctx):
+            mem_a[recv_addr] = 0xd4
+            mem_a[recv_addr + 1] = 0xd4
+
+        def force_trade_b(_ctx):
+            mem_b[recv_addr] = 0xd4
+            mem_b[recv_addr + 1] = 0xd4
+
+        try:
+            pa._pyboy.hook_register(bank_a, addr_a, force_trade_a, None)
+        except ValueError:
+            pass
+        try:
+            pb._pyboy.hook_register(bank_b, addr_b, force_trade_b, None)
+        except ValueError:
+            pass
+
     def unpair(self) -> None:
         """Drop the bridge reference and clear the transport.
 
