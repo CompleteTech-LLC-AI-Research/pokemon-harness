@@ -192,7 +192,17 @@ def _enter_gym(drv: BrockDriver) -> bool:
         _log("  already inside gym")
         return True
     if gs.overworld.map_id != M_PEWTER:
-        _log(f"  WARN: expected map 0x02 PEWTER, got 0x{gs.overworld.map_id:02x}")
+        # We're not on Pewter City and not in the gym — usually means an
+        # upstream phase (forest traversal, gate cross) failed and left us
+        # stranded. Bailing here avoids the inner walk loop running 60
+        # iterations while resolve_battle burns 80 turns on each forest
+        # wild encounter — seen on Yellow honest grind runs where a flaky
+        # forest pathfinder failure left the player mid-forest. Return
+        # False so the phase layer logs FAIL and moves on instead of
+        # spinning for minutes.
+        _log(f"  FAIL: expected map 0x02 PEWTER or 0x36 PEWTER_GYM, "
+             f"got 0x{gs.overworld.map_id:02x}; aborting gym entry")
+        return False
 
     # Walk to (16, 18) — the tile directly south of the warp — then UP
     # onto (16, 17) which triggers the warp. Approaching from the south

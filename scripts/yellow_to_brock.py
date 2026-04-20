@@ -510,15 +510,21 @@ def run_option_b_boost(session: Session) -> None:
 
 def run_route2_grind(session: Session, outdir: Path,
                      rom: str, sym: str, sha1: str) -> None:
-    """Honest Pikachu grind on Route 2 to L15 (Brock-viable level).
+    """Honest Pikachu grind on Route 2 to L15 (Brock-viable level), with
+    Option-B top-up fallback if the grinder bails short.
 
     Yellow's Pikachu does **not** learn Double Kick by level-up — the
     move is a one-off teach from the girl NPC at Cerulean after beating
     Misty. L15 gives Pikachu Quick Attack (L11) + higher base stats,
     enough to chip Onix with Thunder Shock supplemented by Quick Attack.
+    But Yellow-only: Onix's Rock type resists Electric fully, so even a
+    grinded L15 Pikachu without Double Kick struggles. If the grind
+    ended short of L15, fall back to Option-B (L50 + Thunderbolt +
+    Double Kick) so the full pipeline keeps validating Brock end-to-end.
+    This mirrors Red/Blue's grind+top-up pattern in full_to_brock.py.
     """
     print("\n=== phase: grind_to_level_15 (heal-loop) ===", flush=True)
-    grind.grind_to(
+    result = grind.grind_to(
         session,
         outdir=outdir,
         rom=rom, sym=sym, sha1=sha1,
@@ -527,6 +533,23 @@ def run_route2_grind(session: Session, outdir: Path,
         max_battles=120,
         max_wall_seconds=1200.0,
     )
+    # Option-B top-up if we didn't reach L15 — same pattern as Red/Blue.
+    need_topup = getattr(result, "final_level", 0) < 15
+    if need_topup:
+        print(f"  [grind] ended at L{getattr(result, 'final_level', '?')}"
+              f" < 15; applying Option-B top-up", flush=True)
+        # Ensure we're out of any lingering battle/menu before RAM poke,
+        # same cleanup as full_to_brock._option_b_topup caller.
+        for _ in range(40):
+            gs = session.read_game_state()
+            if not gs.battle.active:
+                break
+            session.press("b"); session.step(30, render=True)
+            if not session.read_game_state().battle.active:
+                break
+            session.press("down"); session.step(20, render=True)
+            session.press("a"); session.step(30, render=True)
+        boost_pikachu(session)
 
 
 def run_route2_to_forest(session: Session, outdir: Path,
@@ -585,13 +608,28 @@ def run_forest_traversal(session: Session, outdir: Path,
                     break
             break
         ftb._activate_repel(drv)
-        seed = outdir / f"_forest_leg_{attempt}.state"
-        seed.write_bytes(session.save_state())
-        path_file = outdir / f"_forest_leg_{attempt}.txt"
-        try:
-            path = run_pathfinder(seed, "1,0", path_file, rom, sym, sha1)
-        except RuntimeError as e:
-            print(f"  forest pathfind fail: {e}", flush=True)
+        # The forest pathfinder subprocess intermittently fails with an
+        # empty stderr — looks like a PyBoy state-serialization race on
+        # freshly-saved seeds. A short settle + retry absorbs it.
+        path = None
+        last_err = None
+        for retry in range(3):
+            if retry:
+                session.step(120, render=True)
+            seed = outdir / f"_forest_leg_{attempt}_r{retry}.state"
+            seed.write_bytes(session.save_state())
+            path_file = outdir / f"_forest_leg_{attempt}_r{retry}.txt"
+            try:
+                path = run_pathfinder(seed, "1,0", path_file,
+                                      rom, sym, sha1)
+                break
+            except RuntimeError as e:
+                last_err = e
+                print(f"  forest pathfind retry {retry+1} fail: {e}",
+                      flush=True)
+        if path is None:
+            print(f"  forest pathfind gave up after 3 retries: {last_err}",
+                  flush=True)
             break
         print(f"  forest leg {attempt}: {len(path)} steps", flush=True)
         if not path:
