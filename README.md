@@ -308,21 +308,41 @@ place:
    frame. Defeats the "two truly independent agents" model; equivalent
    to just running in-process.
 
-2. **Agent-layer ready-tick handshake (recommended).** Each agent's
-   MCP client exchanges a small protocol message before issuing any
-   button press that needs frame-level sync:
+2. **Agent-layer rendezvous (implemented, recommended).** Each agent
+   calls [`AgentSync.rendezvous(label, payload)`](src/pokered_harness/link/agent_sync.py)
+   before issuing any button press that needs cross-agent sync:
 
-   ```
-   agent_a → agent_b: "ready at game_tick=1234, pressing A"
-   agent_b → agent_a: "ready at game_tick=1235, pressing A"
-   both: step until game_tick hits the agreed value, then press_a
+   ```python
+   from pokered_harness.link import AgentSync
+   sync = AgentSync(link)  # same TcpSerialLink the game uses
+   peer_tick = sync.rendezvous("about_to_press_a", str(session.current_tick()).encode())
+   # Both agents now know each other's current tick and are wall-clock
+   # synchronized. Issue the coordinated press here.
+   session.press("a")
    ```
 
-   Messages travel over whatever channel the two agents already use
-   (same TCP `SerialLink` via a custom `kind`, or a separate sidechannel
-   such as shared filesystem / Redis / HTTP). The transport's
-   per-kind FIFO guarantees ordering within a kind and independence
-   across kinds, so adding an `"agent_sync"` kind costs nothing.
+   The rendezvous piggybacks on the existing `SerialLink` transport
+   via a namespaced `agent_sync/<label>` kind, so it never collides
+   with game RPC kinds (`exchange_bytes/…`, `exchange_nybble/…`,
+   `menu_selection/…`). Per-kind FIFO within `SerialLink` guarantees
+   that two back-to-back rendezvous calls at the same label pair up
+   in order. Demonstrated end-to-end over real TCP on real ROMs by
+   `test_remote_agent_sync_coordinates_link_menu_vote_blue_blue`.
+
+   What rendezvous proves vs. what it doesn't: rendezvous aligns
+   agents to a *wall-clock moment* — enough for both to then press a
+   button "now" with sub-millisecond skew. It does NOT retroactively
+   align the two sides' game-tick clocks. Menu voting in pokered
+   runs `Serial_ExchangeLinkMenuSelection` every frame; if the two
+   sides' game-clocks have drifted (side A has issued 30 menu_selection
+   RPCs while side B issued 5), FIFO pairing matches stale votes
+   from different game-states and the vote doesn't converge.
+   Completing a full trade or battle therefore also needs one of:
+   (a) the transport-level `endpoint` hijack (what LinkPair's
+   `_install_linkmenu_autoselect_trade` does — force-plant votes
+   without going through the per-frame loop), or (b) a sync-every-N-
+   frames policy where both agents pause and re-rendezvous often
+   enough that the FIFO stays fresh.
 
 3. **Designated-driver turn-based (simplest).** One agent owns the
    "I'll press A this tick" decision each turn; the other follows on

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pokered_harness.link.agent_sync import AgentSync
 from pokered_harness.link.pair import LinkPair
 from pokered_harness.link.remote import (
     STATUS_EXTERNAL,
@@ -20,6 +21,7 @@ from pokered_harness.link.symbols import LinkRole
 from pokered_harness.link.transport import LinkTransport
 
 __all__ = [
+    "AgentSync",
     "BridgeEndpoint",
     "InProcessSerialLink",
     "LinkPair",
