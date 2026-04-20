@@ -313,6 +313,16 @@ class RemoteLinkEndpoint:
             rf.E = new_de & 0xFF
             rf.B = 0
             rf.C = 0
+            # Pokered's Serial_ExchangeBytes final instructions are
+            # `xor a` (A=0, Z=1) then `ret` — callers that branch on
+            # flags (e.g. `jr z` / `jr nz`) see Z=1 in normal hardware.
+            # Set rf.A = 0 and rf.F = 0x80 (Z flag in bit 7) so our
+            # RET simulation leaves the same state as the real function.
+            # Without this, flag-dependent branches after call diverge
+            # between the two sides and exchange #2 never fires on
+            # one side (the classic 2/1 desync pattern).
+            rf.A = 0
+            rf.F = 0x80
 
         # Replace any pre-existing Serial_ExchangeBytes hook (e.g. the
         # SerialBridge BRIDGE-role callback) with our remote variant.
