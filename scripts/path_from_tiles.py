@@ -449,14 +449,34 @@ def main() -> int:
     #   require both to pass. Empirically: cell (8, 20) has
     #   bottom-left 0x31 BLOCKED, bottom-right 0x05 walkable —
     #   game blocks RIGHT into it.
+    # Collision model: the pokeyellow source
+    # (engine/overworld/player_state.asm _GetTileAndCoordsInFrontOfPlayer)
+    # calls `lda_coord <dx>, <dy>` where the screen-row base for the
+    # player's "feet" is row 9 (player sprite is 2 tiles tall, feet
+    # at screen (8, 9)). All four directions read a tile at screen
+    # (feet_x +/- 2 or feet_x, feet_y +/- 2 or feet_y) — crucially,
+    # UP reads (8, 7) = feet_y-2 which is the BOTTOM-LEFT of the
+    # destination step cell (step cell (pX, pY-1) has bottom-left at
+    # map (pX*2, pY*2-1) which equals screen offset (8, 7)).
+    # So BOTTOM-LEFT at (sx*2, sy*2+1) is the canonical check.
+    #
+    # The AND-BOTH-BOTTOM cave heuristic was retired after discovering
+    # it over-restricts movement (Mt Moon B2F asymmetric cells with
+    # bottom-left 0x05 + bottom-right 0x1b were incorrectly blocked).
     _CAVE_TILESETS = {3, 14, 16, 17, 21, 22}
-    use_and_both = tileset_id in _CAVE_TILESETS
-    if os.environ.get("PATH_CAVE_MODEL") == "single":
-        use_and_both = False  # debug: use overworld single-offset for caves
+    model = os.environ.get("PATH_MODEL", "single")
+    use_top_left = model == "top_left"
+    use_and_both = model == "and_both" and tileset_id in _CAVE_TILESETS
 
     def step_passable(sx: int, sy: int) -> bool:
         if (sx, sy) in sprite_blockers:
             return False
+        if use_top_left:
+            ty = sy * 2
+            tx = sx * 2
+            if not (0 <= ty < h_tiles and 0 <= tx < w_tiles):
+                return False
+            return tile_grid[ty][tx] in passable_tiles
         ty = sy * 2 + 1
         if not (0 <= ty < h_tiles):
             return False

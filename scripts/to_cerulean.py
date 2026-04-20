@@ -68,6 +68,67 @@ _MT_MOON_1F_TRAINER_EVENTS = [0x571, 0x572, 0x573, 0x574,
 _MT_MOON_B2F_TRAINER_EVENTS = [0x579, 0x57A, 0x57B, 0x57C, 0x57D]
 
 
+# _MT_MOON_WARPS_BY_FLOOR is defined after the Mt Moon map-id
+# constants below — see "Mt. Moon warp-hop routing" section.
+
+
+def _try_warp_hop(drv: rtb.Driver, session: Session, outdir: Path,
+                  rom: str, sym: str, sha1: str,
+                  warps: list[tuple[int, int]], label: str,
+                  stop_map_ids: tuple[int, ...],
+                  tried_edges: set[tuple[int, int, int, int, int]]
+                  ) -> str:
+    """Try each warp in order; walk to the first one A* can reach
+    AND we haven't taken from the current position before. Tracks
+    edges as (cur_map, cur_x, cur_y, warp_x, warp_y) — this is the
+    correct granularity for Mt. Moon's warp maze: the same warp
+    tile may be used multiple times from different positions, but
+    taking the SAME warp from the SAME position would just loop.
+
+    Uses step-by-step re-A*-planning so NPC wandering (Jessie/James
+    auto-movement on B2F, trainer sight-cone approach) doesn't
+    desync the plan mid-walk — a critical property for the Mt Moon
+    maze where wild encounters can briefly halt the player and a
+    pre-planned path goes stale.
+
+    Returns the walk_path result code, or ``"no_warp"`` if no
+    warp is reachable + un-tried."""
+    gs = drv.gs()
+    cur_map = gs.overworld.map_id
+    cur_x, cur_y = gs.overworld.x, gs.overworld.y
+    for (wx, wy) in warps:
+        edge = (cur_map, cur_x, cur_y, wx, wy)
+        if edge in tried_edges:
+            continue
+        # Cheap pre-check: can A* even find the path from here?
+        try:
+            seed = outdir / f"_{label}_seed.state"
+            seed.write_bytes(session.save_state())
+            path = _run_pathfinder_ex(seed, f"{wx},{wy}",
+                                       outdir / f"_{label}.txt",
+                                       rom, sym, sha1, None)
+        except RuntimeError:
+            continue
+        if not path:
+            continue
+        print(f"  [{label}] ({cur_x},{cur_y}) -> warp ({wx},{wy}) "
+              f"A* {len(path)} steps (step-by-step walk)", flush=True)
+        tried_edges.add(edge)
+        # Step-by-step walk: re-plans per press so Jessie/James
+        # movements + brief wild-battle interruptions don't break
+        # the plan. Target map is the DESTINATION floor of the warp
+        # (which we don't know without decoding warp_event data),
+        # so we watch for any map change as "warp fired" signal.
+        return _step_by_step_walk(drv, session, outdir,
+                                   f"{wx},{wy}", label,
+                                   rom, sym, sha1,
+                                   target_map_id=None,  # any map change
+                                   max_presses=150,
+                                   extra_blockers=None,
+                                   stop_map_ids=stop_map_ids)
+    return "no_warp"
+
+
 def _mark_trainers_defeated(session: Session, event_nums: list[int],
                              label: str = "trainers") -> None:
     """Set the given wEventFlags bits so each trainer reads as
@@ -104,6 +165,39 @@ M_MT_MOON_B2F = 0x3D
 _ROUTE3_EXIT_MAPS = (M_ROUTE_4, M_MT_MOON_1F)
 
 
+# Mt. Moon warp-hop routing. Each list = warp tiles on that floor in
+# priority order. Stepping onto (x, y) fires the game's warp logic;
+# we A* there and the game handles the floor transition. Visited-
+# warp tracking (see _try_warp_hop) prevents infinite A<->B ping-pong.
+_MT_MOON_WARPS_BY_FLOOR = {
+    M_MT_MOON_1F: [
+        # All 3 B1F warps. Route-4-west warps (14/15, 35) are where
+        # we came in — not listed because we don't want to warp back.
+        (17, 11), (5, 5), (25, 15),
+    ],
+    M_MT_MOON_B1F: [
+        # (27, 3) = Route 4 east exit. Only reachable from B1F upper
+        # strip, so listed first — A* returns no-path if we aren't
+        # in the strip yet.
+        (27, 3),
+        # (23, 3) also in the upper strip (warp to B2F). Its position
+        # is the same component as (27, 3); if A* reaches (23, 3) it
+        # means we're in the strip and should retry (27, 3).
+        (23, 3),
+        # Main-area B2F warps — cycle through these to maze across
+        # B2F and eventually emerge in the upper strip via B2F (5, 7).
+        (17, 11), (21, 17), (13, 27),
+    ],
+    M_MT_MOON_B2F: [
+        # Golden warp: (5, 7) -> B1F (23, 3) in the upper strip,
+        # 4 tiles west of the (27, 3) Route-4 exit.
+        (5, 7),
+        # Fallback B1F warps if (5, 7) is in an unreachable component.
+        (21, 17), (25, 9), (15, 27),
+    ],
+}
+
+
 def _save(session: Session, outdir: Path, name: str) -> Path:
     p = outdir / "milestones" / f"{name}.state"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -128,9 +222,10 @@ def _gs_summary(session: Session) -> str:
 def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
                         goal_xy: str, label: str,
                         rom: str, sym: str, sha1: str,
-                        target_map_id: int,
+                        target_map_id: int | None,
                         max_presses: int = 200,
-                        extra_blockers: str | None = None) -> str:
+                        extra_blockers: str | None = None,
+                        stop_map_ids: tuple[int, ...] = ()) -> str:
     """Walk toward ``goal_xy`` one press at a time, re-A*-planning
     from the current position + current NPC sprite layout after
     every single step. This is slow (each step is ~1 s of pathfinder
@@ -143,12 +238,20 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
     """
     no_progress = 0
     last_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
+    start_map = drv.gs().overworld.map_id
     for i in range(max_presses):
         gs = drv.gs()
         if gs.battle.active:
             drv.resolve_battle()
             continue
-        if gs.overworld.map_id == target_map_id:
+        if target_map_id is not None and gs.overworld.map_id == target_map_id:
+            return "map"
+        if gs.overworld.map_id in stop_map_ids:
+            return "stop"
+        # target_map_id=None means ANY map change counts as success
+        # (warp-hop pattern: we A* to a warp tile, walk it, and the
+        # moment the game changes map we've triggered the warp).
+        if target_map_id is None and gs.overworld.map_id != start_map:
             return "map"
         if gs.overworld.map_id in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
             return "blackout"
@@ -758,6 +861,7 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
     blackout_cycles = 0
     stuck_in_mm_count = 0
     last_mm_xy = None
+    tried_edges: set[tuple[int, int, int, int, int]] = set()
     while drv.gs().overworld.map_id != M_CERULEAN_CITY:
         cur_map = drv.gs().overworld.map_id
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
@@ -845,64 +949,43 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                     drv.press("right")
                 session.step(60, render=True)
                 continue
-        # Phase B: Mt. Moon 1F -> B1F.
-        # 1F warp (17, 11) -> B1F warp 3 at (25, 9). Shortest route
-        # to the B2F transit warp at B1F (17, 11).
-        if drv.gs().overworld.map_id == M_MT_MOON_1F:
+        # Phase B-D: Mt. Moon warp-puzzle hopping. The Route 4 east
+        # exit at B1F (27, 3) is only reachable from the B1F "upper
+        # strip" which is isolated from the main cave area by walls.
+        # You reach the upper strip by taking B2F (5, 7) -> B1F
+        # (23, 3). Getting to B2F (5, 7) requires crossing B2F,
+        # which may itself require multiple warp hops. Approach:
+        # on each Mt Moon floor, A* to any REACHABLE warp tile (in
+        # priority order), walk it, let the game warp, and repeat
+        # until we land on Route 4. A visited-warp set breaks
+        # A <-> B ping-pong.
+        if drv.gs().overworld.map_id in (M_MT_MOON_1F, M_MT_MOON_B1F,
+                                          M_MT_MOON_B2F):
             ftb._activate_repel(drv)
-            _mark_trainers_defeated(session, _MT_MOON_1F_TRAINER_EVENTS,
-                                     label="mm1f_pre_solve")
-            res = _step_by_step_walk(drv, session, outdir, "17,11",
-                                      "mm1f_b1f",
-                                      rom, sym, sha1,
-                                      target_map_id=M_MT_MOON_B1F,
-                                      max_presses=400,
-                                      extra_blockers=None)
-            print(f"  mm1f_b1f step-walk: {res} -> "
-                  f"{_gs_summary(session)}", flush=True)
+            cur_map = drv.gs().overworld.map_id
+            if cur_map == M_MT_MOON_1F:
+                _mark_trainers_defeated(session,
+                                         _MT_MOON_1F_TRAINER_EVENTS,
+                                         label="mm1f_pre_solve")
+            elif cur_map == M_MT_MOON_B2F:
+                _mark_trainers_defeated(session,
+                                         _MT_MOON_B2F_TRAINER_EVENTS,
+                                         label="mmb2f_pre_solve")
+            warps = _MT_MOON_WARPS_BY_FLOOR[cur_map]
+            label = {M_MT_MOON_1F: "mm1f_warp",
+                     M_MT_MOON_B1F: "mmb1f_warp",
+                     M_MT_MOON_B2F: "mmb2f_warp"}[cur_map]
+            res = _try_warp_hop(drv, session, outdir, rom, sym, sha1,
+                                warps, label,
+                                stop_map_ids=(M_ROUTE_4,),
+                                tried_edges=tried_edges)
+            print(f"  {label}: {res} -> {_gs_summary(session)}",
+                  flush=True)
             session.step(120, render=True)
-        # Phase C: Mt. Moon B1F -> B2F (via 17,11 warp).
-        # The Route 4 east exit warp at B1F (27, 3) is in an isolated
-        # upper-strip walkable zone unreachable by walking from the
-        # main B1F area. The intended route transits B2F: enter from
-        # B1F (17, 11) -> B2F (25, 9), navigate B2F to (5, 7), then
-        # warp back to B1F (23, 3) which IS in the upper strip.
-        if drv.gs().overworld.map_id == M_MT_MOON_B1F:
-            ftb._activate_repel(drv)
-            # If we've already transited B2F and landed in the upper
-            # strip at (23, 3), walk east to (27, 3) -> Route 4.
-            cur_x = drv.gs().overworld.x
-            cur_y = drv.gs().overworld.y
-            if cur_y <= 4:
-                res = _pathfind_walk(drv, session, outdir, "27,3",
-                                      "mmb1f_to_r4",
-                                      rom, sym, sha1,
-                                      stop_map_ids=(M_ROUTE_4,))
-                print(f"  mmb1f_to_r4 pathfind: {res} -> "
-                      f"{_gs_summary(session)}", flush=True)
-            else:
-                # From main area, walk to (17, 11) which warps to B2F.
-                res = _pathfind_walk(drv, session, outdir, "17,11",
-                                      "mmb1f_to_b2f",
-                                      rom, sym, sha1,
-                                      stop_map_ids=(M_MT_MOON_B2F,))
-                print(f"  mmb1f_to_b2f pathfind: {res} -> "
-                      f"{_gs_summary(session)}", flush=True)
-            session.step(120, render=True)
-        # Phase D: Mt. Moon B2F -> back to B1F upper strip.
-        # B2F (5, 7) warps to B1F (23, 3) in the upper strip,
-        # adjacent to the (27, 3) exit warp.
-        if drv.gs().overworld.map_id == M_MT_MOON_B2F:
-            ftb._activate_repel(drv)
-            _mark_trainers_defeated(session, _MT_MOON_B2F_TRAINER_EVENTS,
-                                     label="mmb2f_pre_solve")
-            res = _pathfind_walk(drv, session, outdir, "5,7",
-                                  "mmb2f_to_b1f_upper",
-                                  rom, sym, sha1,
-                                  stop_map_ids=(M_MT_MOON_B1F,))
-            print(f"  mmb2f_to_b1f_upper pathfind: {res} -> "
-                  f"{_gs_summary(session)}", flush=True)
-            session.step(120, render=True)
+            if res == "no_warp":
+                print(f"  no reachable warps on map 0x{cur_map:02x}; "
+                      f"bailing", flush=True)
+                return False
     return drv.gs().overworld.map_id == M_CERULEAN_CITY
 
 
