@@ -697,46 +697,17 @@ def run_gym_interior(session: Session, outdir: Path,
 
 
 def run_brock_badge(session: Session) -> bool:
-    brock_drv = bg.BrockDriver(session)
-    # Walk to (4, 2) past the Jr Trainer, mashing A through any
-    # intervening dialogs. Direction presses that stall get an A-mash
-    # retry to clear pre-battle text.
-    for _ in range(30):
-        gs = brock_drv.gs()
-        if gs.overworld.x == 4 and gs.overworld.y == 2:
-            break
-        if gs.battle.active:
-            brock_drv.resolve_battle(max_turns=40); continue
-        if brock_drv.joy_locked():
-            brock_drv.press("a"); continue
-        before = (gs.overworld.x, gs.overworld.y)
-        brock_drv.press("up")
-        after = (brock_drv.gs().overworld.x, brock_drv.gs().overworld.y)
-        if after == before and not brock_drv.gs().battle.active:
-            for _ in range(4):
-                brock_drv.press("a")
-                if brock_drv.gs().battle.active:
-                    brock_drv.resolve_battle(max_turns=30)
-                    break
-    print(f"  pre-brock: xy=({brock_drv.gs().overworld.x},"
-          f"{brock_drv.gs().overworld.y})", flush=True)
-    # Brock trigger: press A on him, then mash A through ~30 frames
-    # of pre-battle dialog until wIsInBattle flips on.
-    for i in range(60):
-        if brock_drv.gs().battle.active:
-            print(f"  brock dialog closed after {i} A-presses", flush=True)
-            break
-        brock_drv.press("a")
-    brock_drv.resolve_battle(max_turns=50)
-    # Post-battle: badge-grant dialog.
-    for _ in range(200):
-        gs = brock_drv.gs()
-        if gs.progress.badges_raw & 0x01:
-            break
-        if gs.battle.active:
-            brock_drv.resolve_battle(max_turns=30); continue
-        brock_drv.press("a")
-    return bool(brock_drv.gs().progress.badges_raw & 0x01)
+    """Hand off to the shared Red/Blue Brock driver.
+
+    ``run_pewter_to_brock_badge`` handles: already-inside-gym detection,
+    Jr. Trainer sight-line trigger, Brock sight-line + A-talk retry
+    (the "Jr. Trainer intercepts our A-talk" case), and the long
+    post-fight badge/TM34 dialog flush. Yellow reuses this path
+    unchanged now that the Pikachu lead has Thunderbolt + Double Kick
+    to handle Brock's Onix. The retry loop that was previously
+    open-coded here lives in ``brock_gym.run_pewter_to_brock_badge``.
+    """
+    return bg.run_pewter_to_brock_badge(session)
 
 
 # --- Main ----------------------------------------------------------------
