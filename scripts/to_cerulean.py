@@ -675,20 +675,59 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
     # blackout → Pewter PC. Recover and retry — each cycle covers
     # new ground because defeated trainers stay defeated.
     blackout_cycles = 0
+    stuck_in_mm_count = 0
+    last_mm_xy = None
     while drv.gs().overworld.map_id != M_CERULEAN_CITY:
         cur_map = drv.gs().overworld.map_id
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
-            if blackout_cycles >= 5:
+            if blackout_cycles >= 15:
                 print(f"  mt_moon: too many blackouts; bailing",
                       flush=True)
                 return False
             blackout_cycles += 1
+            stuck_in_mm_count = 0
             print(f"  mt_moon blackout #{blackout_cycles} → recovering",
                   flush=True)
             if not _recover_to_route4_west(drv, session, outdir,
                                             rom, sym, sha1):
                 return False
             continue
+        # If stuck in Mt. Moon same xy across multiple phases, force
+        # a blackout to reset NPC positions via the poison trick.
+        if cur_map in (M_MT_MOON_1F, M_MT_MOON_B1F, M_MT_MOON_B2F):
+            cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
+            if cur_xy == last_mm_xy:
+                stuck_in_mm_count += 1
+                if stuck_in_mm_count >= 2:
+                    print(f"  mt_moon stuck at {cur_xy}; poison-blackout "
+                          "to reset NPC state", flush=True)
+                    try:
+                        mem = session._pyboy.memory  # type: ignore
+                        drv.mem[drv.sym.addr_of("wLastBlackoutMap")] = M_PEWTER_CITY
+                        from pokered_harness.state.party import (
+                            _OFFSET_HP, _OFFSET_STATUS,
+                        )
+                        base = drv.sym.addr_of("wPartyMons")
+                        mem[base + _OFFSET_HP + 0] = 0
+                        mem[base + _OFFSET_HP + 1] = 1
+                        mem[base + _OFFSET_STATUS] = 1 << 3
+                    except Exception:
+                        pass
+                    for _ in range(120):
+                        if drv.gs().overworld.map_id != cur_map:
+                            break
+                        for d in ("up", "down", "left", "right"):
+                            drv.press(d)
+                            if drv.gs().battle.active:
+                                drv.resolve_battle()
+                            if drv.gs().overworld.map_id != cur_map:
+                                break
+                    session.step(300, render=True)
+                    stuck_in_mm_count = 0
+                    continue
+            else:
+                stuck_in_mm_count = 0
+                last_mm_xy = cur_xy
         # Phase A: walk to Route 4 (18, 5) Mt. Moon warp.
         if drv.gs().overworld.map_id == M_ROUTE_4:
             for _ in range(4):
