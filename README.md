@@ -129,18 +129,18 @@ End-to-end scripts live under `scripts/`:
 
 PyBoy has no hardware-level link-cable emulation (see
 [PyBoy #29](https://github.com/Baekalfen/PyBoy/issues/29)). The harness
-works around this by running two `Session` instances and installing
-execution hooks at pret serial-routine labels
-(`Serial_ExchangeBytes`,
-`Serial_TryEstablishingExternallyClockedConnection`, ...); when the
-game enters one of those helpers, a `SerialBridge` swaps the pending
-HRAM bytes between sides and forces the connection-status cell to
-"linked". The two sessions are stepped in lockstep by `LinkPair`.
+works around this by hooking pret's serial-routine labels
+(`Serial_ExchangeBytes`, `Serial_ExchangeNybble`,
+`Serial_ExchangeLinkMenuSelection`,
+`Serial_TryEstablishingExternallyClockedConnection`) and exchanging
+bytes at the semantic WRAM layer. Two deployment modes are supported:
 
-Label set is validated against real `pokeblue.sym` and `pokeyellow.sym`
-by `tests/test_link_symbols_real_roms.py` (skipped when the matching
-ROM's `.sym` is absent). Pairing install is smoke-tested against real
-ROMs in `tests/test_link_integration.py`.
+### Mode A: single-process pair (`LinkPair`)
+
+One process, two `Session` objects, stepped in lockstep by
+[`LinkPair`](src/pokered_harness/link/pair.py). A `SerialBridge` swaps
+the pending HRAM bytes between sides in-process. Useful for local
+trade-simulation, debugging, and the integration test suite.
 
 Peer env vars (all three optional — unset means single-session mode):
 
@@ -150,11 +150,62 @@ POKERED_PEER_SYM_PATH=rom/blue/pokemon-blue.sym \
 POKERED_PEER_ROM_SHA1=<see VERSIONS.md>
 ```
 
-MCP tools:
+MCP tools for Mode A:
 
 - `link_pair` — build the bridge and install hooks.
 - `link_step {"count": 60}` — advance both sides 60 ticks, interleaved.
-- `link_unpair` — drop the bridge (pre-existing session hooks survive).
+- `link_peer_press / link_peer_hold / link_peer_release` — drive the peer.
+- `link_unpair` — drop the bridge.
+
+### Mode B: two agents, one ROM each (`RemoteLinkEndpoint`)
+
+Two independent MCP servers, each owning exactly one `Session`, connected
+by a TCP `SerialLink`. Each server installs a
+[`RemoteLinkEndpoint`](src/pokered_harness/link/remote.py) pointed at
+the link; serial routines that fire on one side block on a
+`link.exchange(...)` RPC until the other side fires the matching routine.
+This is the deployment where **two independent AI agents each drive
+their own Pokémon** and trade or battle each other — no shared state, no
+shared memory, just the cable.
+
+Cross-version correctness: the RPC `kind` is a *symbol name* resolved on
+each side against its own `.sym` file. Blue's `wSerialPlayerDataBlock`
+at `0xD152` and Yellow's at `0xD151` both serialize as
+`exchange_bytes/wSerialPlayerDataBlock` on the wire, so a Blue ↔ Yellow
+trade is wire-compatible and the bytes land at the correct per-version
+address on each side.
+
+MCP tools for Mode B:
+
+- `link_listen {"port": 9999}` — bind TCP (internal-clock master role).
+  Returns immediately; poll `link_status` for `remote_mode=="connected"`.
+- `link_connect {"host": "peer.host", "port": 9999}` — connect to a
+  listening peer (external-clock slave role).
+- `link_status` — snapshot of local state (paired/listening/connected).
+- `link_disconnect` — close the link.
+
+Typical flow for two-agent trading, assuming both servers have
+`POKERED_ROM_PATH` set to their respective ROM:
+
+1. Agent A (listener): call `link_listen {"port": 9999}`.
+2. Agent B (connector): call `link_connect {"host": "A's host", "port": 9999}`.
+3. Both poll `link_status` until `remote_mode == "connected"`.
+4. Both agents drive their own sessions into Cerulean Pokémon Center
+   → Cable Club attendant using normal `press` / `step` tools. When the
+   game runs `Serial_ExchangeBytes` it's transparently wired to the
+   peer's matching call over TCP.
+5. `link_disconnect` when done.
+
+### Label / symbol validation
+
+Label set is validated against real `pokered.sym`, `pokeblue.sym`, and
+`pokeyellow.sym` by
+[`tests/test_link_symbols_real_roms.py`](tests/test_link_symbols_real_roms.py)
+(skipped when the matching ROM's `.sym` is absent). Mode A handshake is
+smoke-tested in
+[`tests/test_link_integration.py`](tests/test_link_integration.py);
+Mode B is covered end-to-end (including cross-version blue↔yellow) by
+[`tests/test_link_integration_remote.py`](tests/test_link_integration_remote.py).
 
 ### Producing Cable Club save states
 
@@ -175,10 +226,11 @@ Until that lands, produce each fixture manually:
 4. Repeat for the peer version.
 5. Run `python scripts/link_trade_demo.py --primary blue --peer yellow --view`.
 
-Current limitations: PyBoy 2.7.0 has no `hook_deregister`, so `unpair`
+Current limitations: PyBoy 2.7.0 has no `hook_deregister`, so unpair
 leaves dormant callbacks in place; Mt. Moon → Cerulean progression is
 not yet scripted so Cable Club fixtures must be produced manually;
-trade-only — link battle is deferred.
+trade-only — link battle reuses the same transport but the UI-side
+wiring is deferred.
 
 ## Color rendering
 
