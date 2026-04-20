@@ -178,6 +178,58 @@ class LinkPair:
         _install_pair("Serial_ExchangeLinkMenuSelection", {"MenuSelection": 2})
 
         self._install_linkmenu_autoselect_trade()
+        self._install_exchange_bytes_skip()
+
+    def _install_exchange_bytes_skip(self) -> None:
+        """Short-circuit ``Serial_ExchangeBytes`` to copy peer's send buffer
+        into this side's receive buffer and RET immediately.
+
+        The function's parameters are ``hl`` = send-buffer addr,
+        ``de`` = receive-buffer addr, ``bc`` = byte count. Both peers
+        have identical WRAM layouts so ``peer_memory[hl..hl+bc]`` is
+        the peer's send bytes for the same logical buffer.
+
+        Without this skip ``Serial_ExchangeBytes`` spin-waits in its
+        byte-by-byte serial loop, which PyBoy's silent rSB-write
+        rejection makes impossible to complete. Skipping and
+        pre-populating the recv buffer lets the game's trade-data-block
+        exchange (party data, random numbers, patch lists) complete.
+        """
+        pa, pb = self._primary, self._peer
+        mem_a, mem_b = pa._pyboy.memory, pb._pyboy.memory
+        pba, pbb = pa._pyboy, pb._pyboy
+
+        if "Serial_ExchangeBytes" not in pa.symbols:
+            return
+        bank, addr = pa.symbols.bank_addr("Serial_ExchangeBytes")
+
+        def skip(this_pb, this_mem, peer_mem):
+            rf = this_pb.register_file
+            hl = rf.HL
+            de = (rf.D << 8) | rf.E
+            bc = (rf.B << 8) | rf.C
+            for i in range(bc):
+                this_mem[de + i] = peer_mem[hl + i]
+            sp = rf.SP
+            rf.PC = (this_mem[sp + 1] << 8) | this_mem[sp]
+            rf.SP = (sp + 2) & 0xFFFF
+            rf.HL = (hl + bc) & 0xFFFF
+            new_de = (de + bc) & 0xFFFF
+            rf.D = new_de >> 8
+            rf.E = new_de & 0xFF
+            rf.B = 0
+            rf.C = 0
+
+        try:
+            pba.hook_deregister(bank, addr)
+        except Exception:
+            pass
+        try:
+            pbb.hook_deregister(bank, addr)
+        except Exception:
+            pass
+        pba.hook_register(bank, addr, lambda _: skip(pba, mem_a, mem_b), None)
+        pbb.hook_register(bank, addr, lambda _: skip(pbb, mem_b, mem_a), None)
 
     def _install_linkmenu_autoselect_trade(self) -> None:
         """Auto-select TRADE in the Cable Club LinkMenu.
