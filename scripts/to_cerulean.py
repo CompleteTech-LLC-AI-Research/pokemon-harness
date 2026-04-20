@@ -525,6 +525,72 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
     return drv.gs().overworld.map_id in _ROUTE3_EXIT_MAPS
 
 
+# --- Phase 5: cross Route 4 east -> Cerulean City ------------------------
+
+def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
+                 rom: str, sym: str, sha1: str) -> bool:
+    """Walk east across Route 4 to the Cerulean City connection.
+
+    Route 4 has EAST connection to Cerulean (per map header). Player
+    enters Route 4 from Route 3's north boundary around x=13, y=17.
+    We need to walk NORTH a few steps (Route 4 has terrain y=17 is
+    grass, y<=10 is walkable path), then EAST across to the city
+    connection. Trainer fight along the way (Lass at (63, 3)).
+    """
+    ftb._activate_repel(drv)
+    # Settle + dialog clear from the warp-in transition.
+    session.step(120, render=True)
+    # First step onto Route 4 properly (press UP to get off the
+    # connection-entry tile at y=17).
+    for _ in range(4):
+        before = (drv.gs().overworld.x, drv.gs().overworld.y)
+        drv.press("up")
+        if drv.gs().battle.active:
+            drv.resolve_battle()
+        if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
+            break
+    ftb._activate_repel(drv)
+    # A* to the east edge — Cerulean connects east of Route 4.
+    for goal, label in [("30,4", "r4_wp1"), ("50,4", "r4_wp2"),
+                         ("63,6", "r4_wp3")]:
+        if drv.gs().overworld.map_id != M_ROUTE_4:
+            break
+        res = _pathfind_walk(drv, session, outdir, goal, label,
+                              rom, sym, sha1,
+                              stop_map_ids=(M_CERULEAN_CITY,))
+        print(f"  {label}: {res} -> {_gs_summary(session)}", flush=True)
+        if res == "blackout":
+            break
+        ftb._activate_repel(drv)
+    # Cross east map-connection into Cerulean.
+    for _ in range(8):
+        if drv.gs().overworld.map_id == M_CERULEAN_CITY:
+            break
+        drv.press("right")
+    session.step(60, render=True)
+    return drv.gs().overworld.map_id == M_CERULEAN_CITY
+
+
+# --- Phase 6: walk Cerulean → Cerulean PC -------------------------------
+
+def walk_to_cerulean_pc(drv: rtb.Driver, session: Session, outdir: Path,
+                        rom: str, sym: str, sha1: str) -> bool:
+    """A* from Cerulean City entry tile to the Cerulean PC door at
+    (19, 18) and step UP through the warp."""
+    ftb._activate_repel(drv)
+    session.step(60, render=True)
+    res = _pathfind_walk(drv, session, outdir, "19,18", "to_cpc",
+                         rom, sym, sha1,
+                         stop_map_ids=(M_CERULEAN_POKECENTER,))
+    print(f"  to_cpc: {res}", flush=True)
+    for _ in range(6):
+        if drv.gs().overworld.map_id == M_CERULEAN_POKECENTER:
+            break
+        drv.press("up")
+    session.step(60, render=True)
+    return drv.gs().overworld.map_id == M_CERULEAN_POKECENTER
+
+
 # --- Main -----------------------------------------------------------------
 
 PHASES = [
@@ -532,6 +598,8 @@ PHASES = [
     "pewter_pc",
     "route3_entry",
     "mt_moon_entry",
+    "cerulean_entry",
+    "cerulean_pc",
 ]
 
 
@@ -587,8 +655,26 @@ def main() -> int:
     if not cross_route3(drv, session, outdir, rom, sym, sha1):
         print(f"  FAIL mt_moon_entry: {_gs_summary(session)}", flush=True)
         return 1
-    print(f"  in mt_moon: {_gs_summary(session)}", flush=True)
+    print(f"  on route4: {_gs_summary(session)}", flush=True)
     _save(session, outdir, "mt_moon_entry")
+    if args.stop_after == "mt_moon_entry":
+        return 0
+
+    print("\n=== phase: cerulean_entry ===", flush=True)
+    if not cross_route4(drv, session, outdir, rom, sym, sha1):
+        print(f"  FAIL cerulean_entry: {_gs_summary(session)}", flush=True)
+        return 1
+    print(f"  in cerulean: {_gs_summary(session)}", flush=True)
+    _save(session, outdir, "cerulean_entry")
+    if args.stop_after == "cerulean_entry":
+        return 0
+
+    print("\n=== phase: cerulean_pc ===", flush=True)
+    if not walk_to_cerulean_pc(drv, session, outdir, rom, sym, sha1):
+        print(f"  FAIL cerulean_pc: {_gs_summary(session)}", flush=True)
+        return 1
+    print(f"  at cerulean PC: {_gs_summary(session)}", flush=True)
+    _save(session, outdir, "cerulean_pc")
     return 0
 
 
