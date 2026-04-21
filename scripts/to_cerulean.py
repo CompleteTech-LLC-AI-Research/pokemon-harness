@@ -403,6 +403,16 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
     start_map = drv.gs().overworld.map_id
     for i in range(max_presses):
         gs = drv.gs()
+        # Defensive: if map reads as 0x00 (pallet-town or null), the
+        # game is likely mid-transition (scripted NPC walk, dialog
+        # close, etc.). A couple extra frames usually settles it;
+        # only if still 0x00 after that do we treat it as a real
+        # map change. This avoids spurious "map" returns on Blue/Red
+        # color where joy_locked scripted sequences transiently show
+        # map=0x00 between frames.
+        if gs.overworld.map_id == 0x00 and start_map != 0x00:
+            session.step(30, render=True)
+            gs = drv.gs()
         if gs.battle.active:
             drv.resolve_battle()
             continue
@@ -414,6 +424,13 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
         # (warp-hop pattern: we A* to a warp tile, walk it, and the
         # moment the game changes map we've triggered the warp).
         if target_map_id is None and gs.overworld.map_id != start_map:
+            # Guard against 0x00 transient: if the "changed" map is
+            # null, probably a scripted-movement frame. Wait to see
+            # if it settles back to start_map.
+            if gs.overworld.map_id == 0x00:
+                session.step(60, render=True)
+                if drv.gs().overworld.map_id == start_map:
+                    continue
             return "map"
         if gs.overworld.map_id in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
             return "blackout"
@@ -825,9 +842,21 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
     # trainer sight cones cause post-battle sprite shifts that
     # invalidate pre-planned paths mid-walk; re-planning per step
     # routes around the new sprite positions.
-    use_sbs = True
+    # Override via TO_CERULEAN_R3_LINEAR=1 for ROMs where step-by-step
+    # loops trigger spurious map transitions to 0x00 (observed on
+    # Blue color after Option-B boost).
+    use_sbs = os.environ.get("TO_CERULEAN_R3_LINEAR") != "1"
     while drv.gs().overworld.map_id not in _ROUTE3_EXIT_MAPS:
         cur_map = drv.gs().overworld.map_id
+        # Transient map=0x00: game mid-transition. Wait and retry
+        # before treating as a real map change.
+        if cur_map == 0x00:
+            session.step(60, render=True)
+            cur_map = drv.gs().overworld.map_id
+            if cur_map == 0x00:
+                print(f"  map still 0x00 after settle; bailing",
+                      flush=True)
+                return False
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
             if blackouts >= max_blackout_recoveries:
                 print(f"  too many blackouts ({blackouts}); bailing",
