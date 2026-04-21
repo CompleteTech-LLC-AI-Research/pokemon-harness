@@ -78,8 +78,10 @@ _YELLOW_SYM = ROM_ROOT / "yellow" / "pokemon-yellow.sym"
 _YELLOW_STATE = _REPO / "tests" / "fixtures" / "link" / "yellow" / "cable_club.state"
 
 _ROM_PATHS = {
+    # Red uses the color-patched ROM so it matches the walkthrough
+    # state produced by vigorous-lovelace-15ea8a (SHA e1deed6308…).
     "red": (
-        ROM_ROOT / "red" / "pokemon-red.gb",
+        ROM_ROOT / "red" / "pokemon-red-color.gb",
         ROM_ROOT / "red" / "pokemon-red.sym",
     ),
     "blue": (
