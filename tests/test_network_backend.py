@@ -1,13 +1,19 @@
 """Tests for :class:`NetworkBackend` (milestone 8).
 
-Proves the TCP transport exchanges bits correctly; tests here don't
-exercise the end-to-end two-process-two-PyBoy integration (that's a
-separate tier with its own fixture complexity). The transport surface
-itself is small enough to unit-test directly.
+Proves the TCP transport exchanges bits correctly. Two layers of
+coverage:
+
+1. Raw protocol (``EDGE_REQ`` / ``EDGE_RESP``) via hand-rolled peer
+   threads — asserts wire-level correctness and error paths.
+2. End-to-end pairs of :class:`SerialCore` instances driven via the
+   backend's reader threads — asserts NetworkBackend can substitute
+   for :class:`CoordinatedBackend` without the peer being in the same
+   process.
 """
 
 from __future__ import annotations
 
+import socket as _socket
 import struct
 import threading
 import time
@@ -20,6 +26,10 @@ from pokered_harness.link.network_backend import (
 )
 
 
+_OP_EDGE_REQ = 0x10
+_OP_EDGE_RESP = 0x11
+
+
 # ---------------------------------------------------------------------------
 # Pair construction + basic wire contract
 # ---------------------------------------------------------------------------
@@ -30,69 +40,8 @@ def test_pair_constructs_without_raising():
     try:
         assert a is not b
     finally:
-        a.close()
-        b.close()
-
-
-def test_paired_backends_exchange_a_single_bit():
-    """Spin a tiny peer thread that echoes our bit back inverted; send
-    a request through ``on_edge`` and assert we got the inverted bit."""
-    a, b = NetworkBackend.pair()
-
-    def echo_inverse():
-        # Read one frame, respond with inverted payload.
-        frame = b._recv_exactly(2)
-        _opcode, payload = struct.unpack(">BB", frame)
-        reply = struct.pack(">BB", 0x10, (~payload) & 1)
-        b._sock.sendall(reply)
-
-    peer = threading.Thread(target=echo_inverse, daemon=True)
-    peer.start()
-    try:
-        reply = a.on_edge(our_bit=1, our_role=1)
-        assert reply == 0  # inverted of 1
-    finally:
-        peer.join(timeout=2.0)
-        a.close()
-        b.close()
-
-
-def test_paired_backends_exchange_full_byte_bit_by_bit():
-    """MSB-first send 0xAA; peer replies with 0x55. After 8 edges each
-    side should have shifted in the other's bits in order."""
-    a, b = NetworkBackend.pair()
-
-    a_bits = [1, 0, 1, 0, 1, 0, 1, 0]  # 0xAA
-    b_bits = [0, 1, 0, 1, 0, 1, 0, 1]  # 0x55
-    received_by_a: list[int] = []
-    received_by_b: list[int] = []
-
-    def run_peer():
-        """Peer acts like a manual coordinator: reads our bit, sends
-        its bit, records what it received."""
-        for bit in b_bits:
-            frame = b._recv_exactly(2)
-            _op, payload = struct.unpack(">BB", frame)
-            received_by_b.append(payload)
-            b._sock.sendall(struct.pack(">BB", 0x10, bit))
-
-    peer = threading.Thread(target=run_peer, daemon=True)
-    peer.start()
-    try:
-        for bit in a_bits:
-            received_by_a.append(a.on_edge(our_bit=bit, our_role=1))
-    finally:
-        peer.join(timeout=5.0)
-        a.close()
-        b.close()
-
-    assert received_by_a == b_bits
-    assert received_by_b == a_bits
-
-
-# ---------------------------------------------------------------------------
-# Socket lifecycle
-# ---------------------------------------------------------------------------
+        a.stop()
+        b.stop()
 
 
 def test_close_is_idempotent():
@@ -102,64 +51,85 @@ def test_close_is_idempotent():
     b.close()
 
 
-def test_peer_hangup_mid_edge_raises():
-    """When the peer closes the socket, the next on_edge raises
-    :class:`NetworkBackendError` instead of hanging."""
-    a, b = NetworkBackend.pair()
-    b.close()
-    with pytest.raises(NetworkBackendError):
-        a.on_edge(our_bit=1, our_role=1)
-    a.close()
+# ---------------------------------------------------------------------------
+# Raw wire protocol: REQ / RESP round-trip
+# ---------------------------------------------------------------------------
 
 
-def test_peer_sends_wrong_opcode_raises():
+def test_on_edge_sends_REQ_and_waits_for_RESP():
+    """Master-mode ``on_edge`` sends an ``EDGE_REQ`` and blocks on a
+    matching ``EDGE_RESP`` from the peer. We simulate the peer's
+    reader thread inline."""
     a, b = NetworkBackend.pair()
 
-    def bad_peer():
+    def fake_peer_reader():
+        # Read our REQ, respond with inverted bit.
         frame = b._recv_exactly(2)
-        # Reply with wrong opcode.
-        b._sock.sendall(struct.pack(">BB", 0xFF, 0))
+        opcode, payload = struct.unpack(">BB", frame)
+        assert opcode == _OP_EDGE_REQ, f"expected REQ, got 0x{opcode:02x}"
+        b._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, (~payload) & 1))
 
-    t = threading.Thread(target=bad_peer, daemon=True)
-    t.start()
+    peer = threading.Thread(target=fake_peer_reader, daemon=True)
+    peer.start()
+
+    # Start our reader so the incoming RESP goes onto the queue.
+    a.start_receiver(local_core=None, irq_callback=None)
     try:
-        with pytest.raises(NetworkBackendError, match="unexpected opcode"):
-            a.on_edge(our_bit=0, our_role=1)
+        reply = a.on_edge(our_bit=1, our_role=1)
+        assert reply == 0  # inverted of 1
     finally:
-        t.join(timeout=2.0)
-        a.close()
-        b.close()
+        peer.join(timeout=2.0)
+        a.stop()
+        b.stop()
+
+
+def test_on_edge_with_peer_hangup_raises():
+    """If the peer closes the socket before responding, ``on_edge``
+    times out and raises :class:`NetworkBackendError`."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.stop()  # close peer
+    # With the peer gone, our reader hits EOF and marks closed. on_edge's
+    # send will fail; if it succeeds, the wait for RESP times out.
+    with pytest.raises(NetworkBackendError):
+        # Retry a few times in case send succeeds before reader notices.
+        for _ in range(3):
+            a.on_edge(our_bit=1, our_role=1)
+    a.stop()
+
+
+def test_unknown_opcode_is_ignored():
+    """The reader tolerates unknown opcodes (drops them) rather than
+    hard-erroring. This keeps real-ROM runs robust to spurious noise.
+    """
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    # Peer sends garbage opcode then a valid RESP.
+    b._sock.sendall(struct.pack(">BB", 0xFF, 0))
+    b._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, 1))
+
+    # Send a REQ from us — the peer side's reader won't fire because
+    # the "peer" here is just raw socket writes. Put a RESP by hand
+    # to unblock our on_edge.
+    try:
+        reply = a._resp_queue.get(timeout=2.0)  # pop the queued RESP
+        assert reply == 1
+    finally:
+        a.stop()
+        b.stop()
 
 
 # ---------------------------------------------------------------------------
-# Real TCP listen/connect
+# Backend drives a full SerialCore byte-exchange via two reader threads
 # ---------------------------------------------------------------------------
 
 
-def _free_port() -> int:
-    import socket as _s
-    s = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    try:
-        return s.getsockname()[1]
-    finally:
-        s.close()
-
-
-def test_network_backend_drives_serialcore_byte_exchange():
-    """Two :class:`SerialCore` instances paired via :class:`NetworkBackend`
-    (socketpair transport) exchange a full byte correctly.
-
-    This is the proof that :class:`NetworkBackend` is a valid drop-in
-    for :class:`CoordinatedBackend`: master-mode edges fire the backend,
-    which round-trips one bit over TCP per edge, and both sides end up
-    with the peer's byte in SB.
-
-    The slave side is driven manually via ``apply_external_edge`` in
-    this test (same pattern as the in-process coordinator's inline
-    exchange), so we don't need a second independent PyBoy to prove
-    the transport. A full two-process two-PyBoy trade over TCP is a
-    follow-up milestone.
+def test_two_serialcores_exchange_byte_via_network_backend():
+    """Canonical proof: two :class:`SerialCore` instances, each paired
+    with its own :class:`NetworkBackend`, exchange a full byte over
+    a socketpair. Master-mode edges on one side are handled by the
+    peer's reader thread driving its local ``SerialCore`` — exactly
+    the shape a two-process two-PyBoy setup needs.
     """
     from pokered_harness.link.serial_core import (
         CYCLES_PER_BYTE_DMG,
@@ -169,79 +139,152 @@ def test_network_backend_drives_serialcore_byte_exchange():
     ba, bb = NetworkBackend.pair()
 
     master = SerialCore(backend=ba)
-    slave = SerialCore()  # no backend — driven by the other side's on_edge
+    slave = SerialCore()  # no outgoing backend; driven by bb's reader
 
     master.set_SB(0xAA)
     slave.set_SB(0x55)
     master.set_SC(0x81)  # internal clock
     slave.set_SC(0x80)   # external clock
 
-    # Slave-side thread: read edges from the TCP socket and drive the
-    # slave's SerialCore. In a two-process setup this would be the
-    # peer process's main tick loop; here we do it inline in a thread.
-    done = threading.Event()
-    errors: list[BaseException] = []
+    # Record slave-side IRQ fires.
+    slave_irqs: list[int] = []
 
-    def slave_reader():
-        try:
-            for _ in range(8):
-                frame = bb._recv_exactly(2)
-                _op, master_bit = struct.unpack(">BB", frame)
-                slave_out = slave.peek_out_bit()
-                slave.apply_external_edge(master_bit & 1)
-                bb._sock.sendall(struct.pack(">BB", 0x10, slave_out))
-        except Exception as exc:
-            errors.append(exc)
-        finally:
-            done.set()
+    def slave_irq():
+        slave_irqs.append(1)
 
-    t = threading.Thread(target=slave_reader, daemon=True)
-    t.start()
+    ba.start_receiver(local_core=master)  # not strictly needed; keeps
+                                           # reader idle for master side
+    bb.start_receiver(local_core=slave, irq_callback=slave_irq)
 
     try:
-        # Master ticks — each edge fires ba.on_edge, which sends the
-        # bit over TCP and reads the reply. After 8 edges, transfer
-        # completes.
         irq = master.tick(CYCLES_PER_BYTE_DMG)
-        assert irq is True, "master transfer didn't complete"
-        assert done.wait(timeout=5.0), "slave reader thread hung"
-        assert not errors, f"slave reader errored: {errors[0]}"
-        assert master.SB == 0x55, f"master got 0x{master.SB:02x}, expected 0x55"
-        assert slave.SB == 0xAA, f"slave got 0x{slave.SB:02x}, expected 0xAA"
+        assert irq is True, "master didn't complete transfer"
+
+        # Give bb's reader a moment to finish its final edge send.
+        time.sleep(0.1)
+        assert master.SB == 0x55, f"master got 0x{master.SB:02x}"
+        assert slave.SB == 0xAA, f"slave got 0x{slave.SB:02x}"
+        assert slave_irqs == [1], "slave IRQ callback should fire once"
     finally:
-        ba.close()
-        bb.close()
+        ba.stop()
+        bb.stop()
 
 
-def test_listen_and_connect_over_loopback():
-    """Spin up a listener in a thread, connect from the main thread,
-    exchange a bit, confirm both sides saw the other's bit."""
+def test_multiple_bytes_exchange():
+    """Two cores exchange three bytes in a row via the reader-thread
+    model. Proves the backend works across multiple transfers without
+    resetting."""
+    from pokered_harness.link.serial_core import (
+        CYCLES_PER_BYTE_DMG,
+        SerialCore,
+    )
+
+    ba, bb = NetworkBackend.pair()
+    master = SerialCore(backend=ba)
+    slave = SerialCore()
+
+    ba.start_receiver(local_core=master)
+    bb.start_receiver(local_core=slave)
+
+    try:
+        for master_byte, slave_byte in [(0x01, 0xFE), (0xAA, 0x55), (0x42, 0x24)]:
+            master.set_SB(master_byte)
+            slave.set_SB(slave_byte)
+            master.set_SC(0x81)
+            slave.set_SC(0x80)
+            master.tick(master.last_cycles + CYCLES_PER_BYTE_DMG)
+            time.sleep(0.05)
+            assert master.SB == slave_byte, (
+                f"master expected 0x{slave_byte:02x}, got 0x{master.SB:02x}"
+            )
+            assert slave.SB == master_byte, (
+                f"slave expected 0x{master_byte:02x}, got 0x{slave.SB:02x}"
+            )
+    finally:
+        ba.stop()
+        bb.stop()
+
+
+# ---------------------------------------------------------------------------
+# Real TCP listen/connect
+# ---------------------------------------------------------------------------
+
+
+def _free_port() -> int:
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    try:
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+def test_listen_and_connect_over_loopback_exchange_byte():
+    """Full loopback: one thread listens, one connects, each gets a
+    :class:`NetworkBackend`, and they exchange a byte."""
+    from pokered_harness.link.serial_core import (
+        CYCLES_PER_BYTE_DMG,
+        SerialCore,
+    )
+
     port = _free_port()
     server_holder: dict = {}
+    ready = threading.Event()
+
+    # Pre-bind the listener in main thread so we can reliably connect
+    # once the server thread calls accept().
+    listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", port))
+    listener.listen(1)
 
     def server():
-        backend, listener = NetworkBackend.listen(port)
+        conn, _ = listener.accept()
+        conn.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+        backend = NetworkBackend(conn)
         server_holder["backend"] = backend
-        server_holder["listener"] = listener
-        # Echo inverted.
-        frame = backend._recv_exactly(2)
-        _op, payload = struct.unpack(">BB", frame)
-        backend._sock.sendall(struct.pack(">BB", 0x10, (~payload) & 1))
+        core = SerialCore()
+        core.set_SB(0x33)
+        core.set_SC(0x80)
+        backend.start_receiver(local_core=core)
+        server_holder["core"] = core
+        ready.set()
+        time.sleep(2.0)
 
     t = threading.Thread(target=server, daemon=True)
     t.start()
-    # Give the listener a tick to bind. A small sleep is adequate here;
-    # a proper ready-signal would be overkill for a localhost test.
-    time.sleep(0.1)
 
-    client = NetworkBackend.connect("127.0.0.1", port)
+    client_backend = NetworkBackend.connect("127.0.0.1", port)
+    assert ready.wait(timeout=2.0), "server didn't finish setup"
+    client_core = SerialCore(backend=client_backend)
+    client_core.set_SB(0xCC)
+    client_core.set_SC(0x81)
+    client_backend.start_receiver(local_core=client_core)
     try:
-        reply = client.on_edge(our_bit=1, our_role=1)
-        assert reply == 0
+        client_core.tick(CYCLES_PER_BYTE_DMG)
+        time.sleep(0.2)
+        assert client_core.SB == 0x33
+        assert server_holder["core"].SB == 0xCC
     finally:
-        client.close()
+        client_backend.stop()
         t.join(timeout=2.0)
         if "backend" in server_holder:
-            server_holder["backend"].close()
-        if "listener" in server_holder:
-            server_holder["listener"].close()
+            server_holder["backend"].stop()
+        try:
+            listener.close()
+        except OSError:
+            pass
+
+
+def _wait_bound(port: int, timeout: float = 2.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            s.settimeout(0.05)
+            s.connect(("127.0.0.1", port))
+            s.close()
+            return True
+        except (OSError, _socket.timeout):
+            time.sleep(0.05)
+    return False

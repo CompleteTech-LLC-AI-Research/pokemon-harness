@@ -58,6 +58,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from pokered_harness.link.network_backend import NetworkBackend
 from pokered_harness.link.serial_coordinator import LockstepCoordinator
 from pokered_harness.link.serial_core import SerialCore
 
@@ -83,11 +84,12 @@ class PyBoyLinkSession:
     #: Max attached instances. Gen I Pokémon is strictly 2-player.
     MAX_ATTACHED: int = 2
 
-    def __init__(self) -> None:
+    def __init__(self, network_backend: NetworkBackend | None = None) -> None:
         self._pyboys: list[object] = []
         self._cores: list[SerialCore] = []
         self._originals: list[object] = []
         self._coord: LockstepCoordinator | None = None
+        self._network_backend: NetworkBackend | None = network_backend
 
     # --- construction --------------------------------------------------
 
@@ -95,28 +97,70 @@ class PyBoyLinkSession:
     def local(cls) -> "PyBoyLinkSession":
         """Create a local two-instance session.
 
-        (For symmetry with an eventual :meth:`connect`/:meth:`listen` —
-        today ``local`` is the only constructor.)
+        Both PyBoys attach into the same process; they're paired via
+        a :class:`LockstepCoordinator`.
         """
         return cls()
+
+    @classmethod
+    def listen(
+        cls, port: int, *, host: str = "127.0.0.1"
+    ) -> "PyBoyLinkSession":
+        """Bind ``(host, port)``, accept one peer, return the session.
+
+        Single-instance mode: the session holds a :class:`NetworkBackend`;
+        :meth:`attach` installs a :class:`SerialCore` on the local PyBoy
+        whose backend is the NetworkBackend. The peer process is
+        expected to have used :meth:`connect` and to be driving its
+        own PyBoy.
+
+        Blocks until a peer connects.
+        """
+        backend, _listener = NetworkBackend.listen(port, host=host)
+        # Close the listener — we only accept one connection.
+        try:
+            _listener.close()
+        except OSError:
+            pass
+        return cls(network_backend=backend)
+
+    @classmethod
+    def connect(
+        cls, host: str, port: int, *, timeout_s: float = 10.0
+    ) -> "PyBoyLinkSession":
+        """Connect to a peer running :meth:`listen` on ``(host, port)``.
+
+        Returns a single-instance network-mode session; call
+        :meth:`attach` to install the serial core.
+        """
+        backend = NetworkBackend.connect(host, port, timeout_s=timeout_s)
+        return cls(network_backend=backend)
 
     # --- attach / detach -----------------------------------------------
 
     def attach(self, pyboy: _PyBoyLike) -> SerialCore:
         """Install a :class:`SerialCore` on ``pyboy.mb``.
 
-        Returns the core so callers can inspect it directly. If this is
-        the second attachment the pair becomes paired via a
+        Returns the core so callers can inspect it directly.
+
+        Local mode: the second attachment pairs both instances via a
         :class:`LockstepCoordinator`.
 
-        Raises ``RuntimeError`` if ``pyboy`` is already attached or if
-        the session is already at :attr:`MAX_ATTACHED`.
+        Network mode: only one instance attaches per session. The core's
+        backend is the :class:`NetworkBackend`; the reader thread starts
+        so peer-driven (slave-mode) edges advance the local core and
+        fire the CPU's serial IRQ.
+
+        Raises ``RuntimeError`` if ``pyboy`` is already attached, the
+        session is at :attr:`MAX_ATTACHED`, or a network-mode session
+        already has its one attachment.
         """
         if pyboy in self._pyboys:
             raise RuntimeError(f"already attached: {pyboy!r}")
-        if len(self._pyboys) >= self.MAX_ATTACHED:
+        max_attached = 1 if self._network_backend is not None else self.MAX_ATTACHED
+        if len(self._pyboys) >= max_attached:
             raise RuntimeError(
-                f"session is full ({self.MAX_ATTACHED} instances max)"
+                f"session is full ({max_attached} instances max)"
             )
 
         mb = pyboy.mb
@@ -136,11 +180,18 @@ class PyBoyLinkSession:
         self._cores.append(core)
         self._originals.append(original)
 
-        # When the second side comes in, wire up the coordinator with
-        # IRQ callbacks pointing at each motherboard's CPU so slave-side
-        # transfer completion (which happens via the peer driving edges,
-        # bypassing our own mb.tick path) still wakes halted code.
-        if len(self._cores) == 2:
+        if self._network_backend is not None:
+            # Network-mode: hook the local core up to the TCP backend
+            # and fire the slave-IRQ via this pyboy's CPU flag register
+            # when peer-driven edges complete our transfer.
+            core.backend = self._network_backend
+            self._network_backend.start_receiver(
+                local_core=core,
+                irq_callback=self._make_serial_irq_raiser(pyboy),
+            )
+        elif len(self._cores) == 2:
+            # Local-mode pair: wire the in-process coordinator with
+            # IRQ callbacks pointing at each motherboard's CPU.
             self._coord = LockstepCoordinator(
                 self._cores[0],
                 self._cores[1],
