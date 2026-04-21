@@ -386,6 +386,18 @@ per bit. Mitigated by keeping the core in the same module as the rest
 of the hot-path devices; callbacks to the Python-side backend fire only
 on edge boundaries (up to 8 per byte), not per CPU cycle.
 
+**Python-side attach against wheel PyBoy is blocked.** Confirmed via
+the `pokered-harness` companion repo's `PyBoyLinkSession` prototype:
+wheel-installed PyBoy is fully Cython-compiled — `cdef Motherboard mb`,
+`cdef Serial serial` — so neither `pyboy.mb` nor `pyboy.mb.serial` is
+Python-accessible, and a pure-Python `SerialCore` cannot be swapped in
+from outside the C extension. Any integration targeting the
+wheel-installed PyBoy has to either (a) install PyBoy from source with
+the Cython extension disabled, or (b) land the serial overhaul inside
+PyBoy itself and ship a new wheel. Option (b) is this document's
+intended outcome; option (a) is the near-term development mode for
+contributors prototyping the new core.
+
 **Non-blocking network edge.** WAN jitter could bubble up as
 frame-rate stutter. Mitigated by a small jitter buffer (documented
 in [PyBoy wiki's Student-Projects page](https://github.com/Baekalfen/PyBoy/wiki/Student-Projects)
