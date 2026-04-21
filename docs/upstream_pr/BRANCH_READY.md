@@ -1,4 +1,4 @@
-# Upstream PR branch is ready — commit `f0d0001`
+# Upstream PR branch is ready — commit `f0856a3`
 
 The `vendor/pyboy-src/` PyBoy clone now has a `link-cable-bit-accurate-serial`
 branch built per the [APPLY.md](APPLY.md) recipe and verified green against
@@ -7,10 +7,11 @@ the PyBoy regression suite.
 ## Branch contents
 
 ```
-link-cable-bit-accurate-serial @ f0d0001
+link-cable-bit-accurate-serial @ f0856a3
 ├── f9f812b setup: honor PYBOY_NO_CYTHON env var for contributor non-Cython builds
 ├── ebb0aac serial: bit-accurate FF01/FF02 shift register + link-cable support
-└── f0d0001 link: NetworkBackend reader-thread + LinkSession network mode
+├── f0856a3 link: NetworkBackend reader-thread + LinkSession network mode
+└── f0856a3 link: NetworkBackend OP_SYNC opcode for cross-peer rendezvous
 ```
 
 **Changed files** (vs. upstream `master`):
