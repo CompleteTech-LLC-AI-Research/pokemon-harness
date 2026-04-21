@@ -1177,13 +1177,18 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                 # Already on east half — path to Cerulean via a
                 # step-by-step walker so trainer post-battle sprite
                 # shifts don't invalidate the pre-planned path.
-                # Target the Cerulean map-connection cell (89, 6).
+                # Cerulean map-connection runs along Route 4's east
+                # edge at col 89. Row 6 there (the "obvious" east exit)
+                # is surrounded by walls — tile-unreachable. The
+                # actually-walkable rows at col 89 are 10-11 (lower
+                # plateau, tile 0x39). Target (89, 10) and let the
+                # final RIGHT-mash step off the edge into Cerulean.
                 if drv.gs().overworld.x < 89:
                     res = _step_by_step_walk(drv, session, outdir,
-                                              "89,6", "r4e_to_cerulean",
+                                              "89,10", "r4e_to_cerulean",
                                               rom, sym, sha1,
                                               target_map_id=M_CERULEAN_CITY,
-                                              max_presses=200,
+                                              max_presses=300,
                                               extra_blockers=None,
                                               stop_map_ids=(M_CERULEAN_CITY,))
                     print(f"  r4e_to_cerulean: {res} -> "
@@ -1262,14 +1267,22 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
 
 def walk_to_cerulean_pc(drv: rtb.Driver, session: Session, outdir: Path,
                         rom: str, sym: str, sha1: str) -> bool:
-    """A* from Cerulean City entry tile to the Cerulean PC door at
-    (19, 18) and step UP through the warp."""
+    """Walk from the Cerulean City entry tile to the Cerulean PC door
+    approach cell (19, 18), then step UP onto the warp at (19, 17)
+    which triggers the Pokémon Center transition.
+
+    Uses step-by-step re-A* to route around the wandering Super Nerd
+    at (15, 18) (WALK UP_DOWN) — linear walk stalls at (14, 18) when
+    he's on the east-bound path."""
     ftb._activate_repel(drv)
     session.step(60, render=True)
-    res = _pathfind_walk(drv, session, outdir, "19,18", "to_cpc",
-                         rom, sym, sha1,
-                         stop_map_ids=(M_CERULEAN_POKECENTER,))
-    print(f"  to_cpc: {res}", flush=True)
+    res = _step_by_step_walk(drv, session, outdir, "19,18", "to_cpc",
+                              rom, sym, sha1,
+                              target_map_id=M_CERULEAN_POKECENTER,
+                              max_presses=120,
+                              extra_blockers=None,
+                              stop_map_ids=(M_CERULEAN_POKECENTER,))
+    print(f"  to_cpc: {res} -> {_gs_summary(session)}", flush=True)
     for _ in range(6):
         if drv.gs().overworld.map_id == M_CERULEAN_POKECENTER:
             break
