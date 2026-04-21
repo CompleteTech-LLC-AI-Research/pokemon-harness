@@ -168,3 +168,53 @@ Addresses differ from Red/Blue but the name-based resolver masks that.
 
 `Session.from_files(..., expected_rom_sha1=...)` hashes the provided ROM
 and raises `VersionMismatch` on any deviation from the pins above.
+
+## Link-cable symbol coverage
+
+**Status: unverified — pending real-ROM validation.** The labels below
+were taken from the pret community sources (`home/serial.asm` and
+`engine/link/*.asm`) and are *believed* stable across Red/Blue/Yellow,
+but none have been confirmed against actual `.sym` files produced by
+`make DEBUG=1` on each version. When validating: any label that turns
+out to be renamed or missing on a given ROM should be patched in
+`src/pokered_harness/link/symbols.py` via the entry's `per_version` map.
+
+### BRIDGE (bridge mutates memory when hooked)
+
+| Key | Label | Required | Expected on |
+|---|---|---|---|
+| `exchange_bytes` | `Serial_ExchangeBytes` | yes | red, blue, yellow |
+| `send_zero_byte` | `Serial_SendZeroByte` | no | red, blue, yellow |
+| `exchange_nybble` | `Serial_SyncAndExchangeNybble` | no | red, blue, yellow |
+
+### HANDSHAKE (bridge short-circuits to "linked")
+
+| Key | Label | Required | Expected on |
+|---|---|---|---|
+| `handshake` | `Serial_TryEstablishingLink` | yes | red, blue, yellow |
+| `cable_club_return` | `CableClub_DoBattleOrTradeAgain` | no | red, blue, yellow |
+
+### PROGRESS (fires as event, no memory mutation)
+
+| Key | Label | Required | Expected on |
+|---|---|---|---|
+| `trade_select_mon` | `TradeCenter_SelectMon` | no | red, blue, yellow |
+| `trade_load_data` | `LoadTradingData` | no | red, blue, yellow |
+| `trade_show_player_mon` | `Trade_ShowPlayerMon` | no | red, blue, yellow |
+| `trade_show_enemy_mon` | `Trade_ShowEnemyMon` | no | red, blue, yellow |
+| `print_trainer_info` | `PrintTrainerInfo` | no | red, blue, yellow |
+
+### BATTLE (reserved — link-battle milestone, not wired yet)
+
+| Key | Label | Required | Expected on |
+|---|---|---|---|
+| `link_battle_versus` | `LinkBattleVersusTextString` | no | red, blue, yellow |
+
+### HRAM labels (required on all ROMs)
+
+| Label | Purpose |
+|---|---|
+| `hSerialSendData` | Outgoing byte cell |
+| `hSerialReceiveData` | Incoming byte cell |
+| `hSerialConnectionStatus` | Connection status cell (bridge writes 0x01) |
+

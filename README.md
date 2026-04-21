@@ -125,6 +125,268 @@ End-to-end scripts live under `scripts/`:
   Double Kick) to clear Brock's Rock/Ground team; replace with real
   Route 2 grind when the heal-loop lands.
 
+## Link cable
+
+PyBoy has no hardware-level link-cable emulation (see
+[PyBoy #29](https://github.com/Baekalfen/PyBoy/issues/29)). The harness
+works around this by hooking pret's serial-routine labels
+(`Serial_ExchangeBytes`, `Serial_ExchangeNybble`,
+`Serial_ExchangeLinkMenuSelection`,
+`Serial_TryEstablishingExternallyClockedConnection`) and exchanging
+bytes at the semantic WRAM layer. Two deployment modes are supported:
+
+### Mode A: single-process pair (`LinkPair`)
+
+One process, two `Session` objects, stepped in lockstep by
+[`LinkPair`](src/pokered_harness/link/pair.py). A `SerialBridge` swaps
+the pending HRAM bytes between sides in-process. Useful for local
+trade-simulation, debugging, and the integration test suite.
+
+Peer env vars (all three optional — unset means single-session mode):
+
+```bash
+POKERED_PEER_ROM_PATH=rom/blue/pokemon-blue.gb \
+POKERED_PEER_SYM_PATH=rom/blue/pokemon-blue.sym \
+POKERED_PEER_ROM_SHA1=<see VERSIONS.md>
+```
+
+MCP tools for Mode A:
+
+- `link_pair` — build the bridge and install hooks.
+- `link_step {"count": 60}` — advance both sides 60 ticks, interleaved.
+- `link_peer_press / link_peer_hold / link_peer_release` — drive the peer.
+- `link_unpair` — drop the bridge.
+
+### Mode B: two agents, one ROM each (`RemoteLinkEndpoint`)
+
+Two independent MCP servers, each owning exactly one `Session`, connected
+by a TCP `SerialLink`. Each server installs a
+[`RemoteLinkEndpoint`](src/pokered_harness/link/remote.py) pointed at
+the link; serial routines that fire on one side block on a
+`link.exchange(...)` RPC until the other side fires the matching routine.
+This is the deployment where **two independent AI agents each drive
+their own Pokémon** and trade or battle each other — no shared state, no
+shared memory, just the cable.
+
+Cross-version correctness: the RPC `kind` is a *symbol name* resolved on
+each side against its own `.sym` file. Blue's `wSerialPlayerDataBlock`
+at `0xD152` and Yellow's at `0xD151` both serialize as
+`exchange_bytes/wSerialPlayerDataBlock` on the wire, so a Blue ↔ Yellow
+trade is wire-compatible and the bytes land at the correct per-version
+address on each side.
+
+MCP tools for Mode B:
+
+- `link_listen {"port": 9999}` — bind TCP (internal-clock master role).
+  Returns immediately; poll `link_status` for `remote_mode=="connected"`.
+- `link_connect {"host": "peer.host", "port": 9999}` — connect to a
+  listening peer (external-clock slave role).
+- `link_status` — snapshot of local state (paired/listening/connected).
+- `link_disconnect` — close the link.
+
+Typical flow for two-agent trading, assuming both servers have
+`POKERED_ROM_PATH` set to their respective ROM:
+
+1. Agent A (listener): call `link_listen {"port": 9999}`.
+2. Agent B (connector): call `link_connect {"host": "A's host", "port": 9999}`.
+3. Both poll `link_status` until `remote_mode == "connected"`.
+4. Both agents drive their own sessions into Cerulean Pokémon Center
+   → Cable Club attendant using normal `press` / `step` tools. When the
+   game runs `Serial_ExchangeBytes` it's transparently wired to the
+   peer's matching call over TCP.
+5. `link_disconnect` when done.
+
+### Label / symbol validation
+
+Label set is validated against real `pokered.sym`, `pokeblue.sym`, and
+`pokeyellow.sym` by
+[`tests/test_link_symbols_real_roms.py`](tests/test_link_symbols_real_roms.py)
+(skipped when the matching ROM's `.sym` is absent). Mode A handshake is
+smoke-tested in
+[`tests/test_link_integration.py`](tests/test_link_integration.py);
+Mode B is covered end-to-end by
+[`tests/test_link_integration_remote.py`](tests/test_link_integration_remote.py).
+
+### Mode B coverage matrix
+
+Listener × connector, with the milestones driven end-to-end over
+localhost TCP. Role matters: listener is the internal-clock master,
+connector the external-clock slave — a reversed pair is a distinct
+wire configuration.
+
+| Listener | Connector | Handshake | Nybble → LinkMenu | Nybble RPC obs | Menu-sel RPC obs | TRADE_CENTER warp |
+|---|---|---|---|---|---|---|
+| blue | blue | ✅ | ✅ | ✅ | ✅ | ✅ |
+| blue | yellow | ✅ | ✅ | ✅ | ✅ | ✅ |
+| yellow | blue | ✅ | ✅ | ✅ | ✅ | ✅ |
+| yellow | yellow | ✅ | ✅ | ✅ | ✅ | ✅ |
+| red | red | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+| red | blue | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+| blue | red | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+| red | yellow | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+| yellow | red | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+
+Every non-red row now hits every transport-testable milestone.
+Menu-selection RPC counts are balanced on both sides within ±1 for
+all 4 working pairs (measured: blue↔blue 65/64, blue↔yellow 113/112,
+yellow↔blue 60/59, yellow↔yellow 97/96) — the byte exchange through
+`Serial_ExchangeLinkMenuSelection` round-trips correctly regardless of
+version pairing.
+
+Fixture gaps:
+
+- **Red** — no `tests/fixtures/link/red/cable_club.state` exists.
+  Mt. Moon → Cerulean progression is not yet scripted in the Red
+  harness, so the fixture has never been produced.
+- **Yellow** — `tests/fixtures/link/yellow/cable_club.state` (git-
+  ignored along with all `*.state` files per the BYO-ROM policy) is
+  produced locally by running
+  [`scripts/produce_yellow_cable_club_fixture.py`](scripts/produce_yellow_cable_club_fixture.py).
+  That script expects the sibling worktree's
+  `walkthrough_to_cerulean/milestones/cerulean_pc.state` as input —
+  a state the Yellow walkthrough harness produces via a blackout-warp
+  shortcut to the Cerulean Pokecenter with correct CGB palette (via
+  the nurse-heal trigger). From there the script encodes the
+  `up×4, left×2, down, right-until-x=11, up` route that sidesteps the
+  nurse NPC at (4, 3) and lands the player on the only tile where
+  pressing A fires `CableClubNPC` on Yellow (discovered by hooking
+  `01:7035 CableClubNPC` across x=5..12 — only x=11 triggers).
+
+Transport-layer behaviour past LinkMenu
+(`Serial_ExchangeLinkMenuSelection`, `Serial_ExchangeBytes` for the
+three RNG/player-data/patch-list blocks inside `CableClub_DoBattleOrTrade`)
+is covered across multiple levels:
+
+- In-process, end-to-end on real ROMs:
+  `test_link_integration.test_link_trade_roundtrip` (blue) —
+  reaches `TradeCenter_DrawPartyLists` via the full trade protocol.
+- Remote, unit-level on `InProcessSerialLink`:
+  `test_remote_endpoint.test_exchange_menu_selection_exchanges_two_bytes`
+  and `test_exchange_bytes_cross_version_translates_via_symbol`.
+- Remote, over actual TCP, real ROMs:
+  - `test_remote_rpc_flow_past_link_menu_over_tcp` drives each of
+    the 4 working pairs to LinkMenu and observes
+    `menu_selection/wLinkMenuSelectionSendBuffer` RPCs flowing with
+    balanced counts on both sides.
+  - `test_remote_menu_vote_converges_and_warps_to_trade_center_blue`
+    installs the same auto-select-TRADE hook that
+    `LinkPair._install_linkmenu_autoselect_trade` uses
+    (pre-plants `0xD4` in `wLinkMenuSelectionReceiveBuffer`),
+    simulating two agents cooperatively voting TRADE. Both peers
+    warp to map `0xEF` (TRADE_CENTER) — transport-level proof that
+    the full `Serial_ExchangeLinkMenuSelection` byte exchange
+    round-trips correctly over TCP and drives the post-menu warp.
+  - Generic `test_serial_link.test_tcp_exchange_round_trip` +
+    `test_tcp_larger_payload` cover arbitrary byte payloads.
+
+The `exchange_bytes/wSerialRandomNumberListBlock` round-trip
+(the first of the three post-menu exchanges inside
+`CableClub_DoBattleOrTradeAgain`) is now additionally tested
+two-process on real TCP in
+`test_remote_exchange_bytes_fires_in_trade_center_blue_blue`. It
+uses the same auto-select-TRADE hook the in-process LinkPair relies
+on, driven by a deterministic `LockstepOrchestrator` (one thread per
+session + per-frame barrier + button-inject-at-frame-boundary).
+The 2nd and 3rd exchanges reliably desync after the bypass — see
+the "deployment timing" section below — and are covered
+transitively by the in-process `test_link_trade_roundtrip`.
+
+### Deployment timing for two independent MCP agents
+
+The transport (`TcpSerialLink` + `RemoteLinkEndpoint` + symbol-
+translated RPC `kind`) is proven up to the first post-menu byte
+exchange. Beyond that, completing a full trade or battle between two
+**independent** MCP processes needs an application-layer sync
+mechanism — the game was designed for hardware where both Game Boys
+are locked to a physical 8192 Hz clock. PyBoy has no such external
+clock, so two separate Python processes stepping their own emulators
+drift in game-frame alignment unless one of the following is in
+place:
+
+1. **Shared tick broker (collapses remote → LinkPair).** Wire both
+   processes so a single orchestrator decides when each advances a
+   frame. Defeats the "two truly independent agents" model; equivalent
+   to just running in-process.
+
+2. **Agent-layer rendezvous (implemented, recommended).** Each agent
+   calls [`AgentSync.rendezvous(label, payload)`](src/pokered_harness/link/agent_sync.py)
+   before issuing any button press that needs cross-agent sync:
+
+   ```python
+   from pokered_harness.link import AgentSync
+   sync = AgentSync(link)  # same TcpSerialLink the game uses
+   peer_tick = sync.rendezvous("about_to_press_a", str(session.current_tick()).encode())
+   # Both agents now know each other's current tick and are wall-clock
+   # synchronized. Issue the coordinated press here.
+   session.press("a")
+   ```
+
+   The rendezvous piggybacks on the existing `SerialLink` transport
+   via a namespaced `agent_sync/<label>` kind, so it never collides
+   with game RPC kinds (`exchange_bytes/…`, `exchange_nybble/…`,
+   `menu_selection/…`). Per-kind FIFO within `SerialLink` guarantees
+   that two back-to-back rendezvous calls at the same label pair up
+   in order. Demonstrated end-to-end over real TCP on real ROMs by
+   `test_remote_agent_sync_coordinates_link_menu_vote_blue_blue`.
+
+   What rendezvous proves vs. what it doesn't: rendezvous aligns
+   agents to a *wall-clock moment* — enough for both to then press a
+   button "now" with sub-millisecond skew. It does NOT retroactively
+   align the two sides' game-tick clocks. Menu voting in pokered
+   runs `Serial_ExchangeLinkMenuSelection` every frame; if the two
+   sides' game-clocks have drifted (side A has issued 30 menu_selection
+   RPCs while side B issued 5), FIFO pairing matches stale votes
+   from different game-states and the vote doesn't converge.
+   Completing a full trade or battle therefore also needs one of:
+   (a) the transport-level `endpoint` hijack (what LinkPair's
+   `_install_linkmenu_autoselect_trade` does — force-plant votes
+   without going through the per-frame loop), or (b) a sync-every-N-
+   frames policy where both agents pause and re-rendezvous often
+   enough that the FIFO stays fresh.
+
+3. **Designated-driver turn-based (simplest).** One agent owns the
+   "I'll press A this tick" decision each turn; the other follows on
+   the same relative tick offset. Essentially turn-based multiplayer
+   where only one side's button-press matters per game phase.
+
+Option 2 is the production-minded answer — it preserves agent
+autonomy, uses the existing transport, and matches how humans
+coordinate over a physical cable ("ready?" "ready" → both press).
+Option 3 is a fallback for simpler use cases.
+
+Until application-layer sync is wired up, two-agent trades complete
+up to the TRADE_CENTER warp (status bytes, nybble sync, menu-vote
+convergence, and first post-menu RNG exchange all verified end-to-
+end over TCP on real ROMs) — from there, the in-process
+`test_link_trade_roundtrip` covers the UI flow, and
+`test_link_integration_remote.py` documents the remote limitations
+alongside the transport tests.
+
+### Producing Cable Club save states
+
+Actual trade / link-battle testing needs both sides sitting at the
+Cerulean Pokémon Center Cable Club attendant with 2+ Pokémon in party.
+The first accessible Cable Club is in Cerulean City (after Brock →
+Mt. Moon). The repo ships harness scripts through Boulder Badge; Mt.
+Moon → Cerulean progression is not yet automated.
+
+Until that lands, produce each fixture manually:
+
+1. Launch `scripts/walkthrough.py --view` (or any interactive script)
+   with the target ROM.
+2. Play through to Cerulean Pokémon Center, enter the Cable Club,
+   stand in front of the trade attendant.
+3. At a Python prompt (or mid-script), call
+   `open("tests/fixtures/link/<version>/cable_club.state", "wb").write(session.save_state())`.
+4. Repeat for the peer version.
+5. Run `python scripts/link_trade_demo.py --primary blue --peer yellow --view`.
+
+Current limitations: PyBoy 2.7.0 has no `hook_deregister`, so unpair
+leaves dormant callbacks in place; Mt. Moon → Cerulean progression is
+not yet scripted so Cable Club fixtures must be produced manually;
+trade-only — link battle reuses the same transport but the UI-side
+wiring is deferred.
+
 ## Color rendering
 
 The harness constructs `PyBoy(..., cgb=True)`. Stock Red/Blue render

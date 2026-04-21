@@ -1,14 +1,16 @@
-"""Load pinned version data from ``VERSIONS.md``.
+"""Load pinned version data from ``VERSIONS.md`` and read per-session
+env vars for the MCP server entry point.
 
-The file is primarily human documentation, but the SHA-1 and PyBoy pin
-need to be machine-readable so callers don't duplicate them. The parser
-is deliberately lenient: it scans the file for exact-shape rows and
-ignores everything else. If the format ever drifts, the failure is loud
-(``VersionsConfigError``) rather than silent.
+The version pin file is primarily human documentation, but the SHA-1 and
+PyBoy pin need to be machine-readable so callers don't duplicate them.
+The parser is deliberately lenient: it scans the file for exact-shape
+rows and ignores everything else. If the format ever drifts, the failure
+is loud (``VersionsConfigError``) rather than silent.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,3 +59,87 @@ def load_versions(path: str | Path | None = None) -> VersionsConfig:
         rom_sha1=sha.group(1).lower(),
         pyboy_version=pyboy.group(1),
     )
+
+
+# -- per-session env vars ----------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SessionEnv:
+    """Per-session env-var bundle (primary OR peer).
+
+    ``rom_path`` / ``sym_path`` are the only required fields for a working
+    session; ``rom_sha1`` is optional (None → skip hash enforcement). A
+    peer bundle with ``rom_path is None`` means "peer not configured" and
+    is the signal the MCP server uses to skip peer construction.
+    """
+
+    rom_path: str | None
+    sym_path: str | None
+    rom_sha1: str | None
+    version: str
+
+
+def _derive_version(rom_path: str | None, explicit: str | None) -> str:
+    """Return a lowercase version string for ``rom_path``.
+
+    Heuristic — if an explicit override is set (e.g. via
+    ``POKERED_ROM_VERSION``), use it; otherwise inspect the filename.
+    Unknown filenames default to ``"red"``.
+    """
+    if explicit:
+        return explicit.strip().lower()
+    if not rom_path:
+        return "red"
+    lower = rom_path.lower()
+    if "yellow" in lower:
+        return "yellow"
+    if "blue" in lower:
+        return "blue"
+    return "red"
+
+
+def load_primary_env() -> SessionEnv:
+    """Read the primary session's env vars (``POKERED_*``).
+
+    ``rom_path`` / ``sym_path`` may be ``None`` here — the MCP ``main()``
+    entry point validates them; library callers can consume the bundle
+    even when incomplete.
+    """
+    return SessionEnv(
+        rom_path=os.environ.get("POKERED_ROM_PATH"),
+        sym_path=os.environ.get("POKERED_SYM_PATH"),
+        rom_sha1=os.environ.get("POKERED_ROM_SHA1"),
+        version=_derive_version(
+            os.environ.get("POKERED_ROM_PATH"),
+            os.environ.get("POKERED_ROM_VERSION"),
+        ),
+    )
+
+
+def load_peer_env() -> SessionEnv:
+    """Read the peer session's env vars (``POKERED_PEER_*``).
+
+    All three peer vars are optional. When ``rom_path`` or ``sym_path`` is
+    ``None`` the server runs in single-session mode; link-cable tools will
+    refuse to ``pair`` until the peer is configured.
+    """
+    return SessionEnv(
+        rom_path=os.environ.get("POKERED_PEER_ROM_PATH"),
+        sym_path=os.environ.get("POKERED_PEER_SYM_PATH"),
+        rom_sha1=os.environ.get("POKERED_PEER_ROM_SHA1"),
+        version=_derive_version(
+            os.environ.get("POKERED_PEER_ROM_PATH"),
+            os.environ.get("POKERED_PEER_ROM_VERSION"),
+        ),
+    )
+
+
+__all__ = [
+    "SessionEnv",
+    "VersionsConfig",
+    "VersionsConfigError",
+    "load_peer_env",
+    "load_primary_env",
+    "load_versions",
+]

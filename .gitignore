@@ -30,3 +30,7 @@ walkthrough_*/
 .vscode/
 *.swp
 .DS_Store
+
+# Non-Cython PyBoy venv + vendor source (see test_pyboy_link_session_roms.py)
+.venv-noncython/
+vendor/

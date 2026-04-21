@@ -144,6 +144,20 @@ class Session:
             tick_source=self.current_tick,
         )
 
+    def serial_hook(
+        self,
+        symbol_name: str,
+        callback: Callable[[object], None],
+        *,
+        context: object | None = None,
+    ) -> None:
+        """Register a raw callback at a symbol label, bypassing the event bus.
+
+        Used by the link-cable bridge to mutate emulator memory when serial
+        routines fire. For plain event emission prefer :meth:`register_hook`."""
+        bank, addr = self._symbols.bank_addr(symbol_name)
+        self._pyboy.hook_register(bank, addr, callback, context)
+
     # --- actions -------------------------------------------------------
 
     def step(self, count: int = 1, *, render: bool = False) -> None:
