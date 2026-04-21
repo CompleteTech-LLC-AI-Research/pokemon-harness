@@ -65,7 +65,9 @@ ROM_PATHS = {
         ROM_ROOT / "yellow" / "pokemon-yellow.sym",
     ),
     "red": (
-        ROM_ROOT / "red" / "pokemon-red.gb",
+        # Match the Red fixture produced by
+        # scripts/produce_cable_club_fixture.py (color ROM, SHA e1deed6308…).
+        ROM_ROOT / "red" / "pokemon-red-color.gb",
         ROM_ROOT / "red" / "pokemon-red.sym",
     ),
 }

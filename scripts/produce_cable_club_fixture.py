@@ -57,7 +57,10 @@ from pokered_harness.session import Session  # noqa: E402
 # with the matching CLI flag.
 _VERSIONS = {
     "red": {
-        "rom": "red/pokemon-red.gb",
+        # Walkthrough_red_to_cerulean states are produced against the
+        # color-patched Red ROM (SHA e1deed6308…). Same pokered .sym
+        # file works for both vanilla and color variants.
+        "rom": "red/pokemon-red-color.gb",
         "sym": "red/pokemon-red.sym",
         "source_candidates": (
             "walkthrough_to_cerulean_red",

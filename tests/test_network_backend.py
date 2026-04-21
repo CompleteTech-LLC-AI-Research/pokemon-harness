@@ -146,6 +146,73 @@ def _free_port() -> int:
         s.close()
 
 
+def test_network_backend_drives_serialcore_byte_exchange():
+    """Two :class:`SerialCore` instances paired via :class:`NetworkBackend`
+    (socketpair transport) exchange a full byte correctly.
+
+    This is the proof that :class:`NetworkBackend` is a valid drop-in
+    for :class:`CoordinatedBackend`: master-mode edges fire the backend,
+    which round-trips one bit over TCP per edge, and both sides end up
+    with the peer's byte in SB.
+
+    The slave side is driven manually via ``apply_external_edge`` in
+    this test (same pattern as the in-process coordinator's inline
+    exchange), so we don't need a second independent PyBoy to prove
+    the transport. A full two-process two-PyBoy trade over TCP is a
+    follow-up milestone.
+    """
+    from pokered_harness.link.serial_core import (
+        CYCLES_PER_BYTE_DMG,
+        SerialCore,
+    )
+
+    ba, bb = NetworkBackend.pair()
+
+    master = SerialCore(backend=ba)
+    slave = SerialCore()  # no backend — driven by the other side's on_edge
+
+    master.set_SB(0xAA)
+    slave.set_SB(0x55)
+    master.set_SC(0x81)  # internal clock
+    slave.set_SC(0x80)   # external clock
+
+    # Slave-side thread: read edges from the TCP socket and drive the
+    # slave's SerialCore. In a two-process setup this would be the
+    # peer process's main tick loop; here we do it inline in a thread.
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def slave_reader():
+        try:
+            for _ in range(8):
+                frame = bb._recv_exactly(2)
+                _op, master_bit = struct.unpack(">BB", frame)
+                slave_out = slave.peek_out_bit()
+                slave.apply_external_edge(master_bit & 1)
+                bb._sock.sendall(struct.pack(">BB", 0x10, slave_out))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=slave_reader, daemon=True)
+    t.start()
+
+    try:
+        # Master ticks — each edge fires ba.on_edge, which sends the
+        # bit over TCP and reads the reply. After 8 edges, transfer
+        # completes.
+        irq = master.tick(CYCLES_PER_BYTE_DMG)
+        assert irq is True, "master transfer didn't complete"
+        assert done.wait(timeout=5.0), "slave reader thread hung"
+        assert not errors, f"slave reader errored: {errors[0]}"
+        assert master.SB == 0x55, f"master got 0x{master.SB:02x}, expected 0x55"
+        assert slave.SB == 0xAA, f"slave got 0x{slave.SB:02x}, expected 0xAA"
+    finally:
+        ba.close()
+        bb.close()
+
+
 def test_listen_and_connect_over_loopback():
     """Spin up a listener in a thread, connect from the main thread,
     exchange a bit, confirm both sides saw the other's bit."""
