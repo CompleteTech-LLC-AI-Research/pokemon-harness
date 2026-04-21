@@ -8,6 +8,10 @@ from pokered_harness.link.remote import (
     RemoteLinkEndpoint,
 )
 from pokered_harness.link.serial_bridge import BridgeEndpoint, SerialBridge
+from pokered_harness.link.network_backend import (
+    NetworkBackend,
+    NetworkBackendError,
+)
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_coordinator import (
     CoordinatedBackend,
@@ -45,6 +49,8 @@ __all__ = [
     "LinkTransport",
     "LocalBackend",
     "LockstepCoordinator",
+    "NetworkBackend",
+    "NetworkBackendError",
     "NullBackend",
     "PyBoyLinkSession",
     "RemoteLinkEndpoint",
