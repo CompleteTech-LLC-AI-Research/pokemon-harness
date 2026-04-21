@@ -132,15 +132,19 @@ def main() -> int:
                 )
                 last_progress = time.time()
 
-        # Keep ticking so peer can still reach LinkMenu if it's behind.
-        # (Serial activity stays alive via the NetworkBackend reader
-        # thread; our CPU stepping lets our game process any inbound
-        # bytes the peer needs to echo.)
-        extra_deadline = min(deadline, time.time() + 60.0)
+        # Keep ticking briefly so peer can still reach LinkMenu if
+        # it's behind. Then sync with peer to enter the next phase.
+        extra_deadline = min(deadline, time.time() + 30.0)
         while time.time() < extra_deadline:
             session.step(40)
 
         if args.goal == "trade":
+            # Phase barrier: both sides at LinkMenu before voting Trade
+            # Center. Without this the vote-exchange nibble loop has
+            # no way to guarantee overlap in Pokemon's polling windows.
+            log("sync: link_menu barrier")
+            link._network_backend.sync_with_peer(sync_id=1, timeout=60.0)
+            log("sync: past link_menu barrier")
             # Trade Center warp — A-mash until map becomes 0xEF.
             TRADE_CENTER = 0xEF
             while time.time() < deadline:
@@ -148,9 +152,13 @@ def main() -> int:
                     break
                 session.press("a", duration=4)
                 session.step(20)
+            log("trade center warp complete")
 
-            # Settle after warp so TradeCenter_Script initializes.
+            # Settle after warp + barrier before walking.
             session.step(120)
+            log("sync: warp barrier")
+            link._network_backend.sync_with_peer(sync_id=2, timeout=60.0)
+            log("sync: past warp barrier")
 
             # Walk onto hidden-event trigger tile.
             conn_status = session._pyboy.memory[
@@ -168,14 +176,40 @@ def main() -> int:
                 session.step(30)
 
             # A-mash to dismiss "JUST A MOMENT!" and start
-            # CableClub_DoBattleOrTrade.
+            # CableClub_DoBattleOrTrade. NO sync barrier here — the
+            # big trainer/party block exchange that runs inside
+            # CableClub_DoBattleOrTrade needs both sides' CPUs
+            # actively ticking to exchange bytes. Blocking on a
+            # barrier mid-exchange would stall both ends. Instead
+            # we rely on the warp barrier (sync_id=2) aligning us
+            # closely enough that the natural parallel tick rates
+            # keep the exchange progressing on both sides.
             while time.time() < deadline:
                 if counters["CableClub_DoBattleOrTrade"][0] > 0:
                     break
                 session.press("a", duration=4)
                 session.step(20)
+            log("CableClub_DoBattleOrTrade fired; big exchange running")
+
+            # Wait for the big exchange to complete — detect via
+            # TradeCenter_SelectMon firing (runs after the exchange
+            # + warp-to-trade-flow).
+            while time.time() < deadline:
+                if counters["TradeCenter_SelectMon"][0] > 0:
+                    break
+                session.step(40)
+            log("TradeCenter_SelectMon fired; big exchange done")
+
+            # Barrier here: both sides are post-exchange, about to
+            # drive the menu. Safe to sync (game is in UI-setup phase,
+            # no active serial traffic).
+            log("sync: select_mon barrier")
+            link._network_backend.sync_with_peer(sync_id=3, timeout=60.0)
+            log("sync: past select_mon barrier")
 
             # State-aware menu navigation.
+            log(f"entering menu nav; counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} }")
+            last_log = time.time()
             stats_key = "TradeCenter_SelectMon.selectStatsMenuItem"
             trade_key = "TradeCenter_SelectMon.selectTradeMenuItem"
             menu_key = "TradeCenter_SelectMon.playerMonMenu_HandleInput"
@@ -187,6 +221,10 @@ def main() -> int:
                 and counters["_AddEnemyMonToPlayerParty"][0] == 0
             ):
                 session.step(40)
+                if time.time() - last_log > 15.0:
+                    snap = {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS}
+                    log(f"menu nav progress: {snap}")
+                    last_log = time.time()
                 now = {k: counters[k][0] for k in (stats_key, trade_key, menu_key, tct_key)}
                 if now[trade_key] > prev[trade_key]:
                     session.press("a", duration=4)

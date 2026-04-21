@@ -219,6 +219,49 @@ def _free_port() -> int:
         s.close()
 
 
+def test_sync_with_peer_rendezvous():
+    """Both sides call sync_with_peer(id=N); each call returns only
+    after the peer's matching SYNC arrives. Proves the barrier
+    primitive for subprocess-level trade phase boundaries."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+
+    a_done = threading.Event()
+    b_done = threading.Event()
+
+    def side(backend, done):
+        backend.sync_with_peer(sync_id=7, timeout=5.0)
+        done.set()
+
+    ta = threading.Thread(target=side, args=(a, a_done), daemon=True)
+    tb = threading.Thread(target=side, args=(b, b_done), daemon=True)
+    ta.start()
+    tb.start()
+    try:
+        assert a_done.wait(timeout=6.0), "side A never returned from sync"
+        assert b_done.wait(timeout=6.0), "side B never returned from sync"
+    finally:
+        ta.join(timeout=1.0)
+        tb.join(timeout=1.0)
+        a.stop()
+        b.stop()
+
+
+def test_sync_with_peer_times_out_on_silent_peer():
+    """If the peer never sends SYNC, sync_with_peer raises
+    :class:`NetworkBackendError` after the timeout."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    # Peer's reader not started; B never sends its SYNC back.
+    try:
+        with pytest.raises(NetworkBackendError, match="no peer OP_SYNC"):
+            a.sync_with_peer(sync_id=1, timeout=1.0)
+    finally:
+        a.stop()
+        b.stop()
+
+
 def test_listen_and_connect_over_loopback_exchange_byte():
     """Full loopback: one thread listens, one connects, each gets a
     :class:`NetworkBackend`, and they exchange a byte."""

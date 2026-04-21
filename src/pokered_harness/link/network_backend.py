@@ -57,15 +57,19 @@ from typing import Callable, Optional
 # Opcodes:
 #   EDGE_REQ  = master → slave: "here's my outgoing bit"
 #   EDGE_RESP = slave → master: "here's my outgoing bit, bit just applied"
+#   SYNC      = "I've reached checkpoint <id>; waiting for peer's SYNC <id>"
 #
-# Using two opcodes instead of one lets a reader thread on each side
-# demux incoming frames without knowing the current role — peers can
+# Using distinct opcodes lets a reader thread on each side demux
+# incoming frames without knowing the current role — peers can
 # freely swap master/slave between transfers (which Pokemon's
-# handshake does during nibble-sync).
+# handshake does during nibble-sync). SYNC is a separate out-of-band
+# rendezvous primitive that higher-level code (e.g. the subprocess
+# trade driver) uses at phase boundaries.
 _OP_EDGE_REQ: int = 0x10
 _OP_EDGE_RESP: int = 0x11
+_OP_SYNC: int = 0x20
 
-_FRAME = struct.Struct(">BB")  # opcode, payload
+_FRAME = struct.Struct(">BB")  # opcode, payload (1-byte id for SYNC)
 
 
 class NetworkBackendError(RuntimeError):
@@ -87,6 +91,11 @@ class NetworkBackend:
         self._write_lock = threading.Lock()
         # Responses from peer (when we're master) land here.
         self._resp_queue: queue.Queue[int] = queue.Queue()
+        # Peer SYNC events, indexed by sync-id. queue.Queue per id
+        # lets multiple pending syncs coexist (unusual but defensively
+        # modeled).
+        self._sync_queues: dict[int, queue.Queue[int]] = {}
+        self._sync_lock = threading.Lock()
         self._closed = False
         # Slave-mode config — set by start_receiver.
         self._local_core: Optional[object] = None
@@ -188,6 +197,43 @@ class NetworkBackend:
                 "no EDGE_RESP from peer within 10s"
             ) from exc
 
+    # --- out-of-band rendezvous ---------------------------------------
+
+    def sync_with_peer(self, sync_id: int = 0, *, timeout: float = 120.0) -> None:
+        """Cross-peer rendezvous barrier.
+
+        Send an ``OP_SYNC`` frame with ``sync_id`` (0-255), then block
+        until the peer's matching ``OP_SYNC`` arrives. Both peers must
+        call ``sync_with_peer`` with the same ``sync_id`` to proceed.
+        Used by higher-level drivers (e.g. the subprocess trade flow)
+        to converge both sides at phase boundaries.
+
+        Raises :class:`NetworkBackendError` if the peer's SYNC doesn't
+        arrive within ``timeout`` seconds.
+        """
+        if not 0 <= sync_id <= 255:
+            raise ValueError(f"sync_id must fit in uint8, got {sync_id}")
+        # Make sure we have a queue ready before we send, so the
+        # reader thread can deposit an incoming SYNC even if we
+        # haven't started waiting yet.
+        with self._sync_lock:
+            q = self._sync_queues.setdefault(sync_id, queue.Queue())
+        try:
+            with self._write_lock:
+                if self._closed:
+                    raise NetworkBackendError("backend closed")
+                self._sock.sendall(_FRAME.pack(_OP_SYNC, sync_id))
+        except OSError as exc:
+            raise NetworkBackendError(
+                f"failed to send OP_SYNC({sync_id}): {exc}"
+            ) from exc
+        try:
+            q.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise NetworkBackendError(
+                f"no peer OP_SYNC({sync_id}) within {timeout}s"
+            ) from exc
+
     # --- lifecycle ----------------------------------------------------
 
     def close(self) -> None:
@@ -215,6 +261,10 @@ class NetworkBackend:
                     self._handle_edge_req(payload & 1)
                 elif opcode == _OP_EDGE_RESP:
                     self._resp_queue.put(payload & 1)
+                elif opcode == _OP_SYNC:
+                    with self._sync_lock:
+                        q = self._sync_queues.setdefault(payload, queue.Queue())
+                    q.put(payload)
                 else:
                     # Unknown opcode — drop. A strict implementation
                     # would raise and tear down; we log-and-continue

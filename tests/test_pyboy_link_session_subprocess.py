@@ -99,7 +99,7 @@ def _spawn_peer(role: str, port: int, *, goal: str, deadline_seconds: float):
     )
 
 
-def _collect_result(proc, timeout: float) -> dict:
+def _collect_result(proc, timeout: float, *, label: str = "") -> dict:
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -109,8 +109,18 @@ def _collect_result(proc, timeout: float) -> dict:
             f"peer subprocess timed out after {timeout}s.\n"
             f"stdout:\n{stdout[-2000:]}\nstderr:\n{stderr[-2000:]}"
         )
-    # Extract the sentinel-delimited result line from stdout (rest is
-    # PyBoy symbol-load warnings).
+    # Always print peer stderr trace for visibility. The peer script
+    # logs progress to stderr; on test failure this shows where it
+    # got stuck.
+    if label and stderr:
+        trace = [
+            line for line in stderr.splitlines()
+            if "[peer" in line or "EXCEPTION" in line or "sync:" in line
+        ]
+        if trace:
+            print(f"\n[{label}] peer trace:")
+            for line in trace[-40:]:
+                print(f"  {line}")
     for line in stdout.splitlines():
         if line.startswith("__TCP_TRADE_RESULT__ "):
             return json.loads(line[len("__TCP_TRADE_RESULT__ "):])
@@ -137,8 +147,8 @@ def test_subprocess_pair_reaches_link_menu_over_tcp():
     time.sleep(1.0)
     connector = _spawn_peer("connect", port, goal="link_menu", deadline_seconds=deadline)
 
-    result_a = _collect_result(listener, timeout=deadline + 60.0)
-    result_b = _collect_result(connector, timeout=deadline + 60.0)
+    result_a = _collect_result(listener, timeout=deadline + 60.0, label="listener")
+    result_b = _collect_result(connector, timeout=deadline + 60.0, label="connector")
 
     print(f"\nsubprocess TCP LinkMenu results:")
     print(f"  listener: {result_a}")
@@ -154,14 +164,23 @@ def test_subprocess_pair_reaches_link_menu_over_tcp():
 
 @pytest.mark.xfail(
     reason=(
-        "Two-subprocess full trade works in principle but stabilizing "
-        "it past LinkMenu (Trade Center vote + warp + trigger walk) "
-        "still requires explicit cross-process rendezvous at phase "
-        "boundaries — subprocess isolation solves the GIL-scheduling "
-        "skew but not the fundamental 'both sides must vote in the "
-        "same LinkMenu poll window' requirement. The in-process test "
-        "uses a shared threading.Barrier for this; the subprocess "
-        "version needs a TCP sync opcode extension on NetworkBackend."
+        "Subprocess isolation + three OP_SYNC barriers (link_menu, "
+        "warp, select_mon) get both sides through CableClub_"
+        "DoBattleOrTrade's big trainer/party-data exchange in the "
+        "passing case, but there's a fundamental race we haven't "
+        "addressed: whichever side's CPU finishes the big exchange "
+        "first moves on to TradeCenter_SelectMon. At that point its "
+        "SerialCore is no longer armed as slave, so the peer's "
+        "still-running master-mode transfers get pull-up 0xFF "
+        "responses from the backend's reader thread and stall. "
+        "Fixing this would need either a 'keep-alive slave arm' "
+        "protocol at the backend layer (reader thread keeps "
+        "echoing sensible data even while local core is idle), "
+        "or tighter interleaving at the CPU level (subprocess "
+        "IPC + a tick-rate throttle). The LinkMenu-reach "
+        "subprocess test passes reliably and proves the transport "
+        "works end-to-end; this full-trade test stays xfail'd "
+        "until the keep-alive protocol lands."
     ),
     run=True,
     strict=False,
@@ -176,8 +195,8 @@ def test_subprocess_pair_completes_trade_over_tcp():
     time.sleep(1.0)
     connector = _spawn_peer("connect", port, goal="trade", deadline_seconds=deadline)
 
-    result_a = _collect_result(listener, timeout=deadline + 60.0)
-    result_b = _collect_result(connector, timeout=deadline + 60.0)
+    result_a = _collect_result(listener, timeout=deadline + 60.0, label="listener")
+    result_b = _collect_result(connector, timeout=deadline + 60.0, label="connector")
 
     print(f"\nsubprocess TCP full-trade results:")
     print(f"  listener: {result_a}")
