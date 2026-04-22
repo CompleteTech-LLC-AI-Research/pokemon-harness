@@ -101,6 +101,17 @@ class NetworkBackend:
         self._local_core: Optional[object] = None
         self._irq_callback: Optional[Callable[[], None]] = None
         self._reader: Optional[threading.Thread] = None
+        # Keep-alive "fake slave" bit index. When our local core is
+        # idle but the peer is still master-clocking (common during
+        # trade/battle sequences where one side's CPU finishes a phase
+        # slightly ahead of the peer), stream the bits of
+        # SERIAL_NO_DATA_BYTE (0xFE, binary 1111 1110, MSB first) back
+        # to the peer instead of pull-up 0xFF. Pokemon's protocol
+        # treats 0xFE as "connected, no data" but 0xFF as "cable
+        # yanked"; the keep-alive byte keeps the peer progressing
+        # through its still-running exchange until our side catches up
+        # and re-arms its slave core.
+        self._keepalive_bit_idx: int = 0
 
     @classmethod
     def listen(
@@ -288,10 +299,17 @@ class NetworkBackend:
         ):
             our_bit = core.peek_out_bit()
             completed = core.apply_external_edge(peer_bit)
+            # Reset keep-alive counter so the next idle stretch starts
+            # fresh at the top of a 0xFE byte boundary rather than
+            # mid-byte.
+            self._keepalive_bit_idx = 0
         else:
-            # Not armed as slave — return pull-up (matches NullBackend
-            # semantics).
-            our_bit = 1
+            # Not armed as slave — stream the bits of
+            # SERIAL_NO_DATA_BYTE (0xFE) MSB-first. Wraps every 8
+            # edges so successive idle bytes all come out as 0xFE.
+            # First 7 bits are 1, last is 0.
+            our_bit = 0 if self._keepalive_bit_idx == 7 else 1
+            self._keepalive_bit_idx = (self._keepalive_bit_idx + 1) & 7
             completed = False
         try:
             with self._write_lock:
