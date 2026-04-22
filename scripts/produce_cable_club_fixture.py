@@ -51,41 +51,63 @@ os.environ.setdefault("POKERED_SKIP_SHA1", "1")
 from pokered_harness.session import Session  # noqa: E402
 
 
-# Per-version defaults. ROM + sym paths resolve against the repo root's
-# ``rom/<version>/`` directory; the source-state default points at the
-# sibling walkthrough_to_cerulean worktree(s). Override any of these
-# with the matching CLI flag.
+# Per-version defaults keyed by (version, variant). The ``color`` and
+# ``cgb`` variants use the color-patched (R/B) or CGB (Yellow) ROM;
+# the ``vanilla`` variants use the un-patched DMG R/B ROMs. PyBoy save
+# states are bit-tied to the exact ROM bytes they were captured
+# against, so each variant needs its own fixture on disk even when
+# the player destination (Cable Club receptionist) is identical.
+# ROM + sym paths resolve against the repo root's ``rom/<version>/``
+# directory; the source-state default points at the sibling
+# walkthrough_to_cerulean worktree(s). Override any of these with the
+# matching CLI flag.
 _VERSIONS = {
-    "red": {
-        # Walkthrough_red_to_cerulean states are produced against the
-        # color-patched Red ROM (SHA e1deed6308…). Same pokered .sym
-        # file works for both vanilla and color variants.
+    ("red", "color"): {
         "rom": "red/pokemon-red-color.gb",
         "sym": "red/pokemon-red.sym",
+        "out_name": "cable_club.state",
         "source_candidates": (
             "walkthrough_to_cerulean_red",
             "walkthrough_red_to_cerulean",
         ),
     },
-    "blue": {
+    ("red", "vanilla"): {
+        "rom": "red/pokemon-red.gb",
+        "sym": "red/pokemon-red.sym",
+        "out_name": "cable_club-vanilla.state",
+        # Vanilla needs a vanilla-ROM-captured cerulean_pc source;
+        # point --source at one produced by running the walkthrough
+        # scripts (run_to_brock -> to_cerulean) with
+        # POKERED_ROM_PATH=rom/red/pokemon-red.gb.
+        "source_candidates": (),
+    },
+    ("blue", "color"): {
         "rom": "blue/pokemon-blue-color.gb",
         "sym": "blue/pokemon-blue.sym",
+        "out_name": "cable_club.state",
         "source_candidates": (
             "walkthrough_to_cerulean_blue",
             "walkthrough_blue_to_cerulean",
         ),
     },
-    "yellow": {
+    ("blue", "vanilla"): {
+        "rom": "blue/pokemon-blue.gb",
+        "sym": "blue/pokemon-blue.sym",
+        "out_name": "cable_club-vanilla.state",
+        "source_candidates": (),
+    },
+    ("yellow", "cgb"): {
         "rom": "yellow/pokemon-yellow.gbc",
         "sym": "yellow/pokemon-yellow.sym",
-        # Yellow is the first version where this worktree landed —
-        # the un-suffixed path is the real one.
+        "out_name": "cable_club.state",
         "source_candidates": (
             "walkthrough_to_cerulean",
             "walkthrough_to_cerulean_yellow",
         ),
     },
 }
+_DEFAULT_VARIANTS = {"red": "color", "blue": "color", "yellow": "cgb"}
+_KNOWN_VERSIONS = sorted({v for v, _ in _VERSIONS})
 
 
 def _repo_rom_root() -> Path:
@@ -95,17 +117,17 @@ def _repo_rom_root() -> Path:
     return _REPO / "rom"
 
 
-def _default_source(version: str) -> Path | None:
-    """Find ``cerulean_pc.state`` for this version under any sibling
-    worktree. Walks two levels down from .claude/worktrees/ so that
+def _default_source(version: str, variant: str) -> Path | None:
+    """Find ``cerulean_pc.state`` for this (version, variant) under any
+    sibling worktree. Walks two levels down from .claude/worktrees/ so
     both ``<name>/<candidate>/milestones/cerulean_pc.state`` and a
     same-worktree ``<candidate>/milestones/cerulean_pc.state`` layout
-    match. Version-agnostic — caller is expected to point the right
-    ROM at a matching source state."""
+    match. Caller is expected to point a matching-variant ROM at the
+    source state (the two must share ROM bytes)."""
     worktrees_root = _REPO.parent  # .claude/worktrees/
     if not worktrees_root.is_dir():
         return None
-    candidate_names = _VERSIONS[version]["source_candidates"]
+    candidate_names = _VERSIONS[(version, variant)]["source_candidates"]
     for worktree in sorted(worktrees_root.iterdir()):
         if not worktree.is_dir() or worktree == _REPO:
             continue
@@ -116,16 +138,19 @@ def _default_source(version: str) -> Path | None:
     return None
 
 
-def _default_rom(version: str) -> Path:
-    return _repo_rom_root() / _VERSIONS[version]["rom"]
+def _default_rom(version: str, variant: str) -> Path:
+    return _repo_rom_root() / _VERSIONS[(version, variant)]["rom"]
 
 
-def _default_sym(version: str) -> Path:
-    return _repo_rom_root() / _VERSIONS[version]["sym"]
+def _default_sym(version: str, variant: str) -> Path:
+    return _repo_rom_root() / _VERSIONS[(version, variant)]["sym"]
 
 
-def _default_out(version: str) -> Path:
-    return _REPO / "tests" / "fixtures" / "link" / version / "cable_club.state"
+def _default_out(version: str, variant: str) -> Path:
+    return (
+        _REPO / "tests" / "fixtures" / "link" / version
+        / _VERSIONS[(version, variant)]["out_name"]
+    )
 
 
 def produce(source: Path, rom: Path, sym: Path, out: Path) -> None:
@@ -177,8 +202,18 @@ def produce(source: Path, rom: Path, sym: Path, out: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
-        "--version", choices=sorted(_VERSIONS), required=True,
+        "--version", choices=_KNOWN_VERSIONS, required=True,
         help="ROM version (red / blue / yellow)",
+    )
+    ap.add_argument(
+        "--variant", choices=("color", "vanilla", "cgb"), default=None,
+        help=(
+            "ROM variant. Defaults to the per-version canonical "
+            "variant (color for R/B, cgb for Y). Pass ``vanilla`` on "
+            "Red or Blue to produce cable_club-vanilla.state against "
+            "the un-patched DMG ROM — requires a matching "
+            "vanilla-captured --source cerulean_pc.state."
+        ),
     )
     ap.add_argument("--source", type=Path, default=None)
     ap.add_argument("--rom", type=Path, default=None)
@@ -186,17 +221,25 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
     v = args.version
-    source = args.source or _default_source(v)
-    rom = args.rom or _default_rom(v)
-    sym = args.sym or _default_sym(v)
-    out = args.out or _default_out(v)
-    if source is None or not source.exists():
-        candidates = _VERSIONS[v]["source_candidates"]
+    variant = args.variant or _DEFAULT_VARIANTS[v]
+    if (v, variant) not in _VERSIONS:
         raise SystemExit(
-            f"source cerulean_pc.state not found for version {v!r}. "
-            f"Looked for: " + ", ".join(candidates) + ". "
-            f"Produce it via one of those sibling worktrees, or pass "
-            f"--source explicitly."
+            f"no fixture recipe for {v}/{variant}; known: "
+            + ", ".join(f"{a}/{b}" for a, b in _VERSIONS)
+        )
+    source = args.source or _default_source(v, variant)
+    rom = args.rom or _default_rom(v, variant)
+    sym = args.sym or _default_sym(v, variant)
+    out = args.out or _default_out(v, variant)
+    if source is None or not source.exists():
+        candidates = _VERSIONS[(v, variant)]["source_candidates"]
+        raise SystemExit(
+            f"source cerulean_pc.state not found for {v}/{variant}. "
+            f"Looked for: {', '.join(candidates) or '<none>'}. "
+            f"Produce a {variant}-ROM-captured cerulean_pc.state via "
+            f"the walkthrough scripts (run_to_brock -> to_cerulean) "
+            f"with POKERED_ROM_PATH pointing at the {variant} ROM, "
+            f"then pass --source explicitly."
         )
     if not rom.exists():
         raise SystemExit(f"ROM not found: {rom}")
