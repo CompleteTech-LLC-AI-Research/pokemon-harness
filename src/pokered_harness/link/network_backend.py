@@ -51,6 +51,7 @@ import queue
 import socket
 import struct
 import threading
+import time
 from typing import Callable, Optional
 
 
@@ -290,13 +291,47 @@ class NetworkBackend:
 
     def _handle_edge_req(self, peer_bit: int) -> None:
         """Peer is master, we are slave. Apply edge to local_core,
-        respond with our bit."""
+        respond with our bit.
+
+        When the local core transiently isn't armed (e.g. the ROM's
+        serial IRQ handler is in the middle of reading SB and
+        re-arming the slave with a new SB+SC, which takes a handful
+        of CPU cycles), briefly poll for re-arm rather than
+        immediately responding with keep-alive bytes. Keep-alive
+        (0xFE) is a valid "no data" signal but it's not the right
+        response mid-stream inside a fixed-length block exchange
+        like ``Serial_ExchangeBytes`` — the peer would receive 0xFE
+        in place of real payload data and desync.
+
+        If the re-arm wait expires without the local core becoming
+        armed, fall back to the keep-alive stream.
+        """
         core = self._local_core
-        if (
-            core is not None
-            and getattr(core, "transfer_enabled", 0)
-            and not getattr(core, "internal_clock", 0)
-        ):
+
+        def armed() -> bool:
+            return (
+                core is not None
+                and getattr(core, "transfer_enabled", 0)
+                and not getattr(core, "internal_clock", 0)
+            )
+
+        if not armed():
+            # Spin-wait with short sleeps. Deadline sized to cover
+            # the slowest realistic re-arm window in pokered (serial
+            # IRQ handler → SB/SC re-arm ≲ 100 CPU cycles of game
+            # code, but in non-Cython Python-threaded subprocesses
+            # the host-wall-clock gap between the peer's REQ and our
+            # ROM rearming can stretch to 50+ ms when the peer's
+            # subprocess is getting more CPU share). Longer than the
+            # deadline and we fall back to keep-alive rather than
+            # stalling the peer's on_edge forever.
+            deadline = time.time() + 0.100  # 100 ms
+            while time.time() < deadline and not self._closed:
+                if armed():
+                    break
+                time.sleep(0.0005)
+
+        if armed():
             our_bit = core.peek_out_bit()
             completed = core.apply_external_edge(peer_bit)
             # Reset keep-alive counter so the next idle stretch starts
@@ -304,8 +339,8 @@ class NetworkBackend:
             # mid-byte.
             self._keepalive_bit_idx = 0
         else:
-            # Not armed as slave — stream the bits of
-            # SERIAL_NO_DATA_BYTE (0xFE) MSB-first. Wraps every 8
+            # Still not armed after the re-arm wait — stream the bits
+            # of SERIAL_NO_DATA_BYTE (0xFE) MSB-first. Wraps every 8
             # edges so successive idle bytes all come out as 0xFE.
             # First 7 bits are 1, last is 0.
             our_bit = 0 if self._keepalive_bit_idx == 7 else 1
