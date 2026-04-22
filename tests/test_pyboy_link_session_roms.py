@@ -109,19 +109,32 @@ _ROM_VARIANTS = {
 }
 
 
-def _open_session_variant(version: str, rom_path):
-    """Like :func:`_open_session` but uses the given ROM path rather than
-    the default entry in :data:`_ROM_PATHS`. Used by the variant tests
-    to exercise both ``pokemon-blue.gb`` and ``pokemon-blue-color.gb``
-    against the same cable_club.state fixture.
-    """
+def _variant_state_path(version: str, tag: str):
+    """Resolve the cable_club.state fixture path for a specific ROM
+    variant. Color/CGB use the default ``cable_club.state`` (captured
+    against the color-patched ROM). Vanilla uses
+    ``cable_club-vanilla.state`` — produced by running
+    ``scripts/produce_cable_club_fixture.py`` against a vanilla
+    ``cerulean_pc.state`` source. Save states are bit-tied to the
+    exact ROM bytes they were captured against, so vanilla and color
+    need separate fixtures."""
+    base = _REPO / "tests" / "fixtures" / "link" / version
+    if tag == "vanilla":
+        return base / "cable_club-vanilla.state"
+    return base / "cable_club.state"
+
+
+def _open_session_variant(version: str, rom_path, tag: str):
+    """Like :func:`_open_session` but uses the given ROM path + the
+    variant-specific cable_club fixture. Used by the variant tests to
+    exercise vanilla and color ROMs with their matching fixtures."""
     os.environ.setdefault("POKERED_SKIP_SHA1", "1")
     sys.path.insert(0, str(_REPO / "src"))
     from pokered_harness.session import Session  # noqa: E402
 
     _, sym = _ROM_PATHS[version]
     session = Session.from_files(rom_path, sym)
-    session.load_state(_state_path(version).read_bytes())
+    session.load_state(_variant_state_path(version, tag).read_bytes())
     return session
 
 
@@ -1319,39 +1332,21 @@ def _rom_variant_pairs():
     ``("red", "color", "vanilla")``. Yellow has only one variant so it
     contributes a single entry.
 
-    Any pair involving the vanilla variant is xfail'd. The cable_club
-    save-state fixtures were captured against the color-patched ROMs
-    (see :file:`scripts/produce_cable_club_fixture.py`'s ``rom``
-    defaults) and PyBoy's save state is bit-tied to the specific ROM
-    bytes it was captured against. Loading a color-captured state
-    into a vanilla ROM puts the PC and memory banks in a mutually
-    inconsistent state and the Cable Club receptionist dialog doesn't
-    converge. Genuine vanilla coverage requires producing vanilla
-    cable_club.state fixtures via the walkthrough harness — tracked as
-    follow-up work; the xfail makes the missing coverage discoverable
-    rather than hidden.
+    Fixtures are ROM-specific (PyBoy save states are bit-tied to the
+    ROM bytes they were captured against). The test body skips when
+    a variant's fixture doesn't exist so vanilla pairings will
+    auto-enable once someone produces ``cable_club-vanilla.state``
+    via :file:`scripts/produce_cable_club_fixture.py` against a
+    vanilla-ROM-captured ``cerulean_pc.state``.
     """
     pairs = []
     for version, variants in _ROM_VARIANTS.items():
         for rom_a, tag_a in variants:
             for rom_b, tag_b in variants:
-                marks = []
-                if tag_a == "vanilla" or tag_b == "vanilla":
-                    marks.append(pytest.mark.xfail(
-                        reason=(
-                            "cable_club.state fixtures are ROM-specific "
-                            "(captured against color-patched ROMs); vanilla "
-                            "pairing needs its own fixture regenerated via "
-                            "scripts/produce_cable_club_fixture.py with "
-                            "vanilla ROM + vanilla cerulean_pc source state"
-                        ),
-                        strict=False,
-                    ))
                 pairs.append(
                     pytest.param(
                         version, rom_a, tag_a, rom_b, tag_b,
                         id=f"{version}-{tag_a}-x-{tag_b}",
-                        marks=marks,
                     )
                 )
     return pairs
@@ -1372,14 +1367,25 @@ def test_same_version_variants_reach_link_menu(
     Uses the LinkMenu milestone rather than full battle to keep runtime
     reasonable — 4 variants × 9 pairings × 7 min would be ~4 hours. The
     LinkMenu path converges in ~2 min per pairing.
+
+    Each side loads its variant-specific cable_club.state fixture
+    (``cable_club.state`` for color, ``cable_club-vanilla.state`` for
+    vanilla). Skips when the required fixture is missing — so pairings
+    auto-enable once vanilla fixtures are produced.
     """
     if not (rom_a.is_file() and rom_b.is_file()):
         pytest.skip(f"ROM variant missing: {rom_a.name} or {rom_b.name}")
-    if not _state_path(version).is_file():
-        pytest.skip(f"cable_club state missing for {version}")
+    state_a = _variant_state_path(version, tag_a)
+    state_b = _variant_state_path(version, tag_b)
+    if not (state_a.is_file() and state_b.is_file()):
+        missing = [p.name for p in (state_a, state_b) if not p.is_file()]
+        pytest.skip(
+            f"cable_club state fixture(s) missing for {version}: "
+            f"{missing}. Produce via scripts/produce_cable_club_fixture.py"
+        )
 
-    a = _open_session_variant(version, rom_a)
-    b = _open_session_variant(version, rom_b)
+    a = _open_session_variant(version, rom_a, tag_a)
+    b = _open_session_variant(version, rom_b, tag_b)
     try:
         link = PyBoyLinkSession.local()
         link.attach(a._pyboy)
