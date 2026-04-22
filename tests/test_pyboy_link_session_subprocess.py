@@ -162,40 +162,38 @@ def test_subprocess_pair_reaches_link_menu_over_tcp():
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Subprocess isolation + three OP_SYNC barriers (link_menu, "
-        "warp, select_mon) get both sides through CableClub_"
-        "DoBattleOrTrade's big trainer/party-data exchange in the "
-        "passing case. NetworkBackend now streams SERIAL_NO_DATA_BYTE "
-        "(0xFE) bits as a keep-alive when the local SerialCore is "
-        "idle but the peer is still master-clocking (see "
-        "network_backend._handle_edge_req) — a necessary but not "
-        "sufficient fix. The remaining race: once TradeCenter_"
-        "SelectMon is reached on one side, the peer's trade flow "
-        "expects a specific, per-byte nibble protocol (move-select, "
-        "confirm-yes, etc.) that only the real local CPU's trade "
-        "menu logic can produce. Keep-alive bytes let the peer's "
-        "transfers complete physically but they don't carry "
-        "meaningful selection data — the peer waits forever for "
-        "the local side's confirmation nibble. Resolution needs "
-        "sub-frame CPU interleaving between subprocesses (e.g. a "
-        "shared-memory ring buffer driving both PyBoy ticks in "
-        "lockstep) or some explicit protocol multiplexing to "
-        "forward game-state snapshots cross-process. Neither is in "
-        "scope for the link-cable milestone. The LinkMenu-reach "
-        "subprocess test still passes reliably and proves the "
-        "transport works end-to-end; this full-trade test stays "
-        "xfail'd until one of those deeper mechanisms lands."
-    ),
-    run=True,
-    strict=False,
-)
 def test_subprocess_pair_completes_trade_over_tcp():
     """Two-subprocess full trade: both sides run
-    ``_AddEnemyMonToPlayerParty``."""
+    ``_AddEnemyMonToPlayerParty``.
+
+    End-to-end proof that the NetworkBackend transport carries a
+    complete Pokemon trade between two independent PyBoy processes.
+    The flow uses four OP_SYNC barriers to keep the subprocesses'
+    game-state in step at phase boundaries:
+
+      1. ``link_menu`` — both sides have reached LinkMenu and are
+         about to vote Trade Center.
+      2. ``warp`` — both sides have warped to map 0xEF (TRADE_CENTER)
+         and are about to walk onto the hidden-event trigger tiles.
+      3. ``select_mon`` — both sides' big trainer/party-data block
+         exchange has completed and TradeCenter_SelectMon is up.
+      4. ``post_trade`` — both sides' ``_AddEnemyMonToPlayerParty``
+         has fired (i.e. received the peer's mon). Without this
+         rendezvous, whichever side finished first would tear down
+         its SerialCore and leave the peer's ``on_edge`` timing out
+         on the few final bytes of the trade's mon-data exchange.
+
+    NetworkBackend's ``_handle_edge_req`` carries the per-edge work:
+    when the local SerialCore is armed as slave, apply the peer's
+    bit and reply; when it's transiently unarmed (mid-IRQ re-arm
+    window), briefly poll for re-arm before falling back to the
+    SERIAL_NO_DATA_BYTE (0xFE) keep-alive stream. That wait-for-
+    rearm is what lets each side's ROM finish the full fixed-length
+    Serial_ExchangeBytes loops without desyncing on the missing
+    bytes the peer skipped over while busy elsewhere.
+    """
     port = _free_port()
-    deadline = 480.0
+    deadline = 720.0
 
     listener = _spawn_peer("listen", port, goal="trade", deadline_seconds=deadline)
     time.sleep(1.0)

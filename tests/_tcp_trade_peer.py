@@ -242,6 +242,32 @@ def main() -> int:
                 else:
                     session.press("a", duration=4)
                 prev = now
+
+            # Post-trade sync + keep-tick. Whichever side's
+            # _AddEnemyMonToPlayerParty fired first has finished the
+            # trade locally but the peer may still be mid-exchange
+            # waiting for a few final bytes. Exiting the drive loop
+            # immediately would tear down our SerialCore and leave
+            # the peer's on_edge calls timing out. Instead, rendezvous
+            # over OP_SYNC and then keep ticking the local core (and
+            # honoring peer EDGE_REQs via the NetworkBackend reader)
+            # long enough for the peer to complete its own trade.
+            if counters["_AddEnemyMonToPlayerParty"][0] > 0:
+                log("sync: post-trade barrier")
+                try:
+                    link._network_backend.sync_with_peer(
+                        sync_id=4, timeout=120.0
+                    )
+                    log("sync: past post-trade barrier")
+                except Exception as exc:
+                    log(f"post-trade sync raised {type(exc).__name__}: {exc}")
+                # After rendezvous both sides have fired
+                # _AddEnemyMonToPlayerParty. Keep ticking briefly so
+                # the peer's post-trade animation / UI code can still
+                # drive any residual serial traffic through us.
+                post_deadline = min(deadline, time.time() + 30.0)
+                while time.time() < post_deadline:
+                    session.step(40)
     except Exception as exc:
         log(f"EXCEPTION in drive loop: {type(exc).__name__}: {exc}")
     finally:
