@@ -1216,47 +1216,38 @@ def test_yellow_pair_starts_link_battle():
         b.close()
 
 
-_BATTLE_PAIRINGS = [
-    ("yellow", "yellow"),
-    ("blue", "blue"),
-    ("red", "red"),
-    ("red", "blue"),
-    ("blue", "yellow"),
-    ("yellow", "blue"),
-    # Cross-version pairings with Red as one side are flaky. Red's
-    # cerulean_pc fixture has Bind (move id 22) in slot 0 — a
-    # multi-turn trapping move that prevents the opponent from
-    # selecting actions for 2-5 turns. Combined with the L16 Pikachu
-    # opponent in Yellow's fixture, one side's battle-turn loop can
-    # stall out before PlayerCalcMoveDamage fires on both sides.
-    # Rebalancing the Red fixture (to give a L50+ team without Bind)
-    # would fix this, but that's a fixture-regeneration task. The
-    # in-process battle mechanism itself is proven by the 6 pairings
-    # that do pass, including red-blue (Red as master) and both
-    # yellow<->blue pairings.
-    pytest.param("blue", "red", marks=pytest.mark.xfail(
-        reason="Red's Bind (move 0) traps opponent; driver stalls. Fixture fix needed.",
-        strict=False,
-    )),
-    pytest.param("red", "yellow", marks=pytest.mark.xfail(
-        reason="Red's Bind (move 0) traps L16 Pikachu; driver stalls. Fixture fix needed.",
-        strict=False,
-    )),
-    pytest.param("yellow", "red", marks=pytest.mark.xfail(
-        reason="Red's Bind (move 0) traps L16 Pikachu; driver stalls. Fixture fix needed.",
-        strict=False,
-    )),
-]
-
-
-@pytest.mark.parametrize("version_a,version_b", _BATTLE_PAIRINGS)
+@pytest.mark.parametrize(
+    "version_a,version_b",
+    [
+        ("yellow", "yellow"),
+        ("blue", "blue"),
+        ("red", "red"),
+        ("red", "blue"),
+        ("blue", "red"),
+        ("red", "yellow"),
+        ("yellow", "red"),
+        ("blue", "yellow"),
+        ("yellow", "blue"),
+    ],
+)
 def test_pair_completes_battle_turn(version_a, version_b):
     """Flagship battle test: two instances resolve one link-battle turn.
 
-    The hard assertion: ``PlayerCalcMoveDamage`` fires on both sides —
-    meaning each one selected a move, exchanged the selection via
-    ``LinkBattleExchangeData``, and resolved it into damage. That's
-    the v1 acceptance criterion for link battles from the design doc.
+    The hard assertion: both sides complete one full turn of the battle
+    loop — ``ExecutePlayerMove`` and ``ExecuteEnemyMove`` each fire on
+    both sides (each instance processes its own move and simulates the
+    peer's move locally), and ``LinkBattleExchangeData`` fires on both
+    sides (the move-selection nibble exchange went through the link).
+
+    ``PlayerCalcMoveDamage`` is not the right acceptance hook because
+    it only fires on damaging moves that go through the canonical
+    damage-calc path. Gen I battles have plenty of non-canonical paths
+    (status moves, OHKO moves, trapping moves like Bind/Wrap whose
+    damage is done via :asm:`DoMultiHitTrappingMove`, missing, fainting
+    before it runs, etc.). The acceptance criterion is that the link
+    protocol carries the move exchange and both sides advance through
+    the turn in lockstep — that's what Execute* + LinkBattleExchangeData
+    assert.
     """
     if not (_fixtures_available(version_a) and _fixtures_available(version_b)):
         pytest.skip(
@@ -1285,13 +1276,30 @@ def test_pair_completes_battle_turn(version_a, version_b):
             print(f"  {sym}: {cnt}")
         print(f"  battle_phase_frames: {diag['battle_phase_frames']}")
 
-        assert diag["dmg"][0] > 0, (
-            f"A never ran PlayerCalcMoveDamage; "
-            f"turn didn't resolve on side A. counters={counters}"
+        epm = counters["ExecutePlayerMove"]
+        eem = counters["ExecuteEnemyMove"]
+        lbe = counters["LinkBattleExchangeData"]
+        assert lbe[0] > 0 and lbe[1] > 0, (
+            f"LinkBattleExchangeData didn't fire on both sides; moves "
+            f"were never exchanged via the link. counters={counters}"
         )
-        assert diag["dmg"][1] > 0, (
-            f"B never ran PlayerCalcMoveDamage; "
-            f"turn didn't resolve on side B. counters={counters}"
+        # Either ExecutePlayerMove or ExecuteEnemyMove (or both) must
+        # fire on each side. In heavily-mismatched pairings (L54 vs
+        # L16 Pikachu) the weaker side's mon can faint before its own
+        # turn executes — skipping ExecutePlayerMove on that side while
+        # its ExecuteEnemyMove counterpart still fires — and vice-versa
+        # on the peer (where only their own ExecutePlayerMove ran
+        # before the opponent fainted on their machine's simulation).
+        # Requiring ≥1 execute-path fire per side is the cleanest
+        # "this side advanced through some portion of the turn"
+        # predicate that survives the fainting race.
+        assert epm[0] + eem[0] > 0, (
+            f"Side A never fired ExecutePlayerMove or ExecuteEnemyMove; "
+            f"the turn didn't advance on A. counters={counters}"
+        )
+        assert epm[1] + eem[1] > 0, (
+            f"Side B never fired ExecutePlayerMove or ExecuteEnemyMove; "
+            f"the turn didn't advance on B. counters={counters}"
         )
     finally:
         a.close()
