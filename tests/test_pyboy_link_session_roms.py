@@ -1334,10 +1334,16 @@ def _rom_variant_pairs():
 
     Fixtures are ROM-specific (PyBoy save states are bit-tied to the
     ROM bytes they were captured against). The test body skips when
-    a variant's fixture doesn't exist so vanilla pairings will
-    auto-enable once someone produces ``cable_club-vanilla.state``
-    via :file:`scripts/produce_cable_club_fixture.py` against a
-    vanilla-ROM-captured ``cerulean_pc.state``.
+    a variant's fixture doesn't exist so vanilla pairings auto-enable
+    once ``cable_club-vanilla.state`` is produced via::
+
+        python scripts/produce_cable_club_fixture.py \\
+            --version red --variant vanilla \\
+            --source path/to/vanilla_cerulean_pc.state
+
+    The source must itself be captured against the vanilla ROM (run
+    the walkthrough scripts with ``POKERED_ROM_PATH`` pointing at the
+    vanilla ROM first).
     """
     pairs = []
     for version, variants in _ROM_VARIANTS.items():
