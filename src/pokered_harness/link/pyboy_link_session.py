@@ -1,10 +1,13 @@
 """``PyBoyLinkSession`` — public surface for linking PyBoy instances.
 
 Milestone 4 of the design doc (:doc:`docs/pyboy_serial_overhaul_design.md`).
-Given one or two PyBoy instances, this installs a
-:class:`~pokered_harness.link.serial_core.SerialCore` onto each in
-place of PyBoy's legacy ``pyboy.core.serial.Serial`` and pairs them
-under a :class:`~pokered_harness.link.serial_coordinator.LockstepCoordinator`.
+Given one or two PyBoy instances, this wires a
+:class:`~pokered_harness.link.serial_coordinator.CoordinatedBackend` (or
+:class:`~pokered_harness.link.network_backend.NetworkBackend`) onto the
+``backend`` attribute of each ``pyboy.mb.serial`` so the already-installed
+bit-accurate :class:`pyboy.core.serial.Serial` instance exchanges bits
+with its peer. No class swap is performed — the existing PyBoy Serial
+instance is reused.
 
 Usage
 -----
@@ -32,16 +35,17 @@ Usage
 Design notes
 ------------
 
-* ``attach`` swaps out ``pyboy.mb.serial`` with a fresh
-  :class:`SerialCore`. Register state (``SB``/``SC``) is copied across
-  so mid-game attaches don't visibly disturb the emulator.
+* ``attach`` sets ``pyboy.mb.serial.backend`` rather than replacing the
+  whole ``mb.serial`` object. The bit-accurate shift-register logic
+  lives in PyBoy's native Serial class (upstream fork); the harness
+  only chooses which peer (null / local / network) provides the bits.
 * Once *both* sides attach, a :class:`LockstepCoordinator` is
   created, wiring each core's backend to the other. Until then, the
-  first side's core uses a :class:`NullBackend` and behaves like a
-  disconnected cable — matching the "not yet connected" phase in
-  Pokémon's own link-cable code.
-* ``detach`` restores the original ``pyboy.mb.serial`` object; PyBoy
-  returns to its legacy behavior.
+  first side's core keeps its default :class:`NullBackend` and behaves
+  like a disconnected cable — matching the "not yet connected" phase
+  in Pokémon's own link-cable code.
+* ``detach`` restores each serial's original ``backend`` (normally
+  :class:`NullBackend`); PyBoy returns to disconnected-cable behavior.
 * ``step`` interleaves the two emulators in small frame chunks. Per-edge
   lockstep (mGBA-style) is a later refinement — per-frame is sufficient
   for Gen I Pokémon because the protocol uses software timing loops
@@ -60,7 +64,7 @@ from typing import Protocol, runtime_checkable
 
 from pokered_harness.link.network_backend import NetworkBackend
 from pokered_harness.link.serial_coordinator import LockstepCoordinator
-from pokered_harness.link.serial_core import SerialCore
+from pokered_harness.link.serial_core import NullBackend
 
 
 @runtime_checkable
@@ -68,8 +72,8 @@ class _PyBoyLike(Protocol):
     """Minimal duck-type the session needs from a PyBoy instance.
 
     Real :class:`pyboy.PyBoy` satisfies this. A test fake need only
-    expose a ``mb`` with a swappable ``serial`` attribute and a
-    ``tick`` method.
+    expose a ``mb`` with a ``serial`` attribute (carrying a
+    settable ``backend``) and a ``tick`` method.
     """
 
     mb: object
@@ -86,8 +90,13 @@ class PyBoyLinkSession:
 
     def __init__(self, network_backend: NetworkBackend | None = None) -> None:
         self._pyboys: list[object] = []
-        self._cores: list[SerialCore] = []
-        self._originals: list[object] = []
+        # Tracks each attached PyBoy's serial instance (``pyboy.mb.serial``).
+        # Kept under the historical ``_cores`` name so callers relying on
+        # :attr:`cores` keep working.
+        self._cores: list[object] = []
+        # Per-attach backend we installed; saved so detach() can restore
+        # whatever was on ``mb.serial.backend`` before we touched it.
+        self._prev_backends: list[object] = []
         self._coord: LockstepCoordinator | None = None
         self._network_backend: NetworkBackend | None = network_backend
 
@@ -109,10 +118,9 @@ class PyBoyLinkSession:
         """Bind ``(host, port)``, accept one peer, return the session.
 
         Single-instance mode: the session holds a :class:`NetworkBackend`;
-        :meth:`attach` installs a :class:`SerialCore` on the local PyBoy
-        whose backend is the NetworkBackend. The peer process is
-        expected to have used :meth:`connect` and to be driving its
-        own PyBoy.
+        :meth:`attach` wires that backend onto the local PyBoy's
+        ``mb.serial.backend``. The peer process is expected to have
+        used :meth:`connect` and to be driving its own PyBoy.
 
         Blocks until a peer connects.
         """
@@ -131,25 +139,29 @@ class PyBoyLinkSession:
         """Connect to a peer running :meth:`listen` on ``(host, port)``.
 
         Returns a single-instance network-mode session; call
-        :meth:`attach` to install the serial core.
+        :meth:`attach` to wire the session's NetworkBackend onto the
+        local PyBoy's ``mb.serial.backend``.
         """
         backend = NetworkBackend.connect(host, port, timeout_s=timeout_s)
         return cls(network_backend=backend)
 
     # --- attach / detach -----------------------------------------------
 
-    def attach(self, pyboy: _PyBoyLike) -> SerialCore:
-        """Install a :class:`SerialCore` on ``pyboy.mb``.
+    def attach(self, pyboy: _PyBoyLike) -> object:
+        """Wire a backend onto ``pyboy.mb.serial``.
 
-        Returns the core so callers can inspect it directly.
+        Returns the PyBoy ``Serial`` instance so callers can inspect
+        its register state directly.
 
         Local mode: the second attachment pairs both instances via a
-        :class:`LockstepCoordinator`.
+        :class:`LockstepCoordinator`; the coordinator installs a
+        :class:`CoordinatedBackend` on each serial's ``backend``
+        attribute.
 
-        Network mode: only one instance attaches per session. The core's
-        backend is the :class:`NetworkBackend`; the reader thread starts
-        so peer-driven (slave-mode) edges advance the local core and
-        fire the CPU's serial IRQ.
+        Network mode: only one instance attaches per session. The
+        serial's ``backend`` is set to the :class:`NetworkBackend`;
+        the reader thread starts so peer-driven (slave-mode) edges
+        advance the local serial and fire the CPU's serial IRQ.
 
         Raises ``RuntimeError`` if ``pyboy`` is already attached, the
         session is at :attr:`MAX_ATTACHED`, or a network-mode session
@@ -164,21 +176,15 @@ class PyBoyLinkSession:
             )
 
         mb = pyboy.mb
-        original = mb.serial
-        core = SerialCore()
-        # Preserve the legacy serial's current register state so the
-        # motherboard's next read of SB/SC sees the same byte it would
-        # have seen without the swap. Legacy Serial also has these
-        # attributes.
-        core.SB = int(getattr(original, "SB", 0xFF)) & 0xFF
-        core.SC = int(getattr(original, "SC", 0x00)) & 0xFF
-        core.last_cycles = int(getattr(original, "last_cycles", 0))
-        core.clock = int(getattr(original, "clock", 0))
+        core = mb.serial  # reuse the existing PyBoy Serial instance
+        # Save whatever backend the serial currently has so detach()
+        # can restore it. On a freshly constructed PyBoy this is
+        # ``NullBackend``; mid-game attaches preserve whatever was set.
+        prev_backend = getattr(core, "backend", None)
 
-        mb.serial = core
         self._pyboys.append(pyboy)
         self._cores.append(core)
-        self._originals.append(original)
+        self._prev_backends.append(prev_backend)
 
         if self._network_backend is not None:
             # Network-mode: hook the local core up to the TCP backend
@@ -191,7 +197,9 @@ class PyBoyLinkSession:
             )
         elif len(self._cores) == 2:
             # Local-mode pair: wire the in-process coordinator with
-            # IRQ callbacks pointing at each motherboard's CPU.
+            # IRQ callbacks pointing at each motherboard's CPU. The
+            # coordinator installs CoordinatedBackend on each core's
+            # ``backend`` attribute.
             self._coord = LockstepCoordinator(
                 self._cores[0],
                 self._cores[1],
@@ -226,8 +234,8 @@ class PyBoyLinkSession:
         return _raise
 
     def detach(self, pyboy: _PyBoyLike) -> None:
-        """Restore ``pyboy``'s original ``mb.serial`` and (if paired)
-        tear down the coordinator. No-op if ``pyboy`` isn't attached."""
+        """Restore ``pyboy.mb.serial.backend`` and (if paired) tear
+        down the coordinator. No-op if ``pyboy`` isn't attached."""
         if pyboy not in self._pyboys:
             return
         # Tearing down the coordinator first ensures neither remaining
@@ -237,11 +245,19 @@ class PyBoyLinkSession:
             self._coord.detach()
             self._coord = None
         idx = self._pyboys.index(pyboy)
-        original = self._originals[idx]
-        pyboy.mb.serial = original
+        prev_backend = self._prev_backends[idx]
+        core = self._cores[idx]
+        # Restore whatever backend the serial had before we touched it
+        # (NullBackend by default on a fresh PyBoy).
+        try:
+            core.backend = prev_backend if prev_backend is not None else NullBackend()
+        except AttributeError:
+            # If PyBoy's Serial doesn't expose a settable ``backend``
+            # yet (partial Agent-A merge), there's nothing to restore.
+            pass
         self._pyboys.pop(idx)
         self._cores.pop(idx)
-        self._originals.pop(idx)
+        self._prev_backends.pop(idx)
 
     def detach_all(self) -> None:
         """Detach every attached PyBoy in reverse order."""
@@ -255,7 +271,14 @@ class PyBoyLinkSession:
         return tuple(self._pyboys)
 
     @property
-    def cores(self) -> tuple[SerialCore, ...]:
+    def cores(self) -> tuple[object, ...]:
+        """Tuple of each attached PyBoy's ``mb.serial`` instance.
+
+        Historically these were harness-owned ``SerialCore`` objects;
+        post the PyBoy fork merge they're the native
+        :class:`pyboy.core.serial.Serial` instances themselves (which
+        duck-type identically — ``SB``, ``SC``, ``transfer_enabled``,
+        ``apply_external_edge``, ``peek_out_bit``, ``backend``)."""
         return tuple(self._cores)
 
     @property

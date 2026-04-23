@@ -1,364 +1,158 @@
-"""Bit-accurate Game Boy serial core (design-doc milestone 1).
+"""Thin re-export shim for PyBoy's native bit-accurate serial core.
 
-This is a drop-in replacement for ``pyboy.core.serial.Serial`` that
-implements the ``FF01``/``FF02`` synchronous shift-register contract
-described in Pan Docs instead of the legacy "force SB=0xFF, count down
-8x8192Hz" model in mainline PyBoy.
+Historically this module shipped its own ``SerialCore`` class that was
+swapped into ``pyboy.mb.serial`` at attach time. After the upstream
+PyBoy fork absorbed the bit-accurate logic directly into
+:class:`pyboy.core.serial.Serial` (with a runtime-settable ``backend``
+attribute and the ``NullBackend``/``LocalBackend``/``SerialBackend``
+helpers co-located), the harness no longer needs its own class: the
+existing ``pyboy.mb.serial`` instance is reused and only its
+``backend`` is wired up.
+
+This module now exists purely as a back-compat re-export so callers
+(and tests) that import :class:`SerialCore`, :class:`NullBackend`, etc.
+keep working. The constants ``ROLE_INTERNAL`` / ``ROLE_EXTERNAL`` /
+``CYCLES_PER_EDGE_DMG`` / ``SC_TRANSFER_ENABLE`` / ``SC_CLOCK_SOURCE``
+/ ``SC_CLOCK_SPEED`` / ``IF_SERIAL`` / ``CYCLES_PER_BYTE_DMG`` /
+``MAX_CYCLES`` are imported from PyBoy where available and fall back
+to local definitions when PyBoy isn't importable (pure-Python unit
+test runs).
 
 See :doc:`docs/pyboy_serial_overhaul_design.md` for the full design.
-The duck-type matches PyBoy's :class:`Serial` (``SB``, ``SC``,
-``set_SB``, ``set_SC``, ``tick``, ``save_state``, ``load_state``,
-``_cycles_to_interrupt``) so a :class:`PyBoyLinkSession` can swap it
-in via ``pyboy.mb.serial = SerialCore(...)`` without touching PyBoy
-internals.
-
-Bit-level model
----------------
-
-Each transfer is 8 edges. At every edge the MSB of the shift register
-is clocked out and a peer bit is clocked into the LSB. After edge 8
-the shift register holds the received byte, it is copied back to
-``SB``, ``SC`` bit 7 clears, and a serial interrupt is requested.
-
-Master (internal clock) vs slave (external clock)
--------------------------------------------------
-
-Master mode (``SC`` bit 0 = 1) generates its own edges at
-``CYCLES_PER_EDGE_DMG`` CPU cycles apiece. Slave mode (``SC`` bit 0 = 0)
-has no internal timebase; edges must be driven externally via
-:meth:`SerialCore.apply_external_edge`. With no peer, a slave transfer
-never completes (Pan Docs; Pokémon uses software timeout loops to
-recover).
-
-Backend contract
-----------------
-
-A :class:`SerialBackend` provides peer bits. Master mode calls
-``backend.on_edge(our_bit, ROLE_INTERNAL)`` on every edge and receives
-the peer's bit. Slave mode is driven by a coordinator / peer directly
-via :meth:`apply_external_edge` — the backend is not consulted because
-the slave core has no timebase to ask "is an edge due yet?".
-
-:class:`NullBackend` always returns ``1`` (disconnected cable RX is
-pulled high). :class:`LocalBackend.pair()` returns two backends that
-swap bits on matching edges — correct only under lockstep coordination
-(see the coordinator milestone); without a coordinator the first caller
-gets pull-up and the second gets the first's bit, which is by design.
 """
 
 from __future__ import annotations
 
 from typing import Protocol
 
-try:
-    from pyboy.utils import MAX_CYCLES as _PYBOY_MAX_CYCLES
-except ImportError:  # pragma: no cover - exercised only without PyBoy
-    _PYBOY_MAX_CYCLES = 1 << 31
-
-MAX_CYCLES: int = _PYBOY_MAX_CYCLES
-
-#: DMG serial is 8192 Hz. PyBoy's existing constant (128 CPU cycles
-#: per edge) is preserved so SerialCore stays compatible with PyBoy's
-#: tick loop.
+# Local fallback constants — match the PyBoy values exactly. Used when
+# PyBoy isn't importable (e.g. sdist-only unit tests) and shadowed by
+# the PyBoy-side constants below when it is.
 CYCLES_PER_EDGE_DMG: int = 128
-
-#: Full DMG transfer = 8 edges = 1024 cycles.
 CYCLES_PER_BYTE_DMG: int = 8 * CYCLES_PER_EDGE_DMG
-
-# --- FF02 (SC) bits --------------------------------------------------------
-
-SC_TRANSFER_ENABLE: int = 0x80  # bit 7: 1 = transfer requested / in progress
-SC_CLOCK_SPEED: int = 0x02      # bit 1: CGB fast clock (milestone 9 — unused)
-SC_CLOCK_SOURCE: int = 0x01     # bit 0: 1 = internal (master), 0 = external
-
-# --- FF0F (IF) bit for serial -----------------------------------------------
-
+SC_TRANSFER_ENABLE: int = 0x80
+SC_CLOCK_SPEED: int = 0x02
+SC_CLOCK_SOURCE: int = 0x01
 IF_SERIAL: int = 0x08
-
-# --- role constants (passed to SerialBackend.on_edge) ----------------------
-
-ROLE_INTERNAL: int = 1  # we are the master
-ROLE_EXTERNAL: int = 0  # we are the slave
+ROLE_INTERNAL: int = 1
+ROLE_EXTERNAL: int = 0
+MAX_CYCLES: int = 1 << 31
 
 
-class SerialBackend(Protocol):
-    """Peer side of the cable.
-
-    Called by :class:`SerialCore` on each master-mode edge to fetch the
-    peer's outgoing bit. Slave-mode edges bypass the backend and are
-    driven via :meth:`SerialCore.apply_external_edge` by the
-    coordinator / peer.
-    """
-
-    def on_edge(self, our_bit: int, our_role: int) -> int: ...
-
-
-class NullBackend:
-    """Disconnected cable.
-
-    Pan Docs: the master's RX line is pulled high when no cable is
-    attached, so every received bit is ``1`` and the full byte reads as
-    ``0xFF``. Slave with no peer never edges, so :meth:`on_edge` is
-    never called in slave mode.
-    """
-
-    def on_edge(self, our_bit: int, our_role: int) -> int:
-        return 1
-
-
-class LocalBackend:
-    """Two in-process backends bridged bit-at-a-time.
-
-    Use :meth:`pair` to build a linked pair. Correct behavior requires
-    the coordinator to drive both cores to the same edge cycle before
-    reading — under strict lockstep, each side's :meth:`on_edge` call
-    deposits into the peer and drains the peer's previous deposit, so
-    both sides see the other's real bit.
-
-    Without a coordinator (first caller gets pull-up), that asymmetry
-    is the documented limitation of the raw backend; use
-    :class:`LockstepCoordinator` (a later milestone) to make it
-    symmetric.
-    """
-
-    def __init__(self) -> None:
-        self._peer: "LocalBackend | None" = None
-        # Bit the peer deposited into us, waiting for us to consume.
-        self._inbox: int | None = None
-
-    @classmethod
-    def pair(cls) -> tuple["LocalBackend", "LocalBackend"]:
-        a, b = cls(), cls()
-        a._peer = b
-        b._peer = a
-        return a, b
-
-    @property
-    def peer_ready(self) -> bool:
-        """``True`` iff the peer has already deposited a bit this round."""
-        return self._inbox is not None
-
-    def on_edge(self, our_bit: int, our_role: int) -> int:
-        if self._peer is None:
-            # Unpaired LocalBackend behaves like NullBackend.
-            return 1
-        # Deposit our bit for the peer.
-        self._peer._inbox = our_bit & 1
-        # Drain any bit the peer left for us.
-        if self._inbox is None:
-            return 1  # pull-up default; lockstep will eliminate this path
-        bit, self._inbox = self._inbox, None
-        return bit
-
-
+# Try to pull the real implementations out of PyBoy. When the fork has
+# Agent A's changes merged in, ``pyboy.core.serial`` exposes the
+# bit-accurate ``Serial`` class plus the backend helpers. When PyBoy
+# is missing entirely, fall back to local stubs so imports still work
+# for non-integration unit tests.
 try:
-    from pyboy.core.serial import Serial as _PyBoySerial
-except ImportError:  # pragma: no cover - harness can run without PyBoy (unit tests)
-    _PyBoySerial = object  # type: ignore
+    from pyboy.utils import MAX_CYCLES as _PYBOY_MAX_CYCLES  # noqa: F401
+    MAX_CYCLES = _PYBOY_MAX_CYCLES
+except ImportError:  # pragma: no cover - exercised only without PyBoy
+    pass
 
 
-class SerialCore(_PyBoySerial):
-    """Bit-accurate serial shift register.
+_PYBOY_AVAILABLE = False
+try:
+    from pyboy.core import serial as _pyboy_serial  # type: ignore
+    _PYBOY_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only without PyBoy
+    _pyboy_serial = None  # type: ignore
 
-    Inherits from ``pyboy.core.serial.Serial`` (empty shell from PyBoy's
-    perspective — we override every method) so the Cython-built
-    ``Motherboard.serial`` typed slot accepts instances of this class.
 
-    Duck-compatible with ``pyboy.core.serial.Serial``:
+if _PYBOY_AVAILABLE:
+    # --- Re-exports from the PyBoy native module ----------------------------
 
-    * Attributes: ``SB``, ``SC``, ``transfer_enabled``,
-      ``internal_clock``, ``_cycles_to_interrupt``, ``last_cycles``,
-      ``clock``, ``clock_target``.
-    * Methods: ``set_SB(value)``, ``set_SC(value)``, ``tick(cycles)``,
-      ``save_state(f)``, ``load_state(f, state_version)``.
+    # ``Serial`` is the bit-accurate class post-Agent-A. Alias it as
+    # ``SerialCore`` for back-compat.
+    _PyBoySerial = getattr(_pyboy_serial, "Serial")
 
-    ``tick`` returns ``True`` on the cycle a transfer completes (caller
-    fires the serial interrupt), matching PyBoy's Motherboard contract.
-    """
+    # Prefer PyBoy's own ``SerialCore`` alias if Agent A exported one;
+    # otherwise use ``Serial`` directly.
+    SerialCore = getattr(_pyboy_serial, "SerialCore", _PyBoySerial)  # type: ignore
 
-    # Matches save-state block tag written by the legacy Serial class;
-    # bumped to a new tag once this core replaces the legacy class.
-    STATE_VERSION: int = 1
+    # Backend helpers — importable from the same module post-Agent-A.
+    # If Agent A's fork isn't fully merged yet these may be absent;
+    # fall through to the local stubs defined below.
+    NullBackend = getattr(_pyboy_serial, "NullBackend", None)  # type: ignore
+    LocalBackend = getattr(_pyboy_serial, "LocalBackend", None)  # type: ignore
+    SerialBackend = getattr(_pyboy_serial, "SerialBackend", None)  # type: ignore
 
-    def __init__(self, backend: SerialBackend | None = None) -> None:
-        self.backend: SerialBackend = backend if backend is not None else NullBackend()
+    # Constants — prefer PyBoy's values when exposed.
+    CYCLES_PER_EDGE_DMG = getattr(
+        _pyboy_serial, "CYCLES_PER_EDGE_DMG", CYCLES_PER_EDGE_DMG
+    )
+    CYCLES_PER_BYTE_DMG = getattr(
+        _pyboy_serial, "CYCLES_PER_BYTE_DMG", CYCLES_PER_BYTE_DMG
+    )
+    SC_TRANSFER_ENABLE = getattr(
+        _pyboy_serial, "SC_TRANSFER_ENABLE", SC_TRANSFER_ENABLE
+    )
+    SC_CLOCK_SPEED = getattr(_pyboy_serial, "SC_CLOCK_SPEED", SC_CLOCK_SPEED)
+    SC_CLOCK_SOURCE = getattr(_pyboy_serial, "SC_CLOCK_SOURCE", SC_CLOCK_SOURCE)
+    IF_SERIAL = getattr(_pyboy_serial, "IF_SERIAL", IF_SERIAL)
+    ROLE_INTERNAL = getattr(_pyboy_serial, "ROLE_INTERNAL", ROLE_INTERNAL)
+    ROLE_EXTERNAL = getattr(_pyboy_serial, "ROLE_EXTERNAL", ROLE_EXTERNAL)
+else:
+    # No PyBoy available — define no-op stubs so imports don't crash.
+    SerialCore = None  # type: ignore
+    NullBackend = None  # type: ignore
+    LocalBackend = None  # type: ignore
+    SerialBackend = None  # type: ignore
 
-        # FF01/FF02 register state.
-        self.SB: int = 0xFF  # default pulls up; matches legacy serial's init
-        self.SC: int = 0x00
 
-        # Convenience flags PyBoy's mb.py may read directly.
-        self.transfer_enabled: int = 0  # 0/1; mirrors SC bit 7
-        self.internal_clock: int = 0    # 0/1; mirrors SC bit 0
+# If PyBoy didn't expose the backend helpers (partial Agent-A merge
+# or PyBoy missing entirely), provide local fallback implementations so
+# ``from pokered_harness.link.serial_core import NullBackend`` still
+# works and the harness can exercise its own code paths.
 
-        # PyBoy cycle accounting (same model as legacy Serial).
-        self.last_cycles: int = 0
-        self.clock: int = 0
-        self.clock_target: int = MAX_CYCLES
-        self._cycles_to_interrupt: int = MAX_CYCLES
+if SerialBackend is None:
+    class SerialBackend(Protocol):  # type: ignore[no-redef]
+        """Peer side of the cable.
 
-        # Bit-accurate state.
-        self._shift_register: int = 0xFF  # working byte; MSB is next-out bit
-        self._bits_remaining: int = 0
-
-    # --- register writes ------------------------------------------------
-
-    def set_SB(self, value: int) -> None:
-        """Write ``FF01``.
-
-        Pan Docs: games load the outgoing byte here before arming
-        ``SC``. We preserve it verbatim (legacy PyBoy forces ``0xFF``).
+        Called by :class:`SerialCore` on each master-mode edge to fetch
+        the peer's outgoing bit. Slave-mode edges bypass the backend
+        and are driven via ``apply_external_edge`` by the coordinator /
+        peer.
         """
-        self.SB = value & 0xFF
 
-    def set_SC(self, value: int) -> None:
-        """Write ``FF02``.
+        def on_edge(self, our_bit: int, our_role: int) -> int: ...
 
-        Arms a transfer when bit 7 is set. Bit 0 selects internal
-        (master) vs external (slave) clock. Bit 1 (CGB fast clock) is
-        stored but not acted on in milestone 1.
-        """
-        self.SC = value & 0xFF
-        self.transfer_enabled = 1 if (self.SC & SC_TRANSFER_ENABLE) else 0
-        self.internal_clock = 1 if (self.SC & SC_CLOCK_SOURCE) else 0
 
-        if self.transfer_enabled:
-            # Fresh transfer: load the shift register from SB. Subsequent
-            # writes to SB mid-transfer do NOT disturb the in-flight
-            # shift register (Pan Docs is ambiguous here; matching
-            # hardware behavior is "the byte snapshotted at start").
-            self._shift_register = self.SB
-            self._bits_remaining = 8
-            if self.internal_clock:
-                self.clock_target = self.clock + CYCLES_PER_EDGE_DMG
-            else:
-                # Slave: never completes without external edges.
-                self.clock_target = MAX_CYCLES
-        else:
-            self._bits_remaining = 0
-            self.clock_target = MAX_CYCLES
+if NullBackend is None:
+    class NullBackend:  # type: ignore[no-redef]
+        """Disconnected cable — every received bit reads as ``1``."""
 
-        self._cycles_to_interrupt = self.clock_target - self.clock
+        def on_edge(self, our_bit: int, our_role: int) -> int:
+            return 1
 
-    # --- core tick ------------------------------------------------------
 
-    def tick(self, _cycles: int) -> bool:
-        """Advance by ``_cycles - last_cycles`` CPU cycles.
+if LocalBackend is None:
+    class LocalBackend:  # type: ignore[no-redef]
+        """Two in-process backends bridged bit-at-a-time."""
 
-        Returns ``True`` exactly on the cycle the current transfer
-        completes and the serial interrupt should fire.
-        """
-        delta = _cycles - self.last_cycles
-        if delta == 0:
-            return False
-        self.last_cycles = _cycles
-        self.clock += delta
+        def __init__(self) -> None:
+            self._peer: "LocalBackend | None" = None
+            self._inbox: int | None = None
 
-        interrupt = False
-        # Only master mode ticks progress a transfer; slave mode waits
-        # for apply_external_edge.
-        if self.transfer_enabled and self.internal_clock:
-            while self._bits_remaining > 0 and self.clock >= self.clock_target:
-                if self._process_internal_edge():
-                    interrupt = True
+        @classmethod
+        def pair(cls) -> tuple["LocalBackend", "LocalBackend"]:
+            a, b = cls(), cls()
+            a._peer = b
+            b._peer = a
+            return a, b
 
-        self._cycles_to_interrupt = max(0, self.clock_target - self.clock)
-        return interrupt
+        @property
+        def peer_ready(self) -> bool:
+            return self._inbox is not None
 
-    # --- external clock (slave mode / coordinator) ----------------------
-
-    def apply_external_edge(self, peer_bit: int) -> bool:
-        """Advance one edge driven by an external clock.
-
-        Intended for slave mode (or for a coordinator driving both
-        cores in lockstep). ``peer_bit`` is the bit the peer is
-        shifting to us this edge. Returns ``True`` if the transfer
-        completes on this edge.
-
-        Raises ``RuntimeError`` if no transfer is armed or if the core
-        is currently in internal-clock mode (master).
-        """
-        if not self.transfer_enabled:
-            raise RuntimeError(
-                "apply_external_edge: no transfer armed (SC bit 7 clear)"
-            )
-        if self.internal_clock:
-            raise RuntimeError(
-                "apply_external_edge: core is internal-clock (master); "
-                "use tick() instead"
-            )
-        return self._advance_one_edge(peer_bit)
-
-    def peek_out_bit(self) -> int:
-        """The bit that will be shifted out on the next edge (MSB of
-        the working register). Does not advance state."""
-        return (self._shift_register >> 7) & 1
-
-    # --- internals ------------------------------------------------------
-
-    def _process_internal_edge(self) -> bool:
-        """Master-mode edge: fetch peer bit from backend, advance one."""
-        out_bit = (self._shift_register >> 7) & 1
-        peer_bit = self.backend.on_edge(out_bit, ROLE_INTERNAL) & 1
-        completed = self._advance_one_edge(peer_bit)
-        # Schedule next edge cycle (even if we just completed; the final
-        # clock_target is then clamped below).
-        self.clock_target += CYCLES_PER_EDGE_DMG
-        if completed:
-            self.clock_target = MAX_CYCLES
-        return completed
-
-    def _advance_one_edge(self, peer_bit: int) -> bool:
-        """Shared edge logic: shift out MSB, shift in peer bit, handle
-        completion. Returns True if the transfer just finished."""
-        self._shift_register = ((self._shift_register << 1) | (peer_bit & 1)) & 0xFF
-        self._bits_remaining -= 1
-        if self._bits_remaining == 0:
-            # Pan Docs: SB latches the received byte; SC bit 7 clears
-            # (other bits preserved); serial interrupt requested.
-            self.SB = self._shift_register
-            self.SC &= (~SC_TRANSFER_ENABLE) & 0xFF
-            self.transfer_enabled = 0
-            self.clock_target = MAX_CYCLES
-            self._cycles_to_interrupt = MAX_CYCLES
-            return True
-        return False
-
-    # --- save/load (duck-compatible with legacy Serial) ------------------
-
-    def save_state(self, f) -> None:
-        f.write(self.SB)
-        f.write(self.SC)
-        f.write(self.transfer_enabled)
-        f.write(self.internal_clock)
-        f.write_64bit(self.last_cycles)
-        f.write_64bit(self._cycles_to_interrupt)
-        f.write_64bit(self.clock)
-        f.write_64bit(self.clock_target)
-        # Extensions for the bit-accurate core. Legacy PyBoy states
-        # don't include these; load_state tolerates their absence.
-        f.write(self._shift_register)
-        f.write(self._bits_remaining)
-
-    def load_state(self, f, state_version: int) -> None:
-        self.SB = f.read()
-        self.SC = f.read()
-        self.transfer_enabled = f.read()
-        self.internal_clock = f.read()
-        self.last_cycles = f.read_64bit()
-        self._cycles_to_interrupt = f.read_64bit()
-        self.clock = f.read_64bit()
-        self.clock_target = f.read_64bit()
-        # If the saved state was written by this core, recover bit state.
-        try:
-            self._shift_register = f.read()
-            self._bits_remaining = f.read()
-        except Exception:
-            # Legacy state: synthesize conservative bit state (not in
-            # transfer). Matches what the legacy core would have
-            # represented anyway.
-            self._shift_register = self.SB
-            self._bits_remaining = 0
+        def on_edge(self, our_bit: int, our_role: int) -> int:
+            if self._peer is None:
+                return 1
+            self._peer._inbox = our_bit & 1
+            if self._inbox is None:
+                return 1
+            bit, self._inbox = self._inbox, None
+            return bit
 
 
 __all__ = [
