@@ -151,8 +151,18 @@ class LocalBackend:
         return bit
 
 
-class SerialCore:
+try:
+    from pyboy.core.serial import Serial as _PyBoySerial
+except ImportError:  # pragma: no cover - harness can run without PyBoy (unit tests)
+    _PyBoySerial = object  # type: ignore
+
+
+class SerialCore(_PyBoySerial):
     """Bit-accurate serial shift register.
+
+    Inherits from ``pyboy.core.serial.Serial`` (empty shell from PyBoy's
+    perspective — we override every method) so the Cython-built
+    ``Motherboard.serial`` typed slot accepts instances of this class.
 
     Duck-compatible with ``pyboy.core.serial.Serial``:
 
