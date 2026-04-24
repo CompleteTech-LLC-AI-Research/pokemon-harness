@@ -50,6 +50,12 @@ _REPO = Path(__file__).resolve().parents[1]
 # pokeyellow constants/map_constants.asm names this 0xEF).
 TRADE_CENTER_MAP_ID = 0xEF
 
+# Controlled by --cgb/--no-cgb; default True (CGB mode + Full Color
+# Hack gives the color presentation we want). If Gen 1 menu/dialog
+# overlays don't render in CGB + Color-Hack, use --no-cgb to force DMG
+# rendering — loses color but makes menus visible.
+_PYBOY_CGB_OVERRIDE: bool = True
+
 
 # ---------------------------------------------------------------------------
 # venv re-exec
@@ -144,15 +150,384 @@ def _assert_fixtures_available(version: str) -> None:
         sys.exit(2)
 
 
-def _open_session(version: str):
-    """Mirror of ``_open_session`` in the test module."""
+def _find_pyboy_hwnds() -> list[int]:
+    """Return the handles of all visible top-level windows titled
+    ``PyBoy``. Returned in creation order (same as EnumWindows — which
+    matches open order for these sessions)."""
+    if sys.platform != "win32":
+        return []
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    EnumWindowsProc = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+    )
+    found: list[int] = []
+
+    def _cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, buf, 256)
+        if buf.value and "PyBoy" in buf.value:
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(EnumWindowsProc(_cb), 0)
+    return found
+
+
+def _win32_grab_window(hwnd: int, out_path: Path) -> bool:
+    """Capture the client area of ``hwnd`` via Win32 ``PrintWindow`` +
+    BitBlt and save as a PNG at ``out_path``. Returns True on success.
+
+    This bypasses PyBoy's ``screen.image`` framebuffer readback entirely
+    — it grabs exactly what the user sees on the SDL2 window, including
+    dialog overlays that the Cython CGB renderer's internal backbuffer
+    doesn't reflect in ``screen.ndarray``.
+    """
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    from ctypes import wintypes
+    from PIL import Image
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+
+    class RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    rect = RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+        return False
+    w, h = rect.right - rect.left, rect.bottom - rect.top
+    if w <= 0 or h <= 0:
+        return False
+
+    hdc_window = user32.GetDC(hwnd)
+    hdc_mem = gdi32.CreateCompatibleDC(hdc_window)
+    hbm = gdi32.CreateCompatibleBitmap(hdc_window, w, h)
+    gdi32.SelectObject(hdc_mem, hbm)
+
+    # PW_CLIENTONLY (1) | PW_RENDERFULLCONTENT (2) — the latter forces
+    # the window to render fully even if DWM-composited / off-screen.
+    PW_CLIENTONLY = 1
+    PW_RENDERFULLCONTENT = 2
+    ok = user32.PrintWindow(hwnd, hdc_mem, PW_CLIENTONLY | PW_RENDERFULLCONTENT)
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_long),
+            ("biHeight", ctypes.c_long), ("biPlanes", ctypes.c_uint16),
+            ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+            ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_long),
+            ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", ctypes.c_uint32),
+            ("biClrImportant", ctypes.c_uint32),
+        ]
+    bmi = BITMAPINFOHEADER()
+    bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+    bmi.biWidth = w
+    bmi.biHeight = -h  # negative → top-down
+    bmi.biPlanes = 1
+    bmi.biBitCount = 32
+    bmi.biCompression = 0  # BI_RGB
+    buf = (ctypes.c_ubyte * (w * h * 4))()
+    gdi32.GetDIBits(hdc_mem, hbm, 0, h, buf, ctypes.byref(bmi), 0)
+
+    gdi32.DeleteObject(hbm)
+    gdi32.DeleteDC(hdc_mem)
+    user32.ReleaseDC(hwnd, hdc_window)
+
+    if not ok:
+        return False
+    img = Image.frombuffer("RGBA", (w, h), bytes(buf), "raw", "BGRA", 0, 1)
+    img.convert("RGB").save(out_path)
+    return True
+
+
+def _read_vram_range(pyboy, start: int, length: int) -> bytes:
+    """Bulk-read ``length`` bytes starting at ``start`` from pyboy memory."""
+    return bytes(pyboy.memory[start + i] for i in range(length))
+
+
+def _read_vram_bank(pyboy, bank: int, start: int, length: int) -> bytes:
+    """Read VRAM at ``start..start+length`` from bank ``bank`` (0 or 1)
+    in CGB mode. Temporarily swaps VBK (0xFF4F) and restores it."""
+    old_vbk = pyboy.memory[0xFF4F]
+    try:
+        pyboy.memory[0xFF4F] = bank
+        return bytes(pyboy.memory[start + i] for i in range(length))
+    finally:
+        pyboy.memory[0xFF4F] = old_vbk
+
+
+def _read_cgb_bg_palettes(pyboy) -> list:
+    """Return the 8 CGB BG palettes as a list of 8 entries; each entry
+    is 4 RGB tuples. Read via BCPS/BCPD (0xFF68/0xFF69) — setting the
+    auto-increment bit in BCPS lets us stream 64 bytes out of BCPD.
+    Each color is 15-bit BGR555: lo + (hi << 8) → rrrrr gggggbbbbb.
+    """
+    old_bcps = pyboy.memory[0xFF68]
+    try:
+        pyboy.memory[0xFF68] = 0x80  # index 0, auto-increment on
+        raw = bytes(pyboy.memory[0xFF69] for _ in range(64))
+    finally:
+        pyboy.memory[0xFF68] = old_bcps
+    palettes = []
+    for pal_i in range(8):
+        colors = []
+        for col_i in range(4):
+            lo = raw[pal_i * 8 + col_i * 2]
+            hi = raw[pal_i * 8 + col_i * 2 + 1]
+            val = lo | (hi << 8)
+            r5 = val & 0x1F
+            g5 = (val >> 5) & 0x1F
+            b5 = (val >> 10) & 0x1F
+            # 5-bit → 8-bit scale (× 255 / 31 ≈ × 8.23)
+            colors.append((r5 * 255 // 31, g5 * 255 // 31, b5 * 255 // 31))
+        palettes.append(colors)
+    return palettes
+
+
+def _render_tilemap_from_vram(pyboy, layer: str, out_path: Path, *, color: bool = True) -> bool:
+    """Vectorized renderer for the BG or Window tile map directly from
+    VRAM. ``layer`` must be ``"bg"`` or ``"win"``. Produces a 160x144
+    PNG showing the *logical* tilemap content — bypasses the CGB
+    compositor entirely, so menu/dialog tiles that PyBoy's CGB renderer
+    doesn't draw on screen still appear here.
+
+    When ``color=True`` (default) the image is rendered in full CGB
+    color by reading per-tile attributes from VRAM bank 1 and per-index
+    RGB palettes from BCPD (0xFF68/69). When ``color=False`` a
+    monochrome 2-bit DMG image is produced.
+    """
+    try:
+        import numpy as np
+        from PIL import Image
+    except Exception:
+        return False
+    lcdc = pyboy.memory[0xFF40]
+    unsigned = bool(lcdc & 0x10)
+    if layer == "bg":
+        map_base = 0x9C00 if (lcdc & 0x08) else 0x9800
+        scy = pyboy.memory[0xFF42]
+        scx = pyboy.memory[0xFF43]
+        start_y = scy
+        start_x = scx
+    else:  # "win"
+        map_base = 0x9C00 if (lcdc & 0x40) else 0x9800
+        wy = pyboy.memory[0xFF4A]
+        wx = pyboy.memory[0xFF4B] - 7
+        start_y = -wy
+        start_x = -wx
+    # Bank 0: tile IDs + DMG tile data.
+    tile_map = np.frombuffer(
+        _read_vram_bank(pyboy, 0, map_base, 0x400), dtype=np.uint8
+    ).reshape(32, 32)
+    if unsigned:
+        tile_data_b0 = np.frombuffer(
+            _read_vram_bank(pyboy, 0, 0x8000, 0x1800), dtype=np.uint8
+        )
+        tile_data_b1 = np.frombuffer(
+            _read_vram_bank(pyboy, 1, 0x8000, 0x1800), dtype=np.uint8
+        ) if color else None
+    else:
+        tile_data_b0 = np.frombuffer(
+            _read_vram_bank(pyboy, 0, 0x8800, 0x1000), dtype=np.uint8
+        )
+        tile_data_b1 = np.frombuffer(
+            _read_vram_bank(pyboy, 1, 0x8800, 0x1000), dtype=np.uint8
+        ) if color else None
+    if color:
+        # Bank 1: tile attribute bytes (palette index, tile bank, flip, etc).
+        tile_attrs = np.frombuffer(
+            _read_vram_bank(pyboy, 1, map_base, 0x400), dtype=np.uint8
+        ).reshape(32, 32)
+        cgb_palettes = _read_cgb_bg_palettes(pyboy)
+        # Flatten into a 32-entry RGB LUT: 8 palettes x 4 colors.
+        rgb_lut = np.array(
+            [c for pal in cgb_palettes for c in pal], dtype=np.uint8
+        ).reshape(8, 4, 3)
+    # Build a 160x144 pixel coordinate grid.
+    ys = np.arange(144)
+    xs = np.arange(160)
+    gx, gy = np.meshgrid(xs, ys)
+    if layer == "bg":
+        src_x = (gx + start_x) & 0xFF
+        src_y = (gy + start_y) & 0xFF
+        in_range = np.ones_like(gx, dtype=bool)
+    else:
+        src_x = gx - start_x
+        src_y = gy - start_y
+        in_range = (src_x >= 0) & (src_y >= 0) & (src_x < 256) & (src_y < 256)
+    tile_col = np.clip(src_x >> 3, 0, 31)
+    tile_row = np.clip(src_y >> 3, 0, 31)
+    tile_ids = tile_map[tile_row, tile_col]
+    if unsigned:
+        tile_addrs = tile_ids.astype(np.int32) * 16
+    else:
+        signed = tile_ids.astype(np.int8).astype(np.int32)
+        tile_addrs = (signed + 128) * 16
+    row_in_tile = (src_y & 0x07).astype(np.int32)
+    col_in_tile = 7 - (src_x & 0x07)
+    bit = (1 << col_in_tile).astype(np.uint8)
+    if color:
+        attrs = tile_attrs[tile_row, tile_col]
+        pal_idx = attrs & 0x07
+        tile_bank = (attrs >> 3) & 0x01
+        flip_x = (attrs >> 5) & 0x01
+        flip_y = (attrs >> 6) & 0x01
+        # Account for Y flip.
+        eff_row = np.where(flip_y == 1, 7 - row_in_tile, row_in_tile)
+        eff_col_bit = np.where(flip_x == 1, src_x & 0x07, col_in_tile)
+        bit_eff = (1 << eff_col_bit).astype(np.uint8)
+        shift_eff = eff_col_bit
+        # Pick tile data from bank 0 or bank 1 per tile.
+        lo0 = tile_data_b0[tile_addrs + eff_row * 2]
+        hi0 = tile_data_b0[tile_addrs + eff_row * 2 + 1]
+        lo1 = tile_data_b1[tile_addrs + eff_row * 2]
+        hi1 = tile_data_b1[tile_addrs + eff_row * 2 + 1]
+        lo = np.where(tile_bank == 1, lo1, lo0)
+        hi = np.where(tile_bank == 1, hi1, hi0)
+        color_idx = (((hi & bit_eff) >> shift_eff) << 1) | ((lo & bit_eff) >> shift_eff)
+        # Look up RGB from per-tile palette.
+        rgb = rgb_lut[pal_idx, color_idx]  # (144, 160, 3)
+        if layer == "win":
+            # Keep out-of-window pixels as white.
+            mask = np.stack([in_range] * 3, axis=-1)
+            rgb = np.where(mask, rgb, 0xFF).astype(np.uint8)
+        Image.fromarray(rgb, mode="RGB").save(out_path)
+        return True
+    # Monochrome fallback.
+    lo = tile_data_b0[tile_addrs + row_in_tile * 2]
+    hi = tile_data_b0[tile_addrs + row_in_tile * 2 + 1]
+    color_idx = (((hi & bit) >> col_in_tile) << 1) | ((lo & bit) >> col_in_tile)
+    palette = np.array([0xFF, 0xAA, 0x55, 0x00], dtype=np.uint8)
+    img_arr = palette[color_idx]
+    if layer == "win":
+        img_arr = np.where(in_range, img_arr, 0xFF).astype(np.uint8)
+    Image.fromarray(img_arr, mode="L").save(out_path)
+    return True
+
+
+def _render_bg_from_vram(pyboy, out_path: Path) -> bool:
+    # Monochrome by default — the CGB attribute/palette read via
+    # pyboy.memory doesn't honor VBK bank swaps reliably.
+    return _render_tilemap_from_vram(pyboy, "bg", out_path, color=False)
+
+
+def _render_window_from_vram(pyboy, out_path: Path) -> bool:
+    return _render_tilemap_from_vram(pyboy, "win", out_path, color=False)
+
+
+def _make_side_by_side(left_path: Path, right_path: Path, out_path: Path) -> bool:
+    """Emit ``out_path`` as ``left_path`` + ``right_path`` side-by-side
+    with matched heights (monochrome image scaled up to the color
+    image's height)."""
+    try:
+        from PIL import Image
+    except Exception:
+        return False
+    if not left_path.exists() or not right_path.exists():
+        return False
+    left = Image.open(left_path).convert("RGB")
+    right = Image.open(right_path).convert("RGB")
+    # Scale right to match left's height using nearest-neighbor (preserve pixel art look).
+    target_h = left.height
+    scale = target_h / right.height
+    target_w = int(round(right.width * scale))
+    right = right.resize((target_w, target_h), Image.Resampling.NEAREST)
+    out = Image.new("RGB", (left.width + right.width, target_h), (30, 30, 30))
+    out.paste(left, (0, 0))
+    out.paste(right, (left.width, 0))
+    out.save(out_path)
+    return True
+
+
+def _force_move_pyboy_windows(positions: list[tuple[int, int]]) -> bool:
+    """Win32-move every visible window titled ``PyBoy`` to the given
+    ``(x, y)`` positions in order. ``SDL_VIDEO_WINDOW_POS`` is unreliable
+    on Windows when multiple monitors are configured (SDL often restores
+    a cached position on the wrong monitor), so we enumerate top-level
+    windows via Win32 and call ``SetWindowPos`` directly.
+
+    Returns True iff at least ``len(positions)`` PyBoy windows were moved.
+    """
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    EnumWindows = user32.EnumWindows
+    EnumWindowsProc = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+    )
+    GetWindowTextW = user32.GetWindowTextW
+    IsWindowVisible = user32.IsWindowVisible
+    SetWindowPos = user32.SetWindowPos
+    SWP_NOZORDER = 0x0004
+    SWP_NOSIZE = 0x0001
+    SWP_SHOWWINDOW = 0x0040
+
+    found: list[int] = []
+
+    def _cb(hwnd, _lparam):
+        if not IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(256)
+        GetWindowTextW(hwnd, buf, 256)
+        if buf.value and "PyBoy" in buf.value:
+            found.append(hwnd)
+        return True
+
+    EnumWindows(EnumWindowsProc(_cb), 0)
+    for hwnd, (x, y) in zip(found, positions):
+        # SWP_NOSIZE keeps PyBoy's current size; we only reposition.
+        SetWindowPos(
+            hwnd, 0, x, y, 0, 0,
+            SWP_NOZORDER | SWP_NOSIZE | SWP_SHOWWINDOW,
+        )
+    return len(found) >= len(positions)
+
+
+def _open_session(version: str, view: bool = False, window_pos: tuple[int, int] | None = None):
+    """Mirror of ``_open_session`` in the test module.
+
+    ``view=True`` opens an SDL2 window for this PyBoy so the game is
+    visible while the trade runs. ``window_pos=(x, y)`` positions the
+    window on the primary monitor so both peers can be shown side-by-side.
+    Sound is always disabled (``sound_emulated=False``).
+    """
     os.environ.setdefault("POKERED_SKIP_SHA1", "1")
     sys.path.insert(0, str(_REPO / "src"))
     from pokered_harness.session import Session  # noqa: E402
+    from pyboy import PyBoy  # noqa: E402
 
     rom, sym = _ROM_PATHS[version]
-    session = Session.from_files(rom, sym)
+
+    # Position SDL2 window via env var (SDL reads this at window creation).
+    if view and window_pos is not None:
+        os.environ["SDL_VIDEO_WINDOW_POS"] = f"{window_pos[0]},{window_pos[1]}"
+
+    def _factory(path: str):
+        return PyBoy(
+            path,
+            window="SDL2" if view else "null",
+            cgb=_PYBOY_CGB_OVERRIDE,
+            sound_emulated=False,
+        )
+
+    session = Session.from_files(rom, sym, view=view, pyboy_factory=_factory)
     session.load_state(_state_path(version).read_bytes())
+    # ``load_state`` restores RAM + registers but the LCD framebuffer it
+    # repaints can lag the restored map by one or two frames (when the
+    # state was saved mid-transition). Tick a dozen frames with rendering
+    # on so the first screenshot reflects the *current* map, not a stale
+    # pre-save one.
+    session.step(12, render=True)
     return session
 
 
@@ -176,7 +551,9 @@ def _install_hook_counter(session, symbol: str, bucket: list, slot: int) -> None
 
 
 def _drive_two_sessions_to_link_menu(
-    a, b, link, *, total_frames: int = 2400, frames_per_attempt: int = 20
+    a, b, link, *, total_frames: int = 2400, frames_per_attempt: int = 20,
+    sampler=None, dwell_s: float = 0.0, natural: bool = False,
+    natural_shot=None,
 ) -> dict:
     counters = {
         "CableClubNPC": [0, 0],
@@ -193,9 +570,13 @@ def _drive_two_sessions_to_link_menu(
         for _ in range(frames):
             a.step(1)
             b.step(1)
+        if dwell_s > 0:
+            time.sleep(dwell_s)
 
     def tick_both_fine(frames: int) -> None:
         link.step_interleaved(frames)
+        if dwell_s > 0:
+            time.sleep(dwell_s)
 
     frames_used = 0
     for _ in range(3):
@@ -203,11 +584,41 @@ def _drive_two_sessions_to_link_menu(
         b.press("up", duration=6)
         tick_both_coarse(20)
         frames_used += 20
+        if sampler is not None:
+            sampler("A_walk_up")
+
+    prev_save = [counters["SaveGameData"][0], counters["SaveGameData"][1]]
+    prev_link = [counters["LinkMenu"][0], counters["LinkMenu"][1]]
+    save_dwelt = False
+    linkmenu_shown = False
 
     attempts = (total_frames - frames_used) // frames_per_attempt
     for _ in range(attempts):
         if counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0:
+            # Natural: hold on the BATTLE/TRADE/CANCEL menu so the viewer
+            # can read all three options before the game's default
+            # cursor selection resolves. We intentionally don't move the
+            # cursor — the fixture's saved cursor position is what the
+            # trade-to-TRADE_CENTER flow depends on, and an up/down dance
+            # can leave it on BATTLE (warps to the Colosseum, map 0xF0).
+            if natural and not linkmenu_shown:
+                linkmenu_shown = True
+                tick_both_coarse(30)  # let the menu render
+                if natural_shot is not None:
+                    natural_shot("nat_02_link_menu")
+                tick_both_coarse(60)  # rest of the 1.5s hold
             break
+        # Natural: when the "Would you like to save?" prompt just
+        # appeared, hold briefly so the YES/NO menu is readable.
+        if natural and not save_dwelt and (
+            counters["SaveGameData"][0] > prev_save[0]
+            or counters["SaveGameData"][1] > prev_save[1]
+        ):
+            save_dwelt = True
+            tick_both_coarse(15)  # tick a bit so the prompt has rendered
+            if natural_shot is not None:
+                natural_shot("nat_01_save_prompt")
+            tick_both_coarse(30)  # remainder of the dwell
         a.press("a", duration=4)
         b.press("a", duration=4)
         in_serial_phase = (
@@ -218,15 +629,21 @@ def _drive_two_sessions_to_link_menu(
         else:
             tick_both_coarse(frames_per_attempt)
         frames_used += frames_per_attempt
+        if sampler is not None:
+            sampler("A_receptionist" if not in_serial_phase else "A_save")
 
     return {"counters": counters, "frames_used": frames_used}
 
 
 def _drive_past_link_menu_to_trade_center(
     a, b, link, *, post_link_menu_frames: int = 1200, frames_per_attempt: int = 20,
-    mid_callback=None,
+    mid_callback=None, sampler=None, dwell_s: float = 0.0,
+    natural: bool = False, natural_shot=None,
 ) -> dict:
-    diag = _drive_two_sessions_to_link_menu(a, b, link)
+    diag = _drive_two_sessions_to_link_menu(
+        a, b, link, sampler=sampler, dwell_s=dwell_s, natural=natural,
+        natural_shot=natural_shot,
+    )
     counters = diag["counters"]
     assert counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0, (
         "precondition: both sides must have reached LinkMenu before "
@@ -247,7 +664,11 @@ def _drive_past_link_menu_to_trade_center(
         a.press("a", duration=4)
         b.press("a", duration=4)
         link.step_interleaved(frames_per_attempt)
+        if dwell_s > 0:
+            time.sleep(dwell_s)
         extra_frames += frames_per_attempt
+        if sampler is not None:
+            sampler("B_warp")
 
     map_a = a.read_game_state().overworld.map_id
     map_b = b.read_game_state().overworld.map_id
@@ -285,18 +706,23 @@ def _install_trade_diag_counters(a, b) -> dict:
 def _drive_complete_trade(
     a, b, link, *, counters: dict,
     trade_budget_frames: int = 4000, step_frames: int = 20,
-    mid_callback=None,
+    mid_callback=None, sampler=None, dwell_s: float = 0.0,
+    natural: bool = False, natural_shot=None,
 ) -> dict:
     add_mon = counters["_AddEnemyMonToPlayerParty"]
     trade_center_trade = counters["TradeCenter_Trade"]
 
     def tick_interleaved(frames: int) -> None:
         link.step_interleaved(frames)
+        if dwell_s > 0:
+            time.sleep(dwell_s)
 
     def tick_per_frame(frames: int) -> None:
         for _ in range(frames):
             a.step(1)
             b.step(1)
+        if dwell_s > 0:
+            time.sleep(dwell_s)
 
     conn_a_now = a._pyboy.memory[a.symbols.addr_of("hSerialConnectionStatus")]
     conn_b_now = b._pyboy.memory[b.symbols.addr_of("hSerialConnectionStatus")]
@@ -311,6 +737,8 @@ def _drive_complete_trade(
         a.press(dir_a, duration=8)
         b.press(dir_b, duration=8)
         tick_per_frame(step_frames)
+        if sampler is not None:
+            sampler("C_walk_into_partner")
 
     settle_frames = 0
     while settle_frames < 1800:
@@ -325,6 +753,8 @@ def _drive_complete_trade(
         else:
             tick_per_frame(step_frames)
         settle_frames += step_frames
+        if sampler is not None:
+            sampler("C_settle")
 
     stats_key = "TradeCenter_SelectMon.selectStatsMenuItem"
     trade_key = "TradeCenter_SelectMon.selectTradeMenuItem"
@@ -338,6 +768,20 @@ def _drive_complete_trade(
     right_pending = [0, 0]
     RIGHT_PRESS_ITERATIONS = 5
 
+    def _hold(frames: int) -> None:
+        """Tick both peers in sync without any button press, so a menu
+        or dialog stays on screen long enough for the viewer to read."""
+        tick_per_frame(frames)
+
+    # Natural: dwell once on the partner-dialog ("What would you like
+    # to do?" / mon-select entry) so the viewer sees the prompt before
+    # we mash A to open the party list.
+    if natural:
+        _hold(15)
+        if natural_shot is not None:
+            natural_shot("nat_03_partner_dialog")
+        _hold(30)
+
     extra_frames = 0
     called_anim_shot = False
     attempts = trade_budget_frames // step_frames
@@ -350,6 +794,8 @@ def _drive_complete_trade(
         else:
             tick_per_frame(step_frames)
         extra_frames += step_frames
+        if sampler is not None:
+            sampler("C_trade_menu")
 
         # Capture a mid-trade-animation frame once TradeCenter_Trade has
         # actually been entered.
@@ -364,15 +810,38 @@ def _drive_complete_trade(
                 return now[key][_idx] > prev[key][_idx]
 
             if ticked(trade_key):
+                # STATS/TRADE/CANCEL cursor landed on TRADE. Natural:
+                # hold so the viewer sees TRADE highlighted before we
+                # press A to confirm.
+                if natural:
+                    _hold(10)
+                    if natural_shot is not None and idx == 0:
+                        natural_shot("nat_06_trade_highlighted")
+                    _hold(20)
                 sess.press("a", duration=4)
                 right_pending[idx] = 0
             elif ticked(stats_key):
+                # STATS/TRADE/CANCEL just opened with cursor on STATS.
+                # Natural: hold so STATS is readable before we move
+                # right to TRADE.
+                if natural:
+                    _hold(10)
+                    if natural_shot is not None and idx == 0:
+                        natural_shot("nat_05_stats_trade_menu")
+                    _hold(20)
                 right_pending[idx] = RIGHT_PRESS_ITERATIONS
                 sess.press("right", duration=12)
             elif right_pending[idx] > 0:
                 sess.press("right", duration=12)
                 right_pending[idx] -= 1
             elif ticked(menu_key):
+                # Party list just opened — cursor on lead mon. Natural:
+                # hold so the viewer sees the party list before A.
+                if natural:
+                    _hold(10)
+                    if natural_shot is not None and idx == 0:
+                        natural_shot("nat_04_party_list")
+                    _hold(20)
                 sess.press("a", duration=4)
             elif ticked(tct_key):
                 sess.press("a", duration=4)
@@ -517,12 +986,53 @@ def _parse_args() -> argparse.Namespace:
         help="Re-exec under .venv-<tag>/Scripts/python.exe if it exists; "
              "otherwise warn and use ambient interp.",
     )
+    p.add_argument(
+        "--view", action="store_true",
+        help="Open SDL2 windows for both peers so the trade is visible live.",
+    )
+    p.add_argument(
+        "--sample-every", type=int, default=0, metavar="N",
+        help="If > 0, capture a framebuffer snapshot from both peers every "
+             "N driver iterations during all phases into "
+             "'<outdir>/timeline/<NNNN>__{red,blue}.png'. Used for visually "
+             "verifying navigation when the SDL2 window isn't being watched.",
+    )
+    p.add_argument(
+        "--speed", type=float, default=1.0, metavar="FACTOR",
+        help="Emulation speed multiplier; 1.0 = real-time, 0.5 = half speed, "
+             "2.0 = double speed. Default 1.0. Use <1 with --view to make "
+             "menu navigation (LinkMenu BATTLE/TRADE, mon-select, TRADE "
+             "confirmation) easier to follow visually.",
+    )
+    p.add_argument(
+        "--hold-after-s", type=int, default=90, metavar="N",
+        help="Seconds to idle both emulators after the trade completes "
+             "so you can watch the final state on the live windows. "
+             "Default 90. Only applies with --view.",
+    )
+    p.add_argument(
+        "--no-cgb", action="store_true",
+        help="Force DMG mode (cgb=False). Loses the Full Color Hack palette "
+             "but makes Gen 1 menu/dialog overlays render correctly. Use for "
+             "diagnosing whether the CGB+ColorHack combo is masking menus.",
+    )
+    p.add_argument(
+        "--natural", action="store_true",
+        help="Drive the trade the way a human would: pause on each key "
+             "menu (save prompt, LinkMenu BATTLE/TRADE/CANCEL, mon-select "
+             "STATS/TRADE, YES/NO confirmation, 'Take good care!'), and "
+             "briefly move the LinkMenu cursor down to BATTLE and back up "
+             "to TRADE so you can see the choice. Off by default so "
+             "tests/matrix runs stay fast.",
+    )
     return p.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
     _maybe_reexec_under_venv(args.venv)
+    global _PYBOY_CGB_OVERRIDE
+    _PYBOY_CGB_OVERRIDE = not args.no_cgb
 
     versions = [v.strip() for v in args.versions.split(",") if v.strip()]
     if len(versions) != 2:
@@ -554,12 +1064,53 @@ def main() -> int:
 
     t_all_start = time.perf_counter()
 
-    a = _open_session(version_a)
-    b = _open_session(version_b)
+    # Side-by-side on the primary monitor: Red on the left, Blue on the right.
+    # Game Boy screen is 160x144; SDL2 default 3x scale is ~480x432 plus
+    # window chrome. Spacing ~520px apart keeps both fully visible.
+    # Primary monitor is queried at runtime — we can't assume (0,0) spans
+    # it on multi-monitor setups (secondary monitors with negative X exist).
+    # SDL_VIDEO_WINDOW_POS is unreliable on Windows under those setups too,
+    # so we open the windows, then force-move them via Win32 below.
+    a = _open_session(version_a, view=args.view, window_pos=(80, 120))
+    b = _open_session(version_b, view=args.view, window_pos=(640, 120))
+
+    if args.view:
+        # Force both windows onto the primary monitor, side-by-side. The
+        # primary monitor on this machine is 2560x1440 at (0,0) — these
+        # coords leave the windows comfortably centered and visible.
+        if _force_move_pyboy_windows([(200, 300), (1200, 300)]):
+            print("[info] moved PyBoy windows to (200,300) and (1200,300) "
+                  "on primary monitor", flush=True)
+        else:
+            print("[warn] could not locate both PyBoy windows to move them; "
+                  "they may be on a secondary monitor", flush=True)
+        _pyboy_hwnds = _find_pyboy_hwnds()
+        if len(_pyboy_hwnds) >= 2:
+            print(f"[info] PyBoy window handles: red={_pyboy_hwnds[0]}, "
+                  f"blue={_pyboy_hwnds[1]} — natural-mode captures will use "
+                  f"Win32 screen-grab so dialogs are included", flush=True)
+        else:
+            _pyboy_hwnds = []
+            print("[warn] could not resolve both PyBoy window handles; "
+                  "natural-mode captures will fall back to framebuffer reads",
+                  flush=True)
+        # PyBoy's Cython ``set_emulation_speed`` is declared ``int`` in the
+        # .pxd, so fractional values silently truncate to 0 (unlimited —
+        # the opposite of what we want). Instead, translate ``--speed`` into
+        # an extra ``time.sleep`` between driver iterations ("dwell") so
+        # each menu state stays on-screen long enough to watch.
+        # 20 frames/iter @ 60fps = 0.333s emulated. At speed=0.5 we want
+        # each iter to take ~0.666s wall — so dwell ~= 0.333s.
+    _iter_s = 20.0 / 60.0
+    _dwell_s = max(0.0, (_iter_s / max(args.speed, 1e-3)) - _iter_s) \
+        if args.view else 0.0
+    if args.view and _dwell_s > 0:
+        print(f"[info] dwell per driver iteration: {_dwell_s*1000:.0f}ms "
+              f"(target speed {args.speed}x)", flush=True)
     try:
         # Phase A: pair + start.
         t0 = time.perf_counter()
-        link = PyBoyLinkSession.local()
+        link = PyBoyLinkSession.local(view=args.view)
         link.attach(a._pyboy)
         link.attach(b._pyboy)
         t_pair = time.perf_counter() - t0
@@ -585,6 +1136,29 @@ def main() -> int:
         # fire during CableClub_DoBattleOrTrade are caught.
         diag_counters = _install_trade_diag_counters(a, b)
 
+        # Optional per-iteration timeline sampler. When --sample-every is
+        # set, every Nth driver iteration dumps a numbered PNG from each
+        # peer into outdir/timeline/ — this is a non-interactive proxy
+        # for "watching the SDL2 windows" so post-run we can verify
+        # navigation progressed on both sides.
+        sampler = None
+        if args.sample_every > 0:
+            timeline_dir = outdir / "timeline"
+            timeline_dir.mkdir(parents=True, exist_ok=True)
+            state = {"counter": 0, "shots": 0}
+            every = args.sample_every
+            def sampler(phase_tag: str):  # noqa: E306 — local closure
+                state["counter"] += 1
+                if state["counter"] % every != 0:
+                    return
+                idx = state["shots"]
+                state["shots"] += 1
+                stem = f"{idx:04d}__{phase_tag}"
+                a._pyboy.screen.image.save(timeline_dir / f"{stem}__red.png")
+                b._pyboy.screen.image.save(timeline_dir / f"{stem}__blue.png")
+            print(f"[info] timeline sampler: every {every} iters -> "
+                  f"{timeline_dir}", flush=True)
+
         # Phase B: drive past LinkMenu to TRADE_CENTER warp.
         t0 = time.perf_counter()
 
@@ -595,8 +1169,48 @@ def main() -> int:
             for p in paths:
                 print(f"  wrote {p}", flush=True)
 
+        def _nat_shot(stem: str) -> None:
+            """Capture each hook-fire state into:
+
+            1. ``stem__{red,blue}.png`` — Win32 PrintWindow of the
+               live SDL2 windows. Color, as the user sees, but the
+               PyBoy CGB compositor drops Gen 1's window-layer menu
+               dialogs so text/cursor boxes are missing.
+            2. ``stem_win__{red,blue}.png`` — Monochrome 160x144
+               render of the Window tile map read straight from VRAM
+               (bank 0). Has the dialog text and cursor but no color.
+            3. ``stem_combined__{red,blue}.png`` — Side-by-side of (1)
+               and (2) scaled to equal height. One image tells you
+               both what the screen shows AND what the dialog says.
+            """
+            if len(_pyboy_hwnds) >= 2:
+                red_path = outdir / f"{stem}__red.png"
+                blue_path = outdir / f"{stem}__blue.png"
+                ok_r = _win32_grab_window(_pyboy_hwnds[0], red_path)
+                ok_b = _win32_grab_window(_pyboy_hwnds[1], blue_path)
+                if ok_r:
+                    print(f"  wrote {red_path} (win32)", flush=True)
+                if ok_b:
+                    print(f"  wrote {blue_path} (win32)", flush=True)
+            win_r = outdir / f"{stem}_win__red.png"
+            win_b = outdir / f"{stem}_win__blue.png"
+            if _render_window_from_vram(a._pyboy, win_r):
+                print(f"  wrote {win_r} (vram/win)", flush=True)
+            if _render_window_from_vram(b._pyboy, win_b):
+                print(f"  wrote {win_b} (vram/win)", flush=True)
+            # Side-by-side composite per peer.
+            for peer, live, vram in (
+                ("red", outdir / f"{stem}__red.png", win_r),
+                ("blue", outdir / f"{stem}__blue.png", win_b),
+            ):
+                combined = outdir / f"{stem}_combined__{peer}.png"
+                if _make_side_by_side(live, vram, combined):
+                    print(f"  wrote {combined} (color+dialog)", flush=True)
+
         warp = _drive_past_link_menu_to_trade_center(
-            a, b, link, mid_callback=_mid_linkmenu_shot,
+            a, b, link, mid_callback=_mid_linkmenu_shot, sampler=sampler,
+            dwell_s=_dwell_s, natural=args.natural,
+            natural_shot=_nat_shot if args.natural else None,
         )
         t_phase_b = time.perf_counter() - t0
         print(f"[phase B: link menu -> trade center] {t_phase_b:.2f}s",
@@ -636,7 +1250,9 @@ def main() -> int:
 
         trade_diag = _drive_complete_trade(
             a, b, link, counters=diag_counters,
-            mid_callback=_mid_trade_anim_shot,
+            mid_callback=_mid_trade_anim_shot, sampler=sampler,
+            dwell_s=_dwell_s, natural=args.natural,
+            natural_shot=_nat_shot if args.natural else None,
         )
         t_phase_c = time.perf_counter() - t0
         print(f"[phase C: complete trade] {t_phase_c:.2f}s", flush=True)
@@ -663,6 +1279,17 @@ def main() -> int:
         for p in trade_done_png:
             print(f"  wrote {p}", flush=True)
 
+        # Natural: after the trade animation finishes the game shows the
+        # "Take good care of <mon>!" dialog. Hold on it so the viewer
+        # sees the line before we tick forward to verify the party swap.
+        if args.natural:
+            for _ in range(60):   # ~1s — let the dialog render
+                a.step(1)
+                b.step(1)
+            _nat_shot("nat_07_take_good_care")
+            for _ in range(120):  # ~2s — remainder of the dwell
+                a.step(1)
+                b.step(1)
         # Let a few extra frames tick so the party reflects the swap.
         link.step_interleaved(30)
 
@@ -674,6 +1301,53 @@ def main() -> int:
         post_png = shoot.shoot_pair(a, b, "phase_06_post")
         for p in post_png:
             print(f"  wrote {p}", flush=True)
+
+        # Post-trade hold so the viewer can see:
+        #  - the received Pokémon being added to the party (Pokédex
+        #    card flash + "No. 003 VENUSAUR / OT/ASH / IDNo. ####" dialog)
+        #  - the post-trade auto-save ("SAVING DON'T TURN OFF THE POWER")
+        #  - return to the Trade Center with the new Pokémon in party
+        # Captures intermediate screenshots every few hundred frames so
+        # the specific sub-states are preserved in PNGs too.
+        # Seven 3s chunks = 21s total so the full tail of the sequence
+        # (dex card → party-add → save → return to TC → idle) has room
+        # to play out without being cut off at the window close.
+        if args.view:
+            print("[info] holding post-trade state for 21s so you can see "
+                  "the received Pokémon's Pokédex card, the party-add, "
+                  "the post-trade auto-save, and the return to the Trade "
+                  "Center…", flush=True)
+            for chunk_idx, tag in enumerate([
+                "phase_07_party_add",
+                "phase_08_pokedex_card",
+                "phase_09_post_save_a",
+                "phase_10_post_save_b",
+                "phase_11_back_in_tc",
+                "phase_12_tc_idle_a",
+                "phase_13_tc_idle_b",
+            ]):
+                for _ in range(180):  # 3 seconds
+                    a.step(1)
+                    b.step(1)
+                try:
+                    paths = shoot.shoot_pair(a, b, tag)
+                    for p in paths:
+                        print(f"  wrote {p}", flush=True)
+                except Exception:
+                    pass
+            # Post-trade idle hold so the viewer can watch the tail
+            # end without the windows closing. Deliberately NOT
+            # interactive — ``sys.stdin.isatty()`` lies under
+            # some harness runners (pseudo-TTY attached but stdin
+            # returns EOF immediately), and that would drop through
+            # the "press Enter" branch and close the windows
+            # instantly. Fixed hold is robust in every environment.
+            hold_s = args.hold_after_s
+            print(f"[info] post-trade idle hold for {hold_s}s — watch the "
+                  f"windows, they'll close on their own.", flush=True)
+            for _ in range(hold_s * 60):
+                a.step(1)
+                b.step(1)
 
         t_total = time.perf_counter() - t_all_start
         print(f"[total wall-clock] {t_total:.2f}s", flush=True)

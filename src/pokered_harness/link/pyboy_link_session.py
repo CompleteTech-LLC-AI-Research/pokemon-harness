@@ -88,7 +88,12 @@ class PyBoyLinkSession:
     #: Max attached instances. Gen I Pokémon is strictly 2-player.
     MAX_ATTACHED: int = 2
 
-    def __init__(self, network_backend: NetworkBackend | None = None) -> None:
+    def __init__(
+        self,
+        network_backend: NetworkBackend | None = None,
+        *,
+        view: bool = False,
+    ) -> None:
         self._pyboys: list[object] = []
         # Tracks each attached PyBoy's serial instance (``pyboy.mb.serial``).
         # Kept under the historical ``_cores`` name so callers relying on
@@ -99,17 +104,23 @@ class PyBoyLinkSession:
         self._prev_backends: list[object] = []
         self._coord: LockstepCoordinator | None = None
         self._network_backend: NetworkBackend | None = network_backend
+        # When True, per-frame stepping keeps the LCD renderer on and calls
+        # each PyBoy's _post_tick (via pyboy.tick(0, True, False)) so the
+        # SDL2 window actually flips and pumps events. Without this the
+        # visible windows stay blank because _interleave_one_frame otherwise
+        # drives mb.tick directly and skips the plugin manager.
+        self._view: bool = view
 
     # --- construction --------------------------------------------------
 
     @classmethod
-    def local(cls) -> "PyBoyLinkSession":
+    def local(cls, *, view: bool = False) -> "PyBoyLinkSession":
         """Create a local two-instance session.
 
         Both PyBoys attach into the same process; they're paired via
         a :class:`LockstepCoordinator`.
         """
-        return cls()
+        return cls(view=view)
 
     @classmethod
     def listen(
@@ -311,9 +322,10 @@ class PyBoyLinkSession:
                 f"step() requires {self.MAX_ATTACHED} attached instances, "
                 f"have {len(self._pyboys)}"
             )
+        effective_render = render or self._view
         for _ in range(frames):
             for pyboy in self._pyboys:
-                pyboy.tick(1, render)
+                pyboy.tick(1, effective_render)
 
     def step_interleaved(
         self, frames: int = 1, *, chunk_cycles: int = 256
@@ -344,16 +356,21 @@ class PyBoyLinkSession:
         ticks_per_chunk = max(1, chunk_cycles // 7)
         a, b = self._pyboys[0], self._pyboys[1]
         for _ in range(frames):
-            self._interleave_one_frame(a, b, ticks_per_chunk)
+            self._interleave_one_frame(a, b, ticks_per_chunk, view=self._view)
 
     @staticmethod
-    def _interleave_one_frame(a, b, ticks_per_chunk: int) -> None:
-        """Drive ``a`` and ``b`` through one frame each, interleaved."""
+    def _interleave_one_frame(a, b, ticks_per_chunk: int, *, view: bool = False) -> None:
+        """Drive ``a`` and ``b`` through one frame each, interleaved.
+
+        When ``view`` is True the LCD renderer stays on and each PyBoy's
+        ``_post_tick`` (via ``tick(0, True, False)``) is invoked after the
+        frame so the SDL2 window flips and pumps events.
+        """
         # Per-frame setup mirrors what pyboy._tick does.
         for p in (a, b):
             p._handle_events(p.events)
             p.mb.lcd.frame_done = False
-            p.mb.lcd.disable_renderer = True
+            p.mb.lcd.disable_renderer = not view
             p.mb.sound.disable_sampling = True
             p.mb.sound.clear_buffer()
 
@@ -394,6 +411,12 @@ class PyBoyLinkSession:
             p.mb.breakpoint_singlestep = 0
             p.frame_count += 1
             p._post_handle_events()
+            if view:
+                # Drive PyBoy's _post_tick (plugin manager post_tick +
+                # frame_limiter) so the SDL2 window flips its backbuffer
+                # and pumps events. tick(0) skips the inner _tick loop
+                # but still reaches _post_tick.
+                p.tick(0, True, False)
 
 
 __all__ = [

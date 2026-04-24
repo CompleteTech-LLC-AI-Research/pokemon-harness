@@ -160,7 +160,7 @@ class Session:
 
     # --- actions -------------------------------------------------------
 
-    def step(self, count: int = 1, *, render: bool = False) -> None:
+    def step(self, count: int = 1, *, render: bool | None = None) -> None:
         if count <= 0:
             raise ValueError(f"count must be positive, got {count}")
         # Increment BEFORE pyboy.tick so hooks firing mid-step read the
@@ -168,6 +168,8 @@ class Session:
         # invariant "events emitted during step → evt.tick > pre_step_tick"
         # hold, which is what ``run_until_event`` relies on.
         self._tick += count
+        if render is None:
+            render = self._view
         self._pyboy.tick(count, render=render)
 
     def press(self, button: str | Button, *, duration: int = 1) -> None:
@@ -213,7 +215,7 @@ class Session:
         *,
         max_ticks: int,
         chunk: int = 16,
-        render: bool = False,
+        render: bool | None = None,
     ) -> RunUntilResult:
         """Tick forward until any of ``event_names`` fires or the budget
         runs out.
