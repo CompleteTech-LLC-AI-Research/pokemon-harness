@@ -1,0 +1,161 @@
+"""Focused, ROM-free tests for the acceptance-gate plumbing."""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+from tests._rom_assets import find_fixture_root, find_rom_root, fixture_path, rom_path, sym_path
+from tests._tier_config import classify_test
+
+
+_GATE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "production_gate.py"
+_SPEC = importlib.util.spec_from_file_location("pokered_production_gate", _GATE_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+gate = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = gate
+_SPEC.loader.exec_module(gate)
+
+
+def test_tier_classifier_keeps_unknown_tests_rom_free():
+    marks = classify_test("tests/test_new_unit.py", "test_parser")
+    assert marks == frozenset({"unit"})
+
+
+def test_tier_classifier_separates_required_remote_and_optional_trade():
+    remote = classify_test(
+        "tests/test_link_integration_remote.py",
+        "test_remote_handshake_writes_status_on_both_sides",
+    )
+    trade = classify_test(
+        "tests/test_link_integration_remote.py",
+        "test_remote_rpc_flow_past_link_menu_over_tcp",
+    )
+    assert {"real_rom", "remote_link"} <= remote
+    assert "acceptance" not in remote
+    assert {"real_rom", "remote_link", "acceptance", "trade"} <= trade
+
+
+def test_tier_classifier_marks_late_rearm_as_timing_sensitive():
+    marks = classify_test(
+        "tests/test_network_backend.py",
+        "test_on_edge_waits_for_late_rearm",
+    )
+    assert "unit" in marks
+    assert "timing_sensitive" in marks
+
+
+def test_versions_sha_parser_pairs_each_rom_path(tmp_path):
+    versions = tmp_path / "VERSIONS.md"
+    versions.write_text(
+        """
+| SHA-1 | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |
+| Path | `rom/red/pokemon-red.gb` |
+
+| SHA-1 | `BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB` |
+| Path | `rom/yellow/pokemon-yellow.gbc` |
+""",
+        encoding="utf-8",
+    )
+    assert gate.parse_expected_sha1(versions) == {
+        Path("red/pokemon-red.gb"): "a" * 40,
+        Path("yellow/pokemon-yellow.gbc"): "b" * 40,
+    }
+
+
+def test_asset_inspection_reports_hash_mismatch_and_missing_inputs(tmp_path):
+    rom_root = tmp_path / "rom"
+    fixture_root = tmp_path / "fixtures"
+    red = rom_root / "red" / "pokemon-red.gb"
+    red.parent.mkdir(parents=True)
+    red.write_bytes(b"wrong bytes")
+    (rom_root / "red" / "pokemon-red.sym").write_text("symbols", encoding="utf-8")
+    (fixture_root / "red").mkdir(parents=True)
+    (fixture_root / "red" / "cable_club.state").write_bytes(b"state")
+
+    records = gate.inspect_assets(
+        rom_root,
+        fixture_root,
+        {Path("red/pokemon-red.gb"): "0" * 40},
+    )
+    by_label = {record.label: record for record in records}
+    assert by_label["red-stock"].status == "sha1-mismatch"
+    assert by_label["red-stock"].actual_sha1 == hashlib.sha1(b"wrong bytes").hexdigest()
+    assert by_label["red"].status == "ok"
+    assert by_label["blue"].status == "missing"
+    assert any("blue-stock" in problem for problem in gate.required_asset_problems(records))
+
+
+def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_path, monkeypatch):
+    rom_root = tmp_path / "rom"
+    red = rom_root / "red"
+    red.mkdir(parents=True)
+    rom_path_value = red / "pokemon-red.gb"
+    sym_path_value = red / "pokemon-red.sym"
+    rom_path_value.write_bytes(b"rom")
+    sym_path_value.write_text("sym", encoding="utf-8")
+    explicit = "/caller/selected.gb"
+    monkeypatch.setenv("POKERED_ROM_PATH", explicit)
+    environment = gate.build_test_environment(
+        tmp_path,
+        rom_root,
+        tmp_path / "fixtures",
+        {Path("red/pokemon-red.gb"): hashlib.sha1(b"rom").hexdigest()},
+    )
+    assert environment["POKERED_ROM_ROOT"] == str(rom_root)
+    assert environment["POKERED_ROM_PATH"] == explicit
+    assert environment["PYTHONPATH"].split(":")[:2] == [str(tmp_path / "src"), str(tmp_path)]
+
+
+def test_gate_report_loader_counts_xfail_and_skip_reasons(tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "counts": {
+                    "total": 3,
+                    "passed": 1,
+                    "failed": 0,
+                    "skipped": 1,
+                    "xfailed": 1,
+                    "xpassed": 0,
+                    "errors": 0,
+                },
+                "tests": [
+                    {"outcome": "passed", "reason": "", "was_xfail": False},
+                    {"outcome": "skipped", "reason": "missing ROM", "was_xfail": False},
+                    {"outcome": "skipped", "reason": "known issue", "was_xfail": True},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    counts, reasons, error = gate.load_gate_report(report)
+    assert error == ""
+    assert counts.total == 3
+    assert counts.skipped == 1
+    assert counts.xfailed == 1
+    assert reasons == {"known issue": 1, "missing ROM": 1}
+
+
+def test_optional_skip_is_explicit_and_non_required():
+    result = gate.synthetic_optional_skip("trade", "optional trade unavailable: no fixtures")
+    assert result.status == "SKIP"
+    assert result.required is False
+    assert result.counts.skipped == 1
+    assert result.skip_reasons == {"optional trade unavailable: no fixtures": 1}
+
+
+def test_rom_helper_honors_explicit_roots(tmp_path, monkeypatch):
+    configured_rom = tmp_path / "external-rom"
+    configured_fixture = tmp_path / "external-fixtures"
+    monkeypatch.setenv("POKERED_ROM_ROOT", str(configured_rom))
+    monkeypatch.setenv("POKERED_FIXTURE_ROOT", str(configured_fixture))
+    assert find_rom_root(tmp_path) == configured_rom
+    assert find_fixture_root(tmp_path) == configured_fixture
+    assert rom_path("yellow", project_root=tmp_path) == configured_rom / "yellow" / "pokemon-yellow.gbc"
+    assert sym_path("blue", project_root=tmp_path) == configured_rom / "blue" / "pokemon-blue.sym"
+    assert fixture_path("red", project_root=tmp_path) == configured_fixture / "red" / "cable_club.state"

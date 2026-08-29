@@ -73,18 +73,26 @@ def main() -> int:
     from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
     from pokered_harness.session import Session
 
-    rom_root = None
-    for parent in (args.repo_root, *args.repo_root.parents):
-        if (parent / "rom").is_dir():
-            rom_root = parent / "rom"
-            break
-    assert rom_root is not None, f"rom/ not found from {args.repo_root}"
+    configured_rom_root = os.environ.get("POKERED_ROM_ROOT")
+    if configured_rom_root:
+        rom_root = Path(configured_rom_root).expanduser()
+    else:
+        rom_root = None
+        for parent in (args.repo_root, *args.repo_root.parents):
+            if (parent / "rom").is_dir():
+                rom_root = parent / "rom"
+                break
+        assert rom_root is not None, f"rom/ not found from {args.repo_root}"
 
     rom = rom_root / "yellow" / "pokemon-yellow.gbc"
     sym = rom_root / "yellow" / "pokemon-yellow.sym"
-    state = (
-        args.repo_root / "tests" / "fixtures" / "link" / "yellow" / "cable_club.state"
+    configured_fixture_root = os.environ.get("POKERED_FIXTURE_ROOT")
+    fixture_root = (
+        Path(configured_fixture_root).expanduser()
+        if configured_fixture_root
+        else args.repo_root / "tests" / "fixtures" / "link"
     )
+    state = fixture_root / "yellow" / "cable_club.state"
 
     def log(msg):
         print(f"[peer {args.role}] {msg}", file=sys.stderr, flush=True)

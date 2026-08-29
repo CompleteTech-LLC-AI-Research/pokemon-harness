@@ -23,6 +23,7 @@ from pokered_harness.link.symbols import (
     resolve_link_symbols,
 )
 from pokered_harness.symbols.loader import load_sym_file
+from tests._rom_assets import sym_path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,9 +38,9 @@ else:  # pragma: no cover - defensive
 
 
 SYM_PATHS = {
-    "blue": ROM_ROOT / "blue" / "pokemon-blue.sym",
-    "yellow": ROM_ROOT / "yellow" / "pokemon-yellow.sym",
-    "red": ROM_ROOT / "red" / "pokemon-red.sym",
+    "blue": sym_path("blue"),
+    "yellow": sym_path("yellow"),
+    "red": sym_path("red"),
 }
 
 

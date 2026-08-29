@@ -22,17 +22,7 @@ import pytest
 
 from pokered_harness.link import LinkPair
 from pokered_harness.session import Session
-
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-for parent in [REPO_ROOT, *REPO_ROOT.parents]:
-    if (parent / "rom").is_dir():
-        ROM_ROOT = parent / "rom"
-        break
-else:  # pragma: no cover
-    ROM_ROOT = REPO_ROOT / "rom"
-
-FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "link"
+from tests._rom_assets import fixture_path, rom_path, sym_path
 
 
 ROM_PATHS = {
@@ -40,9 +30,9 @@ ROM_PATHS = {
     # (pokeblue_color_vanilla.ips). Loading it into stock Blue silently
     # corrupts WRAM on the first tick — the state requires the CGB color
     # ROM as its paired cartridge.
-    "blue": (ROM_ROOT / "blue" / "pokemon-blue-color.gb", ROM_ROOT / "blue" / "pokemon-blue.sym"),
-    "yellow": (ROM_ROOT / "yellow" / "pokemon-yellow.gbc", ROM_ROOT / "yellow" / "pokemon-yellow.sym"),
-    "red": (ROM_ROOT / "red" / "pokemon-red.gb", ROM_ROOT / "red" / "pokemon-red.sym"),
+    "blue": (rom_path("blue", color=True), sym_path("blue")),
+    "yellow": (rom_path("yellow"), sym_path("yellow")),
+    "red": (rom_path("red"), sym_path("red")),
 }
 
 
@@ -102,7 +92,7 @@ def test_link_pair_installs_hooks_on_real_roms(version_a: str, version_b: str):
 
 
 def _cable_club_state(version: str) -> Path:
-    return FIXTURE_ROOT / version / "cable_club.state"
+    return fixture_path(version)
 
 
 @pytest.mark.parametrize(
