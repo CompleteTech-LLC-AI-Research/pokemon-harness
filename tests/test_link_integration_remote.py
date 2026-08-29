@@ -42,33 +42,23 @@ from pokered_harness.link.remote import (
 )
 from pokered_harness.link.serial_link import TcpSerialLink
 from pokered_harness.session import Session
-
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-for _parent in [REPO_ROOT, *REPO_ROOT.parents]:
-    if (_parent / "rom").is_dir():
-        ROM_ROOT = _parent / "rom"
-        break
-else:  # pragma: no cover
-    ROM_ROOT = REPO_ROOT / "rom"
-
-FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "link"
+from tests._rom_assets import fixture_path, rom_path, sym_path
 
 
 ROM_PATHS = {
     "blue": (
-        ROM_ROOT / "blue" / "pokemon-blue-color.gb",
-        ROM_ROOT / "blue" / "pokemon-blue.sym",
+        rom_path("blue", color=True),
+        sym_path("blue"),
     ),
     "yellow": (
-        ROM_ROOT / "yellow" / "pokemon-yellow.gbc",
-        ROM_ROOT / "yellow" / "pokemon-yellow.sym",
+        rom_path("yellow"),
+        sym_path("yellow"),
     ),
     "red": (
         # Match the Red fixture produced by
         # scripts/produce_cable_club_fixture.py (color ROM, SHA e1deed6308…).
-        ROM_ROOT / "red" / "pokemon-red-color.gb",
-        ROM_ROOT / "red" / "pokemon-red.sym",
+        rom_path("red", color=True),
+        sym_path("red"),
     ),
 }
 
@@ -84,7 +74,7 @@ def _open_session(version: str) -> Session:
 
 
 def _cable_club_state(version: str) -> Path:
-    return FIXTURE_ROOT / version / "cable_club.state"
+    return fixture_path(version)
 
 
 def _free_port() -> int:

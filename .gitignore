@@ -25,6 +25,11 @@ venv/
 walkthrough_output/
 walkthrough_*/
 
+# Production-gate reports and ROM-derived diagnostics
+.production-gate/
+production_gate_output/
+artifacts/
+
 # Tooling
 .idea/
 .vscode/

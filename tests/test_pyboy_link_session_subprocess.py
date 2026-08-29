@@ -29,21 +29,16 @@ import time
 from pathlib import Path
 
 import pytest
+from tests._rom_assets import fixture_path, rom_path, sym_path
 
 
 _REPO = Path(__file__).resolve().parents[1]
 
 
 def _fixtures_ready() -> bool:
-    for parent in (_REPO, *_REPO.parents):
-        rom_root = parent / "rom"
-        if rom_root.is_dir():
-            rom = rom_root / "yellow" / "pokemon-yellow.gbc"
-            sym = rom_root / "yellow" / "pokemon-yellow.sym"
-            break
-    else:
-        return False
-    state = _REPO / "tests" / "fixtures" / "link" / "yellow" / "cable_club.state"
+    rom = rom_path("yellow")
+    sym = sym_path("yellow")
+    state = fixture_path("yellow")
     return rom.is_file() and sym.is_file() and state.is_file()
 
 

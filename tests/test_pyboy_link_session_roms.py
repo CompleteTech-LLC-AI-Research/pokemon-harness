@@ -63,6 +63,7 @@ import pytest
 
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_core import SerialCore
+from tests._rom_assets import fixture_path, rom_path, sym_path
 
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -73,20 +74,20 @@ for _parent in [_REPO, *_REPO.parents]:
 else:  # pragma: no cover - defensive; tests skip below if ROM missing.
     ROM_ROOT = _REPO / "rom"
 
-_YELLOW_ROM = ROM_ROOT / "yellow" / "pokemon-yellow.gbc"
-_YELLOW_SYM = ROM_ROOT / "yellow" / "pokemon-yellow.sym"
-_YELLOW_STATE = _REPO / "tests" / "fixtures" / "link" / "yellow" / "cable_club.state"
+_YELLOW_ROM = rom_path("yellow")
+_YELLOW_SYM = sym_path("yellow")
+_YELLOW_STATE = fixture_path("yellow")
 
 _ROM_PATHS = {
     # Red uses the color-patched ROM so it matches the walkthrough
     # state produced by vigorous-lovelace-15ea8a (SHA e1deed6308…).
     "red": (
-        ROM_ROOT / "red" / "pokemon-red-color.gb",
-        ROM_ROOT / "red" / "pokemon-red.sym",
+        rom_path("red", color=True),
+        sym_path("red"),
     ),
     "blue": (
-        ROM_ROOT / "blue" / "pokemon-blue-color.gb",
-        ROM_ROOT / "blue" / "pokemon-blue.sym",
+        rom_path("blue", color=True),
+        sym_path("blue"),
     ),
     "yellow": (_YELLOW_ROM, _YELLOW_SYM),
 }
@@ -98,12 +99,12 @@ _ROM_PATHS = {
 # regressions where the patch accidentally diverges from vanilla.
 _ROM_VARIANTS = {
     "red": [
-        (ROM_ROOT / "red" / "pokemon-red.gb", "vanilla"),
-        (ROM_ROOT / "red" / "pokemon-red-color.gb", "color"),
+        (rom_path("red"), "vanilla"),
+        (rom_path("red", color=True), "color"),
     ],
     "blue": [
-        (ROM_ROOT / "blue" / "pokemon-blue.gb", "vanilla"),
-        (ROM_ROOT / "blue" / "pokemon-blue-color.gb", "color"),
+        (rom_path("blue"), "vanilla"),
+        (rom_path("blue", color=True), "color"),
     ],
     "yellow": [(_YELLOW_ROM, "cgb")],
 }
@@ -118,7 +119,7 @@ def _variant_state_path(version: str, tag: str):
     ``cerulean_pc.state`` source. Save states are bit-tied to the
     exact ROM bytes they were captured against, so vanilla and color
     need separate fixtures."""
-    base = _REPO / "tests" / "fixtures" / "link" / version
+    base = fixture_path(version).parent
     if tag == "vanilla":
         return base / "cable_club-vanilla.state"
     return base / "cable_club.state"
@@ -139,7 +140,7 @@ def _open_session_variant(version: str, rom_path, tag: str):
 
 
 def _state_path(version: str):
-    return _REPO / "tests" / "fixtures" / "link" / version / "cable_club.state"
+    return fixture_path(version)
 
 
 _fixtures_ready = (
