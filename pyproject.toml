@@ -10,8 +10,12 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = { text = "LGPL-3.0-only" }
 dependencies = [
-    "pyboy==2.7.0",
+    "mcp>=1.0",
+    "cython>=3.0.6,<3.1,!=3.0.10",
+    "numpy",
     "pydantic>=2.6",
+    "pysdl2",
+    "pysdl2-dll",
 ]
 
 [project.optional-dependencies]
@@ -21,12 +25,35 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.5",
 ]
-mcp = [
-    "mcp>=1.0",
+
+[tool.setuptools]
+include-package-data = true
+
+# Package the pinned PyBoy fork into the same distribution as the harness.
+# This keeps editable installs and wheels on the identical runtime without a
+# local-path dependency (which is not valid in wheel metadata).
+packages = [
+    "pokered_harness",
+    "pokered_harness.events",
+    "pokered_harness.link",
+    "pokered_harness.state",
+    "pokered_harness.symbols",
+    "pyboy",
+    "pyboy.api",
+    "pyboy.core",
+    "pyboy.core.cartridge",
+    "pyboy.link",
+    "pyboy.logging",
+    "pyboy.plugins",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools.package-dir]
+"" = "src"
+pyboy = "vendor/pyboy-src/pyboy"
+
+[tool.setuptools.package-data]
+"pyboy.core" = ["*.bin"]
+"pyboy.plugins" = ["font.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

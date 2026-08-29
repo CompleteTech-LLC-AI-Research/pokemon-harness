@@ -4,9 +4,8 @@
       "command": "python",
       "args": ["-m", "pokered_harness.mcp_server"],
       "env": {
-        "PYTHONPATH": "${PWD}/src",
-        "POKERED_ROM_PATH": "${PWD}/rom/pokemon-red-color.gb",
-        "POKERED_SYM_PATH": "${PWD}/rom/pokemon-red.sym",
+        "POKERED_ROM_PATH": "${PWD}/rom/red/pokemon-red-color.gb",
+        "POKERED_SYM_PATH": "${PWD}/rom/red/pokemon-red.sym",
         "POKERED_ROM_SHA1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
       }
     }
