@@ -1,106 +1,115 @@
-# Applying the SerialCore overhaul to upstream PyBoy
+# Draft upstream integration recipe
 
-This directory's [README.md](README.md) describes the architecture. This
-file is the **contributor recipe**: exactly how to lift the work out of
-the companion `pokered-harness` repo and produce a PyBoy PR branch.
+> **Contributor draft only.** This recipe has not been run against a current
+> PyBoy checkout by this documentation lane. Review every path, API, Cython
+> boundary, and save-state decision against the exact PyBoy base commit.
 
-Assumes PyBoy is checked out locally (e.g. `~/src/PyBoy`) and this repo
-is also checked out (e.g. `~/src/pokered-harness`).
+The goal is to prepare a reviewable upstream experiment from the candidate
+link modules in this repository. It does not create or certify a release of
+this harness or PyBoy.
 
-## One-shot bring-over
+## Preconditions
+
+- Have separate checkouts of PyBoy and this repository.
+- Record the exact PyBoy base commit before making changes.
+- Keep ROMs, save states, virtual environments, and vendor trees outside the
+  upstream patch unless PyBoy's contribution policy requires otherwise.
+- Read the [design proposal](../pyboy_serial_overhaul_design.md) and the
+  [upstream integration note](README.md) first.
+
+## Proposed bring-over
+
+Replace `<harness-root>` and `<pyboy-root>` with local paths. Work in a new
+branch in the PyBoy checkout and review each copied file before committing:
 
 ```sh
-cd ~/src/PyBoy
-git checkout -b link-cable-bit-accurate-serial
+cd <pyboy-root>
+git switch -c link-cable-bit-accurate-serial
 
-# 1) Replace pyboy/core/serial.py with the bit-accurate SerialCore.
-#    The harness module is self-contained and import-path-independent,
-#    so a direct copy works. Rename the class to match (Serial -> SerialCore
-#    if keeping both; or just Serial if doing the cutover in one step).
-cp ~/src/pokered-harness/src/pokered_harness/link/serial_core.py \
-   pyboy/core/serial.py
+# Candidate serial implementation. Confirm the target PyBoy constructor and
+# register/save-state contracts before replacing or aliasing this file.
+cp <harness-root>/src/pokered_harness/link/serial_core.py pyboy/core/serial.py
 
-# 2) Add the new link/ subpackage.
 mkdir -p pyboy/link
-touch pyboy/link/__init__.py
-cp ~/src/pokered-harness/src/pokered_harness/link/serial_coordinator.py \
-   pyboy/link/coordinator.py
-cp ~/src/pokered-harness/src/pokered_harness/link/pyboy_link_session.py \
-   pyboy/link/session.py
-cp ~/src/pokered-harness/src/pokered_harness/link/network_backend.py \
-   pyboy/link/network.py
-
-# 3) Fix up imports — everything currently imports as
-#    `from pokered_harness.link.X import Y`. Rewrite to
-#    `from pyboy.core.serial import ...` / `from pyboy.link.X import ...`.
-#    Suggested sed pass (review before committing):
-find pyboy/link pyboy/core/serial.py -name "*.py" -print0 \
-  | xargs -0 sed -i \
-    -e 's|from pokered_harness\.link\.serial_core|from pyboy.core.serial|g' \
-    -e 's|from pokered_harness\.link\.serial_coordinator|from pyboy.link.coordinator|g' \
-    -e 's|from pokered_harness\.link\.network_backend|from pyboy.link.network|g' \
-    -e 's|from pokered_harness\.link\.pyboy_link_session|from pyboy.link.session|g'
-
-# 4) Rename PyBoyLinkSession → LinkSession inside pyboy/link/session.py.
-#    (Optional — the "PyBoy" prefix is redundant inside PyBoy itself.)
-
-# 5) Wire the new core into Motherboard. Single-line change in
-#    pyboy/core/mb.py:
-#        self.serial = serial.Serial()
-#    becomes
-#        self.serial = serial.SerialCore()
-
-# 6) Copy test files.
-mkdir -p tests/link
-cp ~/src/pokered-harness/tests/test_serial_core.py tests/link/test_serial_core.py
-cp ~/src/pokered-harness/tests/test_serial_coordinator.py tests/link/test_coordinator.py
-cp ~/src/pokered-harness/tests/test_pyboy_link_session.py tests/link/test_session.py
-cp ~/src/pokered-harness/tests/test_link_protocol.py tests/link/test_protocol.py
-cp ~/src/pokered-harness/tests/test_network_backend.py tests/link/test_network.py
-# (Real-ROM tests stay out of the PR — they need BYO ROMs + fixtures.)
-
-# 7) Same sed pass on tests/link/.
-
-git add -A
-git commit -m "Bit-accurate serial + link session + network backend"
+cp <harness-root>/src/pokered_harness/link/serial_coordinator.py pyboy/link/coordinator.py
+cp <harness-root>/src/pokered_harness/link/pyboy_link_session.py pyboy/link/session.py
+cp <harness-root>/src/pokered_harness/link/network_backend.py pyboy/link/network.py
+cp <harness-root>/src/pokered_harness/link/__init__.py pyboy/link/__init__.py
 ```
 
-Then open a PR against `Baekalfen/PyBoy:master` with a link to the
-[README.md](README.md) design notes in the description, and a link
-back to this repo's
-[docs/pyboy_serial_overhaul_design.md](../pyboy_serial_overhaul_design.md)
-for the longer-form rationale.
+Adapt imports and names deliberately. Do not apply a blind repository-wide
+replacement. In particular, review:
 
-## What to highlight in the PR description
+- `pokered_harness` imports and PyBoy public naming;
+- motherboard construction and the `cdef`/Python boundary;
+- serial register masks, interrupt delivery, and clock scheduling;
+- network framing, timeout, disconnect, and thread ownership; and
+- old/new save-state compatibility.
 
-Leaning on the upstream maintainers' time:
+The conceptual motherboard change is:
 
-- **No breaking change for single-instance users.** `SerialCore` ships a
-  `NullBackend` by default, which behaves like the legacy class
-  (master reads `0xFF`, external-clock transfers never complete). All
-  280+ existing PyBoy tests pass against the new core.
+```diff
+- self.serial = serial.Serial(...)
++ self.serial = serial.SerialCore(...)
+```
 
-- **Proven on real Pokémon ROMs.** Two PyBoy instances paired under the
-  new `LinkSession` complete a full Gen I Pokémon trade end-to-end
-  (yellow/yellow, blue/blue, red/red, plus every cross-version pair).
-  The trade sequence exercises the preamble handshake, the ~200-byte
-  trainer/party block exchange, the nibble-sync loop, the LinkMenu
-  selection exchange, `TradeCenter_SelectMon`, and
-  `_AddEnemyMonToPlayerParty`.
+It is not known to be the exact change for every PyBoy revision. The target
+maintainer must choose whether to stage the new core behind an explicit API or
+replace the existing implementation.
 
-- **No opcode changes, no cdef-boundary changes.** Strictly Python-level
-  on top of PyBoy's existing `mb.cpu.set_interruptflag` surface.
+## Candidate test copy
 
-- **Pan Docs conformance.** Bit-level shift register; `SC` bit 7
-  auto-clears at completion (legacy class had it inverted); external
-  clock transfers wait indefinitely with no peer; disconnected master
-  RX is pulled high.
+If upstream maintainers want the ROM-free responsibilities in PyBoy, copy and
+adapt these tests into the target test layout:
 
-## Known-follow-up issues to mention (not blocking the PR)
+```sh
+mkdir -p tests/link
+cp <harness-root>/tests/test_serial_core.py tests/link/test_serial_core.py
+cp <harness-root>/tests/test_serial_coordinator.py tests/link/test_coordinator.py
+cp <harness-root>/tests/test_pyboy_link_session.py tests/link/test_session.py
+cp <harness-root>/tests/test_link_protocol.py tests/link/test_protocol.py
+cp <harness-root>/tests/test_network_backend.py tests/link/test_network.py
+```
 
-- CGB high-speed serial (`SC` bit 1) — design-doc milestone 9.
-  Architecture accommodates it; not needed for Gen I Pokémon.
-- Four-player modes (Gen II multi-cart) — architecture accommodates
-  N>2 but this PR caps at 2.
-- WAN network play / jitter buffer — milestone 8 shipped with LAN
-  latency tolerance, not WAN.
+Real-ROM tests remain a separate BYO-asset integration tier. Do not turn
+fixture-gated tests into an unconditional upstream pass by adding skips or by
+copying ROM-derived artifacts into the branch.
+
+## Review and verification before commit
+
+Run the target project's formatter, type checks, and focused tests as defined
+by its own contributor instructions. At minimum, attach:
+
+- exact PyBoy base and head commits;
+- the changed-file diff and `git diff --check` output;
+- focused serial/coordinator/session/protocol/network results;
+- the complete existing PyBoy regression result;
+- save-state compatibility results; and
+- build results for every claimed Cython/source configuration.
+
+Use explicit paths when staging the patch; do not stage unrelated files:
+
+```sh
+git add pyboy/core/serial.py pyboy/link tests/link
+git diff --cached --check
+git status --short
+git commit -m "Draft bit-accurate serial and link session"
+```
+
+The commit command above is an example for the target PyBoy checkout. It does
+not authorize pushing, opening, or merging a pull request. Those are separate
+release decisions.
+
+## What cannot be claimed from this recipe
+
+This recipe does not establish that:
+
+- the branch exists or is ready;
+- PyBoy CI is green;
+- the stock Cython wheel accepts Python-side serial replacement;
+- a Pokémon trade or battle completes; or
+- any Red/Blue/Yellow matrix has passed.
+
+Those claims require fresh evidence recorded using the harness
+[production runbook](../PRODUCTION_RUNBOOK.md) and
+[release checklist](../RELEASE_CHECKLIST.md).
