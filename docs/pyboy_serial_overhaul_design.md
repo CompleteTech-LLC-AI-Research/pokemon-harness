@@ -4,6 +4,12 @@
 **Status:** draft, for upstream discussion issue
 **Audience:** PyBoy maintainers, link-cable-interested contributors
 
+> **Proposal boundary.** This document describes a possible upstream design;
+> it is not a report that the design is merged, production-ready, or supported
+> by the default PyBoy wheel. Current harness status and release evidence live
+> in the [production runbook](PRODUCTION_RUNBOOK.md) and
+> [release checklist](RELEASE_CHECKLIST.md).
+
 ## Why this document exists
 
 PyBoy currently does not implement the Game Boy serial/link model needed
@@ -15,7 +21,7 @@ freezes, internal-clock-only operation, mid-byte synchronization issues
 — because they extended the existing simplified serial core incrementally
 rather than replacing it.
 
-This proposal describes a three-layer rewrite that treats **Game Boy
+This proposal describes a possible three-layer rewrite that treats **Game Boy
 serial as a synchronous shift register** (per Pan Docs), layers a
 **backend abstraction** over it (per SameBoy), and adds a **lockstep
 coordinator** for multi-instance emulation (per mGBA). The goal is to
@@ -386,17 +392,15 @@ per bit. Mitigated by keeping the core in the same module as the rest
 of the hot-path devices; callbacks to the Python-side backend fire only
 on edge boundaries (up to 8 per byte), not per CPU cycle.
 
-**Python-side attach against wheel PyBoy is blocked.** Confirmed via
-the `pokered-harness` companion repo's `PyBoyLinkSession` prototype:
-wheel-installed PyBoy is fully Cython-compiled — `cdef Motherboard mb`,
-`cdef Serial serial` — so neither `pyboy.mb` nor `pyboy.mb.serial` is
-Python-accessible, and a pure-Python `SerialCore` cannot be swapped in
-from outside the C extension. Any integration targeting the
-wheel-installed PyBoy has to either (a) install PyBoy from source with
-the Cython extension disabled, or (b) land the serial overhaul inside
-PyBoy itself and ship a new wheel. Option (b) is this document's
-intended outcome; option (a) is the near-term development mode for
-contributors prototyping the new core.
+**Python-side attach against the default wheel is a compatibility risk.** In
+the audited environment the wheel-installed PyBoy is Cython-compiled —
+`Motherboard` and `Serial` are extension-level attributes — so the harness's
+pure-Python `PyBoyLinkSession` cannot assume that `pyboy.mb.serial` is
+accessible or swappable. This is an observation about the current prototype,
+not an upstream compatibility guarantee. Any upstream implementation must
+either expose and support the required API, land the serial integration inside
+PyBoy, or provide a separately documented source-build mode and test it on the
+claimed platforms.
 
 **Non-blocking network edge.** WAN jitter could bubble up as
 frame-rate stutter. Mitigated by a small jitter buffer (documented
@@ -418,7 +422,7 @@ is a goal, not an accident. Tested as invariants.
 - Emulating hardware imperfections beyond the master-pull-up model
   (cable resistance, differential signaling).
 
-## Acceptance criteria for v1
+## Proposed acceptance criteria for a future v1
 
 - All three tiers of tests green on CI.
 - Two PyBoy instances trade a Pokémon end-to-end on Red/Blue/Yellow
@@ -427,8 +431,8 @@ is a goal, not an accident. Tested as invariants.
   resolution on both sides.
 - Existing single-instance PyBoy users see zero behavior change (no
   regression in the 280+ existing PyBoy tests).
-- Documentation covers the public API + a working example under
-  `examples/link_trade.py`.
+- Documentation covers the public API and includes a working example in the
+  target upstream repository.
 
 ## References
 

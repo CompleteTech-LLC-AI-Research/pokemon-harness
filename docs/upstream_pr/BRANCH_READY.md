@@ -1,73 +1,41 @@
-# Upstream PR branch is ready — commit `f0856a3`
+# Upstream branch readiness template
 
-The `vendor/pyboy-src/` PyBoy clone now has a `link-cable-bit-accurate-serial`
-branch built per the [APPLY.md](APPLY.md) recipe and verified green against
-the PyBoy regression suite.
+> **Not a current readiness assertion.** The audited harness checkout does not
+> contain a `vendor/pyboy-src/` clone, an upstream branch, or verifiable output
+> for the historical commit names that previously appeared in this file.
 
-## Branch contents
+Use this page only after recreating a candidate PyBoy branch and attaching
+fresh evidence. The [APPLY.md](APPLY.md) recipe is illustrative and requires
+review against the exact PyBoy base commit.
 
-```
-link-cable-bit-accurate-serial @ f0856a3
-├── f9f812b setup: honor PYBOY_NO_CYTHON env var for contributor non-Cython builds
-├── ebb0aac serial: bit-accurate FF01/FF02 shift register + link-cable support
-├── f0856a3 link: NetworkBackend reader-thread + LinkSession network mode
-└── f0856a3 link: NetworkBackend OP_SYNC opcode for cross-peer rendezvous
-```
+## Required branch record
 
-**Changed files** (vs. upstream `master`):
-- `pyboy/core/serial.py` — replaced with bit-accurate `SerialCore`; kept
-  `Serial = SerialCore` alias + accepts `cgb_mode` positional arg so
-  `pyboy/core/mb.py`'s `self.serial = serial.Serial(cgb_mode)` works
-  unchanged. Masks in unused SC bits 2-6 (DMG) / 2-6 (CGB) so mooneye
-  `misc/bits/unused_hwio` and `acceptance/bits/unused_hwio` pass.
-- `pyboy/link/__init__.py`, `coordinator.py`, `session.py`, `network.py`
-  — new subpackage: `LockstepCoordinator`, `CoordinatedBackend`,
-  `LinkSession` (renamed from `PyBoyLinkSession`), `NetworkBackend`.
-- `setup.py` — one-line tweak so `PYBOY_NO_CYTHON=1 pip install -e .`
-  gives a non-Cython build (useful for contributors prototyping on
-  the link-cable stack where `mb.serial` needs to be swappable).
-- `tests/link/` — 85 new tests (register, coordinator, session,
-  protocol, network). All green.
+- [ ] PyBoy upstream repository and exact base commit are recorded.
+- [ ] The candidate branch name, head commit, and complete changed-file list
+  are recorded.
+- [ ] The harness source commit used for the import is recorded.
+- [ ] Any Cython/build-system changes are reviewed and tested on each claimed
+  platform.
+- [ ] No generated ROM, save state, virtual environment, or vendor checkout is
+  included in the branch record unless the upstream project explicitly
+  requires it.
 
-## Verification
+## Required verification
 
-**New tests (85):** all green in ~5s each.
+- [ ] New serial-core, coordinator, session, protocol, and network tests pass.
+- [ ] The full PyBoy regression command passes with the exact output attached.
+- [ ] Save-state compatibility is tested for both legacy and new state data,
+  or the incompatibility and migration plan are explicit.
+- [ ] The stock Cython build and any source/non-Cython development build have
+  separately documented results.
+- [ ] Real-ROM results, if claimed, identify ROM hashes, symbol hashes,
+  fixture hashes, runtime build, deadlines, and teardown. A skipped test is
+  not a pass.
+- [ ] Review confirms that LinkMenu, transport, or synthetic protocol results
+  are not described as a completed trade or battle.
 
-**Full PyBoy regression suite** (non-heavy subset — 297 tests including
-mooneye, gameshark, breakpoints, interaction, serial_link, external_api,
-windows, and more):
-```
-297 passed, 118 skipped, 121 deselected, 1 xfailed, 1 xpassed in 627.35s
-```
+## Decision
 
-**Mooneye unused_hwio** (the only thing that regressed initially and
-was fixed by adding the `_sc_readonly_mask`):
-```
-tests/test_mooneye.py::test_mooneye[True-False-True-misc/bits/unused_hwio-C.gb] PASSED
-tests/test_mooneye.py::test_mooneye[True-False-False-acceptance/bits/unused_hwio-GS.gb] PASSED
-```
-
-## How to push + open the PR
-
-From this worktree (owner of the `vendor/pyboy-src/` clone):
-
-```sh
-cd vendor/pyboy-src
-
-# Add a fork of Baekalfen/PyBoy to this clone. Replace with actual fork URL.
-git remote add fork git@github.com:<your-user>/PyBoy.git
-
-# Push the branch.
-git push -u fork link-cable-bit-accurate-serial
-
-# Open the PR against Baekalfen/PyBoy:master.
-gh pr create \
-  --repo Baekalfen/PyBoy \
-  --base master \
-  --head <your-user>:link-cable-bit-accurate-serial \
-  --title "Bit-accurate serial + link cable session (Pokemon R/B/Y trading)" \
-  --body-file ../../docs/upstream_pr/README.md
-```
-
-Or manually via the GitHub web UI — upload the branch, use
-[docs/upstream_pr/README.md](README.md) as the PR description.
+Until all required records and outputs are attached, the branch status is
+`NOT READY FOR UPSTREAM CLAIMS`. Do not reuse historical test counts, timing,
+commit IDs, or screenshots as current evidence.
