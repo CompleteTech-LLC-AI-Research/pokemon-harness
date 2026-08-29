@@ -31,6 +31,12 @@ walkthrough_*/
 *.swp
 .DS_Store
 
-# Non-Cython PyBoy venv + vendor source (see test_pyboy_link_session_roms.py)
+# Non-Cython PyBoy venv.
 .venv-noncython/
-vendor/
+
+# The harness ships the exact patched PyBoy source used by the link runtime.
+# Keep all other vendor material ignored; the source tree itself is explicitly
+# allow-listed below so a clean checkout can install it without PYTHONPATH.
+vendor/*
+!vendor/pyboy-src/
+!vendor/pyboy-src/**
