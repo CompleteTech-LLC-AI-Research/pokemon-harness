@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from pokered_harness.config import (
+    SUPPORTED_ROM_VERSIONS,
     VersionsConfig,
     VersionsConfigError,
     load_peer_env,
@@ -150,3 +151,22 @@ def test_load_primary_env_version_yellow_heuristic(monkeypatch):
     env = load_primary_env()
     assert env.rom_path == "rom/yellow/pokemon-yellow.gbc"
     assert env.version == "yellow"
+
+
+def test_blank_environment_values_are_treated_as_unset(monkeypatch):
+    monkeypatch.setenv("POKERED_ROM_PATH", "  ")
+    monkeypatch.setenv("POKERED_SYM_PATH", "")
+    monkeypatch.setenv("POKERED_ROM_SHA1", " ")
+    env = load_primary_env()
+    assert env.rom_path is None
+    assert env.sym_path is None
+    assert env.rom_sha1 is None
+
+
+def test_session_env_rejects_partial_or_unknown_configuration(monkeypatch):
+    monkeypatch.setenv("POKERED_ROM_PATH", "rom.gb")
+    monkeypatch.delenv("POKERED_SYM_PATH", raising=False)
+    with pytest.raises(VersionsConfigError, match="both ROM and symbol"):
+        load_primary_env().validate(role="primary")
+
+    assert SUPPORTED_ROM_VERSIONS == frozenset({"red", "blue", "yellow"})
