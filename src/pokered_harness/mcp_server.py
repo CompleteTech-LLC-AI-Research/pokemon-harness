@@ -18,26 +18,63 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
+import contextlib
 import json
+import math
 import os
+import socket
 import threading
-from pathlib import Path
-from typing import Any
+import time
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import mcp.types as mcp_types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+from pokered_harness.config import SUPPORTED_ROM_VERSIONS
 from pokered_harness.events.hooks import GameEvent
 from pokered_harness.link.pair import LinkPair
 from pokered_harness.link.remote import RemoteLinkEndpoint
 from pokered_harness.link.serial_link import (
     SerialLink,
     SerialLinkError,
+    SerialLinkTimeout,
     TcpSerialLink,
 )
 from pokered_harness.serialize import to_jsonable
-from pokered_harness.session import Session
+from pokered_harness.session import (
+    InvalidStateError,
+    Session,
+    SessionClosedError,
+    SessionConfigurationError,
+    VersionMismatch,
+)
+
+
+class McpHarnessError(ValueError):
+    """A client-visible MCP failure with a stable machine-readable code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class _ListenerCancelled(Exception):
+    """Internal sentinel for an intentional listener shutdown."""
+
+
+_ALLOWED_REMOTE_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_DEFAULT_REMOTE_HELLO_TIMEOUT_S = 10.0
+_DEFAULT_CLEANUP_TIMEOUT_S = 5.0
+_MAX_REMOTE_TIMEOUT_S = 300.0
+_DIRECT_LINK_HOOKS = (
+    "Serial_ExchangeBytes",
+    "Serial_ExchangeNybble",
+    "Serial_ExchangeLinkMenuSelection",
+    "Serial_TryEstablishingExternallyClockedConnection",
+)
 
 # Default hooks registered at session start. Keep this list short — each
 # entry is a semantic event downstream agents are expected to react to.
@@ -111,6 +148,26 @@ class LinkState:
         self.remote_bind_port: int | None = None
         self._listener_thread: threading.Thread | None = None
         self._listener_error: Exception | None = None
+        self._remote_error: Exception | None = None
+        self._listener_socket: socket.socket | None = None
+        self._listener_cancel = threading.Event()
+        self._connect_cancel = threading.Event()
+        self._state_lock = threading.RLock()
+        self._operation_lock = threading.Lock()
+        self._disconnecting = False
+        self._generation = 0
+
+    @contextmanager
+    def operation(self) -> Iterator[None]:
+        """Serialize emulator/link mutations without blocking disconnect."""
+        with self._operation_lock:
+            yield
+
+    @contextmanager
+    def state(self) -> Iterator[None]:
+        """Protect link lifecycle fields shared with the listener thread."""
+        with self._state_lock:
+            yield
 
 
 # -- tool definitions --------------------------------------------------------
@@ -319,13 +376,58 @@ def _tool_specs() -> list[mcp_types.Tool]:
 # -- dispatch helpers --------------------------------------------------------
 
 
-def _text_reply(payload: Any) -> list[mcp_types.TextContent]:
-    return [mcp_types.TextContent(type="text", text=json.dumps(payload))]
+def _text_reply(payload: Any) -> mcp_types.CallToolResult:
+    """Return both legacy JSON text and MCP structured tool content."""
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=json.dumps(payload))],
+        structuredContent=payload if isinstance(payload, dict) else None,
+        isError=False,
+    )
+
+
+def _error_reply(exc: Exception) -> mcp_types.CallToolResult:
+    """Convert an internal exception into a stable MCP error envelope."""
+    payload = {
+        "ok": False,
+        "error": {
+            "code": _error_code(exc),
+            "message": str(exc) or type(exc).__name__,
+            "type": type(exc).__name__,
+        },
+    }
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=json.dumps(payload))],
+        structuredContent=payload,
+        isError=True,
+    )
+
+
+def _error_code(exc: Exception) -> str:
+    if isinstance(exc, McpHarnessError):
+        return exc.code
+    if isinstance(exc, SessionClosedError):
+        return "session_closed"
+    if isinstance(exc, VersionMismatch):
+        return "version_mismatch"
+    if isinstance(exc, SessionConfigurationError):
+        return "invalid_session_configuration"
+    if isinstance(exc, InvalidStateError):
+        return "invalid_state"
+    if isinstance(exc, (SerialLinkTimeout, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, SerialLinkError):
+        return "link_error"
+    if isinstance(exc, (KeyError, TypeError, ValueError, binascii.Error)):
+        return "invalid_argument"
+    if isinstance(exc, OSError):
+        return "transport_error"
+    return "internal_error"
 
 
 def _require_peer(link: LinkState) -> Session:
     if link.peer_session is None:
-        raise ValueError(
+        raise McpHarnessError(
+            "peer_not_configured",
             "peer session not configured; set POKERED_PEER_ROM_PATH and "
             "POKERED_PEER_SYM_PATH at server startup"
         )
@@ -334,7 +436,7 @@ def _require_peer(link: LinkState) -> Session:
 
 def _require_pair(link: LinkState) -> LinkPair:
     if link.pair is None or not link.pair.paired:
-        raise ValueError("not paired; call link_pair first")
+        raise McpHarnessError("not_paired", "not paired; call link_pair first")
     return link.pair
 
 
@@ -385,7 +487,14 @@ def dispatch_tool(
     if name.startswith("link_"):
         if link is None:
             link = LinkState()
-        return _dispatch_link_tool(session, name, arguments, link)
+        # Disconnect deliberately bypasses the operation lock. A serial hook
+        # may be blocked waiting for a peer; closing its socket must be able
+        # to proceed so the blocked operation can unwind. All other mutating
+        # link calls are serialized, while status remains read-mostly.
+        if name == "link_disconnect" or name == "link_status":
+            return _dispatch_link_tool(session, name, arguments, link)
+        with link.operation():
+            return _dispatch_link_tool(session, name, arguments, link)
 
     raise ValueError(f"unknown tool: {name!r}")
 
@@ -398,16 +507,34 @@ def _dispatch_link_tool(
 ) -> Any:
     if name == "link_pair":
         peer = _require_peer(link)
-        if link.pair is not None and link.pair.paired:
-            raise ValueError("already paired; call link_unpair first")
-        if link.pair is None:
-            link.pair = LinkPair(
-                session,
-                peer,
-                version_primary=link.primary_version,
-                version_peer=link.peer_version,
-            )
-        link.pair.pair()
+        with link.state():
+            if link._disconnecting:
+                raise McpHarnessError(
+                    "link_busy", "link teardown is still in progress"
+                )
+            if link.pair is not None and link.pair.paired:
+                raise McpHarnessError(
+                    "already_paired", "already paired; call link_unpair first"
+                )
+            pair = link.pair
+            created = pair is None
+            if pair is None:
+                pair = LinkPair(
+                    session,
+                    peer,
+                    version_primary=link.primary_version,
+                    version_peer=link.peer_version,
+                )
+                link.pair = pair
+        try:
+            pair.pair()
+        except Exception:
+            if created:
+                with link.state():
+                    if link.pair is pair:
+                        link.pair = None
+            _deactivate_link_hooks(session, peer)
+            raise
         return {
             "paired": True,
             "primary_version": link.primary_version,
@@ -415,9 +542,14 @@ def _dispatch_link_tool(
         }
 
     if name == "link_unpair":
-        if link.pair is not None and link.pair.paired:
-            link.pair.unpair()
-        link.pair = None
+        with link.state():
+            pair = link.pair
+        if pair is not None and pair.paired:
+            pair.unpair()
+            _deactivate_link_hooks(session, pair.peer)
+        with link.state():
+            if link.pair is pair:
+                link.pair = None
         return {"paired": False}
 
     if name == "link_step":
@@ -444,18 +576,25 @@ def _dispatch_link_tool(
         return {"ok": True}
 
     if name == "link_status":
-        paired = link.pair is not None and link.pair.paired
-        transport_snapshot: dict[str, Any] = (
-            link.pair.transport.snapshot() if link.pair is not None else {"a_to_b": [], "b_to_a": []}
-        )
         # Surface listener-thread failures lazily on status checks so
         # callers polling for "connected" see the error rather than
         # hanging forever.
-        _refresh_remote_state(link)
+        _refresh_remote_state(link, session)
+        with link.state():
+            pair = link.pair
+            paired = pair is not None and pair.paired
+            remote_mode = link.remote_mode
+            remote_role = link.remote_role
+            remote_bind_port = link.remote_bind_port
+            remote_link = link.remote_link
+            remote_error = link._remote_error or link._listener_error
+        transport_snapshot: dict[str, Any] = (
+            pair.transport.snapshot() if pair is not None else {"a_to_b": [], "b_to_a": []}
+        )
         peer_rom: str | None = None
-        if link.remote_link is not None and link.remote_mode == "connected":
+        if remote_link is not None and remote_mode == "connected":
             try:
-                peer_rom = link.remote_link.peer_rom_version
+                peer_rom = _peer_rom_version_if_ready(remote_link)
             except SerialLinkError:
                 peer_rom = None
         return {
@@ -463,13 +602,13 @@ def _dispatch_link_tool(
             "transport": transport_snapshot,
             "primary_tick": session.current_tick(),
             "peer_tick": link.peer_session.current_tick() if link.peer_session else None,
-            "remote_mode": link.remote_mode,
-            "remote_role": link.remote_role,
-            "remote_bind_port": link.remote_bind_port,
+            "remote_mode": remote_mode,
+            "remote_role": remote_role,
+            "remote_bind_port": remote_bind_port,
             "remote_peer_rom_version": peer_rom,
             "remote_error": (
-                f"{type(link._listener_error).__name__}: {link._listener_error}"
-                if link._listener_error is not None
+                f"{type(remote_error).__name__}: {remote_error}"
+                if remote_error is not None
                 else None
             ),
         }
@@ -477,32 +616,49 @@ def _dispatch_link_tool(
     if name == "link_listen":
         _require_remote_idle(link)
         _require_pair_inactive(link)
-        port = int(arguments["port"])
+        port = _positive_port(arguments.get("port"))
         host = str(arguments.get("host", "127.0.0.1"))
-        rom_version = str(arguments.get("rom_version") or link.primary_version)
-        link.remote_mode = "listening"
-        link.remote_role = "listener"
-        link.remote_bind_port = port
-        link._listener_error = None
+        _validate_remote_host(host)
+        rom_version = _validate_rom_version(
+            str(arguments.get("rom_version") or link.primary_version)
+        )
+        timeout_s = _validate_timeout(
+            arguments.get("timeout_s", _DEFAULT_REMOTE_HELLO_TIMEOUT_S)
+        )
+
+        listener = _bind_listener(host, port)
+        cancel = threading.Event()
+        with link.state():
+            if link._disconnecting:
+                listener.close()
+                raise McpHarnessError(
+                    "link_busy", "link teardown is still in progress"
+                )
+            generation = link._generation
+            link._listener_cancel = cancel
+            link._listener_socket = listener
+            link.remote_mode = "listening"
+            link.remote_role = "listener"
+            link.remote_bind_port = port
+            link._listener_error = None
+            link._remote_error = None
 
         def _accept() -> None:
-            try:
-                tcp = TcpSerialLink.listen(port, rom_version, host=host)
-                endpoint = RemoteLinkEndpoint.as_listener(session, tcp)
-                endpoint.install()
-                link.remote_link = tcp
-                link.remote_endpoint = endpoint
-                link.remote_mode = "connected"
-            except Exception as exc:  # noqa: BLE001
-                link._listener_error = exc
-                link.remote_mode = "idle"
-                link.remote_role = None
-                link.remote_bind_port = None
+            _accept_remote(
+                link,
+                session,
+                listener,
+                cancel,
+                generation,
+                rom_version,
+                timeout_s,
+            )
 
         t = threading.Thread(
             target=_accept, name="mcp-link-listen", daemon=True
         )
-        link._listener_thread = t
+        with link.state():
+            link._listener_thread = t
         t.start()
         return {
             "remote_mode": "listening",
@@ -510,84 +666,384 @@ def _dispatch_link_tool(
             "remote_bind_port": port,
             "host": host,
             "rom_version": rom_version,
+            "timeout_s": timeout_s,
         }
 
     if name == "link_connect":
         _require_remote_idle(link)
         _require_pair_inactive(link)
         host = str(arguments["host"])
-        port = int(arguments["port"])
-        rom_version = str(arguments.get("rom_version") or link.primary_version)
-        timeout_s = float(arguments.get("timeout_s", 10.0))
-        tcp = TcpSerialLink.connect(
-            host, port, rom_version, timeout_s=timeout_s
+        _validate_remote_host(host)
+        port = _positive_port(arguments.get("port"))
+        rom_version = _validate_rom_version(
+            str(arguments.get("rom_version") or link.primary_version)
         )
-        endpoint = RemoteLinkEndpoint.as_connector(session, tcp)
-        endpoint.install()
-        link.remote_link = tcp
-        link.remote_endpoint = endpoint
-        link.remote_mode = "connected"
-        link.remote_role = "connector"
-        link.remote_bind_port = None
+        timeout_s = _validate_timeout(arguments.get("timeout_s", 10.0))
+        with link.state():
+            generation = link._generation
+            link._connect_cancel = threading.Event()
+            connect_cancel = link._connect_cancel
+        tcp: TcpSerialLink | None = None
+        endpoint: RemoteLinkEndpoint | None = None
+        deadline = time.monotonic() + timeout_s
+        try:
+            tcp = TcpSerialLink.connect(
+                host, port, rom_version, timeout_s=timeout_s
+            )
+            _wait_for_remote_hello(tcp, connect_cancel, _remaining(deadline))
+            endpoint = RemoteLinkEndpoint.as_connector(session, tcp)
+            endpoint.install()
+            with link.state():
+                if (
+                    connect_cancel.is_set()
+                    or link._disconnecting
+                    or link._generation != generation
+                ):
+                    raise McpHarnessError(
+                        "link_cancelled", "remote connection cancelled"
+                    )
+                link.remote_link = tcp
+                link.remote_endpoint = endpoint
+                link.remote_mode = "connected"
+                link.remote_role = "connector"
+                link.remote_bind_port = None
+                link._remote_error = None
+        except McpHarnessError:
+            if tcp is not None:
+                _close_serial_link(tcp)
+            _deactivate_link_hooks(session)
+            raise
+        except (SerialLinkError, OSError, TimeoutError) as exc:
+            if tcp is not None:
+                _close_serial_link(tcp)
+            _deactivate_link_hooks(session)
+            raise McpHarnessError("link_connect_failed", str(exc)) from exc
+        finally:
+            with link.state():
+                if link._generation == generation and link.remote_link is None:
+                    link._connect_cancel = threading.Event()
         return {
             "remote_mode": "connected",
             "remote_role": "connector",
             "host": host,
             "port": port,
             "rom_version": rom_version,
-            "peer_rom_version": tcp.peer_rom_version,
+            "peer_rom_version": _peer_rom_version_if_ready(tcp),
         }
 
     if name == "link_disconnect":
-        if link.remote_link is not None:
-            try:
-                link.remote_link.close()
-            except Exception:
-                pass
-        link.remote_link = None
-        link.remote_endpoint = None
-        link.remote_mode = "idle"
-        link.remote_role = None
-        link.remote_bind_port = None
-        link._listener_thread = None
-        link._listener_error = None
+        _disconnect_remote(link, session)
         return {"remote_mode": "idle"}
 
     raise ValueError(f"unknown tool: {name!r}")
 
 
 def _require_remote_idle(link: LinkState) -> None:
-    if link.remote_mode != "idle":
-        raise ValueError(
-            f"remote link busy (mode={link.remote_mode!r}); call "
-            f"link_disconnect first"
-        )
+    with link.state():
+        if link.remote_mode != "idle" or link._disconnecting:
+            raise McpHarnessError(
+                "remote_busy",
+                f"remote link busy (mode={link.remote_mode!r}); call "
+                f"link_disconnect first",
+            )
 
 
 def _require_pair_inactive(link: LinkState) -> None:
-    if link.pair is not None and link.pair.paired:
-        raise ValueError(
-            "in-process pair is active; call link_unpair before using "
-            "remote link tools"
-        )
+    with link.state():
+        if link.pair is not None and link.pair.paired:
+            raise McpHarnessError(
+                "pair_active",
+                "in-process pair is active; call link_unpair before using "
+                "remote link tools",
+            )
 
 
-def _refresh_remote_state(link: LinkState) -> None:
+def _refresh_remote_state(link: LinkState, session: Session) -> None:
     """Reflect background-thread state into fields readable from the
     calling thread. Called by link_status before returning."""
     # If the peer disconnected, the TCP reader thread marks the link
     # closed; surface that as mode=idle so callers don't keep polling
     # a dead endpoint.
-    rl = link.remote_link
-    if (
-        rl is not None
-        and link.remote_mode == "connected"
-        and not rl.connected
-    ):
+    with link.state():
+        rl = link.remote_link
+        connected = link.remote_mode == "connected"
+        if (
+            rl is None
+            or not connected
+            or rl.connected
+        ):
+            return
         link.remote_mode = "idle"
         link.remote_role = None
+        link.remote_bind_port = None
         link.remote_link = None
         link.remote_endpoint = None
+        link._remote_error = getattr(rl, "_reader_exc", None)
+    _close_serial_link(rl, timeout_s=0.25)
+    _deactivate_link_hooks(session)
+
+
+def _positive_port(value: Any) -> int:
+    if isinstance(value, bool):
+        raise McpHarnessError("invalid_port", "port must be an integer")
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise McpHarnessError("invalid_port", f"invalid port: {value!r}") from exc
+    if port < 1 or port > 65535:
+        raise McpHarnessError(
+            "invalid_port", f"port must be in 1..65535, got {port}"
+        )
+    return port
+
+
+def _validate_remote_host(host: str) -> None:
+    normalized = host.strip().lower()
+    if normalized not in _ALLOWED_REMOTE_HOSTS:
+        raise McpHarnessError(
+            "unsafe_remote_host",
+            "remote TCP links are localhost-only; use 127.0.0.1, localhost, "
+            "or ::1",
+        )
+
+
+def _validate_rom_version(version: str) -> str:
+    normalized = version.strip().lower()
+    if normalized not in SUPPORTED_ROM_VERSIONS:
+        raise McpHarnessError(
+            "unsupported_rom_version",
+            f"ROM version must be one of {sorted(SUPPORTED_ROM_VERSIONS)}, "
+            f"got {version!r}",
+        )
+    return normalized
+
+
+def _validate_timeout(value: Any) -> float:
+    if isinstance(value, bool):
+        raise McpHarnessError("invalid_timeout", "timeout_s must be a number")
+    try:
+        timeout_s = float(value)
+    except (TypeError, ValueError) as exc:
+        raise McpHarnessError(
+            "invalid_timeout", f"invalid timeout_s: {value!r}"
+        ) from exc
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise McpHarnessError(
+            "invalid_timeout", f"timeout_s must be finite and positive, got {value!r}"
+        )
+    if timeout_s > _MAX_REMOTE_TIMEOUT_S:
+        raise McpHarnessError(
+            "invalid_timeout",
+            f"timeout_s must be <= {_MAX_REMOTE_TIMEOUT_S:g}, got {timeout_s:g}",
+        )
+    return timeout_s
+
+
+def _remaining(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _peer_rom_version_if_ready(link: Any) -> str | None:
+    hello_event = getattr(link, "_hello_received", None)
+    if hello_event is not None and not hello_event.is_set():
+        return None
+    return link.peer_rom_version
+
+
+def _bind_listener(host: str, port: int) -> socket.socket:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    listener = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+        listener.listen(1)
+        # A short accept timeout lets the cancellation event be observed
+        # without requiring a platform-specific wakeup socket.
+        listener.settimeout(0.1)
+        return listener
+    except OSError as exc:
+        try:
+            listener.close()
+        except OSError:
+            pass
+        raise McpHarnessError(
+            "listen_failed", f"unable to bind {host}:{port}: {exc}"
+        ) from exc
+
+
+def _wait_for_remote_hello(
+    link: TcpSerialLink,
+    cancel: threading.Event | None,
+    timeout_s: float,
+) -> None:
+    """Wait for HELLO without using TcpSerialLink's fixed five-second wait."""
+    hello_event = getattr(link, "_hello_received", None)
+    if hello_event is None:
+        # The current TCP implementation exposes the event privately. Keep
+        # a safe compatibility fallback for alternate SerialLink adapters.
+        try:
+            _ = link.peer_rom_version
+        except SerialLinkError as exc:
+            raise McpHarnessError("link_handshake_failed", str(exc)) from exc
+        return
+
+    deadline = time.monotonic() + timeout_s
+    while not hello_event.is_set():
+        if cancel is not None and cancel.is_set():
+            raise McpHarnessError("link_cancelled", "remote connection cancelled")
+        remaining = _remaining(deadline)
+        if remaining <= 0:
+            raise McpHarnessError(
+                "timeout", f"peer HELLO not received within {timeout_s:g}s"
+            )
+        hello_event.wait(timeout=min(0.05, remaining))
+    try:
+        peer_version = link.peer_rom_version
+    except SerialLinkError as exc:
+        raise McpHarnessError("link_handshake_failed", str(exc)) from exc
+    if not peer_version:
+        raise McpHarnessError("link_handshake_failed", "peer HELLO had no ROM version")
+
+
+def _accept_remote(
+    link: LinkState,
+    session: Session,
+    listener: socket.socket,
+    cancel: threading.Event,
+    generation: int,
+    rom_version: str,
+    timeout_s: float,
+) -> None:
+    tcp: TcpSerialLink | None = None
+    try:
+        while not cancel.is_set():
+            try:
+                conn, _peer_addr = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                if cancel.is_set():
+                    return
+                raise McpHarnessError("listen_failed", str(exc)) from exc
+
+            conn.settimeout(None)
+            tcp = TcpSerialLink(conn, rom_version)
+            _wait_for_remote_hello(tcp, cancel, timeout_s)
+            endpoint = RemoteLinkEndpoint.as_listener(session, tcp)
+            endpoint.install()
+            with link.state():
+                if (
+                    cancel.is_set()
+                    or link._disconnecting
+                    or link._generation != generation
+                ):
+                    raise _ListenerCancelled
+                link.remote_link = tcp
+                link.remote_endpoint = endpoint
+                link.remote_mode = "connected"
+                link.remote_role = "listener"
+                link.remote_bind_port = None
+                link._listener_socket = None
+                link._listener_error = None
+                link._remote_error = None
+            tcp = None
+            return
+    except _ListenerCancelled:
+        return
+    except Exception as exc:  # noqa: BLE001
+        if not cancel.is_set():
+            with link.state():
+                if link._generation == generation:
+                    link._listener_error = exc
+                    link.remote_mode = "idle"
+                    link.remote_role = None
+                    link.remote_bind_port = None
+    finally:
+        if tcp is not None:
+            _close_serial_link(tcp)
+        try:
+            listener.close()
+        except OSError:
+            pass
+        with link.state():
+            if link._listener_socket is listener:
+                link._listener_socket = None
+
+
+def _close_serial_link(link: Any, *, timeout_s: float = _DEFAULT_CLEANUP_TIMEOUT_S) -> None:
+    try:
+        link.close()
+    except Exception:
+        pass
+    reader = getattr(link, "_reader", None)
+    if isinstance(reader, threading.Thread) and reader is not threading.current_thread():
+        reader.join(timeout=max(0.0, timeout_s))
+
+
+def _deactivate_link_hooks(session: Session, peer: Session | None = None) -> None:
+    sessions: list[Session] = [session]
+    if peer is not None and peer is not session:
+        sessions.append(peer)
+    for target in sessions:
+        try:
+            target.deactivate_serial_hooks()
+        except Exception:
+            pass
+        # A few legacy endpoint hooks are installed directly on PyBoy and
+        # cannot be reached through Session.serial_hook. Remove those by
+        # symbol where the runtime supports hook_deregister.
+        for symbol_name in _DIRECT_LINK_HOOKS:
+            try:
+                target.deactivate_hooks_at(symbol_name)
+            except (KeyError, SessionClosedError):
+                pass
+
+
+def _disconnect_remote(link: LinkState, session: Session) -> None:
+    """Cancel listener/connect work, close sockets, and join workers."""
+    with link.state():
+        if link._disconnecting:
+            return
+        link._disconnecting = True
+        link._generation += 1
+        listener = link._listener_socket
+        listener_thread = link._listener_thread
+        remote = link.remote_link
+        link._listener_cancel.set()
+        link._connect_cancel.set()
+        link._listener_socket = None
+        link.remote_link = None
+        link.remote_endpoint = None
+        link.remote_mode = "idle"
+        link.remote_role = None
+        link.remote_bind_port = None
+
+    if listener is not None:
+        try:
+            listener.close()
+        except OSError:
+            pass
+    if remote is not None:
+        _close_serial_link(remote)
+    if (
+        isinstance(listener_thread, threading.Thread)
+        and listener_thread is not threading.current_thread()
+    ):
+        listener_thread.join(timeout=_DEFAULT_CLEANUP_TIMEOUT_S)
+
+    _deactivate_link_hooks(session)
+    with link.state():
+        if listener_thread is not None and listener_thread.is_alive():
+            link._listener_error = TimeoutError(
+                "listener worker did not stop before cleanup deadline"
+            )
+        else:
+            link._listener_error = None
+        link._remote_error = None
+        link._listener_thread = None
+        link._listener_cancel = threading.Event()
+        link._connect_cancel = threading.Event()
+        link._disconnecting = False
 
 
 def read_resource(
@@ -599,16 +1055,20 @@ def read_resource(
     if uri == _URI_GAME_STATE:
         return json.dumps(to_jsonable(session.read_game_state()))
     if uri == _URI_EVENT_LOG:
-        events: list[GameEvent] = list(session.events)
+        events: list[GameEvent] = session.event_snapshot()
         return json.dumps([to_jsonable(e) for e in events])
     if uri == _URI_PEER_GAME_STATE:
         if link is None or link.peer_session is None:
-            raise ValueError("peer session not configured")
-        return json.dumps(to_jsonable(link.peer_session.read_game_state()))
+            raise McpHarnessError("peer_not_configured", "peer session not configured")
+        with link.state():
+            peer = link.peer_session
+        return json.dumps(to_jsonable(peer.read_game_state()))
     if uri == _URI_LINK_TRANSPORT:
         if link is None or link.pair is None:
             return json.dumps({"a_to_b": [], "b_to_a": []})
-        return json.dumps(link.pair.transport.snapshot())
+        with link.state():
+            pair = link.pair
+        return json.dumps(pair.transport.snapshot())
     if uri == _URI_LINK_STATUS:
         if link is None:
             link = LinkState()
@@ -699,9 +1159,20 @@ def build_server(
     @server.call_tool()
     async def _call_tool(
         name: str, arguments: dict[str, Any] | None
-    ) -> list[mcp_types.TextContent]:
+    ) -> mcp_types.CallToolResult:
         args = arguments or {}
-        result = dispatch_tool(session, name, args, link=link)
+        try:
+            # The emulator is not asyncio-aware. Run the blocking operation
+            # off the event loop while the Session/LinkState locks preserve
+            # single-emulator ordering. This also leaves the loop responsive
+            # to status/resource requests while a bounded TCP call waits.
+            result = await asyncio.to_thread(
+                dispatch_tool, session, name, args, link
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return _error_reply(exc)
         return _text_reply(result)
 
     @server.list_resources()
@@ -710,7 +1181,7 @@ def build_server(
 
     @server.read_resource()
     async def _read_resource(uri: Any) -> str:
-        return read_resource(session, str(uri), link=link)
+        return await asyncio.to_thread(read_resource, session, str(uri), link)
 
     return server
 
@@ -736,19 +1207,29 @@ async def serve_stdio(
     peer_session: Session | None = None,
     primary_version: str = "red",
     peer_version: str = "red",
+    link: LinkState | None = None,
 ) -> None:
+    owned_link = link or LinkState(
+        peer_session=peer_session,
+        primary_version=primary_version,
+        peer_version=peer_version,
+    )
     server = build_server(
         session,
         peer_session=peer_session,
         primary_version=primary_version,
         peer_version=peer_version,
+        link=owned_link,
     )
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
-        )
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(),
+            )
+    finally:
+        _disconnect_remote(owned_link, session)
 
 
 def main() -> None:
@@ -770,7 +1251,6 @@ def main() -> None:
       at startup and the link-cable tools become usable. The pair is NOT
       auto-paired — invoke ``link_pair`` explicitly.
     """
-    import contextlib
     import sys
 
     from pokered_harness.config import (
@@ -782,19 +1262,35 @@ def main() -> None:
 
     primary_env = load_primary_env()
     peer_env = load_peer_env()
-    if not primary_env.rom_path or not primary_env.sym_path:
+    try:
+        primary_env.validate(role="primary session")
+        peer_env.validate(role="peer session")
+    except VersionsConfigError as exc:
+        raise SystemExit(f"invalid POKERED_* configuration: {exc}") from exc
+    if primary_env.rom_path is None or primary_env.sym_path is None:
         raise SystemExit(
             "set POKERED_ROM_PATH and POKERED_SYM_PATH before launching"
         )
 
-    expected_sha: str | None = primary_env.rom_sha1
-    if expected_sha is None and not os.environ.get("POKERED_SKIP_SHA1"):
+    versions = None
+    if not _env_flag("POKERED_SKIP_SHA1"):
         try:
-            expected_sha = load_versions().rom_sha1
-        except VersionsConfigError:
-            # No VERSIONS.md in cwd — skip enforcement rather than fail
-            # hard, so the server can boot from arbitrary working dirs.
-            expected_sha = None
+            versions = load_versions()
+        except VersionsConfigError as exc:
+            raise SystemExit(
+                "unable to load ROM/PyBoy pins; set POKERED_VERSIONS_PATH, "
+                "provide POKERED_ROM_SHA1, or explicitly set "
+                "POKERED_SKIP_SHA1=1: "
+                f"{exc}"
+            ) from exc
+
+    expected_sha: str | None = primary_env.rom_sha1
+    if expected_sha is None and versions is not None:
+        expected_sha = versions.rom_sha1
+    expected_pyboy = versions.pyboy_version if versions is not None else None
+    primary_rom, primary_sym = primary_env.resolved_paths()
+    assert primary_rom is not None and primary_sym is not None
+    peer_rom, peer_sym = peer_env.resolved_paths()
 
     # CRITICAL: PyBoy's init writes ~70KB of `.sym`-skip warnings to
     # stdout via a logging handler it installs before we get a chance
@@ -804,22 +1300,25 @@ def main() -> None:
     # during boot and re-emit it on stderr so the noise is still
     # visible but out of the RPC channel.
     peer_session: Session | None = None
-    with contextlib.redirect_stdout(sys.stderr):
-        session = Session.from_files(
-            Path(primary_env.rom_path),
-            Path(primary_env.sym_path),
-            expected_rom_sha1=expected_sha,
-        )
-        register_default_hooks(session)
-        if peer_env.rom_path and peer_env.sym_path:
-            peer_session = Session.from_files(
-                Path(peer_env.rom_path),
-                Path(peer_env.sym_path),
-                expected_rom_sha1=peer_env.rom_sha1,
-            )
-            register_default_hooks(peer_session)
-
+    session: Session | None = None
     try:
+        with contextlib.redirect_stdout(sys.stderr):
+            session = Session.from_files(
+                primary_rom,
+                primary_sym,
+                expected_rom_sha1=expected_sha,
+                expected_pyboy_version=expected_pyboy,
+            )
+            register_default_hooks(session)
+            if peer_rom is not None and peer_sym is not None:
+                peer_session = Session.from_files(
+                    peer_rom,
+                    peer_sym,
+                    expected_rom_sha1=peer_env.rom_sha1,
+                    expected_pyboy_version=expected_pyboy,
+                )
+                register_default_hooks(peer_session)
+
         asyncio.run(
             serve_stdio(
                 session,
@@ -831,7 +1330,18 @@ def main() -> None:
     finally:
         if peer_session is not None:
             peer_session.close()
-        session.close()
+        if session is not None:
+            session.close()
+
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    return value is not None and value.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 if __name__ == "__main__":

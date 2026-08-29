@@ -7,6 +7,7 @@ import pytest
 from pokered_harness.events import EventBus
 from pokered_harness.input import Button
 from pokered_harness.session import (
+    SessionClosedError,
     Session,
     VersionMismatch,
     _default_pyboy_factory,
@@ -373,6 +374,27 @@ def test_close_stops_pyboy():
     s, pb, _ = _session()
     s.close()
     assert pb.stopped is True
+
+
+def test_close_is_idempotent_and_rejects_new_actions():
+    s, pb, _ = _session()
+    s.close()
+    s.close()
+    assert pb.stopped is True
+    with pytest.raises(SessionClosedError, match="session is closed"):
+        s.step()
+
+
+def test_step_rolls_back_tick_when_pyboy_fails():
+    s, pb, _ = _session()
+
+    def fail_tick(*_args, **_kwargs):
+        raise RuntimeError("emulator failure")
+
+    pb.tick = fail_tick  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="emulator failure"):
+        s.step(3)
+    assert s.current_tick() == 0
 
 
 def test_session_context_manager_closes_on_exit():
