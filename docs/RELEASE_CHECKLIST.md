@@ -6,15 +6,20 @@ runtime evidence required by the relevant capability.
 
 ## Current audit status
 
-The baseline at commit `e219fb5` (2026-08-29) was not production-ready. The
-committed release-audit candidate addresses the collection boundary, portable
-`.mcp.json`, bundled PyBoy source runtime, path-aware ROM pinning, native
-local/TCP serial attachment, teardown, dependency pinning, and tiered gate
-reporting. The candidate worktree is clean and the required tier runs pass;
-full sign-off remains partial because the evidence bundle, independent review,
-and unresolved matrix rows are outside the current candidate.
+The baseline at `e219fb5` (2026-08-29) was not production-ready. The audited
+candidate head is `71886778240d25387cb892566b53406ab4c2d0d2`; it addresses the
+collection boundary, portable `.mcp.json`, bundled PyBoy source runtime,
+path-aware ROM pinning, native local/TCP serial attachment, teardown,
+dependency pinning, and tiered gate reporting.
 
-Committed-candidate evidence:
+Evidence provenance matters: the complete real-ROM gate was run at
+`c4ab27c87f7d9545da25a71e592a7a4faaec08ad`, before the three diagnostic-helper
+portability fixes in the current head. At `7188677`, the unit/timing gate and
+static path, compile, and artifact checks were rerun; the complete real-ROM
+gate was not. The full-gate counts below are therefore a snapshot of the
+earlier code-equivalent runtime, not current-head full certification.
+
+Full-gate snapshot:
 
 - unit: 363/363 passed;
 - timing: 35/35 passed across five repetitions;
@@ -25,10 +30,11 @@ Committed-candidate evidence:
 - remote: transport/LinkMenu smoke plus strict Red/Blue subprocess trade and
   battle passed, including both full party-record swaps and move-turn progress.
 
-The local passes are real stateful acceptance evidence for that exact
-Red/Yellow fixture pair, and the remote pass is evidence for the exact
-Red/Blue color-variant subprocess pair. They do not certify the unrun variant
-rows.
+The local passes are real stateful acceptance evidence for the exact color-Red /
+Yellow fixture pair, and the remote pass is evidence for the exact color-Red
+listener / color-Blue connector subprocess pair. The remote test driver uses a
+LinkMenu selection hook; native serial payload checks do not turn that into
+fully user-driven gameplay. None of this certifies unrun or reversed-role rows.
 
 These are evidence boundaries, not waived checklist items. The candidate
 includes `tests/__init__.py`, the pinned vendor source files, and the gate
@@ -36,13 +42,15 @@ script, and the results were reproduced from the isolated clean checkout.
 
 ## Source and artifact hygiene
 
-- [x] The release commit is identified and the worktree is clean.
+- [ ] The release commit is identified and the worktree is clean. The current
+  audit worktree has pre-existing unowned code/build changes; they are
+  deliberately preserved and excluded from this documentation commit.
 - [x] No ROM, `.sym`, `.sav`, `.state`, screenshot, log, cache, or other
   ROM-derived artifact is tracked.
 - [x] The package metadata, README, `VERSIONS.md`, and this checklist agree on
   the release commit and supported scope.
 - [x] No machine-local path, placeholder hash, credential, or unreviewed
-  generated file appears in release documentation.
+  generated file appears in the release documentation.
 
 ## Runtime and dependency identity
 
@@ -76,31 +84,37 @@ script, and the results were reproduced from the isolated clean checkout.
   timeout: `python -m pytest -q -ra`.
 - [x] ROM-free unit/protocol/transport tests pass.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every claimed
-  single-session ROM variant.
+  single-session ROM variant. The current evidence uses an environment-driven
+  primary-ROM run and does not certify all five ROM rows.
 - [x] Local link tests pass with matching ROM-specific fixtures and the
   release runtime.
-- [x] Remote transport tests pass with listener and connector roles recorded.
-- [x] A full remote trade is claimed only if the separate-process trade test
-  passes without fixture/runtime skips and asserts both sides received the
+- [x] Remote transport tests pass with the color-Red listener/internal-clock
+  and color-Blue connector/external-clock roles recorded.
+- [ ] Reversed listener/connector roles are independently tested and certified.
+- [x] Controlled native-serial remote trade acceptance passes in separate
+  processes without fixture/runtime skips and asserts both sides received the
   peer's Pokémon.
 - [x] The canonical local link battle is claimed only after the release-runtime
   test resolves a complete turn on both sides; LinkMenu or transport
   milestones do not count.
-- [x] The remote link battle is claimed only after the separate-process
-  release-runtime test resolves move exchange and execution on both sides
-  without semantic exchange hooks or RAM patches.
-- [ ] Every parameterized version/variant row in the claimed matrix ran, or
-  the omitted rows are explicitly listed as unsupported.
+- [x] Controlled native-serial remote battle acceptance resolves move exchange
+  and execution on both sides in separate processes.
+- [ ] A user-driven remote trade and battle path passes without the test-driver
+  LinkMenu selection hook.
+- [x] Every supported release row has a result or an explicit unsupported
+  classification; the failed diagnostic rows are listed below.
 
 ## Fixture provenance
 
-- [ ] Every Cable Club state was captured from the exact ROM bytes it loads
-  with.
+- [ ] Every Cable Club state, including the separate battle-start states, was
+  captured from the exact ROM bytes it loads with; the current tree lacks a
+  retained battle-fixture provenance record.
 - [ ] Vanilla, color, and Yellow variants use separate, identified fixtures.
 - [ ] Fixture hashes and source-state provenance are in the evidence bundle.
-- [ ] Fixture generation used
+- [x] The ordinary Cable Club fixtures have a documented producer:
   [`scripts/produce_cable_club_fixture.py`](../scripts/produce_cable_club_fixture.py)
-  or a documented equivalent; no missing Yellow-specific producer is cited.
+  and no missing Yellow-specific producer is cited. The producer does not
+  create the separate battle fixtures.
 - [ ] Fixture files remain untracked and are available to the release runner
   through a controlled asset mechanism.
 
@@ -119,19 +133,30 @@ script, and the results were reproduced from the isolated clean checkout.
 
 ## Documentation and sign-off
 
-- [ ] Markdown links resolve against the release tree.
-- [ ] Claims distinguish implemented source, candidate tests, fixture-gated
-  diagnostics, and release-certified behavior.
+- [x] Markdown links resolve against the release tree.
+- [x] Claims distinguish implemented source, candidate tests, fixture-gated
+  diagnostics, controlled native-serial acceptance, and release-certified
+  behavior.
 - [ ] The evidence bundle includes exact commands and complete test output,
   not only a pass count or a screenshot.
-- [ ] Known limitations, skipped rows, and runtime deviations are listed next
+- [x] Known limitations, skipped rows, and runtime deviations are listed next
   to the sign-off decision.
 - [ ] An independent reviewer confirms that no transport milestone, synthetic
   protocol test, or RAM-mutated fixture is described as a completed gameplay
   acceptance.
 
-**Release decision:** `PARTIAL`. The certified source/runtime and gameplay
-scope is green, but full product sign-off remains pending the retained
-evidence bundle, independent review, native-platform certification, and
-resolution or explicit exclusion of failed/unrun ROM-pair rows. Do not
-advertise those rows as supported until their own fixtures and gates pass.
+**Release decision:** `PARTIAL`. The source/runtime and the narrowly defined
+local plus controlled remote acceptance paths have passing snapshots, but full
+product sign-off remains pending:
+
+- a clean current-head worktree and a complete current-head real-ROM gate;
+- a retained evidence bundle, including battle-fixture hashes/provenance;
+- resolution of the two diagnostic local battle stalls (`blue↔blue` and
+  `blue→red`), or an explicitly limited product scope that excludes them;
+- repository-wide lint/broad-suite closure, per-ROM single-session coverage,
+  reversed roles, native-platform certification, and independent review; and
+- a secure transport decision if cross-host TCP is required. Current TCP is
+  loopback-only and unauthenticated/unencrypted.
+
+Do not advertise the failed, unrun, reversed-role, or user-driven remote rows as
+supported until their own fixtures and acceptance gates pass.

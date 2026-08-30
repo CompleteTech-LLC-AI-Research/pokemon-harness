@@ -12,8 +12,9 @@
 
 ## Why this document exists
 
-PyBoy currently does not implement the Game Boy serial/link model needed
-for authentic Gen I Pokémon trading or link battles. Historical attempts
+At the time of this proposal, mainline PyBoy did not implement the Game Boy
+serial/link model needed for authentic Gen I Pokémon trading or link battles.
+Historical attempts
 ([PR #232](https://github.com/Baekalfen/PyBoy/pull/232),
 [PR #344](https://github.com/Baekalfen/PyBoy/pull/344)) reached partial
 functionality but surfaced the same problems repeatedly — socket
@@ -31,7 +32,7 @@ stadium-style transfers, and any other Game Boy link protocol.
 
 ## The specific gap in mainline PyBoy
 
-From `pyboy/core/serial.py` as of the audit:
+From `pyboy/core/serial.py` as of the original design audit:
 
 | Current behavior | Problem | Impact |
 |---|---|---|
@@ -392,15 +393,16 @@ per bit. Mitigated by keeping the core in the same module as the rest
 of the hot-path devices; callbacks to the Python-side backend fire only
 on edge boundaries (up to 8 per byte), not per CPU cycle.
 
-**Python-side attach against the default wheel is a compatibility risk.** In
-the audited environment the wheel-installed PyBoy is Cython-compiled —
-`Motherboard` and `Serial` are extension-level attributes — so the harness's
-pure-Python `PyBoyLinkSession` cannot assume that `pyboy.mb.serial` is
-accessible or swappable. This is an observation about the current prototype,
-not an upstream compatibility guarantee. Any upstream implementation must
-either expose and support the required API, land the serial integration inside
-PyBoy, or provide a separately documented source-build mode and test it on the
-claimed platforms.
+**Python-side attach against a standalone wheel remains a compatibility risk.**
+In the original audited environment the wheel-installed PyBoy was
+Cython-compiled — `Motherboard` and `Serial` were extension-level attributes —
+so the harness's pure-Python `PyBoyLinkSession` could not assume that
+`pyboy.mb.serial` was accessible or swappable. The current harness works around
+that boundary by bundling and pinning a source-compatible snapshot; this is not
+evidence that the default upstream wheel or any upstream branch accepts the
+integration. Any upstream implementation must expose and support the required
+API, land the serial integration inside PyBoy, or provide a separately
+documented source-build mode and test it on the claimed platforms.
 
 **Non-blocking network edge.** WAN jitter could bubble up as
 frame-rate stutter. Mitigated by a small jitter buffer (documented

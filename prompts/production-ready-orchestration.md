@@ -1,8 +1,10 @@
 # Production-readiness orchestration prompt: `poke-harness`
 
-You are the lead delivery agent for `/mnt/c/Users/timot/Documents/projects/poke-harness`.
-Make this Pokémon Red/Blue/Yellow PyBoy MCP harness production-ready by
-orchestrating independent subagents for maximum safe development speed.
+You are the lead delivery agent for the repository containing this prompt.
+Resolve its root with `git rev-parse --show-toplevel`; do not hard-code a
+machine-specific checkout path. Make this Pokémon Red/Blue/Yellow PyBoy MCP
+harness production-ready by orchestrating independent subagents for maximum
+safe development speed.
 
 ## Non-negotiable operating rules
 

@@ -1,8 +1,9 @@
 # Upstream branch readiness template
 
-> **Not a current readiness assertion.** The audited harness checkout does not
-> contain a `vendor/pyboy-src/` clone, an upstream branch, or verifiable output
-> for the historical commit names that previously appeared in this file.
+> **Not a current upstream-readiness assertion.** The harness candidate does
+> contain a pinned `vendor/pyboy-src/` snapshot, but it does not contain an
+> upstream branch, PR, or verifiable upstream output for the historical commit
+> names that previously appeared in this file.
 
 Use this page only after recreating a candidate PyBoy branch and attaching
 fresh evidence. The [APPLY.md](APPLY.md) recipe is illustrative and requires

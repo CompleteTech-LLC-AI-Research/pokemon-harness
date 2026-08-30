@@ -5,15 +5,26 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: audited 2026-08-30 against the committed release-audit candidate. The
-clean candidate passes unit 363/363, timing 35/35 across five repetitions,
+Status: audited 2026-08-30 against candidate head
+`71886778240d25387cb892566b53406ab4c2d0d2`. The complete real-ROM gate was
+run at `c4ab27c87f7d9545da25a71e592a7a4faaec08ad`; the committed delta after
+that gate contains only diagnostic-helper portability fixes. The current head's
+unit/timing gate plus path, compile, and artifact checks were rerun. The
+complete real-ROM gate has not been rerun at the current head. Uncommitted
+worktree changes are excluded from this candidate record.
+
+The full-gate snapshot is unit 363/363, timing 35/35 across five repetitions,
 local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. The
-certified gameplay scope is limited to local Red/Yellow and remote Red/Blue
-color-variant pairs; other link rows remain unsupported pending acceptance.
-Symbol hashes and generator provenance for the audited inputs are recorded
-below. The remaining release decision is `PARTIAL` until the evidence bundle
-and independent review are attached and the failed or unrun matrix rows are
-resolved or explicitly excluded from the supported product.
+stateful evidence is limited to local color Red/Yellow and remote color Red
+listener + color Blue connector. Remote acceptance uses a test-driver
+LinkMenu selection hook; it is native-serial payload evidence, not full
+user-driven gameplay. Other link rows remain unsupported or unverified.
+
+Symbol hashes and audited generator provenance for the inputs are recorded
+below. The remaining release decision is `PARTIAL` because the current-head
+full-gate output is not retained, repository-wide lint and the broad matrix are
+not clean, per-ROM and reversed-role coverage is incomplete, and independent
+review/native-platform evidence is missing.
 
 ## Runtime
 
@@ -47,7 +58,7 @@ for release evidence.
 | Path | `rom/red/pokemon-red.gb` |
 | Symbols | `rom/red/pokemon-red.sym` |
 | Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
-| Role | Certified single-session Red input; link gameplay not claimed |
+| Role | Hash-pinned single-session input; selected checks only; link gameplay not claimed |
 
 ### Pokémon Red color variant
 
@@ -58,7 +69,7 @@ for release evidence.
 | Path | `rom/red/pokemon-red-color.gb` |
 | Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
 | Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
-| Role | Certified local Red/Yellow and remote Red/Blue acceptance listener input |
+| Role | Color-Red input for the certified local Red/Yellow pair and remote listener role |
 
 ### Pokémon Blue (UE)
 
@@ -69,7 +80,7 @@ for release evidence.
 | Path | `rom/blue/pokemon-blue.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` |
 | Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
-| Role | Certified single-session Blue input; link gameplay not claimed |
+| Role | Hash-pinned single-session input; selected checks only; link gameplay not claimed |
 
 ### Pokémon Blue color variant
 
@@ -80,7 +91,7 @@ for release evidence.
 | Path | `rom/blue/pokemon-blue-color.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
 | Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
-| Role | Certified remote Red/Blue acceptance connector input |
+| Role | Color-Blue input for the certified remote connector role |
 
 ### Pokémon Yellow (UE)
 
@@ -91,7 +102,7 @@ for release evidence.
 | Path | `rom/yellow/pokemon-yellow.gbc` |
 | Symbols | `rom/yellow/pokemon-yellow.sym` |
 | Symbol SHA-1 | `7c4205723943e7722230dcf014e5e8a2012474aa` |
-| Role | Certified single-session Yellow input and local Red/Yellow acceptance peer |
+| Role | Yellow session input and certified local Red/Yellow acceptance peer |
 
 Other localisations, hacks, and variants are out of scope unless they receive
 their own ROM hash, matching symbols, fixture provenance, and acceptance
@@ -153,6 +164,33 @@ explicit `--version`, `--variant`, `--source`, `--rom`, `--sym`, and `--out`
 arguments. There is no separate Yellow producer. The producer's successful
 output only establishes a fixture at the expected map/tile; it does not prove
 that a trade or battle works.
+
+The strict acceptance fixtures are distinct from the default Cable Club
+fixtures:
+
+| Acceptance path | ROMs | Required fixture files |
+|---|---|---|
+| Local strict trade | color Red + Yellow | `red/cable_club.state`, `yellow/cable_club.state` |
+| Local strict battle | color Red + Yellow | `red/cable_club-battle.state`, `yellow/cable_club-battle.state` |
+| Remote strict trade | color Red listener + color Blue connector | `red/cable_club.state`, `blue/cable_club.state` |
+| Remote strict battle | color Red listener + color Blue connector | `red/cable_club-battle.state`, `blue/cable_club-battle.state` |
+
+The battle files are separately captured legal states; the existing producer
+does not create them. Every state must be captured from the exact ROM bytes it
+loads, and the release record must include each fixture hash, source-state
+provenance, runtime identity, and capture command. The three default fixture
+hashes observed in the full-gate audit were:
+
+| Fixture | Observed SHA-1 | Evidence boundary |
+|---|---|---|
+| `red/cable_club.state` | `546d7edaf7c3a987f86ae86a97066c7d619eefbb` | External fixture used by the audit; not committed |
+| `blue/cable_club.state` | `0809d2f8e514c7fb714a73a7b13f120b26a40c38` | External fixture used by the audit; not committed |
+| `yellow/cable_club.state` | `37df4dbdb512cd3febdc2d536281683476291d3b` | External fixture used by the audit; not committed |
+
+Battle-fixture hashes and complete source-state provenance were not retained in
+this tree, so fixture provenance remains an open release item. Vanilla
+variant fixtures (`cable_club-vanilla.state` and
+`cable_club-battle-vanilla.state`) are also not part of the certified scope.
 
 The current repository has diagnostic local/remote matrices plus strict local
 Red/Yellow trade and battle acceptance tests and strict independent-process

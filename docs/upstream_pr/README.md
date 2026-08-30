@@ -8,23 +8,27 @@
 The proposal describes how the candidate link modules in
 `src/pokered_harness/link/` could be adapted for
 [Baekalfen/PyBoy](https://github.com/Baekalfen/PyBoy). It is intentionally
-separate from the harness release gate: the harness currently uses the
-PyBoy `2.7.0` dependency, while the Python-side link prototype needs a runtime
-whose motherboard and serial objects are accessible from Python.
+separate from the harness release gate. The current candidate bundles a pinned
+PyBoy `2.7.0` source runtime whose motherboard and serial objects are
+accessible from Python, but that bundle is not an upstream PyBoy contribution
+and this directory does not claim upstream acceptance.
 
 ## Current boundary
 
-- No PyBoy source checkout or `vendor/pyboy-src/` branch is included in this
-  repository at the audited commit.
+- A pinned `vendor/pyboy-src/` source snapshot is included in the current
+  harness candidate. It is a harness dependency, not an upstream branch or
+  upstream review result.
 - No upstream PR number, branch tip, test output, or merge status is asserted
   by these files.
-- The current harness test collection has a committed-tree blocker and the
-  real-ROM/link tests are fixture/runtime gated. See the
+- The current candidate's collection gate passes, but real-ROM/link tests are
+  still fixture- and runtime-gated; the release decision remains `PARTIAL`.
+  See the
   [production runbook](../PRODUCTION_RUNBOOK.md) and
   [release checklist](../RELEASE_CHECKLIST.md).
-- The existing `.mcp.json` path mismatch and the link/runtime contract must be
-  resolved independently before a PyBoy contribution can be treated as a
-  release dependency.
+- The candidate `.mcp.json` is portable when the MCP client expands `${PWD}`;
+  that harness configuration and its link/runtime contract must still be
+  reviewed independently before any PyBoy contribution can be treated as an
+  upstream dependency.
 
 ## Proposed file mapping
 
@@ -97,11 +101,11 @@ must be inspected before relying on `PYBOY_NO_CYTHON`:
 python3 -m venv .venv-noncython
 . .venv-noncython/bin/activate
 python -m pip install --upgrade pip
-git clone --depth 1 https://github.com/Baekalfen/PyBoy.git vendor/pyboy-src
+git clone --depth 1 https://github.com/Baekalfen/PyBoy.git <pyboy-root>
 # Inspect the checked-out PyBoy build configuration and choose its supported
 # non-Cython/source-build procedure; do not assume this variable is honored.
-PYBOY_NO_CYTHON=1 python -m pip install --no-build-isolation -e vendor/pyboy-src
-python -m pip install -e ".[dev,mcp]"
+PYBOY_NO_CYTHON=1 python -m pip install --no-build-isolation -e <pyboy-root>
+python -m pip install -e ".[dev]"
 ```
 
 On Windows, use `.venv-noncython\Scripts\Activate.ps1` and the corresponding
