@@ -23,6 +23,7 @@ import pytest
 from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
+    validate_loopback_host,
 )
 
 _OP_EDGE_REQ = 0x10
@@ -48,6 +49,17 @@ def test_close_is_idempotent():
     a.close()
     a.close()  # no error
     b.close()
+
+
+def test_network_backend_rejects_non_loopback_hosts():
+    """The unauthenticated wire protocol cannot be exposed remotely."""
+    assert validate_loopback_host("127.0.0.1") == "127.0.0.1"
+    assert validate_loopback_host("localhost") == "localhost"
+    assert validate_loopback_host("[::1]") == "::1"
+    with pytest.raises(ValueError, match="localhost-only"):
+        validate_loopback_host("0.0.0.0")
+    with pytest.raises(ValueError, match="localhost-only"):
+        NetworkBackend.connect("192.0.2.1", 1)
 
 
 def test_versioned_handshake_reports_each_peer_rom():

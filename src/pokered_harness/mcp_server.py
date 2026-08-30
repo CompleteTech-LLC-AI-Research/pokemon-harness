@@ -40,6 +40,7 @@ from pokered_harness.link.remote import RemoteLinkEndpoint
 from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
+    validate_loopback_host,
 )
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_link import (
@@ -70,7 +71,6 @@ class _ListenerCancelled(Exception):
     """Internal sentinel for an intentional listener shutdown."""
 
 
-_ALLOWED_REMOTE_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _DEFAULT_REMOTE_HELLO_TIMEOUT_S = 10.0
 _DEFAULT_CLEANUP_TIMEOUT_S = 5.0
 _MAX_REMOTE_TIMEOUT_S = 300.0
@@ -699,8 +699,7 @@ def _dispatch_link_tool(
         _require_remote_idle(link)
         _require_pair_inactive(link)
         port = _positive_port(arguments.get("port"))
-        host = str(arguments.get("host", "127.0.0.1"))
-        _validate_remote_host(host)
+        host = _validate_remote_host(str(arguments.get("host", "127.0.0.1")))
         rom_version = _validate_rom_version(
             str(arguments.get("rom_version") or link.primary_version)
         )
@@ -754,8 +753,7 @@ def _dispatch_link_tool(
     if name == "link_connect":
         _require_remote_idle(link)
         _require_pair_inactive(link)
-        host = str(arguments["host"])
-        _validate_remote_host(host)
+        host = _validate_remote_host(str(arguments["host"]))
         port = _positive_port(arguments.get("port"))
         rom_version = _validate_rom_version(
             str(arguments.get("rom_version") or link.primary_version)
@@ -918,14 +916,15 @@ def _positive_port(value: Any) -> int:
     return port
 
 
-def _validate_remote_host(host: str) -> None:
-    normalized = host.strip().lower()
-    if normalized not in _ALLOWED_REMOTE_HOSTS:
+def _validate_remote_host(host: str) -> str:
+    try:
+        return validate_loopback_host(host)
+    except ValueError as exc:
         raise McpHarnessError(
             "unsafe_remote_host",
             "remote TCP links are localhost-only; use 127.0.0.1, localhost, "
             "or ::1",
-        )
+        ) from exc
 
 
 def _validate_rom_version(version: str) -> str:

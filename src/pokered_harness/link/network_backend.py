@@ -48,6 +48,7 @@ same socket.
 
 from __future__ import annotations
 
+import ipaddress
 import queue
 import socket
 import struct
@@ -90,6 +91,39 @@ _ACTIVE_EXCHANGE_REARM_WAIT_SECONDS = 5.0
 
 class NetworkBackendError(RuntimeError):
     """Wraps socket errors + protocol errors from :class:`NetworkBackend`."""
+
+
+def validate_loopback_host(host: str) -> str:
+    """Return a normalized loopback host or reject unsafe destinations.
+
+    The wire protocol has no authentication or encryption.  Keeping the
+    transport itself loopback-only prevents a direct library caller from
+    accidentally exposing an unauthenticated link service on a LAN.  A
+    caller that needs cross-host operation must provide a separately secured
+    transport rather than bypassing this guard.
+    """
+    if not isinstance(host, str):
+        raise ValueError("host must be a string")
+    normalized = host.strip()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if normalized.lower() == "localhost":
+        return "localhost"
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            "NetworkBackend is localhost-only; use 127.0.0.1, localhost, or ::1"
+        ) from exc
+    if not address.is_loopback:
+        raise ValueError(
+            "NetworkBackend is localhost-only; use 127.0.0.1, localhost, or ::1"
+        )
+    return normalized
+
+
+def _socket_family(host: str) -> int:
+    return socket.AF_INET6 if ":" in host else socket.AF_INET
 
 
 def _validate_rom_version(version: str) -> str:
@@ -203,9 +237,16 @@ class NetworkBackend:
         listener socket to close later if needed. A fresh accepted
         socket is wrapped by the backend.
         """
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        normalized_host = validate_loopback_host(host)
+        family = _socket_family(normalized_host)
+        listener = socket.socket(family, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind((host, port))
+        bind_address = (
+            (normalized_host, port, 0, 0)
+            if family == socket.AF_INET6
+            else (normalized_host, port)
+        )
+        listener.bind(bind_address)
         listener.listen(backlog)
         conn, _ = listener.accept()
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -221,7 +262,8 @@ class NetworkBackend:
         local_rom_version: str | None = None,
     ) -> "NetworkBackend":
         """Open an outbound connection to a ``listen``-ing peer."""
-        sock = socket.create_connection((host, port), timeout=timeout_s)
+        normalized_host = validate_loopback_host(host)
+        sock = socket.create_connection((normalized_host, port), timeout=timeout_s)
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return cls(sock, local_rom_version=local_rom_version)
