@@ -430,8 +430,7 @@ are:
    enforced and is the only supported network boundary; cross-host operation is
    blocked until secure transport is added.
 
-The smallest next actions are to finish the current local/remote reruns,
-capture and retain complete implementation-revision gate output plus
-battle-fixture provenance, decide and test the supported per-ROM/role matrix,
-resolve or
+The smallest next actions are to retain complete raw gate output alongside the
+current sanitized audit record, capture battle-fixture provenance, decide and
+test the supported per-ROM/role matrix, resolve or
 explicitly scope the lint gate, and obtain independent/native-platform review.
