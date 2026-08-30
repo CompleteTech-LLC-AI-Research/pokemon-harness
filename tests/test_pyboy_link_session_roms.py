@@ -1361,13 +1361,19 @@ def _drive_complete_battle_turn(
             if cct[0] > 0 or cct[1] > 0:
                 break
 
-    # Once one side enters the serial-heavy function, keep both CPUs
-    # interleaved.  There is no dialog input to acknowledge here: the ROM's
-    # battle intro is a timed transition, and injecting A while it runs can
-    # be consumed by a later menu in a role-dependent way.
+    # Dismiss the post-warp "JUST A MOMENT!" prompt until each side enters
+    # the serial-heavy function.  Stop sending input to a side immediately
+    # after its hook fires: the battle intro is a timed transition, and an A
+    # press consumed there can leak into a later menu in a role-dependent
+    # way.  Once either side enters the function, use interleaved stepping so
+    # the first serial bytes cannot run against a frozen peer.
     if not (cct[0] > 0 and cct[1] > 0):
         remaining = max(0, 1800 - trigger_frames)
         while remaining > 0 and not (cct[0] > 0 and cct[1] > 0):
+            if cct[0] == 0:
+                a.press("a", duration=4)
+            if cct[1] == 0:
+                b.press("a", duration=4)
             if cct[0] > 0 or cct[1] > 0:
                 chunk = min(step_frames, remaining)
                 tick_interleaved(chunk)

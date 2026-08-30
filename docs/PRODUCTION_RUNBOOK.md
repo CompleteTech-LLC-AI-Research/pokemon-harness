@@ -1,12 +1,14 @@
 # Production runbook
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
-checkout. The baseline at `e219fb5` was not certified. The audited
-implementation revision is `1046a541e0003923aec6000b6b383c6eaafeaa48`; the
-complete real-ROM gate was rerun at that exact clean revision after the
-runtime, link, MCP, and gate integration commits. Later changes recorded in
-the release documents are documentation-only follow-ups. Uncommitted worktree
-changes are excluded from this candidate record.
+checkout. The baseline at `e219fb5` was not certified. The historical audited
+implementation revision is
+`1046a541e0003923aec6000b6b383c6eaafeaa48`; its complete real-ROM gate was
+rerun once at that exact clean revision. The current candidate has since
+changed the link scheduler, transport lifecycle, battle driver, and fixture
+evidence, so the historical counts below are evidence boundaries rather than
+current sign-off. Uncommitted worktree changes are excluded from the candidate
+record.
 
 The full-gate snapshot is unit 372/372, timing 35/35 across five repetitions,
 local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. Strict
@@ -37,12 +39,13 @@ python -m pip install -e ".[dev]"
 python -m pip check
 ```
 
-For the audited implementation, revision
+For a historical reproduction, revision
 `1046a541e0003923aec6000b6b383c6eaafeaa48` must be present before collecting
-evidence. Documentation-only follow-ups may be layered on top. The
-working tree should be clean; ignored BYO assets may be present outside the
-tracked source. Use the same activated interpreter for installation, tests,
-the gate, and MCP.
+the snapshot described above. For a current release candidate, record the
+actual candidate commit and rerun every affected tier; do not layer new
+runtime or test changes over the historical result. The working tree should
+be clean; ignored BYO assets may be present outside the tracked source. Use
+the same activated interpreter for installation, tests, the gate, and MCP.
 
 The required Python version is 3.11 or newer. On Windows PowerShell, create
 the same environment with `py -3 -m venv .venv`, activate with
@@ -148,7 +151,7 @@ checks five pinned ROM paths, three symbol paths, and three default fixture
 paths before running all required tiers.
 
 The current candidate has not passed a repository-wide Ruff audit: `ruff check
-.` reports 525 findings, including legacy and vendored-runtime code. Treat
+.` reports 546 findings, including legacy and vendored-runtime code. Treat
 lint cleanup as a remaining release task even when the scoped production gate
 is green. The current full-gate counts below must not be read as evidence that
 the broad suite or lint gate is clean.
@@ -406,7 +409,7 @@ are:
 2. The full real-ROM gate passed at the audited implementation revision, but
    its complete output is not retained in this repository as a release
    evidence bundle.
-3. `ruff check .` reported 525 findings, and the broad suite is not a clean
+3. `ruff check .` reported 546 findings, and the broad suite is not a clean
    production gate.
 4. The five-row single-session matrix, reversed listener/connector roles,
    native-platform builds, battle-fixture provenance, and an independent review

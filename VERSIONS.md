@@ -5,12 +5,13 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: audited 2026-08-30 against implementation revision
-`1046a541e0003923aec6000b6b383c6eaafeaa48`. The complete real-ROM gate was
-rerun at this exact clean revision after the runtime, link, MCP, and gate
-integration commits. Later changes recorded in the release documents are
-documentation-only follow-ups. Uncommitted worktree changes are excluded from
-this candidate record.
+Status: historical audit snapshot from 2026-08-30 against implementation
+revision `1046a541e0003923aec6000b6b383c6eaafeaa48`. The complete real-ROM
+gate was rerun at that exact clean revision after the runtime, link, MCP, and
+gate integration commits. The current candidate has since changed the link
+scheduler, transport lifecycle, battle driver, and fixture evidence; its
+affected gates must be rerun before release. Uncommitted worktree changes are
+excluded from this historical snapshot.
 
 The full-gate snapshot is unit 372/372, timing 35/35 across five repetitions,
 local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. The

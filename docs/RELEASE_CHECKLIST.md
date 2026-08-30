@@ -6,17 +6,19 @@ runtime evidence required by the relevant capability.
 
 ## Current audit status
 
-The baseline at `e219fb5` (2026-08-29) was not production-ready. The audited
-implementation revision is `1046a541e0003923aec6000b6b383c6eaafeaa48`; it addresses the
-collection boundary, portable `.mcp.json`, bundled PyBoy source runtime,
-path-aware ROM pinning, native local/TCP serial attachment, teardown,
-dependency pinning, and tiered gate reporting.
+The baseline at `e219fb5` (2026-08-29) was not production-ready. The
+historical audited implementation revision is
+`1046a541e0003923aec6000b6b383c6eaafeaa48`; it addressed the collection
+boundary, portable `.mcp.json`, bundled PyBoy source runtime, path-aware ROM
+pinning, native local/TCP serial attachment, teardown, dependency pinning, and
+tiered gate reporting.
 
 Evidence provenance matters: the complete real-ROM gate was rerun at that exact
-clean implementation revision after all runtime integration commits. Later
-changes recorded in the release documents are documentation-only follow-ups.
-The full-gate counts below are implementation-revision evidence; the complete
-output is not retained in this tree as a release evidence bundle.
+clean implementation revision after all runtime integration commits. The
+current candidate has since changed runtime/test behavior, including the link
+scheduler and battle driver, so the full-gate counts below are historical
+implementation-revision evidence; they are not current candidate sign-off and
+the complete output is not retained in this tree as a release evidence bundle.
 
 Full-gate snapshot:
 
@@ -41,13 +43,13 @@ script, and the results were reproduced from the isolated clean checkout.
 
 ## Source and artifact hygiene
 
-- [x] The release commit is identified and the isolated candidate worktree is
+- [ ] The release commit is identified and the isolated candidate worktree is
   clean. BYO ROM/fixture inputs and ignored local build output remain outside
   the tracked release tree.
 - [x] No ROM, `.sym`, `.sav`, `.state`, screenshot, log, cache, or other
   ROM-derived artifact is tracked.
-- [x] The package metadata, README, `VERSIONS.md`, and this checklist agree on
-  the release commit and supported scope.
+- [ ] The package metadata, README, `VERSIONS.md`, and this checklist agree on
+  the final release commit and supported scope.
 - [x] No machine-local path, placeholder hash, credential, or unreviewed
   generated file appears in the release documentation.
 
@@ -78,7 +80,7 @@ script, and the results were reproduced from the isolated clean checkout.
 - [x] Both `python -m pytest --collect-only -q` and the
   `pytest` console-script collection path complete without collection errors.
 - [ ] Repository-wide Ruff audit is clean (`ruff check .` currently reports
-  525 findings, including vendored-runtime and legacy code).
+  546 findings, including vendored-runtime and legacy code).
 - [ ] The broad suite completes with no unexpected failure, skip, xfail, or
   timeout: `python -m pytest -q -ra`.
 - [x] ROM-free unit/protocol/transport tests pass.

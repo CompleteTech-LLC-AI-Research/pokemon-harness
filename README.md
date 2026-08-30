@@ -9,12 +9,12 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-This repository is an audited candidate, not a production release. The audited
-implementation revision is `1046a541e0003923aec6000b6b383c6eaafeaa48`; the
-complete real-ROM gate was rerun at that exact clean revision after the
-runtime, link, MCP, and gate integration commits. Later changes recorded in
-the release documents are documentation-only follow-ups. The baseline at
-`e219fb5` was not production-certified.
+This repository is an audited candidate, not a production release. The
+historical implementation snapshot `1046a541e0003923aec6000b6b383c6eaafeaa48`
+passed the complete real-ROM gate once; the current candidate has since
+changed the link scheduler, transport lifecycle, battle driver, and fixture
+evidence. Those historical counts are retained as a boundary, not as current
+sign-off. The baseline at `e219fb5` was not production-certified.
 
 The counts below are therefore an evidence snapshot with an explicit commit
 boundary, not a claim that every listed capability is a finished product:
@@ -23,10 +23,10 @@ boundary, not a claim that every listed capability is a finished product:
 |---|---|---|
 | Single-session loading, input, state parsing, and save/load | Candidate-tested for selected Red/Blue/Yellow inputs | The gate checks the pinned runtime, hashes, symbols, and real-ROM paths; the environment-driven boot/MCP test is not a five-row single-session certification. |
 | MCP stdio server for one session | Certified for the tested explicit-ROM smoke path | `tests/test_mcp_stdio_integration.py` and the fresh wheel smoke use the constrained MCP 1.x dependency; repeat the test for each ROM before making a per-ROM claim. |
-| In-process `LinkPair` | Implemented; canonical local acceptance passed | The color-Red/Yellow strict trade and battle cases pass with ROM-matched fixtures; the broader variant matrix remains diagnostic. |
-| Remote TCP transport and MCP lifecycle | Candidate-tested for canonical localhost roles | Native MCP attach/HELLO, two-process LinkMenu, and native serial trade/battle paths pass for color Red listener + color Blue connector. The LinkMenu choice is controlled by the acceptance driver. |
-| Remote full trade | Controlled native-serial acceptance passed | The independent-process color Red/Blue test compares both full 44-byte party-mon records; it uses a test-driver LinkMenu selection hook and is not full user-driven gameplay. |
-| Link battle | Local and controlled remote acceptance passed | Red/Yellow resolves a real move turn locally; color Red/Blue resolves a real turn over native TCP serial traffic, with the same controlled LinkMenu setup. |
+| In-process `LinkPair` | Candidate-tested; current battle matrix is incomplete | The historical color-Red/Yellow strict trade and battle cases passed; the current candidate reaches LinkMenu and Colosseum for tested Blue rows, but current strict re-audit is still open. |
+| Remote TCP transport and MCP lifecycle | Candidate-tested for canonical localhost roles | Historical native MCP attach/HELLO, two-process LinkMenu, and native serial paths passed for color Red listener + color Blue connector. The current candidate requires a fresh full gate; the LinkMenu choice is controlled by the acceptance driver. |
+| Remote full trade | Historical controlled native-serial acceptance passed | The independent-process color Red/Blue test compared both full 44-byte party-mon records at the historical boundary; it uses a test-driver LinkMenu selection hook and is not full user-driven gameplay. |
+| Link battle | Historical acceptance; current re-audit blocked | Historical Red/Yellow and color Red/Blue move-turn cases passed, but the current local Blue↔Blue and Blue→Red diagnostics stall after `StartBattle` and before `MainInBattleLoop`. |
 | Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
 The candidate includes the explicit `tests/__init__.py` package boundary and
@@ -48,7 +48,7 @@ Current release blockers are explicit:
 
 - the two diagnostic local battle rows above still stall and the full matrix is
   not certified;
-- the repository-wide Ruff audit reports 525 findings and the broad suite has
+- the repository-wide Ruff audit reports 546 findings and the broad suite has
   not become a clean production gate;
 - the audited implementation gate output is not retained in this tree as a
   complete evidence bundle;
@@ -76,13 +76,14 @@ The intended release inputs are the exact ROM variants listed in
 | Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Certified as the local Red/Yellow acceptance peer |
 | Other localisations and ROM hacks | — | Out of scope |
 
-The certified stateful scope is the local color-Red/Yellow pair and the
-independent-process color-Red/color-Blue pair for the tested trade and battle
-paths, using the bundled source-runtime build. The remote evidence fixes the
-roles as Red listener/internal-clock and Blue connector/external-clock. Stock
-ROM link pairs, Blue/Yellow pairs, reversed listener/connector roles, and other
-unlisted rows are unsupported for this release until they receive their own
-fixtures and acceptance results.
+The historical stateful evidence scope is the local color-Red/Yellow pair and
+the independent-process color-Red/color-Blue pair for the tested trade and
+battle paths, using the bundled source-runtime build. The remote evidence
+fixes the roles as Red listener/internal-clock and Blue connector/external-
+clock. The current candidate is not certified: stock ROM link pairs,
+Blue/Yellow pairs, reversed listener/connector roles, and other unlisted rows
+remain unsupported or unverified until they receive fresh fixtures and
+acceptance results.
 
 ## Requirements and clean install
 
