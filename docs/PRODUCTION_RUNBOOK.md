@@ -416,6 +416,7 @@ are:
    blocked until secure transport is added.
 
 The smallest next actions are to repair and rerun the two stalled battle rows,
-capture and retain complete current-head gate output plus battle-fixture
-provenance, decide and test the supported per-ROM/role matrix, resolve or
+capture and retain complete implementation-revision gate output plus
+battle-fixture provenance, decide and test the supported per-ROM/role matrix,
+resolve or
 explicitly scope the lint gate, and obtain independent/native-platform review.
