@@ -425,9 +425,21 @@ class PyBoyLinkSession:
         self._prev_serials.pop(idx)
 
     def detach_all(self) -> None:
-        """Detach every attached PyBoy in reverse order."""
-        for pyboy in list(reversed(self._pyboys)):
-            self.detach(pyboy)
+        """Detach every attached PyBoy and close the session transport.
+
+        A network backend is a session-level resource, rather than a
+        per-PyBoy attachment.  Stop it after the attachments have been
+        restored so its reader and edge-worker threads cannot retain the
+        detached serial core.  Keep this in ``detach_all`` (the terminal
+        session cleanup path) so ``detach`` retains its existing behavior of
+        only restoring one PyBoy's serial backend.
+        """
+        try:
+            for pyboy in list(reversed(self._pyboys)):
+                self.detach(pyboy)
+        finally:
+            if self._network_backend is not None:
+                self._network_backend.stop()
 
     # --- accessors -----------------------------------------------------
 

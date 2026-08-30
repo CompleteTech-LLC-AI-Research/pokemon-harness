@@ -12,9 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
+from pokered_harness.link.network_backend import NetworkBackend
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
-    NullBackend,
     SerialCore,
 )
 from pokered_harness.link.serial_coordinator import CoordinatedBackend
@@ -174,6 +174,52 @@ def test_detach_all_restores_every_instance():
     assert a.mb.serial is legacy_a
     assert b.mb.serial is legacy_b
     assert link.attached == ()
+
+
+def test_detach_all_stops_session_network_backend_workers():
+    """The session's terminal cleanup must close both network workers."""
+    backend, peer = NetworkBackend.pair()
+    pyboy = _FakePyBoy()
+    link = PyBoyLinkSession(network_backend=backend)
+
+    try:
+        link.attach(pyboy)
+        assert backend._reader is not None and backend._reader.is_alive()
+        assert backend._edge_worker is not None and backend._edge_worker.is_alive()
+
+        link.detach_all()
+
+        assert not backend.connected
+        assert backend._reader is not None and not backend._reader.is_alive()
+        assert backend._edge_worker is not None and not backend._edge_worker.is_alive()
+        assert link.attached == ()
+    finally:
+        # The peer is not owned by this session; clean up the test fixture
+        # explicitly just as a direct NetworkBackend caller must.
+        backend.stop()
+        peer.stop()
+
+
+def test_detach_all_stops_network_backend_when_detach_raises(monkeypatch):
+    """Transport shutdown must be unconditional when detaching fails."""
+    backend, peer = NetworkBackend.pair()
+    link = PyBoyLinkSession(network_backend=backend)
+    link.attach(_FakePyBoy())
+
+    def fail_detach(_pyboy):
+        raise RuntimeError("synthetic serial restoration failure")
+
+    monkeypatch.setattr(link, "detach", fail_detach)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic serial restoration"):
+            link.detach_all()
+
+        assert not backend.connected
+        assert backend._reader is not None and not backend._reader.is_alive()
+        assert backend._edge_worker is not None and not backend._edge_worker.is_alive()
+    finally:
+        backend.stop()
+        peer.stop()
 
 
 # ---------------------------------------------------------------------------
