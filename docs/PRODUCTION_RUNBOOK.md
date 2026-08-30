@@ -16,8 +16,8 @@ repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
 tests, 35/35 timing cases across five repetitions, and current strict local
 Red/Yellow trade plus battle passes at the library's default scheduler slice
 (the tighter `POKERED_LINK_CHUNK_CYCLES=64` rerun also passes); the broader
-local rerun must still be recorded before release sign-off. The current remote
-tier has now passed
+local matrix is now 46/46 at the default slice. The current remote tier has
+now passed
 11/11 tests for the canonical color-Red listener/internal-clock and color-Blue
 connector/external-clock roles. Strict local evidence covers color Red +
 Yellow; strict remote evidence covers color Red as listener/internal-clock and
@@ -415,10 +415,10 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The strict Red↔Yellow local trade and battle cases now pass with the
-   normalized scheduler, but the full current local/remote gate and the
-   broader Blue/Red/Yellow battle matrix are not yet certified. Blue↔Blue and
-   Blue→Red remain diagnostic only.
+1. The current required runtime tiers pass in separate bounded runs (unit
+   392/392, local 46/46, remote 11/11, strict trade 2/2, and strict battle
+   2/2), but the broader Blue/Red/Yellow battle matrix is not certified.
+   Blue↔Blue and Blue→Red remain diagnostic only.
 2. The full real-ROM gate passed at the audited implementation revision, but
    its complete output is not retained in this repository as a release
    evidence bundle.

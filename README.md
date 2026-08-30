@@ -41,17 +41,18 @@ route for all nine ordered Red/Blue/Yellow version pairs. Seven of nine battle
 rows reached a complete turn at that historical boundary; `blue↔blue` and the
 `blue→red` attach ordering stalled before both sides entered move exchange.
 Those rows are not claimed as supported. In the current candidate, the
-  normalized hardware-time scheduler passes the strict Red↔Yellow trade and
-  battle cases at the library's default 256-cycle slice (the tighter
-  64-cycle acceptance rerun also passes); targeted Blue↔Blue and Blue→Red
-  checks reach LinkMenu, but their complete battle behavior and reversed roles
-  remain unverified.
+normalized hardware-time scheduler passes the strict Red↔Yellow trade and
+battle cases at the library's default 256-cycle slice (the tighter 64-cycle
+acceptance rerun also passes); targeted Blue↔Blue and Blue→Red checks reach
+LinkMenu, but their complete battle behavior and reversed roles remain
+unverified.
 
 Current release blockers are explicit:
 
-- the current full local and remote gates are still being rerun for the
-  scheduler change; the strict Red↔Yellow cases are green, but the full matrix
-  is not certified;
+- the current required runtime gates are green (unit 392/392, local 46/46,
+  remote 11/11, strict trade 2/2, and strict battle 2/2), but the broader
+  product matrix and a single retained full-gate evidence bundle are not
+  certified;
 - the repository-wide Ruff audit reports 546 findings and the broad suite has
   not become a clean production gate;
 - the audited implementation gate output is not retained in this tree as a

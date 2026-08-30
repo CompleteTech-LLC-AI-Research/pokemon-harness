@@ -35,6 +35,7 @@ Current candidate rerun evidence (2026-08-30, scheduler fix included):
 
 - unit: 392/392 passed;
 - timing: 35/35 passed across five repetitions;
+- local: 46/46 passed at the default scheduler slice;
 - remote: 11/11 passed for the canonical color-Red listener and color-Blue
   connector roles; and
 - strict local Red/Yellow trade and battle passed at the library's default
@@ -42,9 +43,9 @@ Current candidate rerun evidence (2026-08-30, scheduler fix included):
 - strict trade: 2/2 passed, and strict battle: 2/2 passed, including the
   controlled Red/Blue subprocess cases.
 
-The current local matrix and strict subprocess acceptance results are still
-being collected; they supersede the corresponding historical counts only when
-their complete gate output is retained.
+These current counts supersede the corresponding historical counts for this
+candidate, but the complete gate output is not yet retained as a release
+evidence bundle.
 
 The local passes are real stateful acceptance evidence for the exact color-Red /
 Yellow fixture pair, and the remote pass is evidence for the exact color-Red
