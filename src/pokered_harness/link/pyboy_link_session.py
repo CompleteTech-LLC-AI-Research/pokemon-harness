@@ -88,6 +88,13 @@ class PyBoyLinkSession:
 
     #: Max attached instances. Gen I Pokémon is strictly 2-player.
     MAX_ATTACHED: int = 2
+    # PyBoy's LCD uses 70224 CPU cycles for a normal DMG frame. This is only
+    # a fallback for test doubles or older integrations which do not expose
+    # the LCD's next-frame cycle hint; real PyBoy instances use that hint.
+    _DEFAULT_LCD_FRAME_CYCLES: int = 70224
+    # Keep an individual singlestepped chunk bounded even if a caller
+    # supplies an unusually large ``chunk_cycles`` value.
+    _MAX_SINGLE_STEP_TICKS: int = 4096
     _HRAM_SERIAL_CONNECTION_STATUS: int = 0xFFAA
     _STATUS_EXTERNAL: int = 0x01
     _STATUS_INTERNAL: int = 0x02
@@ -503,6 +510,10 @@ class PyBoyLinkSession:
                 f"step_interleaved() requires {self.MAX_ATTACHED} "
                 f"attached instances, have {len(self._pyboys)}"
             )
+        if not isinstance(chunk_cycles, int) or isinstance(chunk_cycles, bool):
+            raise ValueError("chunk_cycles must be a positive integer")
+        if chunk_cycles <= 0:
+            raise ValueError("chunk_cycles must be a positive integer")
         # ``mb.tick`` returns after one CPU instruction in singlestep mode,
         # but instruction lengths vary.  Pass the actual cycle budget to the
         # frame driver so the two sides stay close in emulated time rather
@@ -528,30 +539,30 @@ class PyBoyLinkSession:
             p.mb.sound.disable_sampling = True
             p.mb.sound.clear_buffer()
 
-        a_done = b_done = False
-        while not (a_done and b_done):
-            # Let the slave reach its SC=0x80 arm point before the
-            # internal-clock side can emit an edge. This matters in the
-            # real ROM flow: the two CPUs are not instruction-aligned,
-            # and always running attached side A first can make an A-side
-            # master edge observe an unarmed B-side slave. Re-evaluate the
-            # order after every chunk because Pokémon swaps roles between
-            # serial transfers.
-            for pyboy in PyBoyLinkSession._serial_step_order(a, b):
-                if pyboy is a and a_done:
-                    continue
-                if pyboy is b and b_done:
-                    continue
-                done = PyBoyLinkSession._step_single_step_chunk(
-                    pyboy, chunk_cycles
+        try:
+            a_cycles = PyBoyLinkSession._cpu_cycles(a)
+            b_cycles = PyBoyLinkSession._cpu_cycles(b)
+            if a_cycles is not None and b_cycles is not None:
+                PyBoyLinkSession._advance_to_shared_cycle_horizon(
+                    a,
+                    b,
+                    a_cycles,
+                    b_cycles,
+                    chunk_cycles,
                 )
-                if pyboy is a:
-                    a_done = done
-                else:
-                    b_done = done
+            else:
+                # Keep lightweight legacy doubles usable. They do not have
+                # a common emulated-time counter, so their only safe frame
+                # boundary is the LCD flag; the outer bound prevents a
+                # broken double from turning this loop into an infinite one.
+                PyBoyLinkSession._advance_to_lcd_boundaries(
+                    a, b, chunk_cycles
+                )
+        finally:
+            for p in (a, b):
+                p.mb.breakpoint_singlestep = 0
 
         for p in (a, b):
-            p.mb.breakpoint_singlestep = 0
             p.frame_count += 1
             p._post_handle_events()
             if view:
@@ -562,22 +573,206 @@ class PyBoyLinkSession:
                 p.tick(0, True, False)
 
     @staticmethod
-    def _step_single_step_chunk(p: object, cycle_budget: int) -> bool:
+    def _cpu_cycles(pyboy: object) -> int | None:
+        """Return a PyBoy CPU's absolute cycle counter when available."""
+        cpu = getattr(getattr(pyboy, "mb", None), "cpu", None)
+        cycles = getattr(cpu, "cycles", None)
+        if cycles is None:
+            return None
+        try:
+            return int(cycles)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    @classmethod
+    def _next_lcd_frame_target(cls, pyboy: object, start_cycles: int) -> int:
+        """Return the absolute CPU cycle at the next LCD frame boundary.
+
+        ``_cycles_to_frame`` is maintained by PyBoy in CPU-cycle units,
+        including the CGB speed shift. Reading it avoids assuming that both
+        emulators entered this scheduler frame at the same LCD phase.
+        """
+        lcd = getattr(getattr(pyboy, "mb", None), "lcd", None)
+        remaining = getattr(lcd, "_cycles_to_frame", None)
+        try:
+            remaining_cycles = int(remaining)
+        except (TypeError, ValueError, OverflowError):
+            remaining_cycles = cls._DEFAULT_LCD_FRAME_CYCLES
+        return start_cycles + max(1, remaining_cycles)
+
+    @classmethod
+    def _advance_to_shared_cycle_horizon(
+        cls,
+        a: object,
+        b: object,
+        a_start: int,
+        b_start: int,
+        chunk_cycles: int,
+    ) -> None:
+        """Advance both sides through one common relative CPU-cycle horizon.
+
+        A local ``lcd.frame_done`` is a one-shot notification, not a safe
+        point at which to freeze one emulator. The peer may still be in the
+        preceding LCD phase, and ROM code which samples ``rLY`` can then
+        observe an impossible phase relationship. Both sides therefore run
+        toward the later of their two next LCD boundaries. If one reaches
+        its local boundary first, ``_step_single_step_chunk`` clears that
+        notification before continuing; it is never used as the shared stop
+        condition.
+        """
+        a_frame_target = cls._next_lcd_frame_target(a, a_start)
+        b_frame_target = cls._next_lcd_frame_target(b, b_start)
+        # CPU counters are absolute to each emulator's own lifetime and may
+        # differ substantially after independently captured save states.
+        # Share the relative interval to the later LCD boundary instead of
+        # forcing the lower absolute counter to catch up billions of cycles.
+        horizon = max(
+            a_frame_target - a_start,
+            b_frame_target - b_start,
+        )
+        a_target = a_start + horizon
+        b_target = b_start + horizon
+        chunk = max(4, chunk_cycles)
+        # Four times the nominal chunk count leaves room for variable-length
+        # instructions and a transient breakpoint return. It is an absolute
+        # bound on scheduler rounds, not a wall-clock wait.
+        max_rounds = max(1, ((horizon + chunk - 1) // chunk) * 4 + 4)
+        # An instruction may overshoot the target, but must not run an
+        # unbounded amount beyond it. The per-chunk tick cap below and this
+        # absolute cycle limit make a stuck/broken PyBoy fail closed.
+        max_cycle_overshoot = max(32, chunk)
+        max_cycles_a = a_target + max_cycle_overshoot
+        max_cycles_b = b_target + max_cycle_overshoot
+        reached_a = reached_b = False
+        rounds = 0
+
+        while not (reached_a and reached_b):
+            if rounds >= max_rounds:
+                current_a = cls._cpu_cycles(a)
+                current_b = cls._cpu_cycles(b)
+                raise TimeoutError(
+                    "PyBoy pair did not reach the shared LCD cycle horizon "
+                    f"within {max_rounds} rounds "
+                    f"(target_delta={horizon}, a={current_a}, b={current_b})"
+                )
+            rounds += 1
+
+            # Let the slave reach its SC=0x80 arm point before the
+            # internal-clock side can emit an edge. Re-evaluate this order
+            # after every chunk because Pokémon swaps roles between serial
+            # transfers.
+            for pyboy in cls._serial_step_order(a, b):
+                current = cls._cpu_cycles(pyboy)
+                if current is None:
+                    raise TimeoutError(
+                        "PyBoy CPU cycle counter disappeared during "
+                        "interleaved stepping"
+                    )
+                target = a_target if pyboy is a else b_target
+                max_cycles = max_cycles_a if pyboy is a else max_cycles_b
+                if current > max_cycles:
+                    raise TimeoutError(
+                        "PyBoy pair exceeded the bounded LCD cycle horizon "
+                        f"(target_delta={horizon}, limit={max_cycles}, "
+                        f"current={current})"
+                    )
+                if current >= target:
+                    if pyboy is a:
+                        reached_a = True
+                    else:
+                        reached_b = True
+                    continue
+
+                budget = min(chunk, target - current)
+                cls._step_single_step_chunk(
+                    pyboy,
+                    budget,
+                    stop_on_frame=False,
+                )
+                current = cls._cpu_cycles(pyboy)
+                if current is None:
+                    raise TimeoutError(
+                        "PyBoy CPU cycle counter disappeared during "
+                        "interleaved stepping"
+                    )
+                if current > max_cycles:
+                    raise TimeoutError(
+                        "PyBoy pair exceeded the bounded LCD cycle horizon "
+                        f"(target_delta={horizon}, limit={max_cycles}, "
+                        f"current={current})"
+                    )
+                if pyboy is a:
+                    reached_a = current >= target
+                else:
+                    reached_b = current >= target
+
+    @classmethod
+    def _advance_to_lcd_boundaries(
+        cls, a: object, b: object, chunk_cycles: int
+    ) -> None:
+        """Bounded fallback for test doubles without CPU cycle counters."""
+        chunk = max(4, chunk_cycles)
+        max_rounds = max(
+            1,
+            ((cls._DEFAULT_LCD_FRAME_CYCLES + chunk - 1) // chunk) * 4 + 4,
+        )
+        a_done = b_done = False
+        rounds = 0
+        while not (a_done and b_done):
+            if rounds >= max_rounds:
+                raise TimeoutError(
+                    "PyBoy pair did not reach both LCD frame boundaries "
+                    f"within {max_rounds} rounds"
+                )
+            rounds += 1
+            for pyboy in cls._serial_step_order(a, b):
+                if pyboy is a and a_done:
+                    continue
+                if pyboy is b and b_done:
+                    continue
+                done = cls._step_single_step_chunk(
+                    pyboy,
+                    chunk,
+                    stop_on_frame=True,
+                )
+                if pyboy is a:
+                    a_done = done
+                else:
+                    b_done = done
+
+    @staticmethod
+    def _step_single_step_chunk(
+        p: object,
+        cycle_budget: int,
+        *,
+        stop_on_frame: bool = True,
+    ) -> bool:
         """Advance ``p`` up to ``cycle_budget`` CPU cycles.
 
         Single-stepped instructions have variable lengths, so a fixed
         instruction count creates role-dependent timing skew. Real PyBoy
         exposes the CPU cycle counter; the instruction-count fallback keeps
-        lightweight legacy test doubles usable.
+        lightweight legacy test doubles usable. When ``stop_on_frame`` is
+        false, a local LCD frame notification is consumed and stepping
+        continues toward the caller's shared cycle horizon.
         """
         cpu = getattr(p.mb, "cpu", None)
         start_cycles = getattr(cpu, "cycles", None)
         fallback_ticks = max(1, cycle_budget // 7)
-        max_ticks = max(fallback_ticks, cycle_budget * 4)
+        max_ticks = min(
+            max(fallback_ticks, cycle_budget * 4),
+            PyBoyLinkSession._MAX_SINGLE_STEP_TICKS,
+        )
         ticks = 0
         while ticks < max_ticks:
-            if p.mb.lcd.frame_done:
+            lcd = getattr(p.mb, "lcd", None)
+            if stop_on_frame and getattr(lcd, "frame_done", False):
                 return True
+            if not stop_on_frame and getattr(lcd, "frame_done", False):
+                # PyBoy's motherboard stops immediately while this flag is
+                # set. Consume the one-shot notification only when the
+                # caller explicitly asked us to cross that boundary.
+                lcd.frame_done = False
             # Re-arm singlestep every iteration so mb.tick returns after a
             # single CPU instruction — breakpoint handling below may clear
             # it.
@@ -600,7 +795,7 @@ class PyBoyLinkSession:
                     break
             elif ticks >= fallback_ticks:
                 break
-        return p.mb.lcd.frame_done
+        return bool(getattr(lcd, "frame_done", False))
 
     @staticmethod
     def _serial_step_order(a: object, b: object) -> tuple[object, object]:
