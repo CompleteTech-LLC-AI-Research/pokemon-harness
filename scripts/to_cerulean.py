@@ -43,9 +43,12 @@ def _sight_cone_blockers(map_name: str) -> str | None:
     """Compute sight-cone blockers for a given map. Returns a
     semicolon-separated "x,y;x,y;..." string suitable for
     path_from_tiles' --extra-blockers arg, or None if the pret
-    clone isn't available. Uses dev-machine vendored path; adjust
-    if the repo moves."""
-    pret = Path("G:/project/pokemon/_vendor/pokeyellow")
+    clone isn't available. Set ``POKERED_PRET_ROOT`` to the checkout
+    containing the Yellow data."""
+    configured = os.environ.get("POKERED_PRET_ROOT")
+    if not configured:
+        return None
+    pret = Path(configured).expanduser()
     if not (pret / "data" / "maps" / "objects").exists():
         return None
     tiles = trainer_sight_cones.sight_cone_tiles(map_name, pret)

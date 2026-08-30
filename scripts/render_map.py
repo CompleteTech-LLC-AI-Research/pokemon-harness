@@ -13,7 +13,7 @@ stuck connectivity (e.g. "from B2F (15,27), can we reach (5,7)?").
 Usage::
 
     python scripts/render_map.py --map MtMoonB2F --warps 15,27=S 5,7=E \\
-        --flood 15,27 --pret G:/project/pokemon/_vendor/pokeyellow
+        --flood 15,27 --pret /path/to/pokeyellow
 
 Each --warps entry paints a labeled cell on the rendered grid. --flood
 starts a BFS from that step cell and marks every reachable cell with
@@ -23,6 +23,7 @@ but unvisited).
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -303,11 +304,7 @@ def main() -> int:
                          "Only affects CAVERN tileset maps.")
     args = ap.parse_args()
 
-    pret_candidates = [
-        args.pret,
-        "G:/project/pokemon/_vendor/pokeyellow",
-        "G:/project/pokemon/_vendor/pokered",
-    ]
+    pret_candidates = [args.pret, os.environ.get("POKERED_PRET_ROOT")]
     pret = None
     for c in pret_candidates:
         if c and Path(c).is_dir():
