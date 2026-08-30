@@ -33,7 +33,7 @@ Full-gate snapshot:
 
 Current candidate rerun evidence (2026-08-30, scheduler fix included):
 
-- unit: 392/392 passed;
+- unit: 394/394 passed;
 - timing: 35/35 passed across five repetitions;
 - local: 46/46 passed at the default scheduler slice;
 - remote: 11/11 passed for the canonical color-Red listener and color-Blue

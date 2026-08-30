@@ -12,7 +12,7 @@ record.
 
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
-2/2. Current candidate evidence on the scheduler-fix boundary is 392/392 unit
+2/2. Current candidate evidence on the scheduler-fix boundary is 394/394 unit
 tests, 35/35 timing cases across five repetitions, and current strict local
 Red/Yellow trade plus battle passes at the library's default scheduler slice
 (the tighter `POKERED_LINK_CHUNK_CYCLES=64` rerun also passes); the broader
@@ -415,7 +415,7 @@ The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
 1. The current required runtime tiers pass in separate bounded runs (unit
-   392/392, local 46/46, remote 11/11, strict trade 2/2, and strict battle
+   394/394, local 46/46, remote 11/11, strict trade 2/2, and strict battle
    2/2), but the broader Blue/Red/Yellow battle matrix is not certified.
    Blue↔Blue and Blue→Red remain diagnostic only.
 2. The full real-ROM gate passed at the audited implementation revision, but

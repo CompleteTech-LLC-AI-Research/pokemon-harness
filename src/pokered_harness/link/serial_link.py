@@ -67,6 +67,7 @@ decide whether to treat that as a "cable disconnected" hardware error
 from __future__ import annotations
 
 import errno
+import math
 import queue
 import select
 import socket
@@ -396,7 +397,7 @@ class TcpSerialLink:
         *,
         timeout_s: float = 10.0,
         cancel_event: threading.Event | None = None,
-    ) -> "TcpSerialLink":
+    ) -> TcpSerialLink:
         """Open an outbound connection to a peer that is
         :meth:`listen`-ing on ``(host, port)``."""
         sock = _connect_socket(host, port, timeout_s, cancel_event)
@@ -412,22 +413,78 @@ class TcpSerialLink:
 
     @classmethod
     def listen(
-        cls, port: int, local_rom_version: str, *, host: str = "127.0.0.1"
-    ) -> "TcpSerialLink":
-        """Bind ``(host, port)`` and block until a peer connects, then
-        return the established link."""
+        cls,
+        port: int,
+        local_rom_version: str,
+        *,
+        host: str = "127.0.0.1",
+        accept_timeout_s: float | None = None,
+        cancel_event: threading.Event | None = None,
+        ready_event: threading.Event | None = None,
+    ) -> TcpSerialLink:
+        """Bind ``(host, port)`` and wait for one peer connection.
+
+        The historical call with no timeout or cancellation arguments keeps
+        its blocking behavior.  Lifecycle owners can provide
+        ``accept_timeout_s`` and/or ``cancel_event`` to make the wait
+        bounded.  ``ready_event`` is set after the listener is bound and
+        accepting, which lets a connector start without a guessed sleep.
+        """
         host = validate_loopback_host(host)
+        if accept_timeout_s is not None:
+            if isinstance(accept_timeout_s, bool):
+                raise ValueError("accept_timeout_s must be finite and positive")
+            try:
+                accept_timeout_s = float(accept_timeout_s)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "accept_timeout_s must be finite and positive"
+                ) from exc
+            if not math.isfinite(accept_timeout_s) or accept_timeout_s <= 0:
+                raise ValueError("accept_timeout_s must be finite and positive")
         listener = socket.socket(
             socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM
         )
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        bind_address = (host, port, 0, 0) if ":" in host else (host, port)
-        listener.bind(bind_address)
-        listener.listen(1)
+        conn: socket.socket | None = None
         try:
-            conn, _peer_addr = listener.accept()
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            bind_address = (host, port, 0, 0) if ":" in host else (host, port)
+            listener.bind(bind_address)
+            listener.listen(1)
+            if ready_event is not None:
+                ready_event.set()
+
+            if accept_timeout_s is None and cancel_event is None:
+                conn, _peer_addr = listener.accept()
+            else:
+                deadline = (
+                    None
+                    if accept_timeout_s is None
+                    else time.monotonic() + accept_timeout_s
+                )
+                while conn is None:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise SerialLinkClosed("listener accept cancelled")
+                    remaining = (
+                        None
+                        if deadline is None
+                        else deadline - time.monotonic()
+                    )
+                    if remaining is not None and remaining <= 0:
+                        raise SerialLinkTimeout(
+                            f"listener accept timed out after {accept_timeout_s:g}s"
+                        )
+                    listener.settimeout(
+                        0.25 if remaining is None else min(0.25, remaining)
+                    )
+                    try:
+                        conn, _peer_addr = listener.accept()
+                    except TimeoutError:
+                        continue
         finally:
             listener.close()
+        if conn is None:
+            raise SerialLinkClosed("listener closed before accepting a peer")
         conn.settimeout(None)
         try:
             return cls(conn, local_rom_version)
@@ -697,7 +754,7 @@ class InProcessSerialLink:
     @classmethod
     def pair(
         cls, a_rom_version: str, b_rom_version: str
-    ) -> tuple["InProcessSerialLink", "InProcessSerialLink"]:
+    ) -> tuple[InProcessSerialLink, InProcessSerialLink]:
         a_to_b: dict[str, queue.Queue[bytes]] = defaultdict(queue.Queue)
         b_to_a: dict[str, queue.Queue[bytes]] = defaultdict(queue.Queue)
         a_lock = threading.Lock()
@@ -735,6 +792,9 @@ class InProcessSerialLink:
 
 
 __all__ = [
+    "OP_BYE",
+    "OP_EXCHANGE",
+    "OP_HELLO",
     "InProcessSerialLink",
     "SerialLink",
     "SerialLinkClosed",
@@ -742,7 +802,4 @@ __all__ = [
     "SerialLinkProtocolError",
     "SerialLinkTimeout",
     "TcpSerialLink",
-    "OP_BYE",
-    "OP_EXCHANGE",
-    "OP_HELLO",
 ]

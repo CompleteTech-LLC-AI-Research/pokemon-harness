@@ -49,7 +49,7 @@ unverified.
 
 Current release blockers are explicit:
 
-- the current required runtime gates are green (unit 392/392, local 46/46,
+- the current required runtime gates are green (unit 394/394, local 46/46,
   remote 11/11, strict trade 2/2, and strict battle 2/2), but the broader
   product matrix and a single retained full-gate evidence bundle are not
   certified;

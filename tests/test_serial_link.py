@@ -163,6 +163,56 @@ def test_in_process_closed_after_close():
 # --- TcpSerialLink ---------------------------------------------------------
 
 
+def test_tcp_listener_ready_event_and_bounded_accept():
+    port = _free_port()
+    ready = threading.Event()
+    errors: list[BaseException] = []
+
+    def listen_without_peer() -> None:
+        try:
+            TcpSerialLink.listen(
+                port,
+                "blue",
+                accept_timeout_s=0.1,
+                ready_event=ready,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread = threading.Thread(target=listen_without_peer, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=1.0)
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert errors and isinstance(errors[0], SerialLinkTimeout)
+
+
+def test_tcp_listener_cancel_event_returns_promptly():
+    port = _free_port()
+    ready = threading.Event()
+    cancel = threading.Event()
+    errors: list[BaseException] = []
+
+    def listen_until_cancelled() -> None:
+        try:
+            TcpSerialLink.listen(
+                port,
+                "blue",
+                cancel_event=cancel,
+                ready_event=ready,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread = threading.Thread(target=listen_until_cancelled, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=1.0)
+    cancel.set()
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert errors and isinstance(errors[0], SerialLinkClosed)
+
+
 def test_tcp_exchange_round_trip():
     server, client = _make_tcp_pair(a_rom="blue", b_rom="yellow")
     try:

@@ -8,7 +8,7 @@ the gate and MCP subprocesses.
 
 ## Runtime identity
 
-- Python: 3.12.3 for the production gate
+- Python: 3.12.13 for the production gate
 - PyBoy: 2.7.0, fork revision
   `c565df66c3731fad2856169a90f6bbec99925915`
 - Runtime mode: bundled Python source; serial contract
@@ -24,7 +24,7 @@ All commands below were run from the isolated candidate with
 
 | Tier | Command/result | Outcome |
 |---|---|---|
-| Unit + timing | `scripts/production_gate.py --unit-only --repeat-timing 5` | 392/392 unit and 35/35 timing cases passed; both collection entry points passed |
+| Unit + timing | `scripts/production_gate.py --unit-only --repeat-timing 5` | 394/394 unit and 35/35 timing cases passed; both collection entry points passed |
 | Local real-ROM | `scripts/production_gate.py --tier local` at the default 256-cycle slice | 46/46 passed; no skips, xfails, or errors |
 | Remote real-ROM | `scripts/production_gate.py --tier remote` | 11/11 passed for color Red listener/internal-clock and color Blue connector/external-clock |
 | Strict trade | `scripts/production_gate.py --tier trade` | 2/2 passed: local Red/Yellow and controlled Red/Blue subprocess |
@@ -48,11 +48,13 @@ and save/load roundtrip for:
 
 ## Known non-gates and limitations
 
-- `pytest -x -vv -ra` reaches 49 passed and 5 known fixture-walkability skips,
-  then fails at the legacy diagnostic
-  `test_remote_trade_reaches_link_menu_via_tcp[blue-blue]` because
-  `SaveGameData` remains `[0, 0]`. This diagnostic is outside the required
-  acceptance tiers; the full suite is not a release gate until its scope or
+- The formerly failing Blue↔Blue natural LinkMenu diagnostic now passes in
+  targeted reruns, as do the Blue↔Yellow and Yellow↔Blue natural paths. The
+  reverse-direction past-LinkMenu diagnostic
+  `test_remote_rpc_flow_past_link_menu_over_tcp[yellow-blue]` still does not
+  reliably complete: its independent runners can stall in cross-version
+  serial/game-state synchronization. It remains outside the required
+  acceptance tiers; the broad suite is not a release gate until this scope or
   implementation is resolved.
 - `ruff check .` reports 546 findings, including vendored and legacy code.
 - Battle and vanilla fixture provenance is incomplete in
