@@ -253,10 +253,14 @@ python -m pytest -q -ra \
 ```
 
 The diagnostic matrix in this module is broader than the release acceptance
-scope. The current audit reached LinkMenu and completed the diagnostic trade
-route for all nine R/B/Y version orderings. Seven of nine diagnostic battle
-rows reached a complete turn; `blue↔blue` and the `blue→red` attach ordering
-did not reach both move-exchange hooks. The strict local cases are:
+scope. The historical audit reached LinkMenu and completed the diagnostic
+trade route for all nine R/B/Y version orderings. Seven of nine diagnostic
+battle rows reached a complete turn at that historical boundary; `blue↔blue`
+and the `blue→red` attach ordering did not reach both move-exchange hooks. A
+current targeted re-audit reaches LinkMenu for Blue↔Blue and Blue→Red in 520
+frames, but the current strict Red↔Yellow battle rerun fails in the bounded
+scheduler and the Blue battle diagnostics stop after `StartBattle`. The strict
+local cases are:
 
 ```bash
 python -m pytest -q \
@@ -402,10 +406,11 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The local diagnostic battle rows `blue↔blue` and `blue→red` stalled before
-   both sides entered move exchange. The other seven ordered R/B/Y diagnostic
-   battle rows reached a turn, but that does not certify the two failures or
-   the full matrix.
+1. The current strict Red↔Yellow battle rerun fails in the bounded scheduler.
+   Current Blue↔Blue and Blue→Red diagnostics reach `StartBattle` but not
+   `MainInBattleLoop` or move exchange. The historical other seven ordered
+   R/B/Y diagnostic battle rows do not certify the current candidate or the
+   full matrix.
 2. The full real-ROM gate passed at the audited implementation revision, but
    its complete output is not retained in this repository as a release
    evidence bundle.

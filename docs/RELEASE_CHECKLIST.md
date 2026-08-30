@@ -152,8 +152,9 @@ product sign-off remains pending:
 
 - a retained complete implementation-revision real-ROM gate evidence bundle;
 - a retained evidence bundle, including battle-fixture hashes/provenance;
-- resolution of the two diagnostic local battle stalls (`blue↔blue` and
-  `blue→red`), or an explicitly limited product scope that excludes them;
+- a current strict battle pass, including the Red/Yellow rerun that currently
+  fails in the bounded scheduler, plus resolution of the Blue↔Blue and
+  Blue→Red stalls or an explicitly limited product scope that excludes them;
 - repository-wide lint/broad-suite closure, per-ROM single-session coverage,
   reversed roles, native-platform certification, and independent review; and
 - a secure transport decision if cross-host TCP is required. Current TCP is

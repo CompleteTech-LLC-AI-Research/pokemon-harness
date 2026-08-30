@@ -36,18 +36,22 @@ are recorded in [`VERSIONS.md`](VERSIONS.md). Full release sign-off remains
 the broad lint and diagnostic matrix are not clean, and several matrix,
 fixture-provenance, role, and security boundaries remain open.
 
-The audited local diagnostic matrix reached LinkMenu and completed the trade
+The historical local diagnostic matrix reached LinkMenu and completed the trade
 route for all nine ordered Red/Blue/Yellow version pairs. Seven of nine battle
-rows reached a complete turn; `blue↔blue` and the `blue→red` attach ordering
-stalled before both sides entered move exchange. Those rows are not claimed as
-supported. The strict local evidence is color Red + Yellow; the strict remote
-evidence is color Red listener + color Blue connector over independent
-localhost TCP processes. Reversed roles and other pairings remain unverified.
+rows reached a complete turn at that historical boundary; `blue↔blue` and the
+`blue→red` attach ordering stalled before both sides entered move exchange.
+Those rows are not claimed as supported. In the current candidate, targeted
+Blue↔Blue and Blue→Red LinkMenu checks pass in 520 frames, but the current
+strict Red↔Yellow battle rerun fails in the bounded scheduler and the current
+Blue battle diagnostics reach `StartBattle` without reaching
+`MainInBattleLoop`. The strict local evidence is therefore historical, not
+current release sign-off. Reversed roles and other pairings remain unverified.
 
 Current release blockers are explicit:
 
-- the two diagnostic local battle rows above still stall and the full matrix is
-  not certified;
+- the current strict Red↔Yellow battle rerun fails in the bounded scheduler,
+  while Blue↔Blue and Blue→Red still do not reach `MainInBattleLoop`; the full
+  matrix is not certified;
 - the repository-wide Ruff audit reports 546 findings and the broad suite has
   not become a clean production gate;
 - the audited implementation gate output is not retained in this tree as a
