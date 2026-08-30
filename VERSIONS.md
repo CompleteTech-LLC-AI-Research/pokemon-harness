@@ -5,9 +5,11 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: audited 2026-08-30 against the current productionization worktree;
-the changes remain uncommitted and the release gate remains blocked pending a
-clean-checkout rerun and claimed-matrix coverage.
+Status: audited 2026-08-30 against the committed release-audit candidate. The
+clean candidate passes unit 360/360, timing 35/35 across five repetitions,
+local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. The
+certified gameplay scope is limited to local Red/Yellow and remote Red/Blue
+color-variant pairs; other link rows remain unsupported pending acceptance.
 
 ## Runtime
 
@@ -15,6 +17,7 @@ clean-checkout rerun and claimed-matrix coverage.
 |---|---|---|
 | Python | `>=3.11` | `pyproject.toml` |
 | PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `pyproject.toml` |
+| MCP | `>=1.27,<2` | `pyproject.toml` and the stdio acceptance test |
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
@@ -39,7 +42,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/red/pokemon-red.gb` |
 | Symbols | `rom/red/pokemon-red.sym` |
-| Role | Candidate stock DMG Red input |
+| Role | Certified single-session Red input; link gameplay not claimed |
 
 ### Pokémon Red color variant
 
@@ -49,7 +52,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/red/pokemon-red-color.gb` |
 | Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
-| Role | Candidate color-variant input; strict remote Red/Blue trade and battle passed; broader matrix required |
+| Role | Certified local Red/Yellow and remote Red/Blue acceptance listener input |
 
 ### Pokémon Blue (UE)
 
@@ -59,7 +62,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/blue/pokemon-blue.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` |
-| Role | Candidate stock DMG Blue input |
+| Role | Certified single-session Blue input; link gameplay not claimed |
 
 ### Pokémon Blue color variant
 
@@ -69,7 +72,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/blue/pokemon-blue-color.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
-| Role | Candidate color-variant input; strict remote Red/Blue trade and battle passed; broader matrix required |
+| Role | Certified remote Red/Blue acceptance connector input |
 
 ### Pokémon Yellow (UE)
 
@@ -79,7 +82,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/yellow/pokemon-yellow.gbc` |
 | Symbols | `rom/yellow/pokemon-yellow.sym` |
-| Role | Candidate native CGB Yellow input; fixture and runtime gates required |
+| Role | Certified single-session Yellow input and local Red/Yellow acceptance peer |
 
 Other localisations, hacks, and variants are out of scope unless they receive
 their own ROM hash, matching symbols, fixture provenance, and acceptance

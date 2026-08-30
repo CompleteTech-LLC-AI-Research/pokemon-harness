@@ -9,25 +9,26 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-The clean baseline at commit `e219fb5` was not production-certified. This
-working tree contains the productionization changes and live gate evidence
-described below, but it is still uncommitted and therefore is not a release
-artifact. The distinction matters:
+The clean baseline at commit `e219fb5` was not production-certified. The
+productionization candidate is committed on the isolated release-audit branch
+and has reproduced the gate from a clean checkout with external, hash-pinned
+ROM assets. The shared development checkout may still contain unrelated dirty
+work; this status describes the committed candidate:
 
 | Capability | Current status | Evidence boundary |
 |---|---|---|
-| Single-session loading, input, state parsing, and save/load | Implemented; gate evidence available | The unit and real-session tiers require the pinned runtime plus local ROM and symbol files. |
-| MCP stdio server for one session | Implemented; gate evidence available | `tests/test_mcp_stdio_integration.py` is real-ROM and dependency gated. |
+| Single-session loading, input, state parsing, and save/load | Certified for the gated Red/Blue/Yellow inputs | The unit and real-session tiers require the pinned runtime plus local ROM and symbol files. |
+| MCP stdio server for one session | Certified in the fresh install smoke test | `tests/test_mcp_stdio_integration.py` passes with the constrained MCP 1.x dependency. |
 | In-process `LinkPair` | Implemented; canonical local acceptance passed | Red/Yellow strict trade and battle acceptance pass with untouched, ROM-matched fixtures; the broader variant matrix remains diagnostic. |
 | Remote TCP transport and MCP lifecycle | Implemented; strict trade/battle gate evidence available | Native MCP attach/HELLO, two-process LinkMenu, Red/Blue full-trade, and Red/Blue battle-turn checks run on the bundled runtime. |
 | Remote full trade | Implemented; strict acceptance passed | The independent Red/Blue subprocess test completes a natural trade and compares both full 44-byte party-mon records against the peer's original record. |
 | Link battle | Local and remote canonical acceptance passed | Red/Yellow resolves a real move turn locally; independent Red/Blue subprocesses resolve a real battle turn over native TCP serial traffic. |
 | Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
-The release commit must include the explicit `tests/__init__.py` package
-boundary and the bundled PyBoy source tree. Until those files are committed
-and a clean checkout reproduces the recorded gates, this remains a working
-tree status rather than release sign-off.
+The candidate includes the explicit `tests/__init__.py` package boundary and
+the bundled PyBoy source tree. Full release sign-off remains `PARTIAL` until
+symbol provenance/evidence-bundle records and an independent review are
+attached, and until any additional ROM-pair rows are separately accepted.
 
 The required setup, test tiers, evidence format, and sign-off rules are in
 [`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md) and
@@ -40,18 +41,18 @@ The intended release inputs are the exact ROM variants listed in
 
 | Game | Input | Status |
 |---|---|---|
-| Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Candidate; hash and real-ROM gate required |
-| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Canonical local Red/Yellow link acceptance passed; broader matrix pending |
-| Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Candidate; hash and real-ROM gate required |
-| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Strict remote Red/Blue trade acceptance passed; broader matrix pending |
-| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Canonical local Red/Yellow link acceptance passed; broader matrix pending |
+| Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Single-session gate passed; link gameplay not claimed |
+| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Certified in the local Red/Yellow and remote Red/Blue acceptance roles |
+| Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Single-session gate passed; link gameplay not claimed |
+| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Certified as the remote Red/Blue acceptance connector |
+| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Certified as the local Red/Yellow acceptance peer |
 | Other localisations and ROM hacks | — | Out of scope |
 
-“Candidate” means that the file layout and code paths exist. The current
-stateful acceptance scope is the local Red/Yellow pair and the independent-
-process Red/Blue remote trade and battle, using the bundled source-runtime
-build. It does not imply that every listed variant or remote pairing has a
-repeatable, green, release-gate result.
+The certified stateful scope is the local Red/Yellow pair and the
+independent-process Red/Blue color pair for remote trade and battle, using the
+bundled source-runtime build. Stock-ROM link pairs, Blue/Yellow pairs, reversed
+variant combinations, and other unlisted rows are unsupported for this
+release until they receive their own fixtures and acceptance results.
 
 ## Requirements and clean install
 
@@ -60,7 +61,7 @@ Requirements:
 - Python 3.11 or newer.
 - The bundled PyBoy runtime (`2.7.0`, harness revision
   `c565df66c3731fad2856169a90f6bbec99925915`).
-- `mcp`, which is a runtime dependency of the package.
+- `mcp>=1.27,<2`, the certified runtime API used by the server.
 - A legally obtained ROM and a matching debug symbol file for any real-ROM
   run.
 
@@ -188,9 +189,9 @@ their exact ROM, fixture, and runtime combination is separately certified.
 Configure the peer before launching the MCP server:
 
 ```bash
-export POKERED_PEER_ROM_PATH=rom/blue/pokemon-blue-color.gb
-export POKERED_PEER_SYM_PATH=rom/blue/pokemon-blue.sym
-export POKERED_PEER_ROM_SHA1=5f4b05725a860e04077045462176d3e2771c5022
+export POKERED_PEER_ROM_PATH=rom/yellow/pokemon-yellow.gbc
+export POKERED_PEER_SYM_PATH=rom/yellow/pokemon-yellow.sym
+export POKERED_PEER_ROM_SHA1=cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1
 ```
 
 Then call `link_pair`, use `link_step`, and call `link_unpair` when finished.

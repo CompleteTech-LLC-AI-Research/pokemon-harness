@@ -7,13 +7,15 @@ runtime evidence required by the relevant capability.
 ## Current audit status
 
 The baseline at commit `e219fb5` (2026-08-29) was not production-ready. The
-current working tree addresses the collection boundary, portable `.mcp.json`,
-bundled PyBoy source runtime, path-aware ROM pinning, native local/TCP serial
-attachment, teardown, and tiered gate reporting. Its live evidence is still
-not release sign-off because the changes are uncommitted and the broad matrix
-is not certified.
+committed release-audit candidate addresses the collection boundary, portable
+`.mcp.json`, bundled PyBoy source runtime, path-aware ROM pinning, native
+local/TCP serial attachment, teardown, dependency pinning, and tiered gate
+reporting. The candidate worktree is clean and the required tier runs pass;
+full sign-off remains partial because symbol provenance, evidence-bundle
+attachment, independent review, and unlisted matrix rows are outside the
+current candidate.
 
-Current working-tree evidence:
+Committed-candidate evidence:
 
 - unit: 360/360 passed;
 - timing: 35/35 passed across five repetitions;
@@ -29,41 +31,41 @@ Red/Yellow fixture pair, and the remote pass is evidence for the exact
 Red/Blue color-variant subprocess pair. They do not certify the unrun variant
 rows.
 
-These are evidence boundaries, not waived checklist items. The release commit
-must include `tests/__init__.py`, the pinned vendor source files, and the gate
-script before reproducing the results from a clean checkout.
+These are evidence boundaries, not waived checklist items. The candidate
+includes `tests/__init__.py`, the pinned vendor source files, and the gate
+script, and the results were reproduced from the isolated clean checkout.
 
 ## Source and artifact hygiene
 
-- [ ] The release commit is identified and the worktree is clean.
-- [ ] No ROM, `.sym`, `.sav`, `.state`, screenshot, log, cache, or other
+- [x] The release commit is identified and the worktree is clean.
+- [x] No ROM, `.sym`, `.sav`, `.state`, screenshot, log, cache, or other
   ROM-derived artifact is tracked.
-- [ ] The package metadata, README, `VERSIONS.md`, and this checklist agree on
+- [x] The package metadata, README, `VERSIONS.md`, and this checklist agree on
   the release commit and supported scope.
-- [ ] No machine-local path, placeholder hash, credential, or unreviewed
+- [x] No machine-local path, placeholder hash, credential, or unreviewed
   generated file appears in release documentation.
 
 ## Runtime and dependency identity
 
-- [ ] Python version is 3.11 or newer and is recorded.
-- [ ] `python -m pip check` passes in the release environment.
-- [ ] The installed PyBoy runtime is `2.7.0` with harness revision
+- [x] Python version is 3.11 or newer and is recorded.
+- [x] `python -m pip check` passes in the release environment.
+- [x] The installed PyBoy runtime is `2.7.0` with harness revision
   `c565df66c3731fad2856169a90f6bbec99925915`, and the source-runtime build
   mode is recorded.
-- [ ] If link support is claimed, the exact runtime exposes the serial objects
+- [x] If link support is claimed, the exact runtime exposes the serial objects
   used by the link layer and the same runtime is used for every link test.
-- [ ] No standalone PyBoy wheel shadows the bundled runtime; the resolved
+- [x] No standalone PyBoy wheel shadows the bundled runtime; the resolved
   module path and serial contract are recorded by the production gate.
 
 ## ROM and symbol identity
 
-- [ ] Every ROM used by the release is legally sourced and matches a SHA-1 in
+- [x] Every ROM used by the release is legally sourced and matches a SHA-1 in
   [`VERSIONS.md`](../VERSIONS.md).
-- [ ] `POKERED_ROM_SHA1` is explicit for every launch and test run.
-- [ ] `POKERED_SKIP_SHA1` is unset for release evidence.
+- [x] `POKERED_ROM_SHA1` is explicit for every launch and test run.
+- [x] `POKERED_SKIP_SHA1` is unset for release evidence.
 - [ ] Each symbol file matches its ROM and records its own SHA-1, generator
   source commit, RGBDS version, and build flags.
-- [ ] Symbol-label checks pass for every claimed game version.
+- [x] Symbol-label checks pass for every claimed game version.
 
 ## Test gates
 
@@ -127,5 +129,8 @@ script before reproducing the results from a clean checkout.
   protocol test, or RAM-mutated fixture is described as a completed gameplay
   acceptance.
 
-**Release decision:** `BLOCKED` until every required item above is checked and
-the evidence bundle is attached to the exact release commit.
+**Release decision:** `PARTIAL`. The certified source/runtime and gameplay
+scope is green, but full product sign-off remains pending symbol-file
+provenance and hash records, the retained evidence bundle, independent review,
+and acceptance of any additional ROM-pair rows. Do not advertise those rows as
+supported until their own fixtures and gates pass.

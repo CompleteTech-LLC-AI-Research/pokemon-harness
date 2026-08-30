@@ -1,11 +1,9 @@
 # Production runbook
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
-checkout. The baseline at commit `e219fb5` was not certified; the current
-working tree adds the bundled runtime, native link lifecycle, and tiered gate.
-Live results from a dirty working tree are development evidence only until a
-clean release commit reproduces them. The release decision is recorded in the
-[release checklist](RELEASE_CHECKLIST.md).
+checkout. The baseline at commit `e219fb5` was not certified; the committed
+release-audit candidate adds the bundled runtime, native link lifecycle, and
+tiered gate. The release decision is recorded in the [release checklist](RELEASE_CHECKLIST.md).
 
 Current evidence boundary: the latest pinned-interpreter gate reports unit
 360/360, timing 35/35 across five repetitions, local 46/46, remote 11/11,
@@ -13,9 +11,10 @@ trade 2/2, and battle 2/2. The strict local Red/Yellow trade and battle cases
 pass with untouched legal fixtures. The independent-process Red/Blue trade and
 battle cases pass through native bit-level serial traffic; trade compares both
 full party records and battle advances through move exchange and execution on
-both processes. The release gate remains `BLOCKED` until the changes are
-committed, the claimed matrix is rerun from a clean checkout, and the evidence
-bundle is attached to that release commit.
+both processes. These results establish the certified candidate scope. Overall
+release status remains `PARTIAL` until symbol provenance/evidence-bundle
+records and independent review are attached; unlisted ROM-pair rows remain
+unsupported.
 
 ## 1. Start from a clean checkout
 
@@ -92,9 +91,9 @@ requires no unexpected skips, xfails, failures, or timeouts in any tier marked
 required below. Fixture-gated tests may be skipped during development, but a
 skip is not a passing release result.
 
-The release tree must include `tests/__init__.py`; otherwise environments that
-do not treat `tests/` as a namespace package can fail collection. Run both
-invocation forms after the package boundary is included in the release commit.
+The release tree includes `tests/__init__.py`; otherwise environments that do
+not treat `tests/` as a namespace package can fail collection. Run both
+invocation forms for every release candidate.
 
 For a machine-readable report, run the gate from the repository root:
 
