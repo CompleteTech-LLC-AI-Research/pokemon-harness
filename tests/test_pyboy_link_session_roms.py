@@ -468,8 +468,6 @@ def _drive_two_sessions_to_link_menu(
 TRADE_CENTER_MAP_ID = 0xEF  # per pokeyellow/constants/map_constants.asm
 COLOSSEUM_MAP_ID = 0xF0
 PARTY_MON_SIZE = 44  # bytes per party-mon record (wPartyMon1..6)
-PARTY_OT_SIZE = 11
-PARTY_NICK_SIZE = 11
 
 
 def _party_raw_summary(session) -> dict[str, object]:
@@ -495,6 +493,7 @@ def _assert_battle_fixture_is_legal(session) -> None:
     mons_addr = addr_of("wPartyMons")
     count = int(pb.memory[count_addr])
     assert count >= 3, f"battle fixture has only {count} party Pokémon"
+    assert count <= 6, f"battle fixture has invalid party count {count}"
     assert int(pb.memory[species_addr + count]) == 0xFF
     for slot in range(count):
         species = int(pb.memory[species_addr + slot])
@@ -503,57 +502,93 @@ def _assert_battle_fixture_is_legal(session) -> None:
         assert int(pb.memory[mon_addr]) == species
         hp = (int(pb.memory[mon_addr + 1]) << 8) | int(pb.memory[mon_addr + 2])
         assert hp > 0
+        saw_empty_move = False
         for move_idx in range(4):
             move_id = int(pb.memory[mon_addr + 8 + move_idx])
             pp = int(pb.memory[mon_addr + 29 + move_idx]) & 0x3F
-            assert move_id == 0 or pp > 0
+            if move_id == 0:
+                saw_empty_move = True
+                assert pp == 0, (
+                    f"{session!r} party slot {slot} has PP for an empty "
+                    f"move slot {move_idx}: pp={pp}"
+                )
+            else:
+                assert not saw_empty_move, (
+                    f"{session!r} party slot {slot} has a move after an "
+                    f"empty slot: index={move_idx}, move={move_id}"
+                )
+                assert move_id < 0xFF
+                assert pp > 0, (
+                    f"{session!r} party slot {slot} move {move_idx} "
+                    f"({move_id}) has no PP"
+                )
+
+    lead_addr = mons_addr
+    assert any(
+        int(pb.memory[lead_addr + 8 + move_idx]) != 0
+        and (int(pb.memory[lead_addr + 29 + move_idx]) & 0x3F) > 0
+        for move_idx in range(4)
+    ), "battle fixture lead has no usable move"
 
 
-def _pad_party_to_3(session) -> None:
-    """Colosseum requires ≥3 Pokémon — duplicate the lead into slots 1,2.
+def _read_active_battle_moves(session) -> tuple[tuple[int, int], ...]:
+    """Read the ROM-owned active move/PP slots without changing emulator RAM."""
+    pb = session._pyboy
+    addr_of = session.symbols.addr_of
+    moves_addr = addr_of("wBattleMonMoves")
+    pp_addr = addr_of("wBattleMonPP")
+    return tuple(
+        (
+            int(pb.memory[moves_addr + move_idx]),
+            int(pb.memory[pp_addr + move_idx]) & 0x3F,
+        )
+        for move_idx in range(4)
+    )
 
-    The Cable Club fixture (``cerulean_pc`` walkthrough milestone) has a
-    single-mon party. Link battles in Colosseum enforce a 3-mon minimum,
-    so we patch the party in RAM rather than regenerating the fixture.
-    This mimics what a player would do by filling the PC withdrawals.
+
+def _assert_active_battle_state_is_legal(session) -> tuple[int, int]:
+    """Validate ROM-populated battle state and return ``(slot, move_id)``.
+
+    A depleted move is legal game state, so the active move list may contain
+    non-zero move IDs with zero PP.  The driver must select a different slot
+    through the real move menu; it must never repair PP or any other RAM field.
     """
     pb = session._pyboy
     addr_of = session.symbols.addr_of
-    count_addr = addr_of("wPartyCount")
-    species_addr = addr_of("wPartySpecies")
-    mons_addr = addr_of("wPartyMons")
-    ot_addr = addr_of("wPartyMonOT")
-    nick_addr = addr_of("wPartyMonNicks")
+    party_species = int(pb.memory[addr_of("wPartySpecies")])
+    active_species = int(pb.memory[addr_of("wBattleMonSpecies")])
+    assert active_species == party_species, (
+        f"active battle species {active_species} does not match lead "
+        f"party species {party_species}"
+    )
+    hp_addr = addr_of("wBattleMonHP")
+    max_hp_addr = addr_of("wBattleMonMaxHP")
+    hp = (int(pb.memory[hp_addr]) << 8) | int(pb.memory[hp_addr + 1])
+    max_hp = (int(pb.memory[max_hp_addr]) << 8) | int(pb.memory[max_hp_addr + 1])
+    assert 0 < hp <= max_hp, f"invalid active battle HP {hp}/{max_hp}"
 
-    if pb.memory[count_addr] >= 3:
-        return
-
-    # Some cable_club fixtures were saved mid-grind with depleted PP on
-    # the lead's moves. Restore any zero-PP moves to a safe non-zero
-    # value (keeps PP-Up bits intact in the top 2 bits). Otherwise the
-    # battle test's "press A on first move" would land on a 0-PP move,
-    # the menu would beep, and LinkBattleExchangeData would never fire.
-    for i in range(4):
-        pp_addr = mons_addr + 29 + i
-        pp_byte = pb.memory[pp_addr]
-        if (pp_byte & 0x3F) == 0:
-            pb.memory[pp_addr] = (pp_byte & 0xC0) | 0x0A
-
-    lead_species = pb.memory[species_addr]
-    lead_mon = [pb.memory[mons_addr + i] for i in range(PARTY_MON_SIZE)]
-    lead_ot = [pb.memory[ot_addr + i] for i in range(PARTY_OT_SIZE)]
-    lead_nick = [pb.memory[nick_addr + i] for i in range(PARTY_NICK_SIZE)]
-
-    for slot in (1, 2):
-        pb.memory[species_addr + slot] = lead_species
-        for i, byte in enumerate(lead_mon):
-            pb.memory[mons_addr + slot * PARTY_MON_SIZE + i] = byte
-        for i, byte in enumerate(lead_ot):
-            pb.memory[ot_addr + slot * PARTY_OT_SIZE + i] = byte
-        for i, byte in enumerate(lead_nick):
-            pb.memory[nick_addr + slot * PARTY_NICK_SIZE + i] = byte
-    pb.memory[species_addr + 3] = 0xFF  # species list terminator
-    pb.memory[count_addr] = 3
+    active_moves = _read_active_battle_moves(session)
+    saw_empty_move = False
+    usable_slots: list[int] = []
+    for move_idx, (move_id, pp) in enumerate(active_moves):
+        if move_id == 0:
+            saw_empty_move = True
+            assert pp == 0, (
+                f"active move slot {move_idx} is empty but has PP {pp}"
+            )
+            continue
+        assert not saw_empty_move, (
+            f"active move slot {move_idx} is populated after an empty slot"
+        )
+        assert move_id < 0xFF
+        if pp > 0:
+            usable_slots.append(move_idx)
+    assert usable_slots, (
+        f"active battle mon has no usable move: "
+        f"moves={[move for move, _ in active_moves]}, "
+        f"pp={[pp for _, pp in active_moves]}"
+    )
+    return usable_slots[0], active_moves[usable_slots[0]][0]
 
 
 @pytest.mark.parametrize(
@@ -1116,6 +1151,7 @@ _BATTLE_DIAG_SYMBOLS = (
     "DisplayLinkBattleVersusTextBox",
     "BattleTransition",
     "MainInBattleLoop",
+    "DisplayBattleMenu",
     "MoveSelectionMenu",
     "LinkBattleExchangeData",
     "ExecutePlayerMove",
@@ -1243,14 +1279,14 @@ def _drive_complete_battle_turn(
 
     1. Walk onto the hidden-event trigger tile (same tiles as Trade
        Center: (4,4) for master, (5,4) for slave).
-    2. A-mash past "JUST A MOMENT!" → ``CableClub_DoBattleOrTrade``
-       runs its big trainer+party data block exchange.
+    2. Wait without input for ``CableClub_DoBattleOrTrade`` to run its big
+       trainer+party data block exchange.
     3. ``DisplayLinkBattleVersusTextBox`` + ``BattleTransition`` fire —
        the battle intro animation plays.
-    4. A-mash through battle start; ``MainInBattleLoop`` + ``MoveSelectionMenu``
-       fire.
-    5. Press A on the main battle menu (FIGHT is item 0) to open move list,
-       press A again to pick the first move.
+    4. Wait for ``MainInBattleLoop``/``DisplayBattleMenu`` before pressing
+       A once to choose FIGHT; no input is sent during the intro transition.
+    5. Read the ROM-populated active move/PP buffers, move the real menu
+       cursor to the first move with PP remaining, and press A once.
     6. ``LinkBattleExchangeData`` nibble-exchanges both sides' moves.
     7. ``ExecutePlayerMove`` / ``ExecuteEnemyMove`` / ``PlayerCalcMoveDamage``
        fire as the turn resolves.
@@ -1262,9 +1298,14 @@ def _drive_complete_battle_turn(
     """
     cct = counters["CableClub_DoBattleOrTrade"]
     vs = counters["DisplayLinkBattleVersusTextBox"]
+    main = counters["MainInBattleLoop"]
+    battle_menu = counters["DisplayBattleMenu"]
     mm = counters["MoveSelectionMenu"]
     lbe = counters["LinkBattleExchangeData"]
     dmg = counters["PlayerCalcMoveDamage"]
+    selected_move_slots: list[int] = []
+    selected_move_ids: list[int] = []
+    active_move_choices: list[tuple[tuple[int, int], ...]] = []
 
     def tick_interleaved(frames: int) -> None:
         link.step_interleaved(frames, chunk_cycles=_LINK_CHUNK_CYCLES)
@@ -1274,13 +1315,39 @@ def _drive_complete_battle_turn(
             a.step(1)
             b.step(1)
 
+    if step_frames <= 0:
+        raise ValueError("step_frames must be positive")
+    if battle_budget_frames < 0:
+        raise ValueError("battle_budget_frames must be non-negative")
+
+    phase_frames = 0
+    remaining_budget = battle_budget_frames
+
+    def tick_bounded(frames: int) -> int:
+        """Advance at most the remaining post-CCT budget."""
+        nonlocal phase_frames, remaining_budget
+        chunk = min(frames, remaining_budget)
+        if chunk <= 0:
+            return 0
+        tick_interleaved(chunk)
+        phase_frames += chunk
+        remaining_budget -= chunk
+        return chunk
+
+    def wait_interleaved(predicate) -> bool:
+        """Poll a ROM milestone within one shared finite frame budget."""
+        while remaining_budget > 0 and not predicate():
+            tick_bounded(step_frames)
+        return bool(predicate())
+
     # Walk onto trigger tiles — same direction rules as trade flow.
-    conn_a = a._pyboy.memory[a.symbols.addr_of("hSerialConnectionStatus")]
-    conn_b = b._pyboy.memory[b.symbols.addr_of("hSerialConnectionStatus")]
+    conn_a = int(a._pyboy.memory[a.symbols.addr_of("hSerialConnectionStatus")])
+    conn_b = int(b._pyboy.memory[b.symbols.addr_of("hSerialConnectionStatus")])
     INTERNAL = 0x02
     dir_a = "right" if conn_a == INTERNAL else "left"
     dir_b = "right" if conn_b == INTERNAL else "left"
 
+    trigger_frames = 0
     for _ in range(4):
         if cct[0] > 0 and cct[1] > 0:
             break
@@ -1290,36 +1357,122 @@ def _drive_complete_battle_turn(
         # CableClub_DoBattleOrTrade exchange is bit-level serial traffic.
         for _ in range(step_frames):
             tick_per_frame(1)
+            trigger_frames += 1
             if cct[0] > 0 or cct[1] > 0:
                 break
 
-    # A-mash past "JUST A MOMENT!" to kick off the big exchange.
-    settle = 0
-    while settle < 1800 and not (cct[0] > 0 and cct[1] > 0):
-        a.press("a", duration=4)
-        b.press("a", duration=4)
-        if cct[0] > 0 or cct[1] > 0:
-            tick_interleaved(step_frames)
-        else:
-            tick_per_frame(step_frames)
-        settle += step_frames
+    # Once one side enters the serial-heavy function, keep both CPUs
+    # interleaved.  There is no dialog input to acknowledge here: the ROM's
+    # battle intro is a timed transition, and injecting A while it runs can
+    # be consumed by a later menu in a role-dependent way.
+    if not (cct[0] > 0 and cct[1] > 0):
+        remaining = max(0, 1800 - trigger_frames)
+        while remaining > 0 and not (cct[0] > 0 and cct[1] > 0):
+            if cct[0] > 0 or cct[1] > 0:
+                chunk = min(step_frames, remaining)
+                tick_interleaved(chunk)
+                phase_frames += chunk
+                remaining -= chunk
+            else:
+                tick_per_frame(1)
+                trigger_frames += 1
+                remaining -= 1
 
-    # Sub-frame interleaving from here — CableClub_DoBattleOrTrade's
-    # block exchange plus the post-exchange move-nibble loop is all
-    # serial-heavy.
-    extra_frames = 0
-    attempts = battle_budget_frames // step_frames
-    for _ in range(attempts):
-        if dmg[0] > 0 and dmg[1] > 0:
-            break
-        tick_interleaved(step_frames)
-        extra_frames += step_frames
-        # A-mash to advance battle-intro dialogs, main-menu FIGHT, and
-        # move-list selection (item 0 = first move). The game's battle
-        # UI accepts A-mash at every "waiting for player" point and
-        # falls through to defaults.
-        a.press("a", duration=4)
-        b.press("a", duration=4)
+    # These waits are bounded and intentionally input-free.  Returning a
+    # diagnostic without fabricating input preserves the existing callers'
+    # strict milestone assertions while making a scheduler/ROM stall visible.
+    if cct[0] > 0 and cct[1] > 0:
+        wait_interleaved(lambda: vs[0] > 0 and vs[1] > 0)
+    if vs[0] > 0 and vs[1] > 0:
+        wait_interleaved(
+            lambda: (
+                main[0] > 0
+                and main[1] > 0
+                and battle_menu[0] > 0
+                and battle_menu[1] > 0
+            ),
+        )
+
+    menu_ready = (
+        main[0] > 0
+        and main[1] > 0
+        and battle_menu[0] > 0
+        and battle_menu[1] > 0
+    )
+    if menu_ready:
+        # Let both ROMs finish drawing/entering HandleMenuInput, then select
+        # FIGHT exactly once on each real battle menu.
+        if tick_bounded(min(step_frames, 4)):
+            a.press("a")
+            b.press("a")
+            wait_interleaved(lambda: mm[0] > 0 and mm[1] > 0)
+
+    move_menu_ready = mm[0] > 0 and mm[1] > 0
+    if move_menu_ready:
+        # The hook fires at function entry.  Give the ROM enough input-free
+        # time to install the menu cursor before inspecting it.
+        settle = min(step_frames, 4)
+        tick_bounded(settle)
+
+        slot_a, move_a = _assert_active_battle_state_is_legal(a)
+        slot_b, move_b = _assert_active_battle_state_is_legal(b)
+        active_a = _read_active_battle_moves(a)
+        active_b = _read_active_battle_moves(b)
+        active_move_choices.extend((active_a, active_b))
+        selected_move_slots.extend((slot_a, slot_b))
+        selected_move_ids.extend((move_a, move_b))
+
+        def known_move_count(slots: tuple[tuple[int, int], ...]) -> int:
+            count = 0
+            for move_id, _pp in slots:
+                if move_id == 0:
+                    break
+                count += 1
+            assert count > 0
+            return count
+
+        def menu_cursor(session, move_count: int) -> int:
+            cursor = int(
+                session._pyboy.memory[
+                    session.symbols.addr_of("wCurrentMenuItem")
+                ]
+            )
+            assert 1 <= cursor <= move_count, (
+                f"invalid move-menu cursor {cursor} for {move_count} moves"
+            )
+            return cursor - 1
+
+        count_a = known_move_count(active_a)
+        count_b = known_move_count(active_b)
+        cursor_a = menu_cursor(a, count_a)
+        cursor_b = menu_cursor(b, count_b)
+        remaining_down = [
+            (slot_a - cursor_a) % count_a,
+            (slot_b - cursor_b) % count_b,
+        ]
+        while remaining_down[0] or remaining_down[1]:
+            if remaining_down[0]:
+                a.press("down")
+                remaining_down[0] -= 1
+            if remaining_down[1]:
+                b.press("down")
+                remaining_down[1] -= 1
+            tick_bounded(min(step_frames, 2))
+
+        assert menu_cursor(a, count_a) == slot_a
+        assert menu_cursor(b, count_b) == slot_b
+
+        # A legal move is now selected through the ROM's own menu handling.
+        # No subsequent input is injected while link exchange or damage code
+        # runs.
+        a.press("a")
+        b.press("a")
+
+    # Keep the original bounded resolution window and acceptance semantics:
+    # callers decide whether link exchange, execution, or damage is required
+    # for their tier.  Crucially, this loop never sends blind input.
+    while remaining_budget > 0 and not (dmg[0] > 0 and dmg[1] > 0):
+        tick_bounded(step_frames)
 
     return {
         "cct": cct,
@@ -1327,7 +1480,14 @@ def _drive_complete_battle_turn(
         "mm": mm,
         "lbe": lbe,
         "dmg": dmg,
-        "battle_phase_frames": extra_frames,
+        "main": main,
+        "battle_menu": battle_menu,
+        "menu_ready": menu_ready,
+        "move_menu_ready": move_menu_ready,
+        "active_move_choices": active_move_choices,
+        "selected_move_slots": selected_move_slots,
+        "selected_move_ids": selected_move_ids,
+        "battle_phase_frames": phase_frames,
         "counters": counters,
     }
 
