@@ -142,6 +142,7 @@ The complete gate command uses the same interpreter as the activated
 environment and keeps its report outside the checkout:
 
 ```bash
+EVIDENCE_DIR="$(mktemp -d)"
 POKERED_ROM_ROOT="$PWD/rom" \
 POKERED_FIXTURE_ROOT="$PWD/tests/fixtures/link" \
 python scripts/production_gate.py \
@@ -150,14 +151,20 @@ python scripts/production_gate.py \
   --fixture-root "$PWD/tests/fixtures/link" \
   --python "$(command -v python)" \
   --repeat-timing 5 \
+  --evidence-dir "$EVIDENCE_DIR" \
   --format text
 ```
 
-Use `--format json` and redirect to a file outside the checkout when a
-machine-readable report must be retained. `--unit-only` proves only the
-ROM-free and timing tiers; it is not a production sign-off. The default gate
-checks five pinned ROM paths, three symbol paths, and three default fixture
-paths before running all required tiers.
+`--evidence-dir` writes `gate-report.json`, `gate-report.txt`, and
+`evidence-manifest.json`. The bundle contains metadata, asset hashes and
+sizes, runtime identity, tier results, and bounded/redacted diagnostics; it
+does not copy ROM or fixture bytes, inherit environment variables into the
+report, or retain absolute local paths. The manifest hashes the two report
+files so a retained bundle can be checked for accidental modification. A
+failed or blocked run still writes its status and diagnostics. `--unit-only`
+proves only the ROM-free and timing tiers; it is not a production sign-off.
+The default gate checks five pinned ROM paths, three symbol paths, and three
+default fixture paths before running all required tiers.
 
 The current candidate has not passed a repository-wide Ruff audit: `ruff check
 .` reports 540 findings, including legacy and vendored-runtime code. Treat
@@ -169,15 +176,17 @@ The release tree includes `tests/__init__.py`; otherwise environments that do
 not treat `tests/` as a namespace package can fail collection. Run both
 invocation forms for every release candidate.
 
-For a machine-readable report, run the gate from the repository root:
+For a machine-readable report plus the human-readable report and manifest, run
+the gate from the repository root:
 
 ```bash
-python scripts/production_gate.py --format json > production-gate.json
+python scripts/production_gate.py --evidence-dir /tmp/pokered-gate-evidence
 ```
 
 The command fails closed when required ROMs, symbols, fixtures, or acceptance
-tests are missing. Keep the report outside version control if it contains
-local paths or ROM-derived details.
+tests are missing. Keep the evidence directory outside version control. The
+stdout `--format json` output remains available for callers that need it, but
+the evidence directory is the retained, sanitized bundle.
 
 ## 4. Run the evidence tiers
 
@@ -418,9 +427,10 @@ are:
    394/394, local 46/46, remote 11/11, strict trade 2/2, and strict battle
    2/2), but the broader Blue/Red/Yellow battle matrix is not certified.
    Blue↔Blue and Blue→Red remain diagnostic only.
-2. The full real-ROM gate passed at the audited implementation revision, but
-   its complete output is not retained in this repository as a release
-   evidence bundle.
+2. The historical full real-ROM gate passed, but its complete output was not
+   retained as a release evidence bundle. The gate now provides
+   `--evidence-dir`; no new complete bundle has been generated for this
+   candidate yet, so the next full run must use that option.
 3. `ruff check .` reported 540 findings, and the broad suite is not a clean
    production gate.
 4. The five-row single-session matrix, reversed listener/connector roles,

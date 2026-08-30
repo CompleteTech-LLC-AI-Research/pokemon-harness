@@ -6,15 +6,19 @@ import hashlib
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from tests._rom_assets import find_fixture_root, find_rom_root, fixture_path, rom_path, sym_path
+from tests._rom_assets import (
+    find_fixture_root,
+    find_rom_root,
+    fixture_path,
+    rom_path,
+    sym_path,
+)
 from tests._tier_config import classify_test
-
 
 _GATE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "production_gate.py"
 _SPEC = importlib.util.spec_from_file_location("pokered_production_gate", _GATE_PATH)
@@ -262,3 +266,101 @@ def test_collection_preflight_runs_module_and_console_commands(tmp_path, monkeyp
         [str(python), "-m", "pytest", "--collect-only", "-q"],
         [str(console), "--collect-only", "-q"],
     ]
+
+
+def test_evidence_bundle_is_portable_sanitized_and_diagnostic(tmp_path):
+    project_root = tmp_path / "checkout"
+    rom_root = project_root / "rom"
+    fixture_root = project_root / "tests" / "fixtures" / "link"
+    asset_path = rom_root / "red" / "pokemon-red.gb"
+    asset_path.parent.mkdir(parents=True)
+
+    runtime = {
+        "python_executable": str(project_root / ".venv" / "bin" / "python"),
+        "python_version": "3.12.13",
+        "pyboy_module": str(project_root / "vendor" / "pyboy-src" / "pyboy"),
+        "pyboy_import_error": "Authorization: Bearer topsecret b'ROM_BYTES'",
+    }
+    collections = [
+        gate.CollectionResult(
+            name="python-module",
+            command=[str(project_root / ".venv" / "bin" / "python"), "-m", "pytest"],
+            status="PASS",
+            returncode=0,
+        )
+    ]
+    tiers = [
+        gate.TierResult(
+            name="remote",
+            description="remote",
+            expression="remote",
+            required=True,
+            status="FAIL",
+            counts=gate.Counts(total=1, failed=1),
+            returncodes=[1],
+            output_tail="password=topsecret b'ROM_BYTES'\nassertion failed",
+            reason="peer failed at /sensitive/path",
+            iteration_failures=["iteration 1: token=topsecret"],
+        )
+    ]
+    payload = gate.build_evidence_payload(
+        project_root=project_root,
+        rom_root=rom_root,
+        fixture_root=fixture_root,
+        runtime=runtime,
+        assets=[
+            gate.AssetRecord(
+                label="red-stock",
+                kind="rom",
+                path=str(asset_path),
+                status="ok",
+                size=123,
+                actual_sha1="a" * 40,
+            )
+        ],
+        collections=collections,
+        tiers=tiers,
+        gate_problems=["credential=topsecret at " + str(project_root)],
+        overall="FAIL",
+    )
+
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "topsecret" not in serialized
+    assert "ROM_BYTES" not in serialized
+    assert str(tmp_path) not in serialized
+    assert "/sensitive/path" not in serialized
+    assert payload["assets"][0]["path"] == "<rom-root>/red/pokemon-red.gb"
+    assert payload["tiers"][0]["status"] == "FAIL"
+    assert "assertion failed" in payload["tiers"][0]["output_tail"]
+
+    evidence_dir = tmp_path / "evidence" / "partial-run"
+    paths = gate.write_evidence_bundle(evidence_dir, payload)
+    assert set(paths) == {"report", "text", "manifest"}
+    assert {path.name for path in paths.values()} == {
+        "gate-report.json",
+        "gate-report.txt",
+        "evidence-manifest.json",
+    }
+    report = json.loads(paths["report"].read_text(encoding="utf-8"))
+    manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+    assert report["overall"] == "FAIL"
+    assert report["tiers"][0]["iteration_failures"]
+    assert manifest["overall"] == "FAIL"
+    assert {entry["path"] for entry in manifest["files"]} == {
+        "gate-report.json",
+        "gate-report.txt",
+    }
+    report_hash = hashlib.sha256(paths["report"].read_bytes()).hexdigest()
+    assert next(
+        entry for entry in manifest["files"] if entry["path"] == "gate-report.json"
+    )["sha256"] == report_hash
+    text = paths["text"].read_text(encoding="utf-8")
+    assert "overall: FAIL" in text
+    assert "assertion failed" in text
+    assert "topsecret" not in text
+    assert "ROM_BYTES" not in text
+
+
+def test_parser_accepts_evidence_directory():
+    args = gate.build_parser().parse_args(["--evidence-dir", "retained-evidence"])
+    assert args.evidence_dir == Path("retained-evidence")

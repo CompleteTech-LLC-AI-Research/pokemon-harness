@@ -17,6 +17,27 @@ vanilla entries retain hashes but have `unknown` or `partial` provenance
 because their source-state hashes, runtime identity, and capture commands were
 not retained.
 
+## Production gate evidence bundles
+
+The production gate can retain a portable, sanitized result bundle without
+copying ROMs, save states, or environment variables:
+
+```bash
+python scripts/production_gate.py \
+  --evidence-dir /tmp/pokered-gate-evidence \
+  --format text
+```
+
+The directory contains `gate-report.json`, `gate-report.txt`, and
+`evidence-manifest.json`. The manifest records the report files' sizes and
+SHA-256 values. Reports retain runtime identity, asset hashes and sizes,
+collection/tier outcomes, and bounded failure diagnostics. Absolute local
+paths are replaced with placeholders, and free-form diagnostics are bounded
+and redacted for credential and binary-looking data. A `FAIL` or `BLOCKED`
+run is retained as such; it must not be reinterpreted as a pass. Keep the
+evidence directory outside the checkout unless its generated files are
+explicitly intended for review.
+
 Validate only the checked-in manifest in an asset-free checkout:
 
 ```bash

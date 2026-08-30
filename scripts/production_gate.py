@@ -10,6 +10,7 @@ Examples::
     python scripts/production_gate.py
     python scripts/production_gate.py --unit-only
     python scripts/production_gate.py --tier remote --repeat-timing 5
+    python scripts/production_gate.py --unit-only --evidence-dir /tmp/pokered-evidence
 
 The default command is strict for every selected tier, including the
 stateful trade and battle acceptance cases. Missing ROMs or derived fixtures
@@ -30,10 +31,11 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
-
+from typing import Any
 
 KNOWN_ROM_FILES: tuple[tuple[str, Path], ...] = (
     ("red-stock", Path("red/pokemon-red.gb")),
@@ -83,6 +85,10 @@ DEFAULT_TIMEOUT_SECONDS: dict[str, float] = {
     "timing": 900.0,
 }
 COLLECTION_TIMEOUT_SECONDS = 300.0
+EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_REPORT_FILENAME = "gate-report.json"
+EVIDENCE_TEXT_FILENAME = "gate-report.txt"
+EVIDENCE_MANIFEST_FILENAME = "evidence-manifest.json"
 GATE_CONTROLLED_ENVIRONMENT = (
     "PYTEST_ADDOPTS",
     "PYTEST_PLUGINS",
@@ -96,6 +102,17 @@ _SYMBOL_SHA1_RE = re.compile(
 )
 _SYMBOL_PATH_RE = re.compile(r"^\|\s*Symbols?\s*\|\s*`([^`]+)`\s*\|")
 _PYBOY_RE = re.compile(r"^\|\s*PyBoy\s*\|\s*`([^`]+)`\s*\|")
+_CREDENTIAL_TEXT_RE = re.compile(
+    r"(?i)\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|"
+    r"credential|password|passwd|private[_-]?key|secret|token)\b"
+    r"\s*(?:[:=]\s*|\s+)(?:bearer\s+)?[^\s,;]+"
+)
+_URI_CREDENTIAL_RE = re.compile(r"(?i)(https?://[^/\s:@]+):[^@\s]+@")
+_BYTE_LITERAL_RE = re.compile(
+    r"(?is)\bb(?:'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\")"
+)
+_LONG_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{128,}(?![A-Za-z0-9])")
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9>])(?:[A-Za-z]:[\\/]|/)[^\s,;()]+")
 
 
 def _asset_key(value: str | Path) -> Path:
@@ -337,7 +354,7 @@ def inspect_assets(
         try:
             size = path.stat().st_size
             actual = sha1_of_file(path)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError):
             return AssetRecord(
                 label,
                 kind,
@@ -1479,6 +1496,351 @@ def _jsonable_tier(tier: TierResult) -> dict[str, Any]:
     return data
 
 
+def _safe_text(value: Any, *, limit: int = 8000) -> str:
+    """Bound and redact free-form diagnostics before retaining them."""
+
+    text = "" if value is None else str(value)
+    text = _URI_CREDENTIAL_RE.sub(r"\1:[REDACTED]@", text)
+    text = _BYTE_LITERAL_RE.sub("[BINARY DATA REDACTED]", text)
+    text = _CREDENTIAL_TEXT_RE.sub("[CREDENTIAL REDACTED]", text)
+    text = _LONG_TOKEN_RE.sub("[LONG TOKEN REDACTED]", text)
+    text = "".join(
+        character
+        if character in "\n\r\t" or character.isprintable()
+        else f"\\x{ord(character):02x}"
+        for character in text
+    )
+    if len(text) > limit:
+        text = "[...truncated...]\n" + text[-limit:]
+    return text
+
+
+def _evidence_roots(
+    project_root: Path,
+    rom_root: Path,
+    fixture_root: Path,
+) -> tuple[tuple[str, Path], ...]:
+    return (
+        ("rom-root", rom_root),
+        ("fixture-root", fixture_root),
+        ("project-root", project_root),
+    )
+
+
+def _portable_path(
+    value: str | Path,
+    roots: tuple[tuple[str, Path], ...],
+) -> str:
+    """Represent a path without retaining machine-local absolute paths."""
+
+    candidate = Path(value)
+    try:
+        resolved_candidate = candidate.resolve(strict=False)
+    except (OSError, RuntimeError):
+        resolved_candidate = candidate
+
+    for label, root in roots:
+        try:
+            resolved_root = root.expanduser().resolve(strict=False)
+            relative = resolved_candidate.relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not relative.parts:
+            return f"<{label}>"
+        return f"<{label}>/{relative.as_posix()}"
+
+    return "<external-path>"
+
+
+def _safe_diagnostic(
+    value: Any,
+    roots: tuple[tuple[str, Path], ...],
+    *,
+    limit: int = 8000,
+) -> str:
+    text = _safe_text(value, limit=limit)
+    replacements: dict[str, str] = {}
+    for label, root in roots:
+        for raw in (str(root), str(root.expanduser())):
+            if raw:
+                replacements[raw] = f"<{label}>"
+        try:
+            replacements[str(root.expanduser().resolve(strict=False))] = f"<{label}>"
+        except (OSError, RuntimeError):
+            pass
+    for raw, replacement in sorted(replacements.items(), key=lambda item: -len(item[0])):
+        text = text.replace(raw, replacement)
+    text = _ABSOLUTE_PATH_RE.sub("<external-path>", text)
+    return text
+
+
+def _safe_command(
+    command: list[str] | None,
+    roots: tuple[tuple[str, Path], ...],
+) -> list[str] | None:
+    if command is None:
+        return None
+    result: list[str] = []
+    for argument in command:
+        try:
+            path = Path(argument)
+            is_absolute = path.is_absolute()
+        except (TypeError, ValueError):
+            is_absolute = False
+        if is_absolute:
+            result.append(_portable_path(argument, roots))
+        else:
+            result.append(_safe_diagnostic(argument, roots, limit=1000))
+    return result
+
+
+def _safe_runtime(
+    runtime: dict[str, Any],
+    roots: tuple[tuple[str, Path], ...],
+) -> dict[str, Any]:
+    path_keys = frozenset(
+        {"python_executable", "pyboy_module", "serial_module", "harness_module"}
+    )
+    result: dict[str, Any] = {}
+    for key, value in runtime.items():
+        if value is None or isinstance(value, (bool, int, float)):
+            result[key] = value
+        elif key in path_keys:
+            result[key] = _portable_path(str(value), roots)
+        else:
+            result[key] = _safe_diagnostic(value, roots)
+    return result
+
+
+def _safe_asset(
+    asset: AssetRecord,
+    roots: tuple[tuple[str, Path], ...],
+) -> dict[str, Any]:
+    data = asdict(asset)
+    data["path"] = _portable_path(asset.path, roots)
+    return data
+
+
+def _safe_collection(
+    collection: CollectionResult,
+    roots: tuple[tuple[str, Path], ...],
+) -> dict[str, Any]:
+    data = asdict(collection)
+    data["command"] = _safe_command(collection.command, roots) or []
+    data["output_tail"] = _safe_diagnostic(collection.output_tail, roots)
+    data["reason"] = _safe_diagnostic(collection.reason, roots, limit=2000)
+    return data
+
+
+def _safe_tier(
+    tier: TierResult,
+    roots: tuple[tuple[str, Path], ...],
+) -> dict[str, Any]:
+    data = _jsonable_tier(tier)
+    data["command"] = _safe_command(tier.command, roots)
+    data["output_tail"] = _safe_diagnostic(tier.output_tail, roots)
+    data["reason"] = _safe_diagnostic(tier.reason, roots, limit=2000)
+    data["iteration_failures"] = [
+        _safe_diagnostic(failure, roots, limit=2000)
+        for failure in tier.iteration_failures
+    ]
+    data["selected_nodeids"] = [
+        _safe_diagnostic(nodeid, roots, limit=1000)
+        for nodeid in tier.selected_nodeids
+    ]
+    data["skip_reasons"] = {
+        _safe_diagnostic(reason, roots, limit=2000): count
+        for reason, count in tier.skip_reasons.items()
+    }
+    return data
+
+
+def build_evidence_payload(
+    *,
+    project_root: Path,
+    rom_root: Path,
+    fixture_root: Path,
+    runtime: dict[str, Any],
+    assets: list[AssetRecord],
+    collections: list[CollectionResult],
+    tiers: list[TierResult],
+    gate_problems: list[str],
+    overall: str,
+    generated_at: str | None = None,
+    evidence_error: str = "",
+) -> dict[str, Any]:
+    """Build the sanitized, metadata-only payload retained by the gate.
+
+    The normal stdout JSON remains backward-compatible.  This separate
+    payload is deliberately allow-listed and redacts free-form diagnostics so
+    an evidence directory never becomes a copy of ROMs, save states, or the
+    inherited process environment.
+    """
+
+    roots = _evidence_roots(project_root, rom_root, fixture_root)
+    payload: dict[str, Any] = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "generated_at": generated_at or datetime.now(UTC).isoformat(),
+        "project_root": "<project-root>",
+        "rom_root": "<rom-root>",
+        "fixture_root": "<fixture-root>",
+        "runtime": _safe_runtime(runtime, roots),
+        "collections": [_safe_collection(item, roots) for item in collections],
+        "assets": [_safe_asset(item, roots) for item in assets],
+        "tiers": [_safe_tier(item, roots) for item in tiers],
+        "gate_problems": [
+            _safe_diagnostic(problem, roots, limit=2000) for problem in gate_problems
+        ],
+        "overall": overall,
+        "safety": {
+            "rom_bytes": "not included",
+            "credentials": "environment is not captured; free-form diagnostics are redacted",
+            "diagnostics": "bounded text tails only",
+        },
+    }
+    if evidence_error:
+        payload["evidence_error"] = _safe_diagnostic(evidence_error, roots, limit=2000)
+    return payload
+
+
+def _payload_counts_text(counts: dict[str, Any]) -> str:
+    fields = ("total", "passed", "failed", "skipped", "xfailed", "xpassed", "errors")
+    return " ".join(f"{field}={counts.get(field, 0)}" for field in fields)
+
+
+def render_evidence_text(payload: dict[str, Any]) -> str:
+    """Render the already-sanitized payload for human inspection."""
+
+    lines = [
+        "Pokémon harness production gate evidence bundle",
+        f"generated_at={payload.get('generated_at', '')}",
+        f"overall: {payload.get('overall', 'UNKNOWN')}",
+        "environment:",
+    ]
+    runtime = payload.get("runtime", {})
+    if isinstance(runtime, dict):
+        for key in (
+            "python_executable",
+            "python_version",
+            "pytest_version",
+            "pyboy_version",
+            "pyboy_revision",
+            "pyboy_kind",
+            "pyboy_module",
+            "serial_module",
+            "serial_contract",
+            "harness_module",
+        ):
+            if key in runtime:
+                lines.append(f"  {key}={runtime[key]}")
+
+    problems = payload.get("gate_problems", [])
+    lines.append("gate-policy:")
+    if problems:
+        lines.extend(f"  FAIL: {problem}" for problem in problems)
+    else:
+        lines.append("  PASS")
+
+    lines.append("collection:")
+    for collection in payload.get("collections", []):
+        lines.append(
+            f"  {collection.get('status', 'UNKNOWN'):4} {collection.get('name', '')}: "
+            f"returncode={collection.get('returncode')} "
+            f"duration={collection.get('duration_seconds', 0.0):.1f}s"
+        )
+        command = collection.get("command", [])
+        lines.append(f"    command: {' '.join(command)}")
+        if collection.get("reason"):
+            lines.append(f"    reason: {collection['reason']}")
+        if collection.get("status") != "PASS" and collection.get("output_tail"):
+            lines.append("    output tail:")
+            lines.extend(f"      {line}" for line in collection["output_tail"].splitlines())
+
+    lines.append("assets:")
+    for asset in payload.get("assets", []):
+        details = []
+        for key in ("expected_sha1", "actual_sha1", "size"):
+            if asset.get(key) is not None:
+                details.append(f"{key}={asset[key]}")
+        suffix = f" {' '.join(details)}" if details else ""
+        lines.append(
+            f"  {str(asset.get('status', 'unknown')).upper():13} "
+            f"{asset.get('kind', ''):7} {asset.get('label', '')}: "
+            f"{asset.get('path', '')}{suffix}"
+        )
+
+    lines.append("tiers:")
+    for tier in payload.get("tiers", []):
+        lines.append(
+            f"  {tier.get('status', 'UNKNOWN'):8} {tier.get('name', ''):7} "
+            f"{_payload_counts_text(tier.get('counts', {}))} "
+            f"duration={tier.get('duration_seconds', 0.0):.1f}s"
+        )
+        if tier.get("reason"):
+            lines.append(f"    reason: {tier['reason']}")
+        for reason, count in tier.get("skip_reasons", {}).items():
+            lines.append(f"    skip[{count}]: {reason}")
+        for failure in tier.get("iteration_failures", []):
+            lines.append(f"    iteration-failure: {failure}")
+        if tier.get("status") in {"FAIL", "BLOCKED"} and tier.get("output_tail"):
+            lines.append("    output tail:")
+            lines.extend(f"      {line}" for line in tier["output_tail"].splitlines())
+
+    if payload.get("evidence_error"):
+        lines.append(f"evidence-error: {payload['evidence_error']}")
+    lines.append("safety:")
+    for key, value in payload.get("safety", {}).items():
+        lines.append(f"  {key}: {value}")
+    return "\n".join(lines) + "\n"
+
+
+def _evidence_file_metadata(path: Path, relative_name: str) -> dict[str, Any]:
+    content = path.read_bytes()
+    return {
+        "path": relative_name,
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def write_evidence_bundle(
+    evidence_dir: Path,
+    payload: dict[str, Any],
+) -> dict[str, Path]:
+    """Write a small, self-contained report bundle without copying inputs."""
+
+    evidence_dir = evidence_dir.expanduser()
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    report_path = evidence_dir / EVIDENCE_REPORT_FILENAME
+    text_path = evidence_dir / EVIDENCE_TEXT_FILENAME
+    manifest_path = evidence_dir / EVIDENCE_MANIFEST_FILENAME
+
+    report_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    text_path.write_text(render_evidence_text(payload), encoding="utf-8")
+    manifest = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "generated_at": payload.get("generated_at"),
+        "overall": payload.get("overall"),
+        "files": [
+            _evidence_file_metadata(report_path, EVIDENCE_REPORT_FILENAME),
+            _evidence_file_metadata(text_path, EVIDENCE_TEXT_FILENAME),
+        ],
+        "safety": payload.get("safety", {}),
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "report": report_path,
+        "text": text_path,
+        "manifest": manifest_path,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=project_root_from_script())
@@ -1512,6 +1874,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("text", "json"),
         default="text",
         help="report format (default: text)",
+    )
+    parser.add_argument(
+        "--evidence-dir",
+        type=Path,
+        help=(
+            "write a sanitized gate-report.json, gate-report.txt, and "
+            "evidence-manifest.json to this directory"
+        ),
     )
     return parser
 
@@ -1607,6 +1977,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         and tier_ok
         else "FAIL"
     )
+    evidence_error = ""
+    if args.evidence_dir is not None:
+        evidence_dir = args.evidence_dir.expanduser()
+        if not evidence_dir.is_absolute():
+            evidence_dir = (Path.cwd() / evidence_dir).resolve()
+        evidence_payload = build_evidence_payload(
+            project_root=project_root,
+            rom_root=rom_root,
+            fixture_root=fixture_root,
+            runtime=runtime,
+            assets=assets,
+            collections=collections,
+            tiers=tiers,
+            gate_problems=gate_problems,
+            overall=overall,
+        )
+        try:
+            write_evidence_bundle(evidence_dir, evidence_payload)
+        except (OSError, TypeError, ValueError) as exc:
+            evidence_error = (
+                f"could not write evidence bundle to {evidence_dir}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            gate_problems.append(evidence_error)
+            overall = "FAIL"
+
     if args.format == "json":
         payload = {
             "project_root": str(project_root),
@@ -1619,6 +2015,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "gate_problems": gate_problems,
             "overall": overall,
         }
+        if evidence_error:
+            payload["evidence_error"] = evidence_error
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(
