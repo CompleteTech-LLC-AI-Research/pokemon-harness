@@ -45,7 +45,7 @@ What stays:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from pokered_harness.link.serial_link import SerialLink, SerialLinkTimeout
 

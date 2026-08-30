@@ -32,9 +32,10 @@ boundary, not a claim that every listed capability is a finished product:
 The candidate includes the explicit `tests/__init__.py` package boundary and
 the bundled PyBoy source tree. Symbol hashes and audited generator provenance
 are recorded in [`VERSIONS.md`](VERSIONS.md). Full release sign-off remains
-`PARTIAL`: the complete gate output and independent review are not attached,
-the broad lint and diagnostic matrix are not clean, and several matrix,
-fixture-provenance, role, and security boundaries remain open.
+`PARTIAL`: current per-tier evidence bundles are retained outside the
+checkout, but a single complete release bundle and independent review are not
+attached, the broad lint and diagnostic matrix are not clean, and several
+matrix, fixture-provenance, role, and security boundaries remain open.
 
 The historical local diagnostic matrix reached LinkMenu and completed the trade
 route for all nine ordered Red/Blue/Yellow version pairs. Seven of nine battle
@@ -49,11 +50,12 @@ unverified.
 
 Current release blockers are explicit:
 
-- the current required runtime gates are green (unit 394/394, local 46/46,
+- the current required runtime gates are green (unit 398/398, local 46/46,
   remote 11/11, strict trade 2/2, and strict battle 2/2), but the broader
   product matrix and a single retained full-gate evidence bundle are not
   certified;
-- the repository-wide Ruff audit reports 540 findings and the broad suite has
+- the repository-wide Ruff audit reports 529 findings under the locked Ruff
+  version, and the broad suite has
   not become a clean production gate;
 - the audited implementation gate output is not retained in this tree as a
   complete evidence bundle;

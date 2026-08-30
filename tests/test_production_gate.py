@@ -213,9 +213,13 @@ def test_rom_helper_honors_explicit_roots(tmp_path, monkeypatch):
     monkeypatch.setenv("POKERED_FIXTURE_ROOT", str(configured_fixture))
     assert find_rom_root(tmp_path) == configured_rom
     assert find_fixture_root(tmp_path) == configured_fixture
-    assert rom_path("yellow", project_root=tmp_path) == configured_rom / "yellow" / "pokemon-yellow.gbc"
+    assert rom_path("yellow", project_root=tmp_path) == (
+        configured_rom / "yellow" / "pokemon-yellow.gbc"
+    )
     assert sym_path("blue", project_root=tmp_path) == configured_rom / "blue" / "pokemon-blue.sym"
-    assert fixture_path("red", project_root=tmp_path) == configured_fixture / "red" / "cable_club.state"
+    assert fixture_path("red", project_root=tmp_path) == (
+        configured_fixture / "red" / "cable_club.state"
+    )
 
 
 def test_collection_preflight_requires_the_selected_environment_console_script(tmp_path):

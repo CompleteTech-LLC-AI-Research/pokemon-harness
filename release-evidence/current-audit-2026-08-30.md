@@ -24,7 +24,7 @@ All commands below were run from the isolated candidate with
 
 | Tier | Command/result | Outcome |
 |---|---|---|
-| Unit + timing | `scripts/production_gate.py --unit-only --repeat-timing 5` | 394/394 unit and 35/35 timing cases passed; both collection entry points passed |
+| Unit + timing | `scripts/production_gate.py --unit-only --repeat-timing 5` | 398/398 unit and 35/35 timing cases passed; both collection entry points passed |
 | Local real-ROM | `scripts/production_gate.py --tier local` at the default 256-cycle slice | 46/46 passed; no skips, xfails, or errors |
 | Remote real-ROM | `scripts/production_gate.py --tier remote` | 11/11 passed for color Red listener/internal-clock and color Blue connector/external-clock |
 | Strict trade | `scripts/production_gate.py --tier trade` | 2/2 passed: local Red/Yellow and controlled Red/Blue subprocess |
@@ -56,7 +56,7 @@ and save/load roundtrip for:
   serial/game-state synchronization. It remains outside the required
   acceptance tiers; the broad suite is not a release gate until this scope or
   implementation is resolved.
-- `ruff check .` reports 540 findings, including vendored and legacy code.
+- The locked `ruff check .` reports 529 findings, including vendored and legacy code.
 - Battle and vanilla fixture provenance is incomplete in
   `fixture-manifest.json`; hashes establish byte identity, not capture history.
 - The tested remote roles are fixed; reversed roles, user-driven remote menu

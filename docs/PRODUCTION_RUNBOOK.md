@@ -12,7 +12,7 @@ record.
 
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
-2/2. Current candidate evidence on the scheduler-fix boundary is 394/394 unit
+2/2. Current candidate evidence on the scheduler-fix boundary is 398/398 unit
 tests, 35/35 timing cases across five repetitions, and current strict local
 Red/Yellow trade plus battle passes at the library's default scheduler slice
 (the tighter `POKERED_LINK_CHUNK_CYCLES=64` rerun also passes); the broader
@@ -166,11 +166,11 @@ proves only the ROM-free and timing tiers; it is not a production sign-off.
 The default gate checks five pinned ROM paths, three symbol paths, and three
 default fixture paths before running all required tiers.
 
-The current candidate has not passed a repository-wide Ruff audit: `ruff check
-.` reports 540 findings, including legacy and vendored-runtime code. Treat
-lint cleanup as a remaining release task even when the scoped production gate
-is green. The current full-gate counts below must not be read as evidence that
-the broad suite or lint gate is clean.
+The current candidate has not passed a repository-wide Ruff audit: the locked
+`ruff check .` reports 529 findings, including legacy and vendored-runtime
+code. Treat lint cleanup as a remaining release task even when the scoped
+production gate is green. The current full-gate counts below must not be read
+as evidence that the broad suite or lint gate is clean.
 
 The release tree includes `tests/__init__.py`; otherwise environments that do
 not treat `tests/` as a namespace package can fail collection. Run both
@@ -424,14 +424,14 @@ The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
 1. The current required runtime tiers pass in separate bounded runs (unit
-   394/394, local 46/46, remote 11/11, strict trade 2/2, and strict battle
+   398/398, local 46/46, remote 11/11, strict trade 2/2, and strict battle
    2/2), but the broader Blue/Red/Yellow battle matrix is not certified.
    Blue↔Blue and Blue→Red remain diagnostic only.
 2. The historical full real-ROM gate passed, but its complete output was not
-   retained as a release evidence bundle. The gate now provides
-   `--evidence-dir`; no new complete bundle has been generated for this
-   candidate yet, so the next full run must use that option.
-3. `ruff check .` reported 540 findings, and the broad suite is not a clean
+   retained as a release evidence bundle. Current per-tier runs use
+   `--evidence-dir` and retain sanitized bundles outside the checkout; a single
+   complete release bundle still needs to be assembled from one full run.
+3. The locked `ruff check .` reports 529 findings, and the broad suite is not a clean
    production gate.
 4. The five-row single-session matrix, reversed listener/connector roles,
    native-platform builds, battle-fixture provenance, and an independent review

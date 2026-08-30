@@ -707,7 +707,9 @@ def environment_policy_problems(
     return problems
 
 
-def load_required_test_keys(project_root: Path) -> tuple[dict[str, frozenset[tuple[str, str]]], str]:
+def load_required_test_keys(
+    project_root: Path,
+) -> tuple[dict[str, frozenset[tuple[str, str]]], str]:
     """Load the strict acceptance manifest from the checked-out tier config."""
 
     config_path = project_root / "tests" / "_tier_config.py"
@@ -724,7 +726,9 @@ def load_required_test_keys(project_root: Path) -> tuple[dict[str, frozenset[tup
 
     result: dict[str, frozenset[tuple[str, str]]] = {}
     for tier_name, raw_keys in raw.items():
-        if not isinstance(tier_name, str) or not isinstance(raw_keys, (set, frozenset, tuple, list)):
+        if not isinstance(tier_name, str) or not isinstance(
+            raw_keys, (set, frozenset, tuple, list)
+        ):
             return {}, f"invalid required-test manifest entry for {tier_name!r}"
         normalized: set[tuple[str, str]] = set()
         for key in raw_keys:
@@ -1469,7 +1473,10 @@ def render_text(
         if asset.size is not None:
             suffix.append(f"size={asset.size}")
         detail = " " + " ".join(suffix) if suffix else ""
-        lines.append(f"  {asset.status.upper():13} {asset.kind:7} {asset.label}: {asset.path}{detail}")
+        lines.append(
+            f"  {asset.status.upper():13} {asset.kind:7} {asset.label}: "
+            f"{asset.path}{detail}"
+        )
 
     lines.append("tiers:")
     for tier in tiers:
@@ -1846,7 +1853,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=project_root_from_script())
     parser.add_argument("--rom-root", type=Path)
     parser.add_argument("--fixture-root", type=Path)
-    parser.add_argument("--python", dest="python_executable", type=Path, default=Path(sys.executable))
+    parser.add_argument(
+        "--python", dest="python_executable", type=Path, default=Path(sys.executable)
+    )
     parser.add_argument(
         "--tier",
         action="append",

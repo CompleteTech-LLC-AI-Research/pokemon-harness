@@ -31,9 +31,10 @@ Full-gate snapshot:
 - remote: transport/LinkMenu smoke plus strict Red/Blue subprocess trade and
   battle passed, including both full party-record swaps and move-turn progress.
 
-Current candidate rerun evidence (2026-08-30, scheduler fix included):
+Current candidate rerun evidence (2026-08-30, scheduler, teardown, packaging,
+and evidence fixes included):
 
-- unit: 394/394 passed;
+- unit: 398/398 passed;
 - timing: 35/35 passed across five repetitions;
 - local: 46/46 passed at the default scheduler slice;
 - remote: 11/11 passed for the canonical color-Red listener and color-Blue
@@ -44,8 +45,9 @@ Current candidate rerun evidence (2026-08-30, scheduler fix included):
   controlled Red/Blue subprocess cases.
 
 These current counts supersede the corresponding historical counts for this
-candidate, but the complete gate output is not yet retained as a release
-evidence bundle.
+candidate. Sanitized per-tier evidence bundles were retained outside the
+checkout with `--evidence-dir`; a single complete release evidence bundle is
+still not attached to this tree.
 
 The local passes are real stateful acceptance evidence for the exact color-Red /
 Yellow fixture pair, and the remote pass is evidence for the exact color-Red
@@ -96,7 +98,8 @@ script, and the results were reproduced from the isolated clean checkout.
 - [x] Both `python -m pytest --collect-only -q` and the
   `pytest` console-script collection path complete without collection errors.
 - [ ] Repository-wide Ruff audit is clean (`ruff check .` currently reports
-  540 findings, including vendored-runtime and legacy code).
+  529 findings under the locked Ruff version, including vendored-runtime and
+  legacy code).
 - [ ] The broad suite completes with no unexpected failure, skip, xfail, or
   timeout: `python -m pytest -q -ra`.
 - [x] ROM-free unit/protocol/transport tests pass.

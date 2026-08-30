@@ -40,6 +40,7 @@ def test_project_bundles_the_pinned_pyboy_source() -> None:
     package_dir = setuptools["package-dir"]
 
     assert "pyboy" in packages
+    assert "pyboy.link" not in packages
     assert package_dir["pyboy"] == "vendor/pyboy-src/pyboy"
     assert not any(dep.lower().startswith("pyboy") for dep in project["project"]["dependencies"])
 
