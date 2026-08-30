@@ -41,10 +41,11 @@ route for all nine ordered Red/Blue/Yellow version pairs. Seven of nine battle
 rows reached a complete turn at that historical boundary; `blue↔blue` and the
 `blue→red` attach ordering stalled before both sides entered move exchange.
 Those rows are not claimed as supported. In the current candidate, the
-normalized hardware-time scheduler passes the strict Red↔Yellow trade and
-battle cases with `POKERED_LINK_CHUNK_CYCLES=64`; targeted Blue↔Blue and
-Blue→Red checks reach LinkMenu, but their complete battle behavior and reversed
-roles remain unverified.
+  normalized hardware-time scheduler passes the strict Red↔Yellow trade and
+  battle cases at the library's default 256-cycle slice (the tighter
+  64-cycle acceptance rerun also passes); targeted Blue↔Blue and Blue→Red
+  checks reach LinkMenu, but their complete battle behavior and reversed roles
+  remain unverified.
 
 Current release blockers are explicit:
 

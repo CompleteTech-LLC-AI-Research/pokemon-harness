@@ -14,9 +14,10 @@ The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
 2/2. Current candidate evidence on the scheduler-fix boundary is 392/392 unit
 tests, 35/35 timing cases across five repetitions, and current strict local
-Red/Yellow trade plus battle passes with
-`POKERED_LINK_CHUNK_CYCLES=64`; the broader local and remote reruns must still
-be recorded before release sign-off. The current remote tier has now passed
+Red/Yellow trade plus battle passes at the library's default scheduler slice
+(the tighter `POKERED_LINK_CHUNK_CYCLES=64` rerun also passes); the broader
+local rerun must still be recorded before release sign-off. The current remote
+tier has now passed
 11/11 tests for the canonical color-Red listener/internal-clock and color-Blue
 connector/external-clock roles. Strict local evidence covers color Red +
 Yellow; strict remote evidence covers color Red as listener/internal-clock and
@@ -266,9 +267,9 @@ trade route for all nine R/B/Y version orderings. Seven of nine diagnostic
 battle rows reached a complete turn at that historical boundary; `blue↔blue`
 and the `blue→red` attach ordering did not reach both move-exchange hooks. A
 current targeted re-audit reaches LinkMenu for Blue↔Blue and Blue→Red in 520
-frames. The current strict Red↔Yellow trade and battle cases pass with
-`POKERED_LINK_CHUNK_CYCLES=64`; the remaining matrix is not certified. The
-strict local cases are:
+frames. The current strict Red↔Yellow trade and battle cases pass at the
+library's default scheduler slice; the tighter 64-cycle rerun also passes.
+The remaining matrix is not certified. The strict local cases are:
 
 ```bash
 python -m pytest -q \

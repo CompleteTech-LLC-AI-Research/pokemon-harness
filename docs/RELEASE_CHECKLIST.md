@@ -37,8 +37,8 @@ Current candidate rerun evidence (2026-08-30, scheduler fix included):
 - timing: 35/35 passed across five repetitions;
 - remote: 11/11 passed for the canonical color-Red listener and color-Blue
   connector roles; and
-- strict local Red/Yellow trade and battle passed with
-  `POKERED_LINK_CHUNK_CYCLES=64`; and
+- strict local Red/Yellow trade and battle passed at the library's default
+  scheduler slice (the tighter 64-cycle rerun also passed); and
 - strict trade: 2/2 passed, and strict battle: 2/2 passed, including the
   controlled Red/Blue subprocess cases.
 
