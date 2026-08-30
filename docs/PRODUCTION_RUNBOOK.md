@@ -10,10 +10,17 @@ evidence, so the historical counts below are evidence boundaries rather than
 current sign-off. Uncommitted worktree changes are excluded from the candidate
 record.
 
-The full-gate snapshot is unit 372/372, timing 35/35 across five repetitions,
-local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. Strict
-local evidence covers color Red + Yellow; strict remote evidence covers color
-Red as listener/internal-clock and color Blue as connector/external-clock.
+The historical full-gate snapshot is unit 372/372, timing 35/35 across five
+repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
+2/2. Current candidate evidence on the scheduler-fix boundary is 392/392 unit
+tests, 35/35 timing cases across five repetitions, and current strict local
+Red/Yellow trade plus battle passes with
+`POKERED_LINK_CHUNK_CYCLES=64`; the broader local and remote reruns must still
+be recorded before release sign-off. The current remote tier has now passed
+11/11 tests for the canonical color-Red listener/internal-clock and color-Blue
+connector/external-clock roles. Strict local evidence covers color Red +
+Yellow; strict remote evidence covers color Red as listener/internal-clock and
+color Blue as connector/external-clock.
 The remote subprocess driver controls the LinkMenu choice with a test hook, so
 the remote result is controlled native-serial acceptance, not full user-driven
 menu gameplay. Symbol hashes and audited generator provenance are in
@@ -258,9 +265,9 @@ trade route for all nine R/B/Y version orderings. Seven of nine diagnostic
 battle rows reached a complete turn at that historical boundary; `blue↔blue`
 and the `blue→red` attach ordering did not reach both move-exchange hooks. A
 current targeted re-audit reaches LinkMenu for Blue↔Blue and Blue→Red in 520
-frames, but the current strict Red↔Yellow battle rerun fails in the bounded
-scheduler and the Blue battle diagnostics stop after `StartBattle`. The strict
-local cases are:
+frames. The current strict Red↔Yellow trade and battle cases pass with
+`POKERED_LINK_CHUNK_CYCLES=64`; the remaining matrix is not certified. The
+strict local cases are:
 
 ```bash
 python -m pytest -q \
@@ -406,11 +413,10 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current strict Red↔Yellow battle rerun fails in the bounded scheduler.
-   Current Blue↔Blue and Blue→Red diagnostics reach `StartBattle` but not
-   `MainInBattleLoop` or move exchange. The historical other seven ordered
-   R/B/Y diagnostic battle rows do not certify the current candidate or the
-   full matrix.
+1. The strict Red↔Yellow local trade and battle cases now pass with the
+   normalized scheduler, but the full current local/remote gate and the
+   broader Blue/Red/Yellow battle matrix are not yet certified. Blue↔Blue and
+   Blue→Red remain diagnostic only.
 2. The full real-ROM gate passed at the audited implementation revision, but
    its complete output is not retained in this repository as a release
    evidence bundle.
@@ -423,7 +429,7 @@ are:
    enforced and is the only supported network boundary; cross-host operation is
    blocked until secure transport is added.
 
-The smallest next actions are to repair and rerun the two stalled battle rows,
+The smallest next actions are to finish the current local/remote reruns,
 capture and retain complete implementation-revision gate output plus
 battle-fixture provenance, decide and test the supported per-ROM/role matrix,
 resolve or

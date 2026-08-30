@@ -23,10 +23,10 @@ boundary, not a claim that every listed capability is a finished product:
 |---|---|---|
 | Single-session loading, input, state parsing, and save/load | Candidate-tested for selected Red/Blue/Yellow inputs | The gate checks the pinned runtime, hashes, symbols, and real-ROM paths; the environment-driven boot/MCP test is not a five-row single-session certification. |
 | MCP stdio server for one session | Certified for the tested explicit-ROM smoke path | `tests/test_mcp_stdio_integration.py` and the fresh wheel smoke use the constrained MCP 1.x dependency; repeat the test for each ROM before making a per-ROM claim. |
-| In-process `LinkPair` | Candidate-tested; current battle matrix is incomplete | The historical color-Red/Yellow strict trade and battle cases passed; the current candidate reaches LinkMenu and Colosseum for tested Blue rows, but current strict re-audit is still open. |
-| Remote TCP transport and MCP lifecycle | Candidate-tested for canonical localhost roles | Historical native MCP attach/HELLO, two-process LinkMenu, and native serial paths passed for color Red listener + color Blue connector. The current candidate requires a fresh full gate; the LinkMenu choice is controlled by the acceptance driver. |
-| Remote full trade | Historical controlled native-serial acceptance passed | The independent-process color Red/Blue test compared both full 44-byte party-mon records at the historical boundary; it uses a test-driver LinkMenu selection hook and is not full user-driven gameplay. |
-| Link battle | Historical acceptance; current re-audit blocked | Historical Red/Yellow and color Red/Blue move-turn cases passed, but the current local Blue↔Blue and Blue→Red diagnostics stall after `StartBattle` and before `MainInBattleLoop`. |
+| In-process `LinkPair` | Candidate-tested; Red/Yellow strict trade and battle pass | The current candidate passes the strict color-Red/Yellow party swap and one complete battle turn with the normalized scheduler; the broader Red/Blue/Yellow matrix remains diagnostic. |
+| Remote TCP transport and MCP lifecycle | Current candidate 11/11 remote gate pass for canonical localhost roles | The current gate passed native MCP attach/HELLO, two-process LinkMenu, and native serial paths for color Red listener + color Blue connector. The LinkMenu choice is controlled by the acceptance driver. |
+| Remote full trade | Historical controlled native-serial acceptance; current strict rerun pending | The independent-process color Red/Blue test compares both full 44-byte party-mon records; current strict trade is running against the scheduler-fix candidate and still uses a test-driver LinkMenu selection hook, not full user-driven gameplay. |
+| Link battle | Current Red/Yellow acceptance; broader matrix incomplete | The current candidate resolves one strict Red/Yellow move turn. Blue↔Blue, Blue→Red, reversed roles, and other rows are not certified. |
 | Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
 The candidate includes the explicit `tests/__init__.py` package boundary and
@@ -40,18 +40,17 @@ The historical local diagnostic matrix reached LinkMenu and completed the trade
 route for all nine ordered Red/Blue/Yellow version pairs. Seven of nine battle
 rows reached a complete turn at that historical boundary; `blue↔blue` and the
 `blue→red` attach ordering stalled before both sides entered move exchange.
-Those rows are not claimed as supported. In the current candidate, targeted
-Blue↔Blue and Blue→Red LinkMenu checks pass in 520 frames, but the current
-strict Red↔Yellow battle rerun fails in the bounded scheduler and the current
-Blue battle diagnostics reach `StartBattle` without reaching
-`MainInBattleLoop`. The strict local evidence is therefore historical, not
-current release sign-off. Reversed roles and other pairings remain unverified.
+Those rows are not claimed as supported. In the current candidate, the
+normalized hardware-time scheduler passes the strict Red↔Yellow trade and
+battle cases with `POKERED_LINK_CHUNK_CYCLES=64`; targeted Blue↔Blue and
+Blue→Red checks reach LinkMenu, but their complete battle behavior and reversed
+roles remain unverified.
 
 Current release blockers are explicit:
 
-- the current strict Red↔Yellow battle rerun fails in the bounded scheduler,
-  while Blue↔Blue and Blue→Red still do not reach `MainInBattleLoop`; the full
-  matrix is not certified;
+- the current full local and remote gates are still being rerun for the
+  scheduler change; the strict Red↔Yellow cases are green, but the full matrix
+  is not certified;
 - the repository-wide Ruff audit reports 546 findings and the broad suite has
   not become a clean production gate;
 - the audited implementation gate output is not retained in this tree as a

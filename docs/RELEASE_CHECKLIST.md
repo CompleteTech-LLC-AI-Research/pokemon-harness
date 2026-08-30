@@ -31,6 +31,19 @@ Full-gate snapshot:
 - remote: transport/LinkMenu smoke plus strict Red/Blue subprocess trade and
   battle passed, including both full party-record swaps and move-turn progress.
 
+Current candidate rerun evidence (2026-08-30, scheduler fix included):
+
+- unit: 392/392 passed;
+- timing: 35/35 passed across five repetitions;
+- remote: 11/11 passed for the canonical color-Red listener and color-Blue
+  connector roles; and
+- strict local Red/Yellow trade and battle passed with
+  `POKERED_LINK_CHUNK_CYCLES=64`.
+
+The current local matrix and strict subprocess acceptance results are still
+being collected; they supersede the corresponding historical counts only when
+their complete gate output is retained.
+
 The local passes are real stateful acceptance evidence for the exact color-Red /
 Yellow fixture pair, and the remote pass is evidence for the exact color-Red
 listener / color-Blue connector subprocess pair. The remote test driver uses a
@@ -152,9 +165,9 @@ product sign-off remains pending:
 
 - a retained complete implementation-revision real-ROM gate evidence bundle;
 - a retained evidence bundle, including battle-fixture hashes/provenance;
-- a current strict battle pass, including the Red/Yellow rerun that currently
-  fails in the bounded scheduler, plus resolution of the Blue↔Blue and
-  Blue→Red stalls or an explicitly limited product scope that excludes them;
+- a retained current local/remote gate and strict subprocess evidence bundle,
+  plus resolution of the Blue↔Blue and Blue→Red diagnostic battle gaps or an
+  explicitly limited product scope that excludes them;
 - repository-wide lint/broad-suite closure, per-ROM single-session coverage,
   reversed roles, native-platform certification, and independent review; and
 - a secure transport decision if cross-host TCP is required. Current TCP is
