@@ -275,11 +275,13 @@ def _connect_socket(
         if cancel_event is not None and cancel_event.is_set():
             raise SerialLinkClosed("connection cancelled")
         sock = socket.socket(family, socktype, proto)
+        connected = False
         try:
             sock.setblocking(False)
             result = sock.connect_ex(sockaddr)
             if result == 0:
                 sock.setblocking(True)
+                connected = True
                 return sock
             if result not in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
                 last_error = OSError(result, errno.errorcode.get(result, "connect failed"))
@@ -301,6 +303,7 @@ def _connect_socket(
                 error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
                 if error == 0:
                     sock.setblocking(True)
+                    connected = True
                     return sock
                 last_error = OSError(
                     error, errno.errorcode.get(error, "connect failed")
@@ -311,7 +314,7 @@ def _connect_socket(
         except OSError as exc:
             last_error = exc
         finally:
-            if sock.fileno() != -1 and (last_error is not None or sock.getblocking() is False):
+            if sock.fileno() != -1 and not connected:
                 try:
                     sock.close()
                 except OSError:
