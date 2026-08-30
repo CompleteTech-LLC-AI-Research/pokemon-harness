@@ -319,6 +319,25 @@ def test_link_step_advances_both_when_paired():
     assert result == {"primary_tick": 4, "peer_tick": 4}
 
 
+def test_remote_link_step_routes_through_endpoint():
+    s_primary, pb_primary, _, _, link, _ = _link_state_with_peer()
+    calls: list[tuple[int, bool]] = []
+
+    class EndpointSpy:
+        def step(self, count: int, *, render: bool = False) -> None:
+            calls.append((count, render))
+            s_primary.step(count, render=render)
+
+    link.remote_endpoint = EndpointSpy()  # type: ignore[assignment]
+    result = dispatch_tool(
+        s_primary, "link_step", {"count": 4, "render": True}, link=link
+    )
+
+    assert calls == [(4, True)]
+    assert pb_primary.tick_calls == [(4, True)]
+    assert result == {"primary_tick": 4, "peer_tick": None}
+
+
 def test_local_link_step_holds_both_session_locks():
     s_primary, _, s_peer, _, link, _ = _link_state_with_peer()
     entered = threading.Event()

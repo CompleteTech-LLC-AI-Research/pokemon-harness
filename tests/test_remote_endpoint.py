@@ -266,6 +266,19 @@ def test_serial_tick_noop_when_sc_start_clear():
     assert mem[0xFF0F] == 0x00
 
 
+def test_step_services_serial_tick_after_each_frame():
+    session, pb, _mem = _make_session(_BLUE_SYM)
+    la, _lb = InProcessSerialLink.pair("blue", "blue")
+    endpoint = RemoteLinkEndpoint.as_connector(session, la)
+    serial_ticks: list[int] = []
+    endpoint.serial_tick = lambda: serial_ticks.append(session.current_tick())  # type: ignore[method-assign]
+
+    endpoint.step(3, render=True)
+
+    assert pb.tick_calls == [(1, True), (1, True), (1, True)]
+    assert serial_ticks == [1, 2, 3]
+
+
 # --- install() guards ----------------------------------------------------
 
 

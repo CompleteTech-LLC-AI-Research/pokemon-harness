@@ -164,6 +164,22 @@ class RemoteLinkEndpoint:
         mem[_RSC_ADDR] = sc & ~_SC_START
         mem[_IF_ADDR] = mem[_IF_ADDR] | _IF_SERIAL
 
+    def step(self, count: int = 1, *, render: bool = False) -> None:
+        """Advance the compatibility endpoint one frame at a time.
+
+        The semantic fallback has no native PyBoy serial backend.  Its
+        hardware-serial tick must therefore run after every emulator frame;
+        batching several frames before calling :meth:`serial_tick` can let
+        the ROMs enter different serial phases and strand a peer exchange.
+        Native ``NetworkBackend`` sessions do not use this method because
+        their serial edges are serviced by the backend itself.
+        """
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise ValueError(f"count must be a positive integer, got {count!r}")
+        for _ in range(count):
+            self._session.step(1, render=render)
+            self.serial_tick()
+
     # --- hook installers ----------------------------------------------
 
     def _install_handshake(self) -> None:

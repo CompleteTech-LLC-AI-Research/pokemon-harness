@@ -681,9 +681,16 @@ def _dispatch_link_tool(
         with link.state():
             network_session = link.network_session
             local_link_session = link.local_link_session
+            remote_endpoint = link.remote_endpoint
         if network_session is not None:
             count = int(arguments["count"])
             session.step(count, render=bool(arguments.get("render", False)))
+            return {"primary_tick": session.current_tick(), "peer_tick": None}
+        if remote_endpoint is not None:
+            count = int(arguments["count"])
+            remote_endpoint.step(
+                count, render=bool(arguments.get("render", False))
+            )
             return {"primary_tick": session.current_tick(), "peer_tick": None}
         if local_link_session is not None:
             count = int(arguments["count"])

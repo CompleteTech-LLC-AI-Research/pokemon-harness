@@ -99,8 +99,9 @@ class _SessionRunner:
     Each MCP process in production owns one session + one endpoint and
     steps its emulator on its own cadence. The remote tests simulate
     that by running each session in a daemon thread: the thread pumps
-    ``session.step(chunk) + endpoint.serial_tick()`` in a loop. Main-
-    thread callers drive gameplay by queueing button presses via
+    ``endpoint.step(chunk)`` in a loop. The endpoint expands the chunk
+    into frame-sized session steps and services serial hardware after
+    every frame. Main-thread callers drive gameplay by queueing button presses via
     :meth:`press`; presses are applied at the top of each chunk so
     step + press + serial-tick stay in the same Python thread (avoids
     a PyBoy/thread-safety rabbit hole)."""
@@ -176,8 +177,7 @@ class _SessionRunner:
                         break
                     self.session.press(button, duration=duration)
                     applied.set()
-                self.session.step(self.chunk)
-                self.endpoint.serial_tick()
+                self.endpoint.step(self.chunk)
                 with self._progress:
                     self._progress.notify_all()
         except Exception as exc:  # noqa: BLE001
