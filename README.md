@@ -9,11 +9,12 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-This repository is an audited candidate, not a production release. The current
-candidate head is `1046a541e0003923aec6000b6b383c6eaafeaa48`. The complete
-real-ROM gate was rerun at that exact clean head after the runtime, link, MCP,
-gate, and documentation integration commits. The baseline at `e219fb5` was
-not production-certified.
+This repository is an audited candidate, not a production release. The audited
+implementation revision is `1046a541e0003923aec6000b6b383c6eaafeaa48`; the
+complete real-ROM gate was rerun at that exact clean revision after the
+runtime, link, MCP, and gate integration commits. Later changes recorded in
+the release documents are documentation-only follow-ups. The baseline at
+`e219fb5` was not production-certified.
 
 The counts below are therefore an evidence snapshot with an explicit commit
 boundary, not a claim that every listed capability is a finished product:
@@ -49,8 +50,8 @@ Current release blockers are explicit:
   not certified;
 - the repository-wide Ruff audit reports 525 findings and the broad suite has
   not become a clean production gate;
-- the current-head gate output is not retained in this tree as a complete
-  evidence bundle;
+- the audited implementation gate output is not retained in this tree as a
+  complete evidence bundle;
 - per-ROM single-session coverage, reversed listener/connector roles, native
   platform coverage, and independent review remain incomplete; and
 - TCP is deliberately localhost-only because it has no authentication or

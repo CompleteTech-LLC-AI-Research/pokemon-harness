@@ -5,11 +5,12 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: audited 2026-08-30 against candidate head
+Status: audited 2026-08-30 against implementation revision
 `1046a541e0003923aec6000b6b383c6eaafeaa48`. The complete real-ROM gate was
-rerun at this exact clean head after the runtime, link, MCP, gate, and
-documentation integration commits. Uncommitted worktree changes are excluded
-from this candidate record.
+rerun at this exact clean revision after the runtime, link, MCP, and gate
+integration commits. Later changes recorded in the release documents are
+documentation-only follow-ups. Uncommitted worktree changes are excluded from
+this candidate record.
 
 The full-gate snapshot is unit 372/372, timing 35/35 across five repetitions,
 local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. The
@@ -20,9 +21,10 @@ user-driven gameplay. Other link rows remain unsupported or unverified.
 
 Symbol hashes and audited generator provenance for the inputs are recorded
 below. The remaining release decision is `PARTIAL` because the complete
-current-head gate output is not retained as an evidence bundle, repository-wide
-lint and the broad matrix are not clean, per-ROM and reversed-role coverage is
-incomplete, and independent review/native-platform evidence is missing.
+implementation-revision gate output is not retained as an evidence bundle,
+repository-wide lint and the broad matrix are not clean, per-ROM and
+reversed-role coverage is incomplete, and independent review/native-platform
+evidence is missing.
 
 ## Runtime
 

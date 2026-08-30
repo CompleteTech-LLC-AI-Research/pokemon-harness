@@ -1,11 +1,12 @@
 # Production runbook
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
-checkout. The baseline at `e219fb5` was not certified. The current audited
-candidate head is `1046a541e0003923aec6000b6b383c6eaafeaa48`; the complete
-real-ROM gate was rerun at that exact clean head after the runtime, link, MCP,
-gate, and documentation integration commits. Uncommitted worktree changes are
-excluded from this candidate record.
+checkout. The baseline at `e219fb5` was not certified. The audited
+implementation revision is `1046a541e0003923aec6000b6b383c6eaafeaa48`; the
+complete real-ROM gate was rerun at that exact clean revision after the
+runtime, link, MCP, and gate integration commits. Later changes recorded in
+the release documents are documentation-only follow-ups. Uncommitted worktree
+changes are excluded from this candidate record.
 
 The full-gate snapshot is unit 372/372, timing 35/35 across five repetitions,
 local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. Strict
@@ -36,8 +37,9 @@ python -m pip install -e ".[dev]"
 python -m pip check
 ```
 
-For this audited candidate, `HEAD` must be
-`1046a541e0003923aec6000b6b383c6eaafeaa48` before collecting evidence. The
+For the audited implementation, revision
+`1046a541e0003923aec6000b6b383c6eaafeaa48` must be present before collecting
+evidence. Documentation-only follow-ups may be layered on top. The
 working tree should be clean; ignored BYO assets may be present outside the
 tracked source. Use the same activated interpreter for installation, tests,
 the gate, and MCP.
@@ -401,8 +403,9 @@ are:
    both sides entered move exchange. The other seven ordered R/B/Y diagnostic
    battle rows reached a turn, but that does not certify the two failures or
    the full matrix.
-2. The full real-ROM gate passed at the current candidate head, but its complete
-   output is not retained in this repository as a release evidence bundle.
+2. The full real-ROM gate passed at the audited implementation revision, but
+   its complete output is not retained in this repository as a release
+   evidence bundle.
 3. `ruff check .` reported 525 findings, and the broad suite is not a clean
    production gate.
 4. The five-row single-session matrix, reversed listener/connector roles,

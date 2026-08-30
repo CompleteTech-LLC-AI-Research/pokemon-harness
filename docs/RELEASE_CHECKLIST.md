@@ -7,15 +7,16 @@ runtime evidence required by the relevant capability.
 ## Current audit status
 
 The baseline at `e219fb5` (2026-08-29) was not production-ready. The audited
-candidate head is `1046a541e0003923aec6000b6b383c6eaafeaa48`; it addresses the
+implementation revision is `1046a541e0003923aec6000b6b383c6eaafeaa48`; it addresses the
 collection boundary, portable `.mcp.json`, bundled PyBoy source runtime,
 path-aware ROM pinning, native local/TCP serial attachment, teardown,
 dependency pinning, and tiered gate reporting.
 
-Evidence provenance matters: the complete real-ROM gate was rerun at the exact
-current clean head after all integration commits. The full-gate counts below
-are current-head evidence; the complete output is not retained in this tree as
-a release evidence bundle.
+Evidence provenance matters: the complete real-ROM gate was rerun at that exact
+clean implementation revision after all runtime integration commits. Later
+changes recorded in the release documents are documentation-only follow-ups.
+The full-gate counts below are implementation-revision evidence; the complete
+output is not retained in this tree as a release evidence bundle.
 
 Full-gate snapshot:
 
@@ -147,7 +148,7 @@ script, and the results were reproduced from the isolated clean checkout.
 local plus controlled remote acceptance paths have passing snapshots, but full
 product sign-off remains pending:
 
-- a retained complete current-head real-ROM gate evidence bundle;
+- a retained complete implementation-revision real-ROM gate evidence bundle;
 - a retained evidence bundle, including battle-fixture hashes/provenance;
 - resolution of the two diagnostic local battle stalls (`blue↔blue` and
   `blue→red`), or an explicitly limited product scope that excludes them;
