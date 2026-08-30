@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import select
 import socket
 import struct
 import threading
@@ -9,6 +10,7 @@ import time
 
 import pytest
 
+from pokered_harness.link import serial_link as serial_link_module
 from pokered_harness.link.serial_link import (
     InProcessSerialLink,
     SerialLinkClosed,
@@ -17,7 +19,6 @@ from pokered_harness.link.serial_link import (
     SerialLinkTimeout,
     TcpSerialLink,
 )
-
 
 # --- helpers ---------------------------------------------------------------
 
@@ -30,6 +31,22 @@ def _free_port() -> int:
         return s.getsockname()[1]
     finally:
         s.close()
+
+
+def _send_raw(sock: socket.socket, data: bytes) -> None:
+    """Send raw bytes through a non-blocking test socket."""
+    view = memoryview(data)
+    deadline = time.monotonic() + 1.0
+    while view:
+        try:
+            sent = sock.send(view)
+        except (BlockingIOError, InterruptedError):
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "test socket did not become writable"
+            select.select([], [sock], [sock], min(0.05, remaining))
+            continue
+        assert sent > 0, "test socket made no send progress"
+        view = view[sent:]
 
 
 def _make_tcp_pair(
@@ -239,6 +256,64 @@ def test_tcp_peer_close_wakes_exchange_waiter_promptly():
         client.close()
 
 
+def test_tcp_inbound_exchange_queue_overflow_fails_closed():
+    server, client = _make_tcp_pair()
+    kind = "flood"
+    body = bytes([serial_link_module.OP_EXCHANGE]) + serial_link_module._pack_lp_str(
+        kind
+    ) + serial_link_module._pack_lp_bytes(b"x")
+    try:
+        for _ in range(serial_link_module._MAX_INBOUND_FRAMES_PER_KIND):
+            client._send_frame(body)
+
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            inbound = server._inbound.get(kind)
+            if (
+                inbound is not None
+                and inbound.qsize() == serial_link_module._MAX_INBOUND_FRAMES_PER_KIND
+            ):
+                break
+            time.sleep(0.005)
+        inbound = server._inbound[kind]
+        assert inbound.maxsize == serial_link_module._MAX_INBOUND_FRAMES_PER_KIND
+        assert inbound.qsize() == serial_link_module._MAX_INBOUND_FRAMES_PER_KIND
+
+        client._send_frame(body)
+        deadline = time.monotonic() + 1.0
+        while server._reader_exc is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert isinstance(server._reader_exc, SerialLinkProtocolError)
+        assert not server.connected
+        assert server._inbound_frame_count == 0
+        assert server._inbound_byte_count == 0
+    finally:
+        server.close()
+        client.close()
+
+
+def test_tcp_inbound_exchange_frame_budget_fails_closed_across_kinds():
+    server, client = _make_tcp_pair()
+    try:
+        for index in range(serial_link_module._MAX_INBOUND_FRAMES + 1):
+            kind = f"flood-{index}"
+            body = bytes([serial_link_module.OP_EXCHANGE]) + serial_link_module._pack_lp_str(
+                kind
+            ) + serial_link_module._pack_lp_bytes(b"x")
+            client._send_frame(body)
+
+        deadline = time.monotonic() + 1.0
+        while server._reader_exc is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert isinstance(server._reader_exc, SerialLinkProtocolError)
+        assert not server.connected
+        assert len(server._inbound) <= serial_link_module._MAX_INBOUND_KINDS
+        assert server._inbound_frame_count == 0
+    finally:
+        server.close()
+        client.close()
+
+
 def test_tcp_close_sends_bye_before_shutdown():
     local, peer = socket.socketpair()
     link = TcpSerialLink(local, "blue")
@@ -273,14 +348,31 @@ def test_tcp_serial_link_rejects_non_loopback_hosts():
         TcpSerialLink.listen(_free_port(), "blue", host="0.0.0.0")
 
 
+def test_tcp_truncated_frame_is_protocol_error_and_closes():
+    server, client = _make_tcp_pair()
+    try:
+        # The header promises five body bytes, but only one arrives before
+        # the peer half-closes its write side.
+        _send_raw(client._sock, struct.pack(">I", 5) + b"x")
+        client._sock.shutdown(socket.SHUT_WR)
+
+        deadline = time.monotonic() + 1.0
+        while server._reader_exc is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert isinstance(server._reader_exc, SerialLinkProtocolError)
+        assert not server.connected
+    finally:
+        server.close()
+        client.close()
+
+
 def test_tcp_rejects_malformed_frame():
     """Hand-craft a bogus frame and confirm the reader thread raises."""
     server, client = _make_tcp_pair()
     try:
         # Write directly to the socket to bypass _send_frame framing.
         # Zero-length frame is explicitly rejected.
-        with client._write_lock:
-            client._sock.sendall(b"\x00\x00\x00\x00")
+        _send_raw(client._sock, b"\x00\x00\x00\x00")
         # Peer's reader thread should flag a protocol error and close.
         for _ in range(50):
             time.sleep(0.01)
@@ -290,3 +382,59 @@ def test_tcp_rejects_malformed_frame():
     finally:
         server.close()
         client.close()
+
+
+def test_tcp_close_is_bounded_when_peer_stops_reading(monkeypatch):
+    local, peer = socket.socketpair()
+    local.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    link = TcpSerialLink(local, "blue")
+    try:
+        # Fill the outbound kernel buffer without involving the link writer;
+        # close() must not block forever trying to send BYE afterwards.
+        for _ in range(1024):
+            try:
+                link._sock.send(b"x" * 65536)
+            except BlockingIOError:
+                break
+        else:
+            pytest.fail("test socket never filled")
+
+        monkeypatch.setattr(serial_link_module, "_WRITE_TIMEOUT_S", 0.05)
+        started = time.monotonic()
+        link.close()
+        assert time.monotonic() - started < 1.0
+        assert not link.connected
+        assert not link._reader.is_alive()
+    finally:
+        link.close()
+        peer.close()
+
+
+def test_tcp_close_race_with_writer_finishes(monkeypatch):
+    local, peer = socket.socketpair()
+    local.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    link = TcpSerialLink(local, "blue")
+    writer_done = threading.Event()
+
+    def blocked_writer() -> None:
+        try:
+            link._send_frame(b"x" * serial_link_module._MAX_FRAME_SIZE)
+        except (SerialLinkClosed, SerialLinkTimeout):
+            pass
+        finally:
+            writer_done.set()
+
+    try:
+        monkeypatch.setattr(serial_link_module, "_WRITE_TIMEOUT_S", 0.05)
+        writer = threading.Thread(target=blocked_writer, daemon=True)
+        writer.start()
+        time.sleep(0.01)
+        started = time.monotonic()
+        link.close()
+        assert time.monotonic() - started < 1.0
+        assert writer_done.wait(timeout=1.0)
+        assert not writer.is_alive()
+        assert not link._reader.is_alive()
+    finally:
+        link.close()
+        peer.close()
