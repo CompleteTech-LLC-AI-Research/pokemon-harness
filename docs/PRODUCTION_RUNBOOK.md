@@ -160,7 +160,7 @@ checks five pinned ROM paths, three symbol paths, and three default fixture
 paths before running all required tiers.
 
 The current candidate has not passed a repository-wide Ruff audit: `ruff check
-.` reports 546 findings, including legacy and vendored-runtime code. Treat
+.` reports 540 findings, including legacy and vendored-runtime code. Treat
 lint cleanup as a remaining release task even when the scoped production gate
 is green. The current full-gate counts below must not be read as evidence that
 the broad suite or lint gate is clean.
@@ -421,7 +421,7 @@ are:
 2. The full real-ROM gate passed at the audited implementation revision, but
    its complete output is not retained in this repository as a release
    evidence bundle.
-3. `ruff check .` reported 546 findings, and the broad suite is not a clean
+3. `ruff check .` reported 540 findings, and the broad suite is not a clean
    production gate.
 4. The five-row single-session matrix, reversed listener/connector roles,
    native-platform builds, battle-fixture provenance, and an independent review

@@ -56,7 +56,7 @@ and save/load roundtrip for:
   serial/game-state synchronization. It remains outside the required
   acceptance tiers; the broad suite is not a release gate until this scope or
   implementation is resolved.
-- `ruff check .` reports 546 findings, including vendored and legacy code.
+- `ruff check .` reports 540 findings, including vendored and legacy code.
 - Battle and vanilla fixture provenance is incomplete in
   `fixture-manifest.json`; hashes establish byte identity, not capture history.
 - The tested remote roles are fixed; reversed roles, user-driven remote menu

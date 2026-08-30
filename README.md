@@ -53,7 +53,7 @@ Current release blockers are explicit:
   remote 11/11, strict trade 2/2, and strict battle 2/2), but the broader
   product matrix and a single retained full-gate evidence bundle are not
   certified;
-- the repository-wide Ruff audit reports 546 findings and the broad suite has
+- the repository-wide Ruff audit reports 540 findings and the broad suite has
   not become a clean production gate;
 - the audited implementation gate output is not retained in this tree as a
   complete evidence bundle;
