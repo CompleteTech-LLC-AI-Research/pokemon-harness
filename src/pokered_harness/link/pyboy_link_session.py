@@ -492,8 +492,9 @@ class PyBoyLinkSession:
         interleaving for tight serial-sync phases.
 
         Instead of ticking one whole frame on each side, this alternates
-        ~``chunk_cycles`` CPU cycles per side. That keeps the two CPUs
-        close enough that a Pokémon serial-sync loop — which oscillates
+        ~``chunk_cycles`` normal-speed hardware cycles per side. The raw CPU
+        budget is scaled for each motherboard's CGB speed, keeping the two
+        CPUs close enough that a Pokémon serial-sync loop — which oscillates
         a side between SC=0x80 (slave) and SC=0x81 (master) several
         times per byte — sees its peer in the matching role. Per-frame
         interleaving (``step``) is too coarse for this because each
@@ -515,9 +516,9 @@ class PyBoyLinkSession:
         if chunk_cycles <= 0:
             raise ValueError("chunk_cycles must be a positive integer")
         # ``mb.tick`` returns after one CPU instruction in singlestep mode,
-        # but instruction lengths vary.  Pass the actual cycle budget to the
-        # frame driver so the two sides stay close in emulated time rather
-        # than in an empirical number of instructions.
+        # but instruction lengths vary. Pass a normal-speed hardware-time
+        # budget to the frame driver; it scales that budget for each side's
+        # current CGB CPU speed rather than comparing raw CPU counters.
         effective_view = self._view if render is None else bool(render) or self._view
         a, b = self._pyboys[0], self._pyboys[1]
         for _ in range(frames):
@@ -584,21 +585,37 @@ class PyBoyLinkSession:
         except (TypeError, ValueError, OverflowError):
             return None
 
-    @classmethod
-    def _next_lcd_frame_target(cls, pyboy: object, start_cycles: int) -> int:
-        """Return the absolute CPU cycle at the next LCD frame boundary.
+    @staticmethod
+    def _lcd_speed_shift(pyboy: object) -> int:
+        """Return the LCD/CPU speed ratio exposed by a PyBoy instance.
 
-        ``_cycles_to_frame`` is maintained by PyBoy in CPU-cycle units,
-        including the CGB speed shift. Reading it avoids assuming that both
-        emulators entered this scheduler frame at the same LCD phase.
+        PyBoy's ``LCD.speed_shift`` is zero at normal speed and one while a
+        CGB CPU is in double-speed mode.  Lightweight test doubles often do
+        not expose it, so the conservative fallback is normal speed.
+        """
+        lcd = getattr(getattr(pyboy, "mb", None), "lcd", None)
+        value = getattr(lcd, "speed_shift", 0)
+        try:
+            return max(0, min(1, int(value)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    @classmethod
+    def _normalized_frame_delta(cls, pyboy: object) -> int:
+        """Return the next LCD boundary in normal-speed cycles.
+
+        ``_cycles_to_frame`` is stored in the motherboard's CPU-cycle unit,
+        which is twice as large for a CGB double-speed CPU.  Normalize it to
+        the LCD hardware domain before comparing two emulators.
         """
         lcd = getattr(getattr(pyboy, "mb", None), "lcd", None)
         remaining = getattr(lcd, "_cycles_to_frame", None)
         try:
-            remaining_cycles = int(remaining)
+            remaining_cycles = max(1, int(remaining))
         except (TypeError, ValueError, OverflowError):
             remaining_cycles = cls._DEFAULT_LCD_FRAME_CYCLES
-        return start_cycles + max(1, remaining_cycles)
+        shift = cls._lcd_speed_shift(pyboy)
+        return max(1, (remaining_cycles + (1 << shift) - 1) >> shift)
 
     @classmethod
     def _advance_to_shared_cycle_horizon(
@@ -609,7 +626,7 @@ class PyBoyLinkSession:
         b_start: int,
         chunk_cycles: int,
     ) -> None:
-        """Advance both sides through one common relative CPU-cycle horizon.
+        """Advance both sides through one common hardware-time horizon.
 
         A local ``lcd.frame_done`` is a one-shot notification, not a safe
         point at which to freeze one emulator. The peer may still be in the
@@ -620,18 +637,19 @@ class PyBoyLinkSession:
         notification before continuing; it is never used as the shared stop
         condition.
         """
-        a_frame_target = cls._next_lcd_frame_target(a, a_start)
-        b_frame_target = cls._next_lcd_frame_target(b, b_start)
         # CPU counters are absolute to each emulator's own lifetime and may
         # differ substantially after independently captured save states.
-        # Share the relative interval to the later LCD boundary instead of
-        # forcing the lower absolute counter to catch up billions of cycles.
+        # Normalize each relative LCD boundary to normal-speed hardware
+        # cycles before choosing the common horizon.  A CGB double-speed CPU
+        # therefore advances roughly twice as many raw CPU cycles as a DMG
+        # CPU for the same game frame, while both ROMs still execute one
+        # frame's worth of DelayFrame/VBlank work.
         horizon = max(
-            a_frame_target - a_start,
-            b_frame_target - b_start,
+            cls._normalized_frame_delta(a),
+            cls._normalized_frame_delta(b),
         )
-        a_target = a_start + horizon
-        b_target = b_start + horizon
+        a_target = a_start + (horizon << cls._lcd_speed_shift(a))
+        b_target = b_start + (horizon << cls._lcd_speed_shift(b))
         chunk = max(4, chunk_cycles)
         # Four times the nominal chunk count leaves room for variable-length
         # instructions and a transient breakpoint return. It is an absolute
@@ -646,8 +664,12 @@ class PyBoyLinkSession:
         # of the caller's chunk so a legitimate CGB/DMG phase boundary does
         # not become a false scheduler failure.
         max_cycle_overshoot = max(32, chunk * 8)
-        max_cycles_a = a_target + max_cycle_overshoot
-        max_cycles_b = b_target + max_cycle_overshoot
+        # Retain a finite amount of instruction/peer-handoff slack at the
+        # fastest supported CPU ratio.  The normal Gen I CGB path is stable
+        # for the duration of a scheduler frame; the current speed is still
+        # read for every chunk so a transition takes effect immediately.
+        max_cycles_a = a_target + (max_cycle_overshoot << 1)
+        max_cycles_b = b_target + (max_cycle_overshoot << 1)
         reached_a = reached_b = False
         rounds = 0
 
@@ -673,7 +695,6 @@ class PyBoyLinkSession:
                         "PyBoy CPU cycle counter disappeared during "
                         "interleaved stepping"
                     )
-                target = a_target if pyboy is a else b_target
                 max_cycles = max_cycles_a if pyboy is a else max_cycles_b
                 if current > max_cycles:
                     raise TimeoutError(
@@ -681,14 +702,22 @@ class PyBoyLinkSession:
                         f"(target_delta={horizon}, limit={max_cycles}, "
                         f"current={current})"
                     )
-                if current >= target:
+                target = a_target if pyboy is a else b_target
+                reached = current >= target
+                if reached:
                     if pyboy is a:
                         reached_a = True
                     else:
                         reached_b = True
                     continue
 
-                budget = min(chunk, target - current)
+                # Express the public chunk in normal-speed hardware cycles,
+                # then scale it for the current CPU speed. This keeps the
+                # two instruction streams close in the same time domain.
+                budget = min(
+                    chunk << cls._lcd_speed_shift(pyboy),
+                    target - current,
+                )
                 cls._step_single_step_chunk(
                     pyboy,
                     budget,
@@ -706,10 +735,11 @@ class PyBoyLinkSession:
                         f"(target_delta={horizon}, limit={max_cycles}, "
                         f"current={current})"
                     )
+                reached = current >= target
                 if pyboy is a:
-                    reached_a = current >= target
+                    reached_a = reached
                 else:
-                    reached_b = current >= target
+                    reached_b = reached
 
     @classmethod
     def _advance_to_lcd_boundaries(

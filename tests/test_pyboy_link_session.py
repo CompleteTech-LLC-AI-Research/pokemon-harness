@@ -242,6 +242,7 @@ class _FrameBoundaryDouble:
         *,
         start_cycles: int = 0,
         stalled: bool = False,
+        speed_shift: int = 0,
     ):
         self._frame_boundary = start_cycles + frame_boundary
         self._next_frame_boundary = self._frame_boundary
@@ -250,6 +251,7 @@ class _FrameBoundaryDouble:
         self.lcd = SimpleNamespace(
             frame_done=False,
             _cycles_to_frame=frame_boundary,
+            speed_shift=speed_shift,
         )
         self.sound = SimpleNamespace(
             disable_sampling=False,
@@ -278,11 +280,13 @@ class _FrameBoundaryPyBoy:
         *,
         start_cycles: int = 0,
         stalled: bool = False,
+        speed_shift: int = 0,
     ):
         self.mb = _FrameBoundaryDouble(
             frame_boundary,
             start_cycles=start_cycles,
             stalled=stalled,
+            speed_shift=speed_shift,
         )
         self.events = []
         self.frame_count = 0
@@ -305,6 +309,30 @@ def test_interleaved_frame_crosses_early_lcd_boundary_to_shared_horizon():
 
     assert a.mb.cpu.cycles - a_start == b.mb.cpu.cycles - b_start == 32
     assert a.mb.ticks_after_boundary > 0
+    assert a.frame_count == b.frame_count == 1
+
+
+def test_interleaved_frame_normalizes_cgb_double_speed_cycles():
+    """A CGB double-speed CPU must not consume two game frames.
+
+    PyBoy's CPU cycle counter advances twice as quickly in CGB double-speed
+    mode, while the LCD and the ROM's DelayFrame cadence remain in the
+    normal hardware-time domain. The scheduler therefore scales the raw
+    CPU budget per side before choosing its shared horizon.
+    """
+    a_start = 1_000_000
+    b_start = 2_000_000
+    a = _FrameBoundaryPyBoy(
+        40, start_cycles=a_start, speed_shift=1
+    )
+    b = _FrameBoundaryPyBoy(
+        20, start_cycles=b_start, speed_shift=0
+    )
+
+    PyBoyLinkSession._interleave_one_frame(a, b, chunk_cycles=8)
+
+    assert a.mb.cpu.cycles - a_start == 40
+    assert b.mb.cpu.cycles - b_start == 20
     assert a.frame_count == b.frame_count == 1
 
 

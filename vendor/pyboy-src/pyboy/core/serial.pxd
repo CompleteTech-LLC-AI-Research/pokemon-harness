@@ -24,6 +24,7 @@ cdef class Serial:
     cdef public int64_t _cycles_to_interrupt
     cdef public uint64_t last_cycles, clock, clock_target
     cdef public bint transfer_enabled, double_speed, internal_clock
+    cdef public uint8_t cpu_speed_shift
 
     # Bit-accurate shift-register state.
     cdef public uint8_t _shift_register

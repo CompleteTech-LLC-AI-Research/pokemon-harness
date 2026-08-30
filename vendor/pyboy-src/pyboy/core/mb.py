@@ -104,6 +104,7 @@ class Motherboard:
             self.lcd.speed_shift = 1 if self.double_speed else 0
             self.sound.tick(self.cpu.cycles)
             self.sound.speed_shift = 1 if self.double_speed else 0
+            self.serial.cpu_speed_shift = 1 if self.double_speed else 0
             logger.debug("CGB double speed is now: %d", self.double_speed)
             self.key1 ^= 0b10000001
 
@@ -322,6 +323,7 @@ class Motherboard:
         self.interaction.load_state(f, state_version)
         if state_version >= 15:
             self.serial.load_state(f, state_version)
+        self.serial.cpu_speed_shift = 1 if self.double_speed else 0
         f.flush()
         logger.debug("State loaded.")
 

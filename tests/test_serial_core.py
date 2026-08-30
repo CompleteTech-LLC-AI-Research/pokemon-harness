@@ -114,6 +114,24 @@ def test_master_transfer_does_not_complete_early():
     assert s.transfer_enabled == 0
 
 
+def test_cgb_double_speed_keeps_normal_serial_edge_rate():
+    """Normal CGB serial speed is measured in hardware, not CPU cycles."""
+    s = SerialCore(backend=NullBackend())
+    s.cpu_speed_shift = 1
+    s.set_SB(0xAA)
+    s.set_SC(0x81)
+
+    # A double-speed CPU needs twice as many raw CPU cycles per normal-rate
+    # serial edge. The SC fast-clock bit is a separate feature and is not
+    # being enabled by this transfer.
+    assert s.tick((CYCLES_PER_EDGE_DMG * 2) - 1) is False
+    assert s.transfer_enabled == 1
+    assert s.tick(CYCLES_PER_EDGE_DMG * 2) is False
+    assert s.transfer_enabled == 1
+    assert s.tick(CYCLES_PER_BYTE_DMG * 2) is True
+    assert s.transfer_enabled == 0
+
+
 def test_master_edge_by_edge_progresses_one_bit_per_period():
     s = SerialCore(backend=NullBackend())
     s.set_SB(0xAA)

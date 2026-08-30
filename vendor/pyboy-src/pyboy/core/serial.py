@@ -166,6 +166,11 @@ class Serial:
         self.transfer_enabled = 0
         self.internal_clock = 0
         self.double_speed = 0
+        # CPU cycles are twice as fast while the CGB is in double-speed
+        # mode, but the normal serial clock remains in its hardware domain.
+        # Motherboard.switch_speed keeps this separate from SC bit 1, which
+        # selects the CGB fast-serial mode.
+        self.cpu_speed_shift = 0
         self._cycles_to_interrupt = MAX_CYCLES
         self.last_cycles = 0
         self.clock = 0
@@ -217,7 +222,7 @@ class Serial:
             self._bits_remaining = 8
             if self.internal_clock:
                 # Master: schedule first edge.
-                self.clock_target = self.clock + 128
+                self.clock_target = self.clock + (128 << self.cpu_speed_shift)
             else:
                 # Slave: no internal clock, waits for apply_external_edge.
                 # Literal to stay nogil-safe (cpdef void ... nogil can't
@@ -274,7 +279,9 @@ class Serial:
                             interrupt = True
                             break
                         else:
-                            self.clock_target = self.clock_target + 128
+                            self.clock_target = self.clock_target + (
+                                128 << self.cpu_speed_shift
+                            )
 
         if self.clock_target > self.clock:
             self._cycles_to_interrupt = self.clock_target - self.clock
