@@ -640,7 +640,12 @@ class PyBoyLinkSession:
         # An instruction may overshoot the target, but must not run an
         # unbounded amount beyond it. The per-chunk tick cap below and this
         # absolute cycle limit make a stuck/broken PyBoy fail closed.
-        max_cycle_overshoot = max(32, chunk)
+        # A singlestepped motherboard can cross the target by more than one
+        # nominal instruction when an interrupt/HDMA boundary is serviced in
+        # the same tick. Keep the guard finite, but allow a bounded multiple
+        # of the caller's chunk so a legitimate CGB/DMG phase boundary does
+        # not become a false scheduler failure.
+        max_cycle_overshoot = max(32, chunk * 8)
         max_cycles_a = a_target + max_cycle_overshoot
         max_cycles_b = b_target + max_cycle_overshoot
         reached_a = reached_b = False
