@@ -21,8 +21,8 @@ boundary, not a claim that every listed capability is a finished product:
 
 | Capability | Current status | Evidence boundary |
 |---|---|---|
-| Single-session loading, input, state parsing, and save/load | Candidate-tested for selected Red/Blue/Yellow inputs | The gate checks the pinned runtime, hashes, symbols, and real-ROM paths; the environment-driven boot/MCP test is not a five-row single-session certification. |
-| MCP stdio server for one session | Certified for the tested explicit-ROM smoke path | `tests/test_mcp_stdio_integration.py` and the fresh wheel smoke use the constrained MCP 1.x dependency; repeat the test for each ROM before making a per-ROM claim. |
+| Single-session loading, input, state parsing, and save/load | Current five-row MCP stdio evidence pass | On 2026-08-30, `tests/test_mcp_stdio_integration.py` passed with explicit ROM, symbol, and SHA-1 values for stock/color Red, stock/color Blue, and Yellow. The scripted intro walkthrough remains Red-specific. |
+| MCP stdio server for one session | Current five-row explicit-ROM smoke pass | Each of the five ROM rows passed tool discovery, stepping, game-state resource parsing, and save/load roundtrip with the constrained MCP 1.x dependency. |
 | In-process `LinkPair` | Candidate-tested; Red/Yellow strict trade and battle pass | The current candidate passes the strict color-Red/Yellow party swap and one complete battle turn with the normalized scheduler; the broader Red/Blue/Yellow matrix remains diagnostic. |
 | Remote TCP transport and MCP lifecycle | Current candidate 11/11 remote gate pass for canonical localhost roles | The current gate passed native MCP attach/HELLO, two-process LinkMenu, and native serial paths for color Red listener + color Blue connector. The LinkMenu choice is controlled by the acceptance driver. |
 | Remote full trade | Current controlled native-serial acceptance: 2/2 | The current independent-process color Red/Blue test compares both full 44-byte party-mon records; it uses a test-driver LinkMenu selection hook, not full user-driven gameplay. |
@@ -74,9 +74,9 @@ The intended release inputs are the exact ROM variants listed in
 
 | Game | Input | Status |
 |---|---|---|
-| Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Hash-pinned input; selected single-session checks only; link gameplay not claimed |
+| Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Hash-pinned input; five-row MCP stdio evidence includes this row; link gameplay not claimed |
 | Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Certified in the local Red/Yellow and remote Red/Blue acceptance roles |
-| Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Hash-pinned input; selected single-session checks only; link gameplay not claimed |
+| Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Hash-pinned input; five-row MCP stdio evidence includes this row; link gameplay not claimed |
 | Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Certified as the remote Red/Blue acceptance connector |
 | Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Certified as the local Red/Yellow acceptance peer |
 | Other localisations and ROM hacks | — | Out of scope |

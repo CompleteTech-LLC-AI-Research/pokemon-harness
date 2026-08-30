@@ -231,10 +231,9 @@ python -m pytest -q -ra \
 ```
 
 Repeat with the appropriate path, symbol file, and hash for each release input
-that will be advertised. The current evidence used one environment-driven
-primary-ROM selection for this test module, so it does not by itself certify
-all five ROM rows. These tests prove only the tested boot/state/MCP surface;
-they do not prove link gameplay.
+that will be advertised. On 2026-08-30, this MCP stdio module passed for all
+five explicit rows: stock/color Red, stock/color Blue, and Yellow. These tests
+prove only the tested boot/state/MCP surface; they do not prove link gameplay.
 
 ### Tier C: real symbol and local-link smoke
 

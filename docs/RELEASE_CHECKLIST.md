@@ -100,9 +100,10 @@ script, and the results were reproduced from the isolated clean checkout.
 - [ ] The broad suite completes with no unexpected failure, skip, xfail, or
   timeout: `python -m pytest -q -ra`.
 - [x] ROM-free unit/protocol/transport tests pass.
-- [ ] Real-session boot, state, and MCP stdio tests pass for every claimed
-  single-session ROM variant. The current evidence uses an environment-driven
-  primary-ROM run and does not certify all five ROM rows.
+- [x] Real-session boot, state, and MCP stdio tests pass for every claimed
+  single-session ROM variant. Five explicit-ROM runs passed on 2026-08-30:
+  stock/color Red, stock/color Blue, and Yellow. The scripted intro golden
+  path remains specific to Red.
 - [x] Local link tests pass with matching ROM-specific fixtures and the
   release runtime.
 - [x] Remote transport tests pass with the color-Red listener/internal-clock
