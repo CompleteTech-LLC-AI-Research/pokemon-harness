@@ -5,6 +5,10 @@ tree so developers can run them directly.  This module gives the production
 gate a stable, reviewable classification without relying on test names alone
 for the broad ROM boundary.  The small set of acceptance names is explicit so
 that a new test cannot silently move into an optional tier.
+
+Every collected test module must be listed below.  Failing collection for an
+unlisted module is intentional: silently classifying a newly added ROM test as
+``unit`` would let the production gate report green without exercising it.
 """
 
 from __future__ import annotations
@@ -40,6 +44,46 @@ REAL_ROM_MODULES = frozenset(
         "test_pyboy_link_session_subprocess.py",
     }
 )
+
+# Keep the ROM-free side explicit as well.  A new ``test_*.py`` file must be
+# reviewed and added to exactly one of these sets before it can enter pytest's
+# collection path.  This is deliberately a little repetitive: the manifest is
+# a guard against a test silently falling into the wrong production tier.
+UNIT_MODULES = frozenset(
+    {
+        "test_agent_sync.py",
+        "test_config.py",
+        "test_events.py",
+        "test_game_state.py",
+        "test_link_orchestrator.py",
+        "test_link_pair.py",
+        "test_link_protocol.py",
+        "test_link_serial_bridge.py",
+        "test_link_symbols.py",
+        "test_link_transport.py",
+        "test_mcp_server.py",
+        "test_network_backend.py",
+        "test_production_gate.py",
+        "test_pyboy_link_session.py",
+        "test_remote_endpoint.py",
+        "test_runtime_packaging.py",
+        "test_serial_coordinator.py",
+        "test_serial_core.py",
+        "test_serial_link.py",
+        "test_session.py",
+        "test_state_bag.py",
+        "test_state_battle.py",
+        "test_state_menu.py",
+        "test_state_overworld.py",
+        "test_state_party.py",
+        "test_state_progress.py",
+        "test_state_status.py",
+        "test_state_text.py",
+        "test_symbol_loader.py",
+    }
+)
+
+KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES
 
 LOCAL_LINK_MODULES = frozenset(
     {
@@ -140,6 +184,15 @@ BATTLE_ACCEPTANCE_TESTS = frozenset(
     }
 )
 
+# The gate uses these keys to prove that each strict acceptance tier still
+# contains every required end-to-end assertion.  A positive aggregate count is
+# not enough: one surviving test could otherwise mask deletion/deselection of
+# the other acceptance case.
+TIER_REQUIRED_TESTS = {
+    "trade": TRADE_ACCEPTANCE_TESTS,
+    "battle": BATTLE_ACCEPTANCE_TESTS,
+}
+
 # These tests exercise socket/thread scheduling.  The name-based fallback is
 # intentional for the late-rearm regression added by the link reliability
 # lane, whose exact name is owned by that lane.
@@ -172,8 +225,13 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
 
     if filename in REAL_ROM_MODULES:
         marks.add("real_rom")
-    else:
+    elif filename in UNIT_MODULES:
         marks.add("unit")
+    else:
+        raise ValueError(
+            f"test module {filename!r} is not classified; add it to "
+            "UNIT_MODULES or REAL_ROM_MODULES before collection"
+        )
 
     if filename in LOCAL_LINK_MODULES:
         marks.add("local_link")
@@ -206,13 +264,16 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
 __all__ = [
     "BATTLE_TESTS",
     "BATTLE_ACCEPTANCE_TESTS",
+    "KNOWN_TEST_MODULES",
     "LOCAL_LINK_MODULES",
     "MARKERS",
     "MCP_STDIO_MODULES",
     "REAL_ROM_MODULES",
     "REMOTE_LINK_MODULES",
+    "TIER_REQUIRED_TESTS",
     "TIMING_SENSITIVE_TESTS",
     "TRADE_TESTS",
     "TRADE_ACCEPTANCE_TESTS",
+    "UNIT_MODULES",
     "classify_test",
 ]

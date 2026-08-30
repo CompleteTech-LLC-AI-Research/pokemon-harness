@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import signal
 import subprocess
 import sys
@@ -82,9 +83,30 @@ DEFAULT_TIMEOUT_SECONDS: dict[str, float] = {
     "timing": 900.0,
 }
 COLLECTION_TIMEOUT_SECONDS = 300.0
+GATE_CONTROLLED_ENVIRONMENT = (
+    "PYTEST_ADDOPTS",
+    "PYTEST_PLUGINS",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+)
 
 _SHA1_RE = re.compile(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|")
 _PATH_RE = re.compile(r"^\|\s*Path\s*\|\s*`([^`]+)`\s*\|")
+_SYMBOL_SHA1_RE = re.compile(
+    r"^\|\s*Symbol\s+SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|"
+)
+_SYMBOL_PATH_RE = re.compile(r"^\|\s*Symbols?\s*\|\s*`([^`]+)`\s*\|")
+_PYBOY_RE = re.compile(r"^\|\s*PyBoy\s*\|\s*`([^`]+)`\s*\|")
+
+
+def _asset_key(value: str | Path) -> Path:
+    """Normalize a documented repository-relative asset path."""
+
+    parts = [part for part in str(value).replace("\\", "/").split("/") if part]
+    if parts and parts[0] == ".":
+        parts = parts[1:]
+    if parts and parts[0].lower() == "rom":
+        parts = parts[1:]
+    return Path(*parts)
 
 
 @dataclass(frozen=True)
@@ -112,8 +134,32 @@ class Counts:
 
     @classmethod
     def from_report(cls, payload: dict[str, Any]) -> "Counts":
-        raw = payload.get("counts", {})
-        return cls(**{field: int(raw.get(field, 0)) for field in cls.__dataclass_fields__})
+        raw = payload.get("counts")
+        if not isinstance(raw, dict):
+            raise ValueError("pytest report has no counts object")
+
+        values: dict[str, int] = {}
+        for field_name in cls.__dataclass_fields__:
+            value = raw.get(field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    f"pytest report count {field_name!r} must be a non-negative integer"
+                )
+            values[field_name] = value
+
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class GateReport:
+    """Validated outcome data emitted by the pytest gate plugin."""
+
+    counts: Counts
+    skip_reasons: dict[str, int] = field(default_factory=dict)
+    nodeids: tuple[str, ...] = ()
+    collection_errors: tuple[dict[str, str], ...] = ()
+    collection_skips: tuple[dict[str, str], ...] = ()
+    error: str = ""
 
 
 @dataclass
@@ -130,6 +176,8 @@ class TierResult:
     command: list[str] | None = None
     output_tail: str = ""
     reason: str = ""
+    iteration_failures: list[str] = field(default_factory=list)
+    selected_nodeids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -193,26 +241,65 @@ def find_fixture_root(project_root: Path, explicit: Path | None = None) -> Path:
 
 
 def parse_expected_sha1(versions_file: Path) -> dict[Path, str]:
-    """Extract ROM SHA-1 pins from the per-ROM tables in VERSIONS.md."""
+    """Extract ROM and symbol SHA-1 pins from ``VERSIONS.md``.
+
+    The gate must fail closed when a required ROM or symbol is present but is
+    not pinned.  The existing version document stores ROM pins as
+    ``SHA-1``/``Path`` rows and symbol pins as ``Symbol SHA-1``/``Symbols``
+    rows, so preserve both in one path-keyed map.
+    """
 
     expected: dict[Path, str] = {}
     pending_sha: str | None = None
+    current_symbol_path: Path | None = None
     if not versions_file.is_file():
         return expected
 
     for line in versions_file.read_text(encoding="utf-8").splitlines():
+        if line.startswith("##"):
+            pending_sha = None
+            current_symbol_path = None
+            continue
         sha_match = _SHA1_RE.match(line)
         if sha_match:
             pending_sha = sha_match.group(1).lower()
             continue
         path_match = _PATH_RE.match(line)
         if path_match and pending_sha:
-            relative = Path(path_match.group(1))
-            if relative.parts and relative.parts[0] == "rom":
-                relative = Path(*relative.parts[1:])
+            relative = _asset_key(path_match.group(1))
+            previous = expected.get(relative)
+            if previous is not None and previous != pending_sha:
+                raise ValueError(f"conflicting SHA-1 pins for {relative}")
             expected[relative] = pending_sha
             pending_sha = None
+            continue
+
+        symbol_path_match = _SYMBOL_PATH_RE.match(line)
+        if symbol_path_match:
+            current_symbol_path = _asset_key(symbol_path_match.group(1))
+            continue
+
+        symbol_sha_match = _SYMBOL_SHA1_RE.match(line)
+        if symbol_sha_match and current_symbol_path is not None:
+            symbol_sha = symbol_sha_match.group(1).lower()
+            previous = expected.get(current_symbol_path)
+            if previous is not None and previous != symbol_sha:
+                raise ValueError(f"conflicting SHA-1 pins for {current_symbol_path}")
+            expected[current_symbol_path] = symbol_sha
+            continue
     return expected
+
+
+def parse_expected_pyboy_version(versions_file: Path) -> str | None:
+    """Return the pinned PyBoy version, if the release manifest has one."""
+
+    if not versions_file.is_file():
+        return None
+    for line in versions_file.read_text(encoding="utf-8").splitlines():
+        match = _PYBOY_RE.match(line)
+        if match:
+            return match.group(1).strip()
+    return None
 
 
 def sha1_of_file(path: Path) -> str:
@@ -230,55 +317,67 @@ def inspect_assets(
 ) -> list[AssetRecord]:
     records: list[AssetRecord] = []
 
+    def inspect_file(
+        label: str,
+        kind: str,
+        path: Path,
+        relative: Path,
+        *,
+        require_pin: bool,
+    ) -> AssetRecord:
+        expected = expected_sha1.get(_asset_key(relative))
+        if not path.is_file():
+            return AssetRecord(
+                label,
+                kind,
+                str(path),
+                "missing",
+                expected_sha1=expected,
+            )
+        try:
+            size = path.stat().st_size
+            actual = sha1_of_file(path)
+        except (OSError, ValueError) as exc:
+            return AssetRecord(
+                label,
+                kind,
+                str(path),
+                "unreadable",
+                expected_sha1=expected,
+            )
+        if size == 0:
+            status = "empty"
+        elif require_pin and expected is None:
+            status = "sha1-unpinned"
+        elif expected is not None and actual != expected:
+            status = "sha1-mismatch"
+        else:
+            status = "ok"
+        return AssetRecord(
+            label,
+            kind,
+            str(path),
+            status,
+            size=size,
+            expected_sha1=expected,
+            actual_sha1=actual,
+        )
+
     for label, relative in KNOWN_ROM_FILES:
         path = rom_root / relative
-        expected = expected_sha1.get(relative)
-        if not path.is_file():
-            records.append(
-                AssetRecord(label, "rom", str(path), "missing", expected_sha1=expected)
-            )
-            continue
-        actual = sha1_of_file(path)
-        status = "ok" if expected is None or actual == expected else "sha1-mismatch"
-        records.append(
-            AssetRecord(
-                label,
-                "rom",
-                str(path),
-                status,
-                size=path.stat().st_size,
-                expected_sha1=expected,
-                actual_sha1=actual,
-            )
-        )
+        records.append(inspect_file(label, "rom", path, relative, require_pin=True))
 
     for label, relative in KNOWN_SYMBOL_FILES:
         path = rom_root / relative
-        present = path.is_file()
-        records.append(
-            AssetRecord(
-                label,
-                "symbol",
-                str(path),
-                "ok" if present else "missing",
-                size=path.stat().st_size if present else None,
-                actual_sha1=sha1_of_file(path) if present else None,
-            )
-        )
+        records.append(inspect_file(label, "symbol", path, relative, require_pin=True))
 
     for label, relative in REQUIRED_FIXTURES:
         path = fixture_root / relative
-        present = path.is_file()
-        records.append(
-            AssetRecord(
-                label,
-                "fixture",
-                str(path),
-                "ok" if present else "missing",
-                size=path.stat().st_size if present else None,
-                actual_sha1=sha1_of_file(path) if present else None,
-            )
-        )
+        # Fixture hashes are reported for evidence, but the current manifest
+        # deliberately does not pin generated save-state bytes.  Presence and
+        # readability remain required; a future fixture pin in VERSIONS.md is
+        # automatically enforced by ``inspect_file``.
+        records.append(inspect_file(label, "fixture", path, relative, require_pin=False))
     return records
 
 
@@ -305,6 +404,26 @@ def build_test_environment(
     environment["POKERED_FIXTURE_ROOT"] = str(fixture_root)
     environment["PYTHONUNBUFFERED"] = "1"
 
+    # A caller's pytest selection/plugin environment is not part of the
+    # release contract.  In particular, inherited ``PYTEST_ADDOPTS`` can
+    # silently deselect required tests, and a third-party plugin can alter
+    # collection or xfail behavior.  The gate owns these settings.
+    for key in GATE_CONTROLLED_ENVIRONMENT:
+        environment.pop(key, None)
+    for key in tuple(environment):
+        if key.startswith("POKERED_PEER_") or key == "POKERED_ROM_VERSION":
+            environment.pop(key, None)
+    # Never pass the diagnostic hash bypass into a production-gate child.
+    # ``main`` separately reports its presence as a policy failure so merely
+    # stripping it cannot turn an unsafe invocation green.
+    environment.pop("POKERED_SKIP_SHA1", None)
+
+    versions_file = project_root / "VERSIONS.md"
+    if versions_file.is_file():
+        environment["POKERED_VERSIONS_PATH"] = str(versions_file)
+    else:
+        environment.pop("POKERED_VERSIONS_PATH", None)
+
     # Ensure the subprocess tests import this checkout, not an editable
     # install from a different worktree.  Preserve user-provided entries.
     # The vendored PyBoy source is the production runtime.  Put it first so
@@ -330,9 +449,24 @@ def build_test_environment(
     if "POKERED_SYM_PATH" not in environment and red_sym.is_file():
         environment["POKERED_SYM_PATH"] = str(red_sym)
     if "POKERED_ROM_SHA1" not in environment:
-        red_expected = expected_sha1.get(Path("red/pokemon-red.gb"))
-        if red_expected:
-            environment["POKERED_ROM_SHA1"] = red_expected
+        selected_rom = environment.get("POKERED_ROM_PATH")
+        if selected_rom:
+            selected_path = Path(selected_rom).expanduser()
+            if not selected_path.is_absolute():
+                selected_path = project_root / selected_path
+            try:
+                selected_key = _asset_key(
+                    selected_path.resolve(strict=False).relative_to(
+                        rom_root.expanduser().resolve(strict=False)
+                    )
+                )
+            except ValueError:
+                selected_key = _asset_key(selected_path)
+        else:
+            selected_key = Path("red/pokemon-red.gb")
+        selected_expected = expected_sha1.get(selected_key)
+        if selected_expected:
+            environment["POKERED_ROM_SHA1"] = selected_expected
     return environment
 
 
@@ -432,6 +566,161 @@ print(json.dumps(result, sort_keys=True))
         return {"probe_error": f"invalid runtime probe JSON: {exc}: {lines[-1]!r}"}
 
 
+def runtime_problems(project_root: Path, runtime: dict[str, Any]) -> list[str]:
+    """Return runtime identity failures that must prevent a green gate."""
+
+    problems: list[str] = []
+    if runtime.get("probe_error"):
+        problems.append(f"runtime probe failed: {runtime['probe_error']}")
+        return problems
+
+    expected_version = parse_expected_pyboy_version(project_root / "VERSIONS.md")
+    actual_version = runtime.get("pyboy_version")
+    if not actual_version:
+        problems.append("PyBoy version was not reported by the selected interpreter")
+    elif expected_version and actual_version != expected_version:
+        problems.append(
+            f"PyBoy version mismatch: expected {expected_version!r}, got {actual_version!r}"
+        )
+
+    revision_file = project_root / "vendor" / "pyboy-src" / "POKERED_HARNESS_PYBOY_REVISION"
+    if not revision_file.is_file():
+        problems.append(f"pinned PyBoy revision marker is missing: {revision_file}")
+    else:
+        try:
+            expected_revision = revision_file.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError) as exc:
+            problems.append(f"could not read PyBoy revision marker: {type(exc).__name__}: {exc}")
+        else:
+            if not expected_revision:
+                problems.append("pinned PyBoy revision marker is empty")
+            elif runtime.get("pyboy_revision") != expected_revision:
+                problems.append(
+                    "PyBoy revision mismatch: "
+                    f"expected {expected_revision!r}, got {runtime.get('pyboy_revision')!r}"
+                )
+
+    if runtime.get("serial_contract") != "bit-accurate-backend":
+        problems.append(
+            "selected interpreter does not expose the bit-accurate serial contract "
+            f"({runtime.get('serial_contract')!r})"
+        )
+    if not runtime.get("pyboy_module"):
+        problems.append("selected interpreter cannot resolve the PyBoy module")
+    if not runtime.get("harness_module"):
+        problems.append("selected interpreter cannot resolve the harness package")
+    return problems
+
+
+def _resolve_child_path(value: str, project_root: Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve(strict=False)
+
+
+def _asset_record_for_path(records: Iterable[AssetRecord], path: Path) -> AssetRecord | None:
+    resolved = path.resolve(strict=False)
+    for record in records:
+        if Path(record.path).resolve(strict=False) == resolved:
+            return record
+    return None
+
+
+def environment_policy_problems(
+    *,
+    project_root: Path,
+    environment: dict[str, str],
+    assets: Iterable[AssetRecord],
+) -> list[str]:
+    """Reject inherited settings that could make the gate test another input."""
+
+    problems: list[str] = []
+    if os.environ.get("POKERED_SKIP_SHA1", "").strip():
+        problems.append("POKERED_SKIP_SHA1 is set; release gates cannot use the hash bypass")
+
+    asset_list = list(assets)
+    rom_record: AssetRecord | None = None
+    sym_record: AssetRecord | None = None
+    rom_value = environment.get("POKERED_ROM_PATH")
+    sym_value = environment.get("POKERED_SYM_PATH")
+
+    if rom_value:
+        rom_path = _resolve_child_path(rom_value, project_root)
+        rom_record = _asset_record_for_path(asset_list, rom_path)
+        if rom_record is None or rom_record.kind != "rom":
+            problems.append(f"primary ROM is outside the inspected asset set: {rom_value}")
+        elif rom_record.status != "ok":
+            problems.append(
+                f"primary ROM is not a verified asset: {rom_record.label} {rom_record.status}"
+            )
+    elif rom_value is not None:
+        problems.append("POKERED_ROM_PATH is blank")
+
+    if sym_value:
+        sym_path = _resolve_child_path(sym_value, project_root)
+        sym_record = _asset_record_for_path(asset_list, sym_path)
+        if sym_record is None or sym_record.kind != "symbol":
+            problems.append(f"primary symbols are outside the inspected asset set: {sym_value}")
+        elif sym_record.status != "ok":
+            problems.append(
+                f"primary symbols are not a verified asset: {sym_record.label} {sym_record.status}"
+            )
+    elif sym_value is not None:
+        problems.append("POKERED_SYM_PATH is blank")
+
+    if rom_record is not None and sym_record is not None:
+        rom_parent = Path(rom_record.path).parent.name
+        sym_parent = Path(sym_record.path).parent.name
+        if rom_parent != sym_parent:
+            problems.append(
+                "primary ROM and symbol files are from different version directories: "
+                f"{rom_parent!r} vs {sym_parent!r}"
+            )
+
+    if rom_record is not None and rom_record.kind == "rom":
+        selected_sha = environment.get("POKERED_ROM_SHA1", "").strip().lower()
+        if not selected_sha:
+            problems.append("POKERED_ROM_SHA1 is missing for the primary ROM")
+        elif rom_record.actual_sha1 != selected_sha:
+            problems.append(
+                f"primary ROM SHA-1 does not match inspected bytes: "
+                f"expected {rom_record.actual_sha1!r}, got {selected_sha!r}"
+            )
+    return problems
+
+
+def load_required_test_keys(project_root: Path) -> tuple[dict[str, frozenset[tuple[str, str]]], str]:
+    """Load the strict acceptance manifest from the checked-out tier config."""
+
+    config_path = project_root / "tests" / "_tier_config.py"
+    if not config_path.is_file():
+        return {}, f"tier configuration is missing: {config_path}"
+    try:
+        namespace = runpy.run_path(str(config_path))
+    except Exception as exc:
+        return {}, f"tier configuration could not be loaded: {type(exc).__name__}: {exc}"
+
+    raw = namespace.get("TIER_REQUIRED_TESTS")
+    if not isinstance(raw, dict):
+        return {}, "tier configuration has no TIER_REQUIRED_TESTS manifest"
+
+    result: dict[str, frozenset[tuple[str, str]]] = {}
+    for tier_name, raw_keys in raw.items():
+        if not isinstance(tier_name, str) or not isinstance(raw_keys, (set, frozenset, tuple, list)):
+            return {}, f"invalid required-test manifest entry for {tier_name!r}"
+        normalized: set[tuple[str, str]] = set()
+        for key in raw_keys:
+            if not isinstance(key, (tuple, list)) or len(key) != 2:
+                return {}, f"invalid required-test key in tier {tier_name!r}: {key!r}"
+            module, test_name = key
+            if not isinstance(module, str) or not isinstance(test_name, str):
+                return {}, f"invalid required-test key in tier {tier_name!r}: {key!r}"
+            normalized.add((module, test_name))
+        result[tier_name] = frozenset(normalized)
+    return result, ""
+
+
 def _reason_counter(payload: dict[str, Any]) -> dict[str, int]:
     reasons = Counter()
     for record in payload.get("tests", []):
@@ -441,33 +730,225 @@ def _reason_counter(payload: dict[str, Any]) -> dict[str, int]:
     return dict(sorted(reasons.items()))
 
 
-def load_gate_report(path: Path) -> tuple[Counts, dict[str, int], str]:
-    """Load the stable JSON emitted by ``tests._gate_report``."""
+def _load_gate_report(
+    path: Path,
+    *,
+    expected_returncode: int | None = None,
+) -> GateReport:
+    """Read and validate the report produced by the gate pytest plugin."""
 
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return Counts(errors=1), {}, f"could not read pytest report: {type(exc).__name__}: {exc}"
-    return Counts.from_report(payload), _reason_counter(payload), ""
+        return GateReport(
+            Counts(errors=1),
+            error=f"could not read pytest report: {type(exc).__name__}: {exc}",
+        )
+    if not isinstance(payload, dict):
+        return GateReport(Counts(errors=1), error="pytest report root is not an object")
+
+    try:
+        counts = Counts.from_report(payload)
+        records = payload.get("tests")
+        if not isinstance(records, list):
+            raise ValueError("pytest report has no tests list")
+
+        collection_errors = payload.get("collection_errors")
+        if not isinstance(collection_errors, list):
+            raise ValueError("pytest report has no collection_errors list")
+        collection_skips = payload.get("collection_skips", [])
+        if not isinstance(collection_skips, list):
+            raise ValueError("pytest report collection_skips is not a list")
+        for collection_entry in (*collection_errors, *collection_skips):
+            if not isinstance(collection_entry, dict):
+                raise ValueError("pytest report collection entry is not an object")
+            if not isinstance(collection_entry.get("nodeid"), str):
+                raise ValueError("pytest report collection nodeid is not a string")
+            if not isinstance(collection_entry.get("reason"), str):
+                raise ValueError("pytest report collection reason is not a string")
+
+        exitstatus = payload.get("exitstatus")
+        if isinstance(exitstatus, bool) or not isinstance(exitstatus, int):
+            raise ValueError("pytest report exitstatus is not an integer")
+        if expected_returncode is not None and expected_returncode >= 0:
+            if exitstatus != expected_returncode:
+                raise ValueError(
+                    "pytest report exitstatus does not match process returncode: "
+                    f"{exitstatus} != {expected_returncode}"
+                )
+
+        collected = payload.get("collected")
+        nodeids = payload.get("nodeids")
+        if isinstance(collected, bool) or not isinstance(collected, int) or collected < 0:
+            raise ValueError("pytest report collected count is invalid")
+        if not isinstance(nodeids, list) or any(not isinstance(nodeid, str) for nodeid in nodeids):
+            raise ValueError("pytest report nodeids is invalid")
+        if collected != len(nodeids) or len(set(nodeids)) != len(nodeids):
+            raise ValueError("pytest report collected/nodeids are inconsistent")
+        if collected != len(records):
+            raise ValueError(
+                "pytest report collected item count does not match reported test outcomes: "
+                f"{collected} != {len(records)}"
+            )
+
+        derived = Counts(total=len(records), errors=len(collection_errors))
+        seen_nodeids: set[str] = set()
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("pytest report contains a non-object test record")
+            nodeid = record.get("nodeid")
+            if not isinstance(nodeid, str) or not nodeid or nodeid in seen_nodeids:
+                raise ValueError("pytest report contains an invalid or duplicate nodeid")
+            seen_nodeids.add(nodeid)
+            outcome = record.get("outcome")
+            if outcome not in {"passed", "failed", "skipped", "error"}:
+                raise ValueError(f"pytest report contains unknown outcome {outcome!r}")
+            if record.get("when") not in {"setup", "call", "teardown"}:
+                raise ValueError("pytest report contains an invalid test phase")
+            if not isinstance(record.get("was_xfail"), bool):
+                raise ValueError("pytest report was_xfail must be boolean")
+            if not isinstance(record.get("reason"), str):
+                raise ValueError("pytest report reason must be a string")
+
+            if record["was_xfail"] and outcome == "skipped":
+                derived.xfailed += 1
+            elif record["was_xfail"] and outcome == "passed":
+                derived.xpassed += 1
+            elif outcome == "passed":
+                derived.passed += 1
+            elif outcome == "skipped":
+                derived.skipped += 1
+            elif outcome == "failed":
+                derived.failed += 1
+            else:
+                derived.errors += 1
+
+        if derived.total != sum(
+            getattr(derived, field_name)
+            for field_name in ("passed", "failed", "skipped", "xfailed", "xpassed")
+        ) + (derived.errors - len(collection_errors)):
+            raise ValueError("pytest report test outcomes do not add up to total")
+
+        if seen_nodeids != set(nodeids):
+            raise ValueError("pytest report nodeids do not match test records")
+        if counts != derived:
+            raise ValueError(
+                "pytest report count fields do not match individual outcomes: "
+                f"declared={counts!r}, derived={derived!r}"
+            )
+    except (TypeError, ValueError) as exc:
+        return GateReport(Counts(errors=1), error=f"invalid pytest report: {exc}")
+
+    return GateReport(
+        counts=counts,
+        skip_reasons=_reason_counter(payload),
+        nodeids=tuple(nodeids),
+        collection_errors=tuple(collection_errors),
+        collection_skips=tuple(collection_skips),
+    )
+
+
+def load_gate_report(path: Path) -> tuple[Counts, dict[str, int], str]:
+    """Load the stable JSON emitted by ``tests._gate_report``.
+
+    Keep this small compatibility wrapper for focused callers; subprocess
+    execution uses the richer validated :class:`GateReport` directly.
+    """
+
+    report = _load_gate_report(path)
+    return report.counts, report.skip_reasons, report.error
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
+    """Terminate and reap a gate child and its process group."""
+
+    pid = getattr(process, "pid", None)
+    if pid is None:
         return
     if os.name == "posix":
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            # ``start_new_session=True`` makes the child PID the process-group
+            # ID.  Signal the group even when the parent already exited: a
+            # grandchild can otherwise keep the stdout pipe open forever.
+            os.killpg(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
             process.wait(timeout=5.0)
-            return
-        except (OSError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(pid, signal.SIGKILL)
             except OSError:
                 pass
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pass
+        return
+
+    # Windows has no killpg.  The caller creates a new process group; taskkill
+    # is the portable last resort for descendants when a timeout occurs.
+    if process.poll() is None:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=5.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
     try:
         process.kill()
     except OSError:
         pass
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _process_creation_kwargs() -> dict[str, Any]:
+    """Return process-group options for a gate subprocess."""
+
+    if os.name == "posix":
+        return {"start_new_session": True}
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    }
+
+
+def _communicate_after_termination(process: subprocess.Popen[str]) -> str:
+    """Drain a terminated child without allowing a leaked pipe to hang us."""
+
+    try:
+        output, _ = process.communicate(timeout=5.0)
+        return output or ""
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process(process)
+        # A descendant that escaped the process-group boundary can retain the
+        # read end.  Close this process's copy and retain the diagnostic text
+        # already collected instead of waiting forever on EOF.
+        stream = getattr(process, "stdout", None)
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+        partial = exc.output
+        if isinstance(partial, bytes):
+            return partial.decode(errors="replace")
+        return partial or ""
 
 
 def _pytest_console_script(python_executable: Path) -> Path | None:
@@ -561,7 +1042,7 @@ def _run_collection_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            start_new_session=os.name == "posix",
+            **_process_creation_kwargs(),
         )
     except OSError as exc:
         return CollectionResult(
@@ -577,7 +1058,7 @@ def _run_collection_command(
         output, _ = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         _terminate_process(process)
-        output, _ = process.communicate()
+        output = _communicate_after_termination(process)
         return CollectionResult(
             name=name,
             command=command,
@@ -591,7 +1072,8 @@ def _run_collection_command(
             reason="collection timeout",
         )
 
-    returncode = int(process.returncode or 0)
+    raw_returncode = process.returncode
+    returncode = int(raw_returncode) if raw_returncode is not None else 125
     return CollectionResult(
         name=name,
         command=command,
@@ -599,7 +1081,11 @@ def _run_collection_command(
         returncode=returncode,
         duration_seconds=time.monotonic() - started,
         output_tail=output[-8000:],
-        reason="" if returncode == 0 else "pytest collection returned a non-zero exit code",
+        reason=(
+            ""
+            if returncode == 0
+            else "pytest collection returned a non-zero exit code"
+        ),
     )
 
 
@@ -611,7 +1097,7 @@ def run_pytest_once(
     expression: str,
     timeout_seconds: float,
     report_path: Path,
-) -> tuple[int, Counts, dict[str, int], str, list[str]]:
+) -> tuple[int, GateReport, str, list[str]]:
     command = [
         str(python_executable),
         "-m",
@@ -626,36 +1112,74 @@ def run_pytest_once(
     ]
     child_environment = dict(environment)
     child_environment["POKERED_GATE_REPORT"] = str(report_path)
-    started = time.monotonic()
-    process = subprocess.Popen(
-        command,
-        cwd=project_root,
-        env=child_environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=os.name == "posix",
-    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        report_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return (
+            127,
+            GateReport(
+                Counts(errors=1),
+                error=f"could not prepare pytest report path: {type(exc).__name__}: {exc}",
+            ),
+            "",
+            command,
+        )
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=project_root,
+            env=child_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **_process_creation_kwargs(),
+        )
+    except OSError as exc:
+        return (
+            127,
+            GateReport(
+                Counts(errors=1),
+                error=f"could not start pytest: {type(exc).__name__}: {exc}",
+            ),
+            "",
+            command,
+        )
+
+    timed_out = False
     try:
         output, _ = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
+        timed_out = True
         _terminate_process(process)
-        output, _ = process.communicate()
-        output = (
-            f"pytest timed out after {timeout_seconds:.1f}s\n"
-            f"{output}"
-        )
+        output = _communicate_after_termination(process)
         returncode = 124
     else:
-        returncode = int(process.returncode or 0)
+        raw_returncode = process.returncode
+        returncode = int(raw_returncode) if raw_returncode is not None else 125
 
-    counts, reasons, report_error = load_gate_report(report_path)
-    if report_error:
-        output = f"{output}\n{report_error}"
+    report = _load_gate_report(
+        report_path,
+        expected_returncode=None if timed_out else returncode,
+    )
+    if timed_out:
+        timeout_reason = f"pytest timed out after {timeout_seconds:.1f}s"
+        report = GateReport(
+            counts=report.counts,
+            skip_reasons=report.skip_reasons,
+            nodeids=report.nodeids,
+            collection_errors=report.collection_errors,
+            collection_skips=report.collection_skips,
+            error=(f"{timeout_reason}; {report.error}" if report.error else timeout_reason),
+        )
+    if report.error:
+        output = f"{output}\n{report.error}"
     # Keep the command and enough output to diagnose a failed gate without
     # flooding the orchestrator with every emulator trace.
-    del started
-    return returncode, counts, reasons, output[-8000:], command
+    return returncode, report, output[-8000:], command
 
 
 def synthetic_optional_skip(
@@ -674,6 +1198,30 @@ def synthetic_optional_skip(
     )
 
 
+def _test_key_from_nodeid(nodeid: str) -> tuple[str, str] | None:
+    if "::" not in nodeid:
+        return None
+    path, test_name = nodeid.split("::", 1)
+    return Path(path).name, test_name.split("[", 1)[0]
+
+
+def _required_test_problems(
+    nodeids: Iterable[str],
+    required_test_keys: Iterable[tuple[str, str]],
+) -> list[str]:
+    actual = {
+        key
+        for nodeid in nodeids
+        if (key := _test_key_from_nodeid(nodeid)) is not None
+    }
+    missing = sorted(set(required_test_keys) - actual)
+    return [
+        "required acceptance test is absent from selected items: "
+        f"{module}::{name}"
+        for module, name in missing
+    ]
+
+
 def run_tier(
     *,
     name: str,
@@ -684,6 +1232,7 @@ def run_tier(
     repeat: int,
     timeout_override: float | None,
     report_directory: Path,
+    required_test_keys: Iterable[tuple[str, str]] = (),
 ) -> TierResult:
     required = name not in OPTIONAL_TIERS
     if required and name in REQUIRED_TIER_ASSETS and required_problems:
@@ -708,10 +1257,13 @@ def run_tier(
     returncodes: list[int] = []
     output_tail = ""
     command: list[str] | None = None
+    iteration_failures: list[str] = []
+    baseline_nodeids: set[str] | None = None
+    selected_nodeids: list[str] = []
     started = time.monotonic()
     for iteration in range(1, repeat + 1):
         report_path = report_directory / f"{name}-{iteration}.json"
-        returncode, counts, reasons, output, command = run_pytest_once(
+        returncode, report, output, command = run_pytest_once(
             project_root=project_root,
             python_executable=python_executable,
             environment=environment,
@@ -719,6 +1271,7 @@ def run_tier(
             timeout_seconds=timeout,
             report_path=report_path,
         )
+        counts = report.counts
         aggregate.total += counts.total
         aggregate.passed += counts.passed
         aggregate.failed += counts.failed
@@ -726,14 +1279,60 @@ def run_tier(
         aggregate.xfailed += counts.xfailed
         aggregate.xpassed += counts.xpassed
         aggregate.errors += counts.errors
-        aggregate_reasons.update(reasons)
+        aggregate_reasons.update(report.skip_reasons)
         returncodes.append(returncode)
         if output.strip():
             output_tail = output
 
+        problems: list[str] = []
+        if report.error:
+            problems.append(report.error)
+        if returncode != 0:
+            problems.append(f"pytest returned exit code {returncode}")
+        if report.collection_errors:
+            problems.append(
+                f"pytest reported {len(report.collection_errors)} collection error(s)"
+            )
+        if report.collection_skips:
+            problems.append(
+                f"pytest reported {len(report.collection_skips)} collection skip(s)"
+            )
+            aggregate_reasons.update(
+                {
+                    str(entry.get("reason") or "(collection skip without a reason)"): 1
+                    for entry in report.collection_skips
+                }
+            )
+        if counts.total == 0:
+            problems.append("pytest selected no tests for the tier expression")
+        if counts.failed or counts.errors or counts.xfailed or counts.xpassed:
+            problems.append(
+                "unexpected outcomes: "
+                f"failed={counts.failed} errors={counts.errors} "
+                f"xfailed={counts.xfailed} xpassed={counts.xpassed}"
+            )
+        if required and counts.skipped:
+            problems.append(f"required tier produced {counts.skipped} test skip(s)")
+        if not counts.passed and not counts.xpassed:
+            problems.append("iteration produced no passing test outcome")
+
+        required_problems = _required_test_problems(report.nodeids, required_test_keys)
+        problems.extend(required_problems)
+        current_nodeids = set(report.nodeids)
+        if baseline_nodeids is None:
+            baseline_nodeids = current_nodeids
+            selected_nodeids = list(report.nodeids)
+        elif name == "timing" and current_nodeids != baseline_nodeids:
+            problems.append(
+                "timing-tier selected test set changed between repetitions: "
+                f"baseline={len(baseline_nodeids)} current={len(current_nodeids)}"
+            )
+        if problems:
+            iteration_failures.extend(f"iteration {iteration}: {problem}" for problem in problems)
+
     duration = time.monotonic() - started
     unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
-    if any(code not in (0, 5) for code in returncodes):
+    if iteration_failures or any(code != 0 for code in returncodes):
         status = "FAIL"
     elif unexpected:
         status = "FAIL"
@@ -762,6 +1361,8 @@ def run_tier(
         skip_reasons=dict(sorted(aggregate_reasons.items())),
         command=command,
         output_tail=output_tail,
+        iteration_failures=iteration_failures,
+        selected_nodeids=selected_nodeids,
     )
 
 
@@ -792,6 +1393,7 @@ def render_text(
     assets: list[AssetRecord],
     collections: list[CollectionResult],
     tiers: list[TierResult],
+    gate_problems: list[str],
     overall: str,
 ) -> str:
     lines = [
@@ -817,6 +1419,12 @@ def render_text(
             lines.append(f"  {key}={runtime[key]}")
     if runtime.get("probe_error"):
         lines.append(f"  probe_error={runtime['probe_error']}")
+
+    lines.append("gate-policy:")
+    if gate_problems:
+        lines.extend(f"  FAIL: {problem}" for problem in gate_problems)
+    else:
+        lines.append("  PASS")
 
     lines.append("collection:")
     for collection in collections:
@@ -856,6 +1464,8 @@ def render_text(
             lines.append(f"    reason: {tier.reason}")
         for reason, count in tier.skip_reasons.items():
             lines.append(f"    skip[{count}]: {reason}")
+        for failure in tier.iteration_failures:
+            lines.append(f"    iteration-failure: {failure}")
         if tier.status in {"FAIL", "BLOCKED"} and tier.output_tail:
             lines.append("    output tail:")
             lines.extend(f"      {line}" for line in tier.output_tail.splitlines()[-60:])
@@ -935,6 +1545,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     # from the worktree.
     environment["POKERED_PYTHON"] = str(python_executable)
     runtime = probe_runtime(python_executable, project_root, environment)
+    gate_problems = runtime_problems(project_root, runtime)
+    gate_problems.extend(
+        environment_policy_problems(
+            project_root=project_root,
+            environment=environment,
+            assets=assets,
+        )
+    )
+    required_tests_by_tier, tier_config_error = load_required_test_keys(project_root)
+    if tier_config_error:
+        gate_problems.append(tier_config_error)
     collections = run_collection_preflight(
         project_root=project_root,
         python_executable=python_executable,
@@ -969,13 +1590,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     repeat=args.repeat_timing,
                     timeout_override=args.timeout_seconds,
                     report_directory=report_directory,
+                    required_test_keys=required_tests_by_tier.get(name, ()),
                 )
             )
 
+    tier_ok = all(
+        tier.status == "PASS"
+        if tier.required
+        else tier.status in {"PASS", "SKIP"}
+        for tier in tiers
+    )
     overall = (
         "PASS"
-        if all(collection.status == "PASS" for collection in collections)
-        and all(tier.status in {"PASS", "SKIP"} for tier in tiers)
+        if not gate_problems
+        and all(collection.status == "PASS" for collection in collections)
+        and tier_ok
         else "FAIL"
     )
     if args.format == "json":
@@ -987,6 +1616,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "collections": [asdict(collection) for collection in collections],
             "assets": [asdict(asset) for asset in assets],
             "tiers": [_jsonable_tier(tier) for tier in tiers],
+            "gate_problems": gate_problems,
             "overall": overall,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1000,6 +1630,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 assets=assets,
                 collections=collections,
                 tiers=tiers,
+                gate_problems=gate_problems,
                 overall=overall,
             )
         )

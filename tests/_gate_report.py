@@ -14,17 +14,30 @@ from pathlib import Path
 from typing import Any
 
 
+_VALID_OUTCOMES = frozenset({"passed", "failed", "skipped"})
+
+
 def pytest_configure(config: Any) -> None:
+    # pytest.main() can be invoked more than once in one interpreter by
+    # callers embedding the gate.  Reset the module-level state explicitly;
+    # otherwise a later run could inherit records or collection failures from
+    # an earlier run and produce a plausible but incorrect report.
+    _ACTIVE_RECORDS.clear()
+    _ACTIVE_COLLECTION_ERRORS.clear()
+    _ACTIVE_COLLECTION_SKIPS.clear()
+    _ACTIVE_COLLECTED_NODEIDS.clear()
     config._pokered_gate_records = {}
     config._pokered_gate_collection_errors = []
+    config._pokered_gate_collection_skips = []
+
+
+def pytest_collection_finish(session: Any) -> None:
+    """Capture the post-selection item set used by this pytest process."""
+
+    _ACTIVE_COLLECTED_NODEIDS[:] = [item.nodeid for item in session.items]
 
 
 def pytest_runtest_logreport(report: Any) -> None:
-    config = report.config if hasattr(report, "config") else None
-    # TestReport does not expose config on all supported pytest versions; the
-    # active plugin state is retained by the module-level mapping instead.
-    del config
-
     if report.when == "setup" and report.outcome == "passed":
         return
     if report.when == "teardown" and report.outcome == "passed":
@@ -33,17 +46,26 @@ def pytest_runtest_logreport(report: Any) -> None:
     records = _records()
     nodeid = report.nodeid
     current = records.get(nodeid)
+    outcome = str(report.outcome)
+    if outcome not in _VALID_OUTCOMES:
+        # Keep an unexpected pytest outcome visible to the gate as an error,
+        # rather than allowing an unknown value to disappear from accounting.
+        outcome = "error"
 
     # A setup skip/error is terminal for the test.  A teardown failure must
-    # replace a prior passing call so cleanup failures are never hidden.
-    if current is not None and report.when == "call" and current["outcome"] in {
-        "skipped",
-        "failed",
-    }:
-        return
+    # replace a prior passing call so cleanup failures are never hidden.  Once
+    # a failure/error is recorded, a later teardown skip/pass must not turn it
+    # into a green or skipped result.
+    if current is not None:
+        if current["outcome"] in {"failed", "error"}:
+            if outcome in {"failed", "error"} and report.when != current["when"]:
+                current["reason"] = _combine_reasons(current["reason"], _reason(report))
+            return
+        if report.when == "call" and current["when"] == "setup":
+            return
     records[nodeid] = {
         "nodeid": nodeid,
-        "outcome": report.outcome,
+        "outcome": outcome,
         "when": report.when,
         "was_xfail": bool(getattr(report, "wasxfail", False)),
         "reason": _reason(report),
@@ -56,6 +78,13 @@ def pytest_collectreport(report: Any) -> None:
             {
                 "nodeid": getattr(report, "nodeid", "<collection>"),
                 "reason": str(report.longrepr),
+            }
+        )
+    elif getattr(report, "skipped", False):
+        _collection_skips().append(
+            {
+                "nodeid": getattr(report, "nodeid", "<collection>"),
+                "reason": _reason(report),
             }
         )
 
@@ -94,6 +123,9 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
         "counts": {**counts, "total": len(records)},
         "tests": records,
         "collection_errors": list(_collection_errors()),
+        "collection_skips": list(_collection_skips()),
+        "collected": len(_ACTIVE_COLLECTED_NODEIDS),
+        "nodeids": list(_ACTIVE_COLLECTED_NODEIDS),
     }
     path = Path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,6 +137,8 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
 # the JSON protocol independent of private pytest internals.
 _ACTIVE_RECORDS: dict[str, dict[str, Any]] = {}
 _ACTIVE_COLLECTION_ERRORS: list[dict[str, str]] = []
+_ACTIVE_COLLECTION_SKIPS: list[dict[str, str]] = []
+_ACTIVE_COLLECTED_NODEIDS: list[str] = []
 
 
 def _records() -> dict[str, dict[str, Any]]:
@@ -113,6 +147,10 @@ def _records() -> dict[str, dict[str, Any]]:
 
 def _collection_errors() -> list[dict[str, str]]:
     return _ACTIVE_COLLECTION_ERRORS
+
+
+def _collection_skips() -> list[dict[str, str]]:
+    return _ACTIVE_COLLECTION_SKIPS
 
 
 def _reason(report: Any) -> str:
@@ -124,4 +162,18 @@ def _reason(report: Any) -> str:
     return str(longrepr)
 
 
-__all__ = ["pytest_collectreport", "pytest_configure", "pytest_runtest_logreport", "pytest_sessionfinish"]
+def _combine_reasons(previous: str, current: str) -> str:
+    if not previous:
+        return current
+    if not current or current == previous:
+        return previous
+    return f"{previous}\n{current}"
+
+
+__all__ = [
+    "pytest_collectreport",
+    "pytest_collection_finish",
+    "pytest_configure",
+    "pytest_runtest_logreport",
+    "pytest_sessionfinish",
+]

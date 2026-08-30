@@ -6,8 +6,11 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from tests._rom_assets import find_fixture_root, find_rom_root, fixture_path, rom_path, sym_path
 from tests._tier_config import classify_test
@@ -21,9 +24,9 @@ sys.modules[_SPEC.name] = gate
 _SPEC.loader.exec_module(gate)
 
 
-def test_tier_classifier_keeps_unknown_tests_rom_free():
-    marks = classify_test("tests/test_new_unit.py", "test_parser")
-    assert marks == frozenset({"unit"})
+def test_tier_classifier_rejects_unknown_test_modules():
+    with pytest.raises(ValueError, match="not classified"):
+        classify_test("tests/test_new_unit.py", "test_parser")
 
 
 def test_tier_classifier_separates_required_remote_and_diagnostic_trade():
@@ -93,7 +96,10 @@ def test_asset_inspection_reports_hash_mismatch_and_missing_inputs(tmp_path):
     records = gate.inspect_assets(
         rom_root,
         fixture_root,
-        {Path("red/pokemon-red.gb"): "0" * 40},
+        {
+            Path("red/pokemon-red.gb"): "0" * 40,
+            Path("red/pokemon-red.sym"): hashlib.sha1(b"symbols").hexdigest(),
+        },
     )
     by_label = {record.label: record for record in records}
     assert by_label["red-stock"].status == "sha1-mismatch"
@@ -144,11 +150,38 @@ def test_gate_report_loader_counts_xfail_and_skip_reasons(tmp_path):
                     "xpassed": 0,
                     "errors": 0,
                 },
-                "tests": [
-                    {"outcome": "passed", "reason": "", "was_xfail": False},
-                    {"outcome": "skipped", "reason": "missing ROM", "was_xfail": False},
-                    {"outcome": "skipped", "reason": "known issue", "was_xfail": True},
+                    "tests": [
+                    {
+                        "nodeid": "tests/test_gate.py::test_pass",
+                        "outcome": "passed",
+                        "when": "call",
+                        "reason": "",
+                        "was_xfail": False,
+                    },
+                    {
+                        "nodeid": "tests/test_gate.py::test_skip",
+                        "outcome": "skipped",
+                        "when": "call",
+                        "reason": "missing ROM",
+                        "was_xfail": False,
+                    },
+                    {
+                        "nodeid": "tests/test_gate.py::test_xfail",
+                        "outcome": "skipped",
+                        "when": "call",
+                        "reason": "known issue",
+                        "was_xfail": True,
+                    },
                 ],
+                "collection_errors": [],
+                "collection_skips": [],
+                "collected": 3,
+                "nodeids": [
+                    "tests/test_gate.py::test_pass",
+                    "tests/test_gate.py::test_skip",
+                    "tests/test_gate.py::test_xfail",
+                ],
+                "exitstatus": 0,
             }
         ),
         encoding="utf-8",
