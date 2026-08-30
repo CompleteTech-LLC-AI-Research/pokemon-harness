@@ -1,0 +1,33 @@
+name: Release hygiene
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-and-manifest:
+    name: Unit tests and fixture-manifest schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install development dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Validate fixture-manifest schema
+        run: python scripts/validate_fixture_manifest.py --schema-only
+
+      - name: Run ROM-free unit tier
+        run: python -m pytest -q -m unit
