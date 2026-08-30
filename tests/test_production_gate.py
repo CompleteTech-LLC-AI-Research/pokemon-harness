@@ -98,6 +98,8 @@ def test_asset_inspection_reports_hash_mismatch_and_missing_inputs(tmp_path):
     assert by_label["red-stock"].status == "sha1-mismatch"
     assert by_label["red-stock"].actual_sha1 == hashlib.sha1(b"wrong bytes").hexdigest()
     assert by_label["red"].status == "ok"
+    assert by_label["red"].actual_sha1 == hashlib.sha1(b"symbols").hexdigest()
+    assert by_label["red cable-club"].actual_sha1 == hashlib.sha1(b"state").hexdigest()
     assert by_label["blue"].status == "missing"
     assert any("blue-stock" in problem for problem in gate.required_asset_problems(records))
 

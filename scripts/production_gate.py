@@ -240,25 +240,29 @@ def inspect_assets(
 
     for label, relative in KNOWN_SYMBOL_FILES:
         path = rom_root / relative
+        present = path.is_file()
         records.append(
             AssetRecord(
                 label,
                 "symbol",
                 str(path),
-                "ok" if path.is_file() else "missing",
-                size=path.stat().st_size if path.is_file() else None,
+                "ok" if present else "missing",
+                size=path.stat().st_size if present else None,
+                actual_sha1=sha1_of_file(path) if present else None,
             )
         )
 
     for label, relative in REQUIRED_FIXTURES:
         path = fixture_root / relative
+        present = path.is_file()
         records.append(
             AssetRecord(
                 label,
                 "fixture",
                 str(path),
-                "ok" if path.is_file() else "missing",
-                size=path.stat().st_size if path.is_file() else None,
+                "ok" if present else "missing",
+                size=path.stat().st_size if present else None,
+                actual_sha1=sha1_of_file(path) if present else None,
             )
         )
     return records
