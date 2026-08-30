@@ -23,7 +23,6 @@ import sys
 import time
 from pathlib import Path
 
-
 _TRADE_DIAG_SYMBOLS = (
     "CableClubNPC",
     "SaveGameData",
@@ -183,8 +182,8 @@ def main() -> int:
 
     sys.path.insert(0, str(args.repo_root / "src"))
 
-    from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
     from pokered_harness.config import load_versions
+    from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
     from pokered_harness.session import Session
 
     rom_root = Path(os.environ.get("POKERED_ROM_ROOT", args.repo_root / "rom"))
@@ -318,7 +317,7 @@ def main() -> int:
     )
     log("attached; starting drive loop")
 
-    deadline = time.time() + args.deadline_seconds
+    deadline = time.monotonic() + args.deadline_seconds
     select_mon_announced = False
     party_after_trade: dict[str, object] | None = None
 
@@ -361,7 +360,7 @@ def main() -> int:
     def current_menu_item() -> int | None:
         try:
             return session._pyboy.memory[session.symbols.addr_of("wCurrentMenuItem")]
-        except Exception:
+        except (AttributeError, KeyError, TypeError):
             return None
 
     try:
@@ -374,12 +373,12 @@ def main() -> int:
         # nearly the same game phase.
         link._network_backend.sync_with_peer(sync_id=100, timeout=60.0)
         log("phase 1 start")
-        last_progress = time.time()
+        last_progress = time.monotonic()
         serial_phase_ticks = 0
         link_menu_announced = False
         peer_link_menu_ready = False
         peer_link_menu_ready_grace = 0
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             in_serial_phase = (
                 counters["SaveGameData"][0] > 0
                 or counters["Serial_SyncAndExchangeNybble"][0] > 0
@@ -423,7 +422,7 @@ def main() -> int:
                             break
                 session.press("a", duration=4)
                 session.step(40)
-            if time.time() - last_progress > 10.0:
+            if time.monotonic() - last_progress > 10.0:
                 log(
                     f"phase 1 progress: "
                     f"CableClubNPC={counters['CableClubNPC'][0]} "
@@ -431,7 +430,7 @@ def main() -> int:
                     f"Serial_SyncAndExchangeNybble={counters['Serial_SyncAndExchangeNybble'][0]} "
                     f"LinkMenu={counters['LinkMenu'][0]}"
                 )
-                last_progress = time.time()
+                last_progress = time.monotonic()
 
         if link_menu_announced and args.goal != "link_menu":
             for _ in range(64):
@@ -447,7 +446,7 @@ def main() -> int:
             log("sync: past link_menu barrier")
             # Trade Center warp — A-mash until map becomes 0xEF.
             TRADE_CENTER = 0xEF
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 if session.read_game_state().overworld.map_id == TRADE_CENTER:
                     break
                 session.press("a", duration=4)
@@ -465,7 +464,7 @@ def main() -> int:
             warp_announced = False
             peer_warp_ready = False
             log("sync: warp announce-and-continue")
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 if (
                     session.read_game_state().overworld.map_id == TRADE_CENTER
                     and not warp_announced
@@ -510,7 +509,7 @@ def main() -> int:
             # we rely on the warp barrier (sync_id=2) aligning us
             # closely enough that the natural parallel tick rates
             # keep the exchange progressing on both sides.
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 if counters["CableClub_DoBattleOrTrade"][0] > 0:
                     break
                 session.press("a", duration=4)
@@ -524,9 +523,9 @@ def main() -> int:
             # Wait for the big exchange to complete — detect via
             # TradeCenter_SelectMon firing (runs after the exchange
             # + warp-to-trade-flow).
-            last_exchange_log = time.time()
+            last_exchange_log = time.monotonic()
             peer_ready_for_select_mon = False
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 if counters["TradeCenter_SelectMon"][0] > 0 and not select_mon_announced:
                     link._network_backend.announce_sync(sync_id=3)
                     select_mon_announced = True
@@ -546,7 +545,7 @@ def main() -> int:
                     )
                     break
                 session.step(20)
-                if time.time() - last_exchange_log > 15.0:
+                if time.monotonic() - last_exchange_log > 15.0:
                     log(
                         "waiting for select_mon convergence "
                         f"{state_snapshot()} "
@@ -555,7 +554,7 @@ def main() -> int:
                         f"TradeCenter_SelectMon={counters['TradeCenter_SelectMon'][0]} "
                         f"backend={backend_snapshot()}"
                     )
-                    last_exchange_log = time.time()
+                    last_exchange_log = time.monotonic()
             if select_mon_announced:
                 if not peer_ready_for_select_mon:
                     log(
@@ -570,8 +569,8 @@ def main() -> int:
                     # the same exchange. Keep stepping until the peer's own
                     # announcement arrives, then use a real barrier so both
                     # sides start menu navigation from a matched boundary.
-                    settle_deadline = min(deadline, time.time() + 10.0)
-                    while time.time() < settle_deadline:
+                    settle_deadline = min(deadline, time.monotonic() + 10.0)
+                    while time.monotonic() < settle_deadline:
                         session.step(20)
                     log(
                         "TradeCenter_SelectMon converged on both peers; "
@@ -598,7 +597,7 @@ def main() -> int:
 
             # State-aware menu navigation.
             log(f"entering menu nav; counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} }")
-            last_log = time.time()
+            last_log = time.monotonic()
             stats_key = "TradeCenter_SelectMon.selectStatsMenuItem"
             trade_key = "TradeCenter_SelectMon.selectTradeMenuItem"
             menu_key = "TradeCenter_SelectMon.playerMonMenu_HandleInput"
@@ -606,14 +605,14 @@ def main() -> int:
             prev = {k: counters[k][0] for k in (stats_key, trade_key, menu_key, tct_key)}
             right_pending = 0
             while (
-                time.time() < deadline
+                time.monotonic() < deadline
                 and counters["_AddEnemyMonToPlayerParty"][0] == 0
             ):
                 session.step(40)
-                if time.time() - last_log > 15.0:
+                if time.monotonic() - last_log > 15.0:
                     snap = {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS}
                     log(f"menu nav progress: {snap}")
-                    last_log = time.time()
+                    last_log = time.monotonic()
                 now = {k: counters[k][0] for k in (stats_key, trade_key, menu_key, tct_key)}
                 if now[trade_key] > prev[trade_key]:
                     session.press("a", duration=4)
@@ -624,9 +623,7 @@ def main() -> int:
                 elif right_pending > 0:
                     session.press("right", duration=12)
                     right_pending -= 1
-                elif now[menu_key] > prev[menu_key]:
-                    session.press("a", duration=4)
-                elif now[tct_key] > prev[tct_key]:
+                elif now[menu_key] > prev[menu_key] or now[tct_key] > prev[tct_key]:
                     session.press("a", duration=4)
                 else:
                     session.press("a", duration=4)
@@ -653,14 +650,14 @@ def main() -> int:
                     cooperative_sync(sync_id=4, timeout=120.0)
                     log("sync: past post-trade barrier")
                     shot("07_post_trade")
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     log(f"post-trade sync raised {type(exc).__name__}: {exc}")
                 # After rendezvous both sides have fired
                 # _AddEnemyMonToPlayerParty. Keep ticking briefly so
                 # the peer's post-trade animation / UI code can still
                 # drive any residual serial traffic through us.
-                post_deadline = min(deadline, time.time() + 30.0)
-                while time.time() < post_deadline:
+                post_deadline = min(deadline, time.monotonic() + 30.0)
+                while time.monotonic() < post_deadline:
                     session.step(40)
         elif args.goal == "battle":
             log("sync: link_menu battle barrier")
@@ -699,7 +696,7 @@ def main() -> int:
                     break
                 session.press(walk_dir, duration=8)
                 session.step(30)
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 if counters["CableClub_DoBattleOrTrade"][0] > 0:
                     break
                 session.press("a", duration=4)
@@ -713,7 +710,7 @@ def main() -> int:
 
             damage_announced = False
             peer_damage_ready = False
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 if counters["EndOfBattle"][0] > 0:
                     break
                 if counters["PlayerCalcMoveDamage"][0] > 0 and not damage_announced:
@@ -736,10 +733,10 @@ def main() -> int:
                     cooperative_sync(sync_id=15, timeout=120.0)
                     log("sync: past battle damage barrier")
                     shot("06_battle_synced")
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     log(f"battle damage sync raised {type(exc).__name__}: {exc}")
-                post_deadline = min(deadline, time.time() + 10.0)
-                while time.time() < post_deadline:
+                post_deadline = min(deadline, time.monotonic() + 10.0)
+                while time.monotonic() < post_deadline:
                     session.press("a", duration=4)
                     session.step(20)
             if not peer_damage_ready:
@@ -748,18 +745,18 @@ def main() -> int:
                     f"dmg={counters['PlayerCalcMoveDamage'][0]} "
                     f"backend={backend_snapshot()}"
                 )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log(f"EXCEPTION in drive loop: {type(exc).__name__}: {exc}")
     finally:
         try:
             session.close()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            log(f"session cleanup raised {type(exc).__name__}: {exc}")
         try:
             if link._network_backend is not None:
                 link._network_backend.stop()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            log(f"backend cleanup raised {type(exc).__name__}: {exc}")
 
     result = {s: counters[s][0] for s in _TRADE_DIAG_SYMBOLS}
     result["_role"] = args.role

@@ -25,7 +25,6 @@ from pokered_harness.link.network_backend import (
     NetworkBackendError,
 )
 
-
 _OP_EDGE_REQ = 0x10
 _OP_EDGE_RESP = 0x11
 
@@ -295,9 +294,9 @@ def test_announce_sync_can_be_polled_without_blocking():
     b.start_receiver(local_core=None)
     try:
         a.announce_sync(sync_id=9)
-        deadline = time.time() + 2.0
+        deadline = time.monotonic() + 2.0
         hit = False
-        while time.time() < deadline and not hit:
+        while time.monotonic() < deadline and not hit:
             hit = b.poll_peer_sync(sync_id=9)
             time.sleep(0.01)
         assert hit is True
@@ -332,9 +331,9 @@ def test_keepalive_fallback_is_visible_in_debug_snapshot():
     try:
         reply = a.on_edge(our_bit=1, our_role=1)
         assert reply == 1
-        deadline = time.time() + 1.0
+        deadline = time.monotonic() + 1.0
         snap = b.debug_snapshot()
-        while time.time() < deadline and snap["edge_resp_sent"] == 0:
+        while time.monotonic() < deadline and snap["edge_resp_sent"] == 0:
             time.sleep(0.01)
             snap = b.debug_snapshot()
         assert snap["edge_req_received"] == 1
@@ -375,9 +374,9 @@ def test_post_byte_fallback_is_visible_in_debug_snapshot():
         assert first_reply == 0
         second_reply = a.on_edge(our_bit=0, our_role=1)
         assert second_reply == 1
-        deadline = time.time() + 1.0
+        deadline = time.monotonic() + 1.0
         snap = b.debug_snapshot()
-        while time.time() < deadline and snap["keepalive_after_post_byte_waits"] == 0:
+        while time.monotonic() < deadline and snap["keepalive_after_post_byte_waits"] == 0:
             time.sleep(0.01)
             snap = b.debug_snapshot()
         assert snap["slave_post_byte_rearm_waits"] >= 1
@@ -430,9 +429,9 @@ def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive():
         assert first_reply == 0
 
         core.rearm_after(0.150, next_out_bit=0)
-        started = time.time()
+        started = time.monotonic()
         second_reply = a.on_edge(our_bit=0, our_role=1)
-        elapsed = time.time() - started
+        elapsed = time.monotonic() - started
 
         assert second_reply == 0
         assert elapsed >= 0.140
@@ -505,14 +504,14 @@ def test_listen_and_connect_over_loopback_exchange_byte():
 
 
 def _wait_bound(port: int, timeout: float = 2.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
             s.settimeout(0.05)
             s.connect(("127.0.0.1", port))
             s.close()
             return True
-        except (OSError, _socket.timeout):
+        except (TimeoutError, OSError):
             time.sleep(0.05)
     return False
