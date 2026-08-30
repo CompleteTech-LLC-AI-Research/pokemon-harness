@@ -20,7 +20,8 @@ be recorded before release sign-off. The current remote tier has now passed
 11/11 tests for the canonical color-Red listener/internal-clock and color-Blue
 connector/external-clock roles. Strict local evidence covers color Red +
 Yellow; strict remote evidence covers color Red as listener/internal-clock and
-color Blue as connector/external-clock.
+color Blue as connector/external-clock. The current strict trade and battle
+tiers each pass 2/2 (local Red/Yellow plus controlled remote Red/Blue).
 The remote subprocess driver controls the LinkMenu choice with a test hook, so
 the remote result is controlled native-serial acceptance, not full user-driven
 menu gameplay. Symbol hashes and audited generator provenance are in
