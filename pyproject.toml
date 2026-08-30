@@ -10,7 +10,10 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = { text = "LGPL-3.0-only" }
 dependencies = [
-    "mcp>=1.0",
+    # The low-level Server decorators used by mcp_server.py were removed in
+    # MCP 2.x. Keep installs on the tested 1.x API until the server is
+    # deliberately migrated and its stdio contract is re-certified.
+    "mcp>=1.27,<2",
     "cython>=3.0.6,<3.1,!=3.0.10",
     "numpy",
     "pydantic>=2.6",

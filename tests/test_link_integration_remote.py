@@ -29,8 +29,6 @@ from pokered_harness.link import AgentSync
 
 from tests._link_orchestrator import (
     LockstepOrchestrator,
-    walk_a_toward,
-    walk_b_toward,
 )
 
 import pytest
@@ -1365,8 +1363,6 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
             # Observe the game-serial RPC stream.
             kinds_a: list[str] = []
             kinds_b: list[str] = []
-            orig_ex_a = link_a.exchange
-            orig_ex_b = link_b.exchange
 
             def _wrap(sink, inner):
                 def exchange(kind, my_bytes, *, timeout_ms=30000):
@@ -1475,7 +1471,6 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
             # Both agents completed the rendezvous successfully.
             assert "peer_tick" in result_a and "peer_tick" in result_b
             # And the game-level serial flow progressed past the menu.
-            rng_kind = "exchange_bytes/wSerialRandomNumberListBlock"
             menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
             diag = (
                 f"result_a={result_a} result_b={result_b} "
