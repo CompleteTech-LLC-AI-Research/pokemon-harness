@@ -7,6 +7,8 @@ end-to-end byte exchange without loading a real ROM.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
@@ -208,3 +210,24 @@ def test_step_exchanges_a_full_byte_end_to_end():
     assert core_b.SB == 0xAA
     assert core_a.transfer_enabled == 0
     assert core_b.transfer_enabled == 0
+
+
+def test_interleaved_chunk_uses_cpu_cycles_for_variable_length_instructions():
+    """A chunk ends on emulated time, not an instruction-count estimate."""
+
+    class _ChunkMB:
+        def __init__(self):
+            self.cpu = SimpleNamespace(cycles=100)
+            self.lcd = SimpleNamespace(frame_done=False)
+            self.breakpoint_singlestep = 0
+
+        def tick(self):
+            # The second instruction is deliberately longer than the
+            # historical ~7-cycle estimate.
+            self.cpu.cycles += (4, 20)[self.cpu.cycles != 100]
+            return False
+
+    pyboy = SimpleNamespace(mb=_ChunkMB())
+
+    assert PyBoyLinkSession._step_single_step_chunk(pyboy, 24) is False
+    assert pyboy.mb.cpu.cycles == 124

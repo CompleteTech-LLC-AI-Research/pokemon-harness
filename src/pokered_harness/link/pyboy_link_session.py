@@ -503,15 +503,17 @@ class PyBoyLinkSession:
                 f"step_interleaved() requires {self.MAX_ATTACHED} "
                 f"attached instances, have {len(self._pyboys)}"
             )
-        # ~7 cycles per single-stepped mb.tick call (empirical).
-        ticks_per_chunk = max(1, chunk_cycles // 7)
+        # ``mb.tick`` returns after one CPU instruction in singlestep mode,
+        # but instruction lengths vary.  Pass the actual cycle budget to the
+        # frame driver so the two sides stay close in emulated time rather
+        # than in an empirical number of instructions.
         effective_view = self._view if render is None else bool(render) or self._view
         a, b = self._pyboys[0], self._pyboys[1]
         for _ in range(frames):
-            self._interleave_one_frame(a, b, ticks_per_chunk, view=effective_view)
+            self._interleave_one_frame(a, b, chunk_cycles, view=effective_view)
 
     @staticmethod
-    def _interleave_one_frame(a, b, ticks_per_chunk: int, *, view: bool = False) -> None:
+    def _interleave_one_frame(a, b, chunk_cycles: int, *, view: bool = False) -> None:
         """Drive ``a`` and ``b`` through one frame each, interleaved.
 
         When ``view`` is True the LCD renderer stays on and each PyBoy's
@@ -525,32 +527,6 @@ class PyBoyLinkSession:
             p.mb.lcd.disable_renderer = not view
             p.mb.sound.disable_sampling = True
             p.mb.sound.clear_buffer()
-
-        # Drive both through mb.tick with singlestep on. Replicates the
-        # hook-firing logic from pyboy._tick's inner while-loop so our
-        # test-side hook counters still fire.
-        def _step_chunk(p, n: int) -> bool:
-            """Advance ``p`` up to ``n`` mb.tick()s or until frame_done.
-            Returns True if the frame completed."""
-            for _ in range(n):
-                if p.mb.lcd.frame_done:
-                    return True
-                # Re-arm singlestep every iteration so mb.tick returns
-                # after a single CPU instruction — breakpoint handling
-                # below may clear it.
-                p.mb.breakpoint_singlestep = 1
-                if p.mb.tick():
-                    # Breakpoint/singlestep return. Mirror pyboy._tick's
-                    # hook-firing logic (best-effort — skips plugin
-                    # manager, which isn't load-bearing for tests).
-                    p.mb.breakpoint_reinject()
-                    bp = p.mb.breakpoint_reached()
-                    if bp != (-1, -1, -1):
-                        bank, addr, _ = bp
-                        p.mb.breakpoint_remove(bank, addr)
-                        p.mb.breakpoint_singlestep_latch = 0
-                        p._handle_hooks()
-            return p.mb.lcd.frame_done
 
         a_done = b_done = False
         while not (a_done and b_done):
@@ -566,7 +542,9 @@ class PyBoyLinkSession:
                     continue
                 if pyboy is b and b_done:
                     continue
-                done = _step_chunk(pyboy, ticks_per_chunk)
+                done = PyBoyLinkSession._step_single_step_chunk(
+                    pyboy, chunk_cycles
+                )
                 if pyboy is a:
                     a_done = done
                 else:
@@ -582,6 +560,47 @@ class PyBoyLinkSession:
                 # and pumps events. tick(0) skips the inner _tick loop
                 # but still reaches _post_tick.
                 p.tick(0, True, False)
+
+    @staticmethod
+    def _step_single_step_chunk(p: object, cycle_budget: int) -> bool:
+        """Advance ``p`` up to ``cycle_budget`` CPU cycles.
+
+        Single-stepped instructions have variable lengths, so a fixed
+        instruction count creates role-dependent timing skew. Real PyBoy
+        exposes the CPU cycle counter; the instruction-count fallback keeps
+        lightweight legacy test doubles usable.
+        """
+        cpu = getattr(p.mb, "cpu", None)
+        start_cycles = getattr(cpu, "cycles", None)
+        fallback_ticks = max(1, cycle_budget // 7)
+        max_ticks = max(fallback_ticks, cycle_budget * 4)
+        ticks = 0
+        while ticks < max_ticks:
+            if p.mb.lcd.frame_done:
+                return True
+            # Re-arm singlestep every iteration so mb.tick returns after a
+            # single CPU instruction — breakpoint handling below may clear
+            # it.
+            p.mb.breakpoint_singlestep = 1
+            if p.mb.tick():
+                # Breakpoint/singlestep return. Mirror pyboy._tick's
+                # hook-firing logic (best-effort — skips plugin manager,
+                # which isn't load-bearing for tests).
+                p.mb.breakpoint_reinject()
+                bp = p.mb.breakpoint_reached()
+                if bp != (-1, -1, -1):
+                    bank, addr, _ = bp
+                    p.mb.breakpoint_remove(bank, addr)
+                    p.mb.breakpoint_singlestep_latch = 0
+                    p._handle_hooks()
+            ticks += 1
+            if start_cycles is not None:
+                current_cycles = getattr(cpu, "cycles", start_cycles)
+                if int(current_cycles) - int(start_cycles) >= cycle_budget:
+                    break
+            elif ticks >= fallback_ticks:
+                break
+        return p.mb.lcd.frame_done
 
     @staticmethod
     def _serial_step_order(a: object, b: object) -> tuple[object, object]:
