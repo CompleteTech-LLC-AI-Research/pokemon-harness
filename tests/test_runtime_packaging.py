@@ -10,6 +10,27 @@ from pyboy.core.serial import Serial
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PYBOY_REVISION = "c565df66c3731fad2856169a90f6bbec99925915"
+EXPECTED_RUNTIME_DEPENDENCIES = {
+    "mcp": "==1.29.1",
+    "cython": "==3.0.12",
+    "numpy": "==2.5.2",
+    "pydantic": "==2.13.5",
+    "pysdl2": "==0.9.17",
+    "pysdl2-dll": "==2.32.10",
+}
+EXPECTED_DEV_DEPENDENCIES = {
+    "pytest": "==9.1.1",
+    "pytest-asyncio": "==1.4.0",
+    "pytest-cov": "==7.1.0",
+    "ruff": "==0.16.5",
+}
+
+
+def _split_exact_requirement(requirement: str) -> tuple[str, str]:
+    name, separator, version = requirement.partition("==")
+    assert separator == "==", requirement
+    assert name and version, requirement
+    return name.lower(), f"=={version}"
 
 
 def test_project_bundles_the_pinned_pyboy_source() -> None:
@@ -26,6 +47,28 @@ def test_project_bundles_the_pinned_pyboy_source() -> None:
         encoding="ascii"
     ).strip()
     assert marker == EXPECTED_PYBOY_REVISION
+
+
+def test_project_direct_dependencies_are_exactly_pinned() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = dict(_split_exact_requirement(req) for req in project["project"]["dependencies"])
+    dev_dependencies = dict(
+        _split_exact_requirement(req)
+        for req in project["project"]["optional-dependencies"]["dev"]
+    )
+
+    assert dependencies == EXPECTED_RUNTIME_DEPENDENCIES
+    assert dev_dependencies == EXPECTED_DEV_DEPENDENCIES
+
+
+def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
+    bootstrap = (ROOT / "scripts" / "bootstrap_pyboy.py").read_text(encoding="utf-8")
+
+    assert 'choices=("source", "cython")' in bootstrap
+    assert '"--check"' in bootstrap
+    assert 'env["PYBOY_NO_CYTHON"] = "1"' in bootstrap
+    assert "apply_external_edge" in bootstrap
+    assert "cython_compiled" in bootstrap
 
 
 def test_mcp_config_uses_the_installed_runtime_without_absolute_paths() -> None:
