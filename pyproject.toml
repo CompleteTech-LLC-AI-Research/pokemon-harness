@@ -45,7 +45,6 @@ packages = [
     "pyboy.api",
     "pyboy.core",
     "pyboy.core.cartridge",
-    "pyboy.link",
     "pyboy.logging",
     "pyboy.plugins",
 ]
