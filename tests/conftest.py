@@ -23,7 +23,9 @@ def pytest_configure(config: pytest.Config) -> None:
         "mcp_stdio": "real-ROM MCP stdio integration tests",
         "acceptance": "optional real-ROM trade or battle acceptance",
         "trade": "optional real-ROM trade coverage",
+        "trade_acceptance": "strict real-ROM party-swap acceptance",
         "battle": "optional real-ROM battle coverage",
+        "battle_acceptance": "strict real-ROM battle-turn acceptance",
         "timing_sensitive": "repeatable scheduling-sensitive regression",
     }
     for marker in MARKERS:

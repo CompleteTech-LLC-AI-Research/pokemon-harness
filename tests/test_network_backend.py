@@ -51,6 +51,46 @@ def test_close_is_idempotent():
     b.close()
 
 
+def test_versioned_handshake_reports_each_peer_rom():
+    a_sock, b_sock = _socket.socketpair()
+    a = NetworkBackend(a_sock, local_rom_version="red")
+    b = NetworkBackend(b_sock, local_rom_version="blue")
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        assert a.wait_for_hello(timeout=1.0) == "blue"
+        assert b.wait_for_hello(timeout=1.0) == "red"
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_stop_wakes_blocked_edge_waiter():
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    result: list[Exception] = []
+
+    def blocked_edge() -> None:
+        try:
+            a.on_edge(our_bit=1, our_role=1)
+        except Exception as exc:  # noqa: BLE001
+            result.append(exc)
+
+    worker = threading.Thread(target=blocked_edge, daemon=True)
+    worker.start()
+    time.sleep(0.05)
+    started = time.monotonic()
+    a.stop()
+    worker.join(timeout=1.0)
+    elapsed = time.monotonic() - started
+    try:
+        assert not worker.is_alive()
+        assert elapsed < 0.5
+        assert result and isinstance(result[0], NetworkBackendError)
+    finally:
+        b.stop()
+
+
 # ---------------------------------------------------------------------------
 # Raw wire protocol: REQ / RESP round-trip
 # ---------------------------------------------------------------------------
@@ -248,6 +288,28 @@ def test_sync_with_peer_rendezvous():
         b.stop()
 
 
+def test_announce_sync_can_be_polled_without_blocking():
+    """A peer can advertise a SYNC point and the other side can poll it."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        a.announce_sync(sync_id=9)
+        deadline = time.time() + 2.0
+        hit = False
+        while time.time() < deadline and not hit:
+            hit = b.poll_peer_sync(sync_id=9)
+            time.sleep(0.01)
+        assert hit is True
+        assert b.poll_peer_sync(sync_id=9) is False
+        assert a.debug_snapshot()["sync_sent"] == 1
+        assert b.debug_snapshot()["sync_received"] == 1
+        assert b.debug_snapshot()["sync_poll_hits"] == 1
+    finally:
+        a.stop()
+        b.stop()
+
+
 def test_sync_with_peer_times_out_on_silent_peer():
     """If the peer never sends SYNC, sync_with_peer raises
     :class:`NetworkBackendError` after the timeout."""
@@ -257,6 +319,129 @@ def test_sync_with_peer_times_out_on_silent_peer():
     try:
         with pytest.raises(NetworkBackendError, match="no peer OP_SYNC"):
             a.sync_with_peer(sync_id=1, timeout=1.0)
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_keepalive_fallback_is_visible_in_debug_snapshot():
+    """An unarmed slave responds with keep-alive and records that fact."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        reply = a.on_edge(our_bit=1, our_role=1)
+        assert reply == 1
+        deadline = time.time() + 1.0
+        snap = b.debug_snapshot()
+        while time.time() < deadline and snap["edge_resp_sent"] == 0:
+            time.sleep(0.01)
+            snap = b.debug_snapshot()
+        assert snap["edge_req_received"] == 1
+        assert snap["edge_resp_sent"] == 1
+        assert snap["slave_rearm_waits"] == 1
+        assert snap["keepalive_bits_sent"] == 1
+        assert snap["keepalive_bytes_started"] == 1
+        assert snap["last_keepalive_state"] == {"core_present": False}
+    finally:
+        a.stop()
+        b.stop()
+
+
+class _CompletingSlaveCore:
+    def __init__(self) -> None:
+        self.transfer_enabled = 1
+        self.internal_clock = 0
+        self.SB = 0
+        self.SC = 0x80
+
+    def peek_out_bit(self) -> int:
+        return 0
+
+    def apply_external_edge(self, peer_bit: int) -> bool:
+        self.transfer_enabled = 0
+        self.SB = peer_bit & 1
+        return True
+
+
+def test_post_byte_fallback_is_visible_in_debug_snapshot():
+    """A keep-alive immediately after a completed byte is tagged separately."""
+    a, b = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=core)
+    try:
+        first_reply = a.on_edge(our_bit=1, our_role=1)
+        assert first_reply == 0
+        second_reply = a.on_edge(our_bit=0, our_role=1)
+        assert second_reply == 1
+        deadline = time.time() + 1.0
+        snap = b.debug_snapshot()
+        while time.time() < deadline and snap["keepalive_after_post_byte_waits"] == 0:
+            time.sleep(0.01)
+            snap = b.debug_snapshot()
+        assert snap["slave_post_byte_rearm_waits"] >= 1
+        assert snap["keepalive_after_post_byte_waits"] >= 1
+        assert snap["last_slave_byte_complete_at"] is not None
+    finally:
+        a.stop()
+        b.stop()
+
+
+class _LateRearmingSlaveCore:
+    def __init__(self) -> None:
+        self.transfer_enabled = 1
+        self.internal_clock = 0
+        self.SB = 0
+        self.SC = 0x80
+        self._next_out_bit = 0
+        self._byte_index = 0
+
+    def peek_out_bit(self) -> int:
+        return self._next_out_bit
+
+    def apply_external_edge(self, peer_bit: int) -> bool:
+        self.SB = peer_bit & 1
+        if self._byte_index == 0:
+            self.transfer_enabled = 0
+            self._byte_index += 1
+            return True
+        self._byte_index += 1
+        return False
+
+    def rearm_after(self, delay_s: float, *, next_out_bit: int) -> None:
+        def _rearm() -> None:
+            time.sleep(delay_s)
+            self._next_out_bit = next_out_bit & 1
+            self.transfer_enabled = 1
+
+        threading.Thread(target=_rearm, daemon=True).start()
+
+
+def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive():
+    """A slave that rearms after the default wait but within the post-byte
+    grace window should send its real next byte, not 0xFE keep-alive."""
+    a, b = NetworkBackend.pair()
+    core = _LateRearmingSlaveCore()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=core)
+    try:
+        first_reply = a.on_edge(our_bit=1, our_role=1)
+        assert first_reply == 0
+
+        core.rearm_after(0.150, next_out_bit=0)
+        started = time.time()
+        second_reply = a.on_edge(our_bit=0, our_role=1)
+        elapsed = time.time() - started
+
+        assert second_reply == 0
+        assert elapsed >= 0.140
+
+        snap = b.debug_snapshot()
+        assert snap["slave_post_byte_rearm_waits"] >= 1
+        assert snap["slave_post_byte_rearm_successes"] >= 1
+        assert snap["keepalive_after_post_byte_waits"] == 0
+        assert snap["keepalive_bits_sent"] == 0
     finally:
         a.stop()
         b.stop()

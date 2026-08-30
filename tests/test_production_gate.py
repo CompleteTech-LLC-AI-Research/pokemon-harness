@@ -25,7 +25,7 @@ def test_tier_classifier_keeps_unknown_tests_rom_free():
     assert marks == frozenset({"unit"})
 
 
-def test_tier_classifier_separates_required_remote_and_optional_trade():
+def test_tier_classifier_separates_required_remote_and_diagnostic_trade():
     remote = classify_test(
         "tests/test_link_integration_remote.py",
         "test_remote_handshake_writes_status_on_both_sides",
@@ -46,6 +46,19 @@ def test_tier_classifier_marks_late_rearm_as_timing_sensitive():
     )
     assert "unit" in marks
     assert "timing_sensitive" in marks
+
+
+def test_tier_classifier_reserves_strict_acceptance_markers_for_gate():
+    trade = classify_test(
+        "tests/test_pyboy_link_session_roms.py",
+        "test_red_yellow_trade_swaps_real_party_records",
+    )
+    battle = classify_test(
+        "tests/test_pyboy_link_session_roms.py",
+        "test_red_yellow_battle_turn_is_resolved",
+    )
+    assert {"real_rom", "acceptance", "trade", "trade_acceptance"} <= trade
+    assert {"real_rom", "acceptance", "battle", "battle_acceptance"} <= battle
 
 
 def test_versions_sha_parser_pairs_each_rom_path(tmp_path):
@@ -107,7 +120,11 @@ def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_p
     )
     assert environment["POKERED_ROM_ROOT"] == str(rom_root)
     assert environment["POKERED_ROM_PATH"] == explicit
-    assert environment["PYTHONPATH"].split(":")[:2] == [str(tmp_path / "src"), str(tmp_path)]
+    assert environment["PYTHONPATH"].split(":")[:3] == [
+        str(tmp_path / "vendor" / "pyboy-src"),
+        str(tmp_path / "src"),
+        str(tmp_path),
+    ]
 
 
 def test_gate_report_loader_counts_xfail_and_skip_reasons(tmp_path):

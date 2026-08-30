@@ -20,7 +20,9 @@ MARKERS = (
     "mcp_stdio",
     "acceptance",
     "trade",
+    "trade_acceptance",
     "battle",
+    "battle_acceptance",
     "timing_sensitive",
 )
 
@@ -31,6 +33,7 @@ REAL_ROM_MODULES = frozenset(
         "test_golden_paths.py",
         "test_link_integration.py",
         "test_link_integration_remote.py",
+        "test_mcp_real_link.py",
         "test_link_symbols_real_roms.py",
         "test_mcp_stdio_integration.py",
         "test_pyboy_link_session_roms.py",
@@ -48,16 +51,16 @@ LOCAL_LINK_MODULES = frozenset(
 REMOTE_LINK_MODULES = frozenset(
     {
         "test_link_integration_remote.py",
+        "test_mcp_real_link.py",
         "test_pyboy_link_session_subprocess.py",
     }
 )
 
 MCP_STDIO_MODULES = frozenset({"test_mcp_stdio_integration.py"})
 
-# Optional trade acceptance includes the real-ROM UI/transport milestones as
-# well as full completion.  The required remote tier still exercises its
-# non-trade handshake smoke tests; this marker makes the optional boundary
-# explicit instead of hiding a skipped test behind a filename expression.
+# The broad trade set keeps ROM milestones visible in diagnostics. The strict
+# acceptance set below is deliberately narrower and is what the production
+# gate uses for the required trade tier.
 TRADE_TESTS = frozenset(
     {
         ("test_link_integration.py", "test_link_trade_roundtrip"),
@@ -80,6 +83,10 @@ TRADE_TESTS = frozenset(
             "test_remote_agent_sync_coordinates_link_menu_vote_blue_blue",
         ),
         ("test_pyboy_link_session_roms.py", "test_pair_completes_trade_end_to_end"),
+        (
+            "test_pyboy_link_session_roms.py",
+            "test_red_yellow_trade_swaps_real_party_records",
+        ),
         ("test_pyboy_link_session_roms.py", "test_yellow_pair_warps_to_trade_center"),
         (
             "test_pyboy_link_session_subprocess.py",
@@ -93,6 +100,43 @@ BATTLE_TESTS = frozenset(
         ("test_pyboy_link_session_roms.py", "test_yellow_pair_warps_to_colosseum"),
         ("test_pyboy_link_session_roms.py", "test_yellow_pair_starts_link_battle"),
         ("test_pyboy_link_session_roms.py", "test_pair_completes_battle_turn"),
+        (
+            "test_pyboy_link_session_roms.py",
+            "test_red_yellow_battle_turn_is_resolved",
+        ),
+        (
+            "test_pyboy_link_session_subprocess.py",
+            "test_subprocess_pair_resolves_battle_turn_over_tcp",
+        ),
+    }
+)
+
+# The broader TRADE_TESTS/BATTLE_TESTS sets remain useful diagnostics, but
+# the production gate must select only tests that assert the resulting game
+# state rather than a hook or menu milestone.
+TRADE_ACCEPTANCE_TESTS = frozenset(
+    {
+        (
+            "test_pyboy_link_session_roms.py",
+            "test_red_yellow_trade_swaps_real_party_records",
+        ),
+        (
+            "test_pyboy_link_session_subprocess.py",
+            "test_subprocess_pair_completes_trade_over_tcp",
+        ),
+    }
+)
+
+BATTLE_ACCEPTANCE_TESTS = frozenset(
+    {
+        (
+            "test_pyboy_link_session_roms.py",
+            "test_red_yellow_battle_turn_is_resolved",
+        ),
+        (
+            "test_pyboy_link_session_subprocess.py",
+            "test_subprocess_pair_resolves_battle_turn_over_tcp",
+        ),
     }
 )
 
@@ -141,8 +185,12 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     test_key = (filename, test_name)
     if test_key in TRADE_TESTS:
         marks.update(("acceptance", "trade"))
+    if test_key in TRADE_ACCEPTANCE_TESTS:
+        marks.add("trade_acceptance")
     if test_key in BATTLE_TESTS:
         marks.update(("acceptance", "battle"))
+    if test_key in BATTLE_ACCEPTANCE_TESTS:
+        marks.add("battle_acceptance")
     if test_key in TIMING_SENSITIVE_TESTS:
         marks.add("timing_sensitive")
 
@@ -157,6 +205,7 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
 
 __all__ = [
     "BATTLE_TESTS",
+    "BATTLE_ACCEPTANCE_TESTS",
     "LOCAL_LINK_MODULES",
     "MARKERS",
     "MCP_STDIO_MODULES",
@@ -164,5 +213,6 @@ __all__ = [
     "REMOTE_LINK_MODULES",
     "TIMING_SENSITIVE_TESTS",
     "TRADE_TESTS",
+    "TRADE_ACCEPTANCE_TESTS",
     "classify_test",
 ]

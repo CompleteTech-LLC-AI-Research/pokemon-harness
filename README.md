@@ -9,25 +9,25 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-As audited on 2026-08-29 at commit `e219fb5`, this checkout is not certified
-as a production release. The distinction matters:
+The clean baseline at commit `e219fb5` was not production-certified. This
+working tree contains the productionization changes and live gate evidence
+described below, but it is still uncommitted and therefore is not a release
+artifact. The distinction matters:
 
 | Capability | Current status | Evidence boundary |
 |---|---|---|
-| Single-session loading, input, state parsing, and save/load | Implemented; release gate pending | The API and unit tests exist. Real-ROM proof is gated by local ROM and symbol files. |
-| MCP stdio server for one session | Implemented; release gate pending | `tests/test_mcp_stdio_integration.py` is real-ROM and dependency gated. |
-| In-process `LinkPair` | Implemented in source; not release-certified | Local link tests require matching ROM fixtures and a PyBoy runtime whose serial internals are accessible to the link layer. |
-| Remote TCP transport | Transport implementation present; gameplay not certified | `tests/test_link_integration_remote.py` is scoped to transport/serial milestones, not a complete user-driven trade. |
-| Remote full trade | Not release-ready | The subprocess test is fixture- and non-Cython-runtime gated; it must pass with the documented production runtime before this capability can be called supported. |
-| Link battle | Not release-ready | Current battle tests are local, fixture-gated diagnostics; no remote battle acceptance result is recorded. |
+| Single-session loading, input, state parsing, and save/load | Implemented; gate evidence available | The unit and real-session tiers require the pinned runtime plus local ROM and symbol files. |
+| MCP stdio server for one session | Implemented; gate evidence available | `tests/test_mcp_stdio_integration.py` is real-ROM and dependency gated. |
+| In-process `LinkPair` | Implemented; canonical local acceptance passed | Red/Yellow strict trade and battle acceptance pass with untouched, ROM-matched fixtures; the broader variant matrix remains diagnostic. |
+| Remote TCP transport and MCP lifecycle | Implemented; strict trade/battle gate evidence available | Native MCP attach/HELLO, two-process LinkMenu, Red/Blue full-trade, and Red/Blue battle-turn checks run on the bundled runtime. |
+| Remote full trade | Implemented; strict acceptance passed | The independent Red/Blue subprocess test completes a natural trade and compares both full 44-byte party-mon records against the peer's original record. |
+| Link battle | Local and remote canonical acceptance passed | Red/Yellow resolves a real move turn locally; independent Red/Blue subprocesses resolve a real battle turn over native TCP serial traffic. |
 | Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
-The clean committed tree also has a release determinism blocker that must be
-fixed by the test lane: several tests import `tests.*`, but
-`tests/__init__.py` is not committed. The `pytest` console-script invocation
-fails eight modules during collection in this checkout. `python -m pytest` can
-collect them through namespace-package behavior in some environments, but
-that is not a portable substitute for fixing the package boundary.
+The release commit must include the explicit `tests/__init__.py` package
+boundary and the bundled PyBoy source tree. Until those files are committed
+and a clean checkout reproduces the recorded gates, this remains a working
+tree status rather than release sign-off.
 
 The required setup, test tiers, evidence format, and sign-off rules are in
 [`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md) and
@@ -41,23 +41,26 @@ The intended release inputs are the exact ROM variants listed in
 | Game | Input | Status |
 |---|---|---|
 | Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Candidate; hash and real-ROM gate required |
-| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Candidate; use a matching fixture if testing links |
+| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Canonical local Red/Yellow link acceptance passed; broader matrix pending |
 | Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Candidate; hash and real-ROM gate required |
-| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Candidate; use a matching fixture if testing links |
-| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Candidate; hash and real-ROM gate required |
+| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Strict remote Red/Blue trade acceptance passed; broader matrix pending |
+| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Canonical local Red/Yellow link acceptance passed; broader matrix pending |
 | Other localisations and ROM hacks | — | Out of scope |
 
-“Candidate” means that the file layout and code paths exist. It does not mean
-that the current checkout has a repeatable, green, release-gate result for
-that variant.
+“Candidate” means that the file layout and code paths exist. The current
+stateful acceptance scope is the local Red/Yellow pair and the independent-
+process Red/Blue remote trade and battle, using the bundled source-runtime
+build. It does not imply that every listed variant or remote pairing has a
+repeatable, green, release-gate result.
 
 ## Requirements and clean install
 
 Requirements:
 
 - Python 3.11 or newer.
-- The exact PyBoy version declared in `pyproject.toml` (`2.7.0`).
-- `mcp` for the MCP server; it is an optional project extra.
+- The bundled PyBoy runtime (`2.7.0`, harness revision
+  `c565df66c3731fad2856169a90f6bbec99925915`).
+- `mcp`, which is a runtime dependency of the package.
 - A legally obtained ROM and a matching debug symbol file for any real-ROM
   run.
 
@@ -67,7 +70,7 @@ From a clean checkout on Unix, WSL, or Git Bash:
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev,mcp]"
+python -m pip install -e ".[dev]"
 python -m pip check
 ```
 
@@ -75,12 +78,17 @@ On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1` and use
 `python -m pip` for the remaining commands. Keep the environment used for
 testing and the environment used to launch MCP identical.
 
-The link implementation currently requires a separately verified PyBoy
-runtime contract. The stock Cython wheel declared by the project does not
-expose every serial object needed by the link layer, while the link tests
-expect a Python-accessible serial implementation. Until the runtime lane
-pins or packages one supported solution, treat single-session use as the
-only declared default and do not label link support production-ready.
+The distribution bundles the pinned PyBoy source runtime used by the link
+layer. It exposes the Python-accessible serial backend contract and is marked
+with the revision above. If an older standalone `pyboy` wheel is already
+installed in an environment, remove it and reinstall this project before
+testing; `Session.from_files` rejects an unmarked runtime when the package
+pin is enforced.
+
+The default release path uses that source-compatible runtime. The optional
+`scripts/bootstrap_pyboy.py --mode cython` path builds the native accelerator
+for platform validation, but a Cython build that hides `mb.serial` is not a
+valid runtime for the Python-side link attachment tests.
 
 ## BYO-ROM and symbols
 
@@ -124,11 +132,10 @@ Copy only the matching `.sym` files into `rom/<version>/`. Record the source
 repository commits and toolchain used for a release; the current repository
 does not contain those generated files or a complete source-commit lock.
 
-Before starting a session, compare the ROM's SHA-1 with
-[`VERSIONS.md`](VERSIONS.md). Always set `POKERED_ROM_SHA1` explicitly for
-the selected ROM. The current loader uses the first SHA-1 row in
-`VERSIONS.md` as its fallback, so omitting the variable while selecting Blue,
-Yellow, or a color variant can validate against the wrong pin. Never use
+Before starting a session, compare the ROM's SHA-1 with its matching path row
+in [`VERSIONS.md`](VERSIONS.md). Always set `POKERED_ROM_SHA1` explicitly for
+release evidence; the loader also selects a matching documented path when the
+variable is omitted and fails closed when no pin exists. Never use
 `POKERED_SKIP_SHA1=1` for a release run.
 
 ## Run one MCP server
@@ -139,7 +146,6 @@ The server requires the primary ROM and symbol paths:
 POKERED_ROM_PATH=rom/red/pokemon-red-color.gb \
 POKERED_SYM_PATH=rom/red/pokemon-red.sym \
 POKERED_ROM_SHA1=e1deed63080bc24cad5fba18ecb3184f905d16d4 \
-PYTHONPATH=src \
 python -m pokered_harness.mcp_server
 ```
 
@@ -148,11 +154,10 @@ For Blue or Yellow, replace all three values with the matching row in
 documented display option, or construct `Session(view=True)`, when a visible
 session is needed.
 
-The committed `.mcp.json` is not currently a valid default for the canonical
-layout: it refers to flat `rom/pokemon-red-color.gb` and
-`rom/pokemon-red.sym` paths, while the files belong under `rom/red/`. Treat
-that configuration as a packaging-lane blocker and use the explicit command
-above until it is corrected and tested.
+The committed `.mcp.json` uses the canonical `rom/red/` layout, an explicit
+color-ROM hash, and no machine-local `PYTHONPATH`. It is suitable for a
+workspace whose MCP client expands `${PWD}` and whose installed interpreter
+is the package environment.
 
 ## MCP surface
 
@@ -169,15 +174,18 @@ is not paired automatically.
 
 ## Link cable modes
 
-PyBoy does not provide the hardware link model required by Gen I Pokémon.
-The harness therefore bridges the game’s serial routines at either an
-in-process or TCP transport boundary. These are implementation modes, not
-claims of production gameplay support.
+The bundled PyBoy fork provides the bit-accurate serial backend required by
+Gen I Pokémon. Real sessions use that backend for in-process and TCP links;
+the older semantic bridge remains only as a compatibility path for test
+doubles that do not expose the native serial object.
 
 ### In-process pair
 
-`LinkPair` owns two sessions in one process and advances them in an
-interleaved schedule. Configure the peer before launching the MCP server:
+`link_pair` owns two sessions in one process and uses the native bit-accurate
+serial coordinator for real PyBoy sessions. The canonical Red/Yellow local
+trade and battle acceptance cases pass; other rows remain diagnostic until
+their exact ROM, fixture, and runtime combination is separately certified.
+Configure the peer before launching the MCP server:
 
 ```bash
 export POKERED_PEER_ROM_PATH=rom/blue/pokemon-blue-color.gb
@@ -195,10 +203,10 @@ listener is the internal-clock side; the connector is the external-clock
 side. Poll `link_status` until it reports `remote_mode` as `connected`, then
 call `link_disconnect` at teardown.
 
-The current transport has no authentication or encryption. It is therefore
-restricted to loopback or a trusted private network by release policy; it
-must not be exposed to an untrusted LAN, the public internet, or a WAN until
-the transport lane adds an authenticated encrypted channel.
+The MCP remote-link API enforces localhost-only binding and connection
+(`127.0.0.1`, `localhost`, or `::1`). The transport has no authentication or
+encryption and must not be exposed to an untrusted LAN, the public internet,
+or a WAN until an authenticated encrypted channel is added.
 
 The current evidence boundary is deliberately narrow:
 
@@ -209,8 +217,8 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Candidate two-process LinkMenu/trade paths when its fixture and runtime gates are satisfied | Readiness with the default runtime unless it is the tested runtime |
-| `tests/test_pyboy_link_session_roms.py` | Candidate local link, trade, battle, and variant paths under their fixture/runtime gates | A release result when the tests skip, mutate fixture RAM, or use an unpinned runtime |
+| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus strict Red/Blue trade and battle acceptance | Unclaimed ROM/variant rows |
+| `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus strict local Red/Yellow trade and battle acceptance | Full Red/Blue/Yellow coverage or a release result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
 battle needs an acceptance result from the actual release runtime, matching
@@ -252,7 +260,7 @@ python -m pytest -q -ra
 ```
 
 Use the tiered commands in [`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md)
-when ROMs, symbols, fixtures, or the non-Cython link runtime are present. A
+when ROMs, symbols, fixtures, or the bundled link runtime are present. A
 green unit suite alone is not a production result; every required tier must
 run with no unexpected failures, skips, xfails, or timeouts.
 

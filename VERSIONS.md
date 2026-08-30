@@ -5,30 +5,31 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: audited 2026-08-29 against commit `e219fb5`.
+Status: audited 2026-08-30 against the current productionization worktree;
+the changes remain uncommitted and the release gate remains blocked pending a
+clean-checkout rerun and claimed-matrix coverage.
 
 ## Runtime
 
 | Component | Pin | Source of truth |
 |---|---|---|
 | Python | `>=3.11` | `pyproject.toml` |
-| PyBoy | `2.7.0` | `pyproject.toml` and the `pyboy` dependency declaration |
+| PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `pyproject.toml` |
 
-The project dependency is the stock PyBoy wheel. The current link-session
-prototype also needs Python-accessible `mb` and serial attributes, which the
-stock Cython build does not expose in the observed environment. Until a
-runtime lane packages or lands a compatible solution, link tests are not a
-default-runtime release gate. See the
-[production runbook](docs/PRODUCTION_RUNBOOK.md).
+The project distribution bundles the pinned PyBoy source runtime. It exposes
+the Python-accessible `mb.serial` backend used by the bit-accurate link
+coordinator and remote TCP transport. A pre-existing standalone PyBoy wheel
+must not be allowed to shadow this package; verify the runtime identity before
+release. See the [production runbook](docs/PRODUCTION_RUNBOOK.md).
 
 ## ROM pins
 
 ROMs are BYO inputs and belong under `rom/<version>/`, which is gitignored.
 The SHA-1 rows below are the pins currently recorded for the candidate files.
-The first SHA-1 row is intentionally the stock Red row because
-`pokered_harness.config.load_versions()` currently returns the first matching
-SHA-1 row for its legacy fallback behavior. Always pass
-`POKERED_ROM_SHA1` explicitly when selecting any other row.
+`pokered_harness.config.load_versions()` indexes rows by their documented
+`Path`, so a launch can be checked against the selected ROM rather than the
+first row in this file. Explicit `POKERED_ROM_SHA1` values remain preferred
+for release evidence.
 
 ### Pokémon Red (UE)
 
@@ -48,7 +49,7 @@ SHA-1 row for its legacy fallback behavior. Always pass
 | Size | 1,048,576 bytes |
 | Path | `rom/red/pokemon-red-color.gb` |
 | Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
-| Role | Candidate color-variant input; fixture-specific validation required |
+| Role | Candidate color-variant input; strict remote Red/Blue trade and battle passed; broader matrix required |
 
 ### Pokémon Blue (UE)
 
@@ -68,7 +69,7 @@ SHA-1 row for its legacy fallback behavior. Always pass
 | Size | 1,048,576 bytes |
 | Path | `rom/blue/pokemon-blue-color.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
-| Role | Candidate color-variant input; fixture-specific validation required |
+| Role | Candidate color-variant input; strict remote Red/Blue trade and battle passed; broader matrix required |
 
 ### Pokémon Yellow (UE)
 
@@ -105,14 +106,12 @@ symbol-coverage claim is made here.
 corresponding PyBoy check when a caller supplies it. The MCP entry point:
 
 1. uses `POKERED_ROM_SHA1` when set;
-2. otherwise reads the first SHA-1 row from `VERSIONS.md` in the current
-   working directory; and
-3. skips the fallback if `POKERED_SKIP_SHA1` is set or `VERSIONS.md` is not
-   found.
+2. otherwise selects the SHA-1 whose `Path` matches the configured ROM; and
+3. fails closed when no matching pin is available, unless
+   `POKERED_SKIP_SHA1` is explicitly set for diagnostics.
 
-The last two behaviors are compatibility fallbacks, not release policy. A
-release run must provide an explicit hash and must not set
-`POKERED_SKIP_SHA1=1`.
+An explicit hash is still required by release policy, and a release run must
+not set `POKERED_SKIP_SHA1=1`.
 
 ## Link and fixture boundary
 
@@ -129,11 +128,15 @@ arguments. There is no separate Yellow producer. The producer's successful
 output only establishes a fixture at the expected map/tile; it does not prove
 that a trade or battle works.
 
-The current repository has candidate local, remote, trade, and battle tests,
-but their fixture/runtime gates can skip them. Consult the test-surface table
-in the [README](README.md) and run the required tiers in the
-[production runbook](docs/PRODUCTION_RUNBOOK.md) before using any of those
-tests as release evidence.
+The current repository has diagnostic local/remote matrices plus strict local
+Red/Yellow trade and battle acceptance tests and strict independent-process
+Red/Blue trade and battle acceptance tests. Those acceptance cases pass in the
+bundled source-compatible runtime, including full party-record equality after
+the remote trade and real move exchange/execution during the remote battle.
+Consult the test-surface table in the
+[README](README.md) and run the required tiers in the
+[production runbook](docs/PRODUCTION_RUNBOOK.md) before using any other row as
+release evidence.
 
 ## Performance
 

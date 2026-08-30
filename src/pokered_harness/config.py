@@ -29,10 +29,29 @@ class VersionsConfigError(ValueError):
 class VersionsConfig:
     rom_sha1: str
     pyboy_version: str
+    rom_sha1_by_path: tuple[tuple[str, str], ...] = ()
+
+    def sha1_for_path(self, path: str | Path) -> str | None:
+        """Return the pin whose documented ROM path is a suffix of ``path``.
+
+        VERSIONS.md contains several ROM rows, so selecting the first SHA-1
+        is unsafe once a caller chooses Blue, Yellow, or a color variant.
+        Suffix matching accepts both repository-relative paths and absolute
+        paths rooted at a checkout without storing machine-local paths.
+        """
+        candidate = _normalise_path_key(path)
+        for documented_path, sha1 in self.rom_sha1_by_path:
+            if candidate == documented_path or candidate.endswith(
+                "/" + documented_path
+            ):
+                return sha1
+        return None
 
 
 _SHA1_ROW = re.compile(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|", re.MULTILINE)
-_PYBOY_ROW = re.compile(r"^\|\s*PyBoy\s*\|\s*`([^`]+)`\s*\|", re.MULTILINE)
+_PYBOY_ROW = re.compile(
+    r"^\|\s*PyBoy\s*\|\s*`([^`]+)`[^|]*\|", re.MULTILINE
+)
 
 
 def load_versions(path: str | Path | None = None) -> VersionsConfig:
@@ -62,9 +81,25 @@ def load_versions(path: str | Path | None = None) -> VersionsConfig:
             f"no PyBoy version row found in {target}"
         )
 
+    rom_pins: list[tuple[str, str]] = []
+    pending_sha: str | None = None
+    for line in text.splitlines():
+        if line.startswith("##"):
+            pending_sha = None
+            continue
+        sha_row = re.match(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|", line)
+        if sha_row is not None:
+            pending_sha = sha_row.group(1).lower()
+            continue
+        path_row = re.match(r"^\|\s*Path\s*\|\s*`([^`]+)`\s*\|", line)
+        if path_row is not None and pending_sha is not None:
+            rom_pins.append((_normalise_path_key(path_row.group(1)), pending_sha))
+            pending_sha = None
+
     return VersionsConfig(
         rom_sha1=sha.group(1).lower(),
         pyboy_version=pyboy.group(1),
+        rom_sha1_by_path=tuple(rom_pins),
     )
 
 
@@ -198,6 +233,10 @@ def _resolve_path(value: str | None, base: Path) -> Path | None:
     if not path.is_absolute():
         path = base / path
     return path.resolve(strict=False)
+
+
+def _normalise_path_key(value: str | Path) -> str:
+    return str(value).replace("\\", "/").lstrip("./").lower()
 
 
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")

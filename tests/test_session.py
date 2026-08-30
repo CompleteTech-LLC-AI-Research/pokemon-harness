@@ -245,6 +245,24 @@ def test_sha1_helper_and_mismatch_path(tmp_path):
         )
 
 
+def test_expected_pyboy_version_rejects_unmarked_runtime(tmp_path, monkeypatch):
+    import pyboy
+
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_text("00:D35E wCurMap\n", encoding="utf-8")
+    monkeypatch.delattr(pyboy, "__pokered_harness_revision__", raising=False)
+
+    with pytest.raises(VersionMismatch, match="pinned pokered-harness"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_pyboy_version="2.7.0",
+            pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+        )
+
+
 # -- view flag -----------------------------------------------------------
 
 

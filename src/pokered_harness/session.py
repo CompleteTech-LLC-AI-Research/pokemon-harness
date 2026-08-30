@@ -97,6 +97,7 @@ class Session:
         self._events = event_bus if event_bus is not None else EventBus()
         self._tick: int = 0
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.Lock()
         self._closed = False
         self._serial_hooks: list[tuple[_HookState, int, int, str]] = []
         # ``view`` is stashed for introspection; the actual wiring into the
@@ -149,6 +150,11 @@ class Session:
                     f"PyBoy version mismatch: expected {expected_pyboy_version}, "
                     f"got {actual_version}"
                 )
+            if not getattr(_pyboy_module, "__pokered_harness_revision__", None):
+                raise VersionMismatch(
+                    "PyBoy runtime is not the pinned pokered-harness build; "
+                    "install this project's bundled PyBoy source"
+                )
 
         try:
             symbols = load_sym_file(sym_path)
@@ -182,18 +188,21 @@ class Session:
     # --- lifecycle -----------------------------------------------------
 
     def close(self, save: bool = False) -> None:
-        with self._lock:
+        # Mark the session closed before waiting on the emulator lock. A raw
+        # serial hook can be blocked in a network exchange while the PyBoy
+        # tick lock is held; teardown must still make guarded callbacks no-op
+        # and return promptly instead of waiting behind that exchange.
+        with self._lifecycle_lock:
             if self._closed:
                 return
             self._closed = True
             for state, _bank, _addr, _symbol_name in self._serial_hooks:
                 state.active = False
-            self._pyboy.stop(save=save)
+        self._pyboy.stop(save=save)
 
     @property
     def closed(self) -> bool:
-        with self._lock:
-            return self._closed
+        return self._closed
 
     @contextmanager
     def locked(self) -> Iterator["Session"]:

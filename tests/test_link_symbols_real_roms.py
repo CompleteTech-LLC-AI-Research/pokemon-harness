@@ -131,14 +131,12 @@ def test_remote_endpoint_buffer_symbols_resolve(version: str):
     )
 
 
-@pytest.mark.parametrize("version", ["blue", "yellow", "red"])
+@pytest.mark.parametrize("version", ["yellow"])
 def test_remote_endpoint_cross_version_addresses_differ_where_expected(version: str):
     """Sanity check: buffer addresses differ between Yellow and Red/Blue
     for WRAM0 blocks in the ``d000-dfff`` range. This is the whole
     reason RemoteLinkEndpoint routes Serial_ExchangeBytes via symbol
     name instead of raw address."""
-    if version != "yellow":
-        pytest.skip("cross-version address divergence check only for yellow")
     blue_path = SYM_PATHS["blue"]
     yellow_path = SYM_PATHS["yellow"]
     if not (blue_path.exists() and yellow_path.exists()):

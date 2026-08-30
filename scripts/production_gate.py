@@ -11,11 +11,9 @@ Examples::
     python scripts/production_gate.py --unit-only
     python scripts/production_gate.py --tier remote --repeat-timing 5
 
-The default command is strict for the required ROM-free, real-ROM local, and
-real-ROM remote tiers.  Trade and battle are optional: absent BYO-ROM or
-derived fixtures are reported as explicit skips.  Required tiers fail closed
-when their assets are absent instead of converting missing coverage into a
-green skip.
+The default command is strict for every selected tier, including the
+stateful trade and battle acceptance cases. Missing ROMs or derived fixtures
+are reported as blocked rather than converted into a green skip.
 """
 
 from __future__ import annotations
@@ -54,23 +52,23 @@ REQUIRED_FIXTURES: tuple[tuple[str, Path], ...] = (
     ("yellow cable-club", Path("yellow/cable_club.state")),
 )
 
-REQUIRED_TIER_ASSETS = frozenset({"local", "remote"})
-OPTIONAL_TIERS = frozenset({"trade", "battle"})
+REQUIRED_TIER_ASSETS = frozenset({"local", "remote", "trade", "battle"})
+OPTIONAL_TIERS = frozenset()
 
 TIER_EXPRESSIONS: dict[str, str] = {
     "unit": "unit",
     "local": "real_rom and not remote_link and not acceptance",
-    "remote": "real_rom and remote_link",
-    "trade": "real_rom and trade",
-    "battle": "real_rom and battle",
+    "remote": "real_rom and remote_link and not acceptance",
+    "trade": "real_rom and trade_acceptance",
+    "battle": "real_rom and battle_acceptance",
     "timing": "timing_sensitive",
 }
 TIER_DESCRIPTIONS: dict[str, str] = {
     "unit": "ROM-free unit tests",
     "local": "real-ROM local/session/link tests",
     "remote": "real-ROM remote TCP/subprocess tests",
-    "trade": "optional real-ROM trade acceptance",
-    "battle": "optional real-ROM battle acceptance",
+    "trade": "strict real-ROM party-swap acceptance",
+    "battle": "strict real-ROM battle-turn acceptance",
     "timing": "fivefold scheduling-sensitive regression",
 }
 DEFAULT_TIERS = ("unit", "local", "remote", "trade", "battle", "timing")
@@ -291,7 +289,14 @@ def build_test_environment(
 
     # Ensure the subprocess tests import this checkout, not an editable
     # install from a different worktree.  Preserve user-provided entries.
-    source_entries = [str(project_root / "src"), str(project_root)]
+    # The vendored PyBoy source is the production runtime.  Put it first so
+    # a gate run from a clean checkout cannot silently import a globally
+    # installed stock PyBoy with an incompatible Serial implementation.
+    source_entries = [
+        str(project_root / "vendor" / "pyboy-src"),
+        str(project_root / "src"),
+        str(project_root),
+    ]
     old_pythonpath = environment.get("PYTHONPATH")
     if old_pythonpath:
         source_entries.append(old_pythonpath)
@@ -748,6 +753,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     environment = build_test_environment(
         project_root, rom_root, fixture_root, expected_sha1
     )
+    # Subprocess acceptance tests must use the exact interpreter whose runtime
+    # contract was probed above, not a stale auxiliary virtualenv discovered
+    # from the worktree.
+    environment["POKERED_PYTHON"] = str(python_executable)
     runtime = probe_runtime(python_executable, project_root, environment)
 
     if args.unit_only:

@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from pokered_harness.link import LinkPair
+from pokered_harness.config import load_versions
 from pokered_harness.session import Session
 from tests._rom_assets import fixture_path, rom_path, sym_path
 
@@ -43,7 +44,15 @@ def _roms_present(version: str) -> bool:
 
 def _open_session(version: str) -> Session:
     rom, sym = ROM_PATHS[version]
-    return Session.from_files(rom, sym)
+    pins = load_versions("VERSIONS.md")
+    expected_sha = pins.sha1_for_path(rom)
+    assert expected_sha is not None
+    return Session.from_files(
+        rom,
+        sym,
+        expected_rom_sha1=expected_sha,
+        expected_pyboy_version=pins.pyboy_version,
+    )
 
 
 # --- Tier 1: pair smoke --------------------------------------------------

@@ -40,8 +40,29 @@ artifacts/
 .venv-noncython/
 
 # The harness ships the exact patched PyBoy source used by the link runtime.
-# Keep all other vendor material ignored; the source tree itself is explicitly
-# allow-listed below so a clean checkout can install it without PYTHONPATH.
+# Keep generated/vendor extras out of the source distribution.
 vendor/*
 !vendor/pyboy-src/
-!vendor/pyboy-src/**
+!vendor/pyboy-src/**/
+!vendor/pyboy-src/*.py
+!vendor/pyboy-src/*.txt
+!vendor/pyboy-src/*.md
+!vendor/pyboy-src/*.in
+!vendor/pyboy-src/pyproject.toml
+!vendor/pyboy-src/pyboy/
+!vendor/pyboy-src/pyboy/**/*.py
+!vendor/pyboy-src/pyboy/**/*.pxd
+!vendor/pyboy-src/pyboy/**/*.pyx
+!vendor/pyboy-src/pyboy/**/*.bin
+!vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION
+
+# Keep PyBoy-generated build products and bundled sample ROMs ignored even
+# though the source tree above is allow-listed.
+vendor/pyboy-src/**/*.c
+vendor/pyboy-src/**/*.h
+vendor/pyboy-src/**/*.so
+vendor/pyboy-src/**/*.pyd
+vendor/pyboy-src/**/*.gb
+vendor/pyboy-src/**/*.gbc
+vendor/pyboy-src/**/__pycache__/
+vendor/pyboy-src/**/.benchmarks/

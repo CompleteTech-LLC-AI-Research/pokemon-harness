@@ -65,9 +65,9 @@ markers = [
     "local_link: real-ROM in-process link tests",
     "remote_link: real-ROM TCP or subprocess link tests",
     "mcp_stdio: real-ROM MCP stdio integration tests",
-    "acceptance: optional real-ROM trade or battle acceptance",
-    "trade: optional real-ROM trade coverage",
-    "battle: optional real-ROM battle coverage",
+    "acceptance: real-ROM trade or battle acceptance",
+    "trade: real-ROM trade coverage",
+    "battle: real-ROM battle coverage",
     "timing_sensitive: repeatable scheduling-sensitive regression",
 ]
 

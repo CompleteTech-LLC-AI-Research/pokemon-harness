@@ -1,9 +1,21 @@
 # Production runbook
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
-checkout. It is an evidence gate, not a claim that the current checkout has
-passed it. The audit status for commit `e219fb5` is recorded in the
+checkout. The baseline at commit `e219fb5` was not certified; the current
+working tree adds the bundled runtime, native link lifecycle, and tiered gate.
+Live results from a dirty working tree are development evidence only until a
+clean release commit reproduces them. The release decision is recorded in the
 [release checklist](RELEASE_CHECKLIST.md).
+
+Current evidence boundary: the latest pinned-interpreter gate reports unit
+360/360, timing 35/35 across five repetitions, local 46/46, remote 11/11,
+trade 2/2, and battle 2/2. The strict local Red/Yellow trade and battle cases
+pass with untouched legal fixtures. The independent-process Red/Blue trade and
+battle cases pass through native bit-level serial traffic; trade compares both
+full party records and battle advances through move exchange and execution on
+both processes. The release gate remains `BLOCKED` until the changes are
+committed, the claimed matrix is rerun from a clean checkout, and the evidence
+bundle is attached to that release commit.
 
 ## 1. Start from a clean checkout
 
@@ -20,7 +32,7 @@ python3 --version
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev,mcp]"
+python -m pip install -e ".[dev]"
 python -m pip check
 ```
 
@@ -71,8 +83,8 @@ match the ROM.
 Run collection first so missing dependencies and import failures are visible:
 
 ```bash
-PYTHONPATH=src python -m pytest --collect-only -q
-PYTHONPATH=src python -m pytest -q -ra
+python -m pytest --collect-only -q
+python -m pytest -q -ra
 ```
 
 The release gate requires collection to complete without errors. It also
@@ -80,12 +92,19 @@ requires no unexpected skips, xfails, failures, or timeouts in any tier marked
 required below. Fixture-gated tests may be skipped during development, but a
 skip is not a passing release result.
 
-The audited committed tree has a collection determinism blocker because several
-tests import `tests.*` while `tests/__init__.py` is not committed. The
-`pytest` console-script invocation fails eight modules during collection in
-this checkout; `python -m pytest` may collect them through namespace-package
-behavior in some environments. Fix the package boundary in the test lane and
-rerun both invocation forms before using any downstream result.
+The release tree must include `tests/__init__.py`; otherwise environments that
+do not treat `tests/` as a namespace package can fail collection. Run both
+invocation forms after the package boundary is included in the release commit.
+
+For a machine-readable report, run the gate from the repository root:
+
+```bash
+python scripts/production_gate.py --format json > production-gate.json
+```
+
+The command fails closed when required ROMs, symbols, fixtures, or acceptance
+tests are missing. Keep the report outside version control if it contains
+local paths or ROM-derived details.
 
 ## 4. Run the evidence tiers
 
@@ -98,7 +117,7 @@ This tier exercises configuration, state parsing, serial semantics, protocol,
 transport, and symbol-loader behavior without commercial game assets:
 
 ```bash
-PYTHONPATH=src python -m pytest -q \
+python -m pytest -q \
   tests/test_agent_sync.py \
   tests/test_config.py \
   tests/test_game_state.py \
@@ -119,12 +138,11 @@ PYTHONPATH=src python -m pytest -q \
   tests/test_symbol_loader.py
 ```
 
-These tests do not require commercial ROM bytes, but the current
-`pokered_harness.link.serial_core` module re-exports PyBoy's native serial
-implementation when PyBoy is installed. Link-related Tier A tests therefore
-still require the compatible runtime described in `VERSIONS.md`; the stock
-Cython wheel may fail them before any ROM is involved. A green Tier A result
-does not establish emulator, MCP, trade, or battle compatibility.
+These tests do not require commercial ROM bytes. The package bundles the
+source PyBoy runtime pinned in `VERSIONS.md`; the gate prepends that runtime
+when running from a checkout so a standalone PyBoy wheel cannot silently
+change the serial contract. A green Tier A result does not establish
+emulator, MCP, trade, or battle compatibility.
 
 ### Tier B: one real session and MCP stdio
 
@@ -134,7 +152,7 @@ Use one explicit ROM hash. This example uses stock Red:
 POKERED_ROM_PATH=rom/red/pokemon-red.gb \
 POKERED_SYM_PATH=rom/red/pokemon-red.sym \
 POKERED_ROM_SHA1=ea9bcae617fdf159b045185467ae58b2e4a48b9a \
-PYTHONPATH=src python -m pytest -q -ra \
+python -m pytest -q -ra \
   tests/test_golden_paths.py \
   tests/test_mcp_stdio_integration.py
 ```
@@ -147,7 +165,7 @@ prove only the tested boot/state/MCP surface; they do not prove link gameplay.
 With all candidate ROMs and matching symbols available:
 
 ```bash
-PYTHONPATH=src python -m pytest -q -ra \
+python -m pytest -q -ra \
   tests/test_link_symbols_real_roms.py \
   tests/test_link_integration.py
 ```
@@ -158,28 +176,38 @@ hook installation, a short step, and teardown; its trade test is the only
 fixture-gated local round-trip in that module. Neither result should be
 generalized to every ROM variant or to remote play.
 
-### Tier D: candidate local link session, trade, and battle
+### Tier D: local link session, trade, and battle acceptance
 
 The more extensive candidate suite is:
 
 ```bash
-PYTHONPATH=src python -m pytest -q -ra \
+python -m pytest -q -ra \
   tests/test_pyboy_link_session_roms.py
 ```
 
-It requires ROM-specific Cable Club states and a PyBoy build whose `mb` and
-`mb.serial` objects can be swapped from Python. The stock Cython wheel may
-cause the module to skip. The tests also contain diagnostic setup, including
-fixture-dependent party preparation; review the exact test and fixture
-provenance before promoting a result to a product acceptance claim. A skipped
-or partially parameterized matrix is not full Red/Blue/Yellow coverage.
+The diagnostic matrix in this module is broader than the release acceptance
+scope. The strict local cases are:
 
-### Tier E: remote transport and subprocess candidate
+```bash
+python -m pytest -q \
+  tests/test_pyboy_link_session_roms.py::test_red_yellow_trade_swaps_real_party_records \
+  tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved
+```
+
+They require the pinned source-compatible PyBoy runtime, ROM-specific Cable
+Club fixtures, and matching symbols. The trade case compares the complete
+game-owned party-mon records before and after the exchange; the battle case
+uses a pre-generated legal three-mon fixture and requires both sides to reach
+move exchange, execution, and damage calculation. Neither case writes party
+or battle state to make the assertion pass. A skipped or partially
+parameterized matrix is not full Red/Blue/Yellow coverage.
+
+### Tier E: remote transport and subprocess acceptance
 
 First run the transport/serial milestones:
 
 ```bash
-PYTHONPATH=src python -m pytest -q -ra \
+python -m pytest -q -ra \
   tests/test_link_integration_remote.py
 ```
 
@@ -187,17 +215,21 @@ This module exercises remote TCP plumbing and selected real-ROM milestones.
 Some cases stop at LinkMenu or use controlled menu/fixture setup; that is not
 the same as a user-driven full trade or battle.
 
-The separate-process candidate requires an additional non-Cython PyBoy
-environment in `.venv-noncython/` and a Yellow Cable Club fixture:
+The separate-process acceptance uses the same bundled runtime as the normal
+package and explicit color Red/Blue fixtures:
 
 ```bash
-PYTHONPATH=src python -m pytest -q -ra \
+python -m pytest -q -ra \
   tests/test_pyboy_link_session_subprocess.py
 ```
 
-This is the candidate path for two-process LinkMenu and full-trade assertions.
-It is release evidence only when the exact runtime, ROM, symbols, fixtures,
-deadlines, and teardown are recorded and both tests complete without skips.
+The LinkMenu test is a transport smoke test. The strict subprocess trade test
+also compares complete party-mon records, and the strict subprocess battle
+test requires both processes to reach move exchange and execution. Both pass
+naturally with the bundled runtime. Their live-serial driver uses cooperative
+phase rendezvous so a waiting process continues servicing serial IRQs; it does
+not replace game-owned trade or battle bytes with a semantic shortcut. Record
+both child traces and the exact deadline when investigating a regression.
 
 ## 5. Generate link fixtures safely
 
@@ -231,27 +263,29 @@ lands at the producer's expected map/tile; it does not prove a trade or battle.
 
 ## 6. Launch MCP explicitly
 
-Use explicit paths and the matching hash. This avoids the current fallback
-behavior in which `mcp_server` reads only the first SHA-1 row in `VERSIONS.md`:
+Use explicit paths and the matching hash. The server also indexes the
+per-ROM `Path`/`SHA-1` rows in `VERSIONS.md` and fails closed when no matching
+pin exists:
 
 ```bash
 POKERED_ROM_PATH=rom/red/pokemon-red-color.gb \
 POKERED_SYM_PATH=rom/red/pokemon-red.sym \
 POKERED_ROM_SHA1=e1deed63080bc24cad5fba18ecb3184f905d16d4 \
-PYTHONPATH=src python -m pokered_harness.mcp_server
+python -m pokered_harness.mcp_server
 ```
 
 For an in-process peer, add all three `POKERED_PEER_*` variables with the
 peer's matching paths and hash. The peer is created at startup but must be
 paired explicitly with `link_pair`; it is not proof of a working game flow.
 
-The checked-in `.mcp.json` currently points at flat `rom/` paths rather than
-the canonical `rom/red/`, `rom/blue/`, and `rom/yellow/` layout. Do not use it
-for a release run until the packaging lane corrects and tests it.
+The checked-in `.mcp.json` uses the canonical `rom/red/` layout, an explicit
+color-ROM hash, and no machine-local `PYTHONPATH`. It is suitable for a
+workspace whose MCP client expands `${PWD}` and whose installed interpreter
+is the package environment.
 
-Remote TCP link tools currently provide no authentication or encryption. Limit
-them to loopback or a trusted private network. Do not expose them to a public
-address, untrusted LAN, or WAN.
+The MCP remote TCP tools enforce localhost-only hosts (`127.0.0.1`,
+`localhost`, or `::1`). They provide no authentication or encryption; do not
+expose the raw transport or server to a public address, untrusted LAN, or WAN.
 
 ## 7. Record release evidence
 

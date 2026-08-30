@@ -52,9 +52,10 @@ scheduling on top.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from pokered_harness.link.serial_core import (
     NullBackend,
-    ROLE_INTERNAL,
     SerialBackend,
     SerialCore,
 )
@@ -78,22 +79,70 @@ class CoordinatedBackend:
     def __init__(
         self,
         peer: SerialCore,
-        on_peer_transfer_complete: "callable | None" = None,
+        on_peer_transfer_complete: Callable[[], None] | None = None,
+        on_peer_unarmed: Callable[[], bool] | None = None,
     ) -> None:
         self._peer = peer
         self._on_peer_transfer_complete = on_peer_transfer_complete
+        self._on_peer_unarmed = on_peer_unarmed
+        # Lightweight counters make real-ROM diagnostics able to
+        # distinguish a clean cable exchange from pull-up fallback. They
+        # are intentionally plain integers: local coordination is driven
+        # by one emulator thread.
+        self.edge_count = 0
+        self.peer_unarmed_edges = 0
+        self.peer_master_edges = 0
+        self.peer_rearm_attempts = 0
+        self.peer_rearm_successes = 0
 
     @property
     def peer(self) -> SerialCore:
         return self._peer
 
+    def prepare_peer_for_edge(self) -> bool:
+        """Give a same-process peer a chance to arm before an edge.
+
+        A network peer continues executing independently while the local
+        serial core is between edges.  A local pair is driven by one Python
+        thread, so the scheduler must make that short hand-off explicit
+        before the master's edge callback runs.  Returning ``True`` means
+        the peer is now an armed external-clock receiver; it does not drive
+        an edge itself.
+        """
+        peer = self._peer
+        if peer.transfer_enabled:
+            return not peer.internal_clock
+        if self._on_peer_unarmed is None:
+            return False
+        for _ in range(256):
+            if peer.transfer_enabled or peer.internal_clock:
+                break
+            self.peer_rearm_attempts += 1
+            if not self._on_peer_unarmed():
+                break
+        if peer.transfer_enabled and not peer.internal_clock:
+            self.peer_rearm_successes += 1
+            return True
+        return False
+
     def on_edge(self, our_bit: int, our_role: int) -> int:
         peer = self._peer
+        self.edge_count += 1
         # Peer must be armed and in slave mode to accept a driven edge.
         # If it's not armed (e.g. hasn't written SC bit 7 yet) or is
         # also in master mode (protocol error / both sides self-clocking),
         # fall back to pull-up so the master sees 0xFF.
-        if not peer.transfer_enabled or peer.internal_clock:
+        if not peer.transfer_enabled and self._on_peer_unarmed is not None:
+            # In a same-process pair the peer cannot execute while this
+            # master callback is active. Give it a bounded cooperative
+            # chance to reach the ROM's SB/SC re-arm point before treating
+            # the line as disconnected.
+            self.prepare_peer_for_edge()
+        if not peer.transfer_enabled:
+            self.peer_unarmed_edges += 1
+            return 1
+        if peer.internal_clock:
+            self.peer_master_edges += 1
             return 1
         peer_bit = peer.peek_out_bit()
         completed = peer.apply_external_edge(our_bit & 1)
@@ -130,8 +179,10 @@ class LockstepCoordinator:
         core_a: SerialCore,
         core_b: SerialCore,
         *,
-        on_a_transfer_complete: "callable | None" = None,
-        on_b_transfer_complete: "callable | None" = None,
+        on_a_transfer_complete: Callable[[], None] | None = None,
+        on_b_transfer_complete: Callable[[], None] | None = None,
+        on_a_peer_unarmed: Callable[[], bool] | None = None,
+        on_b_peer_unarmed: Callable[[], bool] | None = None,
     ) -> None:
         """
         ``on_a_transfer_complete`` / ``on_b_transfer_complete`` are
@@ -149,6 +200,8 @@ class LockstepCoordinator:
         self._prev_backend_b: SerialBackend | None = core_b.backend
         self._on_a_done = on_a_transfer_complete
         self._on_b_done = on_b_transfer_complete
+        self._on_a_peer_unarmed = on_a_peer_unarmed
+        self._on_b_peer_unarmed = on_b_peer_unarmed
         self._attached = False
         self.attach()
 
@@ -163,10 +216,14 @@ class LockstepCoordinator:
         # A's backend drives edges into B; completion on B means B's
         # slave IRQ callback should fire (wakes B's halted CPU).
         self._a.backend = CoordinatedBackend(
-            self._b, on_peer_transfer_complete=self._on_b_done
+            self._b,
+            on_peer_transfer_complete=self._on_b_done,
+            on_peer_unarmed=self._on_a_peer_unarmed,
         )
         self._b.backend = CoordinatedBackend(
-            self._a, on_peer_transfer_complete=self._on_a_done
+            self._a,
+            on_peer_transfer_complete=self._on_a_done,
+            on_peer_unarmed=self._on_b_peer_unarmed,
         )
         self._attached = True
 

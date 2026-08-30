@@ -87,6 +87,17 @@ def test_repo_versions_md_parses():
     assert cfg.rom_sha1 == "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
 
 
+def test_repo_versions_selects_hash_by_rom_path():
+    cfg = load_versions("VERSIONS.md")
+    assert cfg.sha1_for_path("rom/blue/pokemon-blue.gb") == (
+        "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
+    )
+    assert cfg.sha1_for_path(
+        "/isolated/worktree/rom/yellow/pokemon-yellow.gbc"
+    ) == "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+    assert cfg.sha1_for_path("rom/unknown/custom.gb") is None
+
+
 # -- per-session env vars --------------------------------------------------
 
 

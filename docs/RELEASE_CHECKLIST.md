@@ -6,20 +6,32 @@ runtime evidence required by the relevant capability.
 
 ## Current audit status
 
-As of commit `e219fb5` (2026-08-29), release sign-off is blocked:
+The baseline at commit `e219fb5` (2026-08-29) was not production-ready. The
+current working tree addresses the collection boundary, portable `.mcp.json`,
+bundled PyBoy source runtime, path-aware ROM pinning, native local/TCP serial
+attachment, teardown, and tiered gate reporting. Its live evidence is still
+not release sign-off because the changes are uncommitted and the broad matrix
+is not certified.
 
-- the `pytest` console-script collection path fails eight modules because
-  several tests import `tests.*` but `tests/__init__.py` is not committed
-  (some `python -m pytest` environments hide this through namespace-package
-  behavior);
-- the checked-in `.mcp.json` points at flat `rom/` paths that do not match the
-  documented `rom/<version>/` layout;
-- the default PyBoy Cython wheel does not expose the `mb`/serial attributes
-  required by the current Python-side link-session prototype; and
-- no current, clean, runtime-pinned evidence bundle demonstrates the complete
-  Red/Blue/Yellow trade and battle matrix.
+Current working-tree evidence:
 
-These are blockers, not waived checklist items.
+- unit: 360/360 passed;
+- timing: 35/35 passed across five repetitions;
+- local: 46/46 passed; remote: 11/11 passed;
+- strict acceptance tiers: trade 2/2 and battle 2/2 passed;
+- strict local trade: Red/Yellow party-record swap passed;
+- strict local battle: Red/Yellow battle-turn resolution passed; and
+- remote: transport/LinkMenu smoke plus strict Red/Blue subprocess trade and
+  battle passed, including both full party-record swaps and move-turn progress.
+
+The local passes are real stateful acceptance evidence for that exact
+Red/Yellow fixture pair, and the remote pass is evidence for the exact
+Red/Blue color-variant subprocess pair. They do not certify the unrun variant
+rows.
+
+These are evidence boundaries, not waived checklist items. The release commit
+must include `tests/__init__.py`, the pinned vendor source files, and the gate
+script before reproducing the results from a clean checkout.
 
 ## Source and artifact hygiene
 
@@ -35,11 +47,13 @@ These are blockers, not waived checklist items.
 
 - [ ] Python version is 3.11 or newer and is recorded.
 - [ ] `python -m pip check` passes in the release environment.
-- [ ] The installed PyBoy version is `2.7.0` and the build mode is recorded.
+- [ ] The installed PyBoy runtime is `2.7.0` with harness revision
+  `c565df66c3731fad2856169a90f6bbec99925915`, and the source-runtime build
+  mode is recorded.
 - [ ] If link support is claimed, the exact runtime exposes the serial objects
   used by the link layer and the same runtime is used for every link test.
-- [ ] Any non-Cython or patched PyBoy build is identified by source commit and
-  build instructions; it is not silently substituted for the default wheel.
+- [ ] No standalone PyBoy wheel shadows the bundled runtime; the resolved
+  module path and serial contract are recorded by the production gate.
 
 ## ROM and symbol identity
 
@@ -53,10 +67,10 @@ These are blockers, not waived checklist items.
 
 ## Test gates
 
-- [ ] Both `PYTHONPATH=src python -m pytest --collect-only -q` and the
+- [ ] Both `python -m pytest --collect-only -q` and the
   `pytest` console-script collection path complete without collection errors.
 - [ ] The broad suite completes with no unexpected failure, skip, xfail, or
-  timeout: `PYTHONPATH=src python -m pytest -q -ra`.
+  timeout: `python -m pytest -q -ra`.
 - [ ] ROM-free unit/protocol/transport tests pass.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every claimed
   single-session ROM variant.
@@ -66,8 +80,12 @@ These are blockers, not waived checklist items.
 - [ ] A full remote trade is claimed only if the separate-process trade test
   passes without fixture/runtime skips and asserts both sides received the
   peer's Pokémon.
-- [ ] A link battle is claimed only if a release-runtime test resolves a
-  complete turn on both sides; LinkMenu or transport milestones do not count.
+- [ ] The canonical local link battle is claimed only after the release-runtime
+  test resolves a complete turn on both sides; LinkMenu or transport
+  milestones do not count.
+- [ ] The remote link battle is claimed only after the separate-process
+  release-runtime test resolves move exchange and execution on both sides
+  without semantic exchange hooks or RAM patches.
 - [ ] Every parameterized version/variant row in the claimed matrix ran, or
   the omitted rows are explicitly listed as unsupported.
 
@@ -86,12 +104,13 @@ These are blockers, not waived checklist items.
 ## MCP and network operation
 
 - [ ] The MCP launch uses explicit ROM, symbol, and SHA-1 environment values.
-- [ ] The MCP client uses a tested configuration whose paths match the actual
-  ROM layout; the current `.mcp.json` blocker is resolved before relying on it.
+- [ ] The MCP client uses the tested `${PWD}` configuration whose paths match
+  the `rom/<version>/` layout and whose hash is explicit.
 - [ ] Server stdout remains valid MCP JSON-RPC and emulator diagnostics go to
   stderr.
-- [ ] Remote TCP is restricted to loopback or an approved trusted private
-  network because the current transport has no authentication or encryption.
+- [ ] The MCP remote TCP API is restricted to localhost because the current
+  transport has no authentication or encryption; it is not exposed to a LAN,
+  public address, or WAN.
 - [ ] Listener, connector, pair, disconnect, and session teardown are all
   exercised and leave no child process or open socket.
 

@@ -187,6 +187,15 @@ class LCD:
                 self.clock_target += 80
                 self.next_stat_mode = 3
                 interrupt_flag |= self._STAT.update_LYC(self.LYC, self.LY)
+                # FIX: also evaluate wy_activated_frame when mode 2 is
+                # entered via the LY=153 frame-reset inline path above.
+                # The elif branch below checks this for "normal" mode 2
+                # entries but missed the frame-start entry, so WY==0
+                # never got a chance to match LY==0 and the window
+                # layer never activated for that frame. Manifested as
+                # Gen 1 dialog boxes being written to VRAM but never
+                # composited on screen in CGB mode.
+                self.renderer.wy_activated_frame = self.renderer.wy_activated_frame | (self.WY == self.LY)
 
             elif self._LCDC.lcd_enable:
                 # Change to next mode
