@@ -21,8 +21,11 @@ from pokered_harness.mcp_server import (
     read_resource,
     register_default_hooks,
     serve_stdio,
+    _error_code,
 )
 from pokered_harness.session import Session
+from pokered_harness.link.network_backend import NetworkBackendError
+from pokered_harness.link.serial_link import TcpSerialLink
 from pokered_harness.symbols.loader import load_sym_text
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
@@ -236,7 +239,9 @@ def test_register_default_hooks_skips_missing_symbols():
 # -- link-cable tools ------------------------------------------------------
 
 
-def _link_state_with_peer() -> tuple[Session, FakePyBoy, Session, FakePyBoy, LinkState, FakeFactory]:
+def _link_state_with_peer() -> tuple[
+    Session, FakePyBoy, Session, FakePyBoy, LinkState, FakeFactory
+]:
     """Build a primary+peer pair backed by fake PyBoys, with a FakeFactory
     so pair() doesn't try to construct the real SerialBridge."""
     s_primary, pb_primary, _ = _session()
@@ -547,6 +552,92 @@ def test_link_listen_then_connect_updates_status():
         _time.sleep(0.01)
     assert status_l["remote_mode"] == "idle"
     dispatch_tool(s_listener, "link_disconnect", {}, link=link_l)
+
+
+def test_listener_rejects_bad_peer_and_accepts_next_peer():
+    s_listener, _ = _endpoint_session()
+    link = LinkState(primary_version="blue")
+    port = _free_port()
+    dispatch_tool(s_listener, "link_listen", {"port": port}, link=link)
+    bad = _socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    bad.close()
+    try:
+        for _ in range(100):
+            if link._listener_error is not None:
+                break
+            _time.sleep(0.01)
+        assert link.remote_mode == "listening"
+
+        good = TcpSerialLink.connect("127.0.0.1", port, "yellow")
+        try:
+            for _ in range(100):
+                if link.remote_mode == "connected":
+                    break
+                _time.sleep(0.01)
+            assert link.remote_mode == "connected"
+            assert good.peer_rom_version == "blue"
+        finally:
+            good.close()
+    finally:
+        dispatch_tool(s_listener, "link_disconnect", {}, link=link)
+
+
+def test_link_rejects_rom_version_override_for_primary_session():
+    s, _ = _endpoint_session()
+    link = LinkState(primary_version="blue")
+    with pytest.raises(McpHarnessError, match="does not match") as exc_info:
+        dispatch_tool(
+            s,
+            "link_listen",
+            {"port": _free_port(), "rom_version": "yellow"},
+            link=link,
+        )
+    assert exc_info.value.code == "rom_version_mismatch"
+    assert link.remote_mode == "idle"
+
+
+def test_error_code_maps_network_backend_failures():
+    assert _error_code(NetworkBackendError("backend closed")) == "link_error"
+    assert _error_code(NetworkBackendError("no peer response within 1s")) == "timeout"
+
+
+def test_link_disconnect_cancels_in_progress_connect(monkeypatch):
+    s, _ = _endpoint_session()
+    link = LinkState(primary_version="red")
+    entered = threading.Event()
+    result: list[Exception] = []
+
+    def blocked_connect(*_args, cancel_event=None, **_kwargs):
+        entered.set()
+        assert cancel_event is not None
+        while not cancel_event.is_set():
+            _time.sleep(0.01)
+        raise NetworkBackendError("connection cancelled")
+
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server.TcpSerialLink.connect", blocked_connect
+    )
+
+    def connect() -> None:
+        try:
+            dispatch_tool(
+                s,
+                "link_connect",
+                {"host": "127.0.0.1", "port": _free_port(), "timeout_s": 30},
+                link=link,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.append(exc)
+
+    worker = threading.Thread(target=connect, daemon=True)
+    worker.start()
+    assert entered.wait(timeout=1.0)
+    dispatch_tool(s, "link_disconnect", {}, link=link)
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    assert result and isinstance(result[0], McpHarnessError)
+    assert result[0].code == "link_cancelled"
+    assert link.remote_mode == "idle"
 
 
 def test_link_listen_rejects_concurrent_call():

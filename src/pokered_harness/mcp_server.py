@@ -450,6 +450,10 @@ def _error_code(exc: Exception) -> str:
         return "invalid_state"
     if isinstance(exc, (SerialLinkTimeout, TimeoutError)):
         return "timeout"
+    if isinstance(exc, NetworkBackendError):
+        if "timed out" in str(exc) or "within" in str(exc):
+            return "timeout"
+        return "link_error"
     if isinstance(exc, SerialLinkError):
         return "link_error"
     if isinstance(exc, (KeyError, TypeError, ValueError, binascii.Error)):
@@ -781,6 +785,7 @@ def _dispatch_link_tool(
         rom_version = _validate_rom_version(
             str(arguments.get("rom_version") or link.primary_version)
         )
+        _require_primary_rom_version(link, rom_version)
         timeout_s = _validate_timeout(
             arguments.get("timeout_s", _DEFAULT_REMOTE_HELLO_TIMEOUT_S)
         )
@@ -861,6 +866,7 @@ def _dispatch_link_tool(
         rom_version = _validate_rom_version(
             str(arguments.get("rom_version") or link.primary_version)
         )
+        _require_primary_rom_version(link, rom_version)
         timeout_s = _validate_timeout(arguments.get("timeout_s", 10.0))
         with link.state():
             generation = link._generation
@@ -885,6 +891,7 @@ def _dispatch_link_tool(
                     port,
                     timeout_s=timeout_s,
                     local_rom_version=rom_version,
+                    cancel_event=connect_cancel,
                 )
                 network_session = _attach_network_backend(
                     session,
@@ -900,7 +907,11 @@ def _dispatch_link_tool(
                 # doubles and older callers that do not expose PyBoy's
                 # bit-accurate motherboard serial object.
                 transport = TcpSerialLink.connect(
-                    host, port, rom_version, timeout_s=timeout_s
+                    host,
+                    port,
+                    rom_version,
+                    timeout_s=timeout_s,
+                    cancel_event=connect_cancel,
                 )
                 _wait_for_remote_hello(
                     transport, connect_cancel, _remaining(deadline)
@@ -946,6 +957,10 @@ def _dispatch_link_tool(
             if transport is not None:
                 _close_serial_link(transport)
             _deactivate_link_hooks(session)
+            if connect_cancel.is_set():
+                raise McpHarnessError(
+                    "link_cancelled", "remote connection cancelled"
+                ) from exc
             raise McpHarnessError("link_connect_failed", str(exc)) from exc
         finally:
             with link.state():
@@ -1060,6 +1075,17 @@ def _validate_rom_version(version: str) -> str:
             f"got {version!r}",
         )
     return normalized
+
+
+def _require_primary_rom_version(link: LinkState, version: str) -> None:
+    """Do not let a caller self-identify a session as another ROM."""
+    primary = _validate_rom_version(link.primary_version)
+    if version != primary:
+        raise McpHarnessError(
+            "rom_version_mismatch",
+            f"requested ROM version {version!r} does not match the "
+            f"session's configured primary version {primary!r}",
+        )
 
 
 def _validate_timeout(value: Any) -> float:
@@ -1214,11 +1240,11 @@ def _accept_remote(
     rom_version: str,
     timeout_s: float,
 ) -> None:
-    transport: Any | None = None
-    network_session: PyBoyLinkSession | None = None
-    accepted_conn: socket.socket | None = None
     try:
         while not cancel.is_set():
+            transport: Any | None = None
+            network_session: PyBoyLinkSession | None = None
+            accepted_conn: socket.socket | None = None
             try:
                 accepted_conn, _peer_addr = listener.accept()
             except socket.timeout:
@@ -1228,48 +1254,75 @@ def _accept_remote(
                     return
                 raise McpHarnessError("listen_failed", str(exc)) from exc
 
-            accepted_conn.settimeout(None)
-            if _supports_bit_accurate_network(session):
-                transport = NetworkBackend(
-                    accepted_conn, local_rom_version=rom_version
-                )
-                accepted_conn = None
-                network_session = _attach_network_backend(
-                    session,
-                    transport,
-                    is_internal_clock=True,
-                    local_rom_version=rom_version,
-                )
-                _wait_for_network_hello(transport, cancel, timeout_s)
-                endpoint: RemoteLinkEndpoint | None = None
-            else:
-                transport = TcpSerialLink(accepted_conn, rom_version)
-                accepted_conn = None
-                _wait_for_remote_hello(transport, cancel, timeout_s)
-                endpoint = RemoteLinkEndpoint.as_listener(session, transport)
-                endpoint.install()
-            with link.state():
-                if (
-                    cancel.is_set()
-                    or link._disconnecting
-                    or link._generation != generation
-                ):
-                    raise _ListenerCancelled
-                link.remote_link = transport
-                link.remote_endpoint = endpoint
-                link.network_session = network_session
-                link.remote_mode = "connected"
-                link.remote_role = "listener"
-                link.remote_bind_port = None
-                link._listener_socket = None
-                link._listener_error = None
-                link._remote_error = None
-            transport = None
-            # Ownership has moved into LinkState.  Do not let the listener
-            # worker's finally block detach/close the live session it just
-            # published.
-            network_session = None
-            return
+            try:
+                accepted_conn.settimeout(None)
+                if _supports_bit_accurate_network(session):
+                    transport = NetworkBackend(
+                        accepted_conn, local_rom_version=rom_version
+                    )
+                    accepted_conn = None
+                    network_session = _attach_network_backend(
+                        session,
+                        transport,
+                        is_internal_clock=True,
+                        local_rom_version=rom_version,
+                    )
+                    _wait_for_network_hello(transport, cancel, timeout_s)
+                    endpoint: RemoteLinkEndpoint | None = None
+                else:
+                    transport = TcpSerialLink(accepted_conn, rom_version)
+                    accepted_conn = None
+                    _wait_for_remote_hello(transport, cancel, timeout_s)
+                    endpoint = RemoteLinkEndpoint.as_listener(session, transport)
+                    endpoint.install()
+                with link.state():
+                    if (
+                        cancel.is_set()
+                        or link._disconnecting
+                        or link._generation != generation
+                    ):
+                        raise _ListenerCancelled
+                    link.remote_link = transport
+                    link.remote_endpoint = endpoint
+                    link.network_session = network_session
+                    link.remote_mode = "connected"
+                    link.remote_role = "listener"
+                    link.remote_bind_port = None
+                    link._listener_socket = None
+                    link._listener_error = None
+                    link._remote_error = None
+                # Ownership moved into LinkState; the finalizer below must
+                # not detach or close the live transport.
+                transport = None
+                network_session = None
+                return
+            except _ListenerCancelled:
+                return
+            except Exception as exc:  # noqa: BLE001
+                if cancel.is_set():
+                    return
+                # A bad peer must not take down a listener that can still
+                # accept a valid peer. Record the failure for diagnostics,
+                # clean only this connection, then continue accepting.
+                with link.state():
+                    if link._generation == generation:
+                        link._listener_error = exc
+                if network_session is not None:
+                    try:
+                        network_session.detach_all()
+                    except Exception:
+                        pass
+                if transport is not None:
+                    _close_serial_link(transport)
+                if accepted_conn is not None:
+                    try:
+                        accepted_conn.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        accepted_conn.close()
+                    except OSError:
+                        pass
     except _ListenerCancelled:
         return
     except Exception as exc:  # noqa: BLE001
@@ -1281,22 +1334,6 @@ def _accept_remote(
                     link.remote_role = None
                     link.remote_bind_port = None
     finally:
-        if network_session is not None:
-            try:
-                network_session.detach_all()
-            except Exception:
-                pass
-        if transport is not None:
-            _close_serial_link(transport)
-        if accepted_conn is not None:
-            try:
-                accepted_conn.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                accepted_conn.close()
-            except OSError:
-                pass
         try:
             listener.close()
         except OSError:

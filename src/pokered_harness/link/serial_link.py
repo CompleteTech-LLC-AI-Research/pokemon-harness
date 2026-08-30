@@ -67,12 +67,17 @@ decide whether to treat that as a "cable disconnected" hardware error
 from __future__ import annotations
 
 import queue
+import errno
+import select
 import socket
 import struct
 import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Protocol
+
+from pokered_harness.link.network_backend import validate_loopback_host
 
 
 # --- opcodes ---------------------------------------------------------------
@@ -99,6 +104,19 @@ class SerialLinkTimeout(SerialLinkError):
 
 class SerialLinkProtocolError(SerialLinkError):
     """Received a malformed frame or an unexpected opcode."""
+
+
+_SUPPORTED_ROM_VERSIONS = frozenset(("red", "blue", "yellow"))
+
+
+def _validate_rom_version(version: str) -> str:
+    normalized = version.strip().lower()
+    if normalized not in _SUPPORTED_ROM_VERSIONS:
+        raise ValueError(
+            f"unsupported ROM version {version!r}; expected one of "
+            f"{sorted(_SUPPORTED_ROM_VERSIONS)}"
+        )
+    return normalized
 
 
 # --- Protocol --------------------------------------------------------------
@@ -169,17 +187,100 @@ def _read_exactly(sock: socket.socket, n: int) -> bytes:
 
 
 def _read_lp_str(data: memoryview, offset: int) -> tuple[str, int]:
+    if offset >= len(data):
+        raise SerialLinkProtocolError("length-prefixed string is missing")
     length = data[offset]
     offset += 1
-    s = bytes(data[offset : offset + length]).decode("utf-8")
+    end = offset + length
+    if end > len(data):
+        raise SerialLinkProtocolError("length-prefixed string is truncated")
+    try:
+        s = bytes(data[offset:end]).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SerialLinkProtocolError("length-prefixed string is not UTF-8") from exc
     return s, offset + length
 
 
 def _read_lp_bytes(data: memoryview, offset: int) -> tuple[bytes, int]:
+    if offset + 2 > len(data):
+        raise SerialLinkProtocolError("length-prefixed bytes are missing")
     (length,) = struct.unpack(">H", data[offset : offset + 2])
     offset += 2
-    b = bytes(data[offset : offset + length])
+    end = offset + length
+    if end > len(data):
+        raise SerialLinkProtocolError("length-prefixed bytes are truncated")
+    b = bytes(data[offset:end])
     return b, offset + length
+
+
+def _connect_socket(
+    host: str,
+    port: int,
+    timeout_s: float,
+    cancel_event: threading.Event | None = None,
+) -> socket.socket:
+    """Connect without an uninterruptible blocking ``create_connection``."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise SerialLinkClosed("connection cancelled")
+    normalized_host = validate_loopback_host(host)
+    if timeout_s <= 0:
+        raise ValueError("timeout_s must be positive")
+    end_time = time.monotonic() + timeout_s
+    last_error: OSError | None = None
+    try:
+        addresses = socket.getaddrinfo(
+            normalized_host, port, type=socket.SOCK_STREAM
+        )
+    except OSError as exc:
+        raise SerialLinkError(f"unable to resolve {normalized_host!r}: {exc}") from exc
+    for family, socktype, proto, _canonname, sockaddr in addresses:
+        if cancel_event is not None and cancel_event.is_set():
+            raise SerialLinkClosed("connection cancelled")
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.setblocking(False)
+            result = sock.connect_ex(sockaddr)
+            if result == 0:
+                sock.setblocking(True)
+                return sock
+            if result not in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+                last_error = OSError(result, errno.errorcode.get(result, "connect failed"))
+                continue
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SerialLinkClosed("connection cancelled")
+                remaining = end_time - time.monotonic()
+                if remaining <= 0:
+                    last_error = TimeoutError(
+                        f"connection to {normalized_host}:{port} timed out"
+                    )
+                    break
+                _readable, writable, exceptional = select.select(
+                    [], [sock], [sock], min(0.05, remaining)
+                )
+                if not writable and not exceptional:
+                    continue
+                error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if error == 0:
+                    sock.setblocking(True)
+                    return sock
+                last_error = OSError(
+                    error, errno.errorcode.get(error, "connect failed")
+                )
+                break
+        except (SerialLinkClosed, KeyboardInterrupt):
+            raise
+        except OSError as exc:
+            last_error = exc
+        finally:
+            if sock.fileno() != -1 and (last_error is not None or sock.getblocking() is False):
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+    if last_error is not None:
+        raise last_error
+    raise SerialLinkError(f"unable to connect to {normalized_host}:{port}")
 
 
 # --- TCP implementation ----------------------------------------------------
@@ -201,9 +302,11 @@ class TcpSerialLink:
 
     def __init__(self, sock: socket.socket, local_rom_version: str) -> None:
         self._sock = sock
-        self._local_rom_version = local_rom_version
+        self._local_rom_version = _validate_rom_version(local_rom_version)
         self._peer_rom_version: str | None = None
         self._closed = False
+        self._closed_event = threading.Event()
+        self._close_lock = threading.Lock()
 
         self._write_lock = threading.Lock()
         # Per-kind inbound queue; created lazily when first message of
@@ -220,7 +323,7 @@ class TcpSerialLink:
 
         # Send our HELLO. The reader thread on the other side will
         # capture the peer's HELLO into ``_peer_rom_version``.
-        self._send_frame(bytes([OP_HELLO]) + _pack_lp_str(local_rom_version))
+        self._send_frame(bytes([OP_HELLO]) + _pack_lp_str(self._local_rom_version))
 
     # --- construction --------------------------------------------------
 
@@ -232,10 +335,11 @@ class TcpSerialLink:
         local_rom_version: str,
         *,
         timeout_s: float = 10.0,
+        cancel_event: threading.Event | None = None,
     ) -> "TcpSerialLink":
         """Open an outbound connection to a peer that is
         :meth:`listen`-ing on ``(host, port)``."""
-        sock = socket.create_connection((host, port), timeout=timeout_s)
+        sock = _connect_socket(host, port, timeout_s, cancel_event)
         sock.settimeout(None)  # blocking reads in reader thread
         return cls(sock, local_rom_version)
 
@@ -245,9 +349,13 @@ class TcpSerialLink:
     ) -> "TcpSerialLink":
         """Bind ``(host, port)`` and block until a peer connects, then
         return the established link."""
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        host = validate_loopback_host(host)
+        listener = socket.socket(
+            socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM
+        )
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind((host, port))
+        bind_address = (host, port, 0, 0) if ":" in host else (host, port)
+        listener.bind(bind_address)
         listener.listen(1)
         try:
             conn, _peer_addr = listener.accept()
@@ -284,31 +392,33 @@ class TcpSerialLink:
 
         with self._inbound_lock:
             q = self._inbound[kind]
-        try:
-            return q.get(timeout=timeout_ms / 1000.0)
-        except queue.Empty as exc:
-            self._raise_if_reader_failed()
-            raise SerialLinkTimeout(
-                f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
-            ) from exc
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            if self._closed_event.is_set():
+                self._raise_if_reader_failed()
+                raise SerialLinkClosed("link is closed")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._raise_if_reader_failed()
+                raise SerialLinkTimeout(
+                    f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
+                )
+            try:
+                return q.get(timeout=min(0.05, remaining))
+            except queue.Empty:
+                continue
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        # Best-effort BYE; peer may already be gone.
-        try:
-            self._send_frame(bytes([OP_BYE]))
-        except Exception:
-            pass
-        try:
-            self._sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        with self._close_lock:
+            if self._closed:
+                return
+            # Send BYE while the link is still open. This is best-effort and
+            # ordered behind any concurrent exchange write.
+            try:
+                self._send_frame(bytes([OP_BYE]))
+            except Exception:
+                pass
+            self._mark_closed()
 
     # --- reader thread --------------------------------------------------
 
@@ -325,47 +435,56 @@ class TcpSerialLink:
                 self._dispatch(memoryview(body))
         except SerialLinkClosed:
             # Clean peer close; no error, just mark closed.
-            self._closed = True
+            self._mark_closed()
         except Exception as exc:  # noqa: BLE001
-            self._reader_exc = exc
-            self._closed = True
-            # Unblock any waiters with a protocol error.
-            with self._inbound_lock:
-                for q in self._inbound.values():
-                    # Sentinel empty-bytes unblock; callers check
-                    # _reader_exc and raise.
-                    try:
-                        q.put_nowait(b"")
-                    except queue.Full:
-                        pass
+            self._mark_closed(exc)
         finally:
             self._hello_received.set()  # unblock peer_rom_version waiters
 
     def _dispatch(self, body: memoryview) -> None:
+        if not body:
+            raise SerialLinkProtocolError("empty frame body")
         opcode = body[0]
         if opcode == OP_HELLO:
-            rom_version, _ = _read_lp_str(body, 1)
+            rom_version, offset = _read_lp_str(body, 1)
+            if offset != len(body):
+                raise SerialLinkProtocolError("HELLO has trailing bytes")
+            rom_version = _validate_rom_version(rom_version)
+            if self._peer_rom_version is not None:
+                raise SerialLinkProtocolError("duplicate HELLO")
             self._peer_rom_version = rom_version
             self._hello_received.set()
         elif opcode == OP_EXCHANGE:
             kind, offset = _read_lp_str(body, 1)
-            payload, _ = _read_lp_bytes(body, offset)
+            payload, offset = _read_lp_bytes(body, offset)
+            if offset != len(body):
+                raise SerialLinkProtocolError("EXCHANGE has trailing bytes")
             with self._inbound_lock:
                 q = self._inbound[kind]
             q.put(payload)
         elif opcode == OP_BYE:
-            self._closed = True
-            # Unblock any waiters.
-            with self._inbound_lock:
-                for q in self._inbound.values():
-                    try:
-                        q.put_nowait(b"")
-                    except queue.Full:
-                        pass
+            if len(body) != 1:
+                raise SerialLinkProtocolError("BYE has a payload")
+            self._mark_closed()
         else:
             raise SerialLinkProtocolError(f"unknown opcode 0x{opcode:02x}")
 
     # --- helpers --------------------------------------------------------
+
+    def _mark_closed(self, error: Exception | None = None) -> None:
+        if error is not None and self._reader_exc is None:
+            self._reader_exc = error
+        self._closed = True
+        self._closed_event.set()
+        self._hello_received.set()
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
 
     def _send_frame(self, payload: bytes) -> None:
         header = struct.pack(">I", len(payload))

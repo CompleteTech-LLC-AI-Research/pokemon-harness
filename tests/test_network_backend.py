@@ -62,6 +62,21 @@ def test_network_backend_rejects_non_loopback_hosts():
         NetworkBackend.connect("192.0.2.1", 1)
 
 
+def test_localhost_resolution_must_remain_loopback(monkeypatch):
+    def unsafe_resolution(*_args, **_kwargs):
+        return [(
+            _socket.AF_INET,
+            _socket.SOCK_STREAM,
+            0,
+            "",
+            ("192.0.2.1", 0),
+        )]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", unsafe_resolution)
+    with pytest.raises(ValueError, match="resolved unsafely"):
+        validate_loopback_host("localhost")
+
+
 def test_versioned_handshake_reports_each_peer_rom():
     a_sock, b_sock = _socket.socketpair()
     a = NetworkBackend(a_sock, local_rom_version="red")
@@ -149,25 +164,54 @@ def test_on_edge_with_peer_hangup_raises():
     a.stop()
 
 
-def test_unknown_opcode_is_ignored():
-    """The reader tolerates unknown opcodes (drops them) rather than
-    hard-erroring. This keeps real-ROM runs robust to spurious noise.
-    """
+def test_unknown_opcode_fails_closed_and_stops_reader():
+    """Unknown wire operations are protocol errors, not ignorable noise."""
     a, b = NetworkBackend.pair()
     a.start_receiver(local_core=None)
-    # Peer sends garbage opcode then a valid RESP.
     b._sock.sendall(struct.pack(">BB", 0xFF, 0))
-    b._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, 1))
-
-    # Send a REQ from us — the peer side's reader won't fire because
-    # the "peer" here is just raw socket writes. Put a RESP by hand
-    # to unblock our on_edge.
     try:
-        reply = a._resp_queue.get(timeout=2.0)  # pop the queued RESP
-        assert reply == 1
+        for _ in range(100):
+            if a._reader_exc is not None:
+                break
+            time.sleep(0.01)
+        assert isinstance(a._reader_exc, NetworkBackendError)
+        assert not a.connected
     finally:
         a.stop()
         b.stop()
+
+
+def test_duplicate_edge_responses_do_not_block_shutdown():
+    """A full response queue must fail the reader without wedging stop()."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b._sock.sendall(
+        struct.pack(">BB", _OP_EDGE_RESP, 1)
+        + struct.pack(">BB", _OP_EDGE_RESP, 0)
+    )
+    try:
+        for _ in range(100):
+            if a._reader_exc is not None:
+                break
+            time.sleep(0.01)
+        assert isinstance(a._reader_exc, NetworkBackendError)
+        started = time.monotonic()
+        a.stop()
+        assert time.monotonic() - started < 0.5
+        assert a._reader is not None and not a._reader.is_alive()
+    finally:
+        b.stop()
+
+
+def test_cancelled_network_connect_returns_promptly():
+    cancel = threading.Event()
+    cancel.set()
+    started = time.monotonic()
+    with pytest.raises(NetworkBackendError, match="cancelled"):
+        NetworkBackend.connect(
+            "127.0.0.1", 1, timeout_s=30.0, cancel_event=cancel
+        )
+    assert time.monotonic() - started < 1.0
 
 
 # ---------------------------------------------------------------------------

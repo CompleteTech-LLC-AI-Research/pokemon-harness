@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import struct
 import threading
 import time
 
@@ -214,6 +215,62 @@ def test_tcp_peer_close_causes_closed_error():
     with pytest.raises((SerialLinkClosed, SerialLinkError)):
         client.exchange("x", b"\x00", timeout_ms=500)
     client.close()
+
+
+def test_tcp_peer_close_wakes_exchange_waiter_promptly():
+    server, client = _make_tcp_pair()
+    result: list[Exception] = []
+
+    def blocked_exchange() -> None:
+        try:
+            client.exchange("blocked", b"x", timeout_ms=5000)
+        except Exception as exc:  # noqa: BLE001
+            result.append(exc)
+
+    worker = threading.Thread(target=blocked_exchange, daemon=True)
+    worker.start()
+    time.sleep(0.05)
+    server.close()
+    worker.join(timeout=1.0)
+    try:
+        assert not worker.is_alive()
+        assert result and isinstance(result[0], SerialLinkClosed)
+    finally:
+        client.close()
+
+
+def test_tcp_close_sends_bye_before_shutdown():
+    local, peer = socket.socketpair()
+    link = TcpSerialLink(local, "blue")
+    try:
+        header = peer.recv(4)
+        size = struct.unpack(">I", header)[0]
+        assert peer.recv(size) == bytes([1, 4]) + b"blue"
+        link.close()
+        header = peer.recv(4)
+        size = struct.unpack(">I", header)[0]
+        assert peer.recv(size) == bytes([0xFE])
+    finally:
+        link.close()
+        peer.close()
+
+
+def test_cancelled_tcp_connect_returns_promptly():
+    cancel = threading.Event()
+    cancel.set()
+    started = time.monotonic()
+    with pytest.raises(SerialLinkClosed, match="cancelled"):
+        TcpSerialLink.connect(
+            "127.0.0.1", 1, "blue", timeout_s=30.0, cancel_event=cancel
+        )
+    assert time.monotonic() - started < 1.0
+
+
+def test_tcp_serial_link_rejects_non_loopback_hosts():
+    with pytest.raises(ValueError, match="localhost-only"):
+        TcpSerialLink.connect("192.0.2.1", 1, "blue")
+    with pytest.raises(ValueError, match="localhost-only"):
+        TcpSerialLink.listen(_free_port(), "blue", host="0.0.0.0")
 
 
 def test_tcp_rejects_malformed_frame():
