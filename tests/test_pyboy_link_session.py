@@ -231,3 +231,88 @@ def test_interleaved_chunk_uses_cpu_cycles_for_variable_length_instructions():
 
     assert PyBoyLinkSession._step_single_step_chunk(pyboy, 24) is False
     assert pyboy.mb.cpu.cycles == 124
+
+
+class _FrameBoundaryDouble:
+    """Small motherboard double for the interleaved frame scheduler."""
+
+    def __init__(
+        self,
+        frame_boundary: int,
+        *,
+        start_cycles: int = 0,
+        stalled: bool = False,
+    ):
+        self._frame_boundary = start_cycles + frame_boundary
+        self._next_frame_boundary = self._frame_boundary
+        self._stalled = stalled
+        self.cpu = SimpleNamespace(cycles=start_cycles)
+        self.lcd = SimpleNamespace(
+            frame_done=False,
+            _cycles_to_frame=frame_boundary,
+        )
+        self.sound = SimpleNamespace(
+            disable_sampling=False,
+            clear_buffer=lambda: None,
+        )
+        self.serial = SimpleNamespace(internal_clock=False)
+        self.breakpoint_singlestep = 0
+        self.ticks_after_boundary = 0
+
+    def tick(self):
+        if self._stalled:
+            return False
+        if self._next_frame_boundary > self._frame_boundary:
+            self.ticks_after_boundary += 1
+        self.cpu.cycles += 4
+        if self.cpu.cycles >= self._next_frame_boundary:
+            self.lcd.frame_done = True
+            self._next_frame_boundary += 1000
+        return False
+
+
+class _FrameBoundaryPyBoy:
+    def __init__(
+        self,
+        frame_boundary: int,
+        *,
+        start_cycles: int = 0,
+        stalled: bool = False,
+    ):
+        self.mb = _FrameBoundaryDouble(
+            frame_boundary,
+            start_cycles=start_cycles,
+            stalled=stalled,
+        )
+        self.events = []
+        self.frame_count = 0
+
+    def _handle_events(self, _events):
+        return None
+
+    def _post_handle_events(self):
+        return None
+
+
+def test_interleaved_frame_crosses_early_lcd_boundary_to_shared_horizon():
+    """An early LCD boundary must not freeze its peer's serial clock."""
+    a_start = 1_000_000
+    b_start = 20_000_000
+    a = _FrameBoundaryPyBoy(20, start_cycles=a_start)
+    b = _FrameBoundaryPyBoy(32, start_cycles=b_start)
+
+    PyBoyLinkSession._interleave_one_frame(a, b, chunk_cycles=8)
+
+    assert a.mb.cpu.cycles - a_start == b.mb.cpu.cycles - b_start == 32
+    assert a.mb.ticks_after_boundary > 0
+    assert a.frame_count == b.frame_count == 1
+
+
+def test_interleaved_frame_timeout_is_bounded_and_clears_singlestep():
+    a = _FrameBoundaryPyBoy(8, stalled=True)
+    b = _FrameBoundaryPyBoy(8, stalled=True)
+
+    with pytest.raises(TimeoutError, match="shared LCD cycle horizon"):
+        PyBoyLinkSession._interleave_one_frame(a, b, chunk_cycles=4)
+
+    assert a.mb.breakpoint_singlestep == b.mb.breakpoint_singlestep == 0
