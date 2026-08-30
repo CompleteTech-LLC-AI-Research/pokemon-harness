@@ -48,7 +48,7 @@ below.
   layer; ensure the runtime used by tests is the runtime used by MCP.
 - Make editable installs and wheels portable; remove local-only path hacks and
   stale standalone-PyBoy assumptions.
-- Verify Python 3.11+, dependency resolution, package data, import paths,
+- Verify Python 3.12+, dependency resolution, package data, import paths,
   optional native/Cython mode, and fail-closed runtime identity checks.
 - Add or repair clean-install and wheel smoke tests without bundling game ROMs.
 

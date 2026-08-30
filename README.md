@@ -94,7 +94,7 @@ acceptance results.
 
 Requirements:
 
-- Python 3.11 or newer.
+- Python 3.12 or newer.
 - The bundled PyBoy runtime (`2.7.0`, harness revision
   `c565df66c3731fad2856169a90f6bbec99925915`).
 - `mcp==1.29.1`, the certified runtime API used by the server.

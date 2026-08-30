@@ -31,7 +31,7 @@ evidence is missing.
 
 | Component | Pin | Source of truth |
 |---|---|---|
-| Python | `>=3.11` | `pyproject.toml` |
+| Python | `>=3.12` | `pyproject.toml` |
 | PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `pyproject.toml` |
 | MCP | `1.29.1` | `pyproject.toml` and the stdio acceptance test |
 

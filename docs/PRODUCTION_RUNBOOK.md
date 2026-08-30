@@ -56,7 +56,7 @@ runtime or test changes over the historical result. The working tree should
 be clean; ignored BYO assets may be present outside the tracked source. Use
 the same activated interpreter for installation, tests, the gate, and MCP.
 
-The required Python version is 3.11 or newer. On Windows PowerShell, create
+The required Python version is 3.12 or newer. On Windows PowerShell, create
 the same environment with `py -3 -m venv .venv`, activate with
 `.venv\Scripts\Activate.ps1`, and use `python -m pip` for the remaining
 commands. Run the tests and the MCP server with the same interpreter.

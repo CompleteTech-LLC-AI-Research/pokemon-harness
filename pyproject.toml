@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pokered-harness"
 version = "0.1.0"
 description = "Memory-first automation harness for Pokémon Red via PyBoy, exposed over MCP."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 readme = "README.md"
 license = "LGPL-3.0-only"
 dependencies = [

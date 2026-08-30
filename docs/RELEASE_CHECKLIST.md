@@ -71,7 +71,7 @@ script, and the results were reproduced from the isolated clean checkout.
 
 ## Runtime and dependency identity
 
-- [x] Python version is 3.11 or newer and is recorded.
+- [x] Python version is 3.12 or newer and is recorded.
 - [x] `python -m pip check` passes in the release environment.
 - [x] The installed PyBoy runtime is `2.7.0` with harness revision
   `c565df66c3731fad2856169a90f6bbec99925915`, and the source-runtime build
