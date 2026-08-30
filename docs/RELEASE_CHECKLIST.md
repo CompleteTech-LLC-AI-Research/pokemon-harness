@@ -7,21 +7,19 @@ runtime evidence required by the relevant capability.
 ## Current audit status
 
 The baseline at `e219fb5` (2026-08-29) was not production-ready. The audited
-candidate head is `71886778240d25387cb892566b53406ab4c2d0d2`; it addresses the
+candidate head is `1046a541e0003923aec6000b6b383c6eaafeaa48`; it addresses the
 collection boundary, portable `.mcp.json`, bundled PyBoy source runtime,
 path-aware ROM pinning, native local/TCP serial attachment, teardown,
 dependency pinning, and tiered gate reporting.
 
-Evidence provenance matters: the complete real-ROM gate was run at
-`c4ab27c87f7d9545da25a71e592a7a4faaec08ad`, before the three diagnostic-helper
-portability fixes in the current head. At `7188677`, the unit/timing gate and
-static path, compile, and artifact checks were rerun; the complete real-ROM
-gate was not. The full-gate counts below are therefore a snapshot of the
-earlier code-equivalent runtime, not current-head full certification.
+Evidence provenance matters: the complete real-ROM gate was rerun at the exact
+current clean head after all integration commits. The full-gate counts below
+are current-head evidence; the complete output is not retained in this tree as
+a release evidence bundle.
 
 Full-gate snapshot:
 
-- unit: 363/363 passed;
+- unit: 372/372 passed;
 - timing: 35/35 passed across five repetitions;
 - local: 46/46 passed; remote: 11/11 passed;
 - strict acceptance tiers: trade 2/2 and battle 2/2 passed;
@@ -42,9 +40,9 @@ script, and the results were reproduced from the isolated clean checkout.
 
 ## Source and artifact hygiene
 
-- [ ] The release commit is identified and the worktree is clean. The current
-  audit worktree has pre-existing unowned code/build changes; they are
-  deliberately preserved and excluded from this documentation commit.
+- [x] The release commit is identified and the isolated candidate worktree is
+  clean. BYO ROM/fixture inputs and ignored local build output remain outside
+  the tracked release tree.
 - [x] No ROM, `.sym`, `.sav`, `.state`, screenshot, log, cache, or other
   ROM-derived artifact is tracked.
 - [x] The package metadata, README, `VERSIONS.md`, and this checklist agree on
@@ -149,7 +147,7 @@ script, and the results were reproduced from the isolated clean checkout.
 local plus controlled remote acceptance paths have passing snapshots, but full
 product sign-off remains pending:
 
-- a clean current-head worktree and a complete current-head real-ROM gate;
+- a retained complete current-head real-ROM gate evidence bundle;
 - a retained evidence bundle, including battle-fixture hashes/provenance;
 - resolution of the two diagnostic local battle stalls (`blue↔blue` and
   `blue→red`), or an explicitly limited product scope that excludes them;

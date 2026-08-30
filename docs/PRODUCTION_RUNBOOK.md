@@ -2,13 +2,12 @@
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. The current audited
-candidate head is `71886778240d25387cb892566b53406ab4c2d0d2`; the complete
-real-ROM gate was run at `c4ab27c87f7d9545da25a71e592a7a4faaec08ad`, before
-three committed diagnostic-helper portability fixes. Unit/timing and static
-audits were rerun at the current head, but the complete real-ROM gate was not.
-Uncommitted worktree changes are excluded from this candidate record.
+candidate head is `1046a541e0003923aec6000b6b383c6eaafeaa48`; the complete
+real-ROM gate was rerun at that exact clean head after the runtime, link, MCP,
+gate, and documentation integration commits. Uncommitted worktree changes are
+excluded from this candidate record.
 
-The full-gate snapshot is unit 363/363, timing 35/35 across five repetitions,
+The full-gate snapshot is unit 372/372, timing 35/35 across five repetitions,
 local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. Strict
 local evidence covers color Red + Yellow; strict remote evidence covers color
 Red as listener/internal-clock and color Blue as connector/external-clock.
@@ -38,7 +37,7 @@ python -m pip check
 ```
 
 For this audited candidate, `HEAD` must be
-`71886778240d25387cb892566b53406ab4c2d0d2` before collecting evidence. The
+`1046a541e0003923aec6000b6b383c6eaafeaa48` before collecting evidence. The
 working tree should be clean; ignored BYO assets may be present outside the
 tracked source. Use the same activated interpreter for installation, tests,
 the gate, and MCP.
@@ -402,9 +401,8 @@ are:
    both sides entered move exchange. The other seven ordered R/B/Y diagnostic
    battle rows reached a turn, but that does not certify the two failures or
    the full matrix.
-2. The full real-ROM gate snapshot belongs to commit `c4ab27c`; it was not
-   rerun after the helper-only changes in `7188677`, and the complete output is
-   not retained in this repository.
+2. The full real-ROM gate passed at the current candidate head, but its complete
+   output is not retained in this repository as a release evidence bundle.
 3. `ruff check .` reported 525 findings, and the broad suite is not a clean
    production gate.
 4. The five-row single-session matrix, reversed listener/connector roles,

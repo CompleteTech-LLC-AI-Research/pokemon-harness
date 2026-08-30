@@ -10,14 +10,10 @@ symbol files, save states, or other ROM-derived artifacts.
 ## Release status
 
 This repository is an audited candidate, not a production release. The current
-candidate head is `71886778240d25387cb892566b53406ab4c2d0d2`. The complete
-real-ROM gate was run at `c4ab27c87f7d9545da25a71e592a7a4faaec08ad`; the
-committed delta after that gate contains only portability fixes in three
-diagnostic helper scripts. Any uncommitted worktree changes are excluded from
-this candidate status and must not be folded into its evidence.
-The current head was rechecked with the unit/timing gate and the path, compile,
-and artifact audits, but the complete real-ROM gate has not been rerun at
-`7188677`. The baseline at `e219fb5` was not production-certified.
+candidate head is `1046a541e0003923aec6000b6b383c6eaafeaa48`. The complete
+real-ROM gate was rerun at that exact clean head after the runtime, link, MCP,
+gate, and documentation integration commits. The baseline at `e219fb5` was
+not production-certified.
 
 The counts below are therefore an evidence snapshot with an explicit commit
 boundary, not a claim that every listed capability is a finished product:
@@ -35,9 +31,9 @@ boundary, not a claim that every listed capability is a finished product:
 The candidate includes the explicit `tests/__init__.py` package boundary and
 the bundled PyBoy source tree. Symbol hashes and audited generator provenance
 are recorded in [`VERSIONS.md`](VERSIONS.md). Full release sign-off remains
-`PARTIAL`: the complete evidence bundle and independent review are not attached,
-the broad lint and diagnostic matrix are not clean, and current-head full-gate
-evidence is still missing.
+`PARTIAL`: the complete gate output and independent review are not attached,
+the broad lint and diagnostic matrix are not clean, and several matrix,
+fixture-provenance, role, and security boundaries remain open.
 
 The audited local diagnostic matrix reached LinkMenu and completed the trade
 route for all nine ordered Red/Blue/Yellow version pairs. Seven of nine battle
@@ -53,8 +49,8 @@ Current release blockers are explicit:
   not certified;
 - the repository-wide Ruff audit reports 525 findings and the broad suite has
   not become a clean production gate;
-- the full gate was not rerun at the current head and its complete output is not
-  retained in this tree;
+- the current-head gate output is not retained in this tree as a complete
+  evidence bundle;
 - per-ROM single-session coverage, reversed listener/connector roles, native
   platform coverage, and independent review remain incomplete; and
 - TCP is deliberately localhost-only because it has no authentication or
@@ -94,7 +90,7 @@ Requirements:
 - Python 3.11 or newer.
 - The bundled PyBoy runtime (`2.7.0`, harness revision
   `c565df66c3731fad2856169a90f6bbec99925915`).
-- `mcp>=1.27,<2`, the certified runtime API used by the server.
+- `mcp==1.29.1`, the certified runtime API used by the server.
 - A legally obtained ROM and a matching debug symbol file for any real-ROM
   run.
 

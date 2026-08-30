@@ -6,14 +6,12 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: audited 2026-08-30 against candidate head
-`71886778240d25387cb892566b53406ab4c2d0d2`. The complete real-ROM gate was
-run at `c4ab27c87f7d9545da25a71e592a7a4faaec08ad`; the committed delta after
-that gate contains only diagnostic-helper portability fixes. The current head's
-unit/timing gate plus path, compile, and artifact checks were rerun. The
-complete real-ROM gate has not been rerun at the current head. Uncommitted
-worktree changes are excluded from this candidate record.
+`1046a541e0003923aec6000b6b383c6eaafeaa48`. The complete real-ROM gate was
+rerun at this exact clean head after the runtime, link, MCP, gate, and
+documentation integration commits. Uncommitted worktree changes are excluded
+from this candidate record.
 
-The full-gate snapshot is unit 363/363, timing 35/35 across five repetitions,
+The full-gate snapshot is unit 372/372, timing 35/35 across five repetitions,
 local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. The
 stateful evidence is limited to local color Red/Yellow and remote color Red
 listener + color Blue connector. Remote acceptance uses a test-driver
@@ -21,10 +19,10 @@ LinkMenu selection hook; it is native-serial payload evidence, not full
 user-driven gameplay. Other link rows remain unsupported or unverified.
 
 Symbol hashes and audited generator provenance for the inputs are recorded
-below. The remaining release decision is `PARTIAL` because the current-head
-full-gate output is not retained, repository-wide lint and the broad matrix are
-not clean, per-ROM and reversed-role coverage is incomplete, and independent
-review/native-platform evidence is missing.
+below. The remaining release decision is `PARTIAL` because the complete
+current-head gate output is not retained as an evidence bundle, repository-wide
+lint and the broad matrix are not clean, per-ROM and reversed-role coverage is
+incomplete, and independent review/native-platform evidence is missing.
 
 ## Runtime
 
@@ -32,7 +30,7 @@ review/native-platform evidence is missing.
 |---|---|---|
 | Python | `>=3.11` | `pyproject.toml` |
 | PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `pyproject.toml` |
-| MCP | `>=1.27,<2` | `pyproject.toml` and the stdio acceptance test |
+| MCP | `1.29.1` | `pyproject.toml` and the stdio acceptance test |
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
