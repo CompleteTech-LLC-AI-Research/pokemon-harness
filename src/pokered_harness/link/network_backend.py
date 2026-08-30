@@ -49,6 +49,7 @@ same socket.
 from __future__ import annotations
 
 import ipaddress
+import math
 import queue
 import socket
 import struct
@@ -82,6 +83,8 @@ _ROM_VERSION_NAMES: dict[int, str] = {
 
 _FRAME = struct.Struct(">BB")  # opcode, payload (1-byte id for SYNC)
 _LEN = struct.Struct(">H")
+_EDGE_RESPONSE_TIMEOUT_SECONDS = 10.0
+_CONTROL_QUEUE_MAXSIZE = 256
 _REARM_WAIT_SECONDS = 0.100
 _POST_BYTE_REARM_GRACE_SECONDS = 1.500
 _ACTIVE_EXCHANGE_GRACE_SECONDS = 1.000
@@ -91,6 +94,32 @@ _ACTIVE_EXCHANGE_REARM_WAIT_SECONDS = 5.0
 
 class NetworkBackendError(RuntimeError):
     """Wraps socket errors + protocol errors from :class:`NetworkBackend`."""
+
+
+def _validate_id(value: int, name: str) -> int:
+    """Validate a one-byte protocol identifier without bool coercion."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer in 0..255")
+    if not 0 <= value <= 0xFF:
+        raise ValueError(f"{name} must fit in uint8, got {value}")
+    return value
+
+
+def _validate_optional_timeout(value: float | None, name: str) -> float | None:
+    """Validate an optional finite, non-negative timeout in seconds."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite, non-negative number")
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a finite, non-negative number"
+        ) from exc
+    if not math.isfinite(normalized) or normalized < 0:
+        raise ValueError(f"{name} must be a finite, non-negative number")
+    return normalized
 
 
 def validate_loopback_host(host: str) -> str:
@@ -149,8 +178,14 @@ class NetworkBackend:
     def __init__(self, sock: socket.socket, *, local_rom_version: str | None = None) -> None:
         self._sock = sock
         self._write_lock = threading.Lock()
+        # A Game Boy serial core has one outstanding master edge at a time.
+        # EDGE_RESP has no request id, so a late/duplicate response cannot
+        # safely be matched to a later edge.
+        self._edge_call_lock = threading.Lock()
+        self._edge_response_lock = threading.Lock()
+        self._edge_inflight = False
         # Responses from peer (when we're master) land here.
-        self._resp_queue: queue.Queue[int] = queue.Queue()
+        self._resp_queue: queue.Queue[int] = queue.Queue(maxsize=1)
         # Keep edge application ordered, but do not let a slow slave
         # re-arm wait block the reader from consuming control frames such
         # as SYNC or HELLO. The master sends one EDGE_REQ at a time, so a
@@ -230,14 +265,22 @@ class NetworkBackend:
         host: str = "127.0.0.1",
         backlog: int = 1,
         local_rom_version: str | None = None,
+        accept_timeout_s: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple["NetworkBackend", socket.socket]:
-        """Bind to ``(host, port)`` and block until a peer connects.
+        """Bind to ``(host, port)`` and wait until a peer connects.
 
         Returns ``(backend, listener_sock)``; the caller keeps the
         listener socket to close later if needed. A fresh accepted
-        socket is wrapped by the backend.
+        socket is wrapped by the backend. ``accept_timeout_s`` and
+        ``cancel_event`` make the accept cancellable for lifecycle owners;
+        with both omitted, the historical indefinite accept behavior is
+        preserved.
         """
         normalized_host = validate_loopback_host(host)
+        accept_timeout_s = _validate_optional_timeout(
+            accept_timeout_s, "accept_timeout_s"
+        )
         family = _socket_family(normalized_host)
         listener = socket.socket(family, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -246,11 +289,50 @@ class NetworkBackend:
             if family == socket.AF_INET6
             else (normalized_host, port)
         )
-        listener.bind(bind_address)
-        listener.listen(backlog)
-        conn, _ = listener.accept()
-        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        return cls(conn, local_rom_version=local_rom_version), listener
+        conn: socket.socket | None = None
+        try:
+            listener.bind(bind_address)
+            listener.listen(backlog)
+            if accept_timeout_s is None and cancel_event is None:
+                conn, _ = listener.accept()
+            else:
+                deadline = (
+                    None
+                    if accept_timeout_s is None
+                    else time.monotonic() + accept_timeout_s
+                )
+                while conn is None:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise NetworkBackendError("listener accept cancelled")
+                    remaining = (
+                        None
+                        if deadline is None
+                        else deadline - time.monotonic()
+                    )
+                    if remaining is not None and remaining <= 0:
+                        raise NetworkBackendError(
+                            f"listener accept timed out after {accept_timeout_s:g}s"
+                        )
+                    wait_s = 0.25 if remaining is None else min(0.25, remaining)
+                    listener.settimeout(wait_s)
+                    try:
+                        conn, _ = listener.accept()
+                    except socket.timeout:
+                        continue
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            backend = cls(conn, local_rom_version=local_rom_version)
+        except BaseException:
+            if conn is not None:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+            try:
+                listener.close()
+            except OSError:
+                pass
+            raise
+        return backend, listener
 
     @classmethod
     def connect(
@@ -363,26 +445,53 @@ class NetworkBackend:
         isn't running yet, incoming responses will be lost — callers
         must call :meth:`start_receiver` before master-mode transfers.
         """
-        frame_out = _FRAME.pack(_OP_EDGE_REQ, our_bit & 1)
-        self._stats["edge_req_sent"] = int(self._stats["edge_req_sent"]) + 1
-        try:
-            with self._write_lock:
+        del our_role  # the wire role is carried by the ROM's SC register
+        with self._edge_call_lock:
+            with self._edge_response_lock:
                 if self._closed:
                     raise NetworkBackendError("backend closed")
-                self._sock.sendall(frame_out)
-        except OSError as exc:
-            raise NetworkBackendError(
-                f"failed to send EDGE_REQ: {exc}"
-            ) from exc
-        bit = self._queue_get(
-            self._resp_queue,
-            timeout=10.0,
-            timeout_message="no EDGE_RESP from peer within 10s",
-        )
-        self._stats["edge_resp_received"] = (
-            int(self._stats["edge_resp_received"]) + 1
-        )
-        return bit
+                if self._edge_inflight:
+                    raise NetworkBackendError("concurrent EDGE_REQ is not supported")
+                if not self._resp_queue.empty():
+                    error = NetworkBackendError("stale EDGE_RESP before EDGE_REQ")
+                    self._mark_closed(error)
+                    raise error
+                self._edge_inflight = True
+
+            frame_out = _FRAME.pack(_OP_EDGE_REQ, our_bit & 1)
+            self._stats["edge_req_sent"] = int(self._stats["edge_req_sent"]) + 1
+            try:
+                with self._write_lock:
+                    if self._closed:
+                        raise NetworkBackendError("backend closed")
+                    self._sock.sendall(frame_out)
+                bit = self._queue_get(
+                    self._resp_queue,
+                    timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                    timeout_message=(
+                        "no EDGE_RESP from peer within "
+                        f"{_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
+                    ),
+                )
+                self._stats["edge_resp_received"] = (
+                    int(self._stats["edge_resp_received"]) + 1
+                )
+                return bit
+            except OSError as exc:
+                error = NetworkBackendError(f"failed to send EDGE_REQ: {exc}")
+                self._mark_closed(error)
+                raise error from exc
+            except NetworkBackendError as exc:
+                # Without request ids, a timed-out edge cannot be safely
+                # retried: a delayed peer response would otherwise become
+                # the response for a future edge. Terminate the transport
+                # and require a fresh connection instead.
+                if not self._closed_event.is_set():
+                    self._mark_closed(exc)
+                raise
+            finally:
+                with self._edge_response_lock:
+                    self._edge_inflight = False
 
     # --- out-of-band rendezvous ---------------------------------------
 
@@ -514,6 +623,29 @@ class NetworkBackend:
             raise NetworkBackendError(f"failed to send HELLO: {exc}") from exc
 
     # --- lifecycle ----------------------------------------------------
+
+    def _mark_closed(self, error: Exception | None = None) -> None:
+        """Fail closed and wake all waiters after a transport error.
+
+        ``on_edge`` can discover a stale response or a peer timeout while the
+        reader thread is still blocked in ``recv``. Closing the socket here
+        makes that state terminal and lets both the reader and edge worker
+        unwind; a later call to :meth:`stop` remains idempotent.
+        """
+        if error is not None and self._reader_exc is None:
+            self._reader_exc = error
+        self._closed = True
+        self._closed_event.set()
+        self._hello_received.set()
+        self._signal_edge_worker_stop()
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
 
     def close(self) -> None:
         self.stop()
