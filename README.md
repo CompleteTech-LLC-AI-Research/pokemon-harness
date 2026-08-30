@@ -26,9 +26,17 @@ work; this status describes the committed candidate:
 | Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
 The candidate includes the explicit `tests/__init__.py` package boundary and
-the bundled PyBoy source tree. Full release sign-off remains `PARTIAL` until
-symbol provenance/evidence-bundle records and an independent review are
-attached, and until any additional ROM-pair rows are separately accepted.
+the bundled PyBoy source tree. Symbol hashes and generator provenance are
+recorded in [`VERSIONS.md`](VERSIONS.md). Full release sign-off remains
+`PARTIAL` until the evidence bundle and independent review are attached, and
+until the failed or unrun ROM-pair rows are separately accepted.
+
+The audited local diagnostic matrix reached LinkMenu and completed the trade
+route for all nine Red/Blue/Yellow version orderings. Seven of nine battle
+rows reached a complete turn; `blue↔blue` and the `blue→red` attach ordering
+stalled before both sides entered move exchange. Those rows are not claimed
+as supported. The strict release acceptance remains Red/Yellow locally and
+color Red/Blue over independent TCP processes.
 
 The required setup, test tiers, evidence format, and sign-off rules are in
 [`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md) and
@@ -158,7 +166,9 @@ session is needed.
 The committed `.mcp.json` uses the canonical `rom/red/` layout, an explicit
 color-ROM hash, and no machine-local `PYTHONPATH`. It is suitable for a
 workspace whose MCP client expands `${PWD}` and whose installed interpreter
-is the package environment.
+is the package environment. An installed wheel launched outside a checkout
+may omit `VERSIONS.md` when explicit primary and peer ROM SHA-1 values are
+provided; the bundled PyBoy runtime identity is still enforced.
 
 ## MCP surface
 

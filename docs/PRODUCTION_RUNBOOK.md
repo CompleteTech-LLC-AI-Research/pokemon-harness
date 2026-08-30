@@ -6,15 +6,15 @@ release-audit candidate adds the bundled runtime, native link lifecycle, and
 tiered gate. The release decision is recorded in the [release checklist](RELEASE_CHECKLIST.md).
 
 Current evidence boundary: the latest pinned-interpreter gate reports unit
-360/360, timing 35/35 across five repetitions, local 46/46, remote 11/11,
+363/363, timing 35/35 across five repetitions, local 46/46, remote 11/11,
 trade 2/2, and battle 2/2. The strict local Red/Yellow trade and battle cases
 pass with untouched legal fixtures. The independent-process Red/Blue trade and
 battle cases pass through native bit-level serial traffic; trade compares both
 full party records and battle advances through move exchange and execution on
-both processes. These results establish the certified candidate scope. Overall
-release status remains `PARTIAL` until symbol provenance/evidence-bundle
-records and independent review are attached; unlisted ROM-pair rows remain
-unsupported.
+both processes. These results establish the certified candidate scope. Symbol
+hashes and generator provenance are recorded in `VERSIONS.md`. Overall release
+status remains `PARTIAL` until the evidence bundle and independent review are
+attached; failed or unrun ROM-pair rows remain unsupported.
 
 ## 1. Start from a clean checkout
 
@@ -90,6 +90,11 @@ The release gate requires collection to complete without errors. It also
 requires no unexpected skips, xfails, failures, or timeouts in any tier marked
 required below. Fixture-gated tests may be skipped during development, but a
 skip is not a passing release result.
+
+The current candidate has not passed a repository-wide Ruff audit: `ruff check
+.` reports 525 findings, including legacy and vendored-runtime code. Treat
+lint cleanup as a remaining release task even when the production gate is
+green.
 
 The release tree includes `tests/__init__.py`; otherwise environments that do
 not treat `tests/` as a namespace package can fail collection. Run both
@@ -169,11 +174,11 @@ python -m pytest -q -ra \
   tests/test_link_integration.py
 ```
 
-The local integration module's active matrix is fixture-gated and currently
-covers selected Blue/Yellow pairings. Its pair-smoke test proves construction,
-hook installation, a short step, and teardown; its trade test is the only
-fixture-gated local round-trip in that module. Neither result should be
-generalized to every ROM variant or to remote play.
+The local integration module's active matrix is fixture-gated and covers
+transport milestones. Its pair-smoke test proves construction, hook
+installation, a short step, and teardown; its trade test is a fixture-gated
+round-trip. Neither result should be generalized to every ROM variant or to
+remote play.
 
 ### Tier D: local link session, trade, and battle acceptance
 
@@ -185,7 +190,10 @@ python -m pytest -q -ra \
 ```
 
 The diagnostic matrix in this module is broader than the release acceptance
-scope. The strict local cases are:
+scope. The current audit reached LinkMenu and completed the diagnostic trade
+route for all nine R/B/Y version orderings. Seven of nine diagnostic battle
+rows reached a complete turn; `blue↔blue` and the `blue→red` attach ordering
+did not reach both move-exchange hooks. The strict local cases are:
 
 ```bash
 python -m pytest -q \
@@ -280,7 +288,9 @@ paired explicitly with `link_pair`; it is not proof of a working game flow.
 The checked-in `.mcp.json` uses the canonical `rom/red/` layout, an explicit
 color-ROM hash, and no machine-local `PYTHONPATH`. It is suitable for a
 workspace whose MCP client expands `${PWD}` and whose installed interpreter
-is the package environment.
+is the package environment. A wheel launched outside a checkout can omit
+`VERSIONS.md` when it supplies explicit primary and peer SHA-1 values; the
+bundled PyBoy runtime identity is still checked.
 
 The MCP remote TCP tools enforce localhost-only hosts (`127.0.0.1`,
 `localhost`, or `::1`). They provide no authentication or encryption; do not

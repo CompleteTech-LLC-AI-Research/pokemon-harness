@@ -1267,7 +1267,7 @@ def _drive_complete_battle_turn(
     dmg = counters["PlayerCalcMoveDamage"]
 
     def tick_interleaved(frames: int) -> None:
-        link.step_interleaved(frames)
+        link.step_interleaved(frames, chunk_cycles=_LINK_CHUNK_CYCLES)
 
     def tick_per_frame(frames: int) -> None:
         for _ in range(frames):

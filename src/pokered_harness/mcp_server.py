@@ -1457,7 +1457,10 @@ def main() -> None:
     Optional:
 
     * ``POKERED_ROM_SHA1`` — explicit pin. When unset, the server reads
-      ``VERSIONS.md`` (relative to cwd) and enforces the SHA-1 from it.
+      ``VERSIONS.md`` (relative to cwd) and enforces the SHA-1 from it. A
+      wheel launched outside a checkout may use explicit primary and peer
+      pins without a local ``VERSIONS.md``; the bundled runtime identity is
+      still enforced.
       Set ``POKERED_SKIP_SHA1=1`` to opt out of SHA-1 enforcement
       entirely (useful for ad-hoc testing on non-stock ROMs).
     * ``POKERED_PEER_ROM_PATH`` / ``POKERED_PEER_SYM_PATH`` /
@@ -1486,21 +1489,31 @@ def main() -> None:
             "set POKERED_ROM_PATH and POKERED_SYM_PATH before launching"
         )
 
+    primary_rom, primary_sym = primary_env.resolved_paths()
+    assert primary_rom is not None and primary_sym is not None
+    peer_rom, peer_sym = peer_env.resolved_paths()
+
     versions = None
     if not _env_flag("POKERED_SKIP_SHA1"):
         try:
             versions = load_versions()
         except VersionsConfigError as exc:
-            raise SystemExit(
-                "unable to load ROM/PyBoy pins; set POKERED_VERSIONS_PATH, "
-                "provide POKERED_ROM_SHA1, or explicitly set "
-                "POKERED_SKIP_SHA1=1: "
-                f"{exc}"
-            ) from exc
-
-    primary_rom, primary_sym = primary_env.resolved_paths()
-    assert primary_rom is not None and primary_sym is not None
-    peer_rom, peer_sym = peer_env.resolved_paths()
+            # A wheel-installed server may be launched outside the source
+            # checkout, where VERSIONS.md is intentionally not part of the
+            # Python package. Explicit primary/peer hashes are sufficient
+            # for ROM identity in that deployment; the bundled PyBoy marker
+            # below still enforces the runtime contract. If either hash is
+            # absent, fail closed rather than silently losing pin coverage.
+            missing_explicit_hash = primary_env.rom_sha1 is None or (
+                peer_rom is not None and peer_env.rom_sha1 is None
+            )
+            if missing_explicit_hash:
+                raise SystemExit(
+                    "unable to load ROM/PyBoy pins; set POKERED_VERSIONS_PATH, "
+                    "provide explicit primary and peer ROM SHA-1 values, or "
+                    "explicitly set POKERED_SKIP_SHA1=1: "
+                    f"{exc}"
+                ) from exc
 
     expected_sha: str | None = primary_env.rom_sha1
     if expected_sha is None and versions is not None:
@@ -1531,7 +1544,33 @@ def main() -> None:
             "set POKERED_PEER_ROM_SHA1 or provide a matching peer per-ROM "
             "Path/SHA-1 entry in VERSIONS.md"
         )
-    expected_pyboy = versions.pyboy_version if versions is not None else None
+    if versions is not None:
+        expected_pyboy = versions.pyboy_version
+    elif _env_flag("POKERED_SKIP_SHA1"):
+        expected_pyboy = None
+    else:
+        # Keep the runtime identity check active for a wheel launched without
+        # a checkout-local VERSIONS.md. The vendored runtime exposes both
+        # values; a stock or partially installed PyBoy must not pass as the
+        # production runtime merely because its ROM hash was supplied.
+        try:
+            import pyboy as pyboy_module
+
+            expected_pyboy = getattr(pyboy_module, "__version__", None)
+            revision = getattr(
+                pyboy_module, "__pokered_harness_revision__", None
+            )
+        except Exception as exc:  # pragma: no cover - environment-specific
+            raise SystemExit(
+                "unable to identify the bundled PyBoy runtime without "
+                f"VERSIONS.md: {type(exc).__name__}: {exc}"
+            ) from exc
+        if not expected_pyboy or not revision:
+            raise SystemExit(
+                "installed PyBoy is missing the pokered-harness runtime "
+                "identity; provide VERSIONS.md or install the bundled "
+                "runtime"
+            )
 
     # CRITICAL: PyBoy's init writes ~70KB of `.sym`-skip warnings to
     # stdout via a logging handler it installs before we get a chance

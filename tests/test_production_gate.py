@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -122,7 +123,7 @@ def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_p
     )
     assert environment["POKERED_ROM_ROOT"] == str(rom_root)
     assert environment["POKERED_ROM_PATH"] == explicit
-    assert environment["PYTHONPATH"].split(":")[:3] == [
+    assert environment["PYTHONPATH"].split(os.pathsep)[:3] == [
         str(tmp_path / "vendor" / "pyboy-src"),
         str(tmp_path / "src"),
         str(tmp_path),
@@ -178,3 +179,53 @@ def test_rom_helper_honors_explicit_roots(tmp_path, monkeypatch):
     assert rom_path("yellow", project_root=tmp_path) == configured_rom / "yellow" / "pokemon-yellow.gbc"
     assert sym_path("blue", project_root=tmp_path) == configured_rom / "blue" / "pokemon-blue.sym"
     assert fixture_path("red", project_root=tmp_path) == configured_fixture / "red" / "cable_club.state"
+
+
+def test_collection_preflight_requires_the_selected_environment_console_script(tmp_path):
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir()
+    python.write_text("", encoding="utf-8")
+
+    results = gate.run_collection_preflight(
+        project_root=tmp_path,
+        python_executable=python,
+        environment={},
+        timeout_seconds=1,
+    )
+
+    assert {result.name for result in results} == {"python-module", "pytest-console"}
+    console = next(result for result in results if result.name == "pytest-console")
+    assert console.status == "FAIL"
+    assert "not found beside" in console.reason
+
+
+def test_collection_preflight_runs_module_and_console_commands(tmp_path, monkeypatch):
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir()
+    python.write_text("", encoding="utf-8")
+    console = python.parent / "pytest"
+    console.write_text("", encoding="utf-8")
+
+    calls = []
+
+    def fake_run_collection_command(**kwargs):
+        calls.append(kwargs)
+        return gate.CollectionResult(
+            name=kwargs["name"],
+            command=kwargs["command"],
+            status="PASS",
+            returncode=0,
+        )
+
+    monkeypatch.setattr(gate, "_run_collection_command", fake_run_collection_command)
+    results = gate.run_collection_preflight(
+        project_root=tmp_path,
+        python_executable=python,
+        environment={},
+    )
+
+    assert [result.name for result in results] == ["python-module", "pytest-console"]
+    assert [call["command"] for call in calls] == [
+        [str(python), "-m", "pytest", "--collect-only", "-q"],
+        [str(console), "--collect-only", "-q"],
+    ]

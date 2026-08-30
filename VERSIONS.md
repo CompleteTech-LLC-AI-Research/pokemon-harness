@@ -6,10 +6,14 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: audited 2026-08-30 against the committed release-audit candidate. The
-clean candidate passes unit 360/360, timing 35/35 across five repetitions,
+clean candidate passes unit 363/363, timing 35/35 across five repetitions,
 local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. The
 certified gameplay scope is limited to local Red/Yellow and remote Red/Blue
 color-variant pairs; other link rows remain unsupported pending acceptance.
+Symbol hashes and generator provenance for the audited inputs are recorded
+below. The remaining release decision is `PARTIAL` until the evidence bundle
+and independent review are attached and the failed or unrun matrix rows are
+resolved or explicitly excluded from the supported product.
 
 ## Runtime
 
@@ -42,6 +46,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/red/pokemon-red.gb` |
 | Symbols | `rom/red/pokemon-red.sym` |
+| Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
 | Role | Certified single-session Red input; link gameplay not claimed |
 
 ### Pokémon Red color variant
@@ -52,6 +57,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/red/pokemon-red-color.gb` |
 | Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
+| Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
 | Role | Certified local Red/Yellow and remote Red/Blue acceptance listener input |
 
 ### Pokémon Blue (UE)
@@ -62,6 +68,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/blue/pokemon-blue.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` |
+| Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
 | Role | Certified single-session Blue input; link gameplay not claimed |
 
 ### Pokémon Blue color variant
@@ -72,6 +79,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/blue/pokemon-blue-color.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
+| Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
 | Role | Certified remote Red/Blue acceptance connector input |
 
 ### Pokémon Yellow (UE)
@@ -82,6 +90,7 @@ for release evidence.
 | Size | 1,048,576 bytes |
 | Path | `rom/yellow/pokemon-yellow.gbc` |
 | Symbols | `rom/yellow/pokemon-yellow.sym` |
+| Symbol SHA-1 | `7c4205723943e7722230dcf014e5e8a2012474aa` |
 | Role | Certified single-session Yellow input and local Red/Yellow acceptance peer |
 
 Other localisations, hacks, and variants are out of scope unless they receive
@@ -90,17 +99,31 @@ result. File size alone does not establish compatibility.
 
 ## Symbol-file contract
 
-Symbol files are generated inputs, not committed release assets. Generate them
-from the matching `pret/pokered` or `pret/pokeyellow` source tree with debug
-symbols enabled, then record the source commit, RGBDS/toolchain version, and
-symbol-file SHA-1 in the release evidence. The harness loader checks that the
-requested labels can be parsed; it does not establish the source provenance of
-an arbitrary `.sym` file.
+Symbol files are generated inputs, not committed release assets. The audited
+files byte-match the generated outputs identified in the provenance table
+below. The harness loader checks that the requested labels can be parsed; it
+does not establish the source provenance of an arbitrary `.sym` file.
 
 The link symbol registry contains required, optional, and reserved labels in
 `src/pokered_harness/link/symbols.py`. A symbol-file audit or real-ROM test must
 be run for each version before claiming link support. No blanket cross-version
 symbol-coverage claim is made here.
+
+## Verified symbol provenance
+
+The symbol files used for the 2026-08-30 audit were compared byte-for-byte
+with the matching generated files in the local source checkouts before their
+hashes were recorded above. The source repositories and build inputs were:
+
+| Game symbols | Source commit | Generator/toolchain | Build flags |
+|---|---|---|---|
+| Red `pokered.sym` and Blue `pokeblue.sym` | `pret/pokered` `fbcf7d0e19a3a2db505440d3ccd3d40ca996c15c` | `rgblink` from RGBDS `v1.0.1` | `make DEBUG=1 red blue`; default `RGBASMFLAGS` plus `-Q8 -P includes.asm -E`, with `_RED`/`_BLUE` targets |
+| Yellow `pokeyellow.sym` | `pret/pokeyellow` `bfa7170107eea23b89febb60bfb2ce39173bf2e1` | `rgblink` from RGBDS `v1.0.1` | `make DEBUG=1 yellow`; default `RGBASMFLAGS` plus `-Q8 -P includes.asm -E` |
+
+The source repositories are `https://github.com/pret/pokered` and
+`https://github.com/pret/pokeyellow`. The color ROMs use the corresponding
+base-game symbols because the color patch preserves the symbol-address ABI;
+their ROM hashes remain independently pinned above.
 
 ## Hash and version enforcement
 

@@ -81,6 +81,7 @@ DEFAULT_TIMEOUT_SECONDS: dict[str, float] = {
     "battle": 3600.0,
     "timing": 900.0,
 }
+COLLECTION_TIMEOUT_SECONDS = 300.0
 
 _SHA1_RE = re.compile(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|")
 _PATH_RE = re.compile(r"^\|\s*Path\s*\|\s*`([^`]+)`\s*\|")
@@ -127,6 +128,19 @@ class TierResult:
     duration_seconds: float = 0.0
     skip_reasons: dict[str, int] = field(default_factory=dict)
     command: list[str] | None = None
+    output_tail: str = ""
+    reason: str = ""
+
+
+@dataclass
+class CollectionResult:
+    """Result for one supported pytest collection entry point."""
+
+    name: str
+    command: list[str]
+    status: str
+    returncode: int | None
+    duration_seconds: float = 0.0
     output_tail: str = ""
     reason: str = ""
 
@@ -358,6 +372,7 @@ result = {
     "platform": platform.platform(),
     "pytest_version": None,
     "pyboy_version": None,
+    "pyboy_revision": None,
     "pyboy_module": spec_path("pyboy"),
     "pyboy_kind": module_kind(spec_path("pyboy")),
     "serial_module": spec_path("pyboy.core.serial"),
@@ -370,6 +385,13 @@ for package, key in (("pytest", "pytest_version"), ("pyboy", "pyboy_version")):
         result[key] = importlib.metadata.version(package)
     except importlib.metadata.PackageNotFoundError:
         pass
+try:
+    import pyboy
+
+    result["pyboy_version"] = getattr(pyboy, "__version__", None)
+    result["pyboy_revision"] = getattr(pyboy, "__pokered_harness_revision__", None)
+except Exception as exc:
+    result["pyboy_import_error"] = f"{type(exc).__name__}: {exc}"
 try:
     import pokered_harness.link.serial_core as serial_core
     serial_cls = getattr(serial_core, "SerialCore", None)
@@ -446,6 +468,139 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
         process.kill()
     except OSError:
         pass
+
+
+def _pytest_console_script(python_executable: Path) -> Path | None:
+    """Find the pytest console script belonging to ``python_executable``."""
+
+    bin_directory = python_executable.parent
+    names = ("pytest.exe", "pytest") if os.name == "nt" else ("pytest", "pytest.exe")
+    for name in names:
+        candidate = bin_directory / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def run_collection_preflight(
+    *,
+    project_root: Path,
+    python_executable: Path,
+    environment: dict[str, str],
+    timeout_seconds: float = COLLECTION_TIMEOUT_SECONDS,
+) -> list[CollectionResult]:
+    """Run both supported pytest collection entry points.
+
+    A release must prove that the module invocation and the console script
+    resolve the same test tree.  This is intentionally separate from the
+    marker-tier subprocesses: a collection failure must remain visible even
+    when a selected tier happens to contain no affected tests.
+    """
+
+    commands: list[tuple[str, list[str]]] = [
+        (
+            "python-module",
+            [str(python_executable), "-m", "pytest", "--collect-only", "-q"],
+        )
+    ]
+    console_script = _pytest_console_script(python_executable)
+    if console_script is None:
+        return [
+            CollectionResult(
+                name="pytest-console",
+                command=[str(python_executable.parent / "pytest")],
+                status="FAIL",
+                returncode=None,
+                reason=(
+                    "pytest console script was not found beside the selected "
+                    f"interpreter {python_executable}"
+                ),
+            ),
+            *[
+                _run_collection_command(
+                    name=name,
+                    command=command,
+                    project_root=project_root,
+                    environment=environment,
+                    timeout_seconds=timeout_seconds,
+                )
+                for name, command in commands
+            ],
+        ]
+    commands.append(
+        ("pytest-console", [str(console_script), "--collect-only", "-q"])
+    )
+    return [
+        _run_collection_command(
+            name=name,
+            command=command,
+            project_root=project_root,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+        for name, command in commands
+    ]
+
+
+def _run_collection_command(
+    *,
+    name: str,
+    command: list[str],
+    project_root: Path,
+    environment: dict[str, str],
+    timeout_seconds: float,
+) -> CollectionResult:
+    started = time.monotonic()
+    child_environment = dict(environment)
+    child_environment.pop("POKERED_GATE_REPORT", None)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=project_root,
+            env=child_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as exc:
+        return CollectionResult(
+            name=name,
+            command=command,
+            status="FAIL",
+            returncode=None,
+            duration_seconds=time.monotonic() - started,
+            reason=f"could not start collection command: {type(exc).__name__}: {exc}",
+        )
+
+    try:
+        output, _ = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_process(process)
+        output, _ = process.communicate()
+        return CollectionResult(
+            name=name,
+            command=command,
+            status="FAIL",
+            returncode=124,
+            duration_seconds=time.monotonic() - started,
+            output_tail=(
+                f"pytest collection timed out after {timeout_seconds:.1f}s\n"
+                f"{output[-8000:]}"
+            ),
+            reason="collection timeout",
+        )
+
+    returncode = int(process.returncode or 0)
+    return CollectionResult(
+        name=name,
+        command=command,
+        status="PASS" if returncode == 0 else "FAIL",
+        returncode=returncode,
+        duration_seconds=time.monotonic() - started,
+        output_tail=output[-8000:],
+        reason="" if returncode == 0 else "pytest collection returned a non-zero exit code",
+    )
 
 
 def run_pytest_once(
@@ -635,6 +790,7 @@ def render_text(
     fixture_root: Path,
     runtime: dict[str, Any],
     assets: list[AssetRecord],
+    collections: list[CollectionResult],
     tiers: list[TierResult],
     overall: str,
 ) -> str:
@@ -650,6 +806,7 @@ def render_text(
         "python_version",
         "pytest_version",
         "pyboy_version",
+        "pyboy_revision",
         "pyboy_kind",
         "pyboy_module",
         "serial_module",
@@ -660,6 +817,22 @@ def render_text(
             lines.append(f"  {key}={runtime[key]}")
     if runtime.get("probe_error"):
         lines.append(f"  probe_error={runtime['probe_error']}")
+
+    lines.append("collection:")
+    for collection in collections:
+        command = " ".join(collection.command)
+        lines.append(
+            f"  {collection.status:4} {collection.name}: "
+            f"returncode={collection.returncode} duration={collection.duration_seconds:.1f}s"
+        )
+        lines.append(f"    command: {command}")
+        if collection.reason:
+            lines.append(f"    reason: {collection.reason}")
+        if collection.status == "FAIL" and collection.output_tail:
+            lines.append("    output tail:")
+            lines.extend(
+                f"      {line}" for line in collection.output_tail.splitlines()[-60:]
+            )
 
     lines.append("assets:")
     for asset in assets:
@@ -762,6 +935,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # from the worktree.
     environment["POKERED_PYTHON"] = str(python_executable)
     runtime = probe_runtime(python_executable, project_root, environment)
+    collections = run_collection_preflight(
+        project_root=project_root,
+        python_executable=python_executable,
+        environment=environment,
+        timeout_seconds=args.timeout_seconds or COLLECTION_TIMEOUT_SECONDS,
+    )
 
     if args.unit_only:
         selected = ["unit", "timing"]
@@ -793,13 +972,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
 
-    overall = "PASS" if all(tier.status in {"PASS", "SKIP"} for tier in tiers) else "FAIL"
+    overall = (
+        "PASS"
+        if all(collection.status == "PASS" for collection in collections)
+        and all(tier.status in {"PASS", "SKIP"} for tier in tiers)
+        else "FAIL"
+    )
     if args.format == "json":
         payload = {
             "project_root": str(project_root),
             "rom_root": str(rom_root),
             "fixture_root": str(fixture_root),
             "runtime": runtime,
+            "collections": [asdict(collection) for collection in collections],
             "assets": [asdict(asset) for asset in assets],
             "tiers": [_jsonable_tier(tier) for tier in tiers],
             "overall": overall,
@@ -813,6 +998,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fixture_root=fixture_root,
                 runtime=runtime,
                 assets=assets,
+                collections=collections,
                 tiers=tiers,
                 overall=overall,
             )
