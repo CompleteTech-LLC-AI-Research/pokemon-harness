@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 import json
 import socket as _socket
 import threading
@@ -697,6 +697,87 @@ def test_link_disconnect_stops_listener_worker():
     assert not worker.is_alive()
     assert link.remote_mode == "idle"
     assert link._listener_thread is None
+
+
+def test_link_disconnect_closes_accepted_transport_during_handshake():
+    """Cancellation must close a connection before HELLO ownership transfers."""
+    s, _ = _endpoint_session()
+    link = LinkState(primary_version="red")
+    port = _free_port()
+    before = {
+        id(thread)
+        for thread in threading.enumerate()
+        if thread.name == "TcpSerialLink.reader" and thread.is_alive()
+    }
+    peer = None
+    accepted_readers = []
+    try:
+        dispatch_tool(s, "link_listen", {"port": port}, link=link)
+        # Hold the accepted socket open without sending HELLO.  This keeps the
+        # worker in its cancellable handshake wait instead of letting EOF close
+        # the transport and hide a teardown leak.
+        peer = _socket.create_connection(("127.0.0.1", port), timeout=1.0)
+        deadline = _time.monotonic() + 2.0
+        while _time.monotonic() < deadline:
+            accepted_readers = [
+                thread
+                for thread in threading.enumerate()
+                if (
+                    thread.name == "TcpSerialLink.reader"
+                    and thread.is_alive()
+                    and id(thread) not in before
+                )
+            ]
+            if accepted_readers:
+                break
+            _time.sleep(0.01)
+        assert accepted_readers
+
+        dispatch_tool(s, "link_disconnect", {}, link=link)
+
+        assert link.remote_mode == "idle"
+        assert link._listener_thread is None
+        assert all(not thread.is_alive() for thread in accepted_readers)
+    finally:
+        if peer is not None:
+            peer.close()
+        with suppress(McpHarnessError):
+            dispatch_tool(s, "link_disconnect", {}, link=link)
+
+
+def test_link_disconnect_detaches_native_backend_under_session_lock():
+    """Restoring the serial backend must not race an in-flight session step."""
+    s, _ = _endpoint_session()
+    link = LinkState()
+    detached = threading.Event()
+    disconnect_done = threading.Event()
+
+    class FakeRemote:
+        def close(self):
+            return None
+
+    class FakeNetworkSession:
+        def detach_all(self):
+            detached.set()
+
+    link.remote_mode = "connected"
+    link.remote_link = FakeRemote()  # type: ignore[assignment]
+    link.network_session = FakeNetworkSession()  # type: ignore[assignment]
+
+    def disconnect() -> None:
+        dispatch_tool(s, "link_disconnect", {}, link=link)
+        disconnect_done.set()
+
+    with s.locked():
+        worker = threading.Thread(target=disconnect)
+        worker.start()
+        assert not detached.wait(timeout=0.1)
+        assert not disconnect_done.is_set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert detached.is_set()
+    assert disconnect_done.is_set()
 
 
 def test_mcp_handler_returns_structured_client_error():

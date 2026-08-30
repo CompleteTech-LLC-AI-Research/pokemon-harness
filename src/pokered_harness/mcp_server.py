@@ -1032,12 +1032,15 @@ def _refresh_remote_state(link: LinkState, session: Session) -> None:
         network_session = link.network_session
         link.network_session = None
         link._remote_error = getattr(rl, "_reader_exc", None)
+    # Close the dead transport first so an in-flight serial operation wakes;
+    # then restore the emulator backend under the owning Session lock.
+    _close_serial_link(rl, timeout_s=0.25)
     if network_session is not None:
         try:
-            network_session.detach_all()
-        except Exception:
+            with session.locked():
+                network_session.detach_all()
+        except Exception:  # noqa: BLE001, S110
             pass
-    _close_serial_link(rl, timeout_s=0.25)
     _deactivate_link_hooks(session)
 
 
@@ -1307,13 +1310,21 @@ def _accept_remote(
                 with link.state():
                     if link._generation == generation:
                         link._listener_error = exc
-                if network_session is not None:
-                    try:
-                        network_session.detach_all()
-                    except Exception:
-                        pass
+            finally:
+                # The accepted connection is not published to LinkState until
+                # HELLO succeeds.  Therefore link_disconnect can cancel this
+                # worker while it is waiting for HELLO, leaving these locals
+                # as the only owners.  Always release them here, including
+                # the cancellation path, or the transport reader can outlive
+                # the MCP link and retain the peer socket indefinitely.
                 if transport is not None:
                     _close_serial_link(transport)
+                if network_session is not None:
+                    try:
+                        with session.locked():
+                            network_session.detach_all()
+                    except Exception:  # noqa: BLE001, S110
+                        pass
                 if accepted_conn is not None:
                     try:
                         accepted_conn.shutdown(socket.SHUT_RDWR)
@@ -1451,7 +1462,8 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             )
         if network_session is not None:
             try:
-                network_session.detach_all()
+                with session.locked():
+                    network_session.detach_all()
             except Exception as exc:  # noqa: BLE001
                 cleanup_errors.append(exc)
         if (
