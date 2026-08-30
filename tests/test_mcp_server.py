@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 import json
 import socket as _socket
+import threading
 import time as _time
 
 import pytest
@@ -18,6 +20,7 @@ from pokered_harness.mcp_server import (
     dispatch_tool,
     read_resource,
     register_default_hooks,
+    serve_stdio,
 )
 from pokered_harness.session import Session
 from pokered_harness.symbols.loader import load_sym_text
@@ -109,6 +112,13 @@ def test_dispatch_load_state_accepts_base64():
     s, _, _ = _session()
     payload = base64.b64encode(b"SNAPSHOT").decode("ascii")
     assert dispatch_tool(s, "load_state", {"data": payload}) == {"ok": True}
+
+
+def test_dispatch_load_state_rejects_non_base64_payload():
+    s, _, _ = _session()
+    with pytest.raises(McpHarnessError, match="not valid base64") as exc_info:
+        dispatch_tool(s, "load_state", {"data": "%%%"})
+    assert exc_info.value.code == "invalid_state"
 
 
 def test_dispatch_run_until_event_reports_structured_result():
@@ -302,6 +312,58 @@ def test_link_step_advances_both_when_paired():
     assert s_primary.current_tick() == 4
     assert s_peer.current_tick() == 4
     assert result == {"primary_tick": 4, "peer_tick": 4}
+
+
+def test_local_link_step_holds_both_session_locks():
+    s_primary, _, s_peer, _, link, _ = _link_state_with_peer()
+    entered = threading.Event()
+    release = threading.Event()
+    step_done = threading.Event()
+
+    class BlockingLinkSession:
+        paired = True
+
+        def step_interleaved(self, count, *, render=False):
+            assert count == 1
+            assert render is False
+            entered.set()
+            assert release.wait(timeout=2.0)
+
+    link.local_link_session = BlockingLinkSession()  # type: ignore[assignment]
+
+    link_thread = threading.Thread(
+        target=dispatch_tool,
+        args=(s_primary, "link_step", {"count": 1}),
+        kwargs={"link": link},
+    )
+    link_thread.start()
+    assert entered.wait(timeout=1.0)
+
+    def ordinary_step():
+        s_primary.step()
+        step_done.set()
+
+    ordinary_thread = threading.Thread(target=ordinary_step)
+    ordinary_thread.start()
+    assert not step_done.wait(timeout=0.1)
+
+    release.set()
+    link_thread.join(timeout=2.0)
+    ordinary_thread.join(timeout=2.0)
+    assert not link_thread.is_alive()
+    assert not ordinary_thread.is_alive()
+    assert step_done.is_set()
+
+
+def test_link_disconnect_does_not_deactivate_an_in_process_pair():
+    s_primary, _, _, _, link, _ = _link_state_with_peer()
+    dispatch_tool(s_primary, "link_pair", {}, link=link)
+    assert link.pair is not None and link.pair.paired
+
+    assert dispatch_tool(s_primary, "link_disconnect", {}, link=link) == {
+        "remote_mode": "idle"
+    }
+    assert link.pair is not None and link.pair.paired
 
 
 def test_link_peer_press_routes_to_peer_not_primary():
@@ -575,3 +637,78 @@ def test_link_status_resource_returns_same_shape_as_tool():
     )
     assert resource_payload == tool_payload
     assert resource_payload["remote_mode"] == "idle"
+
+
+def test_list_tools_reflects_peer_configuration_and_advertises_listen_timeout():
+    import mcp.types as mcp_types
+
+    s, _, _ = _session()
+    server = build_server(s)
+    handler = server.request_handlers[mcp_types.ListToolsRequest]
+    response = asyncio.run(handler(mcp_types.ListToolsRequest()))
+    names = {tool.name for tool in response.root.tools}
+    assert {"step", "save_state", "load_state", "link_status", "link_listen"} <= names
+    assert "link_pair" not in names
+    listen = next(tool for tool in response.root.tools if tool.name == "link_listen")
+    assert "timeout_s" in listen.inputSchema["properties"]
+
+    s_peer, _, _ = _session()
+    try:
+        peer_server = build_server(s, link=LinkState(peer_session=s_peer))
+        peer_handler = peer_server.request_handlers[mcp_types.ListToolsRequest]
+        peer_response = asyncio.run(peer_handler(mcp_types.ListToolsRequest()))
+        peer_names = {tool.name for tool in peer_response.root.tools}
+        assert {
+            "link_pair",
+            "link_unpair",
+            "link_step",
+            "link_peer_press",
+            "link_peer_hold",
+            "link_peer_release",
+        } <= peer_names
+    finally:
+        s_peer.close()
+
+
+def test_load_state_handler_returns_structured_invalid_state_error():
+    import mcp.types as mcp_types
+
+    s, _, _ = _session()
+    server = build_server(s)
+    handler = server.request_handlers[mcp_types.CallToolRequest]
+    request = mcp_types.CallToolRequest(
+        params=mcp_types.CallToolRequestParams(
+            name="load_state", arguments={"data": "%%%"}
+        )
+    )
+    response = asyncio.run(handler(request))
+    payload = response.root.structuredContent
+    assert response.root.isError is True
+    assert payload is not None
+    assert payload["error"]["code"] == "invalid_state"
+
+
+def test_serve_stdio_routes_runtime_stdout_to_stderr(monkeypatch, capsys):
+    class FakeServer:
+        def create_initialization_options(self):
+            return None
+
+        async def run(self, *_args, **_kwargs):
+            print("runtime diagnostic")
+
+    @asynccontextmanager
+    async def fake_stdio_server():
+        yield object(), object()
+
+    monkeypatch.setattr("pokered_harness.mcp_server.stdio_server", fake_stdio_server)
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server.build_server",
+        lambda *_args, **_kwargs: FakeServer(),
+    )
+    s, _, _ = _session()
+
+    asyncio.run(serve_stdio(s))
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "runtime diagnostic" in captured.err

@@ -24,6 +24,7 @@ import json
 import math
 import os
 import socket
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -79,6 +80,16 @@ _DIRECT_LINK_HOOKS = (
     "Serial_ExchangeNybble",
     "Serial_ExchangeLinkMenuSelection",
     "Serial_TryEstablishingExternallyClockedConnection",
+)
+_LOCAL_LINK_TOOL_NAMES = frozenset(
+    {
+        "link_pair",
+        "link_unpair",
+        "link_step",
+        "link_peer_press",
+        "link_peer_hold",
+        "link_peer_release",
+    }
 )
 
 # Default hooks registered at session start. Keep this list short — each
@@ -161,6 +172,12 @@ class LinkState:
         self._listener_socket: socket.socket | None = None
         self._listener_cancel = threading.Event()
         self._connect_cancel = threading.Event()
+        self._disconnect_done = threading.Event()
+        self._disconnect_done.set()
+        self._disconnect_owner: int | None = None
+        self._connect_done = threading.Event()
+        self._connect_done.set()
+        self._connect_in_progress = False
         self._state_lock = threading.RLock()
         self._operation_lock = threading.Lock()
         self._disconnecting = False
@@ -182,8 +199,8 @@ class LinkState:
 # -- tool definitions --------------------------------------------------------
 
 
-def _tool_specs() -> list[mcp_types.Tool]:
-    return [
+def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
+    specs = [
         mcp_types.Tool(
             name="step",
             description="Advance the emulator by `count` ticks (frames).",
@@ -345,6 +362,12 @@ def _tool_specs() -> list[mcp_types.Tool]:
                         "description": "Local ROM version announced in HELLO; "
                                        "defaults to primary_version at startup.",
                     },
+                    "timeout_s": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": _MAX_REMOTE_TIMEOUT_S,
+                        "default": _DEFAULT_REMOTE_HELLO_TIMEOUT_S,
+                    },
                 },
                 "required": ["port"],
             },
@@ -380,6 +403,9 @@ def _tool_specs() -> list[mcp_types.Tool]:
             inputSchema={"type": "object", "properties": {}},
         ),
     ]
+    if has_peer:
+        return specs
+    return [spec for spec in specs if spec.name not in _LOCAL_LINK_TOOL_NAMES]
 
 
 # -- dispatch helpers --------------------------------------------------------
@@ -433,6 +459,20 @@ def _error_code(exc: Exception) -> str:
     return "internal_error"
 
 
+def _decode_state_data(value: Any) -> bytes:
+    """Decode the wire representation used by the ``load_state`` tool."""
+    if not isinstance(value, str):
+        raise McpHarnessError(
+            "invalid_state", "load_state.data must be a base64 string"
+        )
+    try:
+        return base64.b64decode(value.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+        raise McpHarnessError(
+            "invalid_state", "load_state.data is not valid base64"
+        ) from exc
+
+
 def _require_peer(link: LinkState) -> Session:
     if link.peer_session is None:
         raise McpHarnessError(
@@ -449,13 +489,9 @@ def _require_pair(link: LinkState) -> LinkPair:
     return link.pair
 
 
-def dispatch_tool(
-    session: Session,
-    name: str,
-    arguments: dict[str, Any],
-    link: LinkState | None = None,
+def _dispatch_session_tool(
+    session: Session, name: str, arguments: dict[str, Any]
 ) -> Any:
-    """Pure dispatch — no asyncio, no MCP types. Unit-testable on its own."""
     if name == "step":
         session.step(int(arguments["count"]), render=bool(arguments.get("render", False)))
         return {"tick": session.current_tick()}
@@ -477,7 +513,7 @@ def dispatch_tool(
         return {"data": base64.b64encode(blob).decode("ascii")}
 
     if name == "load_state":
-        session.load_state(base64.b64decode(arguments["data"]))
+        session.load_state(_decode_state_data(arguments["data"]))
         return {"ok": True}
 
     if name == "run_until_event":
@@ -492,20 +528,38 @@ def dispatch_tool(
             "event": to_jsonable(result.event) if result.event else None,
         }
 
-    # -- link-cable tools -------------------------------------------------
-    if name.startswith("link_"):
-        if link is None:
-            link = LinkState()
-        # Disconnect deliberately bypasses the operation lock. A serial hook
-        # may be blocked waiting for a peer; closing its socket must be able
-        # to proceed so the blocked operation can unwind. All other mutating
-        # link calls are serialized, while status remains read-mostly.
-        if name == "link_disconnect" or name == "link_status":
-            return _dispatch_link_tool(session, name, arguments, link)
-        with link.operation():
-            return _dispatch_link_tool(session, name, arguments, link)
-
     raise ValueError(f"unknown tool: {name!r}")
+
+
+def dispatch_tool(
+    session: Session,
+    name: str,
+    arguments: dict[str, Any],
+    link: LinkState | None = None,
+) -> Any:
+    """Pure dispatch — no asyncio, no MCP types. Unit-testable on its own."""
+    if not name.startswith("link_"):
+        # A server can receive multiple MCP requests concurrently. Session's
+        # own lock protects individual calls, while this operation lock keeps
+        # compound actions (notably run_until_event and save/load) from being
+        # interleaved with link operations. Direct library callers that do not
+        # provide a LinkState still get Session-level serialization.
+        if link is None:
+            return _dispatch_session_tool(session, name, arguments)
+        with link.operation():
+            return _dispatch_session_tool(session, name, arguments)
+
+    # -- link-cable tools -------------------------------------------------
+    if link is None:
+        link = LinkState()
+    # Disconnect deliberately bypasses the operation lock. A serial hook
+    # may be blocked waiting for a peer; closing its socket must be able
+    # to proceed so the blocked operation can unwind. All other mutating
+    # link calls are serialized, while status remains read-mostly.
+    if name == "link_disconnect" or name == "link_status":
+        return _dispatch_link_tool(session, name, arguments, link)
+    with link.operation():
+        return _dispatch_link_tool(session, name, arguments, link)
 
 
 def _dispatch_link_tool(
@@ -588,17 +642,35 @@ def _dispatch_link_tool(
         with link.state():
             pair = link.pair
             local_link_session = link.local_link_session
+        cleanup_errors: list[Exception] = []
         if local_link_session is not None:
-            local_link_session.detach_all()
-            with link.state():
-                if link.local_link_session is local_link_session:
-                    link.local_link_session = None
+            try:
+                local_link_session.detach_all()
+            except Exception as exc:  # noqa: BLE001
+                cleanup_errors.append(exc)
+            else:
+                with link.state():
+                    if link.local_link_session is local_link_session:
+                        link.local_link_session = None
         if pair is not None and pair.paired:
-            pair.unpair()
-            _deactivate_link_hooks(session, pair.peer)
-        with link.state():
-            if link.pair is pair:
-                link.pair = None
+            try:
+                pair.unpair()
+            except Exception as exc:  # noqa: BLE001
+                cleanup_errors.append(exc)
+            else:
+                _deactivate_link_hooks(session, pair.peer)
+                with link.state():
+                    if link.pair is pair:
+                        link.pair = None
+        elif pair is not None:
+            with link.state():
+                if link.pair is pair:
+                    link.pair = None
+        if cleanup_errors:
+            details = "; ".join(
+                f"{type(exc).__name__}: {exc}" for exc in cleanup_errors
+            )
+            raise McpHarnessError("link_teardown_failed", details)
         return {"paired": False}
 
     if name == "link_step":
@@ -613,18 +685,24 @@ def _dispatch_link_tool(
             count = int(arguments["count"])
             if count <= 0:
                 raise ValueError(f"count must be positive, got {count}")
-            local_link_session.step_interleaved(
-                count, render=bool(arguments.get("render", False))
-            )
-            # PyBoyLinkSession drives the underlying emulators directly; keep
-            # Session-level bookkeeping aligned with the same frame count.
-            session.reset_tick(session.current_tick() + count)
             peer = _require_peer(link)
-            peer.reset_tick(peer.current_tick() + count)
-            return {
-                "primary_tick": session.current_tick(),
-                "peer_tick": peer.current_tick(),
-            }
+            # The interleaved path drives PyBoy directly rather than through
+            # Session.step(), so acquire both Session locks explicitly. This
+            # prevents an ordinary MCP step/save/load/resource call from
+            # mutating either motherboard concurrently with link stepping.
+            with session.locked(), peer.locked():
+                local_link_session.step_interleaved(
+                    count, render=bool(arguments.get("render", False))
+                )
+                # PyBoyLinkSession drives the underlying emulators directly;
+                # keep Session-level bookkeeping aligned with the same frame
+                # count.
+                session.reset_tick(session.current_tick() + count)
+                peer.reset_tick(peer.current_tick() + count)
+                return {
+                    "primary_tick": session.current_tick(),
+                    "peer_tick": peer.current_tick(),
+                }
         pair = _require_pair(link)
         pair.step(int(arguments["count"]), render=bool(arguments.get("render", False)))
         return {
@@ -738,9 +816,34 @@ def _dispatch_link_tool(
         t = threading.Thread(
             target=_accept, name="mcp-link-listen", daemon=True
         )
-        with link.state():
-            link._listener_thread = t
-        t.start()
+        try:
+            # Keep publication and start under the same lifecycle lock. If
+            # disconnect races this point, it must not close the listener and
+            # then leave us returning a stale "listening" state with a worker
+            # that was started against a dead socket.
+            with link.state():
+                if link._disconnecting or link._generation != generation:
+                    raise McpHarnessError(
+                        "link_cancelled", "remote listener cancelled"
+                    )
+                link._listener_thread = t
+                t.start()
+        except Exception:
+            cancel.set()
+            try:
+                listener.close()
+            except OSError:
+                pass
+            with link.state():
+                if link._listener_socket is listener:
+                    link._listener_socket = None
+                if link._listener_thread is t:
+                    link._listener_thread = None
+                if link._generation == generation and not link._disconnecting:
+                    link.remote_mode = "idle"
+                    link.remote_role = None
+                    link.remote_bind_port = None
+            raise
         return {
             "remote_mode": "listening",
             "remote_role": "listener",
@@ -763,6 +866,13 @@ def _dispatch_link_tool(
             generation = link._generation
             link._connect_cancel = threading.Event()
             connect_cancel = link._connect_cancel
+            link._connect_in_progress = True
+            link._connect_done.clear()
+            link.remote_mode = "connecting"
+            link.remote_role = "connector"
+            link.remote_bind_port = None
+            link._listener_error = None
+            link._remote_error = None
         transport: Any | None = None
         endpoint: RemoteLinkEndpoint | None = None
         network_session: PyBoyLinkSession | None = None
@@ -821,6 +931,15 @@ def _dispatch_link_tool(
                 _close_serial_link(transport)
             _deactivate_link_hooks(session)
             raise
+        except _ListenerCancelled as exc:
+            if network_session is not None:
+                network_session.detach_all()
+            if transport is not None:
+                _close_serial_link(transport)
+            _deactivate_link_hooks(session)
+            raise McpHarnessError(
+                "link_cancelled", "remote connection cancelled"
+            ) from exc
         except (SerialLinkError, NetworkBackendError, OSError, TimeoutError) as exc:
             if network_session is not None:
                 network_session.detach_all()
@@ -831,7 +950,12 @@ def _dispatch_link_tool(
         finally:
             with link.state():
                 if link._generation == generation and link.remote_link is None:
+                    link.remote_mode = "idle"
+                    link.remote_role = None
+                    link.remote_bind_port = None
                     link._connect_cancel = threading.Event()
+                link._connect_in_progress = False
+                link._connect_done.set()
         return {
             "remote_mode": "connected",
             "remote_role": "connector",
@@ -850,7 +974,7 @@ def _dispatch_link_tool(
 
 def _require_remote_idle(link: LinkState) -> None:
     with link.state():
-        if link.remote_mode != "idle" or link._disconnecting:
+        if link.remote_mode != "idle" or link._disconnecting or link._connect_in_progress:
             raise McpHarnessError(
                 "remote_busy",
                 f"remote link busy (mode={link.remote_mode!r}); call "
@@ -1092,10 +1216,11 @@ def _accept_remote(
 ) -> None:
     transport: Any | None = None
     network_session: PyBoyLinkSession | None = None
+    accepted_conn: socket.socket | None = None
     try:
         while not cancel.is_set():
             try:
-                conn, _peer_addr = listener.accept()
+                accepted_conn, _peer_addr = listener.accept()
             except socket.timeout:
                 continue
             except OSError as exc:
@@ -1103,11 +1228,12 @@ def _accept_remote(
                     return
                 raise McpHarnessError("listen_failed", str(exc)) from exc
 
-            conn.settimeout(None)
+            accepted_conn.settimeout(None)
             if _supports_bit_accurate_network(session):
                 transport = NetworkBackend(
-                    conn, local_rom_version=rom_version
+                    accepted_conn, local_rom_version=rom_version
                 )
+                accepted_conn = None
                 network_session = _attach_network_backend(
                     session,
                     transport,
@@ -1117,7 +1243,8 @@ def _accept_remote(
                 _wait_for_network_hello(transport, cancel, timeout_s)
                 endpoint: RemoteLinkEndpoint | None = None
             else:
-                transport = TcpSerialLink(conn, rom_version)
+                transport = TcpSerialLink(accepted_conn, rom_version)
+                accepted_conn = None
                 _wait_for_remote_hello(transport, cancel, timeout_s)
                 endpoint = RemoteLinkEndpoint.as_listener(session, transport)
                 endpoint.install()
@@ -1161,6 +1288,15 @@ def _accept_remote(
                 pass
         if transport is not None:
             _close_serial_link(transport)
+        if accepted_conn is not None:
+            try:
+                accepted_conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                accepted_conn.close()
+            except OSError:
+                pass
         try:
             listener.close()
         except OSError:
@@ -1170,14 +1306,26 @@ def _accept_remote(
                 link._listener_socket = None
 
 
-def _close_serial_link(link: Any, *, timeout_s: float = _DEFAULT_CLEANUP_TIMEOUT_S) -> None:
+def _close_serial_link(
+    link: Any, *, timeout_s: float = _DEFAULT_CLEANUP_TIMEOUT_S
+) -> bool:
+    close_ok = True
     try:
         link.close()
     except Exception:
-        pass
-    reader = getattr(link, "_reader", None)
-    if isinstance(reader, threading.Thread) and reader is not threading.current_thread():
-        reader.join(timeout=max(0.0, timeout_s))
+        close_ok = False
+    workers = [
+        getattr(link, "_reader", None),
+        getattr(link, "_edge_worker", None),
+    ]
+    join_timeout = max(0.0, timeout_s)
+    for worker in workers:
+        if isinstance(worker, threading.Thread) and worker is not threading.current_thread():
+            worker.join(timeout=join_timeout)
+    return close_ok and not any(
+        isinstance(worker, threading.Thread) and worker.is_alive()
+        for worker in workers
+    )
 
 
 def _deactivate_link_hooks(session: Session, peer: Session | None = None) -> None:
@@ -1195,62 +1343,125 @@ def _deactivate_link_hooks(session: Session, peer: Session | None = None) -> Non
         for symbol_name in _DIRECT_LINK_HOOKS:
             try:
                 target.deactivate_hooks_at(symbol_name)
-            except (KeyError, SessionClosedError, ValueError):
+            except Exception:
                 pass
 
 
 def _disconnect_remote(link: LinkState, session: Session) -> None:
     """Cancel listener/connect work, close sockets, and join workers."""
+    current_thread_id = threading.get_ident()
     with link.state():
         if link._disconnecting:
-            return
-        link._disconnecting = True
-        link._generation += 1
-        listener = link._listener_socket
-        listener_thread = link._listener_thread
-        remote = link.remote_link
-        network_session = link.network_session
-        link._listener_cancel.set()
-        link._connect_cancel.set()
-        link._listener_socket = None
-        link.remote_link = None
-        link.remote_endpoint = None
-        link.network_session = None
-        link.remote_mode = "idle"
-        link.remote_role = None
-        link.remote_bind_port = None
-
-    if listener is not None:
-        try:
-            listener.close()
-        except OSError:
-            pass
-    if remote is not None:
-        _close_serial_link(remote)
-    if network_session is not None:
-        try:
-            network_session.detach_all()
-        except Exception:
-            pass
-    if (
-        isinstance(listener_thread, threading.Thread)
-        and listener_thread is not threading.current_thread()
-    ):
-        listener_thread.join(timeout=_DEFAULT_CLEANUP_TIMEOUT_S)
-
-    _deactivate_link_hooks(session)
-    with link.state():
-        if listener_thread is not None and listener_thread.is_alive():
-            link._listener_error = TimeoutError(
-                "listener worker did not stop before cleanup deadline"
-            )
+            done = link._disconnect_done
+            owned_by_current_thread = link._disconnect_owner == current_thread_id
         else:
-            link._listener_error = None
-        link._remote_error = None
-        link._listener_thread = None
-        link._listener_cancel = threading.Event()
-        link._connect_cancel = threading.Event()
-        link._disconnecting = False
+            done = None
+            owned_by_current_thread = False
+        if link._disconnecting:
+            # A second disconnect should not report success while the first
+            # caller is still tearing down sockets and callbacks. A
+            # re-entrant call from the owner must return to avoid deadlock.
+            pass
+        elif not (
+            link.remote_mode != "idle"
+            or link._listener_socket is not None
+            or link.remote_link is not None
+            or link.remote_endpoint is not None
+            or link.network_session is not None
+            or link._connect_in_progress
+        ):
+            # In particular, do not deactivate local-pair hooks when the
+            # caller uses the remote disconnect tool while no remote link is
+            # active. The public contract says the two modes are independent.
+            return
+        else:
+            link._disconnecting = True
+            link._disconnect_owner = current_thread_id
+            link._disconnect_done.clear()
+            link._generation += 1
+            listener = link._listener_socket
+            listener_thread = link._listener_thread
+            remote = link.remote_link
+            remote_endpoint = link.remote_endpoint
+            network_session = link.network_session
+            connect_in_progress = link._connect_in_progress
+            connect_done = link._connect_done
+            link._listener_cancel.set()
+            link._connect_cancel.set()
+            link._listener_socket = None
+            link.remote_link = None
+            link.remote_endpoint = None
+            link.network_session = None
+            link.remote_mode = "idle"
+            link.remote_role = None
+            link.remote_bind_port = None
+
+    if done is not None:
+        if not owned_by_current_thread:
+            done.wait(timeout=_DEFAULT_CLEANUP_TIMEOUT_S)
+        return
+
+    cleanup_errors: list[Exception] = []
+    try:
+        if listener is not None:
+            try:
+                listener.close()
+            except OSError:
+                pass
+        if remote is not None and not _close_serial_link(remote):
+            cleanup_errors.append(
+                TimeoutError("remote link worker did not stop before cleanup deadline")
+            )
+        if network_session is not None:
+            try:
+                network_session.detach_all()
+            except Exception as exc:  # noqa: BLE001
+                cleanup_errors.append(exc)
+        if (
+            isinstance(listener_thread, threading.Thread)
+            and listener_thread is not threading.current_thread()
+        ):
+            listener_thread.join(timeout=_DEFAULT_CLEANUP_TIMEOUT_S)
+        if connect_in_progress and not connect_done.wait(
+            timeout=_DEFAULT_CLEANUP_TIMEOUT_S
+        ):
+            cleanup_errors.append(
+                TimeoutError(
+                    "connect worker did not stop before cleanup deadline"
+                )
+            )
+        # A remote endpoint owns raw PyBoy callbacks; a listener that never
+        # accepted a peer does not. This conditional also preserves an active
+        # in-process pair when link_disconnect is called in its idle state.
+        if remote_endpoint is not None or network_session is not None:
+            _deactivate_link_hooks(session)
+    finally:
+        with link.state():
+            if listener_thread is not None and listener_thread.is_alive():
+                cleanup_errors.append(
+                    TimeoutError(
+                        "listener worker did not stop before cleanup deadline"
+                    )
+                )
+            if cleanup_errors:
+                link._listener_error = cleanup_errors[0]
+                link._remote_error = cleanup_errors[0]
+            else:
+                link._listener_error = None
+                link._remote_error = None
+            link._listener_thread = None
+            link._listener_cancel = threading.Event()
+            if not connect_in_progress or connect_done.is_set():
+                link._connect_cancel = threading.Event()
+            link._disconnect_owner = None
+            link._disconnecting = False
+            link._disconnect_done.set()
+
+    if cleanup_errors:
+        details = "; ".join(
+            f"{type(exc).__name__}: {exc}" for exc in cleanup_errors
+        )
+        raise McpHarnessError("link_teardown_failed", details)
 
 
 def read_resource(
@@ -1361,7 +1572,7 @@ def build_server(
 
     @server.list_tools()
     async def _list_tools() -> list[mcp_types.Tool]:
-        return _tool_specs()
+        return _tool_specs(has_peer=link.peer_session is not None)
 
     @server.call_tool()
     async def _call_tool(
@@ -1430,20 +1641,27 @@ async def serve_stdio(
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(),
-            )
+            # stdio_server captures the real stdout file descriptor before
+            # entering this block. Redirecting the Python stream only after
+            # that capture keeps JSON-RPC on the original stdout while
+            # routing emulator/library diagnostics printed during requests to
+            # stderr as well as during boot.
+            with contextlib.redirect_stdout(sys.stderr):
+                await server.run(
+                    read_stream,
+                    write_stream,
+                    server.create_initialization_options(),
+                )
     finally:
-        _disconnect_remote(owned_link, session)
-        # A stdio client can terminate while either link mode is active.
-        # Restore native serial backends before the owning Sessions are
-        # closed by main().
-        try:
-            dispatch_tool(session, "link_unpair", {}, link=owned_link)
-        except Exception:
-            pass
+        with contextlib.redirect_stdout(sys.stderr):
+            _disconnect_remote(owned_link, session)
+            # A stdio client can terminate while either link mode is active.
+            # Restore native serial backends before the owning Sessions are
+            # closed by main().
+            try:
+                dispatch_tool(session, "link_unpair", {}, link=owned_link)
+            except Exception:
+                pass
 
 
 def main() -> None:
@@ -1468,8 +1686,6 @@ def main() -> None:
       at startup and the link-cable tools become usable. The pair is NOT
       auto-paired — invoke ``link_pair`` explicitly.
     """
-    import sys
-
     from pokered_harness.config import (
         VersionsConfigError,
         load_peer_env,
