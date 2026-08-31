@@ -6,12 +6,10 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: `PARTIAL` current audit candidate; the functional source boundary is
-`b0791ee` (2026-08-31). The current full-gate snapshot is unit 453/453, local
-46/46, remote 12/13, strict trade 2/2, strict battle 2/2, and timing 35/35
-across five repetitions. The remote tier is red because the TCP LinkMenu
-subprocess row fails in repeated current runs; the strict trade and battle
-tiers pass independently for the canonical color-Red listener and color-Blue
-connector roles. Load-stable full-matrix support remains open.
+`3aad196` (2026-08-31). The current full-gate snapshot is unit 457/457, local
+46/46, remote 13/13, strict trade 2/2, strict battle 2/2, and timing 35/35
+across five repetitions. The remote tier and the canonical strict trade and
+battle roles pass; load-stable full-matrix support remains open.
 The historical complete real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` remains separate evidence, not
 current sign-off. Uncommitted worktree changes are excluded.
@@ -23,14 +21,14 @@ Red/Blue remote battle smoke passes with ordinary menu input and native serial
 move exchange. Other link rows remain unsupported or unverified.
 
 Symbol hashes and audited generator provenance for the inputs are recorded
-below. The remaining release decision is `PARTIAL` because the current remote
-tier is red, the complete implementation-revision gate output is not retained
-as an evidence bundle, product lint and the broad matrix are not clean,
+below. The remaining release decision is `PARTIAL` because the complete
+implementation-revision gate output is not retained in the release tree,
+product lint and the broad matrix are not clean,
 per-ROM and reversed-role coverage is incomplete, and independent
 review/native-platform evidence is missing.
-The Lane G audit at `b0791ee` leaves 101 product Ruff findings under the
-default `ruff check .` boundary; the pinned vendored runtime is excluded from
-that product audit and has 227 findings when checked explicitly.
+The current Lane G audit at `3aad196` leaves 79 product Ruff findings under
+the default `ruff check .` boundary; the pinned vendored runtime is excluded
+from that product audit and has 227 findings when checked explicitly.
 
 ## Runtime
 

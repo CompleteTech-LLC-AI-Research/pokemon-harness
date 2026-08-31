@@ -41,8 +41,9 @@ acceptance checks. Use explicit ROM, symbol, and SHA-1 values; never use
 - The passing local stateful evidence is color Red + Yellow for the strict
   trade and battle cases; this does not certify every version pairing.
 - The passing remote transport evidence is color Red as listener/internal-clock
-  and color Blue as connector/external-clock, using localhost TCP. An isolated
-  remote trade passes, but concurrent-tier load stability is open.
+  and color Blue as connector/external-clock, using localhost TCP; the current
+  remote transport tier is 13/13. The strict remote trade and battle paths also
+  pass, but concurrent-tier load stability is open.
 - The exact-head remote battle smoke selects LinkMenu with ordinary directional
   and A input and exercises native serial move exchange; it does not certify
   every remote battle row or repeated-load stability.

@@ -33,40 +33,35 @@ Full-gate snapshot:
 
 Current candidate rerun evidence (2026-08-31, source-hardening, teardown,
 packaging, gate, lint-boundary, evidence, native trade, and native battle fixes
-included; candidate boundary `b0791ee`):
+included; functional boundary `3aad196`):
 
-- exact-head unit: 453/453 passed;
+- exact-head unit: 457/457 passed;
 - timing: 35/35 passed across five repetitions;
 - exact-head stateful local: 46/46 passed at the default scheduler slice;
-- exact-head remote: 12/13, with the LinkMenu subprocess row failing in
-  repeated current runs for the canonical color-Red listener and color-Blue
-  connector roles;
+- exact-head remote: 13/13 passed, including the LinkMenu subprocess row for
+  the canonical color-Red listener and color-Blue connector roles;
 - strict native trade: 2/2 passed;
 - strict no-hook Red/Blue remote battle: 2/2 passed with ordinary menu input
   and native serial move exchange;
 - current MCP lifecycle: 74/74 passed; and
-- the current full gate is therefore red despite the passing local, trade,
-  battle, and timing tiers.
+- the current full gate is green for every required tier and all pinned assets.
 
 These current counts supersede the corresponding historical unit count for
 this candidate. The exact-head fast and local/remote reruns were collected at
-functional source boundary `b0791ee`. The remote LinkMenu failure is retained
-as a failure because it reproduced in the standalone remote rerun; passing
-strict trade and battle tiers do not override that red transport tier. The
-intervening functional commits harden runtime bootstrap, MCP lifecycle/cancellation,
-gate coverage, lint boundaries, native trade/battle drivers, and evidence
-verification. Sanitized
+functional source boundary `3aad196`. The intervening functional commits
+harden runtime bootstrap, MCP lifecycle/cancellation, gate coverage, lint
+boundaries, native trade/battle drivers, and evidence verification. Sanitized
 per-tier evidence bundles were retained outside the checkout with
-`--evidence-dir`; a single complete release evidence bundle is still not
-attached to this tree.
+`--evidence-dir`; the complete current bundle still needs to be retained in
+the release evidence store rather than committed beside the source.
 
 The local passes are real stateful acceptance evidence for the exact color-Red /
-Yellow fixture pair. The remote transport evidence is partial for the exact
-color-Red listener / color-Blue connector subprocess pair because the LinkMenu
-row is red. The strict remote trade uses native serial payloads and full
-party-record checks, and the strict remote battle driver uses ordinary menu
-input without RAM writes or selection hooks; these passing tiers do not certify
-unrun or reversed-role rows.
+Yellow fixture pair. The remote transport evidence for the exact color-Red
+listener / color-Blue connector subprocess pair is green, including LinkMenu.
+The strict remote trade uses native serial payloads and full party-record checks,
+and the strict remote battle driver uses ordinary menu input without RAM writes
+or selection hooks; these passing tiers do not certify unrun or reversed-role
+gameplay rows.
 
 These are evidence boundaries, not waived checklist items. The candidate
 includes `tests/__init__.py`, the pinned vendor source files, and the gate
@@ -110,8 +105,8 @@ script, and the results were reproduced from the isolated clean checkout.
 
 - [x] Both `python -m pytest --collect-only -q` and the
   `pytest` console-script collection path complete without collection errors.
-- [ ] Product-owned Ruff audit is clean (`ruff check .` leaves 101 findings
-  under the locked Ruff version at the Lane G audit boundary; the pinned
+- [ ] Product-owned Ruff audit is clean (`ruff check .` leaves 79 findings
+  under the locked Ruff version at the current candidate boundary; the pinned
   vendored runtime is explicitly audited separately and currently reports 227
   findings).
 - [ ] The broad suite completes with no unexpected failure, skip, xfail, or
@@ -124,15 +119,14 @@ script, and the results were reproduced from the isolated clean checkout.
   snapshot. The scripted intro golden path remains specific to Red.
 - [x] Local link tests pass with matching ROM-specific fixtures and the
   release runtime.
-- [ ] The required remote transport tier is green with the color-Red
+- [x] The required remote transport tier is green with the color-Red
   listener/internal-clock and color-Blue connector/external-clock roles
-  recorded; the current result is 12/13 because the LinkMenu subprocess row
-  fails in repeated runs.
+  recorded; the current result is 13/13, including the LinkMenu subprocess row.
 - [ ] Reversed listener/connector roles are independently tested and certified.
-- [ ] Native-serial remote trade acceptance is repeatable in separate
+- [x] Native-serial remote trade acceptance is repeatable in separate
   processes without fixture/runtime skips and asserts both sides received the
-  peer's Pokémon. The current strict trade tier is 2/2, but repeatability and
-  full remote-tier stability remain open while the LinkMenu row is red.
+  peer's Pokémon. The current strict trade tier is 2/2; concurrent full-matrix
+  stability remains open.
 - [ ] Remote trade remains green when the required stateful tiers run
   concurrently; the current strict trade tier passes, but this stability
   condition has not been certified.
@@ -142,8 +136,9 @@ script, and the results were reproduced from the isolated clean checkout.
 - [x] The exact-head native-serial remote battle acceptance resolves move
   exchange and execution on both sides in separate processes using ordinary
   menu input, without RAM writes or a selection hook.
-- [ ] The remote trade path is stable without a test-driver LinkMenu selection
-  hook; the battle half of this requirement is complete.
+- [x] The remote trade path is stable without a test-driver LinkMenu selection
+  hook for the certified Red/Blue run; concurrent full-matrix stability remains
+  open. The battle half of this requirement is also complete.
 - [x] Every supported release row has a result or an explicit unsupported
   classification; the failed diagnostic rows are listed below.
 
@@ -187,16 +182,15 @@ script, and the results were reproduced from the isolated clean checkout.
   protocol test, or RAM-mutated fixture is described as a completed gameplay
   acceptance.
 
-**Release decision:** `PARTIAL`. The source/runtime and the narrowly defined
-local plus authentic remote-battle acceptance paths have passing snapshots, but full
+**Release decision:** `PARTIAL`. The source/runtime and the certified local plus
+authentic remote trade/battle paths have passing current snapshots, but full
 product sign-off remains pending:
 
 - a retained complete implementation-revision real-ROM gate evidence bundle;
 - a retained evidence bundle, including battle-fixture hashes/provenance;
 - a retained current local/remote gate and strict subprocess evidence bundle,
-  plus resolution of the repeated remote LinkMenu failure and the Blue↔Blue
-  and Blue→Red diagnostic battle gaps
-  or an explicitly limited product scope that excludes them;
+  plus resolution of the Blue↔Blue and Blue→Red diagnostic battle gaps or an
+  explicitly limited product scope that excludes them;
 - repository-wide lint/broad-suite closure, per-ROM single-session coverage,
   reversed roles, native-platform certification, and independent review; and
 - a secure transport decision if cross-host TCP is required. Current TCP is

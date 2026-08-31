@@ -13,13 +13,11 @@ record.
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
 2/2. The current source-hardening candidate's functional changes reach
-`b0791ee`. Its current full-gate snapshot is unit 453/453, local 46/46,
-remote 12/13, strict trade 2/2, strict battle 2/2, and timing 35/35 across
-five repetitions. The MCP lifecycle suite passes 74/74. The remote tier is
-red because its TCP LinkMenu subprocess row fails in repeated current runs;
-the strict local Red/Yellow trade and battle and the Red/Blue remote battle
-acceptance still pass using ordinary input and native serial move exchange.
-Broader battle rows and load-stable full remote coverage remain unverified.
+`3aad196`. Its current full-gate snapshot is unit 457/457, local 46/46,
+remote 13/13, strict trade 2/2, strict battle 2/2, and timing 35/35 across
+five repetitions. The MCP lifecycle suite passes 74/74. The required current
+tiers are green for the tested roles; broader gameplay rows and load-stable
+full-matrix coverage remain unverified.
 Symbol hashes and audited generator provenance are in
 [`VERSIONS.md`](../VERSIONS.md). Overall status is `PARTIAL`; the exact open
 items are listed in [the release checklist](RELEASE_CHECKLIST.md).
@@ -171,8 +169,8 @@ default fixture paths before running all required tiers.
 
 The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
 explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. At the Lane G audit boundary (`b0791ee`), the
-default product audit reports 101 findings after safe mechanical cleanup. An
+default `ruff check .` audit. At the current candidate boundary (`3aad196`),
+the default product audit reports 79 findings after safe mechanical cleanup. An
 explicit `ruff check vendor/pyboy-src` still reports 227 upstream findings;
 the vendored runtime is instead covered by revision pinning, compileall, and
 import/serial-contract tests. Product lint cleanup remains a release task even
@@ -328,8 +326,8 @@ python -m pytest -q -ra \
 
 The LinkMenu test is a transport smoke test. The strict subprocess trade test
 uses cooperative phase rendezvous and compares complete party-mon records; its
-latest exact-head run exceeded the 720-second child deadline, so load stability
-remains open. The strict subprocess battle test requires both processes to
+current full-gate run passes, while concurrent load stability remains open. The
+strict subprocess battle test requires both processes to
 reach move exchange and execution, and now selects LinkMenu through ordinary
 directional/A input without RAM writes or selection hooks. Both payloads travel
 through native bit-level serial traffic, and the tests reject the out-of-band
@@ -440,18 +438,16 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current full gate passes unit 453/453, local 46/46, strict trade 2/2,
-   strict battle 2/2, and timing 35/35 across five repetitions. The remote
-   tier is 12/13 because `test_subprocess_pair_reaches_link_menu_over_tcp`
-   fails in repeated current runs. The broader Blue/Red/Yellow battle matrix
-   is not certified, and Blue↔Blue and Blue→Red remain diagnostic only.
-2. The historical full real-ROM gate passed, but its complete output was not
-   retained as a release evidence bundle. Current per-tier runs use
-   `--evidence-dir` and retain sanitized bundles outside the checkout; a single
-   complete release bundle still needs to be assembled from one full run.
-3. The Lane G product lint audit leaves 101 findings under the locked default
-   `ruff check .` boundary; an explicit vendored-runtime audit reports 227
-   findings, and the broad suite is not a clean production gate.
+1. The current full gate passes unit 457/457, local 46/46, remote 13/13,
+   strict trade 2/2, strict battle 2/2, and timing 35/35 across five
+   repetitions. The broader Blue/Red/Yellow gameplay matrix is not certified,
+   and Blue↔Blue and Blue→Red remain diagnostic only for strict acceptance.
+2. A complete sanitized evidence bundle was generated outside the checkout by
+   the full gate with `--evidence-dir`; it still needs to be retained in the
+   release evidence store and associated with the pushed commit.
+3. The current Lane G product lint audit leaves 79 findings under the locked
+   default `ruff check .` boundary; an explicit vendored-runtime audit reports
+   227 findings, and the broad suite is not a clean production gate.
 4. The five-row single-session matrix, reversed listener/connector roles,
    native-platform builds, battle-fixture provenance, and an independent review
    remain incomplete.
