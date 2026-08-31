@@ -1735,8 +1735,11 @@ def main() -> None:
       wheel launched outside a checkout may use explicit primary and peer
       pins without a local ``VERSIONS.md``; the bundled runtime identity is
       still enforced.
-      Set ``POKERED_SKIP_SHA1=1`` to opt out of SHA-1 enforcement
-      entirely (useful for ad-hoc testing on non-stock ROMs).
+    * ``POKERED_SYM_SHA1`` / ``POKERED_PEER_SYM_SHA1`` — explicit symbol-file
+      pins for wheel launches without a local ``VERSIONS.md``. In a source
+      checkout, matching per-path symbol pins are selected automatically.
+    * ``POKERED_SKIP_SHA1=1`` — opt out of ROM and symbol SHA-1 enforcement
+      entirely (useful only for ad-hoc testing on non-stock assets).
     * ``POKERED_PEER_ROM_PATH`` / ``POKERED_PEER_SYM_PATH`` /
       ``POKERED_PEER_ROM_SHA1`` — when set, a peer Session is constructed
       at startup and the link-cable tools become usable. The pair is NOT
@@ -1801,6 +1804,17 @@ def main() -> None:
             "entry in VERSIONS.md"
         )
 
+    primary_symbol_sha = os.environ.get("POKERED_SYM_SHA1")
+    if primary_symbol_sha is not None:
+        primary_symbol_sha = primary_symbol_sha.strip() or None
+    if primary_symbol_sha is None and versions is not None:
+        primary_symbol_sha = versions.symbol_sha1_for_path(primary_sym)
+    if primary_symbol_sha is None and not _env_flag("POKERED_SKIP_SHA1"):
+        raise SystemExit(
+            "set POKERED_SYM_SHA1 or provide a matching symbol-file pin "
+            "for POKERED_SYM_PATH in VERSIONS.md"
+        )
+
     peer_expected_sha: str | None = peer_env.rom_sha1
     if peer_rom is not None and peer_expected_sha is None and versions is not None:
         peer_expected_sha = versions.sha1_for_path(peer_rom)
@@ -1816,6 +1830,19 @@ def main() -> None:
             "set POKERED_PEER_ROM_SHA1 or provide a matching peer per-ROM "
             "Path/SHA-1 entry in VERSIONS.md"
         )
+
+    peer_symbol_sha: str | None = None
+    if peer_sym is not None:
+        peer_symbol_sha = os.environ.get("POKERED_PEER_SYM_SHA1")
+        if peer_symbol_sha is not None:
+            peer_symbol_sha = peer_symbol_sha.strip() or None
+        if peer_symbol_sha is None and versions is not None:
+            peer_symbol_sha = versions.symbol_sha1_for_path(peer_sym)
+        if peer_symbol_sha is None and not _env_flag("POKERED_SKIP_SHA1"):
+            raise SystemExit(
+                "set POKERED_PEER_SYM_SHA1 or provide a matching peer "
+                "symbol-file pin for POKERED_PEER_SYM_PATH in VERSIONS.md"
+            )
     if versions is not None:
         expected_pyboy = versions.pyboy_version
     elif _env_flag("POKERED_SKIP_SHA1"):
@@ -1859,6 +1886,7 @@ def main() -> None:
                 primary_rom,
                 primary_sym,
                 expected_rom_sha1=expected_sha,
+                expected_symbol_sha1=primary_symbol_sha,
                 expected_pyboy_version=expected_pyboy,
             )
             register_default_hooks(session)
@@ -1867,6 +1895,7 @@ def main() -> None:
                     peer_rom,
                     peer_sym,
                     expected_rom_sha1=peer_expected_sha,
+                    expected_symbol_sha1=peer_symbol_sha,
                     expected_pyboy_version=expected_pyboy,
                 )
                 register_default_hooks(peer_session)
