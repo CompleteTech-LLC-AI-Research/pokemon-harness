@@ -45,59 +45,65 @@ def _server_params() -> StdioServerParameters:
 
 @pytest.mark.asyncio
 async def test_stdio_list_tools_and_call_step():
-    async with stdio_client(_server_params()) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    async with (
+        stdio_client(_server_params()) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
 
-            tool_list = await session.list_tools()
-            tool_names = {t.name for t in tool_list.tools}
-            assert {"step", "press", "save_state", "load_state",
-                    "run_until_event"} <= tool_names
+        tool_list = await session.list_tools()
+        tool_names = {t.name for t in tool_list.tools}
+        assert {"step", "press", "save_state", "load_state",
+                "run_until_event"} <= tool_names
 
-            # Call ``step`` and verify the session's tick advanced.
-            result = await session.call_tool("step", {"count": 4})
-            assert result.isError is not True
-            payload = json.loads(result.content[0].text)
-            assert payload["tick"] == 4
+        # Call ``step`` and verify the session's tick advanced.
+        result = await session.call_tool("step", {"count": 4})
+        assert result.isError is not True
+        payload = json.loads(result.content[0].text)
+        assert payload["tick"] == 4
 
 
 @pytest.mark.asyncio
 async def test_stdio_game_state_resource_is_parseable():
-    async with stdio_client(_server_params()) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    async with (
+        stdio_client(_server_params()) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
 
-            # Advance a bit so memory isn't all-zero uninitialised noise.
-            await session.call_tool("step", {"count": 120})
+        # Advance a bit so memory isn't all-zero uninitialised noise.
+        await session.call_tool("step", {"count": 120})
 
-            result = await session.read_resource("pokered://game-state")
-            # ReadResourceResult.contents is a list of ResourceContents.
-            assert result.contents, "expected at least one resource content"
-            body = json.loads(result.contents[0].text)  # type: ignore[union-attr]
-            # Schema assertions — not value assertions, since the game is
-            # still booting and no specific state is guaranteed.
-            assert "overworld" in body
-            assert "party" in body
-            assert "battle" in body
-            assert "progress" in body
-            assert "map_id" in body["overworld"]
+        result = await session.read_resource("pokered://game-state")
+        # ReadResourceResult.contents is a list of ResourceContents.
+        assert result.contents, "expected at least one resource content"
+        body = json.loads(result.contents[0].text)  # type: ignore[union-attr]
+        # Schema assertions — not value assertions, since the game is
+        # still booting and no specific state is guaranteed.
+        assert "overworld" in body
+        assert "party" in body
+        assert "battle" in body
+        assert "progress" in body
+        assert "map_id" in body["overworld"]
 
 
 @pytest.mark.asyncio
 async def test_stdio_save_state_roundtrip_is_deterministic():
-    async with stdio_client(_server_params()) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    async with (
+        stdio_client(_server_params()) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
 
-            await session.call_tool("step", {"count": 200})
-            save = await session.call_tool("save_state", {})
-            blob_b64 = json.loads(save.content[0].text)["data"]
-            blob = base64.b64decode(blob_b64)
-            assert len(blob) > 0
+        await session.call_tool("step", {"count": 200})
+        save = await session.call_tool("save_state", {})
+        blob_b64 = json.loads(save.content[0].text)["data"]
+        blob = base64.b64decode(blob_b64)
+        assert len(blob) > 0
 
-            # Advance further, then load the saved state back.
-            await session.call_tool("step", {"count": 300})
-            load_result = await session.call_tool(
-                "load_state", {"data": blob_b64}
-            )
-            assert json.loads(load_result.content[0].text) == {"ok": True}
+        # Advance further, then load the saved state back.
+        await session.call_tool("step", {"count": 300})
+        load_result = await session.call_tool(
+            "load_state", {"data": blob_b64}
+        )
+        assert json.loads(load_result.content[0].text) == {"ok": True}

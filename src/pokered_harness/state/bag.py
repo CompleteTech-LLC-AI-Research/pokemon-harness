@@ -38,8 +38,7 @@ class Bag:
 
 def parse_bag(memory: MemoryLike, symbols: SymbolTable) -> Bag:
     count = symbols.read_u8(memory, "wNumBagItems")
-    if count > MAX_BAG_STACKS:
-        count = MAX_BAG_STACKS
+    count = min(count, MAX_BAG_STACKS)
     if count == 0:
         return Bag(count=0, stacks=())
 

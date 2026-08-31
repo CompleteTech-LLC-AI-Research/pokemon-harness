@@ -238,9 +238,9 @@ class SerialBridge:
 
 
 __all__ = [
+    "HRAM_SERIAL_RECEIVE",
+    "HRAM_SERIAL_SEND",
+    "HRAM_SERIAL_STATUS",
     "BridgeEndpoint",
     "SerialBridge",
-    "HRAM_SERIAL_SEND",
-    "HRAM_SERIAL_RECEIVE",
-    "HRAM_SERIAL_STATUS",
 ]

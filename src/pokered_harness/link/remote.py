@@ -339,15 +339,14 @@ class RemoteLinkEndpoint:
 
         # Replace any pre-existing Serial_ExchangeBytes hook (e.g. the
         # SerialBridge BRIDGE-role callback) with our remote variant.
-        try:
-            pb.hook_deregister(bank, addr)
-        except Exception:
-            pass
+        deregister = getattr(pb, "hook_deregister", None)
+        if callable(deregister):
+            deregister(bank, addr)
         pb.hook_register(bank, addr, _cb, None)
 
 
 __all__ = [
-    "RemoteLinkEndpoint",
     "STATUS_EXTERNAL",
     "STATUS_INTERNAL",
+    "RemoteLinkEndpoint",
 ]

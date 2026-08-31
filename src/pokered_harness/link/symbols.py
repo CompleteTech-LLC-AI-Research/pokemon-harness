@@ -200,9 +200,9 @@ def symbols_for_role(role: LinkRole) -> tuple[LinkSymbol, ...]:
 
 
 __all__ = [
+    "LINK_SYMBOLS",
     "LinkRole",
     "LinkSymbol",
-    "LINK_SYMBOLS",
     "resolve_link_symbols",
     "symbols_for_role",
 ]

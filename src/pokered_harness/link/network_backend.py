@@ -101,7 +101,7 @@ class NetworkBackendError(RuntimeError):
 def _validate_id(value: int, name: str) -> int:
     """Validate a one-byte protocol identifier without bool coercion."""
     if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"{name} must be an integer in 0..255")
+        raise TypeError(f"{name} must be an integer in 0..255")
     if not 0 <= value <= 0xFF:
         raise ValueError(f"{name} must fit in uint8, got {value}")
     return value
@@ -112,7 +112,7 @@ def _validate_optional_timeout(value: float | None, name: str) -> float | None:
     if value is None:
         return None
     if isinstance(value, bool):
-        raise ValueError(f"{name} must be a finite, non-negative number")
+        raise TypeError(f"{name} must be a finite, non-negative number")
     try:
         normalized = float(value)
     except (TypeError, ValueError) as exc:
@@ -134,7 +134,7 @@ def validate_loopback_host(host: str) -> str:
     transport rather than bypassing this guard.
     """
     if not isinstance(host, str):
-        raise ValueError("host must be a string")
+        raise TypeError("host must be a string")
     normalized = host.strip()
     if normalized.startswith("[") and normalized.endswith("]"):
         normalized = normalized[1:-1]
@@ -349,6 +349,8 @@ class NetworkBackend:
             "keepalive_bits_sent": 0,
             "keepalive_bytes_started": 0,
             "irq_callbacks": 0,
+            "irq_callback_errors": 0,
+            "last_irq_callback_error": None,
             "last_keepalive_state": None,
             "last_slave_byte_complete_at": None,
             "last_slave_rearm_at": None,
@@ -1127,9 +1129,14 @@ class NetworkBackend:
             try:
                 self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
                 self._irq_callback()
-            except Exception:
-                # IRQ callback errors shouldn't kill the reader thread.
-                pass
+            except Exception as exc:  # noqa: BLE001 - isolate optional callback
+                # IRQ callback errors shouldn't kill the reader thread. Keep a
+                # compact diagnostic so callers can inspect failures through
+                # debug_snapshot() without changing transport behavior.
+                self._stats["irq_callback_errors"] = (
+                    int(self._stats["irq_callback_errors"]) + 1
+                )
+                self._stats["last_irq_callback_error"] = type(exc).__name__
 
     @staticmethod
     def _core_state_snapshot(core: object | None) -> dict[str, object]:
