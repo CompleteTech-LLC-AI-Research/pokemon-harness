@@ -66,9 +66,7 @@ def test_relative_python_path_does_not_dereference_virtualenv_symlink(tmp_path):
     except (NotImplementedError, OSError):
         pytest.skip("symlinks are unavailable on this platform")
 
-    selected = gate._python_path_from_argument(
-        Path(".venv/bin/python"), tmp_path
-    )
+    selected = gate._python_path_from_argument(Path(".venv/bin/python"), tmp_path)
 
     assert selected == venv_python
     assert selected.is_symlink()
@@ -267,7 +265,7 @@ def test_gate_report_loader_counts_xfail_and_skip_reasons(tmp_path):
                     "xpassed": 0,
                     "errors": 0,
                 },
-                    "tests": [
+                "tests": [
                     {
                         "nodeid": "tests/test_gate.py::test_pass",
                         "outcome": "passed",
@@ -332,6 +330,18 @@ def test_rom_helper_honors_explicit_roots(tmp_path, monkeypatch):
     assert sym_path("blue", project_root=tmp_path) == configured_rom / "blue" / "pokemon-blue.sym"
     assert fixture_path("red", project_root=tmp_path) == (
         configured_fixture / "red" / "cable_club.state"
+    )
+
+
+def test_relative_roots_are_anchored_to_the_inspected_project(tmp_path, monkeypatch):
+    monkeypatch.setenv("POKERED_ROM_ROOT", "external-rom")
+    monkeypatch.setenv("POKERED_FIXTURE_ROOT", "external-fixtures")
+
+    assert gate.find_rom_root(tmp_path) == tmp_path / "external-rom"
+    assert gate.find_fixture_root(tmp_path) == tmp_path / "external-fixtures"
+    assert gate.find_rom_root(tmp_path, Path("explicit-rom")) == tmp_path / "explicit-rom"
+    assert gate.find_fixture_root(tmp_path, Path("explicit-fixtures")) == (
+        tmp_path / "explicit-fixtures"
     )
 
 
@@ -580,9 +590,10 @@ def test_evidence_bundle_is_portable_sanitized_and_diagnostic(tmp_path):
         "gate-report.txt",
     }
     report_hash = hashlib.sha256(paths["report"].read_bytes()).hexdigest()
-    assert next(
-        entry for entry in manifest["files"] if entry["path"] == "gate-report.json"
-    )["sha256"] == report_hash
+    assert (
+        next(entry for entry in manifest["files"] if entry["path"] == "gate-report.json")["sha256"]
+        == report_hash
+    )
     text = paths["text"].read_text(encoding="utf-8")
     assert "overall: FAIL" in text
     assert "assertion failed" in text

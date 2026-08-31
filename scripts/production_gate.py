@@ -97,9 +97,7 @@ GATE_CONTROLLED_ENVIRONMENT = (
 
 _SHA1_RE = re.compile(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|")
 _PATH_RE = re.compile(r"^\|\s*Path\s*\|\s*`([^`]+)`\s*\|")
-_SYMBOL_SHA1_RE = re.compile(
-    r"^\|\s*Symbol\s+SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|"
-)
+_SYMBOL_SHA1_RE = re.compile(r"^\|\s*Symbol\s+SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|")
 _SYMBOL_PATH_RE = re.compile(r"^\|\s*Symbols?\s*\|\s*`([^`]+)`\s*\|")
 _PYBOY_RE = re.compile(
     r"^\|\s*PyBoy\s*\|\s*`([^`]+)`"
@@ -111,9 +109,7 @@ _CREDENTIAL_TEXT_RE = re.compile(
     r"\s*(?:[:=]\s*|\s+)(?:bearer\s+)?[^\s,;]+"
 )
 _URI_CREDENTIAL_RE = re.compile(r"(?i)(https?://[^/\s:@]+):[^@\s]+@")
-_BYTE_LITERAL_RE = re.compile(
-    r"(?is)\bb(?:'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\")"
-)
+_BYTE_LITERAL_RE = re.compile(r"(?is)\bb(?:'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\")")
 _LONG_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{128,}(?![A-Za-z0-9])")
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9>])(?:[A-Za-z]:[\\/]|/)[^\s,;()]+")
 
@@ -153,10 +149,10 @@ class Counts:
     errors: int = 0
 
     @classmethod
-    def from_report(cls, payload: dict[str, Any]) -> "Counts":
+    def from_report(cls, payload: dict[str, Any]) -> Counts:
         raw = payload.get("counts")
         if not isinstance(raw, dict):
-            raise ValueError("pytest report has no counts object")
+            raise TypeError("pytest report has no counts object")
 
         values: dict[str, int] = {}
         for field_name in cls.__dataclass_fields__:
@@ -227,24 +223,31 @@ def _python_path_from_argument(value: Path, cwd: Path) -> Path:
     return cwd / path
 
 
-def _path_from_env(name: str) -> Path | None:
+def _path_from_project_root(project_root: Path, value: str | Path) -> Path:
+    """Anchor a relative CLI/environment path to the inspected checkout."""
+
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else project_root / path
+
+
+def _path_from_env(name: str, project_root: Path) -> Path | None:
     value = os.environ.get(name)
-    return Path(value).expanduser() if value else None
+    return _path_from_project_root(project_root, value) if value else None
 
 
 def find_rom_root(project_root: Path, explicit: Path | None = None) -> Path:
     """Resolve ROM storage without assuming the worktree owns ``rom/``."""
 
     if explicit is not None:
-        return explicit.expanduser()
-    configured = _path_from_env("POKERED_ROM_ROOT")
+        return _path_from_project_root(project_root, explicit)
+    configured = _path_from_env("POKERED_ROM_ROOT", project_root)
     if configured is not None:
         return configured
 
     # If only a primary ROM path is configured, use its nearest ``rom``
     # ancestor when possible.  This keeps the report useful for a worktree
     # whose ROMs live in a sibling checkout.
-    configured_rom = _path_from_env("POKERED_ROM_PATH")
+    configured_rom = _path_from_env("POKERED_ROM_PATH", project_root)
     if configured_rom is not None:
         for parent in (configured_rom.parent, *configured_rom.parents):
             if parent.name == "rom":
@@ -259,8 +262,8 @@ def find_rom_root(project_root: Path, explicit: Path | None = None) -> Path:
 
 def find_fixture_root(project_root: Path, explicit: Path | None = None) -> Path:
     if explicit is not None:
-        return explicit.expanduser()
-    configured = _path_from_env("POKERED_FIXTURE_ROOT")
+        return _path_from_project_root(project_root, explicit)
+    configured = _path_from_env("POKERED_FIXTURE_ROOT", project_root)
     if configured is not None:
         return configured
     for parent in (project_root, *project_root.parents):
@@ -519,7 +522,7 @@ def probe_runtime(
 ) -> dict[str, Any]:
     """Probe the interpreter that will run pytest, not the parent shell."""
 
-    probe = r'''
+    probe = r"""
 import importlib.machinery
 import importlib.metadata
 import importlib.util
@@ -581,7 +584,7 @@ try:
 except Exception as exc:
     result["serial_contract_error"] = f"{type(exc).__name__}: {exc}"
 print(json.dumps(result, sort_keys=True))
-'''
+"""
     try:
         completed = subprocess.run(
             [str(python_executable), "-c", probe],
@@ -753,7 +756,7 @@ def load_required_test_keys(
         return {}, f"tier configuration is missing: {config_path}"
     try:
         namespace = runpy.run_path(str(config_path))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - fail closed on any config-load error
         return {}, f"tier configuration could not be loaded: {type(exc).__name__}: {exc}"
 
     raw = namespace.get("TIER_REQUIRED_TESTS")
@@ -788,7 +791,7 @@ def load_required_nodeids(
         return {}, f"tier configuration is missing: {config_path}"
     try:
         namespace = runpy.run_path(str(config_path))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - fail closed on any config-load error
         return {}, f"tier configuration could not be loaded: {type(exc).__name__}: {exc}"
 
     raw = namespace.get("TIER_REQUIRED_NODEIDS")
@@ -840,34 +843,37 @@ def _load_gate_report(
         counts = Counts.from_report(payload)
         records = payload.get("tests")
         if not isinstance(records, list):
-            raise ValueError("pytest report has no tests list")
+            raise TypeError("pytest report has no tests list")
         collection_only = payload.get("collection_only", False)
         if not isinstance(collection_only, bool):
-            raise ValueError("pytest report collection_only is not boolean")
+            raise TypeError("pytest report collection_only is not boolean")
 
         collection_errors = payload.get("collection_errors")
         if not isinstance(collection_errors, list):
-            raise ValueError("pytest report has no collection_errors list")
+            raise TypeError("pytest report has no collection_errors list")
         collection_skips = payload.get("collection_skips", [])
         if not isinstance(collection_skips, list):
-            raise ValueError("pytest report collection_skips is not a list")
+            raise TypeError("pytest report collection_skips is not a list")
         for collection_entry in (*collection_errors, *collection_skips):
             if not isinstance(collection_entry, dict):
-                raise ValueError("pytest report collection entry is not an object")
+                raise TypeError("pytest report collection entry is not an object")
             if not isinstance(collection_entry.get("nodeid"), str):
-                raise ValueError("pytest report collection nodeid is not a string")
+                raise TypeError("pytest report collection nodeid is not a string")
             if not isinstance(collection_entry.get("reason"), str):
-                raise ValueError("pytest report collection reason is not a string")
+                raise TypeError("pytest report collection reason is not a string")
 
         exitstatus = payload.get("exitstatus")
         if isinstance(exitstatus, bool) or not isinstance(exitstatus, int):
-            raise ValueError("pytest report exitstatus is not an integer")
-        if expected_returncode is not None and expected_returncode >= 0:
-            if exitstatus != expected_returncode:
-                raise ValueError(
-                    "pytest report exitstatus does not match process returncode: "
-                    f"{exitstatus} != {expected_returncode}"
-                )
+            raise TypeError("pytest report exitstatus is not an integer")
+        if (
+            expected_returncode is not None
+            and expected_returncode >= 0
+            and exitstatus != expected_returncode
+        ):
+            raise ValueError(
+                "pytest report exitstatus does not match process returncode: "
+                f"{exitstatus} != {expected_returncode}"
+            )
 
         collected = payload.get("collected")
         nodeids = payload.get("nodeids")
@@ -889,7 +895,7 @@ def _load_gate_report(
         seen_nodeids: set[str] = set()
         for record in records:
             if not isinstance(record, dict):
-                raise ValueError("pytest report contains a non-object test record")
+                raise TypeError("pytest report contains a non-object test record")
             nodeid = record.get("nodeid")
             if not isinstance(nodeid, str) or not nodeid or nodeid in seen_nodeids:
                 raise ValueError("pytest report contains an invalid or duplicate nodeid")
@@ -900,9 +906,9 @@ def _load_gate_report(
             if record.get("when") not in {"setup", "call", "teardown"}:
                 raise ValueError("pytest report contains an invalid test phase")
             if not isinstance(record.get("was_xfail"), bool):
-                raise ValueError("pytest report was_xfail must be boolean")
+                raise TypeError("pytest report was_xfail must be boolean")
             if not isinstance(record.get("reason"), str):
-                raise ValueError("pytest report reason must be a string")
+                raise TypeError("pytest report reason must be a string")
 
             if record["was_xfail"] and outcome == "skipped":
                 derived.xfailed += 1
@@ -1223,8 +1229,7 @@ def _run_collection_command(
             returncode=124,
             duration_seconds=time.monotonic() - started,
             output_tail=(
-                f"pytest collection timed out after {timeout_seconds:.1f}s\n"
-                f"{output[-8000:]}"
+                f"pytest collection timed out after {timeout_seconds:.1f}s\n{output[-8000:]}"
             ),
             reason="collection timeout",
         )
@@ -1378,26 +1383,17 @@ def _normalize_nodeid(nodeid: str) -> str:
     normalized_path = path.replace("\\", "/")
     while normalized_path.startswith("./"):
         normalized_path = normalized_path[2:]
-    return (
-        f"{normalized_path}::{test_name}"
-        if separator
-        else normalized_path
-    )
+    return f"{normalized_path}::{test_name}" if separator else normalized_path
 
 
 def _required_test_problems(
     nodeids: Iterable[str],
     required_test_keys: Iterable[tuple[str, str]],
 ) -> list[str]:
-    actual = {
-        key
-        for nodeid in nodeids
-        if (key := _test_key_from_nodeid(nodeid)) is not None
-    }
+    actual = {key for nodeid in nodeids if (key := _test_key_from_nodeid(nodeid)) is not None}
     missing = sorted(set(required_test_keys) - actual)
     return [
-        "required acceptance test is absent from selected items: "
-        f"{module}::{name}"
+        f"required acceptance test is absent from selected items: {module}::{name}"
         for module, name in missing
     ]
 
@@ -1407,13 +1403,8 @@ def _required_nodeid_problems(
     required_nodeids: Iterable[str],
 ) -> list[str]:
     actual = {_normalize_nodeid(nodeid) for nodeid in nodeids}
-    missing = sorted(
-        {_normalize_nodeid(nodeid) for nodeid in required_nodeids} - actual
-    )
-    return [
-        f"required matrix case is absent from selected items: {nodeid}"
-        for nodeid in missing
-    ]
+    missing = sorted({_normalize_nodeid(nodeid) for nodeid in required_nodeids} - actual)
+    return [f"required matrix case is absent from selected items: {nodeid}" for nodeid in missing]
 
 
 def run_tier(
@@ -1485,13 +1476,9 @@ def run_tier(
         if returncode != 0:
             problems.append(f"pytest returned exit code {returncode}")
         if report.collection_errors:
-            problems.append(
-                f"pytest reported {len(report.collection_errors)} collection error(s)"
-            )
+            problems.append(f"pytest reported {len(report.collection_errors)} collection error(s)")
         if report.collection_skips:
-            problems.append(
-                f"pytest reported {len(report.collection_skips)} collection skip(s)"
-            )
+            problems.append(f"pytest reported {len(report.collection_skips)} collection skip(s)")
             aggregate_reasons.update(
                 {
                     str(entry.get("reason") or "(collection skip without a reason)"): 1
@@ -1528,9 +1515,7 @@ def run_tier(
 
     duration = time.monotonic() - started
     unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
-    if iteration_failures or any(code != 0 for code in returncodes):
-        status = "FAIL"
-    elif unexpected:
+    if iteration_failures or any(code != 0 for code in returncodes) or unexpected:
         status = "FAIL"
     elif aggregate.total == 0:
         status = "FAIL"
@@ -1539,8 +1524,7 @@ def run_tier(
         status = "FAIL"
         output_tail = (
             f"required tier produced {aggregate.skipped} skip(s); "
-            "missing/unsupported coverage is not accepted in the production gate\n"
-            + output_tail
+            "missing/unsupported coverage is not accepted in the production gate\n" + output_tail
         )
     else:
         status = "PASS" if aggregate.passed else "SKIP"
@@ -1634,9 +1618,7 @@ def render_text(
             lines.append(f"    reason: {collection.reason}")
         if collection.status == "FAIL" and collection.output_tail:
             lines.append("    output tail:")
-            lines.extend(
-                f"      {line}" for line in collection.output_tail.splitlines()[-60:]
-            )
+            lines.extend(f"      {line}" for line in collection.output_tail.splitlines()[-60:])
 
     lines.append("assets:")
     for asset in assets:
@@ -1649,8 +1631,7 @@ def render_text(
             suffix.append(f"size={asset.size}")
         detail = " " + " ".join(suffix) if suffix else ""
         lines.append(
-            f"  {asset.status.upper():13} {asset.kind:7} {asset.label}: "
-            f"{asset.path}{detail}"
+            f"  {asset.status.upper():13} {asset.kind:7} {asset.label}: {asset.path}{detail}"
         )
 
     lines.append("tiers:")
@@ -1780,9 +1761,7 @@ def _safe_runtime(
     runtime: dict[str, Any],
     roots: tuple[tuple[str, Path], ...],
 ) -> dict[str, Any]:
-    path_keys = frozenset(
-        {"python_executable", "pyboy_module", "serial_module", "harness_module"}
-    )
+    path_keys = frozenset({"python_executable", "pyboy_module", "serial_module", "harness_module"})
     result: dict[str, Any] = {}
     for key, value in runtime.items():
         if value is None or isinstance(value, (bool, int, float)):
@@ -1809,9 +1788,7 @@ def _safe_collection(
 ) -> dict[str, Any]:
     data = asdict(collection)
     data["command"] = _safe_command(collection.command, roots) or []
-    data["nodeids"] = [
-        _safe_diagnostic(nodeid, roots, limit=1000) for nodeid in collection.nodeids
-    ]
+    data["nodeids"] = [_safe_diagnostic(nodeid, roots, limit=1000) for nodeid in collection.nodeids]
     data["output_tail"] = _safe_diagnostic(collection.output_tail, roots)
     data["reason"] = _safe_diagnostic(collection.reason, roots, limit=2000)
     return data
@@ -1826,12 +1803,10 @@ def _safe_tier(
     data["output_tail"] = _safe_diagnostic(tier.output_tail, roots)
     data["reason"] = _safe_diagnostic(tier.reason, roots, limit=2000)
     data["iteration_failures"] = [
-        _safe_diagnostic(failure, roots, limit=2000)
-        for failure in tier.iteration_failures
+        _safe_diagnostic(failure, roots, limit=2000) for failure in tier.iteration_failures
     ]
     data["selected_nodeids"] = [
-        _safe_diagnostic(nodeid, roots, limit=1000)
-        for nodeid in tier.selected_nodeids
+        _safe_diagnostic(nodeid, roots, limit=1000) for nodeid in tier.selected_nodeids
     ]
     data["skip_reasons"] = {
         _safe_diagnostic(reason, roots, limit=2000): count
@@ -1996,22 +1971,20 @@ def verify_evidence_bundle(evidence_dir: Path) -> None:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(
-            f"could not read evidence manifest: {type(exc).__name__}: {exc}"
-        ) from exc
+        raise ValueError(f"could not read evidence manifest: {type(exc).__name__}: {exc}") from exc
     if not isinstance(manifest, dict):
-        raise ValueError("evidence manifest root is not an object")
+        raise TypeError("evidence manifest root is not an object")
     if manifest.get("schema_version") != EVIDENCE_SCHEMA_VERSION:
         raise ValueError("evidence manifest schema version is unsupported")
 
     entries = manifest.get("files")
     if not isinstance(entries, list):
-        raise ValueError("evidence manifest files is not a list")
+        raise TypeError("evidence manifest files is not a list")
     expected_names = {EVIDENCE_REPORT_FILENAME, EVIDENCE_TEXT_FILENAME}
     actual_names: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict):
-            raise ValueError("evidence manifest file entry is not an object")
+            raise TypeError("evidence manifest file entry is not an object")
         relative_name = entry.get("path")
         if not isinstance(relative_name, str) or not relative_name:
             raise ValueError("evidence manifest file path is invalid")
@@ -2025,7 +1998,9 @@ def verify_evidence_bundle(evidence_dir: Path) -> None:
         try:
             path.relative_to(evidence_dir)
         except ValueError as exc:
-            raise ValueError(f"evidence manifest file escapes its directory: {relative_name!r}") from exc
+            raise ValueError(
+                f"evidence manifest file escapes its directory: {relative_name!r}"
+            ) from exc
         try:
             content = path.read_bytes()
         except OSError as exc:
@@ -2042,15 +2017,13 @@ def verify_evidence_bundle(evidence_dir: Path) -> None:
             "evidence manifest must cover exactly gate-report.json and gate-report.txt"
         )
     try:
-        report = json.loads(
-            (evidence_dir / EVIDENCE_REPORT_FILENAME).read_text(encoding="utf-8")
-        )
+        report = json.loads((evidence_dir / EVIDENCE_REPORT_FILENAME).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(
             f"could not read retained gate report: {type(exc).__name__}: {exc}"
         ) from exc
     if not isinstance(report, dict):
-        raise ValueError("retained gate report root is not an object")
+        raise TypeError("retained gate report root is not an object")
     if report.get("overall") != manifest.get("overall"):
         raise ValueError("evidence manifest overall status does not match gate report")
 
@@ -2155,16 +2128,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Do not call ``resolve()`` here: POSIX virtualenv interpreters are often
     # symlinks to the system interpreter, and resolving would silently drop
     # the environment containing pytest/PyBoy.
-    python_executable = _python_path_from_argument(
-        args.python_executable, Path.cwd()
-    )
+    python_executable = _python_path_from_argument(args.python_executable, project_root)
     rom_root = find_rom_root(project_root, args.rom_root)
     fixture_root = find_fixture_root(project_root, args.fixture_root)
     expected_sha1 = parse_expected_sha1(project_root / "VERSIONS.md")
     assets = inspect_assets(rom_root, fixture_root, expected_sha1)
-    environment = build_test_environment(
-        project_root, rom_root, fixture_root, expected_sha1
-    )
+    environment = build_test_environment(project_root, rom_root, fixture_root, expected_sha1)
     # Subprocess acceptance tests must use the exact interpreter whose runtime
     # contract was probed above, not a stale auxiliary virtualenv discovered
     # from the worktree.
@@ -2224,9 +2193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
     tier_ok = all(
-        tier.status == "PASS"
-        if tier.required
-        else tier.status in {"PASS", "SKIP"}
+        tier.status == "PASS" if tier.required else tier.status in {"PASS", "SKIP"}
         for tier in tiers
     )
     overall = (
@@ -2256,8 +2223,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_evidence_bundle(evidence_dir, evidence_payload)
         except (OSError, TypeError, ValueError) as exc:
             evidence_error = (
-                f"could not write evidence bundle to {evidence_dir}: "
-                f"{type(exc).__name__}: {exc}"
+                f"could not write evidence bundle to {evidence_dir}: {type(exc).__name__}: {exc}"
             )
             gate_problems.append(evidence_error)
             overall = "FAIL"

@@ -26,6 +26,19 @@ jobs:
       - name: Install development dependencies
         run: python -m pip install -e ".[dev]"
 
+      - name: Check packaging and gate lint/format
+        run: |
+          python -m ruff check \
+            scripts/bootstrap_pyboy.py \
+            scripts/production_gate.py \
+            tests/test_production_gate.py \
+            tests/test_runtime_packaging.py
+          python -m ruff format --check \
+            scripts/bootstrap_pyboy.py \
+            scripts/production_gate.py \
+            tests/test_production_gate.py \
+            tests/test_runtime_packaging.py
+
       - name: Validate fixture-manifest schema
         run: python scripts/validate_fixture_manifest.py --schema-only
 
@@ -36,6 +49,44 @@ jobs:
 
       - name: Build wheel without ROM-derived artifacts
         run: python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/pokered-wheels" .
+
+      - name: Verify wheel archive contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "$RUNNER_TEMP/pokered-wheels" <<'PY'
+          from pathlib import Path, PurePosixPath
+          import re
+          import sys
+          from zipfile import ZipFile
+
+          wheel_dir = Path(sys.argv[1])
+          wheels = sorted(wheel_dir.glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+
+          forbidden_suffixes = {
+              ".gb", ".gbc", ".sym", ".map", ".sav", ".state", ".ram",
+              ".sqlite", ".sqlite3", ".so", ".pyd", ".dylib", ".dll",
+          }
+          forbidden_parts = {"rom", "roms", "fixtures", "release-evidence", "artifacts"}
+          windows_absolute = re.compile(r"^[A-Za-z]:[\\/]")
+          bad = []
+          with ZipFile(wheels[0]) as archive:
+              for name in archive.namelist():
+                  path = PurePosixPath(name)
+                  if (
+                      path.is_absolute()
+                      or windows_absolute.match(name)
+                      or ".." in path.parts
+                      or path.suffix.lower() in forbidden_suffixes
+                      or forbidden_parts.intersection(path.parts)
+                  ):
+                      bad.append(name)
+          if bad:
+              raise SystemExit("forbidden wheel entries: " + ", ".join(sorted(bad)))
+          print(f"wheel archive verified: {wheels[0].name}")
+          PY
 
       - name: Verify clean wheel installation
         shell: bash
@@ -52,9 +103,14 @@ jobs:
           import pokered_harness
 
           assert pyboy.__version__ == "2.7.0"
-          assert getattr(pyboy, "__pokered_harness_revision__", "")
+          assert pyboy.__pokered_harness_revision__ == (
+              "c565df66c3731fad2856169a90f6bbec99925915"
+          )
           serial = Serial(False)
-          assert all(hasattr(serial, name) for name in ("backend", "apply_external_edge"))
+          assert all(
+              hasattr(serial, name)
+              for name in ("backend", "apply_external_edge", "peek_out_bit")
+          )
           print(pokered_harness.__file__)
           print(pyboy.__file__)
           PY

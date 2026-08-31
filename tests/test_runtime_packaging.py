@@ -75,9 +75,7 @@ def test_project_direct_dependencies_are_exactly_pinned() -> None:
 
 def test_lockfile_records_the_same_exact_project_requirements() -> None:
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
-    project = next(
-        package for package in lock["package"] if package["name"] == "pokered-harness"
-    )
+    project = next(package for package in lock["package"] if package["name"] == "pokered-harness")
     locked_requirements = {
         item["name"].lower(): item["specifier"]
         for item in project["metadata"]["requires-dist"]
@@ -188,9 +186,7 @@ def test_git_tracked_tree_excludes_rom_and_generated_runtime_artifacts() -> None
         ".so",
         ".pyd",
     }
-    forbidden = [
-        path.as_posix() for path in tracked if path.suffix.lower() in forbidden_suffixes
-    ]
+    forbidden = [path.as_posix() for path in tracked if path.suffix.lower() in forbidden_suffixes]
     assert forbidden == []
 
 
@@ -210,9 +206,7 @@ def test_gitignore_protects_rom_derived_inputs_and_outputs() -> None:
 
 
 def test_ci_runs_gate_clean_install_and_retains_sanitized_evidence() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "release-hygiene.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (ROOT / ".github" / "workflows" / "release-hygiene.yml").read_text(encoding="utf-8")
     assert "scripts/production_gate.py" in workflow
     assert "--unit-only" in workflow
     assert "--repeat-timing 5" in workflow
