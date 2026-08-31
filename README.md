@@ -10,7 +10,7 @@ symbol files, save states, or other ROM-derived artifacts.
 ## Release status
 
 This repository is an audited candidate, not a production release. The
-current functional source boundary is `db86a34`; the historical implementation
+current functional source boundary is `25e231c`; the historical implementation
 boundary at `1046a541e0003923aec6000b6b383c6eaafeaa48` is retained separately.
 The baseline at
 `e219fb5` was not production-certified.
@@ -22,20 +22,20 @@ boundary, not a claim that every listed capability is a finished product:
 |---|---|---|
 | Single-session loading, input, state parsing, and save/load | Clean wheel MCP smoke: 3/3 | On 2026-08-31, an installed wheel outside the checkout passed tool discovery, stepping, game-state parsing, and save/load with explicit Red color ROM/SYM hashes. The wider five-ROM smoke evidence remains historical. |
 | MCP stdio server for one session | Current startup pinning is strict | MCP enforces ROM, symbol, PyBoy version, and exact vendored fork revision when `VERSIONS.md` is available; wheel launches also require explicit ROM/SYM pins. |
-| In-process `LinkPair` | Source-equivalent Red/Yellow strict trade and battle pass | The stateful gate passed 46/46 at the `23ea392` source-equivalent boundary, including strict Red/Yellow party swap and one complete battle turn. The broader matrix remains diagnostic and requires a final exact-head rerun. |
-| Remote TCP transport and MCP lifecycle | Source-equivalent 11/11; current MCP lifecycle 74/74 | Native MCP attach/HELLO, two-process LinkMenu, and native serial paths pass for color-Red listener + color-Blue connector on localhost; the current lifecycle suite also passes 74/74. Reversed roles remain uncertified. |
-| Remote full trade | Source-equivalent 2/2; concurrency-sensitive | The isolated trade tier passed full party-record exchange at the `23ea392` boundary, but a concurrent run timed out once and a later concurrent run took 480.5s. Load robustness is not signed off. |
-| Link battle | Local authentic pass; remote controlled diagnostic only | The mechanical battle tier passed 2/2, but the remote half uses `_install_linkmenu_autoselect`/`_force_linkmenu_selection`; it is not user-driven production evidence. |
+| In-process `LinkPair` | Exact-head local 46/46 | Strict Red/Yellow party swap and one complete battle turn pass against the release runtime; the broader Red/Blue/Yellow matrix remains diagnostic. |
+| Remote TCP transport and MCP lifecycle | Exact-head remote 11/11; MCP lifecycle 74/74 | Native MCP attach/HELLO, two-process LinkMenu, and native serial paths pass for color-Red listener + color-Blue connector on localhost. The exact-head no-hook Red/Blue battle smoke also passes; reversed roles remain uncertified. |
+| Remote full trade | Exact-head 1/2; unstable | The local strict trade passes, but the TCP subprocess trade exceeded its 720s child bound in the latest exact-head run (tier 1/2 at 881.7s). A previous isolated run passed, so stability is not signed off. |
+| Link battle | Authentic local and remote smoke pass | The Red/Yellow local battle and Red/Blue subprocess battle select the mode with ordinary input and complete native move exchange; no test-driver RAM write or selection hook is used. Broader battle rows remain unverified. |
 | Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
 The candidate includes the explicit `tests/__init__.py` package boundary and
 the bundled PyBoy source tree. Symbol hashes and audited generator provenance
 are recorded in [`VERSIONS.md`](VERSIONS.md). The exact-head unit gate passes
-444/444 and the timing tier passes 35/35 across five repetitions. Full release
+445/445 and the timing tier passes 35/35 across five repetitions. Full release
 sign-off remains
 `PARTIAL`: per-tier evidence bundles are retained outside the checkout, but
-the product lint/matrix gates, remote no-bypass battle path, load-stable remote
-trade, reversed roles, fixture provenance, and independent review remain open.
+the product lint/matrix gates, load-stable remote trade, reversed roles, fixture
+provenance, and independent review remain open.
 
 The historical local diagnostic matrix reached LinkMenu and completed the trade
 route for all nine ordered Red/Blue/Yellow version pairs. Seven of nine battle
@@ -50,16 +50,16 @@ unverified.
 
 Current exact-head evidence and blockers are explicit:
 
-- unit 444/444 and timing 35/35 across five repetitions pass at `db86a34`;
-  source-equivalent stateful evidence is local 46/46, remote 11/11, and trade
-  2/2 at `23ea392`, while a concurrent trade later took 480.5s;
-- the Lane G audit at `47195bd` reduces the default product Ruff surface to
+- unit 445/445 and timing 35/35 across five repetitions pass at `25e231c`;
+  exact-head stateful evidence is local 46/46 and remote 11/11, while the
+  latest trade tier finished 1/2 after the TCP case exceeded its bound;
+- the Lane G audit at `25e231c` reduces the default product Ruff surface to
   101 findings under locked Ruff; the explicit vendored-runtime audit remains
   227 findings, and the broad suite has
   not become a clean production gate;
-- the no-hook remote battle attempt timed out after 902.36s before both peers
-  reached the battle path; the existing controlled diagnostic still uses a
-  LinkMenu RAM/hook selector and cannot be counted as authentic acceptance;
+- the exact-head no-hook Red/Blue remote battle smoke passes with ordinary
+  menu input and native serial move exchange; broader battle matrix coverage
+  and repeated stability remain open;
 - per-ROM single-session coverage, reversed listener/connector roles, native
   platform coverage, battle-fixture provenance, load-stable remote trade, and
   independent review remain incomplete; and
@@ -272,15 +272,16 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus controlled color Red/Blue native-serial trade and battle diagnostics | User-driven menu input, reversed roles, and unclaimed ROM/variant rows |
+| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus color Red/Blue native-serial trade and no-hook battle acceptance | Repeated trade stability, reversed roles, and unclaimed ROM/variant rows |
 | `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus strict local Red/Yellow trade and battle acceptance | Full Red/Blue/Yellow coverage or a release result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
 battle needs an acceptance result from the actual release runtime, matching
 ROMs, matching save-state fixtures, bounded deadlines, a clean teardown, and
 an explicit statement about any test-driver menu control. The current remote
-result proves native serial payload handling for a controlled LinkMenu setup;
-it does not prove an end-user can drive both menus independently.
+battle result uses ordinary menu input and proves native serial move exchange;
+the trade result remains stability-sensitive and does not prove every remote
+menu/role combination.
 
 ## Walkthrough scripts
 

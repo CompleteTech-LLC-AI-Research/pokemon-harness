@@ -6,22 +6,20 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: `PARTIAL` current audit candidate; the functional source boundary is
-`db86a34` (2026-08-31). The exact-head fast gate at that boundary is unit
-444/444 and timing 35/35 across five repetitions. Source-equivalent stateful
-evidence at `23ea392` is local 46/46, remote 11/11, and trade 2/2 for the
-canonical color-Red listener and color-Blue connector roles. A concurrent
-trade later took 480.5 seconds, so load stability remains open.
+`25e231c` (2026-08-31). The exact-head fast gate at that boundary is unit
+445/445 and timing 35/35 across five repetitions. Exact-head stateful evidence
+is local 46/46 and remote 11/11 for the canonical color-Red listener and
+color-Blue connector roles. The latest trade tier finished 1/2 because the TCP
+subprocess exceeded its 720-second child bound; load stability remains open.
 The historical complete real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` remains separate evidence, not
 current sign-off. Uncommitted worktree changes are excluded.
 
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
-2/2. Current local Red/Yellow trade and battle pass, while the remote battle
-case is only a controlled native-serial diagnostic because its driver selects
-LinkMenu through `_install_linkmenu_autoselect` and
-`_force_linkmenu_selection`. A no-hook rerun timed out after 902.36 seconds.
-Other link rows remain unsupported or unverified.
+2/2. Current local Red/Yellow trade and battle pass, and the exact-head
+Red/Blue remote battle smoke passes with ordinary menu input and native serial
+move exchange. Other link rows remain unsupported or unverified.
 
 Symbol hashes and audited generator provenance for the inputs are recorded
 below. The remaining release decision is `PARTIAL` because the complete
@@ -29,7 +27,7 @@ implementation-revision gate output is not retained as an evidence bundle,
 product lint and the broad matrix are not clean, per-ROM and
 reversed-role coverage is incomplete, and independent review/native-platform
 evidence is missing.
-The Lane G audit at `47195bd` leaves 101 product Ruff findings under the
+The Lane G audit at `25e231c` leaves 101 product Ruff findings under the
 default `ruff check .` boundary; the pinned vendored runtime is excluded from
 that product audit and has 227 findings when checked explicitly.
 
@@ -176,7 +174,7 @@ arguments. There is no separate Yellow producer. The producer's successful
 output only establishes a fixture at the expected map/tile; it does not prove
 that a trade or battle works.
 
-The strict local acceptance fixtures and controlled remote diagnostics are
+The strict local acceptance fixtures and remote acceptance/diagnostic fixtures are
 distinct from the default Cable Club fixtures:
 
 | Path | ROMs | Required fixture files |
@@ -184,7 +182,7 @@ distinct from the default Cable Club fixtures:
 | Local strict trade | color Red + Yellow | `red/cable_club.state`, `yellow/cable_club.state` |
 | Local strict battle | color Red + Yellow | `red/cable_club-battle.state`, `yellow/cable_club-battle.state` |
 | Remote isolated trade diagnostic | color Red listener + color Blue connector | `red/cable_club.state`, `blue/cable_club.state` |
-| Remote controlled battle diagnostic | color Red listener + color Blue connector | `red/cable_club-battle.state`, `blue/cable_club-battle.state` |
+| Remote no-hook battle smoke | color Red listener + color Blue connector | `red/cable_club-battle.state`, `blue/cable_club-battle.state` |
 
 The battle files are separately captured legal states; the existing producer
 does not create them. Every state must be captured from the exact ROM bytes it
@@ -204,13 +202,12 @@ variant fixtures (`cable_club-vanilla.state` and
 `cable_club-battle-vanilla.state`) are also not part of the certified scope.
 
 The current repository has diagnostic local/remote matrices plus strict local
-Red/Yellow trade and battle acceptance tests, an isolated independent-process
-Red/Blue trade assertion, and a controlled remote battle diagnostic. The
-isolated remote trade passes in the bundled source-compatible runtime,
-including full party-record equality, but its concurrent-tier timeout leaves
-load stability open. The remote battle case reaches native move
-exchange/execution, yet its deterministic LinkMenu RAM/hook selector makes it
-controlled diagnostic evidence rather than a user-driven acceptance. Consult
+Red/Yellow trade and battle acceptance tests, an independent-process Red/Blue
+trade assertion, and a no-hook Red/Blue remote battle smoke. The latest exact-
+head remote trade exceeded its child deadline after the local trade passed,
+including full party-record equality in an earlier run, so load stability is
+open. The remote battle case reaches native move exchange/execution through
+ordinary menu input; broader role and version coverage remains unverified. Consult
 the test-surface table in the
 [README](README.md) and run the required tiers in the
 [production runbook](docs/PRODUCTION_RUNBOOK.md) before using any other row as

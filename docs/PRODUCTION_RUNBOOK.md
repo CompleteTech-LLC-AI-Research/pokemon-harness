@@ -13,16 +13,15 @@ record.
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
 2/2. The current source-hardening candidate's functional changes reach
-`db86a34`. Its exact-head fast gate passes unit 444/444 and timing 35/35
-across five repetitions. Source-equivalent stateful evidence at `23ea392`
-passed local 46/46, remote 11/11, and trade 2/2 for the canonical color-Red
-listener/internal-clock and color-Blue connector/external-clock roles. The
-current MCP lifecycle suite passes 74/74. A concurrent trade later took
-480.5 seconds, so load stability is not certified. The mechanical battle tier
-passed 2/2, but its remote case uses `_install_linkmenu_autoselect` and
-`_force_linkmenu_selection`; it is controlled native-serial evidence, not
-user-driven battle acceptance. A no-hook rerun timed out after 902.36 seconds
-before both peers reached battle. Symbol hashes and audited generator provenance are in
+`25e231c`. Its exact-head fast gate passes unit 445/445 and timing 35/35
+across five repetitions. Exact-head stateful evidence passes local 46/46 and
+remote 11/11 for the canonical color-Red listener/internal-clock and color-Blue
+connector/external-clock roles; the MCP lifecycle suite passes 74/74. The
+latest trade tier finished 1/2 because its TCP subprocess exceeded the
+720-second child bound, so load stability is not certified. The strict local
+Red/Yellow battle and exact-head Red/Blue remote battle smoke both use ordinary
+input and native serial move exchange; broader battle rows remain unverified.
+Symbol hashes and audited generator provenance are in
 [`VERSIONS.md`](../VERSIONS.md). Overall status is `PARTIAL`; the exact open
 items are listed in [the release checklist](RELEASE_CHECKLIST.md).
 
@@ -173,7 +172,7 @@ default fixture paths before running all required tiers.
 
 The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
 explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. At the Lane G audit boundary (`47195bd`), the
+default `ruff check .` audit. At the Lane G audit boundary (`25e231c`), the
 default product audit reports 101 findings after safe mechanical cleanup. An
 explicit `ruff check vendor/pyboy-src` still reports 227 upstream findings;
 the vendored runtime is instead covered by revision pinning, compileall, and
@@ -307,7 +306,7 @@ calculation hook. Neither case writes party or battle state to make the
 assertion pass. A skipped or partially parameterized matrix is not full
 Red/Blue/Yellow coverage.
 
-### Tier E: remote transport and controlled subprocess diagnostics
+### Tier E: remote transport and subprocess acceptance/diagnostics
 
 First run the transport/serial milestones:
 
@@ -330,14 +329,13 @@ python -m pytest -q -ra \
 
 The LinkMenu test is a transport smoke test. The strict subprocess trade test
 uses cooperative phase rendezvous and compares complete party-mon records; its
-isolated run passed, but its concurrent-tier timeout remains a load-stability
-blocker. The strict subprocess battle test requires both processes to reach
-move exchange and execution, but its driver currently selects LinkMenu through
-`_install_linkmenu_autoselect` and `_force_linkmenu_selection`. That is a
-controlled battle diagnostic, not user-driven menu acceptance. Once setup is
-complete, both payloads travel through native bit-level serial traffic, and the
-tests reject the out-of-band exchange counter. Record both child traces and the
-exact deadline when investigating a regression.
+latest exact-head run exceeded the 720-second child deadline, so load stability
+remains open. The strict subprocess battle test requires both processes to
+reach move exchange and execution, and now selects LinkMenu through ordinary
+directional/A input without RAM writes or selection hooks. Both payloads travel
+through native bit-level serial traffic, and the tests reject the out-of-band
+exchange counter. Record both child traces and the exact deadline when
+investigating a regression.
 
 ## 5. Generate link fixtures safely
 
@@ -436,13 +434,12 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The exact-head fast gate passes unit 444/444 and timing 35/35 across five
-   repetitions; the source-equivalent stateful run passed local 46/46 and
-   remote 11/11, and the source-equivalent trade tier passed 2/2. A
-   concurrent trade later took 480.5 seconds. The no-hook remote battle
-   attempt timed out after 902.36 seconds; the existing remote battle result
-   uses a LinkMenu selector hook. The broader Blue/Red/Yellow battle matrix is
-   not certified, and Blue↔Blue and Blue→Red remain diagnostic only.
+1. The exact-head fast gate passes unit 445/445 and timing 35/35 across five
+   repetitions; exact-head stateful evidence passes local 46/46 and remote
+   11/11, and the exact-head no-hook Red/Blue battle smoke passes. The latest
+   trade tier finished 1/2 because the TCP subprocess exceeded its 720-second
+   child bound. The broader Blue/Red/Yellow battle matrix is not certified,
+   and Blue↔Blue and Blue→Red remain diagnostic only.
 2. The historical full real-ROM gate passed, but its complete output was not
    retained as a release evidence bundle. Current per-tier runs use
    `--evidence-dir` and retain sanitized bundles outside the checkout; a single

@@ -32,25 +32,26 @@ Full-gate snapshot:
   battle passed, including both full party-record swaps and move-turn progress.
 
 Current candidate rerun evidence (2026-08-31, source-hardening, teardown,
-packaging, gate, and evidence fixes included):
+packaging, gate, lint-boundary, and evidence fixes included):
 
-- exact-head unit: 444/444 passed;
+- exact-head unit: 445/445 passed;
 - timing: 35/35 passed across five repetitions;
-- source-equivalent stateful local: 46/46 passed at the default scheduler
-  slice;
-- source-equivalent remote: 11/11 passed for the canonical color-Red listener
-  and color-Blue connector roles;
-- source-equivalent strict trade: 2/2 passed, including the subprocess trade;
+- exact-head stateful local: 46/46 passed at the default scheduler slice;
+- exact-head remote: 11/11 passed for the canonical color-Red listener and
+  color-Blue connector roles;
+- exact-head no-hook Red/Blue remote battle smoke passed with ordinary menu
+  input and native serial move exchange;
 - current MCP lifecycle: 74/74 passed; and
-- the mechanical battle tier passed 2/2, but its remote case uses a
-  deterministic LinkMenu RAM/hook selector and is not user-driven evidence.
+- the latest exact-head trade tier finished 1/2 because its TCP subprocess
+  exceeded the 720-second child bound.
 
 These current counts supersede the corresponding historical unit count for
-this candidate. The stateful counts were collected at the source-equivalent
-`23ea392` boundary; the exact-head fast unit rerun was at functional source
-boundary `db86a34`. The intervening functional commits harden runtime
-bootstrap, MCP lifecycle/cancellation, gate coverage, and evidence
-verification. Sanitized
+this candidate. The exact-head fast and local/remote reruns were collected at
+functional source boundary `25e231c`. The exact-head trade result is retained
+as a failure because its TCP subprocess exceeded its child deadline; an
+earlier isolated trade pass does not establish stability. The intervening
+functional commits harden runtime bootstrap, MCP lifecycle/cancellation, gate
+coverage, lint boundaries, and evidence verification. Sanitized
 per-tier evidence bundles were retained outside the checkout with
 `--evidence-dir`; a single complete release evidence bundle is still not
 attached to this tree.
@@ -59,10 +60,10 @@ The local passes are real stateful acceptance evidence for the exact color-Red /
 Yellow fixture pair, and the remote transport pass is evidence for the exact
 color-Red listener / color-Blue connector subprocess pair. The isolated remote
 trade uses native serial payloads and full party-record checks, but the
-concurrent timeout means load-stable trade is not certified. The remote battle
-driver uses a LinkMenu selection hook; a no-hook rerun timed out after 902.36
-seconds, and native serial payload checks do not turn the controlled diagnostic
-into fully user-driven gameplay. None of this certifies unrun or
+concurrent and exact-head timeout results mean load-stable trade is not
+certified. The exact-head remote battle driver uses ordinary menu input and
+passed without RAM writes or selection hooks; native serial payload checks and
+that single pass do not certify unrun or
 reversed-role rows.
 
 These are evidence boundaries, not waived checklist items. The candidate
@@ -124,20 +125,20 @@ script, and the results were reproduced from the isolated clean checkout.
 - [x] Remote transport tests pass with the color-Red listener/internal-clock
   and color-Blue connector/external-clock roles recorded.
 - [ ] Reversed listener/connector roles are independently tested and certified.
-- [x] Controlled native-serial remote trade acceptance passes in separate
+- [ ] Native-serial remote trade acceptance is repeatable in separate
   processes without fixture/runtime skips and asserts both sides received the
-  peer's Pokémon in an isolated run; load-stable concurrent execution remains
-  open.
+  peer's Pokémon; an earlier isolated run passed, but the latest exact-head
+  run exceeded the 720-second child bound.
 - [ ] Remote trade remains green when the required stateful tiers run
   concurrently; the current run timed out the trade tier.
 - [x] The canonical local link battle is claimed only after the release-runtime
   test resolves a complete turn on both sides; LinkMenu or transport
   milestones do not count.
-- [x] Controlled native-serial remote battle diagnostic resolves move exchange
-  and execution on both sides in separate processes; its deterministic
-  LinkMenu RAM/hook selector is not production user-driven evidence.
-- [ ] A user-driven remote trade and battle path passes without the test-driver
-  LinkMenu selection hook.
+- [x] The exact-head native-serial remote battle acceptance resolves move
+  exchange and execution on both sides in separate processes using ordinary
+  menu input, without RAM writes or a selection hook.
+- [ ] The remote trade path is stable without a test-driver LinkMenu selection
+  hook; the battle half of this requirement is complete.
 - [x] Every supported release row has a result or an explicit unsupported
   classification; the failed diagnostic rows are listed below.
 
@@ -172,8 +173,7 @@ script, and the results were reproduced from the isolated clean checkout.
 
 - [x] Markdown links resolve against the release tree.
 - [x] Claims distinguish implemented source, candidate tests, fixture-gated
-  diagnostics, controlled native-serial acceptance, and release-certified
-  behavior.
+  diagnostics, native-serial acceptance, and release-certified behavior.
 - [ ] The evidence bundle includes exact commands and complete test output,
   not only a pass count or a screenshot.
 - [x] Known limitations, skipped rows, and runtime deviations are listed next
@@ -183,14 +183,14 @@ script, and the results were reproduced from the isolated clean checkout.
   acceptance.
 
 **Release decision:** `PARTIAL`. The source/runtime and the narrowly defined
-local plus controlled remote acceptance paths have passing snapshots, but full
+local plus authentic remote-battle acceptance paths have passing snapshots, but full
 product sign-off remains pending:
 
 - a retained complete implementation-revision real-ROM gate evidence bundle;
 - a retained evidence bundle, including battle-fixture hashes/provenance;
 - a retained current local/remote gate and strict subprocess evidence bundle,
-  plus resolution of the concurrent remote-trade timeout, the remote
-  no-bypass battle path, and the Blue↔Blue and Blue→Red diagnostic battle gaps
+  plus resolution of the exact-head remote-trade timeout and the Blue↔Blue and
+  Blue→Red diagnostic battle gaps
   or an explicitly limited product scope that excludes them;
 - repository-wide lint/broad-suite closure, per-ROM single-session coverage,
   reversed roles, native-platform certification, and independent review; and
