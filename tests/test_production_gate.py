@@ -124,6 +124,47 @@ def test_pyboy_version_parser_accepts_revision_annotation(tmp_path):
     )
 
 
+def test_fixture_manifest_schema_validation_uses_selected_interpreter(tmp_path):
+    result = gate.run_fixture_manifest_validation(
+        project_root=Path(__file__).resolve().parents[1],
+        python_executable=Path(sys.executable),
+        environment={},
+        fixture_root=tmp_path / "fixtures",
+        validate_bytes=False,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["mode"] == "schema"
+    assert result["entries"] == 10
+
+
+def test_fixture_manifest_provenance_requires_certified_entries(tmp_path):
+    manifest = tmp_path / "fixture-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "fixtures": [
+                    {
+                        "id": "red-color-ordinary",
+                        "provenance": {"status": "partial"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    problems = gate.fixture_manifest_provenance_problems(
+        manifest,
+        required_ids=("red-color-ordinary", "blue-color-ordinary"),
+    )
+
+    assert problems == [
+        "certified fixture is absent from manifest: blue-color-ordinary",
+        "certified fixture provenance is not verified: red-color-ordinary ('partial')",
+    ]
+
+
 def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert len(TIER_REQUIRED_NODEIDS["remote"]) == 11
     assert len(TIER_REQUIRED_NODEIDS["local"]) == 18

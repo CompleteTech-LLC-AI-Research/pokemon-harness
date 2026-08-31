@@ -40,13 +40,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
-import os
 import sys
+import time
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
-os.environ.setdefault("POKERED_SKIP_SHA1", "1")
 
 from pokered_harness.session import Session
 
@@ -107,6 +106,8 @@ _VERSIONS = {
 }
 _DEFAULT_VARIANTS = {"red": "color", "blue": "color", "yellow": "cgb"}
 _KNOWN_VERSIONS = sorted({v for v, _ in _VERSIONS})
+_DEFAULT_TIMEOUT_SECONDS = 180.0
+_DEFAULT_MAX_MOVEMENT_STEPS = 64
 
 
 def _repo_rom_root() -> Path:
@@ -152,45 +153,141 @@ def _default_out(version: str, variant: str) -> Path:
     )
 
 
-def produce(source: Path, rom: Path, sym: Path, out: Path) -> None:
+def _check_budget(deadline: float, phase: str) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError(
+            f"fixture production exceeded the {phase} deadline; "
+            "check that the source state was captured from the selected ROM"
+        )
+
+
+def _press_and_step(
+    session: Session,
+    button: str,
+    *,
+    deadline: float,
+    movement_steps: int,
+    max_movement_steps: int,
+    step_frames: int = 20,
+) -> int:
+    if movement_steps >= max_movement_steps:
+        raise TimeoutError(
+            "fixture production exceeded the movement-step budget; "
+            "check that the source state was captured from the selected ROM"
+        )
+    _check_budget(deadline, "movement")
+    session.press(button, duration=8)
+    session.step(step_frames)
+    _check_budget(deadline, "movement")
+    return movement_steps + 1
+
+
+def produce(
+    source: Path,
+    rom: Path,
+    sym: Path,
+    out: Path,
+    *,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_movement_steps: int = _DEFAULT_MAX_MOVEMENT_STEPS,
+) -> None:
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
+    if max_movement_steps <= 0:
+        raise ValueError("max_movement_steps must be greater than zero")
+
+    from pokered_harness.config import load_versions
+
+    pins = load_versions(_REPO / "VERSIONS.md")
+    expected_rom_sha1 = pins.sha1_for_path(rom)
+    expected_symbol_sha1 = pins.symbol_sha1_for_path(sym)
+    if expected_rom_sha1 is None:
+        raise ValueError(f"ROM is not pinned in VERSIONS.md: {rom}")
+    if expected_symbol_sha1 is None:
+        raise ValueError(f"symbol file is not pinned in VERSIONS.md: {sym}")
+
+    deadline = time.monotonic() + timeout_seconds
     _buf = io.StringIO()
+    session: Session | None = None
     with contextlib.redirect_stdout(_buf), contextlib.redirect_stderr(_buf):
-        session = Session.from_files(rom, sym)
-        session.load_state(source.read_bytes())
-        session.step(10)  # let overworld settle
+        try:
+            session = Session.from_files(
+                rom,
+                sym,
+                expected_rom_sha1=expected_rom_sha1,
+                expected_symbol_sha1=expected_symbol_sha1,
+                expected_pyboy_version=pins.pyboy_version,
+                expected_pyboy_revision=pins.pyboy_revision,
+            )
+            session.load_state(source.read_bytes())
+            _check_budget(deadline, "initialization")
+            session.step(10)  # let overworld settle
+            _check_budget(deadline, "initialization")
 
-        # UP x4 — walk to counter row (caps at y=3 in front of nurse at (4,2))
-        for _ in range(4):
-            session.press("up", duration=8)
-            session.step(20)
-        # LEFT x2 — route around the nurse block at (4,3)
-        for _ in range(2):
-            session.press("left", duration=8)
-            session.step(20)
-        # DOWN — step to y=4 (open row), sidestepping nurse
-        session.press("down", duration=8)
-        session.step(20)
-        # RIGHT until x=11 — the receptionist's adjacent tile
-        while session.read_game_state().overworld.x < 11:
-            session.press("right", duration=8)
-            session.step(20)
-        # UP — step onto (11, 3) facing the receptionist
-        session.press("up", duration=8)
-        session.step(30)
+            movement_steps = 0
+            # UP x4 — walk to counter row (caps at y=3 in front of nurse at (4,2))
+            for _ in range(4):
+                movement_steps = _press_and_step(
+                    session,
+                    "up",
+                    deadline=deadline,
+                    movement_steps=movement_steps,
+                    max_movement_steps=max_movement_steps,
+                )
+            # LEFT x2 — route around the nurse block at (4,3)
+            for _ in range(2):
+                movement_steps = _press_and_step(
+                    session,
+                    "left",
+                    deadline=deadline,
+                    movement_steps=movement_steps,
+                    max_movement_steps=max_movement_steps,
+                )
+            # DOWN — step to y=4 (open row), sidestepping nurse
+            movement_steps = _press_and_step(
+                session,
+                "down",
+                deadline=deadline,
+                movement_steps=movement_steps,
+                max_movement_steps=max_movement_steps,
+            )
+            # RIGHT until x=11 — the receptionist's adjacent tile
+            while session.read_game_state().overworld.x < 11:
+                movement_steps = _press_and_step(
+                    session,
+                    "right",
+                    deadline=deadline,
+                    movement_steps=movement_steps,
+                    max_movement_steps=max_movement_steps,
+                )
+            # UP — step onto (11, 3) facing the receptionist
+            movement_steps = _press_and_step(
+                session,
+                "up",
+                deadline=deadline,
+                movement_steps=movement_steps,
+                max_movement_steps=max_movement_steps,
+                step_frames=30,
+            )
 
-        gs = session.read_game_state()
-        assert gs.overworld.map_id == 0x40, (
-            f"expected map 0x40 (Cerulean Pokecenter), got 0x{gs.overworld.map_id:02x}"
-        )
-        assert (gs.overworld.x, gs.overworld.y) == (11, 3), (
-            f"expected final position (11, 3), got "
-            f"({gs.overworld.x}, {gs.overworld.y})"
-        )
+            gs = session.read_game_state()
+            if gs.overworld.map_id != 0x40:
+                raise RuntimeError(
+                    "expected map 0x40 (Cerulean Pokecenter), got "
+                    f"0x{gs.overworld.map_id:02x}"
+                )
+            if (gs.overworld.x, gs.overworld.y) != (11, 3):
+                raise RuntimeError(
+                    "expected final position (11, 3), got "
+                    f"({gs.overworld.x}, {gs.overworld.y})"
+                )
 
-        payload = session.save_state()
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(payload)
-        session.close()
+            payload = session.save_state()
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(payload)
+        finally:
+            if session is not None:
+                session.close()
     print(
         f"wrote {out} ({len(payload)} bytes); "
         f"player at map=0x{gs.overworld.map_id:02x} "
@@ -218,6 +315,21 @@ def main() -> None:
     ap.add_argument("--rom", type=Path, default=None)
     ap.add_argument("--sym", type=Path, default=None)
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=_DEFAULT_TIMEOUT_SECONDS,
+        help=f"wall-clock production budget (default: {_DEFAULT_TIMEOUT_SECONDS:g}s)",
+    )
+    ap.add_argument(
+        "--max-movement-steps",
+        type=int,
+        default=_DEFAULT_MAX_MOVEMENT_STEPS,
+        help=(
+            "maximum directional inputs before failing (default: "
+            f"{_DEFAULT_MAX_MOVEMENT_STEPS})"
+        ),
+    )
     args = ap.parse_args()
     v = args.version
     variant = args.variant or _DEFAULT_VARIANTS[v]
@@ -244,7 +356,17 @@ def main() -> None:
         raise SystemExit(f"ROM not found: {rom}")
     if not sym.exists():
         raise SystemExit(f"sym file not found: {sym}")
-    produce(source, rom, sym, out)
+    try:
+        produce(
+            source,
+            rom,
+            sym,
+            out,
+            timeout_seconds=args.timeout_seconds,
+            max_movement_steps=args.max_movement_steps,
+        )
+    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+        raise SystemExit(f"fixture production failed: {exc}") from exc
 
 
 if __name__ == "__main__":

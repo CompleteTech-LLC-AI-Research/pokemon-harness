@@ -89,6 +89,17 @@ EVIDENCE_SCHEMA_VERSION = 1
 EVIDENCE_REPORT_FILENAME = "gate-report.json"
 EVIDENCE_TEXT_FILENAME = "gate-report.txt"
 EVIDENCE_MANIFEST_FILENAME = "evidence-manifest.json"
+FIXTURE_MANIFEST_RELATIVE_PATH = Path("release-evidence/fixture-manifest.json")
+CERTIFIED_FIXTURE_IDS = frozenset(
+    {
+        "red-color-ordinary",
+        "red-color-battle",
+        "blue-color-ordinary",
+        "blue-color-battle",
+        "yellow-cgb-ordinary",
+        "yellow-cgb-battle",
+    }
+)
 GATE_CONTROLLED_ENVIRONMENT = (
     "PYTEST_ADDOPTS",
     "PYTEST_PLUGINS",
@@ -1171,6 +1182,161 @@ def run_collection_preflight(
     return results
 
 
+def run_fixture_manifest_validation(
+    *,
+    project_root: Path,
+    python_executable: Path,
+    environment: dict[str, str],
+    fixture_root: Path,
+    validate_bytes: bool,
+    timeout_seconds: float = COLLECTION_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Validate the tracked external-fixture manifest with the gate runtime."""
+
+    manifest_path = project_root / FIXTURE_MANIFEST_RELATIVE_PATH
+    validator_path = project_root / "scripts" / "validate_fixture_manifest.py"
+    mode = "byte" if validate_bytes else "schema"
+    command = [
+        str(python_executable),
+        str(validator_path),
+        "--manifest",
+        str(manifest_path),
+    ]
+    if validate_bytes:
+        command.extend(("--fixture-root", str(fixture_root)))
+    else:
+        command.append("--schema-only")
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=project_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "status": "FAIL",
+            "mode": mode,
+            "returncode": 124 if isinstance(exc, subprocess.TimeoutExpired) else None,
+            "entries": None,
+            "reason": f"fixture manifest validator failed: {type(exc).__name__}: {exc}",
+        }
+
+    output = "\n".join(
+        part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
+    )
+    entries: int | None = None
+    match = re.search(r"validation passed: (\d+) entries", completed.stdout)
+    if match is not None:
+        entries = int(match.group(1))
+    return {
+        "status": "PASS" if completed.returncode == 0 else "FAIL",
+        "mode": mode,
+        "returncode": completed.returncode,
+        "entries": entries,
+        "reason": "" if completed.returncode == 0 else output[-4000:],
+    }
+
+
+def fixture_manifest_provenance_problems(
+    manifest_path: Path,
+    required_ids: Iterable[str] = CERTIFIED_FIXTURE_IDS,
+) -> list[str]:
+    """Return missing or non-verified provenance for certified fixtures."""
+
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [
+            f"fixture manifest provenance could not be read: {type(exc).__name__}: {exc}"
+        ]
+    fixtures = document.get("fixtures") if isinstance(document, dict) else None
+    if not isinstance(fixtures, list):
+        return ["fixture manifest provenance has no fixture list"]
+    by_id = {
+        fixture.get("id"): fixture
+        for fixture in fixtures
+        if isinstance(fixture, dict) and isinstance(fixture.get("id"), str)
+    }
+    problems: list[str] = []
+    for fixture_id in sorted(set(required_ids)):
+        fixture = by_id.get(fixture_id)
+        if fixture is None:
+            problems.append(f"certified fixture is absent from manifest: {fixture_id}")
+            continue
+        provenance = fixture.get("provenance")
+        status = provenance.get("status") if isinstance(provenance, dict) else None
+        if status != "verified":
+            problems.append(
+                f"certified fixture provenance is not verified: {fixture_id} ({status!r})"
+            )
+    return problems
+
+
+def run_matrix_collection_audit(
+    *,
+    project_root: Path,
+    collections: Iterable[CollectionResult],
+) -> dict[str, Any]:
+    """Apply the repository matrix auditor to the gate's collection result."""
+
+    collection_list = list(collections)
+    matrix_path = project_root / "scripts" / "tcp_link_matrix.py"
+    try:
+        namespace = runpy.run_path(str(matrix_path))
+        audit_collection = namespace["audit_collection"]
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        return {
+            "status": "FAIL",
+            "structural_pass": False,
+            "acceptance_matrix_complete": False,
+            "collected": 0,
+            "groups": {},
+            "acceptance_gaps": {},
+            "runtime": "not-run",
+            "reason": f"matrix auditor could not be loaded: {type(exc).__name__}: {exc}",
+        }
+
+    nodeids = collection_list[0].nodeids if collection_list else ()
+    errors = tuple(
+        collection.reason
+        for collection in collection_list
+        if collection.status != "PASS" and collection.reason
+    )
+    skips = tuple(
+        collection.reason
+        for collection in collection_list
+        if collection.status == "PASS" and collection.reason
+    )
+    try:
+        audit = audit_collection(
+            nodeids,
+            collection_errors=errors,
+            collection_skips=skips,
+        )
+    except (TypeError, ValueError) as exc:
+        return {
+            "status": "FAIL",
+            "structural_pass": False,
+            "acceptance_matrix_complete": False,
+            "collected": len(nodeids),
+            "groups": {},
+            "acceptance_gaps": {},
+            "runtime": "not-run",
+            "reason": f"matrix audit failed: {type(exc).__name__}: {exc}",
+        }
+    audit["status"] = (
+        "PASS"
+        if audit.get("structural_pass") and audit.get("acceptance_matrix_complete")
+        else "FAIL"
+    )
+    return audit
+
+
 def _run_collection_command(
     *,
     name: str,
@@ -1575,6 +1741,8 @@ def render_text(
     tiers: list[TierResult],
     gate_problems: list[str],
     overall: str,
+    fixture_manifest: dict[str, Any] | None = None,
+    matrix_audit: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         "Pokémon harness production gate",
@@ -1633,6 +1801,36 @@ def render_text(
         lines.append(
             f"  {asset.status.upper():13} {asset.kind:7} {asset.label}: {asset.path}{detail}"
         )
+
+    if fixture_manifest is not None:
+        lines.append("fixture-manifest:")
+        lines.append(
+            f"  {fixture_manifest.get('status', 'UNKNOWN')}: "
+            f"mode={fixture_manifest.get('mode', 'unknown')} "
+            f"entries={fixture_manifest.get('entries')} "
+            f"returncode={fixture_manifest.get('returncode')}"
+        )
+        if fixture_manifest.get("reason"):
+            lines.append(f"  reason: {fixture_manifest['reason']}")
+
+    if matrix_audit is not None:
+        lines.append("matrix-audit:")
+        lines.append(
+            f"  {matrix_audit.get('status', 'UNKNOWN')}: "
+            f"collected={matrix_audit.get('collected', 0)} "
+            f"structural={'PASS' if matrix_audit.get('structural_pass') else 'FAIL'} "
+            f"acceptance-declaration="
+            f"{'PASS' if matrix_audit.get('acceptance_matrix_complete') else 'FAIL'}"
+        )
+        groups = matrix_audit.get("groups", {})
+        if isinstance(groups, dict):
+            for name, group in groups.items():
+                if isinstance(group, dict):
+                    lines.append(
+                        f"  {name}: {group.get('present', 0)}/{group.get('expected', 0)} collected"
+                    )
+        if matrix_audit.get("reason"):
+            lines.append(f"  reason: {matrix_audit['reason']}")
 
     lines.append("tiers:")
     for tier in tiers:
@@ -1794,6 +1992,58 @@ def _safe_collection(
     return data
 
 
+def _safe_fixture_manifest(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep only bounded, non-path fields from manifest validation."""
+
+    return {
+        "status": result.get("status"),
+        "mode": result.get("mode"),
+        "returncode": result.get("returncode"),
+        "entries": result.get("entries"),
+        "reason": _safe_text(result.get("reason"), limit=4000),
+    }
+
+
+def _safe_matrix_audit(result: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize the matrix auditor while retaining exact coverage counts."""
+
+    safe: dict[str, Any] = {
+        "status": result.get("status"),
+        "structural_pass": result.get("structural_pass"),
+        "acceptance_matrix_complete": result.get("acceptance_matrix_complete"),
+        "collected": result.get("collected"),
+        "runtime": _safe_text(result.get("runtime"), limit=100),
+        "reason": _safe_text(result.get("reason"), limit=2000),
+        "groups": {},
+        "acceptance_gaps": {},
+    }
+    raw_groups = result.get("groups", {})
+    if isinstance(raw_groups, dict):
+        groups: dict[str, Any] = {}
+        for name, raw_group in raw_groups.items():
+            if not isinstance(raw_group, dict):
+                continue
+            groups[str(name)] = {
+                "expected": raw_group.get("expected"),
+                "present": raw_group.get("present"),
+                "missing": [
+                    _safe_diagnostic(item, (), limit=1000)
+                    for item in raw_group.get("missing", ())
+                ],
+            }
+        safe["groups"] = groups
+    raw_gaps = result.get("acceptance_gaps", {})
+    if isinstance(raw_gaps, dict):
+        safe["acceptance_gaps"] = {
+            str(name): [
+                _safe_diagnostic(item, (), limit=1000) for item in entries
+            ]
+            for name, entries in raw_gaps.items()
+            if isinstance(entries, (tuple, list))
+        }
+    return safe
+
+
 def _safe_tier(
     tier: TierResult,
     roots: tuple[tuple[str, Path], ...],
@@ -1828,6 +2078,8 @@ def build_evidence_payload(
     overall: str,
     generated_at: str | None = None,
     evidence_error: str = "",
+    fixture_manifest: dict[str, Any] | None = None,
+    matrix_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the sanitized, metadata-only payload retained by the gate.
 
@@ -1858,6 +2110,10 @@ def build_evidence_payload(
             "diagnostics": "bounded text tails only",
         },
     }
+    if fixture_manifest is not None:
+        payload["fixture_manifest"] = _safe_fixture_manifest(fixture_manifest)
+    if matrix_audit is not None:
+        payload["matrix_audit"] = _safe_matrix_audit(matrix_audit)
     if evidence_error:
         payload["evidence_error"] = _safe_diagnostic(evidence_error, roots, limit=2000)
     return payload
@@ -1928,6 +2184,36 @@ def render_evidence_text(payload: dict[str, Any]) -> str:
             f"{asset.get('kind', ''):7} {asset.get('label', '')}: "
             f"{asset.get('path', '')}{suffix}"
         )
+
+    fixture_manifest = payload.get("fixture_manifest")
+    if isinstance(fixture_manifest, dict):
+        lines.append("fixture-manifest:")
+        lines.append(
+            f"  {fixture_manifest.get('status', 'UNKNOWN')}: "
+            f"mode={fixture_manifest.get('mode', 'unknown')} "
+            f"entries={fixture_manifest.get('entries')} "
+            f"returncode={fixture_manifest.get('returncode')}"
+        )
+        if fixture_manifest.get("reason"):
+            lines.append(f"  reason: {fixture_manifest['reason']}")
+
+    matrix_audit = payload.get("matrix_audit")
+    if isinstance(matrix_audit, dict):
+        lines.append("matrix-audit:")
+        lines.append(
+            f"  {matrix_audit.get('status', 'UNKNOWN')}: "
+            f"collected={matrix_audit.get('collected', 0)} "
+            f"structural={'PASS' if matrix_audit.get('structural_pass') else 'FAIL'} "
+            f"acceptance-declaration="
+            f"{'PASS' if matrix_audit.get('acceptance_matrix_complete') else 'FAIL'}"
+        )
+        groups = matrix_audit.get("groups", {})
+        if isinstance(groups, dict):
+            for name, group in groups.items():
+                if isinstance(group, dict):
+                    lines.append(
+                        f"  {name}: {group.get('present', 0)}/{group.get('expected', 0)} collected"
+                    )
 
     lines.append("tiers:")
     for tier in payload.get("tiers", []):
@@ -2153,12 +2439,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     required_nodeids_by_tier, nodeid_config_error = load_required_nodeids(project_root)
     if nodeid_config_error:
         gate_problems.append(nodeid_config_error)
-    collections = run_collection_preflight(
-        project_root=project_root,
-        python_executable=python_executable,
-        environment=environment,
-        timeout_seconds=args.timeout_seconds or COLLECTION_TIMEOUT_SECONDS,
-    )
 
     if args.unit_only:
         selected = ["unit", "timing"]
@@ -2166,6 +2446,54 @@ def main(argv: Sequence[str] | None = None) -> int:
         selected = list(dict.fromkeys(args.tier))
     else:
         selected = list(DEFAULT_TIERS)
+    real_rom_scope = bool(set(selected) & REQUIRED_TIER_ASSETS)
+
+    collections = run_collection_preflight(
+        project_root=project_root,
+        python_executable=python_executable,
+        environment=environment,
+        timeout_seconds=args.timeout_seconds or COLLECTION_TIMEOUT_SECONDS,
+    )
+
+    fixture_manifest = run_fixture_manifest_validation(
+        project_root=project_root,
+        python_executable=python_executable,
+        environment=environment,
+        fixture_root=fixture_root,
+        validate_bytes=real_rom_scope,
+        timeout_seconds=args.timeout_seconds or COLLECTION_TIMEOUT_SECONDS,
+    )
+    if fixture_manifest["status"] != "PASS":
+        gate_problems.append(
+            "fixture manifest validation failed: "
+            f"mode={fixture_manifest['mode']} "
+            f"{fixture_manifest.get('reason') or 'unknown error'}"
+        )
+    elif real_rom_scope:
+        gate_problems.extend(
+            fixture_manifest_provenance_problems(
+                project_root / FIXTURE_MANIFEST_RELATIVE_PATH
+            )
+        )
+
+    matrix_audit = run_matrix_collection_audit(
+        project_root=project_root,
+        collections=collections,
+    )
+    if real_rom_scope:
+        if not matrix_audit.get("structural_pass"):
+            gate_problems.append("link matrix structural audit failed")
+        if not matrix_audit.get("acceptance_matrix_complete"):
+            gaps = matrix_audit.get("acceptance_gaps", {})
+            gap_counts = ", ".join(
+                f"{name}={len(entries)}"
+                for name, entries in gaps.items()
+                if isinstance(entries, (tuple, list))
+            )
+            gate_problems.append(
+                "strict acceptance matrix declaration is incomplete"
+                + (f" ({gap_counts})" if gap_counts else "")
+            )
 
     required_problems = required_asset_problems(assets)
     tiers: list[TierResult] = []
@@ -2218,6 +2546,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             tiers=tiers,
             gate_problems=gate_problems,
             overall=overall,
+            fixture_manifest=fixture_manifest,
+            matrix_audit=matrix_audit,
         )
         try:
             write_evidence_bundle(evidence_dir, evidence_payload)
@@ -2239,6 +2569,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "tiers": [_jsonable_tier(tier) for tier in tiers],
             "gate_problems": gate_problems,
             "overall": overall,
+            "fixture_manifest": fixture_manifest,
+            "matrix_audit": matrix_audit,
         }
         if evidence_error:
             payload["evidence_error"] = evidence_error
@@ -2255,6 +2587,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 tiers=tiers,
                 gate_problems=gate_problems,
                 overall=overall,
+                fixture_manifest=fixture_manifest,
+                matrix_audit=matrix_audit,
             )
         )
     return 0 if overall == "PASS" else 1
