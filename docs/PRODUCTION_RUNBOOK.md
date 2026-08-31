@@ -1,26 +1,38 @@
 # Production runbook
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
-checkout. The baseline at `e219fb5` was not certified. The historical audited
-implementation revision is
-`1046a541e0003923aec6000b6b383c6eaafeaa48`; its complete real-ROM gate was
-rerun once at that exact clean revision. The current candidate has since
-changed the link scheduler, transport lifecycle, battle driver, and fixture
-evidence, so the historical counts below are evidence boundaries rather than
-current sign-off. Uncommitted worktree changes are excluded from the candidate
-record.
+checkout. The baseline at `e219fb5` was not certified. Unless labelled
+historical, the current candidate facts refer to `c3c1d8e` on 2026-08-31.
+Uncommitted worktree changes and external BYO assets are excluded from the
+tracked source tree.
 
-The historical full-gate snapshot is unit 372/372, timing 35/35 across five
-repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
-2/2. The current source-hardening candidate's functional changes reach
-`3aad196`. Its current full-gate snapshot is unit 457/457, local 46/46,
-remote 13/13, strict trade 2/2, strict battle 2/2, and timing 35/35 across
-five repetitions. The MCP lifecycle suite passes 74/74. The required current
-tiers are green for the tested roles; broader gameplay rows and load-stable
-full-matrix coverage remain unverified.
-Symbol hashes and audited generator provenance are in
-[`VERSIONS.md`](../VERSIONS.md). Overall status is `PARTIAL`; the exact open
-items are listed in [the release checklist](RELEASE_CHECKLIST.md).
+The asset-free gate at `c3c1d8e` passed unit 469/469 and timing 35/35 across
+five repetitions; its collection preflight collected 594 tests and its scoped
+result was `PASS`. This proves only the ROM-free and timing scope. The matrix
+audit in that run collected nine ordered pairs, six reversed-role rows, nine
+local variant rows, and two strict trade plus two strict battle entry points,
+but the strict acceptance declaration was incomplete and matrix runtime was
+`NOT RUN`. Lane B's final matrix report is still required.
+
+A prior controlled real-ROM snapshot at `3aad196` recorded local 46/46,
+remote 13/13, strict trade 2/2, and strict battle 2/2 for the canonical
+color-Red/Yellow local and color-Red/color-Blue remote roles. Those results
+are historical evidence boundaries, not a current `c3c1d8e` full-gate result.
+Symbol hashes and fixture byte/provenance records are in
+[`VERSIONS.md`](../VERSIONS.md) and the tracked
+[`fixture-manifest.json`](../release-evidence/fixture-manifest.json). Overall
+status is `PARTIAL`; the exact open items are listed in [the release
+checklist](RELEASE_CHECKLIST.md).
+
+Status semantics:
+
+- `PASS` is scoped to the named command and means clean collection plus no
+  failure, error, skip, xfail, or timeout in that selected scope.
+- `PARTIAL` means that controlled evidence exists but a required release
+  condition remains open.
+- `PRODUCTION-READY` requires the full gate with all required BYO assets,
+  complete strict matrix declaration and runtime coverage, retained evidence,
+  and a clean candidate with no open blocker.
 
 ## 1. Start from a clean checkout
 
@@ -92,21 +104,38 @@ files:
 tests/fixtures/link/
 ├── red/
 │   ├── cable_club.state
-│   └── cable_club-battle.state
+│   ├── cable_club-battle.state
+│   ├── cable_club-vanilla.state
+│   └── cable_club-battle-vanilla.state
 ├── blue/
 │   ├── cable_club.state
-│   └── cable_club-battle.state
+│   ├── cable_club-battle.state
+│   ├── cable_club-vanilla.state
+│   └── cable_club-battle-vanilla.state
 └── yellow/
     ├── cable_club.state
     └── cable_club-battle.state
 ```
 
-The default `cable_club.state` files support the ordinary Cable Club path;
-the `cable_club-battle.state` files are separate legal battle-start states.
-The production gate preflight lists the three default files, while the strict
-battle tests independently require the three battle files. A missing battle
-file therefore produces a required-tier skip/failure rather than a valid
-battle result.
+The default `cable_club.state` files support the ordinary Cable Club path; the
+`cable_club-battle.state` files are separate derived battle-start states. The
+two `*-vanilla.state` pairs are recorded in the manifest but remain partial
+because their ordinary source-state provenance is not established. The
+production gate preflight checks the three canonical ordinary files, strict
+acceptance tests require the three canonical battle files, and the manifest
+byte validator checks all ten listed entries. A missing required file or a
+manifest hash mismatch is a blocked/failed release result, never a passing
+skip.
+
+For the currently controlled stateful scope, the BYO asset set is:
+
+- five pinned ROMs: stock and color Red, stock and color Blue, and Yellow;
+- three matching symbol files: Red, Blue, and Yellow; and
+- six canonical color-Red, color-Blue, and Yellow ordinary/battle states.
+
+Supply the two vanilla ordinary/battle pairs as well when validating the
+checked-in ten-entry manifest. They are not a supported release scope until a
+vanilla-ROM-matching source state is supplied and reproduced.
 
 Compare every ROM used by a test or launch to the corresponding SHA-1 in
 [`VERSIONS.md`](../VERSIONS.md). For example:
@@ -117,6 +146,13 @@ sha1sum rom/blue/pokemon-blue.gb rom/blue/pokemon-blue-color.gb
 sha1sum rom/yellow/pokemon-yellow.gbc
 sha1sum rom/red/pokemon-red.sym rom/blue/pokemon-blue.sym rom/yellow/pokemon-yellow.sym
 sha1sum tests/fixtures/link/*/*.state
+```
+
+Then validate the manifest's exact sizes and SHA-1/SHA-256 values:
+
+```bash
+python scripts/validate_fixture_manifest.py \
+  --fixture-root "$PWD/tests/fixtures/link"
 ```
 
 The matching `.sym` file must come from the matching game source/build. Use the
@@ -156,31 +192,61 @@ python scripts/production_gate.py \
   --format text
 ```
 
+For the asset-free smoke used to validate a source-only checkout, run the
+scoped gate explicitly:
+
+```bash
+EVIDENCE_DIR="$(mktemp -d)"
+python scripts/production_gate.py \
+  --repo-root "$PWD" \
+  --python "$(command -v python)" \
+  --unit-only \
+  --repeat-timing 5 \
+  --evidence-dir "$EVIDENCE_DIR" \
+  --format text
+```
+
+At `c3c1d8e`, this command collected 594 tests, passed unit 469/469, passed
+timing 35/35 in each of five repetitions, and returned scoped `PASS`. It also
+performed schema-only validation of the ten-entry fixture manifest. Because
+`--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
+load save states, exercise MCP with a real ROM, or run link gameplay; it is not
+a production sign-off.
+
 `--evidence-dir` writes `gate-report.json`, `gate-report.txt`, and
 `evidence-manifest.json`. The bundle contains metadata, asset hashes and
 sizes, runtime identity, tier results, and bounded/redacted diagnostics; it
 does not copy ROM or fixture bytes, inherit environment variables into the
 report, or retain absolute local paths. The manifest hashes the two report
 files so a retained bundle can be checked for accidental modification. A
-failed or blocked run still writes its status and diagnostics. `--unit-only`
-proves only the ROM-free and timing tiers; it is not a production sign-off.
-The default gate checks five pinned ROM paths, three symbol paths, and three
-default fixture paths before running all required tiers.
+failed or blocked run still writes its status and diagnostics. The default
+gate checks five pinned ROM paths, three symbol paths, the ten manifest state
+entries, and all required real-ROM tiers. It also fails closed when the strict
+acceptance matrix declaration is incomplete.
 
 The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
 explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. At the current candidate boundary (`3aad196`),
-the default product audit reports 79 findings after safe mechanical cleanup. An
-explicit `ruff check vendor/pyboy-src` still reports 227 upstream findings;
-the vendored runtime is instead covered by revision pinning, compileall, and
-import/serial-contract tests. Product lint cleanup remains a release task even
-when the scoped production gate is green. The current full-gate counts below
-must not be read as evidence that the broad suite or product lint gate is
-clean.
+default `ruff check .` audit. At `c3c1d8e`, `ruff check .` reports seven
+findings in the product surface, so lint is not a release pass. The vendored
+runtime is covered by revision pinning, compile/import checks, and the serial
+contract rather than by the product lint count.
 
 The release tree includes `tests/__init__.py`; otherwise environments that do
 not treat `tests/` as a namespace package can fail collection. Run both
 invocation forms for every release candidate.
+
+The standalone matrix command is collection-only and intentionally returns
+nonzero while the acceptance declaration is incomplete:
+
+```bash
+python scripts/tcp_link_matrix.py \
+  --repo-root "$PWD" \
+  --python "$(command -v python)" \
+  --format text
+```
+
+It proves presence of ordered/parameterized node IDs only. Runtime is always
+reported as `NOT RUN`; it must not be described as gameplay coverage.
 
 For a machine-readable report plus the human-readable report and manifest, run
 the gate from the repository root:
@@ -279,14 +345,14 @@ python -m pytest -q -ra \
 ```
 
 The diagnostic matrix in this module is broader than the release acceptance
-scope. The historical audit reached LinkMenu and completed the diagnostic
-trade route for all nine R/B/Y version orderings. Seven of nine diagnostic
-battle rows reached a complete turn at that historical boundary; `blue↔blue`
-and the `blue→red` attach ordering did not reach both move-exchange hooks. A
-current targeted re-audit reaches LinkMenu for Blue↔Blue and Blue→Red in 520
-frames. The current strict Red↔Yellow trade and battle cases pass at the
-library's default scheduler slice; the tighter 64-cycle rerun also passes.
-The remaining matrix is not certified. The strict local cases are:
+scope. A historical audit reached LinkMenu and completed the diagnostic trade
+route for all nine R/B/Y version orderings. Seven of nine diagnostic battle
+rows reached a complete turn at that historical boundary; `blue↔blue` and the
+`blue→red` attach ordering did not reach both move-exchange hooks. A targeted
+re-audit reached LinkMenu for Blue↔Blue and Blue→Red, but that is not a strict
+gameplay result. A prior controlled run passed the strict Red↔Yellow trade and
+battle cases at the library's default scheduler slice; the remaining matrix is
+not certified. The strict local cases are:
 
 ```bash
 python -m pytest -q \
@@ -297,11 +363,11 @@ python -m pytest -q \
 They require the pinned source-compatible PyBoy runtime, ROM-specific Cable
 Club fixtures, and matching symbols. The trade case compares the complete
 game-owned party-mon records before and after the exchange; the battle case
-uses a pre-generated legal three-mon fixture and requires both sides to reach
-move exchange and turn execution. It does not require the optional damage
-calculation hook. Neither case writes party or battle state to make the
-assertion pass. A skipped or partially parameterized matrix is not full
-Red/Blue/Yellow coverage.
+uses a legal derived three-mon fixture and requires both sides to reach move
+exchange and turn execution. It does not require the optional damage
+calculation hook. Neither case writes party or battle state during acceptance.
+A skipped or partially parameterized matrix is not full Red/Blue/Yellow
+coverage, and the current strict declaration remains incomplete pending Lane B.
 
 ### Tier E: remote transport and subprocess acceptance/diagnostics
 
@@ -324,15 +390,17 @@ python -m pytest -q -ra \
   tests/test_pyboy_link_session_subprocess.py
 ```
 
-The LinkMenu test is a transport smoke test. The strict subprocess trade test
-uses cooperative phase rendezvous and compares complete party-mon records; its
-current full-gate run passes, while concurrent load stability remains open. The
-strict subprocess battle test requires both processes to
+The LinkMenu test is a transport smoke test. A prior controlled strict
+subprocess trade run used cooperative phase rendezvous and compared complete
+party-mon records; concurrent load stability remains open. The strict
+subprocess battle test requires both processes to
 reach move exchange and execution, and now selects LinkMenu through ordinary
 directional/A input without RAM writes or selection hooks. Both payloads travel
 through native bit-level serial traffic, and the tests reject the out-of-band
 exchange counter. Record both child traces and the exact deadline when
-investigating a regression.
+investigating a regression. These results cover only the canonical color-Red
+listener/internal-clock and color-Blue connector/external-clock roles; they do
+not close the unrun ordered pairs or reversed roles.
 
 The native MCP link path only installs the pinned PyBoy serial backend and
 transport callbacks. It must not seed `hSerialConnectionStatus` (the ROM-owned
@@ -346,7 +414,7 @@ is not production acceptance evidence.
 Save states are emulator artifacts and are tied to the exact ROM bytes. Keep
 them local under `tests/fixtures/link/<version>/` and never commit them.
 
-The producer is:
+The bounded, pinned ordinary-fixture producer is:
 
 ```bash
 python scripts/produce_cable_club_fixture.py --help
@@ -362,7 +430,9 @@ python scripts/produce_cable_club_fixture.py \
   --source <yellow-cerulean-pc.state> \
   --rom rom/yellow/pokemon-yellow.gbc \
   --sym rom/yellow/pokemon-yellow.sym \
-  --out tests/fixtures/link/yellow/cable_club.state
+  --out tests/fixtures/link/yellow/cable_club.state \
+  --timeout-seconds 180 \
+  --max-movement-steps 64
 ```
 
 For stock Red or Blue use `--variant vanilla`, a vanilla-ROM-captured source,
@@ -370,14 +440,38 @@ and an output named `cable_club-vanilla.state`. For the default Red/Blue color
 variant use `--variant color` and `cable_club.state`. There is no separate
 Yellow producer. Successful fixture generation proves only that the state
 lands at the producer's expected map/tile; it does not prove a trade or battle.
+The producer validates the selected ROM and symbols against `VERSIONS.md`,
+uses the pinned source PyBoy version and fork revision, and fails when either
+the wall-clock or movement budget is exhausted. It does not set or require
+`POKERED_SKIP_SHA1=1`.
 
-The producer does not create `cable_club-battle.state`. Capture a separate
-legal three-mon battle-start state for each exact ROM and place it beside the
-ordinary fixture with that filename. Do not repair a fixture by writing party,
-battle, or link state after capture; if a state was captured against another
-ROM variant, regenerate it. The producer currently enables its own diagnostic
-SHA-1 bypass while creating a state; never carry `POKERED_SKIP_SHA1=1` into
-the acceptance or release commands.
+The tracked battle-fixture utility derives immutable battle-start states from
+ordinary fixtures. It copies the lead record into a legal multi-mon party,
+repairs zero-PP lead moves, validates the result, and closes the emulator
+before writing the output. Acceptance loads the resulting file and does not
+perform this preparation in emulator RAM. Prepare the canonical color rows in
+an external output root with:
+
+```bash
+BATTLE_OUTPUT_ROOT="$(mktemp -d)"
+python scripts/prepare_battle_cable_club_fixtures.py \
+  --repo-root "$PWD" \
+  --rom-root "$PWD/rom" \
+  --fixture-root "$PWD/tests/fixtures/link" \
+  --output-root "$BATTLE_OUTPUT_ROOT" \
+  --variants red_color blue_color yellow
+```
+
+The two vanilla battle rows may be generated with `red_gb` and `blue_gb`, but
+they remain `PARTIAL` until their ordinary source state is proven to match the
+vanilla ROM. The exact ten-entry hashes, source-state records, and status
+values are in the fixture manifest. Validate them with:
+
+```bash
+python scripts/validate_fixture_manifest.py --schema-only
+python scripts/validate_fixture_manifest.py \
+  --fixture-root "$PWD/tests/fixtures/link"
+```
 
 ## 6. Launch MCP explicitly
 
@@ -438,24 +532,30 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current full gate passes unit 457/457, local 46/46, remote 13/13,
-   strict trade 2/2, strict battle 2/2, and timing 35/35 across five
-   repetitions. The broader Blue/Red/Yellow gameplay matrix is not certified,
-   and Blue↔Blue and Blue→Red remain diagnostic only for strict acceptance.
-2. A complete sanitized evidence bundle was generated outside the checkout by
-   the full gate with `--evidence-dir`; it still needs to be retained in the
-   release evidence store and associated with the pushed commit.
-3. The current Lane G product lint audit leaves 79 findings under the locked
-   default `ruff check .` boundary; an explicit vendored-runtime audit reports
-   227 findings, and the broad suite is not a clean production gate.
-4. The five-row single-session matrix, reversed listener/connector roles,
-   native-platform builds, battle-fixture provenance, and an independent review
-   remain incomplete.
+1. The current `c3c1d8e` gate result is only the asset-free scoped result:
+   unit 469/469 and timing 35/35 across five repetitions. No current full
+   real-ROM gate result is claimed here. The prior controlled stateful
+   snapshot covers only the canonical color-Red/Yellow local and
+   color-Red/color-Blue remote roles.
+2. The strict matrix declaration is incomplete: the collection audit has
+   nine ordered pairs, six reversed-role rows, and nine local variant rows,
+   but 16 supported trade cases and 16 supported battle cases lack strict
+   entry points. Matrix runtime is `NOT RUN`, and Lane B's final report is
+   required before this boundary changes.
+3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
+   reproduction evidence, while the vanilla ordinary source provenance is
+   `PARTIAL`. The manifest is external and untracked; its complete byte
+   validation and a retained sanitized evidence bundle still need to be
+   associated with the release candidate.
+4. `ruff check .` reports seven product findings at `c3c1d8e`; the broad suite,
+   all advertised single-session rows, reversed roles, native-platform
+   coverage, load-stable full-matrix behavior, and independent review remain
+   open.
 5. Remote TCP has no authentication or encryption. Loopback-only operation is
-   enforced and is the only supported network boundary; cross-host operation is
-   blocked until secure transport is added.
+   enforced and is the only supported network boundary; cross-host operation
+   is blocked until secure transport is added.
 
-The smallest next actions are to retain complete raw gate output alongside the
-current sanitized audit record, capture battle-fixture provenance, decide and
-test the supported per-ROM/role matrix, resolve or
-explicitly scope the lint gate, and obtain independent/native-platform review.
+The smallest next actions are to obtain Lane B's complete declaration/runtime
+report, run the full gate with all required BYO assets, retain its sanitized
+and raw output, resolve or explicitly scope the remaining matrix and lint
+items, and obtain independent/native-platform review.

@@ -1,200 +1,192 @@
 # Release checklist
 
-Use this checklist for a proposed release of `pokered-harness`. A checked
-source pin or passing unit test is not a substitute for the real-ROM and
-runtime evidence required by the relevant capability.
+Use this checklist for a proposed `pokered-harness` release. A source pin,
+fixture hash, or passing unit test is not a substitute for the real-ROM and
+runtime evidence required by the capability being advertised.
 
-## Current audit status
+## Status semantics
 
-The baseline at `e219fb5` (2026-08-29) was not production-ready. The
-historical audited implementation revision is
-`1046a541e0003923aec6000b6b383c6eaafeaa48`; it addressed the collection
-boundary, portable `.mcp.json`, bundled PyBoy source runtime, path-aware ROM
-pinning, native local/TCP serial attachment, teardown, dependency pinning, and
-tiered gate reporting.
+- `PASS` is scoped to one named command or tier. It requires clean collection
+  and no failure, error, skip, xfail, or timeout in that scope.
+- `PARTIAL` means that controlled evidence exists but one or more release
+  conditions remain open.
+- `PRODUCTION-READY` requires a clean candidate, all required BYO assets, a
+  complete strict acceptance declaration and runtime matrix, retained evidence,
+  and no open blocker.
 
-Evidence provenance matters: the complete real-ROM gate was rerun at that exact
-clean implementation revision after all runtime integration commits. The
-current candidate has since changed runtime/test behavior, including the link
-scheduler and battle driver, so the full-gate counts below are historical
-implementation-revision evidence; they are not current candidate sign-off and
-the complete output is not retained in this tree as a release evidence bundle.
+## Current audit snapshot
 
-Full-gate snapshot:
+The candidate boundary is `c3c1d8e` (2026-08-31). The asset-free command:
 
-- unit: 372/372 passed;
-- timing: 35/35 passed across five repetitions;
-- local: 46/46 passed; remote: 11/11 passed;
-- strict acceptance tiers: trade 2/2 and battle 2/2 passed;
-- strict local trade: Red/Yellow party-record swap passed;
-- strict local battle: Red/Yellow battle-turn resolution passed; and
-- remote: transport/LinkMenu smoke plus strict Red/Blue subprocess trade and
-  battle passed, including both full party-record swaps and move-turn progress.
+```bash
+EVIDENCE_DIR="$(mktemp -d)"
+python scripts/production_gate.py \
+  --repo-root "$PWD" \
+  --python "$(command -v python)" \
+  --unit-only \
+  --repeat-timing 5 \
+  --evidence-dir "$EVIDENCE_DIR" \
+  --format text
+```
 
-Current candidate rerun evidence (2026-08-31, source-hardening, teardown,
-packaging, gate, lint-boundary, evidence, native trade, and native battle fixes
-included; functional boundary `3aad196`):
+returned scoped `PASS`: collection 594, unit 469/469, and timing 35/35 in
+each of five repetitions. It used bundled source PyBoy 2.7.0, fork
+`c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
+ten-entry fixture manifest. No ROM-backed tier ran in this command.
 
-- exact-head unit: 457/457 passed;
-- timing: 35/35 passed across five repetitions;
-- exact-head stateful local: 46/46 passed at the default scheduler slice;
-- exact-head remote: 13/13 passed, including the LinkMenu subprocess row for
-  the canonical color-Red listener and color-Blue connector roles;
-- strict native trade: 2/2 passed;
-- strict no-hook Red/Blue remote battle: 2/2 passed with ordinary menu input
-  and native serial move exchange;
-- current MCP lifecycle: 74/74 passed; and
-- the current full gate is green for every required tier and all pinned assets.
+The same collection audit found all nine ordered version pairs, six
+reversed-role rows, nine local variant rows, and two strict trade plus two
+strict battle entry points. It reported 16 supported trade cases and 16
+supported battle cases without strict entry points, and matrix runtime was
+`NOT RUN`. Lane B's final matrix report is required before the acceptance
+boundary can be called complete.
 
-These current counts supersede the corresponding historical unit count for
-this candidate. The exact-head fast and local/remote reruns were collected at
-functional source boundary `3aad196`. The intervening functional commits
-harden runtime bootstrap, MCP lifecycle/cancellation, gate coverage, lint
-boundaries, native trade/battle drivers, and evidence verification. Sanitized
-per-tier evidence bundles were retained outside the checkout with
-`--evidence-dir`; the complete current bundle still needs to be retained in
-the release evidence store rather than committed beside the source.
+A prior controlled real-ROM snapshot recorded local 46/46, remote 13/13,
+strict trade 2/2, and strict battle 2/2 for the canonical color-Red/Yellow
+local and color-Red/color-Blue remote roles. Those counts are historical
+evidence boundaries, not a current `c3c1d8e` full-gate result.
 
-The local passes are real stateful acceptance evidence for the exact color-Red /
-Yellow fixture pair. The remote transport evidence for the exact color-Red
-listener / color-Blue connector subprocess pair is green, including LinkMenu.
-The strict remote trade uses native serial payloads and full party-record checks,
-and the strict remote battle driver uses ordinary menu input without RAM writes
-or selection hooks; these passing tiers do not certify unrun or reversed-role
-gameplay rows.
-
-These are evidence boundaries, not waived checklist items. The candidate
-includes `tests/__init__.py`, the pinned vendor source files, and the gate
-script, and the results were reproduced from the isolated clean checkout.
+**Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
+Yellow fixture bytes have recorded reproduction evidence, and the bounded
+producer plus tracked battle-fixture generator are present. Full sign-off is
+pending strict matrix declaration/runtime coverage, vanilla source provenance,
+the full asset-backed gate, broad-suite and lint closure, reversed roles,
+native-platform evidence, retained complete evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [ ] The release commit is identified and the isolated candidate worktree is
-  clean. BYO ROM/fixture inputs and ignored local build output remain outside
-  the tracked release tree.
-- [x] No ROM, `.sym`, `.sav`, `.state`, screenshot, log, cache, or other
-  ROM-derived artifact is tracked.
-- [ ] The package metadata, README, `VERSIONS.md`, and this checklist agree on
-  the final release commit and supported scope.
-- [x] No machine-local path, placeholder hash, credential, or unreviewed
-  generated file appears in the release documentation.
+- [x] The candidate source boundary is identified as `c3c1d8e`; the final
+  release commit must be recorded after documentation integration.
+- [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
+  logs, caches, and virtual environments are not tracked.
+- [x] Documentation keeps BYO assets and external evidence outside the source
+  tree and uses relative paths or placeholders rather than machine paths.
+- [ ] The final release candidate is clean after the documentation commit and
+  its exact commit is retained with the evidence bundle.
 
 ## Runtime and dependency identity
 
-- [x] Python version is 3.12 or newer and is recorded.
-- [x] `python -m pip check` passes in the release environment.
-- [x] The installed PyBoy runtime is `2.7.0` with harness revision
-  `c565df66c3731fad2856169a90f6bbec99925915`, and the source-runtime build
-  mode is recorded.
-- [x] If link support is claimed, the exact runtime exposes the serial objects
-  used by the link layer and the same runtime is used for every link test.
-- [x] No standalone PyBoy wheel shadows the bundled runtime; the resolved
-  module path and serial contract are recorded by the production gate.
+- [x] Python requirement is `>=3.12`.
+- [x] The distribution bundles source PyBoy `2.7.0` at fork revision
+  `c565df66c3731fad2856169a90f6bbec99925915`.
+- [x] `mcp==1.29.1` is pinned in `pyproject.toml`.
+- [x] The asset-free gate resolved the bundled source runtime and the
+  bit-accurate serial contract.
+- [ ] Any release environment runs `python -m pip check` and records the
+  interpreter/runtime identity from the same environment used by MCP.
+- [ ] Cython/native-accelerator mode has its own serial-attachment and
+  acceptance evidence; source mode remains the only documented production
+  link runtime.
 
-## ROM and symbol identity
+## ROM, symbol, and BYO asset identity
 
-- [x] Every ROM used by the release is legally sourced and matches a SHA-1 in
-  [`VERSIONS.md`](../VERSIONS.md).
-- [x] `POKERED_ROM_SHA1` is explicit for every launch and test run.
-- [x] `POKERED_SKIP_SHA1` is unset for release evidence.
-- [x] Each symbol file matches its ROM and records its own SHA-1, generator
-  source commit, RGBDS version, and build flags in `VERSIONS.md`.
-- [x] Symbol-label checks pass for every claimed game version.
+- [x] `VERSIONS.md` records SHA-1 pins for stock/color Red, stock/color Blue,
+  Yellow, and the three matching symbol files.
+- [ ] The operator attests that every supplied ROM and symbol file is legally
+  obtained and matches the documented pin.
+- [x] Release commands require explicit `POKERED_ROM_SHA1` and do not use
+  `POKERED_SKIP_SHA1=1`.
+- [x] The default real-ROM gate expects five ROMs and three symbols; the
+  acceptance scope additionally requires the canonical ordinary and battle
+  states for color Red, color Blue, and Yellow.
+- [ ] The operator runs the full gate with those assets and records exact
+  hashes, sizes, deadlines, skips, xfails, failures, and teardown results.
 
 ## Test gates
 
-- [x] Both `python -m pytest --collect-only -q` and the
-  `pytest` console-script collection path complete without collection errors.
-- [ ] Product-owned Ruff audit is clean (`ruff check .` leaves 79 findings
-  under the locked Ruff version at the current candidate boundary; the pinned
-  vendored runtime is explicitly audited separately and currently reports 227
-  findings).
-- [ ] The broad suite completes with no unexpected failure, skip, xfail, or
-  timeout: `python -m pytest -q -ra`.
-- [x] ROM-free unit/protocol/transport tests pass.
-- [ ] Real-session boot, state, and MCP stdio tests pass for every claimed
-  single-session ROM variant. A clean wheel installed outside the checkout
-  passed the explicit color-Red MCP smoke 3/3 on 2026-08-31; the wider
-  stock/color Red, stock/color Blue, and Yellow five-row result is an earlier
-  snapshot. The scripted intro golden path remains specific to Red.
-- [x] Local link tests pass with matching ROM-specific fixtures and the
-  release runtime.
-- [x] The required remote transport tier is green with the color-Red
-  listener/internal-clock and color-Blue connector/external-clock roles
-  recorded; the current result is 13/13, including the LinkMenu subprocess row.
-- [ ] Reversed listener/connector roles are independently tested and certified.
-- [x] Native-serial remote trade acceptance is repeatable in separate
-  processes without fixture/runtime skips and asserts both sides received the
-  peer's Pokémon. The current strict trade tier is 2/2; concurrent full-matrix
-  stability remains open.
-- [ ] Remote trade remains green when the required stateful tiers run
-  concurrently; the current strict trade tier passes, but this stability
-  condition has not been certified.
-- [x] The canonical local link battle is claimed only after the release-runtime
-  test resolves a complete turn on both sides; LinkMenu or transport
-  milestones do not count.
-- [x] The exact-head native-serial remote battle acceptance resolves move
-  exchange and execution on both sides in separate processes using ordinary
-  menu input, without RAM writes or a selection hook.
-- [x] The remote trade path is stable without a test-driver LinkMenu selection
-  hook for the certified Red/Blue run; concurrent full-matrix stability remains
-  open. The battle half of this requirement is also complete.
-- [x] Every supported release row has a result or an explicit unsupported
-  classification; the failed diagnostic rows are listed below.
+- [x] Both module and console-script collection paths complete in the scoped
+  `c3c1d8e` gate; 594 tests were collected with no collection errors.
+- [x] ROM-free unit tests pass 469/469 in the scoped gate.
+- [x] Timing tests pass 35/35 across five repetitions in the scoped gate.
+- [ ] `ruff check .` is clean; the current candidate still reports seven
+  product findings.
+- [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
+  xfail, or timeout.
+- [ ] Real-session boot, state, and MCP stdio tests pass for every advertised
+  ROM variant. The clean-wheel 3/3 color-Red smoke is not five-row sign-off.
+- [ ] The full real-ROM local and remote tiers pass on the final candidate
+  with no fixture or runtime skips.
+- [x] Controlled canonical local evidence exists for color Red plus Yellow,
+  including trade and battle assertions.
+- [x] Controlled canonical remote evidence exists for color Red as
+  listener/internal-clock and color Blue as connector/external-clock,
+  including strict trade and battle paths.
+- [ ] The strict acceptance declaration covers every supported ordered pair and
+  its runtime has passed; the current declaration and runtime audit are
+  incomplete pending Lane B.
+- [ ] Reversed listener/connector roles and concurrent load stability are
+  independently certified.
+- [ ] Native-platform/build coverage and an independent release review are
+  complete.
 
-## Fixture provenance
+## Fixture provenance and generation
 
-- [ ] Every Cable Club state, including the separate battle-start states, was
-  captured from the exact ROM bytes it loads with; the current tree lacks a
-  retained battle-fixture provenance record.
-- [ ] Vanilla, color, and Yellow variants use separate, identified fixtures.
-- [ ] Fixture hashes and source-state provenance are in the evidence bundle.
-- [x] The ordinary Cable Club fixtures have a documented producer:
-  [`scripts/produce_cable_club_fixture.py`](../scripts/produce_cable_club_fixture.py)
-  and no missing Yellow-specific producer is cited. The producer does not
-  create the separate battle fixtures.
-- [ ] Fixture files remain untracked and are available to the release runner
-  through a controlled asset mechanism.
+- [x] `release-evidence/fixture-manifest.json` records ten external state
+  entries with sizes, SHA-1/SHA-256 values, expected ROM/SYM pins, source-state
+  records, runtime identity, and command templates.
+- [x] Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
+  fixture bytes have deterministic reproduction evidence.
+- [x] `scripts/produce_cable_club_fixture.py` validates pins and has bounded
+  defaults of 180 seconds and 64 movement steps.
+- [x] `scripts/prepare_battle_cable_club_fixtures.py` is tracked and produces
+  immutable derived battle fixtures; acceptance does not prepare party state
+  in emulator RAM.
+- [ ] Vanilla ordinary source provenance is verified. The retained Red/Blue
+  vanilla source states are not proven to match the vanilla ROM, so vanilla
+  ordinary and derived battle rows remain `PARTIAL`.
+- [ ] The operator validates all ten manifest entries with
+  `python scripts/validate_fixture_manifest.py --fixture-root ...` and keeps
+  the external fixture root available to the release runner.
+- [ ] A retained evidence bundle includes the exact source-state hashes,
+  capture/generation commands, runtime identity, and original-vs-verification
+  timestamp distinction.
 
 ## MCP and network operation
 
-- [x] The MCP launch uses explicit ROM, symbol, and SHA-1 environment values.
-- [x] The MCP client uses the tested `${PWD}` configuration whose paths match
-  the `rom/<version>/` layout and whose hash is explicit.
-- [x] Server stdout remains valid MCP JSON-RPC and emulator diagnostics go to
-  stderr.
-- [x] The MCP remote TCP API is restricted to localhost because the current
-  transport has no authentication or encryption; it is not exposed to a LAN,
-  public address, or WAN.
-- [x] Listener, connector, pair, disconnect, and session teardown are all
-  exercised and leave no child process or open socket.
+- [x] MCP launch examples use explicit ROM, symbol, and SHA-1 values.
+- [x] The bundled runtime is the default path and no machine-local
+  `PYTHONPATH` is required by `.mcp.json`.
+- [x] MCP stdout remains the JSON-RPC channel; diagnostics are kept off the
+  protocol stream.
+- [x] TCP binding and connection are restricted to loopback addresses.
+- [x] Lifecycle code has controlled pair/listen/connect/disconnect/close
+  coverage, but final real-ROM teardown must still be recorded in the full
+  evidence bundle.
+- [ ] Cross-host TCP is not enabled without adding authentication and
+  encryption; the current transport is unauthenticated and unencrypted.
 
-## Documentation and sign-off
+## Required release commands
 
-- [x] Markdown links resolve against the release tree.
-- [x] Claims distinguish implemented source, candidate tests, fixture-gated
-  diagnostics, native-serial acceptance, and release-certified behavior.
-- [ ] The evidence bundle includes exact commands and complete test output,
-  not only a pass count or a screenshot.
-- [x] Known limitations, skipped rows, and runtime deviations are listed next
-  to the sign-off decision.
-- [ ] An independent reviewer confirms that no transport milestone, synthetic
-  protocol test, or RAM-mutated fixture is described as a completed gameplay
-  acceptance.
+Run from a clean checkout with the same interpreter used for installation and
+MCP:
 
-**Release decision:** `PARTIAL`. The source/runtime and the certified local plus
-authentic remote trade/battle paths have passing current snapshots, but full
-product sign-off remains pending:
+```bash
+python -m pytest --collect-only -q
+python -m pytest -q -ra
+python scripts/tcp_link_matrix.py \
+  --repo-root "$PWD" \
+  --python "$(command -v python)" \
+  --format text
+python scripts/validate_fixture_manifest.py --schema-only
+python scripts/validate_fixture_manifest.py \
+  --fixture-root "$PWD/tests/fixtures/link"
+EVIDENCE_DIR="$(mktemp -d)"
+python scripts/production_gate.py \
+  --repo-root "$PWD" \
+  --rom-root "$PWD/rom" \
+  --fixture-root "$PWD/tests/fixtures/link" \
+  --python "$(command -v python)" \
+  --repeat-timing 5 \
+  --evidence-dir "$EVIDENCE_DIR" \
+  --format text
+```
 
-- a retained complete implementation-revision real-ROM gate evidence bundle;
-- a retained evidence bundle, including battle-fixture hashes/provenance;
-- a retained current local/remote gate and strict subprocess evidence bundle,
-  plus resolution of the Blue↔Blue and Blue→Red diagnostic battle gaps or an
-  explicitly limited product scope that excludes them;
-- repository-wide lint/broad-suite closure, per-ROM single-session coverage,
-  reversed roles, native-platform certification, and independent review; and
-- a secure transport decision if cross-host TCP is required. Current TCP is
-  loopback-only and unauthenticated/unencrypted.
+The matrix command is collection-only and intentionally returns nonzero while
+its strict declaration is incomplete. The asset-free gate may return `PASS`
+without ROMs because it selects only unit and timing; the default gate must
+return `PASS` only after assets, strict matrix, fixture, and all required
+real-ROM tiers pass. Keep the sanitized evidence bundle outside version
+control.
 
-Do not advertise the failed, unrun, reversed-role, or user-driven remote rows as
-supported until their own fixtures and acceptance gates pass.
+Do not describe a skipped, xfailed, timed-out, synthetic, hook-only,
+RAM-mutated, or LinkMenu-only result as a completed trade or battle.
