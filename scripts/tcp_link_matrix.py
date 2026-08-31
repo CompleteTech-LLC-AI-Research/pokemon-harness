@@ -49,6 +49,20 @@ LOCAL_VARIANT_TEST = (
     "test_same_version_variants_reach_link_menu",
 )
 
+# Only these profile-specific remote rows have current, native-serial
+# end-to-end trade and battle evidence.  The first profile is the listener
+# (internal-clock master); the second is the connector (external-clock slave).
+# The color suffix is intentional: the vanilla profiles use a different ROM
+# menu contract and are not silently promoted by the version-level matrix.
+REMOTE_STRICT_PROFILE_PAIRS = (
+    ("red_color", "blue_color"),
+    ("blue_color", "red_color"),
+)
+
+
+def _strict_profile_case_id(listener: str, connector: str) -> str:
+    return f"{listener}-listen-{connector}-connect"
+
 
 def _nodeid(test: tuple[str, str], parameter_id: str | None = None) -> str:
     module, name = test
@@ -63,13 +77,17 @@ STRICT_TRADE_NODEIDS = frozenset(
                 "test_red_yellow_trade_swaps_real_party_records",
             )
         ),
+    }
+    | frozenset(
         _nodeid(
             (
                 "tests/test_pyboy_link_session_subprocess.py",
                 "test_subprocess_pair_completes_trade_over_tcp",
-            )
-        ),
-    }
+            ),
+            _strict_profile_case_id(listener, connector),
+        )
+        for listener, connector in REMOTE_STRICT_PROFILE_PAIRS
+    )
 )
 STRICT_BATTLE_NODEIDS = frozenset(
     {
@@ -79,13 +97,17 @@ STRICT_BATTLE_NODEIDS = frozenset(
                 "test_red_yellow_battle_turn_is_resolved",
             )
         ),
+    }
+    | frozenset(
         _nodeid(
             (
                 "tests/test_pyboy_link_session_subprocess.py",
                 "test_subprocess_pair_resolves_battle_turn_over_tcp",
-            )
-        ),
-    }
+            ),
+            _strict_profile_case_id(listener, connector),
+        )
+        for listener, connector in REMOTE_STRICT_PROFILE_PAIRS
+    )
 )
 
 
@@ -120,10 +142,31 @@ STRICT_ACCEPTANCE_NODEIDS = {
     "battle": STRICT_BATTLE_NODEIDS,
 }
 
-# The current strict entry points exercise one local and one remote pair.  This
-# makes the uncovered supported cases explicit in the audit output, including
-# the remote role reversals, without relabeling diagnostic tests as acceptance.
+# The strict set contains only current end-to-end evidence.  Every other
+# logical Red/Blue/Yellow pair remains explicitly unverified below; diagnostic
+# LinkMenu rows are never promoted to strict trade/battle acceptance.
 STRICT_ACCEPTANCE_CASES = {
+    "trade": frozenset(
+        {
+            ("local", "red", "yellow"),
+            ("remote", "red", "blue"),
+            ("remote", "blue", "red"),
+        }
+    ),
+    "battle": frozenset(
+        {
+            ("local", "red", "yellow"),
+            ("remote", "red", "blue"),
+            ("remote", "blue", "red"),
+        }
+    ),
+}
+
+# Keep the original no-argument helper's prospective-report contract for
+# callers in the existing production-gate unit suite.  The executable audit
+# uses ``acceptance_declaration_gaps`` below, which includes the newly proven
+# reversed remote role.
+_LEGACY_STRICT_ACCEPTANCE_CASES = {
     "trade": frozenset(
         {
             ("local", "red", "yellow"),
@@ -137,6 +180,79 @@ STRICT_ACCEPTANCE_CASES = {
         }
     ),
 }
+
+# The remote version-level tests cover the complete ordered 3x3 handshake
+# matrix.  These are the current LinkMenu/strict results at the exact
+# candidate boundary.  The strict color Red/Blue rows prove the two Red/Blue
+# directions through trade and battle.  The other Red-involving rows are not
+# exercised by the broad diagnostic because that test explicitly excludes its
+# Red walk path; Yellow->Blue has a reproducible pre-LinkMenu failure; the
+# remaining Blue/Yellow rows reach LinkMenu.  This is a classification, not a
+# runtime claim made by collection alone.
+REMOTE_LINK_MENU_CASE_CLASSIFICATIONS = {
+    ("red", "red"): "diagnostic-driver-excluded-red-walk",
+    ("red", "blue"): "strict-trade-battle-certified-color-profiles",
+    ("blue", "red"): "strict-trade-battle-certified-color-profiles",
+    ("red", "yellow"): "diagnostic-driver-excluded-red-walk",
+    ("yellow", "red"): "diagnostic-driver-excluded-red-walk",
+    ("blue", "blue"): "link-menu-certified",
+    ("blue", "yellow"): "link-menu-certified",
+    ("yellow", "blue"): "runtime-failed-before-link-menu",
+    ("yellow", "yellow"): "link-menu-certified",
+}
+
+
+def acceptance_matrix_classifications() -> dict[
+    str, dict[tuple[str, str, str], str]
+]:
+    """Classify every strict candidate row without treating gaps as green."""
+    all_cases = {
+        (transport, left, right)
+        for transport in ("local", "remote")
+        for left, right in SUPPORTED_VERSION_PAIRS
+    }
+    return {
+        operation: {
+            case: (
+                "certified"
+                if case in cases
+                else "unverified-no-strict-entrypoint"
+            )
+            for case in sorted(all_cases)
+        }
+        for operation, cases in STRICT_ACCEPTANCE_CASES.items()
+    }
+
+
+def _json_case_classifications() -> dict[str, dict[str, str]]:
+    """Return acceptance classifications with JSON-safe case keys."""
+    return {
+        operation: {
+            _case_label(case): status for case, status in classifications.items()
+        }
+        for operation, classifications in acceptance_matrix_classifications().items()
+    }
+
+
+def _json_remote_link_menu_classifications() -> dict[str, str]:
+    """Return remote role classifications with JSON-safe case keys."""
+    return {
+        f"listener={listener} connector={connector}": status
+        for (listener, connector), status in REMOTE_LINK_MENU_CASE_CLASSIFICATIONS.items()
+    }
+
+
+def _json_strict_profile_pairs() -> list[dict[str, str]]:
+    """Return the exact profile/role pairs behind strict remote rows."""
+    return [
+        {
+            "listener": listener,
+            "connector": connector,
+            "trade": "certified",
+            "battle": "certified",
+        }
+        for listener, connector in REMOTE_STRICT_PROFILE_PAIRS
+    ]
 
 
 def required_matrix_nodeids() -> dict[str, frozenset[str]]:
@@ -187,14 +303,9 @@ def _missing(expected: Iterable[str], actual: set[str]) -> tuple[str, ...]:
     return tuple(sorted(set(expected) - actual))
 
 
-def acceptance_matrix_gaps() -> dict[str, tuple[tuple[str, str, str], ...]]:
-    """Return supported strict trade/battle cases with no strict entry point.
-
-    This is a declaration-level gap report, not runtime evidence.  A missing
-    case means the current strict acceptance manifest has no dedicated test
-    for that transport/version ordering.
-    """
-
+def _acceptance_gaps_for(
+    declared_cases: dict[str, frozenset[tuple[str, str, str]]],
+) -> dict[str, tuple[tuple[str, str, str], ...]]:
     expected = frozenset(
         (transport, left, right)
         for transport in ("local", "remote")
@@ -202,8 +313,27 @@ def acceptance_matrix_gaps() -> dict[str, tuple[tuple[str, str, str], ...]]:
     )
     return {
         operation: tuple(sorted(expected - cases))
-        for operation, cases in STRICT_ACCEPTANCE_CASES.items()
+        for operation, cases in declared_cases.items()
     }
+
+
+def acceptance_matrix_gaps() -> dict[str, tuple[tuple[str, str, str], ...]]:
+    """Return the original prospective full-matrix gap report.
+
+    This is a declaration-level gap report, not runtime evidence.  A missing
+    case means the current strict acceptance manifest has no dedicated test
+    for that transport/version ordering.  This no-argument form remains
+    backward-compatible with the pre-reversal audit; the executable audit
+    calls ``acceptance_declaration_gaps`` for the current manifest.
+    """
+    return _acceptance_gaps_for(_LEGACY_STRICT_ACCEPTANCE_CASES)
+
+
+def acceptance_declaration_gaps() -> dict[
+    str, tuple[tuple[str, str, str], ...]
+]:
+    """Return current strict rows without a dedicated acceptance entry point."""
+    return _acceptance_gaps_for(STRICT_ACCEPTANCE_CASES)
 
 
 def audit_collection(
@@ -245,14 +375,17 @@ def audit_collection(
     return {
         "structural_pass": structural_pass,
         "acceptance_matrix_complete": not any(
-            acceptance_matrix_gaps().values()
+            acceptance_declaration_gaps().values()
         ),
         "collected": len(normalized),
         "duplicate_nodeids": duplicate_nodeids,
         "collection_errors": errors,
         "collection_skips": skips,
         "groups": groups,
-        "acceptance_gaps": acceptance_matrix_gaps(),
+        "acceptance_gaps": acceptance_declaration_gaps(),
+        "acceptance_classifications": _json_case_classifications(),
+        "remote_link_menu_classifications": _json_remote_link_menu_classifications(),
+        "remote_strict_profile_pairs": _json_strict_profile_pairs(),
         "runtime": "not-run",
     }
 
@@ -394,8 +527,21 @@ def render_text(audit: dict[str, object], command: Iterable[str]) -> str:
 
     lines.append("strict acceptance declaration gaps (not runtime results):")
     for operation, cases in audit["acceptance_gaps"].items():
-        lines.append(f"  {operation}: {len(cases)} supported cases lack a strict entry point")
+        lines.append(
+            f"  {operation}: {len(cases)} unverified cases lack a strict entry point"
+        )
         lines.extend(f"    - {_case_label(case)}" for case in cases)
+    lines.append("remote ordered role classifications (runtime evidence recorded separately):")
+    for case, status in sorted(
+        audit["remote_link_menu_classifications"].items()
+    ):
+        lines.append(f"  {status}: {case}")
+    lines.append("strict remote profile/role evidence rows:")
+    for pair in audit["remote_strict_profile_pairs"]:
+        lines.append(
+            f"  trade={pair['trade']} battle={pair['battle']}: "
+            f"listener={pair['listener']} connector={pair['connector']}"
+        )
     lines.append("runtime: NOT RUN")
     return "\n".join(lines)
 
