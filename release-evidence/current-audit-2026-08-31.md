@@ -2,12 +2,13 @@
 
 Status: `PARTIAL` — not production-ready.
 
-This record describes the isolated candidate through `c45e3de`. The stateful
-real-ROM tiers were collected at the code-equivalent `2ac09fb` boundary; the
-final-head fast unit/remote rerun was at `23ea392`. Intervening commits fix
-production-gate parsing, preserve virtualenv paths, annotate deliberate cleanup
-exception suppression, or update audit records. No ROM, symbol, fixture,
-save-state, or secret is included here.
+This record describes the isolated candidate with functional source at
+`23ea392`. The stateful real-ROM tiers were collected at the code-equivalent
+`2ac09fb` boundary; the final-head fast unit/remote rerun was at `23ea392`.
+Later commits only update audit records. Intervening functional commits fix
+production-gate parsing, preserve virtualenv paths, or annotate deliberate
+cleanup exception suppression. No ROM, symbol, fixture, save-state, or secret
+is included here.
 
 ## Passing evidence
 

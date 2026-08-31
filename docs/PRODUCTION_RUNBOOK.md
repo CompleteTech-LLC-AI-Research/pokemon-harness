@@ -12,9 +12,10 @@ record.
 
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
-2/2. The current source-hardening candidate reaches `c45e3de`. Its final-head
-fast gate at `23ea392` passes unit 415/415 and timing 35/35 across five
-repetitions; the stateful gate at the code-equivalent `2ac09fb` boundary passed local 46/46 and remote
+2/2. The current source-hardening candidate's functional changes reach
+`23ea392`. Its final-head fast gate at that boundary passes unit 415/415 and
+timing 35/35 across five repetitions; the stateful gate at the code-equivalent
+`2ac09fb` boundary passed local 46/46 and remote
 11/11 for the canonical color-Red listener/internal-clock and color-Blue
 connector/external-clock roles. The strict local Red/Yellow trade and battle
 cases pass. An isolated Red/Blue subprocess trade also passed 1/1 in 229.37
