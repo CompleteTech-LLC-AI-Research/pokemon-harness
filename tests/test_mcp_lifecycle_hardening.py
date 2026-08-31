@@ -57,6 +57,16 @@ def _session(*, pyboy: FakePyBoy | None = None) -> tuple[Session, FakePyBoy]:
     )
 
 
+def test_deactivate_hooks_at_tolerates_absent_pyboy_hook() -> None:
+    session, pyboy = _session()
+
+    def _missing_hook(_bank: int, _addr: int) -> None:
+        raise ValueError("Breakpoint not found for bank and addr")
+
+    pyboy.hook_deregister = _missing_hook
+    session.deactivate_hooks_at("Serial_ExchangeBytes")
+
+
 class _BlockingPyBoy(FakePyBoy):
     def __init__(self) -> None:
         super().__init__(DictMemory())

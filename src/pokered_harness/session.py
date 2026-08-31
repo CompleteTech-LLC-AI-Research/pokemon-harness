@@ -408,7 +408,12 @@ class Session:
                     state.active = False
             deregister = getattr(self._pyboy, "hook_deregister", None)
             if deregister is not None:
-                deregister(bank, addr)
+                try:
+                    deregister(bank, addr)
+                except ValueError:
+                    # PyBoy reports an absent breakpoint as ValueError. A
+                    # best-effort cleanup is already complete in that case.
+                    pass
 
     # --- actions -------------------------------------------------------
 

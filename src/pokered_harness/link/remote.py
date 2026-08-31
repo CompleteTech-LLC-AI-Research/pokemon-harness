@@ -341,7 +341,13 @@ class RemoteLinkEndpoint:
         # SerialBridge BRIDGE-role callback) with our remote variant.
         deregister = getattr(pb, "hook_deregister", None)
         if callable(deregister):
-            deregister(bank, addr)
+            try:
+                deregister(bank, addr)
+            except ValueError:
+                # PyBoy raises when no callback is registered at the
+                # address.  The replacement hook is still safe to install
+                # when the optional legacy callback is absent.
+                pass
         pb.hook_register(bank, addr, _cb, None)
 
 

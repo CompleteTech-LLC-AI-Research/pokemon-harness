@@ -91,6 +91,21 @@ def test_handshake_writes_clock_status_byte():
     assert mb[status_addr] == STATUS_EXTERNAL
 
 
+def test_install_tolerates_missing_exchange_bytes_hook():
+    session, pyboy, _memory = _make_session(_BLUE_SYM)
+    link, _peer_link = InProcessSerialLink.pair("blue", "blue")
+
+    def _missing_hook(_bank: int, _addr: int) -> None:
+        raise ValueError("Breakpoint not found for bank and addr")
+
+    pyboy.hook_deregister = _missing_hook
+    endpoint = RemoteLinkEndpoint.as_listener(session, link)
+    endpoint.install()
+
+    assert endpoint.installed is True
+    assert (0x00, 0x216F) in pyboy._hooks
+
+
 # --- exchange nybble -----------------------------------------------------
 
 
