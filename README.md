@@ -38,14 +38,20 @@ strict trade and three strict battle entry points were collected; the matrix
 auditor reports 15 uncovered trade cases and 15 uncovered battle cases, and
 the collection-only runtime is `NOT RUN`.
 
+The current candidate's real-ROM link tiers have not yet been rerun after
+`d8198ef`. The last selected local `46/46`, remote `13/13`, strict trade
+`3/3`, and strict battle `3/3` results were recorded at the prior functional
+boundary `db72be6`; they are retained as historical evidence and are not
+current release sign-off.
+
 | Capability | Status | Evidence boundary |
 |---|---|---|
 | ROM-free unit and timing regressions | `PASS` (scoped) | At `d8198ef`: unit 477/477 and timing 35/35 across five repetitions. |
 | Runtime/package identity | `PASS` (scoped) | The gate resolves bundled source PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PASS` (five-input smoke) | Current explicit Red stock/color, Blue stock/color, and Yellow ROM/SYM MCP stdio and golden-path checks passed; this is not full release sign-off. |
-| In-process link acceptance | `PASS` (selected tier) | The current local tier passed 46/46; strict color-Red/Yellow trade and battle passed, while the broader matrix remains unverified. |
-| Remote TCP and MCP lifecycle | `PASS` (selected tier) | The current remote tier passed 13/13, and strict color-Red/color-Blue trade and battle passed in both listener/connector directions; the full matrix remains open. |
+| In-process link acceptance | `PARTIAL` (historical selected tier) | The prior `db72be6` local tier passed 46/46, with strict color-Red/Yellow trade and battle passing; the current candidate rerun and broader matrix remain open. |
+| Remote TCP and MCP lifecycle | `PARTIAL` (historical selected tier) | The prior `db72be6` remote tier passed 13/13, with strict color-Red/color-Blue trade and battle passing in both listener/connector directions; the current candidate rerun and full matrix remain open. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
 The historical complete real-ROM snapshot at
@@ -251,7 +257,8 @@ evidence for `link_pair`, `link_listen`, or `link_connect`.
 
 `link_pair` owns two sessions in one process and uses the native bit-accurate
 serial coordinator for real PyBoy sessions. The canonical Red/Yellow local
-trade and battle acceptance cases pass; other rows remain diagnostic until
+trade and battle cases passed at the historical `db72be6` boundary; the
+current candidate rerun is still required. Other rows remain diagnostic until
 their exact ROM, fixture, and runtime combination is separately certified.
 Configure the peer before launching the MCP server:
 
@@ -289,8 +296,8 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus color Red/Blue native-serial trade and no-hook battle acceptance | Concurrent-load stability and unclaimed ROM/variant rows |
-| `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus strict local Red/Yellow trade and battle acceptance | Full Red/Blue/Yellow coverage or a release result from a skipped, RAM-mutated, or unpinned path |
+| `tests/test_pyboy_link_session_subprocess.py` | Historical two-process LinkMenu smoke plus color Red/Blue native-serial trade and no-hook battle acceptance | Current-candidate rerun, concurrent-load stability, and unclaimed ROM/variant rows |
+| `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus the historical strict local Red/Yellow trade and battle acceptance | Current-candidate rerun, full Red/Blue/Yellow coverage, or a release result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
 battle needs an acceptance result from the actual release runtime, matching
