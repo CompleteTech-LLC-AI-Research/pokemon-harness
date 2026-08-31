@@ -44,6 +44,18 @@ class SessionConfigurationError(ValueError):
     code = "invalid_session_configuration"
 
 
+class RomNotFoundError(SessionConfigurationError):
+    """Raised when the configured ROM file is not available."""
+
+    code = "rom_not_found"
+
+
+class SymbolNotFoundError(SessionConfigurationError):
+    """Raised when the configured symbol file is not available."""
+
+    code = "symbol_not_found"
+
+
 class InvalidStateError(ValueError):
     """Raised when a save-state payload is not usable."""
 
@@ -54,6 +66,18 @@ class VersionMismatch(SessionError):
     """Raised when a loaded ROM, symbol file, or PyBoy version misses its pin."""
 
     code = "version_mismatch"
+
+
+class RomHashMismatch(VersionMismatch):
+    """Raised when the ROM bytes do not match the configured SHA-1 pin."""
+
+    code = "rom_hash_mismatch"
+
+
+class SymbolHashMismatch(VersionMismatch):
+    """Raised when the symbol bytes do not match the configured SHA-1 pin."""
+
+    code = "symbol_hash_mismatch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +123,9 @@ class Session:
         self._tick: int = 0
         self._lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
+        self._close_done = threading.Event()
+        self._close_done.set()
+        self._close_owner: int | None = None
         self._closed = False
         self._serial_hooks: list[tuple[_HookState, int, int, str]] = []
         # ``view`` is stashed for introspection; the actual wiring into the
@@ -124,17 +151,22 @@ class Session:
         sym_path = Path(sym_path)
 
         if not rom_path.is_file():
-            raise SessionConfigurationError(f"ROM file not found: {rom_path}")
+            raise RomNotFoundError(f"ROM file not found: {rom_path}")
         if not sym_path.is_file():
-            raise SessionConfigurationError(
+            raise SymbolNotFoundError(
                 f"symbol file not found: {sym_path}"
             )
 
         if expected_rom_sha1 is not None:
             expected_rom_sha1 = _normalise_sha1(expected_rom_sha1)
-            actual = sha1_of_file(rom_path)
+            try:
+                actual = sha1_of_file(rom_path)
+            except OSError as exc:
+                raise RomNotFoundError(
+                    f"unable to read ROM file {rom_path}: {exc}"
+                ) from exc
             if actual.lower() != expected_rom_sha1.lower():
-                raise VersionMismatch(
+                raise RomHashMismatch(
                     f"ROM SHA-1 mismatch: expected {expected_rom_sha1}, "
                     f"got {actual} for {rom_path}"
                 )
@@ -146,12 +178,12 @@ class Session:
             try:
                 actual = sha1_of_file(sym_path)
             except OSError as exc:
-                raise SessionConfigurationError(
+                raise SymbolNotFoundError(
                     f"unable to read symbol file {sym_path} for SHA-1 "
                     f"verification: {exc}"
                 ) from exc
             if actual.lower() != expected_symbol_sha1.lower():
-                raise VersionMismatch(
+                raise SymbolHashMismatch(
                     f"symbol SHA-1 mismatch: expected {expected_symbol_sha1}, "
                     f"got {actual} for {sym_path}"
                 )
@@ -194,6 +226,10 @@ class Session:
 
         try:
             symbols = load_sym_file(sym_path)
+        except FileNotFoundError as exc:
+            raise SymbolNotFoundError(
+                f"symbol file not found: {sym_path}"
+            ) from exc
         except (OSError, UnicodeError) as exc:
             raise SessionConfigurationError(
                 f"unable to load symbol file {sym_path}: {exc}"
@@ -224,17 +260,41 @@ class Session:
     # --- lifecycle -----------------------------------------------------
 
     def close(self, save: bool = False) -> None:
-        # Mark the session closed before waiting on the emulator lock. A raw
-        # serial hook can be blocked in a network exchange while the PyBoy
-        # tick lock is held; teardown must still make guarded callbacks no-op
-        # and return promptly instead of waiting behind that exchange.
+        """Stop the emulator exactly once, serialized with all operations.
+
+        The closed flag is published before waiting for ``_lock`` so a raw
+        serial callback that has not entered yet becomes a no-op.  An already
+        running callback or emulator operation is allowed to finish before
+        ``PyBoy.stop`` runs; otherwise stop could race a tick or memory access.
+        Remote link owners close their transport before closing the Session,
+        which wakes a callback blocked in a serial exchange.
+        """
+        current_thread_id = threading.get_ident()
         with self._lifecycle_lock:
             if self._closed:
-                return
-            self._closed = True
-            for state, _bank, _addr, _symbol_name in self._serial_hooks:
-                state.active = False
-        self._pyboy.stop(save=save)
+                close_done = self._close_done
+                owned_by_current_thread = self._close_owner == current_thread_id
+            else:
+                self._closed = True
+                self._close_owner = current_thread_id
+                self._close_done.clear()
+                for state, _bank, _addr, _symbol_name in self._serial_hooks:
+                    state.active = False
+                close_done = None
+                owned_by_current_thread = True
+
+        if close_done is not None:
+            if not owned_by_current_thread:
+                close_done.wait()
+            return
+
+        try:
+            with self._lock:
+                self._pyboy.stop(save=save)
+        finally:
+            with self._lifecycle_lock:
+                self._close_owner = None
+                self._close_done.set()
 
     @property
     def closed(self) -> bool:
@@ -339,8 +399,10 @@ class Session:
         :meth:`serial_hook` are also disabled at the same address.
         """
         with self._lock:
-            self._ensure_open()
-            bank, addr = self._symbols.bank_addr(symbol_name)
+            symbol = self._symbols.get(symbol_name)
+            if symbol is None:
+                return
+            bank, addr = symbol.bank, symbol.addr
             for state, hook_bank, hook_addr, _hook_symbol in self._serial_hooks:
                 if hook_bank == bank and hook_addr == addr:
                     state.active = False

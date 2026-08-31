@@ -61,6 +61,7 @@ UNIT_MODULES = frozenset(
         "test_link_protocol.py",
         "test_link_serial_bridge.py",
         "test_link_symbols.py",
+        "test_mcp_lifecycle_hardening.py",
         "test_link_transport.py",
         "test_mcp_server.py",
         "test_network_backend.py",
