@@ -200,6 +200,11 @@ class Serial:
         if not self.transfer_enabled:
             self._shift_register = self.SB
 
+    @cython.locals(
+        was_transfer_enabled=cython.bint,
+        was_internal_clock=cython.bint,
+        fresh_transfer=cython.bint,
+    )
     def set_SC(self, value):
         """Write FF02.
 
@@ -230,7 +235,7 @@ class Serial:
         fresh_transfer = (
             not was_transfer_enabled
             or not self.transfer_enabled
-            or bool(was_internal_clock) != bool(self.internal_clock)
+            or was_internal_clock != self.internal_clock
             or self._bits_remaining == 0
         )
 
