@@ -15,20 +15,18 @@ Run:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
 
-from pokered_harness.session import Session
 from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 
 # Reuse the verified early-game phases from walkthrough.py rather than
 # maintaining a parallel (and divergent) copy here. Those phases are the
 # only ones empirically proven to reach Viridian City.
 sys.path.insert(0, str(Path(__file__).parent))
-import walkthrough as wt  # noqa: E402
-
+import walkthrough as wt
 
 # Map constants
 M_PALLET = 0x00
@@ -119,7 +117,7 @@ class Driver:
                 return
             # Check if we're fainted
             if gs.party.mons and gs.party.mons[0].hp == 0:
-                print(f"  Bulbasaur fainted in battle!", file=sys.stderr, flush=True)
+                print("  Bulbasaur fainted in battle!", file=sys.stderr, flush=True)
                 # Mash A to get through blackout
                 for _ in range(50):
                     self.press("a")
@@ -638,7 +636,7 @@ class Driver:
                 continue
             # Check if we got the badge
             if gs.progress.badges_raw & 0x01:
-                print(f"  BOULDER BADGE OBTAINED!", file=sys.stderr)
+                print("  BOULDER BADGE OBTAINED!", file=sys.stderr)
                 return
             self.press("up")
         # Post-battle dialog
@@ -713,7 +711,7 @@ def main():
     finally:
         gs = session.read_game_state()
         total_presses = drv.press_count + wt_drv.press_index
-        print(f"\n=== FINAL ===", file=sys.stderr)
+        print("\n=== FINAL ===", file=sys.stderr)
         print(f"map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
               f"presses={total_presses} badges=0x{gs.progress.badges_raw:02x}",
               file=sys.stderr)

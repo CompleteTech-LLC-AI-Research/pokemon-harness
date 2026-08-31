@@ -12,10 +12,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pokered_harness.session import Session
-from pokered_harness.mcp_server import register_default_hooks
 import run_to_brock as rtb
 
+from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 
 DIR = {"u": "up", "d": "down", "l": "left", "r": "right"}
 

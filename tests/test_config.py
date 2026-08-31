@@ -3,13 +3,13 @@ from __future__ import annotations
 import pytest
 
 from pokered_harness.config import (
+    SUPPORTED_ROM_VERSIONS,
     VersionsConfig,
     VersionsConfigError,
     load_peer_env,
     load_primary_env,
     load_versions,
 )
-
 
 _VALID = """\
 # Pinned versions
@@ -18,7 +18,7 @@ _VALID = """\
 
 | Component | Pin | Notes |
 |---|---|---|
-| PyBoy | `2.7.0` | v2 API. |
+| PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | v2 API. |
 
 ## Target ROM
 
@@ -26,6 +26,9 @@ _VALID = """\
 |---|---|
 | SHA-1 | `ea9bcae617fdf159b045185467ae58b2e4a48b9a` |
 | Size | 1,048,576 bytes |
+| Path | `rom/red/pokemon-red.gb` |
+| Symbols | `rom/red/pokemon-red.sym` |
+| Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
 """
 
 
@@ -36,6 +39,10 @@ def test_load_versions_parses_valid_file(tmp_path):
     assert isinstance(cfg, VersionsConfig)
     assert cfg.rom_sha1 == "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
     assert cfg.pyboy_version == "2.7.0"
+    assert cfg.pyboy_revision == "c565df66c3731fad2856169a90f6bbec99925915"
+    assert cfg.symbol_sha1_for_path("rom/red/pokemon-red.sym") == (
+        "03783c86a42588bd77f73bd7814cf8d70e590118"
+    )
 
 
 def test_load_versions_is_case_insensitive_for_sha(tmp_path):
@@ -83,7 +90,30 @@ def test_repo_versions_md_parses():
     regression that prevents silent drift between docs and the loader."""
     cfg = load_versions("VERSIONS.md")
     assert cfg.pyboy_version == "2.7.0"
+    assert cfg.pyboy_revision == "c565df66c3731fad2856169a90f6bbec99925915"
     assert cfg.rom_sha1 == "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
+
+
+def test_repo_versions_selects_hash_by_rom_path():
+    cfg = load_versions("VERSIONS.md")
+    assert cfg.sha1_for_path("rom/blue/pokemon-blue.gb") == (
+        "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
+    )
+    assert cfg.sha1_for_path(
+        "/isolated/worktree/rom/yellow/pokemon-yellow.gbc"
+    ) == "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+    assert cfg.sha1_for_path("rom/unknown/custom.gb") is None
+
+
+def test_repo_versions_selects_symbol_hash_by_symbol_path():
+    cfg = load_versions("VERSIONS.md")
+    assert cfg.symbol_sha1_for_path("rom/red/pokemon-red.sym") == (
+        "03783c86a42588bd77f73bd7814cf8d70e590118"
+    )
+    assert cfg.symbol_sha1_for_path(
+        r"C:\isolated\worktree\rom\yellow\pokemon-yellow.sym"
+    ) == "7c4205723943e7722230dcf014e5e8a2012474aa"
+    assert cfg.symbol_sha1_for_path("rom/unknown/custom.sym") is None
 
 
 # -- per-session env vars --------------------------------------------------
@@ -150,3 +180,22 @@ def test_load_primary_env_version_yellow_heuristic(monkeypatch):
     env = load_primary_env()
     assert env.rom_path == "rom/yellow/pokemon-yellow.gbc"
     assert env.version == "yellow"
+
+
+def test_blank_environment_values_are_treated_as_unset(monkeypatch):
+    monkeypatch.setenv("POKERED_ROM_PATH", "  ")
+    monkeypatch.setenv("POKERED_SYM_PATH", "")
+    monkeypatch.setenv("POKERED_ROM_SHA1", " ")
+    env = load_primary_env()
+    assert env.rom_path is None
+    assert env.sym_path is None
+    assert env.rom_sha1 is None
+
+
+def test_session_env_rejects_partial_or_unknown_configuration(monkeypatch):
+    monkeypatch.setenv("POKERED_ROM_PATH", "rom.gb")
+    monkeypatch.delenv("POKERED_SYM_PATH", raising=False)
+    with pytest.raises(VersionsConfigError, match="both ROM and symbol"):
+        load_primary_env().validate(role="primary")
+
+    assert SUPPORTED_ROM_VERSIONS == frozenset({"red", "blue", "yellow"})

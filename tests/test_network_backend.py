@@ -23,8 +23,8 @@ import pytest
 from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
+    validate_loopback_host,
 )
-
 
 _OP_EDGE_REQ = 0x10
 _OP_EDGE_RESP = 0x11
@@ -49,6 +49,72 @@ def test_close_is_idempotent():
     a.close()
     a.close()  # no error
     b.close()
+
+
+def test_network_backend_rejects_non_loopback_hosts():
+    """The unauthenticated wire protocol cannot be exposed remotely."""
+    assert validate_loopback_host("127.0.0.1") == "127.0.0.1"
+    assert validate_loopback_host("localhost") == "localhost"
+    assert validate_loopback_host("[::1]") == "::1"
+    with pytest.raises(ValueError, match="localhost-only"):
+        validate_loopback_host("0.0.0.0")
+    with pytest.raises(ValueError, match="localhost-only"):
+        NetworkBackend.connect("192.0.2.1", 1)
+
+
+def test_localhost_resolution_must_remain_loopback(monkeypatch):
+    def unsafe_resolution(*_args, **_kwargs):
+        return [(
+            _socket.AF_INET,
+            _socket.SOCK_STREAM,
+            0,
+            "",
+            ("192.0.2.1", 0),
+        )]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", unsafe_resolution)
+    with pytest.raises(ValueError, match="resolved unsafely"):
+        validate_loopback_host("localhost")
+
+
+def test_versioned_handshake_reports_each_peer_rom():
+    a_sock, b_sock = _socket.socketpair()
+    a = NetworkBackend(a_sock, local_rom_version="red")
+    b = NetworkBackend(b_sock, local_rom_version="blue")
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        assert a.wait_for_hello(timeout=1.0) == "blue"
+        assert b.wait_for_hello(timeout=1.0) == "red"
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_stop_wakes_blocked_edge_waiter():
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    result: list[Exception] = []
+
+    def blocked_edge() -> None:
+        try:
+            a.on_edge(our_bit=1, our_role=1)
+        except Exception as exc:  # noqa: BLE001
+            result.append(exc)
+
+    worker = threading.Thread(target=blocked_edge, daemon=True)
+    worker.start()
+    time.sleep(0.05)
+    started = time.monotonic()
+    a.stop()
+    worker.join(timeout=1.0)
+    elapsed = time.monotonic() - started
+    try:
+        assert not worker.is_alive()
+        assert elapsed < 0.5
+        assert result and isinstance(result[0], NetworkBackendError)
+    finally:
+        b.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -98,25 +164,54 @@ def test_on_edge_with_peer_hangup_raises():
     a.stop()
 
 
-def test_unknown_opcode_is_ignored():
-    """The reader tolerates unknown opcodes (drops them) rather than
-    hard-erroring. This keeps real-ROM runs robust to spurious noise.
-    """
+def test_unknown_opcode_fails_closed_and_stops_reader():
+    """Unknown wire operations are protocol errors, not ignorable noise."""
     a, b = NetworkBackend.pair()
     a.start_receiver(local_core=None)
-    # Peer sends garbage opcode then a valid RESP.
     b._sock.sendall(struct.pack(">BB", 0xFF, 0))
-    b._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, 1))
-
-    # Send a REQ from us — the peer side's reader won't fire because
-    # the "peer" here is just raw socket writes. Put a RESP by hand
-    # to unblock our on_edge.
     try:
-        reply = a._resp_queue.get(timeout=2.0)  # pop the queued RESP
-        assert reply == 1
+        for _ in range(100):
+            if a._reader_exc is not None:
+                break
+            time.sleep(0.01)
+        assert isinstance(a._reader_exc, NetworkBackendError)
+        assert not a.connected
     finally:
         a.stop()
         b.stop()
+
+
+def test_duplicate_edge_responses_do_not_block_shutdown():
+    """A full response queue must fail the reader without wedging stop()."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b._sock.sendall(
+        struct.pack(">BB", _OP_EDGE_RESP, 1)
+        + struct.pack(">BB", _OP_EDGE_RESP, 0)
+    )
+    try:
+        for _ in range(100):
+            if a._reader_exc is not None:
+                break
+            time.sleep(0.01)
+        assert isinstance(a._reader_exc, NetworkBackendError)
+        started = time.monotonic()
+        a.stop()
+        assert time.monotonic() - started < 0.5
+        assert a._reader is not None and not a._reader.is_alive()
+    finally:
+        b.stop()
+
+
+def test_cancelled_network_connect_returns_promptly():
+    cancel = threading.Event()
+    cancel.set()
+    started = time.monotonic()
+    with pytest.raises(NetworkBackendError, match="cancelled"):
+        NetworkBackend.connect(
+            "127.0.0.1", 1, timeout_s=30.0, cancel_event=cancel
+        )
+    assert time.monotonic() - started < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +343,28 @@ def test_sync_with_peer_rendezvous():
         b.stop()
 
 
+def test_announce_sync_can_be_polled_without_blocking():
+    """A peer can advertise a SYNC point and the other side can poll it."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        a.announce_sync(sync_id=9)
+        deadline = time.monotonic() + 2.0
+        hit = False
+        while time.monotonic() < deadline and not hit:
+            hit = b.poll_peer_sync(sync_id=9)
+            time.sleep(0.01)
+        assert hit is True
+        assert b.poll_peer_sync(sync_id=9) is False
+        assert a.debug_snapshot()["sync_sent"] == 1
+        assert b.debug_snapshot()["sync_received"] == 1
+        assert b.debug_snapshot()["sync_poll_hits"] == 1
+    finally:
+        a.stop()
+        b.stop()
+
+
 def test_sync_with_peer_times_out_on_silent_peer():
     """If the peer never sends SYNC, sync_with_peer raises
     :class:`NetworkBackendError` after the timeout."""
@@ -257,6 +374,197 @@ def test_sync_with_peer_times_out_on_silent_peer():
     try:
         with pytest.raises(NetworkBackendError, match="no peer OP_SYNC"):
             a.sync_with_peer(sync_id=1, timeout=1.0)
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_keepalive_fallback_is_visible_in_debug_snapshot():
+    """An unarmed slave responds with keep-alive and records that fact."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        reply = a.on_edge(our_bit=1, our_role=1)
+        assert reply == 1
+        deadline = time.monotonic() + 1.0
+        snap = b.debug_snapshot()
+        while time.monotonic() < deadline and snap["edge_resp_sent"] == 0:
+            time.sleep(0.01)
+            snap = b.debug_snapshot()
+        assert snap["edge_req_received"] == 1
+        assert snap["edge_resp_sent"] == 1
+        assert snap["slave_rearm_waits"] == 1
+        assert snap["keepalive_bits_sent"] == 1
+        assert snap["keepalive_bytes_started"] == 1
+        assert snap["last_keepalive_state"] == {"core_present": False}
+    finally:
+        a.stop()
+        b.stop()
+
+
+class _CompletingSlaveCore:
+    def __init__(self) -> None:
+        self.transfer_enabled = 1
+        self.internal_clock = 0
+        self.SB = 0
+        self.SC = 0x80
+
+    def peek_out_bit(self) -> int:
+        return 0
+
+    def apply_external_edge(self, peer_bit: int) -> bool:
+        self.transfer_enabled = 0
+        self.SB = peer_bit & 1
+        return True
+
+
+class _BlockingSlaveCore:
+    """Pause edge application so a transport-idle timeout is observable."""
+
+    def __init__(self) -> None:
+        self.transfer_enabled = 1
+        self.internal_clock = 0
+        self.SB = 0
+        self.SC = 0x80
+        self.edge_started = threading.Event()
+        self.release_edge = threading.Event()
+
+    def peek_out_bit(self) -> int:
+        return 0
+
+    def apply_external_edge(self, _peer_bit: int) -> bool:
+        self.edge_started.set()
+        if not self.release_edge.wait(timeout=2.0):
+            raise RuntimeError("test edge release timed out")
+        return False
+
+
+def test_wait_for_wire_idle_is_bounded_while_edge_worker_is_busy():
+    """The phase barrier must expose a blocked edge instead of hanging."""
+    a, b = NetworkBackend.pair()
+    core = _BlockingSlaveCore()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=core)
+    result: list[int] = []
+
+    def send_edge() -> None:
+        result.append(a.on_edge(our_bit=1, our_role=1))
+
+    worker = threading.Thread(target=send_edge, daemon=True)
+    worker.start()
+    try:
+        assert core.edge_started.wait(timeout=1.0)
+        with pytest.raises(NetworkBackendError, match="wire did not become idle"):
+            b.wait_for_wire_idle(timeout=0.01)
+        assert b.debug_snapshot()["pending_edge_requests"] == 1
+
+        core.release_edge.set()
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert result == [0]
+        b.wait_for_wire_idle(timeout=1.0)
+        assert b.debug_snapshot()["pending_edge_requests"] == 0
+    finally:
+        core.release_edge.set()
+        a.stop()
+        b.stop()
+
+
+def test_wait_for_wire_idle_can_accept_orderly_peer_close():
+    """A completed application barrier may be followed by peer teardown."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        a.stop()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and b.connected:
+            time.sleep(0.01)
+        b.wait_for_wire_idle(timeout=1.0, allow_peer_close=True)
+        assert b._reader_exc is None
+    finally:
+        b.stop()
+
+
+def test_post_byte_fallback_is_visible_in_debug_snapshot():
+    """A keep-alive immediately after a completed byte is tagged separately."""
+    a, b = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=core)
+    try:
+        first_reply = a.on_edge(our_bit=1, our_role=1)
+        assert first_reply == 0
+        second_reply = a.on_edge(our_bit=0, our_role=1)
+        assert second_reply == 1
+        deadline = time.monotonic() + 1.0
+        snap = b.debug_snapshot()
+        while time.monotonic() < deadline and snap["keepalive_after_post_byte_waits"] == 0:
+            time.sleep(0.01)
+            snap = b.debug_snapshot()
+        assert snap["slave_post_byte_rearm_waits"] >= 1
+        assert snap["keepalive_after_post_byte_waits"] >= 1
+        assert snap["last_slave_byte_complete_at"] is not None
+    finally:
+        a.stop()
+        b.stop()
+
+
+class _LateRearmingSlaveCore:
+    def __init__(self) -> None:
+        self.transfer_enabled = 1
+        self.internal_clock = 0
+        self.SB = 0
+        self.SC = 0x80
+        self._next_out_bit = 0
+        self._byte_index = 0
+
+    def peek_out_bit(self) -> int:
+        return self._next_out_bit
+
+    def apply_external_edge(self, peer_bit: int) -> bool:
+        self.SB = peer_bit & 1
+        if self._byte_index == 0:
+            self.transfer_enabled = 0
+            self._byte_index += 1
+            return True
+        self._byte_index += 1
+        return False
+
+    def rearm_after(self, delay_s: float, *, next_out_bit: int) -> None:
+        def _rearm() -> None:
+            time.sleep(delay_s)
+            self._next_out_bit = next_out_bit & 1
+            self.transfer_enabled = 1
+
+        threading.Thread(target=_rearm, daemon=True).start()
+
+
+def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive():
+    """A slave that rearms after the default wait but within the post-byte
+    grace window should send its real next byte, not 0xFE keep-alive."""
+    a, b = NetworkBackend.pair()
+    core = _LateRearmingSlaveCore()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=core)
+    try:
+        first_reply = a.on_edge(our_bit=1, our_role=1)
+        assert first_reply == 0
+
+        core.rearm_after(0.150, next_out_bit=0)
+        started = time.monotonic()
+        second_reply = a.on_edge(our_bit=0, our_role=1)
+        elapsed = time.monotonic() - started
+
+        assert second_reply == 0
+        assert elapsed >= 0.140
+
+        snap = b.debug_snapshot()
+        assert snap["slave_post_byte_rearm_waits"] >= 1
+        assert snap["slave_post_byte_rearm_successes"] >= 1
+        assert snap["keepalive_after_post_byte_waits"] == 0
+        assert snap["keepalive_bits_sent"] == 0
     finally:
         a.stop()
         b.stop()
@@ -320,14 +628,14 @@ def test_listen_and_connect_over_loopback_exchange_byte():
 
 
 def _wait_bound(port: int, timeout: float = 2.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
             s.settimeout(0.05)
             s.connect(("127.0.0.1", port))
             s.close()
             return True
-        except (OSError, _socket.timeout):
+        except (TimeoutError, OSError):
             time.sleep(0.05)
     return False

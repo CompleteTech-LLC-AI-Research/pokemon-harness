@@ -15,11 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pokered_harness.session import Session
-from pokered_harness.mcp_server import register_default_hooks
-import run_to_brock as rtb
 import brock_gym as bg
+import run_to_brock as rtb
 
+from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 
 DIR = {"u": "up", "d": "down", "l": "left", "r": "right"}
 
@@ -241,7 +241,7 @@ def main() -> int:
     s._pyboy.screen.image.save(outdir / "shots" / "phase5_after_brock.png")
 
     gs = drv.gs()
-    print(f"\n=== FINAL ===", flush=True)
+    print("\n=== FINAL ===", flush=True)
     print(f"map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
           f"badges=0x{gs.progress.badges_raw:02x} "
           f"party[0]=L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",

@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
-from pokered_harness.session import Session
 from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 
 
 def probe(session: Session, path: list[str], outdir: Path) -> None:
@@ -39,7 +38,7 @@ def probe(session: Session, path: list[str], outdir: Path) -> None:
             for _ in range(80):
                 session.press("a", duration=6); session.step(24, render=True)
                 if not session.read_game_state().battle.active: break
-            print(f"       (cleared battle)")
+            print("       (cleared battle)")
         # Save screenshot every 10 presses
         if i % 10 == 0 or i == len(path):
             session._pyboy.screen.image.save(outdir / f"probe_{i:03d}.png")

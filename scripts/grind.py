@@ -37,11 +37,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pokered_harness.session import Session
-
-import run_to_brock as rtb
 import full_to_brock as ftb
+import run_to_brock as rtb
 
+from pokered_harness.session import Session
 
 # --- Map constants (shared across Red/Blue/Yellow) -------------------------
 M_PALLET = 0x00
@@ -112,7 +111,7 @@ class GrindResult:
     stopped_reason: str  # "target_level", "target_move", "timeout", "failed"
 
 
-def _lead(drv: "rtb.Driver"):
+def _lead(drv: rtb.Driver):
     gs = drv.gs()
     return gs.party.mons[0] if gs.party.mons else None
 
@@ -162,7 +161,7 @@ def _safe_walk(drv, path: str, *, label: str, stop_map_ids=()) -> str:
 # post-battle state so the caller can act on a faint.
 
 
-def _battle_turn(drv: "rtb.Driver", *, flee_below_hp_frac: float = 0.55,
+def _battle_turn(drv: rtb.Driver, *, flee_below_hp_frac: float = 0.55,
                   force_fight: bool = False,
                   allow_learn: bool = False) -> bool:
     """Drive one battle menu turn.
@@ -332,7 +331,7 @@ def _battle_turn(drv: "rtb.Driver", *, flee_below_hp_frac: float = 0.55,
     return False
 
 
-def _resolve_battle_no_blackout_mash(drv: "rtb.Driver",
+def _resolve_battle_no_blackout_mash(drv: rtb.Driver,
                                       *, max_turns: int = 80,
                                       allow_learn: bool = True) -> bool:
     """Drive battle to completion. Returns True if the lead mon fainted
@@ -364,7 +363,7 @@ def _resolve_battle_no_blackout_mash(drv: "rtb.Driver",
     return False
 
 
-def _drive_post_battle_dialogs(drv: "rtb.Driver",
+def _drive_post_battle_dialogs(drv: rtb.Driver,
                                 allow_learn: bool = True) -> None:
     """After the battle ends, advance any level-up / EXP / move-learn
     dialogs. Exits once joyIgnore clears AND no text box is rendering.
@@ -408,7 +407,7 @@ def _drive_post_battle_dialogs(drv: "rtb.Driver",
 # --- Heal-loop primitive ---------------------------------------------------
 
 
-def _force_blackout_heal(drv: "rtb.Driver", session: Session,
+def _force_blackout_heal(drv: rtb.Driver, session: Session,
                          max_iterations: int = 20) -> bool:
     """Deliberately trigger a wild battle, force-fight, and accept the
     faint. In Gen 1 a blackout teleports the party to the last-visited
@@ -463,7 +462,7 @@ def _force_blackout_heal(drv: "rtb.Driver", session: Session,
 
 
 def walk_to_viridian_and_heal(
-    drv: "rtb.Driver",
+    drv: rtb.Driver,
     session: Session,
     outdir: Path,
     rom: str,
@@ -645,7 +644,7 @@ def walk_to_viridian_and_heal(
 # --- Grass-walking / encounter roll ---------------------------------------
 
 
-def _ensure_in_grass(drv: "rtb.Driver",
+def _ensure_in_grass(drv: rtb.Driver,
                       session: Session | None = None,
                       outdir: Path | None = None,
                       rom: str | None = None,
@@ -711,7 +710,7 @@ def _ensure_in_grass(drv: "rtb.Driver",
             and GRASS_Y_MIN <= gs.overworld.y <= GRASS_Y_MAX)
 
 
-def _walk_until_battle(drv: "rtb.Driver", max_steps: int = 40) -> bool:
+def _walk_until_battle(drv: rtb.Driver, max_steps: int = 40) -> bool:
     """Bounce the player within the Route 2 grass patch until a wild
     encounter fires. Returns True if battle active after the walk.
 
@@ -1081,7 +1080,7 @@ def main() -> int:
         heal_threshold=args.heal_threshold,
     )
 
-    print(f"\n=== GRIND RESULT ===", flush=True)
+    print("\n=== GRIND RESULT ===", flush=True)
     print(f"start_level={res.start_level} final_level={res.final_level}",
           flush=True)
     print(f"battles={res.battles} blackouts={res.blackouts} "

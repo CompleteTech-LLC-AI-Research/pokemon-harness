@@ -48,8 +48,7 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 os.environ.setdefault("POKERED_SKIP_SHA1", "1")
 
-from pokered_harness.session import Session  # noqa: E402
-
+from pokered_harness.session import Session
 
 # Per-version defaults keyed by (version, variant). The ``color`` and
 # ``cgb`` variants use the color-patched (R/B) or CGB (Yellow) ROM;

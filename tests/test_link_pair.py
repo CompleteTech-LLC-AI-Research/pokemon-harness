@@ -16,7 +16,6 @@ from pokered_harness.symbols.loader import load_sym_text
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
 
-
 # ---------------------------------------------------------------------------
 # Fake bridge — replaces the real SerialBridge so tests don't need it.
 # ---------------------------------------------------------------------------
@@ -159,7 +158,7 @@ def test_pair_silently_skips_missing_progress_symbol():
 
 
 def test_pair_progress_hook_emits_events():
-    pair, s_a, s_b, pb_a, _, _ = _make_pair()
+    pair, s_a, _s_b, pb_a, _, _ = _make_pair()
     pair.pair()
     # Fire the hook manually and verify the event landed on the bus.
     pb_a.fire(0x00, 0x6AB1)

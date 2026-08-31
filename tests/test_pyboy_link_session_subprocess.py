@@ -1,7 +1,7 @@
-"""Two-subprocess PyBoy trade over TCP.
+"""Two-subprocess PyBoy trade and battle over TCP.
 
 Spawns two child Python processes, each running
-:mod:`tests._tcp_trade_peer` against its own Yellow PyBoy. One child
+:mod:`tests._tcp_trade_peer` against its own PyBoy ROM. One child
 is the listener, the other connects. Each child drives its side of
 the trade flow and prints a JSON result. The parent (this test)
 parses both results and asserts the agreed-upon milestone hooks
@@ -25,46 +25,81 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from tests._rom_assets import fixture_path, rom_path, sym_path
 
 _REPO = Path(__file__).resolve().parents[1]
 
 
 def _fixtures_ready() -> bool:
-    for parent in (_REPO, *_REPO.parents):
-        rom_root = parent / "rom"
-        if rom_root.is_dir():
-            rom = rom_root / "yellow" / "pokemon-yellow.gbc"
-            sym = rom_root / "yellow" / "pokemon-yellow.sym"
-            break
-    else:
-        return False
-    state = _REPO / "tests" / "fixtures" / "link" / "yellow" / "cable_club.state"
+    rom = rom_path("yellow")
+    sym = sym_path("yellow")
+    state = fixture_path("yellow")
     return rom.is_file() and sym.is_file() and state.is_file()
 
 
+def _trade_fixtures_ready() -> bool:
+    """Return whether the strict Red/Blue subprocess fixtures exist."""
+    return all(
+        path.is_file()
+        for path in (
+            rom_path("red", color=True),
+            sym_path("red"),
+            fixture_path("red"),
+            rom_path("blue", color=True),
+            sym_path("blue"),
+            fixture_path("blue"),
+        )
+    )
+
+
+def _battle_fixtures_ready() -> bool:
+    """Return whether the strict Red/Blue subprocess battle assets exist."""
+    return all(
+        path.is_file()
+        for path in (
+            rom_path("red", color=True),
+            sym_path("red"),
+            fixture_path("red").parent / "cable_club-battle.state",
+            rom_path("blue", color=True),
+            sym_path("blue"),
+            fixture_path("blue").parent / "cable_club-battle.state",
+        )
+    )
+
+
 def _non_cython_pyboy_available() -> bool:
-    """We need the non-Cython PyBoy build (``pyboy.mb.serial``
-    swappable). Probe by locating the worktree's
-    ``.venv-noncython`` interpreter."""
+    """Return whether the configured production subprocess interpreter exists."""
     return _noncython_python().is_file()
 
 
 def _noncython_python() -> Path:
-    return _REPO / ".venv-noncython" / "Scripts" / "python.exe"
+    configured = os.environ.get("POKERED_PYTHON")
+    if configured:
+        return Path(configured)
+    candidates = (
+        _REPO / ".venv-noncython" / "Scripts" / "python.exe",
+        _REPO / ".venv-noncython" / "bin" / "python",
+        _REPO / ".venv" / "Scripts" / "python.exe",
+        _REPO / ".venv" / "bin" / "python",
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
 
 
-pytestmark = pytest.mark.skipif(
+_REMOTE_SKIP_REASON = (
+    "Needs Yellow ROM + cable_club.state fixture + a production Python "
+    "interpreter. Set POKERED_PYTHON if needed. See "
+    "tests/test_pyboy_link_session_roms.py for setup recipe."
+)
+
+_REMOTE_INTEGRATION = pytest.mark.skipif(
     not (_fixtures_ready() and _non_cython_pyboy_available()),
-    reason=(
-        "Needs Yellow ROM + cable_club.state fixture + .venv-noncython/ "
-        "with non-Cython PyBoy. See "
-        "tests/test_pyboy_link_session_roms.py for setup recipe."
-    ),
+    reason=_REMOTE_SKIP_REASON,
 )
 
 
@@ -77,7 +112,14 @@ def _free_port() -> int:
         s.close()
 
 
-def _spawn_peer(role: str, port: int, *, goal: str, deadline_seconds: float):
+def _spawn_peer(
+    role: str,
+    port: int,
+    *,
+    goal: str,
+    deadline_seconds: float,
+    version: str = "yellow",
+):
     """Spawn one side as a subprocess. Returns the Popen handle."""
     script = _REPO / "tests" / "_tcp_trade_peer.py"
     cmd = [
@@ -86,10 +128,11 @@ def _spawn_peer(role: str, port: int, *, goal: str, deadline_seconds: float):
         "--role", role,
         "--port", str(port),
         "--goal", goal,
+        "--version", version,
         "--deadline-seconds", str(deadline_seconds),
         "--repo-root", str(_REPO),
     ]
-    env = {**os.environ, "POKERED_SKIP_SHA1": "1"}
+    env = dict(os.environ)
     return subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -99,38 +142,223 @@ def _spawn_peer(role: str, port: int, *, goal: str, deadline_seconds: float):
     )
 
 
-def _collect_result(proc, timeout: float, *, label: str = "") -> dict:
+class _PairDeadlineExceeded(RuntimeError):
+    """The supervisor reached the pair's hard wall-clock deadline."""
+
+
+def _drain_stream(stream, chunks: list[str]) -> None:
+    """Drain one child pipe without making the supervisor wait on it.
+
+    A daemon thread is used instead of ``communicate()`` futures so the
+    parent can keep one authoritative deadline for both processes.  The
+    reader only owns its stream; the supervisor never joins it after the
+    hard cutoff.
+    """
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        stdout, stderr = proc.communicate()
-        pytest.fail(
-            f"peer subprocess timed out after {timeout}s.\n"
-            f"stdout:\n{stdout[-2000:]}\nstderr:\n{stderr[-2000:]}"
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                return
+            chunks.append(chunk)
+    except (OSError, ValueError):
+        # The supervisor may close a pipe immediately after killing a child.
+        return
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _start_pipe_drainers(proc):
+    captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
+    readers: list[threading.Thread] = []
+    for name in ("stdout", "stderr"):
+        stream = getattr(proc, name)
+        reader = threading.Thread(
+            target=_drain_stream,
+            args=(stream, captured[name]),
+            name=f"tcp-peer-{name}-drainer",
+            daemon=True,
         )
-    # Always print peer stderr trace for visibility. The peer script
-    # logs progress to stderr; on test failure this shows where it
-    # got stuck.
-    if label and stderr:
-        trace = [
-            line for line in stderr.splitlines()
-            if "[peer" in line or "EXCEPTION" in line or "sync:" in line
-        ]
-        if trace:
-            print(f"\n[{label}] peer trace:")
-            for line in trace[-40:]:
-                print(f"  {line}")
+        reader.start()
+        readers.append(reader)
+    return captured, readers
+
+
+def _captured_text(captured: dict[str, list[str]], name: str) -> str:
+    return "".join(captured[name])
+
+
+def _print_peer_trace(stderr: str, *, label: str) -> None:
+    """Print the useful tail of a peer trace without hiding raw failures."""
+    trace = [
+        line
+        for line in stderr.splitlines()
+        if "[peer" in line or "EXCEPTION" in line or "sync:" in line
+    ]
+    if trace:
+        print(f"\n[{label}] peer trace:")
+        for line in trace[-40:]:
+            print(f"  {line}")
+
+
+def _parse_result(proc, captured: dict[str, list[str]], *, label: str) -> dict:
+    stdout = _captured_text(captured, "stdout")
+    stderr = _captured_text(captured, "stderr")
+    _print_peer_trace(stderr, label=label)
     for line in stdout.splitlines():
         if line.startswith("__TCP_TRADE_RESULT__ "):
-            return json.loads(line[len("__TCP_TRADE_RESULT__ "):])
+            result = json.loads(line[len("__TCP_TRADE_RESULT__ "):])
+            if not isinstance(result, dict):
+                pytest.fail(
+                    f"peer subprocess emitted a non-object result; "
+                    f"type={type(result).__name__}"
+                )
+            # Keep the child-owned status fields separate from the parent
+            # observation of its process exit code.
+            result["_supervisor_returncode"] = proc.returncode
+            return result
     pytest.fail(
         f"peer subprocess exited without emitting __TCP_TRADE_RESULT__; "
         f"rc={proc.returncode}, "
-        f"stdout tail:\n{stdout[-2000:]}\nstderr tail:\n{stderr[-2000:]}"
+        f"stdout tail:\n{stdout[-2000:]}\n"
+        f"stderr tail:\n{stderr[-2000:]}"
     )
 
 
+def _assert_peer_success(result: dict, *, label: str) -> None:
+    """Reject partial or failed child sentinels before gameplay assertions."""
+    status = result.get("_drive_status")
+    error = result.get("_drive_error")
+    deadline_exceeded = result.get("_deadline_exceeded")
+    returncode = result.get("_supervisor_returncode")
+    if (
+        status != "ok"
+        or error is not None
+        or deadline_exceeded is not False
+        or returncode != 0
+    ):
+        raise AssertionError(
+            f"{label} peer did not complete successfully: "
+            f"status={status!r} error={error!r} "
+            f"deadline_exceeded={deadline_exceeded!r} "
+            f"returncode={returncode!r}; result={result}"
+        )
+
+
+def _kill_without_waiting(procs) -> None:
+    """Kill and reap only when the OS reports immediate completion."""
+    for proc in procs:
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        # ``wait(timeout=0)`` is a non-blocking reap.  Never wait for a
+        # blocked PyBoy tick after the pair deadline has expired.
+        try:
+            proc.wait(timeout=0)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+
+def _deadline_error(
+    procs, captures: tuple[dict[str, list[str]], dict[str, list[str]]], deadline_at: float
+) -> _PairDeadlineExceeded:
+    tails = []
+    for label, proc, captured in zip(
+        ("listener", "connector"), procs, captures, strict=True
+    ):
+        stdout = _captured_text(captured, "stdout")
+        stderr = _captured_text(captured, "stderr")
+        _print_peer_trace(stderr, label=label)
+        tails.append(
+            f"{label} rc={proc.returncode}\n"
+            f"stdout tail:\n{stdout[-2000:]}\n"
+            f"stderr tail:\n{stderr[-2000:]}"
+        )
+    return _PairDeadlineExceeded(
+        f"peer subprocess pair exceeded hard deadline at {deadline_at:.6f};\n"
+        + "\n".join(tails)
+    )
+
+
+def _collect_pair(listener, connector, *, deadline_at: float) -> tuple[dict, dict]:
+    """Collect both peers under one absolute, non-extendable deadline.
+
+    The pipe drainers prevent a verbose PyBoy child from blocking on a full
+    stdout/stderr pipe.  The supervisor polls both processes and the drainer
+    state from one monotonic cutoff.  If that cutoff expires, both processes
+    are killed immediately; there is deliberately no executor context,
+    ``communicate()`` call, or thread join that can extend the bound.
+    """
+    procs = (listener, connector)
+    captures = []
+    readers = []
+    for proc in procs:
+        captured, proc_readers = _start_pipe_drainers(proc)
+        captures.append(captured)
+        readers.extend(proc_readers)
+
+    while True:
+        remaining = deadline_at - time.monotonic()
+        if remaining <= 0:
+            _kill_without_waiting(procs)
+            raise _deadline_error(procs, tuple(captures), deadline_at)
+        if all(proc.poll() is not None for proc in procs) and all(
+            not reader.is_alive() for reader in readers
+        ):
+            break
+        time.sleep(min(0.01, remaining))
+
+    return (
+        _parse_result(listener, captures[0], label="listener"),
+        _parse_result(connector, captures[1], label="connector"),
+    )
+
+
+def test_collect_pair_enforces_hard_deadline_without_waiting_for_peers():
+    """A blocked child cannot extend the supervisor's absolute deadline."""
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+    listener = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    connector = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(_PairDeadlineExceeded, match="hard deadline"):
+            _collect_pair(
+                listener,
+                connector,
+                deadline_at=started + 0.25,
+            )
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+    finally:
+        _kill_without_waiting((listener, connector))
+        listener.wait(timeout=2.0)
+        connector.wait(timeout=2.0)
+    assert listener.returncode is not None
+    assert connector.returncode is not None
+
+
+def test_partial_peer_sentinel_is_fatal_before_gameplay_assertions():
+    """A deadline/error sentinel cannot pass on counters alone."""
+    partial = {
+        "LinkMenu": 1,
+        "_drive_status": "deadline",
+        "_drive_error": "trade did not complete before deadline",
+        "_deadline_exceeded": True,
+        "_supervisor_returncode": 1,
+    }
+    with pytest.raises(AssertionError, match="did not complete successfully"):
+        _assert_peer_success(partial, label="listener")
+
+
+@_REMOTE_INTEGRATION
 def test_subprocess_pair_reaches_link_menu_over_tcp():
     """Two-subprocess version of the LinkMenu-over-TCP milestone.
 
@@ -141,18 +369,22 @@ def test_subprocess_pair_reaches_link_menu_over_tcp():
     """
     port = _free_port()
     deadline = 240.0
+    pair_deadline = time.monotonic() + deadline + 60.0
 
     listener = _spawn_peer("listen", port, goal="link_menu", deadline_seconds=deadline)
     # Small delay to let listener bind before the connector tries.
     time.sleep(1.0)
     connector = _spawn_peer("connect", port, goal="link_menu", deadline_seconds=deadline)
 
-    result_a = _collect_result(listener, timeout=deadline + 60.0, label="listener")
-    result_b = _collect_result(connector, timeout=deadline + 60.0, label="connector")
+    result_a, result_b = _collect_pair(
+        listener, connector, deadline_at=pair_deadline
+    )
 
-    print(f"\nsubprocess TCP LinkMenu results:")
+    print("\nsubprocess TCP LinkMenu results:")
     print(f"  listener: {result_a}")
     print(f"  connector: {result_b}")
+    _assert_peer_success(result_a, label="listener")
+    _assert_peer_success(result_b, label="connector")
 
     assert result_a.get("LinkMenu", 0) > 0, (
         f"listener never reached LinkMenu; {result_a}"
@@ -162,9 +394,9 @@ def test_subprocess_pair_reaches_link_menu_over_tcp():
     )
 
 
+@_REMOTE_INTEGRATION
 def test_subprocess_pair_completes_trade_over_tcp():
-    """Two-subprocess full trade: both sides run
-    ``_AddEnemyMonToPlayerParty``.
+    """Two-subprocess Red/Blue trade with real party-record checks.
 
     End-to-end proof that the NetworkBackend transport carries a
     complete Pokemon trade between two independent PyBoy processes.
@@ -192,19 +424,38 @@ def test_subprocess_pair_completes_trade_over_tcp():
     Serial_ExchangeBytes loops without desyncing on the missing
     bytes the peer skipped over while busy elsewhere.
     """
+    if not _trade_fixtures_ready():
+        pytest.skip("Red and Blue color Cable Club fixtures are required")
+
     port = _free_port()
     deadline = 720.0
+    pair_deadline = time.monotonic() + deadline + 60.0
 
-    listener = _spawn_peer("listen", port, goal="trade", deadline_seconds=deadline)
+    listener = _spawn_peer(
+        "listen",
+        port,
+        goal="trade",
+        deadline_seconds=deadline,
+        version="red_color",
+    )
     time.sleep(1.0)
-    connector = _spawn_peer("connect", port, goal="trade", deadline_seconds=deadline)
+    connector = _spawn_peer(
+        "connect",
+        port,
+        goal="trade",
+        deadline_seconds=deadline,
+        version="blue_color",
+    )
 
-    result_a = _collect_result(listener, timeout=deadline + 60.0, label="listener")
-    result_b = _collect_result(connector, timeout=deadline + 60.0, label="connector")
+    result_a, result_b = _collect_pair(
+        listener, connector, deadline_at=pair_deadline
+    )
 
-    print(f"\nsubprocess TCP full-trade results:")
+    print("\nsubprocess TCP full-trade results:")
     print(f"  listener: {result_a}")
     print(f"  connector: {result_b}")
+    _assert_peer_success(result_a, label="listener")
+    _assert_peer_success(result_b, label="connector")
 
     assert result_a.get("_AddEnemyMonToPlayerParty", 0) > 0, (
         f"listener never traded; {result_a}"
@@ -212,3 +463,108 @@ def test_subprocess_pair_completes_trade_over_tcp():
     assert result_b.get("_AddEnemyMonToPlayerParty", 0) > 0, (
         f"connector never traded; {result_b}"
     )
+    before_a = result_a.get("party_before", {})
+    before_b = result_b.get("party_before", {})
+    after_a = result_a.get("party_after", {})
+    after_b = result_b.get("party_after", {})
+    lead_a = before_a.get("mon_species", [None])[0]
+    lead_b = before_b.get("mon_species", [None])[0]
+    record_a = before_a.get("mon_records", [None])[0]
+    record_b = before_b.get("mon_records", [None])[0]
+    assert lead_a is not None and lead_b is not None, (
+        f"trade fixtures must contain a lead; A={before_a} B={before_b}"
+    )
+    assert record_a is not None and record_b is not None and record_a != record_b, (
+        "trade fixtures must contain distinguishable lead records; "
+        f"A={before_a} B={before_b}"
+    )
+    assert after_a.get("mon_records", [None])[0] == record_b, (
+        f"listener did not receive connector's lead record; before={before_a} "
+        f"after={after_a}"
+    )
+    assert after_a.get("species", [None])[0] == lead_b, (
+        f"listener mon record is inconsistent; after={after_a}"
+    )
+    assert after_b.get("mon_records", [None])[0] == record_a, (
+        f"connector did not receive listener's lead record; before={before_b} "
+        f"after={after_b}"
+    )
+    assert after_b.get("species", [None])[0] == lead_a, (
+        f"connector mon record is inconsistent; after={after_b}"
+    )
+
+
+@_REMOTE_INTEGRATION
+def test_subprocess_pair_resolves_battle_turn_over_tcp():
+    """Strict Red/Blue remote battle acceptance with native serial traffic.
+
+    The peer processes load legal, ROM-matched battle fixtures and drive the
+    real Cable Club battle path using ordinary directional/A input to select
+    Battle in LinkMenu. No semantic byte/nibble exchange or test-only game
+    state bypass is installed; all exchange traffic must pass through
+    NetworkBackend's native bit-level serial transport.
+    """
+    if not _battle_fixtures_ready():
+        pytest.skip("Red and Blue color battle fixtures are required")
+
+    port = _free_port()
+    deadline = 900.0
+    pair_deadline = time.monotonic() + deadline + 60.0
+
+    listener = _spawn_peer(
+        "listen",
+        port,
+        goal="battle",
+        deadline_seconds=deadline,
+        version="red_color",
+    )
+    time.sleep(1.0)
+    connector = _spawn_peer(
+        "connect",
+        port,
+        goal="battle",
+        deadline_seconds=deadline,
+        version="blue_color",
+    )
+
+    result_a, result_b = _collect_pair(
+        listener, connector, deadline_at=pair_deadline
+    )
+
+    print("\nsubprocess TCP battle-turn results:")
+    print(f"  listener: {result_a}")
+    print(f"  connector: {result_b}")
+    _assert_peer_success(result_a, label="listener")
+    _assert_peer_success(result_b, label="connector")
+
+    required_hooks = (
+        "DisplayLinkBattleVersusTextBox",
+        "MoveSelectionMenu",
+        "LinkBattleExchangeData",
+    )
+    for result in (result_a, result_b):
+        for symbol in required_hooks:
+            assert result.get(symbol, 0) > 0, (
+                f"{symbol} did not fire in remote battle; {result}"
+            )
+        backend_stats = result.get("_backend_stats", {})
+        assert backend_stats.get("edge_req_sent", 0) + backend_stats.get(
+            "edge_req_received", 0
+        ) > 0, f"remote battle used no native serial edges; {result}"
+        assert backend_stats.get("exchange_sent", 0) == 0, (
+            f"remote battle used an out-of-band exchange; {result}"
+        )
+        assert backend_stats.get("exchange_received", 0) == 0, (
+            f"remote battle used an out-of-band exchange; {result}"
+        )
+
+    assert (
+        result_a.get("ExecutePlayerMove", 0)
+        + result_a.get("ExecuteEnemyMove", 0)
+        > 0
+    ), f"listener battle turn did not advance; {result_a}"
+    assert (
+        result_b.get("ExecutePlayerMove", 0)
+        + result_b.get("ExecuteEnemyMove", 0)
+        > 0
+    ), f"connector battle turn did not advance; {result_b}"

@@ -11,15 +11,13 @@ import base64
 import json
 import os
 import sys
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("mcp.client.session")
 
-from mcp import ClientSession  # noqa: E402
-from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: E402
-
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 ROM_PATH = os.environ.get("POKERED_ROM_PATH")
 SYM_PATH = os.environ.get("POKERED_SYM_PATH")

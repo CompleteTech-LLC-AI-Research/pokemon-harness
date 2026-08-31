@@ -8,6 +8,8 @@ from pokered_harness.events import EventBus
 from pokered_harness.input import Button
 from pokered_harness.session import (
     Session,
+    SessionClosedError,
+    SessionConfigurationError,
     VersionMismatch,
     _default_pyboy_factory,
     sha1_of_file,
@@ -15,7 +17,6 @@ from pokered_harness.session import (
 from pokered_harness.symbols.loader import load_sym_text
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
-
 
 # -- small helpers ---------------------------------------------------------
 
@@ -244,6 +245,101 @@ def test_sha1_helper_and_mismatch_path(tmp_path):
         )
 
 
+def test_expected_symbol_sha1_validates_symbol_bytes(tmp_path):
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    symbol_bytes = b"00:D35E wCurMap\n"
+    sym.write_bytes(symbol_bytes)
+    expected = hashlib.sha1(symbol_bytes).hexdigest()
+
+    s = Session.from_files(
+        rom,
+        sym,
+        expected_symbol_sha1=expected.upper(),
+        pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+    )
+    assert s.symbols["wCurMap"].addr == 0xD35E
+
+
+def test_expected_symbol_sha1_mismatch_fails_before_emulator_creation(tmp_path):
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_bytes(b"00:D35E wCurMap\n")
+    factory_calls: list[str] = []
+
+    def factory(path: str) -> FakePyBoy:
+        factory_calls.append(path)
+        return FakePyBoy(DictMemory())
+
+    with pytest.raises(VersionMismatch, match="symbol SHA-1 mismatch"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_symbol_sha1="0" * 40,
+            pyboy_factory=factory,
+        )
+    assert factory_calls == []
+
+
+def test_expected_symbol_sha1_rejects_invalid_pin(tmp_path):
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_bytes(b"00:D35E wCurMap\n")
+
+    with pytest.raises(SessionConfigurationError, match="symbol SHA-1"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_symbol_sha1="not-a-sha1",
+            pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+        )
+
+
+def test_expected_pyboy_version_rejects_unmarked_runtime(tmp_path, monkeypatch):
+    import pyboy
+
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_text("00:D35E wCurMap\n", encoding="utf-8")
+    monkeypatch.delattr(pyboy, "__pokered_harness_revision__", raising=False)
+
+    with pytest.raises(VersionMismatch, match="pinned pokered-harness"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_pyboy_version="2.7.0",
+            pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+        )
+
+
+def test_expected_pyboy_revision_rejects_wrong_runtime(tmp_path, monkeypatch):
+    import pyboy
+
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_text("00:D35E wCurMap\n", encoding="utf-8")
+    monkeypatch.setattr(
+        pyboy,
+        "__pokered_harness_revision__",
+        "0" * 40,
+        raising=False,
+    )
+
+    with pytest.raises(VersionMismatch, match="revision mismatch"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_pyboy_version="2.7.0",
+            expected_pyboy_revision="c565df66c3731fad2856169a90f6bbec99925915",
+            pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+        )
+
+
 # -- view flag -----------------------------------------------------------
 
 
@@ -373,6 +469,27 @@ def test_close_stops_pyboy():
     s, pb, _ = _session()
     s.close()
     assert pb.stopped is True
+
+
+def test_close_is_idempotent_and_rejects_new_actions():
+    s, pb, _ = _session()
+    s.close()
+    s.close()
+    assert pb.stopped is True
+    with pytest.raises(SessionClosedError, match="session is closed"):
+        s.step()
+
+
+def test_step_rolls_back_tick_when_pyboy_fails():
+    s, pb, _ = _session()
+
+    def fail_tick(*_args, **_kwargs):
+        raise RuntimeError("emulator failure")
+
+    pb.tick = fail_tick  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="emulator failure"):
+        s.step(3)
+    assert s.current_tick() == 0
 
 
 def test_session_context_manager_closes_on_exit():

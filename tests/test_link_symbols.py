@@ -20,7 +20,6 @@ from pokered_harness.link.symbols import (
     symbols_for_role,
 )
 
-
 # ---------------------------------------------------------------------------
 # Lightweight SymbolTable fake — just the minimum surface the registry uses.
 # ---------------------------------------------------------------------------
@@ -133,7 +132,7 @@ def test_resolve_returns_dict_of_resolvable_keys() -> None:
     assert set(resolved.keys()) == {s.key for s in LINK_SYMBOLS}
 
     # Every value is a (bank, addr) int tuple.
-    for key, (bank, addr) in resolved.items():
+    for bank, addr in resolved.values():
         assert isinstance(bank, int)
         assert isinstance(addr, int)
 

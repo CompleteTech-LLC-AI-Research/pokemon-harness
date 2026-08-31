@@ -56,7 +56,7 @@ class ProgressState:
 
     @property
     def badge_count(self) -> int:
-        return bin(self.badges_raw & 0xFF).count("1")
+        return (self.badges_raw & 0xFF).bit_count()
 
 
 def parse_progress(memory: MemoryLike, symbols: SymbolTable) -> ProgressState:

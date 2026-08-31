@@ -45,7 +45,7 @@ What stays:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from pokered_harness.link.serial_link import SerialLink, SerialLinkTimeout
 
@@ -94,7 +94,7 @@ class RemoteLinkEndpoint:
 
     def __init__(
         self,
-        session: "Session",
+        session: Session,
         serial_link: SerialLink,
         *,
         is_internal_clock: bool,
@@ -108,16 +108,16 @@ class RemoteLinkEndpoint:
 
     @classmethod
     def as_listener(
-        cls, session: "Session", serial_link: SerialLink
-    ) -> "RemoteLinkEndpoint":
+        cls, session: Session, serial_link: SerialLink
+    ) -> RemoteLinkEndpoint:
         """The peer that called ``TcpSerialLink.listen`` — drives the
         clock (status = USING_INTERNAL_CLOCK 0x02)."""
         return cls(session, serial_link, is_internal_clock=True)
 
     @classmethod
     def as_connector(
-        cls, session: "Session", serial_link: SerialLink
-    ) -> "RemoteLinkEndpoint":
+        cls, session: Session, serial_link: SerialLink
+    ) -> RemoteLinkEndpoint:
         """The peer that called ``TcpSerialLink.connect`` — follows the
         clock (status = USING_EXTERNAL_CLOCK 0x01)."""
         return cls(session, serial_link, is_internal_clock=False)
@@ -125,7 +125,7 @@ class RemoteLinkEndpoint:
     # --- public surface -----------------------------------------------
 
     @property
-    def session(self) -> "Session":
+    def session(self) -> Session:
         return self._session
 
     @property
@@ -163,6 +163,22 @@ class RemoteLinkEndpoint:
             return
         mem[_RSC_ADDR] = sc & ~_SC_START
         mem[_IF_ADDR] = mem[_IF_ADDR] | _IF_SERIAL
+
+    def step(self, count: int = 1, *, render: bool = False) -> None:
+        """Advance the compatibility endpoint one frame at a time.
+
+        The semantic fallback has no native PyBoy serial backend.  Its
+        hardware-serial tick must therefore run after every emulator frame;
+        batching several frames before calling :meth:`serial_tick` can let
+        the ROMs enter different serial phases and strand a peer exchange.
+        Native ``NetworkBackend`` sessions do not use this method because
+        their serial edges are serviced by the backend itself.
+        """
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise ValueError(f"count must be a positive integer, got {count!r}")
+        for _ in range(count):
+            self._session.step(1, render=render)
+            self.serial_tick()
 
     # --- hook installers ----------------------------------------------
 

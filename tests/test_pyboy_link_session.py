@@ -7,15 +7,17 @@ end-to-end byte exchange without loading a real ROM.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from pokered_harness.link.network_backend import NetworkBackend
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
+from pokered_harness.link.serial_coordinator import CoordinatedBackend
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
-    NullBackend,
     SerialCore,
 )
-from pokered_harness.link.serial_coordinator import CoordinatedBackend
 
 
 class _FakeMB:
@@ -174,6 +176,115 @@ def test_detach_all_restores_every_instance():
     assert link.attached == ()
 
 
+def test_detach_all_stops_session_network_backend_workers():
+    """The session's terminal cleanup must close both network workers."""
+    backend, peer = NetworkBackend.pair()
+    pyboy = _FakePyBoy()
+    link = PyBoyLinkSession(network_backend=backend)
+
+    try:
+        link.attach(pyboy)
+        assert backend._reader is not None and backend._reader.is_alive()
+        assert backend._edge_worker is not None and backend._edge_worker.is_alive()
+
+        link.detach_all()
+
+        assert not backend.connected
+        assert backend._reader is not None and not backend._reader.is_alive()
+        assert backend._edge_worker is not None and not backend._edge_worker.is_alive()
+        assert link.attached == ()
+    finally:
+        # The peer is not owned by this session; clean up the test fixture
+        # explicitly just as a direct NetworkBackend caller must.
+        backend.stop()
+        peer.stop()
+
+
+@pytest.mark.parametrize("is_internal_clock", [True, False])
+def test_network_attach_does_not_seed_game_role_status(is_internal_clock):
+    """Native attach leaves ROM-owned serial role state untouched.
+
+    ``hSerialConnectionStatus`` is populated by the ROM's serial interrupt
+    handler after the native handshake. Native attach may configure the
+    serial registers for the requested wire role, but it must never prefill
+    this ROM-owned HRAM byte for either network role.
+    """
+    backend, peer = NetworkBackend.pair()
+    serial = SerialCore()
+    pyboy = _FakePyBoy(serial=serial)
+    pyboy.memory = {0xFFAA: 0xFF}
+    link = PyBoyLinkSession(
+        network_backend=backend,
+        network_is_internal_clock=is_internal_clock,
+        local_rom_version="red",
+    )
+
+    try:
+        link.attach(pyboy)
+        assert pyboy.memory[0xFFAA] == 0xFF
+        assert pyboy.mb.serial.backend is backend
+        assert serial.transfer_enabled == 1
+        assert serial.internal_clock == int(is_internal_clock)
+    finally:
+        link.detach_all()
+        peer.stop()
+
+
+@pytest.mark.parametrize(
+    ("is_internal_clock", "expected_sb", "expected_sc_source"),
+    [(True, 0x01, 1), (False, 0x02, 0)],
+)
+def test_network_attach_arms_native_role_handshake(
+    is_internal_clock, expected_sb, expected_sc_source
+):
+    """Configure FF01/FF02 without touching the ROM's role-status HRAM."""
+    backend, peer = NetworkBackend.pair()
+    serial = SerialCore()
+    serial.set_SB(0x02)
+    serial.set_SC(0x80)
+    pyboy = _FakePyBoy(serial=serial)
+    pyboy.memory = {0xFFAA: 0xFF}
+    link = PyBoyLinkSession(
+        network_backend=backend,
+        network_is_internal_clock=is_internal_clock,
+        local_rom_version="red",
+    )
+
+    try:
+        link.attach(pyboy)
+        assert serial.SB == expected_sb
+        assert serial.transfer_enabled == 1
+        assert serial.internal_clock == expected_sc_source
+        assert serial.SC & 0x80
+        assert serial.SC & 0x01 == expected_sc_source
+        assert pyboy.memory[0xFFAA] == 0xFF
+    finally:
+        link.detach_all()
+        peer.stop()
+
+
+def test_detach_all_stops_network_backend_when_detach_raises(monkeypatch):
+    """Transport shutdown must be unconditional when detaching fails."""
+    backend, peer = NetworkBackend.pair()
+    link = PyBoyLinkSession(network_backend=backend)
+    link.attach(_FakePyBoy())
+
+    def fail_detach(_pyboy):
+        raise RuntimeError("synthetic serial restoration failure")
+
+    monkeypatch.setattr(link, "detach", fail_detach)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic serial restoration"):
+            link.detach_all()
+
+        assert not backend.connected
+        assert backend._reader is not None and not backend._reader.is_alive()
+        assert backend._edge_worker is not None and not backend._edge_worker.is_alive()
+    finally:
+        backend.stop()
+        peer.stop()
+
+
 # ---------------------------------------------------------------------------
 # step(): drives both sides and triggers the coordinated exchange
 # ---------------------------------------------------------------------------
@@ -208,3 +319,137 @@ def test_step_exchanges_a_full_byte_end_to_end():
     assert core_b.SB == 0xAA
     assert core_a.transfer_enabled == 0
     assert core_b.transfer_enabled == 0
+
+
+def test_interleaved_chunk_uses_cpu_cycles_for_variable_length_instructions():
+    """A chunk ends on emulated time, not an instruction-count estimate."""
+
+    class _ChunkMB:
+        def __init__(self):
+            self.cpu = SimpleNamespace(cycles=100)
+            self.lcd = SimpleNamespace(frame_done=False)
+            self.breakpoint_singlestep = 0
+
+        def tick(self):
+            # The second instruction is deliberately longer than the
+            # historical ~7-cycle estimate.
+            self.cpu.cycles += (4, 20)[self.cpu.cycles != 100]
+            return False
+
+    pyboy = SimpleNamespace(mb=_ChunkMB())
+
+    assert PyBoyLinkSession._step_single_step_chunk(pyboy, 24) is False
+    assert pyboy.mb.cpu.cycles == 124
+
+
+class _FrameBoundaryDouble:
+    """Small motherboard double for the interleaved frame scheduler."""
+
+    def __init__(
+        self,
+        frame_boundary: int,
+        *,
+        start_cycles: int = 0,
+        stalled: bool = False,
+        speed_shift: int = 0,
+    ):
+        self._frame_boundary = start_cycles + frame_boundary
+        self._next_frame_boundary = self._frame_boundary
+        self._stalled = stalled
+        self.cpu = SimpleNamespace(cycles=start_cycles)
+        self.lcd = SimpleNamespace(
+            frame_done=False,
+            _cycles_to_frame=frame_boundary,
+            speed_shift=speed_shift,
+        )
+        self.sound = SimpleNamespace(
+            disable_sampling=False,
+            clear_buffer=lambda: None,
+        )
+        self.serial = SimpleNamespace(internal_clock=False)
+        self.breakpoint_singlestep = 0
+        self.ticks_after_boundary = 0
+
+    def tick(self):
+        if self._stalled:
+            return False
+        if self._next_frame_boundary > self._frame_boundary:
+            self.ticks_after_boundary += 1
+        self.cpu.cycles += 4
+        if self.cpu.cycles >= self._next_frame_boundary:
+            self.lcd.frame_done = True
+            self._next_frame_boundary += 1000
+        return False
+
+
+class _FrameBoundaryPyBoy:
+    def __init__(
+        self,
+        frame_boundary: int,
+        *,
+        start_cycles: int = 0,
+        stalled: bool = False,
+        speed_shift: int = 0,
+    ):
+        self.mb = _FrameBoundaryDouble(
+            frame_boundary,
+            start_cycles=start_cycles,
+            stalled=stalled,
+            speed_shift=speed_shift,
+        )
+        self.events = []
+        self.frame_count = 0
+
+    def _handle_events(self, _events):
+        return None
+
+    def _post_handle_events(self):
+        return None
+
+
+def test_interleaved_frame_crosses_early_lcd_boundary_to_shared_horizon():
+    """An early LCD boundary must not freeze its peer's serial clock."""
+    a_start = 1_000_000
+    b_start = 20_000_000
+    a = _FrameBoundaryPyBoy(20, start_cycles=a_start)
+    b = _FrameBoundaryPyBoy(32, start_cycles=b_start)
+
+    PyBoyLinkSession._interleave_one_frame(a, b, chunk_cycles=8)
+
+    assert a.mb.cpu.cycles - a_start == b.mb.cpu.cycles - b_start == 32
+    assert a.mb.ticks_after_boundary > 0
+    assert a.frame_count == b.frame_count == 1
+
+
+def test_interleaved_frame_normalizes_cgb_double_speed_cycles():
+    """A CGB double-speed CPU must not consume two game frames.
+
+    PyBoy's CPU cycle counter advances twice as quickly in CGB double-speed
+    mode, while the LCD and the ROM's DelayFrame cadence remain in the
+    normal hardware-time domain. The scheduler therefore scales the raw
+    CPU budget per side before choosing its shared horizon.
+    """
+    a_start = 1_000_000
+    b_start = 2_000_000
+    a = _FrameBoundaryPyBoy(
+        40, start_cycles=a_start, speed_shift=1
+    )
+    b = _FrameBoundaryPyBoy(
+        20, start_cycles=b_start, speed_shift=0
+    )
+
+    PyBoyLinkSession._interleave_one_frame(a, b, chunk_cycles=8)
+
+    assert a.mb.cpu.cycles - a_start == 40
+    assert b.mb.cpu.cycles - b_start == 20
+    assert a.frame_count == b.frame_count == 1
+
+
+def test_interleaved_frame_timeout_is_bounded_and_clears_singlestep():
+    a = _FrameBoundaryPyBoy(8, stalled=True)
+    b = _FrameBoundaryPyBoy(8, stalled=True)
+
+    with pytest.raises(TimeoutError, match="shared LCD cycle horizon"):
+        PyBoyLinkSession._interleave_one_frame(a, b, chunk_cycles=4)
+
+    assert a.mb.breakpoint_singlestep == b.mb.breakpoint_singlestep == 0

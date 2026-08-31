@@ -14,7 +14,6 @@ With ``--view`` both PyBoy windows open so you can watch the trade.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -28,9 +27,8 @@ else:
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from pokered_harness.link import LinkPair  # noqa: E402
-from pokered_harness.session import Session  # noqa: E402
-
+from pokered_harness.link import LinkPair
+from pokered_harness.session import Session
 
 ROM_PATHS = {
     "red": (ROM_ROOT / "red" / "pokemon-red.gb", ROM_ROOT / "red" / "pokemon-red.sym"),

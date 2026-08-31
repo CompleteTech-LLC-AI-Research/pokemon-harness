@@ -23,8 +23,9 @@ tearing down both underlying sessions.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from pokered_harness.link.symbols import (
     LINK_SYMBOLS,
@@ -58,20 +59,20 @@ _STATUS_PEER_INTERNAL = 0x02
 class BridgeEndpoint:
     """One side of the bridge — a Session plus its resolved HRAM addresses."""
 
-    session: "Session"
+    session: Session
     send_addr: int
     receive_addr: int
     status_addr: int
 
 
-def _require_hram(session: "Session", label: str) -> int:
+def _require_hram(session: Session, label: str) -> int:
     sym = session.symbols.get(label)
     if sym is None:
         raise LookupError(f"required HRAM label missing: {label!r}")
     return sym.addr
 
 
-def _label_on(session: "Session", link_sym: LinkSymbol) -> str | None:
+def _label_on(session: Session, link_sym: LinkSymbol) -> str | None:
     """Return whichever per_version label for ``link_sym`` exists in this
     session's SymbolTable, or None if none of them do."""
     for label in link_sym.per_version.values():
@@ -107,13 +108,13 @@ class SerialBridge:
     @classmethod
     def from_sessions(
         cls,
-        session_a: "Session",
-        session_b: "Session",
+        session_a: Session,
+        session_b: Session,
         transport: LinkTransport,
         *,
         version_a: str,
         version_b: str,
-    ) -> "SerialBridge":
+    ) -> SerialBridge:
         resolved_a = resolve_link_symbols(session_a.symbols, version_a)
         resolved_b = resolve_link_symbols(session_b.symbols, version_b)
         endpoint_a = BridgeEndpoint(

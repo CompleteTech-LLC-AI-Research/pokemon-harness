@@ -18,10 +18,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pokered_harness.session import Session
-from pokered_harness.mcp_server import register_default_hooks
-import run_to_brock as rtb
 import subprocess
+
+import run_to_brock as rtb
+
+from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 
 
 def _pathfind(state_bytes: bytes, goal_xy: tuple[int, int]) -> str | None:
@@ -232,7 +234,7 @@ def grind(drv, target_level: int = 13, max_blackouts: int = 20) -> int:
                     # Blackout triggered
                     blackouts += 1
                     if blackouts >= max_blackouts:
-                        print(f"  blackout budget exhausted", flush=True)
+                        print("  blackout budget exhausted", flush=True)
                         return after.party.mons[0].level
                     break  # navigate again
                 continue

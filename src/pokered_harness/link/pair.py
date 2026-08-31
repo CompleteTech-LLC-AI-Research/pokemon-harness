@@ -8,7 +8,8 @@ pair together and drives both sides in lockstep.
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
 
 from pokered_harness.link.symbols import LinkRole, symbols_for_role
 from pokered_harness.link.transport import LinkTransport
@@ -44,8 +45,8 @@ class LinkPair:
 
     def __init__(
         self,
-        primary: "Session",
-        peer: "Session",
+        primary: Session,
+        peer: Session,
         *,
         version_primary: str,
         version_peer: str,
@@ -62,11 +63,11 @@ class LinkPair:
     # --- properties ----------------------------------------------------
 
     @property
-    def primary(self) -> "Session":
+    def primary(self) -> Session:
         return self._primary
 
     @property
-    def peer(self) -> "Session":
+    def peer(self) -> Session:
         return self._peer
 
     @property

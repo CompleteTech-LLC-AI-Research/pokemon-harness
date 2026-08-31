@@ -28,9 +28,8 @@ from __future__ import annotations
 
 import pytest
 
-from pokered_harness.link.serial_core import CYCLES_PER_BYTE_DMG, SerialCore
 from pokered_harness.link.serial_coordinator import LockstepCoordinator
-
+from pokered_harness.link.serial_core import CYCLES_PER_BYTE_DMG, SerialCore
 
 # --- Pokémon Gen I protocol constants (pret-sourced) -----------------------
 
@@ -216,7 +215,7 @@ def test_battle_action_switch_slots(party_slot_plus_4):
     """Battle engine sends ``wWhichPokemon + 4`` as the switch encoding,
     which occupies the nibble range 0x4-0x9."""
     a, b, _ = _make_pair()
-    recv_a, recv_b = _exchange_byte(a, b, party_slot_plus_4, LINKBATTLE_NO_ACTION)
+    _recv_a, recv_b = _exchange_byte(a, b, party_slot_plus_4, LINKBATTLE_NO_ACTION)
     assert recv_b == party_slot_plus_4
 
 

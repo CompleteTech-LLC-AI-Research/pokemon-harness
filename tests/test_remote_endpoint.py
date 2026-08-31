@@ -23,7 +23,6 @@ from pokered_harness.symbols.loader import load_sym_text
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
 
-
 # --- symbol tables --------------------------------------------------------
 #
 # Two sessions with DIFFERENT addresses for the same symbols — proves
@@ -243,7 +242,7 @@ def test_exchange_bytes_cross_version_translates_via_symbol():
 
 
 def test_serial_tick_clears_sc_start_and_raises_if():
-    session, pb, mem = _make_session(_BLUE_SYM)
+    session, _pb, mem = _make_session(_BLUE_SYM)
     la, _lb = InProcessSerialLink.pair("blue", "blue")
     endpoint = RemoteLinkEndpoint.as_connector(session, la)
     endpoint.install()
@@ -255,7 +254,7 @@ def test_serial_tick_clears_sc_start_and_raises_if():
 
 
 def test_serial_tick_noop_when_sc_start_clear():
-    session, pb, mem = _make_session(_BLUE_SYM)
+    session, _pb, mem = _make_session(_BLUE_SYM)
     la, _lb = InProcessSerialLink.pair("blue", "blue")
     endpoint = RemoteLinkEndpoint.as_connector(session, la)
     endpoint.install()
@@ -264,6 +263,19 @@ def test_serial_tick_noop_when_sc_start_clear():
     endpoint.serial_tick()
     assert mem[0xFF02] == 0x01
     assert mem[0xFF0F] == 0x00
+
+
+def test_step_services_serial_tick_after_each_frame():
+    session, pb, _mem = _make_session(_BLUE_SYM)
+    la, _lb = InProcessSerialLink.pair("blue", "blue")
+    endpoint = RemoteLinkEndpoint.as_connector(session, la)
+    serial_ticks: list[int] = []
+    endpoint.serial_tick = lambda: serial_ticks.append(session.current_tick())  # type: ignore[method-assign]
+
+    endpoint.step(3, render=True)
+
+    assert pb.tick_calls == [(1, True), (1, True), (1, True)]
+    assert serial_ticks == [1, 2, 3]
 
 
 # --- install() guards ----------------------------------------------------

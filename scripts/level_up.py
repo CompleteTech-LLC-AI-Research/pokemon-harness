@@ -43,9 +43,8 @@ import sys
 import time
 from pathlib import Path
 
-from pokered_harness.session import Session
 from pokered_harness.mcp_server import register_default_hooks
-
+from pokered_harness.session import Session
 
 # Map constants
 M_ROUTE_2 = 0x0D

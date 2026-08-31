@@ -9,9 +9,9 @@ ROMs by:
 
 1. Loading two Yellow sessions at the Cable Club receptionist state
    (produced by ``scripts/produce_cable_club_fixture.py``).
-2. Pairing them under :class:`PyBoyLinkSession.local`, which swaps
-   ``pyboy.mb.serial`` for a :class:`SerialCore` and wires the two
-   cores via :class:`LockstepCoordinator`.
+2. Pairing them under :class:`PyBoyLinkSession.local`, which wires the
+   two motherboard serial cores together via
+   :class:`LockstepCoordinator`.
 3. Pressing A on both sides to initiate the receptionist dialogue,
    which eventually leads to ``CableClub_DoBattleOrTradeAgain``
    emitting the trade preamble.
@@ -21,36 +21,21 @@ ROMs by:
    drive serial transfers through our new core.
 
 Gated with ``skipif`` on ROM availability, fixture availability, AND a
-runtime check that ``pyboy.mb`` is Python-accessible. The installed
-wheel build of PyBoy is Cython-compiled and ``mb`` is a ``cdef``
-attribute — inaccessible from Python — so this test only runs under a
-non-Cython PyBoy build.
+runtime check that ``pyboy.mb`` is Python-accessible. The harness package
+bundles the pinned source PyBoy runtime so the link layer can attach its
+bit-accurate backend to the motherboard serial object.
 
-Running under a non-Cython venv
--------------------------------
+The normal checkout installs the pinned, bundled source runtime with
+``python -m pip install -e ".[dev]"``. It must expose ``pyboy.mb.serial`` so
+the Python link session can attach the native serial backend. Optional native
+validation is available through ``scripts/bootstrap_pyboy.py --mode cython``;
+that accelerator build is not used for the Python-visible attachment tests
+when Cython hides the motherboard attributes. Run the strict local acceptance
+cases with::
 
-One-shot setup (from the worktree root)::
-
-    python -m venv .venv-noncython
-    .venv-noncython/Scripts/pip install numpy
-    git clone --depth 1 https://github.com/Baekalfen/PyBoy.git vendor/pyboy-src
-    # Patch vendor/pyboy-src/setup.py line 10 so CYTHON respects
-    # PYBOY_NO_CYTHON (already done in this worktree's vendor/ copy):
-    #   CYTHON = platform.python_implementation() == "CPython" \\
-    #       and not os.getenv("PYBOY_NO_CYTHON")
-    PYBOY_NO_CYTHON=1 .venv-noncython/Scripts/pip install \\
-        --no-build-isolation -e vendor/pyboy-src
-    .venv-noncython/Scripts/pip install -e . pytest pytest-asyncio mcp
-
-Then::
-
-    .venv-noncython/Scripts/python.exe -m pytest \\
-        tests/test_pyboy_link_session_roms.py -v
-
-Expect ~50s for both tests (non-Cython PyBoy is markedly slower than
-the Cython wheel). A pair of 600-frame Yellow emulations at realtime
-is enough headroom for the Cable Club receptionist preamble handshake
-to fire many edges through :class:`SerialCore`.
+    python -m pytest -q \\
+        tests/test_pyboy_link_session_roms.py::test_red_yellow_trade_swaps_real_party_records \\
+        tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved
 """
 
 from __future__ import annotations
@@ -63,7 +48,7 @@ import pytest
 
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_core import SerialCore
-
+from tests._rom_assets import fixture_path, rom_path, sym_path
 
 _REPO = Path(__file__).resolve().parents[1]
 for _parent in [_REPO, *_REPO.parents]:
@@ -73,20 +58,26 @@ for _parent in [_REPO, *_REPO.parents]:
 else:  # pragma: no cover - defensive; tests skip below if ROM missing.
     ROM_ROOT = _REPO / "rom"
 
-_YELLOW_ROM = ROM_ROOT / "yellow" / "pokemon-yellow.gbc"
-_YELLOW_SYM = ROM_ROOT / "yellow" / "pokemon-yellow.sym"
-_YELLOW_STATE = _REPO / "tests" / "fixtures" / "link" / "yellow" / "cable_club.state"
+_YELLOW_ROM = rom_path("yellow")
+_YELLOW_SYM = sym_path("yellow")
+_YELLOW_STATE = fixture_path("yellow")
+
+# Smaller chunks reduce scheduling skew when a local master reaches a
+# serial edge just before the peer ROM has armed its slave transfer. Keep
+# the existing default for normal runs; production acceptance can opt into
+# a tighter cooperative schedule without changing emulator semantics.
+_LINK_CHUNK_CYCLES = int(os.environ.get("POKERED_LINK_CHUNK_CYCLES", "256"))
 
 _ROM_PATHS = {
     # Red uses the color-patched ROM so it matches the walkthrough
     # state produced by vigorous-lovelace-15ea8a (SHA e1deed6308…).
     "red": (
-        ROM_ROOT / "red" / "pokemon-red-color.gb",
-        ROM_ROOT / "red" / "pokemon-red.sym",
+        rom_path("red", color=True),
+        sym_path("red"),
     ),
     "blue": (
-        ROM_ROOT / "blue" / "pokemon-blue-color.gb",
-        ROM_ROOT / "blue" / "pokemon-blue.sym",
+        rom_path("blue", color=True),
+        sym_path("blue"),
     ),
     "yellow": (_YELLOW_ROM, _YELLOW_SYM),
 }
@@ -98,12 +89,12 @@ _ROM_PATHS = {
 # regressions where the patch accidentally diverges from vanilla.
 _ROM_VARIANTS = {
     "red": [
-        (ROM_ROOT / "red" / "pokemon-red.gb", "vanilla"),
-        (ROM_ROOT / "red" / "pokemon-red-color.gb", "color"),
+        (rom_path("red"), "vanilla"),
+        (rom_path("red", color=True), "color"),
     ],
     "blue": [
-        (ROM_ROOT / "blue" / "pokemon-blue.gb", "vanilla"),
-        (ROM_ROOT / "blue" / "pokemon-blue-color.gb", "color"),
+        (rom_path("blue"), "vanilla"),
+        (rom_path("blue", color=True), "color"),
     ],
     "yellow": [(_YELLOW_ROM, "cgb")],
 }
@@ -118,7 +109,7 @@ def _variant_state_path(version: str, tag: str):
     ``cerulean_pc.state`` source. Save states are bit-tied to the
     exact ROM bytes they were captured against, so vanilla and color
     need separate fixtures."""
-    base = _REPO / "tests" / "fixtures" / "link" / version
+    base = fixture_path(version).parent
     if tag == "vanilla":
         return base / "cable_club-vanilla.state"
     return base / "cable_club.state"
@@ -128,18 +119,30 @@ def _open_session_variant(version: str, rom_path, tag: str):
     """Like :func:`_open_session` but uses the given ROM path + the
     variant-specific cable_club fixture. Used by the variant tests to
     exercise vanilla and color ROMs with their matching fixtures."""
-    os.environ.setdefault("POKERED_SKIP_SHA1", "1")
     sys.path.insert(0, str(_REPO / "src"))
-    from pokered_harness.session import Session  # noqa: E402
+    from pokered_harness.config import load_versions
+    from pokered_harness.session import Session
 
     _, sym = _ROM_PATHS[version]
-    session = Session.from_files(rom_path, sym)
+    pins = load_versions(_REPO / "VERSIONS.md")
+    expected_sha = pins.sha1_for_path(rom_path)
+    assert expected_sha is not None
+    session = Session.from_files(
+        rom_path,
+        sym,
+        expected_rom_sha1=expected_sha,
+        expected_pyboy_version=pins.pyboy_version,
+    )
     session.load_state(_variant_state_path(version, tag).read_bytes())
     return session
 
 
 def _state_path(version: str):
-    return _REPO / "tests" / "fixtures" / "link" / version / "cable_club.state"
+    return fixture_path(version)
+
+
+def _battle_state_path(version: str):
+    return fixture_path(version).parent / "cable_club-battle.state"
 
 
 _fixtures_ready = (
@@ -153,10 +156,10 @@ def _pyboy_mb_swappable() -> bool:
     Wheel-installed PyBoy is Cython-compiled (``cdef Motherboard mb``,
     ``cdef Serial serial``); ``mb`` is not exposed to Python at all,
     so :class:`PyBoyLinkSession.attach` cannot swap the serial device.
-    A source-install ``pip install -e .`` of PyBoy with the Cython
-    extension disabled (``PYBOY_NO_CYTHON=1`` or building without
-    Cython) makes both attributes regular Python attributes and the
-    session works end-to-end.
+    The default harness install uses the bundled source-compatible runtime,
+    which keeps those attributes visible. The optional Cython bootstrap is
+    useful for native-runtime validation but is not expected to satisfy this
+    Python-side attachment probe when the extension hides them.
     """
     try:
         import warnings
@@ -190,9 +193,9 @@ pytestmark = pytest.mark.skipif(
     reason=(
         "PyBoy is Cython-compiled (mb / mb.serial are cdef attributes "
         "not exposed to Python) so PyBoyLinkSession.attach can't swap "
-        "in SerialCore from outside the C extension. Install PyBoy "
-        "from source without Cython, or use a fork that bakes "
-        "SerialCore into the motherboard, then this test will run."
+        "in SerialCore from outside the C extension. Install the bundled "
+        "source-compatible runtime, or use a fork that bakes SerialCore "
+        "into the motherboard, then this test will run."
         if _fixtures_ready
         else (
             "Yellow ROM or Cable Club state fixture missing — regenerate "
@@ -203,25 +206,35 @@ pytestmark = pytest.mark.skipif(
 
 
 class _CountingBackend:
-    """Wraps an existing :class:`SerialBackend` and counts edges.
+    """Wraps an existing :class:`SerialBackend` and counts link activity.
 
-    Installed on a :class:`SerialCore` after its coordinator backend is
-    wired, so we can observe real-ROM serial activity without changing
-    the coordinator API.
+    ``on_edge`` only fires on the side currently acting as master. To
+    observe the peer's slave-side progress too, a wrapper can point at a
+    peer counter and increment the peer's receive counters each time it
+    drives an external edge into that peer.
     """
 
     def __init__(self, wrapped) -> None:
         self.wrapped = wrapped
-        self.edges = 0
-        self.bytes_complete = 0
-        self._bit_index = 0
+        self.peer_counter: _CountingBackend | None = None
+        self.master_edges = 0
+        self.slave_edges = 0
+        self.bytes_sent_complete = 0
+        self.bytes_received_complete = 0
+
+    @property
+    def total_edges(self) -> int:
+        return self.master_edges + self.slave_edges
 
     def on_edge(self, our_bit: int, our_role: int) -> int:
         peer_bit = self.wrapped.on_edge(our_bit, our_role)
-        self.edges += 1
-        self._bit_index += 1
-        if self._bit_index % 8 == 0:
-            self.bytes_complete += 1
+        self.master_edges += 1
+        if self.master_edges % 8 == 0:
+            self.bytes_sent_complete += 1
+        if self.peer_counter is not None:
+            self.peer_counter.slave_edges += 1
+            if self.peer_counter.slave_edges % 8 == 0:
+                self.peer_counter.bytes_received_complete += 1
         return peer_bit
 
 
@@ -229,20 +242,28 @@ def _open_yellow_session():
     return _open_session("yellow")
 
 
-def _open_session(version: str):
+def _open_session(version: str, *, state_path=None):
     """Load ``version`` ROM + cable_club.state fixture.
 
     Defers the ``pokered_harness.session`` import so the module remains
     collectable even when some runtime deps are missing (e.g. under
     main-env pytest where the skipif above fires early).
     """
-    os.environ.setdefault("POKERED_SKIP_SHA1", "1")
     sys.path.insert(0, str(_REPO / "src"))
-    from pokered_harness.session import Session  # noqa: E402
+    from pokered_harness.config import load_versions
+    from pokered_harness.session import Session
 
     rom, sym = _ROM_PATHS[version]
-    session = Session.from_files(rom, sym)
-    session.load_state(_state_path(version).read_bytes())
+    pins = load_versions("VERSIONS.md")
+    expected_sha = pins.sha1_for_path(rom)
+    assert expected_sha is not None
+    session = Session.from_files(
+        rom,
+        sym,
+        expected_rom_sha1=expected_sha,
+        expected_pyboy_version=pins.pyboy_version,
+    )
+    session.load_state((state_path or _state_path(version)).read_bytes())
     return session
 
 
@@ -298,6 +319,8 @@ def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
         # can observe real serial activity.
         counter_a = _CountingBackend(core_a.backend)
         counter_b = _CountingBackend(core_b.backend)
+        counter_a.peer_counter = counter_b
+        counter_b.peer_counter = counter_a
         core_a.backend = counter_a
         core_b.backend = counter_b
 
@@ -318,17 +341,23 @@ def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
         # The meaningful assertion: at least *some* serial activity
         # happened. Pokémon's Cable Club state includes the master
         # probe; we should see many edges on both sides.
-        assert counter_a.edges > 0, (
-            "A-side SerialCore saw zero edges after 600 frames — "
+        assert counter_a.total_edges > 0, (
+            "A-side SerialCore saw zero activity after 600 frames — "
             "the ROM isn't driving our serial path"
         )
-        assert counter_b.edges > 0, (
-            "B-side SerialCore saw zero edges after 600 frames — "
+        assert counter_b.total_edges > 0, (
+            "B-side SerialCore saw zero activity after 600 frames — "
             "the ROM isn't driving our serial path"
         )
-        # And at least one full byte should have completed.
-        assert counter_a.bytes_complete >= 1
-        assert counter_b.bytes_complete >= 1
+        # And at least one full byte should have completed somewhere on
+        # the link. The side acting as slave may receive bytes without
+        # ever becoming master during this short receptionist phase.
+        assert (
+            counter_a.bytes_sent_complete
+            + counter_a.bytes_received_complete
+            + counter_b.bytes_sent_complete
+            + counter_b.bytes_received_complete
+        ) >= 1
     finally:
         a.close()
         b.close()
@@ -400,7 +429,7 @@ def _drive_two_sessions_to_link_menu(
         """Sub-frame interleaved via :meth:`PyBoyLinkSession.step_interleaved`.
         Needed during ``Serial_SyncAndExchangeNybble`` so A and B's
         CPUs stay cycle-aligned enough for nibble-sync to converge."""
-        link.step_interleaved(frames)
+        link.step_interleaved(frames, chunk_cycles=_LINK_CHUNK_CYCLES)
 
     frames_used = 0
 
@@ -415,7 +444,6 @@ def _drive_two_sessions_to_link_menu(
     # both sides, switch to fine-grained interleaving so the game's
     # tight master/slave-alternation loop can synchronize.
     attempts = (total_frames - frames_used) // frames_per_attempt
-    nybble_sym = "Serial_SyncAndExchangeNybble"
     for _attempt in range(attempts):
         if counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0:
             break
@@ -439,55 +467,127 @@ def _drive_two_sessions_to_link_menu(
 TRADE_CENTER_MAP_ID = 0xEF  # per pokeyellow/constants/map_constants.asm
 COLOSSEUM_MAP_ID = 0xF0
 PARTY_MON_SIZE = 44  # bytes per party-mon record (wPartyMon1..6)
-PARTY_OT_SIZE = 11
-PARTY_NICK_SIZE = 11
 
 
-def _pad_party_to_3(session) -> None:
-    """Colosseum requires ≥3 Pokémon — duplicate the lead into slots 1,2.
+def _party_raw_summary(session) -> dict[str, object]:
+    """Return the game-owned party lists for transfer diagnostics."""
+    pb = session._pyboy
+    addr_of = session.symbols.addr_of
+    count = int(pb.memory[addr_of("wPartyCount")])
+    species_addr = addr_of("wPartySpecies")
+    mons_addr = addr_of("wPartyMons")
+    species = [int(pb.memory[species_addr + slot]) for slot in range(count + 1)]
+    mon_species = [
+        int(pb.memory[mons_addr + slot * PARTY_MON_SIZE]) for slot in range(count)
+    ]
+    return {"count": count, "species": species, "mon_species": mon_species}
 
-    The Cable Club fixture (``cerulean_pc`` walkthrough milestone) has a
-    single-mon party. Link battles in Colosseum enforce a 3-mon minimum,
-    so we patch the party in RAM rather than regenerating the fixture.
-    This mimics what a player would do by filling the PC withdrawals.
-    """
+
+def _assert_battle_fixture_is_legal(session) -> None:
+    """Require a pre-generated legal party; do not mutate it in the test."""
     pb = session._pyboy
     addr_of = session.symbols.addr_of
     count_addr = addr_of("wPartyCount")
     species_addr = addr_of("wPartySpecies")
     mons_addr = addr_of("wPartyMons")
-    ot_addr = addr_of("wPartyMonOT")
-    nick_addr = addr_of("wPartyMonNicks")
+    count = int(pb.memory[count_addr])
+    assert count >= 3, f"battle fixture has only {count} party Pokémon"
+    assert count <= 6, f"battle fixture has invalid party count {count}"
+    assert int(pb.memory[species_addr + count]) == 0xFF
+    for slot in range(count):
+        species = int(pb.memory[species_addr + slot])
+        mon_addr = mons_addr + slot * PARTY_MON_SIZE
+        assert species not in (0, 0xFF)
+        assert int(pb.memory[mon_addr]) == species
+        hp = (int(pb.memory[mon_addr + 1]) << 8) | int(pb.memory[mon_addr + 2])
+        assert hp > 0
+        saw_empty_move = False
+        for move_idx in range(4):
+            move_id = int(pb.memory[mon_addr + 8 + move_idx])
+            pp = int(pb.memory[mon_addr + 29 + move_idx]) & 0x3F
+            if move_id == 0:
+                saw_empty_move = True
+                assert pp == 0, (
+                    f"{session!r} party slot {slot} has PP for an empty "
+                    f"move slot {move_idx}: pp={pp}"
+                )
+            else:
+                assert not saw_empty_move, (
+                    f"{session!r} party slot {slot} has a move after an "
+                    f"empty slot: index={move_idx}, move={move_id}"
+                )
+                assert move_id < 0xFF
+                assert pp > 0, (
+                    f"{session!r} party slot {slot} move {move_idx} "
+                    f"({move_id}) has no PP"
+                )
 
-    if pb.memory[count_addr] >= 3:
-        return
+    lead_addr = mons_addr
+    assert any(
+        int(pb.memory[lead_addr + 8 + move_idx]) != 0
+        and (int(pb.memory[lead_addr + 29 + move_idx]) & 0x3F) > 0
+        for move_idx in range(4)
+    ), "battle fixture lead has no usable move"
 
-    # Some cable_club fixtures were saved mid-grind with depleted PP on
-    # the lead's moves. Restore any zero-PP moves to a safe non-zero
-    # value (keeps PP-Up bits intact in the top 2 bits). Otherwise the
-    # battle test's "press A on first move" would land on a 0-PP move,
-    # the menu would beep, and LinkBattleExchangeData would never fire.
-    for i in range(4):
-        pp_addr = mons_addr + 29 + i
-        pp_byte = pb.memory[pp_addr]
-        if (pp_byte & 0x3F) == 0:
-            pb.memory[pp_addr] = (pp_byte & 0xC0) | 0x0A
 
-    lead_species = pb.memory[species_addr]
-    lead_mon = [pb.memory[mons_addr + i] for i in range(PARTY_MON_SIZE)]
-    lead_ot = [pb.memory[ot_addr + i] for i in range(PARTY_OT_SIZE)]
-    lead_nick = [pb.memory[nick_addr + i] for i in range(PARTY_NICK_SIZE)]
+def _read_active_battle_moves(session) -> tuple[tuple[int, int], ...]:
+    """Read the ROM-owned active move/PP slots without changing emulator RAM."""
+    pb = session._pyboy
+    addr_of = session.symbols.addr_of
+    moves_addr = addr_of("wBattleMonMoves")
+    pp_addr = addr_of("wBattleMonPP")
+    return tuple(
+        (
+            int(pb.memory[moves_addr + move_idx]),
+            int(pb.memory[pp_addr + move_idx]) & 0x3F,
+        )
+        for move_idx in range(4)
+    )
 
-    for slot in (1, 2):
-        pb.memory[species_addr + slot] = lead_species
-        for i, byte in enumerate(lead_mon):
-            pb.memory[mons_addr + slot * PARTY_MON_SIZE + i] = byte
-        for i, byte in enumerate(lead_ot):
-            pb.memory[ot_addr + slot * PARTY_OT_SIZE + i] = byte
-        for i, byte in enumerate(lead_nick):
-            pb.memory[nick_addr + slot * PARTY_NICK_SIZE + i] = byte
-    pb.memory[species_addr + 3] = 0xFF  # species list terminator
-    pb.memory[count_addr] = 3
+
+def _assert_active_battle_state_is_legal(session) -> tuple[int, int]:
+    """Validate ROM-populated battle state and return ``(slot, move_id)``.
+
+    A depleted move is legal game state, so the active move list may contain
+    non-zero move IDs with zero PP.  The driver must select a different slot
+    through the real move menu; it must never repair PP or any other RAM field.
+    """
+    pb = session._pyboy
+    addr_of = session.symbols.addr_of
+    party_species = int(pb.memory[addr_of("wPartySpecies")])
+    active_species = int(pb.memory[addr_of("wBattleMonSpecies")])
+    assert active_species == party_species, (
+        f"active battle species {active_species} does not match lead "
+        f"party species {party_species}"
+    )
+    hp_addr = addr_of("wBattleMonHP")
+    max_hp_addr = addr_of("wBattleMonMaxHP")
+    hp = (int(pb.memory[hp_addr]) << 8) | int(pb.memory[hp_addr + 1])
+    max_hp = (int(pb.memory[max_hp_addr]) << 8) | int(pb.memory[max_hp_addr + 1])
+    assert 0 < hp <= max_hp, f"invalid active battle HP {hp}/{max_hp}"
+
+    active_moves = _read_active_battle_moves(session)
+    saw_empty_move = False
+    usable_slots: list[int] = []
+    for move_idx, (move_id, pp) in enumerate(active_moves):
+        if move_id == 0:
+            saw_empty_move = True
+            assert pp == 0, (
+                f"active move slot {move_idx} is empty but has PP {pp}"
+            )
+            continue
+        assert not saw_empty_move, (
+            f"active move slot {move_idx} is populated after an empty slot"
+        )
+        assert move_id < 0xFF
+        if pp > 0:
+            usable_slots.append(move_idx)
+    assert usable_slots, (
+        f"active battle mon has no usable move: "
+        f"moves={[move for move, _ in active_moves]}, "
+        f"pp={[pp for _, pp in active_moves]}"
+    )
+    return usable_slots[0], active_moves[usable_slots[0]][0]
 
 
 @pytest.mark.parametrize(
@@ -597,7 +697,9 @@ def _drive_past_link_menu_to_trade_center(
         # Sub-frame interleaving stays on — still in serial-heavy phase
         # (LinkMenu exchange, then the big trainer-data block exchange
         # during warp setup).
-        link.step_interleaved(frames_per_attempt)
+        link.step_interleaved(
+            frames_per_attempt, chunk_cycles=_LINK_CHUNK_CYCLES
+        )
         extra_frames += frames_per_attempt
 
     map_a = a.read_game_state().overworld.map_id
@@ -672,7 +774,7 @@ def _drive_complete_trade(
 
     def tick_interleaved(frames: int) -> None:
         """Sub-frame interleaved — for serial-heavy phases."""
-        link.step_interleaved(frames)
+        link.step_interleaved(frames, chunk_cycles=_LINK_CHUNK_CYCLES)
 
     def tick_per_frame(frames: int) -> None:
         """Per-frame via session.step — for overworld/menu navigation
@@ -709,7 +811,14 @@ def _drive_complete_trade(
         # need the first press to rotate, the second to walk.
         a.press(dir_a, duration=8)
         b.press(dir_b, duration=8)
-        tick_per_frame(step_frames)
+        # Do not batch the trigger crossing.  One side can enter
+        # CableClub_DoBattleOrTrade during this call; ticking twenty
+        # complete frames on that side before advancing its peer lets the
+        # first few serial transfers use stale handshake bytes.
+        for _ in range(step_frames):
+            tick_per_frame(1)
+            if counters["CableClub_DoBattleOrTrade"][0] > 0 or counters["CableClub_DoBattleOrTrade"][1] > 0:
+                break
 
     # Now A-mash to dismiss "JUST A MOMENT!" dialog on each side,
     # which causes WaitForTextScrollButtonPress -> CableClub_Run to
@@ -721,13 +830,12 @@ def _drive_complete_trade(
             break
         a.press("a", duration=4)
         b.press("a", duration=4)
-        # Switch to interleaved when either side enters the serial-
-        # heavy block exchange; per-frame is too coarse there.
-        if (counters["CableClub_DoBattleOrTrade"][0] > 0
-                or counters["CableClub_DoBattleOrTrade"][1] > 0):
-            tick_interleaved(step_frames)
-        else:
-            tick_per_frame(step_frames)
+        # The first call into CableClub_Run can begin the large trainer/
+        # party exchange before the entry hook is observed on both sides.
+        # Keep the CPUs interleaved for this whole post-warp dialog loop;
+        # switching from sequential frames only after the hook fires lets
+        # the first side get ahead and corrupt the byte stream.
+        tick_interleaved(step_frames)
         settle_frames += step_frames
 
     # State-aware trade navigation — reactive to the *deepest* hook
@@ -807,10 +915,19 @@ def _drive_complete_trade(
                 sess.press("a", duration=4)
         prev = now
 
+    # The execution hook fires on function entry, before
+    # ``_AddEnemyMonToPlayerParty`` has copied the received record into
+    # the party array. Advance both emulators past the function body so
+    # callers inspect completed game state rather than an entry snapshot.
+    post_hook_frames = 0
+    if add_mon[0] > 0 and add_mon[1] > 0:
+        post_hook_frames = 120
+        tick_interleaved(post_hook_frames)
+
     return {
         "add_mon": add_mon,
         "trade_center_trade": trade_center_trade,
-        "trade_phase_frames": extra_frames + step_frames * 7,
+        "trade_phase_frames": extra_frames + step_frames * 7 + post_hook_frames,
         "counters": counters,
     }
 
@@ -901,6 +1018,17 @@ def test_pair_completes_trade_end_to_end(version_a, version_b):
             f"  player pos: A=({ow_a.x}, {ow_a.y}), B=({ow_b.x}, {ow_b.y})\n"
             f"  trade phase frames: {trade_diag['trade_phase_frames']}"
         )
+        print(f"  raw party A: {_party_raw_summary(a)}")
+        print(f"  raw party B: {_party_raw_summary(b)}")
+        for label, core in zip(("A", "B"), link.cores):
+            backend = getattr(core, "backend", None)
+            print(
+                f"  coordinator {label}: edges={getattr(backend, 'edge_count', None)} "
+                f"unarmed={getattr(backend, 'peer_unarmed_edges', None)} "
+                f"peer_master={getattr(backend, 'peer_master_edges', None)} "
+                f"rearm_attempts={getattr(backend, 'peer_rearm_attempts', None)} "
+                f"rearm_successes={getattr(backend, 'peer_rearm_successes', None)}"
+            )
         for sym, cnt in trade_diag["counters"].items():
             print(f"  {sym}: {cnt}")
 
@@ -913,6 +1041,57 @@ def test_pair_completes_trade_end_to_end(version_a, version_b):
             f"B never ran _AddEnemyMonToPlayerParty; trade didn't complete "
             f"on side B. diagnostic={trade_diag}"
         )
+    finally:
+        a.close()
+        b.close()
+
+
+def test_red_yellow_trade_swaps_real_party_records():
+    """Release acceptance: a natural Red/Yellow trade swaps both leads.
+
+    The broad matrix above is intentionally diagnostic and only proves the
+    ROM reached the trade routine. This case is the strict gate: it starts
+    from two untouched, ROM-matched Cable Club fixtures and checks the
+    game-owned species list plus each received party-mon record after the
+    real ``_AddEnemyMonToPlayerParty`` path completes.
+    """
+    if not (_fixtures_available("red") and _fixtures_available("yellow")):
+        pytest.skip("Red and Yellow Cable Club fixtures are required")
+
+    a = _open_session("red")
+    b = _open_session("yellow")
+    try:
+        before_a = _party_raw_summary(a)
+        before_b = _party_raw_summary(b)
+        expected_a = before_b["mon_species"][0]
+        expected_b = before_a["mon_species"][0]
+        assert expected_a != expected_b, (
+            f"strict fixture leads must differ: A={before_a} B={before_b}"
+        )
+
+        link = PyBoyLinkSession.local()
+        link.attach(a._pyboy)
+        link.attach(b._pyboy)
+        counters = _install_trade_diag_counters(a, b)
+
+        warp = _drive_past_link_menu_to_trade_center(a, b, link)
+        assert warp["final_map_a"] == TRADE_CENTER_MAP_ID
+        assert warp["final_map_b"] == TRADE_CENTER_MAP_ID
+        diag = _drive_complete_trade(a, b, link, counters=counters)
+
+        after_a = _party_raw_summary(a)
+        after_b = _party_raw_summary(b)
+        assert diag["add_mon"][0] > 0 and diag["add_mon"][1] > 0, (
+            f"trade hook did not fire on both sides: {diag}"
+        )
+        assert after_a["count"] == before_a["count"]
+        assert after_b["count"] == before_b["count"]
+        assert after_a["species"][0] == expected_a
+        assert after_a["mon_species"][0] == expected_a
+        assert after_b["species"][0] == expected_b
+        assert after_b["mon_species"][0] == expected_b
+        assert after_a["species"][-1] == 0xFF
+        assert after_b["species"][-1] == 0xFF
     finally:
         a.close()
         b.close()
@@ -971,6 +1150,7 @@ _BATTLE_DIAG_SYMBOLS = (
     "DisplayLinkBattleVersusTextBox",
     "BattleTransition",
     "MainInBattleLoop",
+    "DisplayBattleMenu",
     "MoveSelectionMenu",
     "LinkBattleExchangeData",
     "ExecutePlayerMove",
@@ -996,7 +1176,8 @@ def _drive_past_link_menu_to_colosseum(
     After both sides exchange matching selections via
     ``Serial_ExchangeLinkMenuSelection``, the game warps each player to
     map ``COLOSSEUM`` (``0xF1``) — provided each party has ≥3 mons.
-    Caller is responsible for padding the party (see :func:`_pad_party_to_3`).
+    Caller is responsible for loading a pre-generated battle fixture with a
+    legal party.
     """
     diag = _drive_two_sessions_to_link_menu(a, b, link)
     counters = diag["counters"]
@@ -1053,11 +1234,11 @@ def test_yellow_pair_warps_to_colosseum():
     if not _fixtures_available("yellow"):
         pytest.skip("Yellow Cable Club fixture missing")
 
-    a = _open_session("yellow")
-    b = _open_session("yellow")
+    a = _open_session("yellow", state_path=_battle_state_path("yellow"))
+    b = _open_session("yellow", state_path=_battle_state_path("yellow"))
     try:
-        _pad_party_to_3(a)
-        _pad_party_to_3(b)
+        _assert_battle_fixture_is_legal(a)
+        _assert_battle_fixture_is_legal(b)
 
         link = PyBoyLinkSession.local()
         link.attach(a._pyboy)
@@ -1097,14 +1278,14 @@ def _drive_complete_battle_turn(
 
     1. Walk onto the hidden-event trigger tile (same tiles as Trade
        Center: (4,4) for master, (5,4) for slave).
-    2. A-mash past "JUST A MOMENT!" → ``CableClub_DoBattleOrTrade``
-       runs its big trainer+party data block exchange.
+    2. Wait without input for ``CableClub_DoBattleOrTrade`` to run its big
+       trainer+party data block exchange.
     3. ``DisplayLinkBattleVersusTextBox`` + ``BattleTransition`` fire —
        the battle intro animation plays.
-    4. A-mash through battle start; ``MainInBattleLoop`` + ``MoveSelectionMenu``
-       fire.
-    5. Press A on the main battle menu (FIGHT is item 0) to open move list,
-       press A again to pick the first move.
+    4. Wait for ``MainInBattleLoop``/``DisplayBattleMenu`` before pressing
+       A once to choose FIGHT; no input is sent during the intro transition.
+    5. Read the ROM-populated active move/PP buffers, move the real menu
+       cursor to the first move with PP remaining, and press A once.
     6. ``LinkBattleExchangeData`` nibble-exchanges both sides' moves.
     7. ``ExecutePlayerMove`` / ``ExecuteEnemyMove`` / ``PlayerCalcMoveDamage``
        fire as the turn resolves.
@@ -1116,59 +1297,186 @@ def _drive_complete_battle_turn(
     """
     cct = counters["CableClub_DoBattleOrTrade"]
     vs = counters["DisplayLinkBattleVersusTextBox"]
+    main = counters["MainInBattleLoop"]
+    battle_menu = counters["DisplayBattleMenu"]
     mm = counters["MoveSelectionMenu"]
     lbe = counters["LinkBattleExchangeData"]
     dmg = counters["PlayerCalcMoveDamage"]
+    selected_move_slots: list[int] = []
+    selected_move_ids: list[int] = []
+    active_move_choices: list[tuple[tuple[int, int], ...]] = []
 
     def tick_interleaved(frames: int) -> None:
-        link.step_interleaved(frames)
+        link.step_interleaved(frames, chunk_cycles=_LINK_CHUNK_CYCLES)
 
     def tick_per_frame(frames: int) -> None:
         for _ in range(frames):
             a.step(1)
             b.step(1)
 
+    if step_frames <= 0:
+        raise ValueError("step_frames must be positive")
+    if battle_budget_frames < 0:
+        raise ValueError("battle_budget_frames must be non-negative")
+
+    phase_frames = 0
+    remaining_budget = battle_budget_frames
+
+    def tick_bounded(frames: int) -> int:
+        """Advance at most the remaining post-CCT budget."""
+        nonlocal phase_frames, remaining_budget
+        chunk = min(frames, remaining_budget)
+        if chunk <= 0:
+            return 0
+        tick_interleaved(chunk)
+        phase_frames += chunk
+        remaining_budget -= chunk
+        return chunk
+
+    def wait_interleaved(predicate) -> bool:
+        """Poll a ROM milestone within one shared finite frame budget."""
+        while remaining_budget > 0 and not predicate():
+            tick_bounded(step_frames)
+        return bool(predicate())
+
     # Walk onto trigger tiles — same direction rules as trade flow.
-    conn_a = a._pyboy.memory[a.symbols.addr_of("hSerialConnectionStatus")]
-    conn_b = b._pyboy.memory[b.symbols.addr_of("hSerialConnectionStatus")]
+    conn_a = int(a._pyboy.memory[a.symbols.addr_of("hSerialConnectionStatus")])
+    conn_b = int(b._pyboy.memory[b.symbols.addr_of("hSerialConnectionStatus")])
     INTERNAL = 0x02
     dir_a = "right" if conn_a == INTERNAL else "left"
     dir_b = "right" if conn_b == INTERNAL else "left"
 
+    trigger_frames = 0
     for _ in range(4):
         if cct[0] > 0 and cct[1] > 0:
             break
         a.press(dir_a, duration=8)
         b.press(dir_b, duration=8)
-        tick_per_frame(step_frames)
+        # Keep the trigger crossing close to simultaneous; the following
+        # CableClub_DoBattleOrTrade exchange is bit-level serial traffic.
+        for _ in range(step_frames):
+            tick_per_frame(1)
+            trigger_frames += 1
+            if cct[0] > 0 or cct[1] > 0:
+                break
 
-    # A-mash past "JUST A MOMENT!" to kick off the big exchange.
-    settle = 0
-    while settle < 1800 and not (cct[0] > 0 and cct[1] > 0):
-        a.press("a", duration=4)
-        b.press("a", duration=4)
-        if cct[0] > 0 or cct[1] > 0:
-            tick_interleaved(step_frames)
-        else:
-            tick_per_frame(step_frames)
-        settle += step_frames
+    # Dismiss the post-warp "JUST A MOMENT!" prompt until each side enters
+    # the serial-heavy function.  Stop sending input to a side immediately
+    # after its hook fires: the battle intro is a timed transition, and an A
+    # press consumed there can leak into a later menu in a role-dependent
+    # way.  Once either side enters the function, use interleaved stepping so
+    # the first serial bytes cannot run against a frozen peer.
+    if not (cct[0] > 0 and cct[1] > 0):
+        remaining = max(0, 1800 - trigger_frames)
+        while remaining > 0 and not (cct[0] > 0 and cct[1] > 0):
+            if cct[0] == 0:
+                a.press("a", duration=4)
+            if cct[1] == 0:
+                b.press("a", duration=4)
+            if cct[0] > 0 or cct[1] > 0:
+                chunk = min(step_frames, remaining)
+                tick_interleaved(chunk)
+                phase_frames += chunk
+                remaining -= chunk
+            else:
+                tick_per_frame(1)
+                trigger_frames += 1
+                remaining -= 1
 
-    # Sub-frame interleaving from here — CableClub_DoBattleOrTrade's
-    # block exchange plus the post-exchange move-nibble loop is all
-    # serial-heavy.
-    extra_frames = 0
-    attempts = battle_budget_frames // step_frames
-    for _ in range(attempts):
-        if dmg[0] > 0 and dmg[1] > 0:
-            break
-        tick_interleaved(step_frames)
-        extra_frames += step_frames
-        # A-mash to advance battle-intro dialogs, main-menu FIGHT, and
-        # move-list selection (item 0 = first move). The game's battle
-        # UI accepts A-mash at every "waiting for player" point and
-        # falls through to defaults.
-        a.press("a", duration=4)
-        b.press("a", duration=4)
+    # These waits are bounded and intentionally input-free.  Returning a
+    # diagnostic without fabricating input preserves the existing callers'
+    # strict milestone assertions while making a scheduler/ROM stall visible.
+    if cct[0] > 0 and cct[1] > 0:
+        wait_interleaved(lambda: vs[0] > 0 and vs[1] > 0)
+    if vs[0] > 0 and vs[1] > 0:
+        wait_interleaved(
+            lambda: (
+                main[0] > 0
+                and main[1] > 0
+                and battle_menu[0] > 0
+                and battle_menu[1] > 0
+            ),
+        )
+
+    menu_ready = (
+        main[0] > 0
+        and main[1] > 0
+        and battle_menu[0] > 0
+        and battle_menu[1] > 0
+    )
+    if menu_ready and tick_bounded(min(step_frames, 4)):
+        # Let both ROMs finish drawing/entering HandleMenuInput, then select
+        # FIGHT exactly once on each real battle menu.
+        a.press("a")
+        b.press("a")
+        wait_interleaved(lambda: mm[0] > 0 and mm[1] > 0)
+
+    move_menu_ready = mm[0] > 0 and mm[1] > 0
+    if move_menu_ready:
+        # The hook fires at function entry.  Give the ROM enough input-free
+        # time to install the menu cursor before inspecting it.
+        settle = min(step_frames, 4)
+        tick_bounded(settle)
+
+        slot_a, move_a = _assert_active_battle_state_is_legal(a)
+        slot_b, move_b = _assert_active_battle_state_is_legal(b)
+        active_a = _read_active_battle_moves(a)
+        active_b = _read_active_battle_moves(b)
+        active_move_choices.extend((active_a, active_b))
+        selected_move_slots.extend((slot_a, slot_b))
+        selected_move_ids.extend((move_a, move_b))
+
+        def known_move_count(slots: tuple[tuple[int, int], ...]) -> int:
+            count = 0
+            for move_id, _pp in slots:
+                if move_id == 0:
+                    break
+                count += 1
+            assert count > 0
+            return count
+
+        def menu_cursor(session, move_count: int) -> int:
+            cursor = int(
+                session._pyboy.memory[
+                    session.symbols.addr_of("wCurrentMenuItem")
+                ]
+            )
+            assert 1 <= cursor <= move_count, (
+                f"invalid move-menu cursor {cursor} for {move_count} moves"
+            )
+            return cursor - 1
+
+        count_a = known_move_count(active_a)
+        count_b = known_move_count(active_b)
+        cursor_a = menu_cursor(a, count_a)
+        cursor_b = menu_cursor(b, count_b)
+        remaining_down = [
+            (slot_a - cursor_a) % count_a,
+            (slot_b - cursor_b) % count_b,
+        ]
+        while remaining_down[0] or remaining_down[1]:
+            if remaining_down[0]:
+                a.press("down")
+                remaining_down[0] -= 1
+            if remaining_down[1]:
+                b.press("down")
+                remaining_down[1] -= 1
+            tick_bounded(min(step_frames, 2))
+
+        assert menu_cursor(a, count_a) == slot_a
+        assert menu_cursor(b, count_b) == slot_b
+
+        # A legal move is now selected through the ROM's own menu handling.
+        # No subsequent input is injected while link exchange or damage code
+        # runs.
+        a.press("a")
+        b.press("a")
+
+    # Keep the original bounded resolution window and acceptance semantics:
+    # callers decide whether link exchange, execution, or damage is required
+    # for their tier.  Crucially, this loop never sends blind input.
+    while remaining_budget > 0 and not (dmg[0] > 0 and dmg[1] > 0):
+        tick_bounded(step_frames)
 
     return {
         "cct": cct,
@@ -1176,7 +1484,14 @@ def _drive_complete_battle_turn(
         "mm": mm,
         "lbe": lbe,
         "dmg": dmg,
-        "battle_phase_frames": extra_frames,
+        "main": main,
+        "battle_menu": battle_menu,
+        "menu_ready": menu_ready,
+        "move_menu_ready": move_menu_ready,
+        "active_move_choices": active_move_choices,
+        "selected_move_slots": selected_move_slots,
+        "selected_move_ids": selected_move_ids,
+        "battle_phase_frames": phase_frames,
         "counters": counters,
     }
 
@@ -1192,11 +1507,11 @@ def test_yellow_pair_starts_link_battle():
     if not _fixtures_available("yellow"):
         pytest.skip("Yellow Cable Club fixture missing")
 
-    a = _open_session("yellow")
-    b = _open_session("yellow")
+    a = _open_session("yellow", state_path=_battle_state_path("yellow"))
+    b = _open_session("yellow", state_path=_battle_state_path("yellow"))
     try:
-        _pad_party_to_3(a)
-        _pad_party_to_3(b)
+        _assert_battle_fixture_is_legal(a)
+        _assert_battle_fixture_is_legal(b)
 
         link = PyBoyLinkSession.local()
         link.attach(a._pyboy)
@@ -1211,7 +1526,7 @@ def test_yellow_pair_starts_link_battle():
             a, b, link, counters=counters, battle_budget_frames=2400
         )
 
-        print(f"\nyellow<->yellow battle-start diagnostic:")
+        print("\nyellow<->yellow battle-start diagnostic:")
         for sym, cnt in counters.items():
             print(f"  {sym}: {cnt}")
         print(f"  battle_phase_frames: {diag['battle_phase_frames']}")
@@ -1267,11 +1582,11 @@ def test_pair_completes_battle_turn(version_a, version_b):
             f"Cable Club fixture(s) missing for {version_a}/{version_b}"
         )
 
-    a = _open_session(version_a)
-    b = _open_session(version_b)
+    a = _open_session(version_a, state_path=_battle_state_path(version_a))
+    b = _open_session(version_b, state_path=_battle_state_path(version_b))
     try:
-        _pad_party_to_3(a)
-        _pad_party_to_3(b)
+        _assert_battle_fixture_is_legal(a)
+        _assert_battle_fixture_is_legal(b)
 
         link = PyBoyLinkSession.local()
         link.attach(a._pyboy)
@@ -1314,6 +1629,45 @@ def test_pair_completes_battle_turn(version_a, version_b):
             f"Side B never fired ExecutePlayerMove or ExecuteEnemyMove; "
             f"the turn didn't advance on B. counters={counters}"
         )
+    finally:
+        a.close()
+        b.close()
+
+
+def test_red_yellow_battle_turn_is_resolved():
+    """Release acceptance: Red/Yellow exchange and resolve one move turn."""
+    if not (_fixtures_available("red") and _fixtures_available("yellow")):
+        pytest.skip("Red and Yellow battle fixtures are required")
+
+    a = _open_session("red", state_path=_battle_state_path("red"))
+    b = _open_session("yellow", state_path=_battle_state_path("yellow"))
+    try:
+        _assert_battle_fixture_is_legal(a)
+        _assert_battle_fixture_is_legal(b)
+
+        link = PyBoyLinkSession.local()
+        link.attach(a._pyboy)
+        link.attach(b._pyboy)
+        counters = _install_battle_diag_counters(a, b)
+        warp = _drive_past_link_menu_to_colosseum(a, b, link)
+        assert warp["final_map_a"] == COLOSSEUM_MAP_ID
+        assert warp["final_map_b"] == COLOSSEUM_MAP_ID
+        _drive_complete_battle_turn(a, b, link, counters=counters)
+
+        required_hooks = (
+            "DisplayLinkBattleVersusTextBox",
+            "BattleTransition",
+            "MainInBattleLoop",
+            "MoveSelectionMenu",
+            "LinkBattleExchangeData",
+            "ExecutePlayerMove",
+            "ExecuteEnemyMove",
+            "PlayerCalcMoveDamage",
+        )
+        for symbol in required_hooks:
+            assert counters[symbol][0] > 0 and counters[symbol][1] > 0, (
+                f"{symbol} did not fire on both sides: counters={counters}"
+            )
     finally:
         a.close()
         b.close()

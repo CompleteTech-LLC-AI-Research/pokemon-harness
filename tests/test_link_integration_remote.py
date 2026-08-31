@@ -25,16 +25,10 @@ import threading
 import time
 from pathlib import Path
 
-from pokered_harness.link import AgentSync
-
-from tests._link_orchestrator import (
-    LockstepOrchestrator,
-    walk_a_toward,
-    walk_b_toward,
-)
-
 import pytest
 
+from pokered_harness.config import load_versions
+from pokered_harness.link import AgentSync
 from pokered_harness.link.remote import (
     STATUS_EXTERNAL,
     STATUS_INTERNAL,
@@ -42,33 +36,25 @@ from pokered_harness.link.remote import (
 )
 from pokered_harness.link.serial_link import TcpSerialLink
 from pokered_harness.session import Session
-
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-for _parent in [REPO_ROOT, *REPO_ROOT.parents]:
-    if (_parent / "rom").is_dir():
-        ROM_ROOT = _parent / "rom"
-        break
-else:  # pragma: no cover
-    ROM_ROOT = REPO_ROOT / "rom"
-
-FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "link"
-
+from tests._link_orchestrator import (
+    LockstepOrchestrator,
+)
+from tests._rom_assets import fixture_path, rom_path, sym_path
 
 ROM_PATHS = {
     "blue": (
-        ROM_ROOT / "blue" / "pokemon-blue-color.gb",
-        ROM_ROOT / "blue" / "pokemon-blue.sym",
+        rom_path("blue", color=True),
+        sym_path("blue"),
     ),
     "yellow": (
-        ROM_ROOT / "yellow" / "pokemon-yellow.gbc",
-        ROM_ROOT / "yellow" / "pokemon-yellow.sym",
+        rom_path("yellow"),
+        sym_path("yellow"),
     ),
     "red": (
         # Match the Red fixture produced by
         # scripts/produce_cable_club_fixture.py (color ROM, SHA e1deed6308…).
-        ROM_ROOT / "red" / "pokemon-red-color.gb",
-        ROM_ROOT / "red" / "pokemon-red.sym",
+        rom_path("red", color=True),
+        sym_path("red"),
     ),
 }
 
@@ -80,11 +66,19 @@ def _roms_present(version: str) -> bool:
 
 def _open_session(version: str) -> Session:
     rom, sym = ROM_PATHS[version]
-    return Session.from_files(rom, sym)
+    pins = load_versions("VERSIONS.md")
+    expected_sha = pins.sha1_for_path(rom)
+    assert expected_sha is not None
+    return Session.from_files(
+        rom,
+        sym,
+        expected_rom_sha1=expected_sha,
+        expected_pyboy_version=pins.pyboy_version,
+    )
 
 
 def _cable_club_state(version: str) -> Path:
-    return FIXTURE_ROOT / version / "cable_club.state"
+    return fixture_path(version)
 
 
 def _free_port() -> int:
@@ -105,8 +99,9 @@ class _SessionRunner:
     Each MCP process in production owns one session + one endpoint and
     steps its emulator on its own cadence. The remote tests simulate
     that by running each session in a daemon thread: the thread pumps
-    ``session.step(chunk) + endpoint.serial_tick()`` in a loop. Main-
-    thread callers drive gameplay by queueing button presses via
+    ``endpoint.step(chunk)`` in a loop. The endpoint expands the chunk
+    into frame-sized session steps and services serial hardware after
+    every frame. Main-thread callers drive gameplay by queueing button presses via
     :meth:`press`; presses are applied at the top of each chunk so
     step + press + serial-tick stay in the same Python thread (avoids
     a PyBoy/thread-safety rabbit hole)."""
@@ -122,7 +117,8 @@ class _SessionRunner:
         self.endpoint = endpoint
         self.chunk = chunk
         self._stop = threading.Event()
-        self._press_queue: queue.Queue[tuple[str, int]] = queue.Queue()
+        self._press_queue: queue.Queue[tuple[str, int, threading.Event]] = queue.Queue()
+        self._progress = threading.Condition()
         self.exc: Exception | None = None
         self._thread = threading.Thread(
             target=self._run,
@@ -137,10 +133,38 @@ class _SessionRunner:
         self._stop.set()
         self._thread.join(timeout=timeout)
 
-    def press(self, button: str, duration: int = 6) -> None:
+    def press(self, button: str, duration: int = 6) -> threading.Event:
         """Queue a button press. The runner thread applies it on its
-        next loop iteration."""
-        self._press_queue.put((button, duration))
+        next loop iteration. The returned event is set after the press is
+        applied, which lets a caller avoid building an unbounded input
+        backlog while PyBoy is ticking."""
+        applied = threading.Event()
+        self._press_queue.put((button, duration, applied))
+        return applied
+
+    def wait_until_tick(self, target: int, timeout: float) -> None:
+        """Wait for deterministic emulator-frame progress.
+
+        The condition is notified after every completed step, so callers do
+        not need wall-clock polling sleeps. A runner exception or a missed
+        deadline is surfaced immediately and remains bounded.
+        """
+        if target < 0:
+            raise ValueError(f"target must be non-negative, got {target}")
+        deadline = time.monotonic() + timeout
+        with self._progress:
+            while self.session.current_tick() < target:
+                if self.exc is not None:
+                    raise self.exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"{self._thread.name} reached tick "
+                        f"{self.session.current_tick()} before target {target}"
+                    )
+                self._progress.wait(timeout=remaining)
+            if self.exc is not None:
+                raise self.exc
 
     def _run(self) -> None:
         try:
@@ -148,14 +172,18 @@ class _SessionRunner:
                 # Drain pending presses before stepping.
                 while True:
                     try:
-                        button, duration = self._press_queue.get_nowait()
+                        button, duration, applied = self._press_queue.get_nowait()
                     except queue.Empty:
                         break
                     self.session.press(button, duration=duration)
-                self.session.step(self.chunk)
-                self.endpoint.serial_tick()
+                    applied.set()
+                self.endpoint.step(self.chunk)
+                with self._progress:
+                    self._progress.notify_all()
         except Exception as exc:  # noqa: BLE001
             self.exc = exc
+            with self._progress:
+                self._progress.notify_all()
 
 
 # --- hook-counter helper -------------------------------------------------
@@ -250,51 +278,26 @@ def test_remote_handshake_writes_status_on_both_sides(
         session_a.load_state(state_a.read_bytes())
         session_b.load_state(state_b.read_bytes())
 
-        port = _free_port()
-
-        # Listener is our "primary" for this test; connector attaches.
-        link_a_holder: dict[str, TcpSerialLink] = {}
-
-        def _listen() -> None:
-            link_a_holder["link"] = TcpSerialLink.listen(port, version_a)
-
-        listen_t = threading.Thread(target=_listen, daemon=True)
-        listen_t.start()
-
-        # Wait for listener to bind before connecting.
-        time.sleep(0.1)
-        link_b = TcpSerialLink.connect("127.0.0.1", port, version_b)
-        listen_t.join(timeout=3.0)
-        link_a = link_a_holder["link"]
-
+        link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(
+            session_a, version_a, session_b, version_b
+        )
         try:
-            # Each endpoint picks up its role from listen/connect
-            # (listener=internal, connector=external).
-            endpoint_a = RemoteLinkEndpoint.as_listener(session_a, link_a)
-            endpoint_b = RemoteLinkEndpoint.as_connector(session_b, link_b)
-            endpoint_a.install()
-            endpoint_b.install()
-
             status_addr = session_a.symbols.addr_of("hSerialConnectionStatus")
 
-            runner_a = _SessionRunner(session_a, endpoint_a)
-            runner_b = _SessionRunner(session_b, endpoint_b)
-            runner_a.start()
-            runner_b.start()
+            runner_a, runner_b = _start_remote_runners(
+                session_a, endpoint_a, session_b, endpoint_b
+            )
             try:
-                # Poll for both handshake bytes to flip away from
-                # "not established" (0xFF). 6 seconds is generous —
-                # the map script fires the hook every frame.
-                deadline = time.time() + 6.0
-                while time.time() < deadline:
-                    status_a = session_a._pyboy.memory[status_addr]
-                    status_b = session_b._pyboy.memory[status_addr]
-                    if status_a != 0xFF and status_b != 0xFF:
-                        break
-                    time.sleep(0.05)
+                # The map script fires the hook every frame. Waiting on
+                # runner progress keeps this bounded without polling sleeps.
+                # The fixture may enter a serial routine after the
+                # handshake hook has fired; that routine can intentionally
+                # block while waiting for a matching peer. Only advance
+                # enough frames to exercise the per-frame handshake, then
+                # inspect the latched bytes.
+                _advance_remote_runners(runner_a, runner_b, 16, timeout_s=6.0)
             finally:
-                runner_a.stop()
-                runner_b.stop()
+                _stop_remote_runners(runner_a, runner_b)
 
             assert runner_a.exc is None, runner_a.exc
             assert runner_b.exc is None, runner_b.exc
@@ -331,21 +334,144 @@ def _tcp_pair(
     everything so the caller can drive + tear down."""
     port = _free_port()
     link_a_holder: dict[str, TcpSerialLink] = {}
+    listen_error: list[BaseException] = []
+    listener_ready = threading.Event()
 
     def _listen() -> None:
-        link_a_holder["link"] = TcpSerialLink.listen(port, version_a)
+        try:
+            link_a_holder["link"] = TcpSerialLink.listen(
+                port,
+                version_a,
+                ready_event=listener_ready,
+                accept_timeout_s=10.0,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            listen_error.append(exc)
+            listener_ready.set()
 
     listen_t = threading.Thread(target=_listen, daemon=True)
     listen_t.start()
-    time.sleep(0.1)
+    assert listener_ready.wait(timeout=10.0), "TCP listener did not become ready"
+    if listen_error:
+        raise listen_error[0]
     link_b = TcpSerialLink.connect("127.0.0.1", port, version_b)
     listen_t.join(timeout=3.0)
+    assert not listen_t.is_alive(), "TCP listener thread did not finish"
+    if listen_error:
+        link_b.close()
+        raise listen_error[0]
+    assert "link" in link_a_holder, "TCP listener returned without a link"
     link_a = link_a_holder["link"]
     endpoint_a = RemoteLinkEndpoint.as_listener(session_a, link_a)
     endpoint_b = RemoteLinkEndpoint.as_connector(session_b, link_b)
     endpoint_a.install()
     endpoint_b.install()
     return link_a, link_b, endpoint_a, endpoint_b
+
+
+_REMOTE_RUNNER_WINDOW_TIMEOUT = 120.0
+_REMOTE_LINK_MENU_ATTEMPTS = 100
+
+
+def _start_remote_runners(
+    session_a: Session,
+    endpoint_a: RemoteLinkEndpoint,
+    session_b: Session,
+    endpoint_b: RemoteLinkEndpoint,
+) -> tuple[_SessionRunner, _SessionRunner]:
+    """Start one independent emulator driver for each TCP endpoint."""
+    runner_a = _SessionRunner(session_a, endpoint_a)
+    runner_b = _SessionRunner(session_b, endpoint_b)
+    try:
+        runner_a.start()
+        runner_b.start()
+    except BaseException:
+        runner_a.stop()
+        runner_b.stop()
+        raise
+    return runner_a, runner_b
+
+
+def _stop_remote_runners(
+    runner_a: _SessionRunner, runner_b: _SessionRunner
+) -> None:
+    """Stop both emulator drivers and leave their exceptions inspectable."""
+    runner_a.stop()
+    runner_b.stop()
+
+
+def _advance_remote_runners(
+    runner_a: _SessionRunner,
+    runner_b: _SessionRunner,
+    frames: int,
+    *,
+    timeout_s: float = _REMOTE_RUNNER_WINDOW_TIMEOUT,
+) -> None:
+    """Wait until both independent runners have advanced ``frames``."""
+    if frames < 0:
+        raise ValueError(f"frames must be non-negative, got {frames}")
+    targets = (
+        runner_a.session.current_tick() + frames,
+        runner_b.session.current_tick() + frames,
+    )
+    deadline = time.monotonic() + timeout_s
+    for runner, target in (
+        (runner_a, targets[0]),
+        (runner_b, targets[1]),
+    ):
+        runner.wait_until_tick(
+            target,
+            max(0.0, deadline - time.monotonic()),
+        )
+
+
+def _press_remote_both(
+    runner_a: _SessionRunner,
+    runner_b: _SessionRunner,
+    button: str,
+    *,
+    duration: int,
+    advance_frames: int = 20,
+) -> None:
+    """Apply one press to each runner before advancing more frames."""
+    applied_a = runner_a.press(button, duration=duration)
+    applied_b = runner_b.press(button, duration=duration)
+    deadline = time.monotonic() + _REMOTE_RUNNER_WINDOW_TIMEOUT
+    if not applied_a.wait(timeout=max(0.0, deadline - time.monotonic())):
+        raise TimeoutError("listener runner did not apply the queued press")
+    if not applied_b.wait(timeout=max(0.0, deadline - time.monotonic())):
+        raise TimeoutError("connector runner did not apply the queued press")
+    _advance_remote_runners(
+        runner_a,
+        runner_b,
+        advance_frames,
+        timeout_s=max(0.0, deadline - time.monotonic()),
+    )
+
+
+def _drive_remote_to_link_menu(
+    runner_a: _SessionRunner,
+    runner_b: _SessionRunner,
+    ready,
+    *,
+    attempts: int = _REMOTE_LINK_MENU_ATTEMPTS,
+) -> None:
+    """Advance a TCP pair to a caller-defined LinkMenu milestone.
+
+    Progress is measured in emulator frames, not host wall-clock sleeps.
+    Each command is applied only after the previous command has reached both
+    independent runners, and each bounded barrier raises if either serial
+    hook stops making progress. This keeps the diagnostic useful on slow
+    hosts without accepting an arbitrary A-press flood as evidence of
+    gameplay.
+    """
+    _advance_remote_runners(runner_a, runner_b, 180)
+    for _ in range(3):
+        _press_remote_both(runner_a, runner_b, "up", duration=6)
+    for _ in range(attempts):
+        if ready():
+            return
+        _press_remote_both(runner_a, runner_b, "a", duration=4)
 
 
 # --- end-to-end trade protocol over TCP ----------------------------------
@@ -482,29 +608,25 @@ def test_remote_trade_reaches_link_menu_via_tcp(
 
             status_addr = session_a.symbols.addr_of("hSerialConnectionStatus")
 
-            runner_a = _SessionRunner(session_a, endpoint_a)
-            runner_b = _SessionRunner(session_b, endpoint_b)
-            runner_a.start()
-            runner_b.start()
+            # Each endpoint owns an independent session/thread, as it does
+            # in two separate MCP processes. The driver waits on emulator
+            # frame progress and applies one input only after the previous
+            # command has landed.
+            runner_a, runner_b = _start_remote_runners(
+                session_a, endpoint_a, session_b, endpoint_b
+            )
             try:
-                time.sleep(1.0)  # let map-script handshake settle
-                for _ in range(3):
-                    runner_a.press("up", duration=6)
-                    runner_b.press("up", duration=6)
-                    time.sleep(0.2)
-                deadline = time.time() + 25.0
-                while time.time() < deadline:
-                    if link_menu[0] > 0 and link_menu[1] > 0:
-                        break
-                    runner_a.press("a", duration=4)
-                    runner_b.press("a", duration=4)
-                    time.sleep(0.15)
+                _drive_remote_to_link_menu(
+                    runner_a,
+                    runner_b,
+                    lambda: link_menu[0] > 0 and link_menu[1] > 0,
+                )
             finally:
-                runner_a.stop()
-                runner_b.stop()
+                _stop_remote_runners(runner_a, runner_b)
 
             assert runner_a.exc is None, runner_a.exc
             assert runner_b.exc is None, runner_b.exc
+
             status_a = session_a._pyboy.memory[status_addr]
             status_b = session_b._pyboy.memory[status_addr]
             assert status_a == STATUS_INTERNAL, f"primary status=0x{status_a:02x}"
@@ -629,29 +751,19 @@ def test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu(
             link_a.exchange = _wrap(kinds_a, orig_ex_a)  # type: ignore[method-assign]
             link_b.exchange = _wrap(kinds_b, orig_ex_b)  # type: ignore[method-assign]
 
-            runner_a = _SessionRunner(session_a, endpoint_a)
-            runner_b = _SessionRunner(session_b, endpoint_b)
-            runner_a.start()
-            runner_b.start()
+            runner_a, runner_b = _start_remote_runners(
+                session_a, endpoint_a, session_b, endpoint_b
+            )
             try:
-                time.sleep(1.0)
-                for _ in range(3):
-                    runner_a.press("up", duration=6)
-                    runner_b.press("up", duration=6)
-                    time.sleep(0.2)
                 # Drive until the nybble RPC has fired at least a
-                # handful of times on each side — generous envelope.
-                deadline = time.time() + 25.0
-                while time.time() < deadline:
-                    if len(kinds_a) >= 3 and len(kinds_b) >= 3:
-                        break
-                    runner_a.press("a", duration=4)
-                    runner_b.press("a", duration=4)
-                    time.sleep(0.15)
+                # handful of times on each side using frame progress.
+                _drive_remote_to_link_menu(
+                    runner_a,
+                    runner_b,
+                    lambda: len(kinds_a) >= 3 and len(kinds_b) >= 3,
+                )
             finally:
-                runner_a.stop()
-                runner_b.stop()
-
+                _stop_remote_runners(runner_a, runner_b)
             assert runner_a.exc is None, runner_a.exc
             assert runner_b.exc is None, runner_b.exc
             nybble_kind = (
@@ -729,9 +841,9 @@ def test_remote_rpc_flow_past_link_menu_over_tcp(
     CableClub_DoBattleOrTradeAgain) are a bonus — they only appear if
     the menu-selection vote converged across the two threads and the
     game actually ran the three post-menu buffer exchanges. We record
-    whether that happened but don't require it, because the vote
-    agreement depends on sub-frame A-press timing between independent
-    daemon threads and can flake under heavy load.
+    whether that happened but don't require it. The diagnostic installs a
+    test-only common TRADE vote before starting the independent runners so
+    sub-frame A-press timing cannot obscure the menu RPC itself.
 
     Parametrized over the full 3×3 matrix; red and yellow gaps skip.
     """
@@ -772,37 +884,45 @@ def test_remote_rpc_flow_past_link_menu_over_tcp(
             def _wrap(sink, inner):
                 def exchange(kind, my_bytes, *, timeout_ms=5000):
                     sink.append(kind)
-                    return inner(kind, my_bytes, timeout_ms=timeout_ms)
+                    # Nybble exchanges are retried by the game and need a
+                    # short timeout to let independently paced runners
+                    # recover. The menu exchange is the milestone under
+                    # observation and can carry the slower cross-version
+                    # branch once both sides reach it.
+                    effective_timeout_ms = (
+                        30000
+                        if kind == "menu_selection/wLinkMenuSelectionSendBuffer"
+                        else timeout_ms
+                    )
+                    return inner(
+                        kind,
+                        my_bytes,
+                        timeout_ms=effective_timeout_ms,
+                    )
                 return exchange
 
             link_a.exchange = _wrap(kinds_a, orig_ex_a)  # type: ignore[method-assign]
             link_b.exchange = _wrap(kinds_b, orig_ex_b)  # type: ignore[method-assign]
 
-            runner_a = _SessionRunner(session_a, endpoint_a)
-            runner_b = _SessionRunner(session_b, endpoint_b)
-            runner_a.start()
-            runner_b.start()
-            try:
-                time.sleep(1.0)
-                # Walk UP to the receptionist + press A through the
-                # attendant dialog / save / nybble sync until both
-                # sides have issued at least some nybble RPCs.
-                for _ in range(3):
-                    runner_a.press("up", duration=6)
-                    runner_b.press("up", duration=6)
-                    time.sleep(0.2)
-                menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
-                deadline = time.time() + 30.0
-                while time.time() < deadline:
-                    if menu_kind in kinds_a and menu_kind in kinds_b:
-                        break
-                    runner_a.press("a", duration=4)
-                    runner_b.press("a", duration=4)
-                    time.sleep(0.15)
-            finally:
-                runner_a.stop()
-                runner_b.stop()
+            # Keep the diagnostic focused on the TCP menu-selection
+            # exchange. A shared test-only TRADE vote prevents one side's
+            # independently timed A press from entering a different branch
+            # and timing out before the RPC we want to observe.
+            _install_autoselect_trade_hook(session_a)
+            _install_autoselect_trade_hook(session_b)
 
+            runner_a, runner_b = _start_remote_runners(
+                session_a, endpoint_a, session_b, endpoint_b
+            )
+            try:
+                menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
+                _drive_remote_to_link_menu(
+                    runner_a,
+                    runner_b,
+                    lambda: menu_kind in kinds_a and menu_kind in kinds_b,
+                )
+            finally:
+                _stop_remote_runners(runner_a, runner_b)
             assert runner_a.exc is None, runner_a.exc
             assert runner_b.exc is None, runner_b.exc
             # Nybble sync (getting us to LinkMenu) must have flowed.
@@ -944,70 +1064,43 @@ def test_remote_menu_vote_converges_and_warps_to_trade_center(
             link_a.exchange = _wrap(kinds_a, orig_ex_a)  # type: ignore[method-assign]
             link_b.exchange = _wrap(kinds_b, orig_ex_b)  # type: ignore[method-assign]
 
-            runner_a = _SessionRunner(session_a, endpoint_a)
-            runner_b = _SessionRunner(session_b, endpoint_b)
-            runner_a.start()
-            runner_b.start()
+            # Install the game-code test hook before either PyBoy thread
+            # starts. This avoids concurrent hook registration while still
+            # exercising the real LinkMenu exchange over TCP.
+            _install_autoselect_trade_hook(session_a)
+            _install_autoselect_trade_hook(session_b)
+
+            runner_a, runner_b = _start_remote_runners(
+                session_a, endpoint_a, session_b, endpoint_b
+            )
             try:
-                time.sleep(1.0)
-                for _ in range(3):
-                    runner_a.press("up", duration=6)
-                    runner_b.press("up", duration=6)
-                    time.sleep(0.2)
                 # Drive to LinkMenu via A-presses.
                 menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
-                deadline = time.time() + 25.0
-                while time.time() < deadline:
-                    if menu_kind in kinds_a and menu_kind in kinds_b:
-                        break
-                    runner_a.press("a", duration=4)
-                    runner_b.press("a", duration=4)
-                    time.sleep(0.15)
+                _drive_remote_to_link_menu(
+                    runner_a,
+                    runner_b,
+                    lambda: menu_kind in kinds_a and menu_kind in kinds_b,
+                )
                 assert menu_kind in kinds_a and menu_kind in kinds_b, (
                     "didn't reach LinkMenu's exchange loop"
                 )
 
-                # Install the same auto-select-TRADE hook LinkPair uses
-                # (see _install_linkmenu_autoselect_trade in pair.py):
-                # hook LinkMenu.exchangeMenuSelectionLoop + 3 (the ld
-                # instruction that reads wLinkMenuSelectionReceiveBuffer
-                # right after Serial_ExchangeLinkMenuSelection returns)
-                # and pre-plant 0xD4 there. The game then reads "peer
-                # pressed A on TRADE", agrees, exits menu, warps to
-                # TRADE_CENTER, and runs CableClub_DoBattleOrTradeAgain.
-                recv_addr = session_a.symbols.addr_of(
-                    "wLinkMenuSelectionReceiveBuffer"
-                )
-                label = "LinkMenu.exchangeMenuSelectionLoop"
-                if label not in session_a.symbols:
-                    pytest.skip(
-                        f"{label} not in symbol table — needed for the "
-                        f"auto-select-TRADE hook"
-                    )
-                for sess in (session_a, session_b):
-                    bank, addr = sess.symbols.bank_addr(label)
-                    mem = sess._pyboy.memory
-
-                    def _force_trade(_ctx, _mem=mem, _addr=recv_addr):
-                        _mem[_addr] = 0xD4
-                        _mem[_addr + 1] = 0xD4
-
-                    sess._pyboy.hook_register(bank, addr + 3, _force_trade, None)
-
                 # Wait for the TRADE_CENTER warp. Both peers land on
                 # opposite sides of the trade table.
                 TRADE_CENTER = 0xEF
-                deadline = time.time() + 15.0
-                while time.time() < deadline:
+                for _ in range(100):
                     m_a = session_a.read_game_state().overworld.map_id
                     m_b = session_b.read_game_state().overworld.map_id
                     if m_a == TRADE_CENTER and m_b == TRADE_CENTER:
                         break
-                    time.sleep(0.1)
+                    _press_remote_both(
+                        runner_a,
+                        runner_b,
+                        "a",
+                        duration=4,
+                    )
             finally:
-                runner_a.stop()
-                runner_b.stop()
-
+                _stop_remote_runners(runner_a, runner_b)
             assert runner_a.exc is None, runner_a.exc
             assert runner_b.exc is None, runner_b.exc
             map_a = session_a.read_game_state().overworld.map_id
@@ -1366,8 +1459,6 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
             # Observe the game-serial RPC stream.
             kinds_a: list[str] = []
             kinds_b: list[str] = []
-            orig_ex_a = link_a.exchange
-            orig_ex_b = link_b.exchange
 
             def _wrap(sink, inner):
                 def exchange(kind, my_bytes, *, timeout_ms=30000):
@@ -1476,7 +1567,6 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
             # Both agents completed the rendezvous successfully.
             assert "peer_tick" in result_a and "peer_tick" in result_b
             # And the game-level serial flow progressed past the menu.
-            rng_kind = "exchange_bytes/wSerialRandomNumberListBlock"
             menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
             diag = (
                 f"result_a={result_a} result_b={result_b} "

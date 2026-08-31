@@ -1,405 +1,342 @@
 # pokered-harness
 
-Memory-first automation harness for **Pokémon Red / Blue (UE)** on
-**PyBoy 2.7.0**, exposed over MCP. See
-[`plans/deep-research-report-glittery-rossum.md`](../.claude/plans/deep-research-report-glittery-rossum.md)
-for the ADR that motivates this architecture.
+`pokered-harness` is a memory-first automation harness for Pokémon Red,
+Blue, and Yellow. It loads a user-supplied ROM and symbol file, exposes a
+typed `Session` API, and can serve that session over MCP.
 
-The package name is `pokered_harness` for historical reasons; Red is the
-canonical target but Blue (v1.0, UE) also works unchanged — see
-[`VERSIONS.md`](VERSIONS.md) for pinned SHA-1s.
+This repository is a source tree. It does not distribute commercial ROMs,
+symbol files, save states, or other ROM-derived artifacts.
 
-## Supported games
+## Release status
 
-| Game | Status | ROM pins | Verified milestone |
-|---|---|---|---|
-| Pokémon Red (UE) | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
-| Pokémon Red + Full Color Hack | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
-| Pokémon Blue (UE) | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
-| Pokémon Blue + pokeblue_color_vanilla.ips | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
-| Pokémon Yellow (UE) | ✅ Supported | [`VERSIONS.md`](VERSIONS.md) | Boulder Badge end-to-end |
-| JP Red, other localisations, ROM hacks | ❌ Out of scope | — | — |
+This repository is an audited candidate, not a production release. The
+current functional source boundary is `3aad196`; the historical implementation
+boundary at `1046a541e0003923aec6000b6b383c6eaafeaa48` is retained separately.
+The baseline at
+`e219fb5` was not production-certified.
 
-Red and Blue share pokered's WRAM layout, so the state parsers and event
-hooks work for both. Blue needs its own symbol file (`pokeblue.sym`) and
-a handful of Blue-specific navigation tweaks live in
-[`scripts/blue_forest_to_brock.py`](scripts/blue_forest_to_brock.py);
-everything else is version-neutral.
+The counts below are therefore an evidence snapshot with an explicit commit
+boundary, not a claim that every listed capability is a finished product:
 
-## BYO-ROM
+| Capability | Current status | Evidence boundary |
+|---|---|---|
+| Single-session loading, input, state parsing, and save/load | Clean wheel MCP smoke: 3/3 | On 2026-08-31, an installed wheel outside the checkout passed tool discovery, stepping, game-state parsing, and save/load with explicit Red color ROM/SYM hashes. The wider five-ROM smoke evidence remains historical. |
+| MCP stdio server for one session | Current startup pinning is strict | MCP enforces ROM, symbol, PyBoy version, and exact vendored fork revision when `VERSIONS.md` is available; wheel launches also require explicit ROM/SYM pins. |
+| In-process `LinkPair` | Exact-head local 46/46 | Strict Red/Yellow party swap and one complete battle turn pass against the release runtime; the broader Red/Blue/Yellow matrix remains diagnostic. |
+| Remote TCP transport and MCP lifecycle | Remote 13/13; MCP lifecycle 74/74 | Native MCP attach/HELLO and the required two-process LinkMenu row pass on localhost with the canonical color-Red listener + color-Blue connector roles. Reversed gameplay roles remain uncertified. |
+| Remote full trade | Strict acceptance 2/2; broader remote tier green | The strict Red/Blue subprocess run completes the native two-process party swap, and the transport tier is green. Load-stable behavior across the complete gameplay matrix is not signed off. |
+| Link battle | Authentic local 2/2 and remote 2/2 | The Red/Yellow local battle and Red/Blue subprocess battle select the mode with ordinary input and complete native move exchange; no test-driver RAM write or selection hook is used. Broader battle rows remain unverified. |
+| Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
-This repo contains no ROMs and no build-derived artifacts (no `.gb`,
-`.gbc`, `.sym`, `.map`, or save states of commercial game content). You
-must supply your own legally obtained copies.
+The candidate includes the explicit `tests/__init__.py` package boundary and
+the bundled PyBoy source tree. Symbol hashes and audited generator provenance
+are recorded in [`VERSIONS.md`](VERSIONS.md). The current full-gate snapshot at
+`3aad196` is unit 457/457, local 46/46, remote 13/13, strict trade 2/2,
+strict battle 2/2, and timing 35/35 across five repetitions. Full release
+sign-off remains `PARTIAL`: the broad matrix is structural rather than
+runtime-certified, and product lint, reversed roles, fixture provenance,
+native-platform coverage, and independent review remain open.
 
-ROMs go under `rom/<version>/` (all gitignored):
+The historical local diagnostic matrix reached LinkMenu and completed the trade
+route for all nine ordered Red/Blue/Yellow version pairs. Seven of nine battle
+rows reached a complete turn at that historical boundary; `blue↔blue` and the
+`blue→red` attach ordering stalled before both sides entered move exchange.
+Those rows are not claimed as supported. In the current candidate, the
+normalized hardware-time scheduler passes the strict Red↔Yellow trade and
+battle cases at the library's default 256-cycle slice (the tighter 64-cycle
+acceptance rerun also passes); targeted Blue↔Blue and Blue→Red checks reach
+LinkMenu, but their complete battle behavior and reversed roles remain
+unverified.
 
-```
-rom/
-├── red/pokemon-red.gb
-├── blue/pokemon-blue.gb
-└── yellow/pokemon-yellow.gbc
-```
+Current exact-head evidence and blockers are explicit:
 
-Record each ROM's SHA-1 in [`VERSIONS.md`](VERSIONS.md) — the session
-manager refuses to run without a match.
+- unit 457/457, local 46/46, remote 13/13, strict trade 2/2, strict battle
+  2/2, and timing 35/35 across five repetitions pass at `3aad196`;
+- the Lane G audit at `3aad196` retains 79 findings in the default product
+  Ruff surface under locked Ruff; the explicit vendored-runtime audit reports
+  227 findings, and the broad suite has
+  not become a clean production gate;
+- the no-hook Red/Blue remote battle smoke passes with ordinary menu input and
+  native serial move exchange, and the strict Red/Blue remote trade passes with
+  complete party-record checks; broader gameplay matrix coverage and concurrent
+  load stability remain open;
+- per-ROM single-session coverage, reversed listener/connector roles, native
+  platform coverage, battle-fixture provenance, load-stable remote trade, and
+  independent review remain incomplete; and
+- the structural TCP matrix covers the ordered version/role combinations, but
+  its runtime acceptance section still has 16 unrun trade rows and 16 unrun
+  battle rows;
+- TCP is deliberately localhost-only because it has no authentication or
+  encryption. Cross-host use is unsupported until an authenticated encrypted
+  channel exists.
 
-## Prerequisites
+The required setup, test tiers, evidence format, and sign-off rules are in
+[`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md) and
+[`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md).
 
-1. **Python 3.11+**.
-2. **PyBoy 2.7.0** — pinned in `pyproject.toml`.
-3. **Symbol files** built with `DEBUG=1` from:
-   - [`pret/pokered`](https://github.com/pret/pokered) — produces both `pokered.sym` and `pokeblue.sym`. Place at `rom/red/pokemon-red.sym` and `rom/blue/pokemon-blue.sym`.
-   - [`pret/pokeyellow`](https://github.com/pret/pokeyellow) — produces `pokeyellow.sym`. Place at `rom/yellow/pokemon-yellow.sym`.
+## Supported input formats
 
-### Generating the symbol files
+The intended release inputs are the exact ROM variants listed in
+[`VERSIONS.md`](VERSIONS.md):
 
-You need [RGBDS](https://rgbds.gbdev.io/), GNU make, and a C compiler
-(gcc or clang-with-gcc-alias) on `PATH`. Then:
+| Game | Input | Status |
+|---|---|---|
+| Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Hash-pinned input; historical five-row MCP stdio evidence includes this row; link gameplay not claimed |
+| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Passing local Red/Yellow role; canonical remote listener role tested, but overall release support remains partial |
+| Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Hash-pinned input; historical five-row MCP stdio evidence includes this row; link gameplay not claimed |
+| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Canonical remote connector role tested; isolated trade evidence only, with full remote support not signed off |
+| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Passing local Red/Yellow peer role; other pairings remain unverified |
+| Other localisations and ROM hacks | — | Out of scope |
+
+The historical stateful evidence scope is the local color-Red/Yellow pair and
+the independent-process color-Red/color-Blue pair for the tested trade and
+battle paths, using the bundled source-runtime build. The remote evidence
+fixes the roles as Red listener/internal-clock and Blue connector/external-
+clock. The current candidate is not certified: stock ROM link pairs,
+Blue/Yellow pairs, reversed listener/connector roles, and other unlisted rows
+remain unsupported or unverified until they receive fresh fixtures and
+acceptance results.
+
+## Requirements and clean install
+
+Requirements:
+
+- Python 3.12 or newer.
+- The bundled PyBoy runtime (`2.7.0`, harness revision
+  `c565df66c3731fad2856169a90f6bbec99925915`).
+- `mcp==1.29.1`, the certified runtime API used by the server.
+- A legally obtained ROM and a matching debug symbol file for any real-ROM
+  run.
+
+From a clean checkout on Unix, WSL, or Git Bash:
 
 ```bash
-# Red + Blue share a source tree
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+python -m pip check
+```
+
+The standard-library `venv` module must include `ensurepip`. On Debian or
+Ubuntu, install the matching OS package (for example, `python3.12-venv` or
+`python3-venv`) first if `python3 -m venv` reports that `ensurepip` is
+unavailable. The commands above assume the resulting environment provides
+`python -m pip`; an environment created by another tool must provide the same
+pip/install contract before it is used for the release gate.
+
+On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1` and use
+`python -m pip` for the remaining commands. Keep the environment used for
+testing and the environment used to launch MCP identical.
+
+The distribution bundles the pinned PyBoy source runtime used by the link
+layer. It exposes the Python-accessible serial backend contract and is marked
+with the revision above. If an older standalone `pyboy` wheel is already
+installed in an environment, remove it and reinstall this project before
+testing; `Session.from_files` rejects an unmarked runtime when the package
+pin is enforced.
+
+The default release path uses that source-compatible runtime. The optional
+`scripts/bootstrap_pyboy.py --mode cython` path builds the native accelerator
+for diagnostic/platform validation only. A Cython build that hides `mb.serial`
+has not been certified for Python-side link attachment and must not be used for
+the link acceptance gate.
+
+## BYO-ROM and symbols
+
+Place the files below under the repository root. The directories are
+gitignored by design:
+
+```text
+rom/
+├── red/
+│   ├── pokemon-red.gb
+│   ├── pokemon-red-color.gb       # optional color variant
+│   └── pokemon-red.sym
+├── blue/
+│   ├── pokemon-blue.gb
+│   ├── pokemon-blue-color.gb      # optional color variant
+│   └── pokemon-blue.sym
+└── yellow/
+    ├── pokemon-yellow.gbc
+    └── pokemon-yellow.sym
+```
+
+The symbol files should be generated with `DEBUG=1` from the matching
+[pret/pokered](https://github.com/pret/pokered) or
+[pret/pokeyellow](https://github.com/pret/pokeyellow) source tree. A generic
+build sequence is:
+
+```bash
 git clone https://github.com/pret/pokered.git
 cd pokered
-make DEBUG=1                           # produces pokered.sym / pokered.map / pokered.gbc
-make clean && make blue DEBUG=1        # produces pokeblue.sym / pokeblue.map / pokeblue.gbc
+make DEBUG=1
+make clean && make blue DEBUG=1
 cd ..
 
-# Yellow is a separate tree
 git clone https://github.com/pret/pokeyellow.git
 cd pokeyellow
-make DEBUG=1                           # produces pokeyellow.sym / pokeyellow.map / pokeyellow.gbc
+make DEBUG=1
+cd ..
 ```
 
-Copy the `.sym` files into the corresponding `rom/<version>/` dirs and
-record the upstream commit SHAs in [`VERSIONS.md`](VERSIONS.md).
+Use the source commits and RGBDS toolchain recorded in [`VERSIONS.md`](VERSIONS.md)
+when reproducing the audited symbols, then copy only the matching `.sym` files
+into `rom/<version>/`. The repository records audited provenance but does not
+contain the generated symbols or enforce a source-build lock.
 
-## Install
+Before starting a session, compare the ROM's SHA-1 with its matching path row
+in [`VERSIONS.md`](VERSIONS.md). Always set `POKERED_ROM_SHA1` explicitly for
+release evidence; the loader also selects a matching documented path when the
+variable is omitted and fails closed when no pin exists. Never use
+`POKERED_SKIP_SHA1=1` for a release run.
 
-```bash
-python -m venv .venv
-. .venv/Scripts/activate   # Windows bash; use .venv/bin/activate on Unix
-pip install -e ".[dev]"
-```
+## Run one MCP server
 
-## Test
-
-```bash
-pytest
-```
-
-## Running
-
-The MCP server is wired in [`.mcp.json`](.mcp.json); it reads
-`POKERED_ROM_PATH`, `POKERED_SYM_PATH`, and `POKERED_ROM_SHA1` from the
-environment. Point those at whichever version you're driving:
+The server requires the primary ROM and symbol paths:
 
 ```bash
-# Red (default in .mcp.json)
 POKERED_ROM_PATH=rom/red/pokemon-red-color.gb \
 POKERED_SYM_PATH=rom/red/pokemon-red.sym \
-POKERED_ROM_SHA1=<see VERSIONS.md>
-
-# Blue
-POKERED_ROM_PATH=rom/blue/pokemon-blue-color.gb \
-POKERED_SYM_PATH=rom/blue/pokemon-blue.sym \
-POKERED_ROM_SHA1=<see VERSIONS.md>
-
-# Yellow (native CGB, no color patch needed)
-POKERED_ROM_PATH=rom/yellow/pokemon-yellow.gbc \
-POKERED_SYM_PATH=rom/yellow/pokemon-yellow.sym \
-POKERED_ROM_SHA1=<see VERSIONS.md>
+POKERED_ROM_SHA1=e1deed63080bc24cad5fba18ecb3184f905d16d4 \
+POKERED_VERSIONS_PATH="$PWD/VERSIONS.md" \
+python -m pokered_harness.mcp_server
 ```
 
-End-to-end scripts live under `scripts/`:
+For Blue or Yellow, replace all three values with the matching row in
+[`VERSIONS.md`](VERSIONS.md). The server starts headless. Use a script's
+documented display option, or construct `Session(view=True)`, when a visible
+session is needed.
 
-- `scripts/full_to_brock.py` — Red (colorized): intro → Boulder Badge.
-- `scripts/blue_forest_to_brock.py` — Blue (colorized): Option-B
-  harness that RAM-boosts Bulbasaur past the grind gap, then runs
-  forest → Pewter → Brock. Will be replaced by a proper Route 2 heal
-  loop in a future iteration.
-- `scripts/yellow_to_brock.py` — Yellow: full intro → Pikachu →
-  rival battle → Pallet → Viridian → Route 2 → Forest → Pewter →
-  Brock. Reuses the Blue harness's A* navigation legs unchanged and
-  applies the same Option-B RAM boost (L50 Pikachu with Thunderbolt +
-  Double Kick) to clear Brock's Rock/Ground team; replace with real
-  Route 2 grind when the heal-loop lands.
+The committed `.mcp.json` uses the canonical `rom/red/` layout, an explicit
+color-ROM hash, an explicit `${PWD}/VERSIONS.md` pin file, and no machine-local
+`PYTHONPATH`. It is suitable for a workspace whose MCP client expands `${PWD}`
+and whose `python` command resolves to the installed package environment. An
+installed wheel launched outside a checkout may omit `VERSIONS.md` when
+explicit primary and peer ROM SHA-1 values are provided; the bundled PyBoy
+runtime identity is still enforced.
 
-## Link cable
+## MCP surface
 
-PyBoy has no hardware-level link-cable emulation (see
-[PyBoy #29](https://github.com/Baekalfen/PyBoy/issues/29)). The harness
-works around this by hooking pret's serial-routine labels
-(`Serial_ExchangeBytes`, `Serial_ExchangeNybble`,
-`Serial_ExchangeLinkMenuSelection`,
-`Serial_TryEstablishingExternallyClockedConnection`) and exchanging
-bytes at the semantic WRAM layer. Two deployment modes are supported:
+The single-session server exposes tools for:
 
-### Mode A: single-process pair (`LinkPair`)
+- stepping frames and pressing, holding, or releasing buttons;
+- saving and loading base64-encoded emulator state;
+- waiting for named hook events; and
+- reading parsed game state and the event log as resources.
 
-One process, two `Session` objects, stepped in lockstep by
-[`LinkPair`](src/pokered_harness/link/pair.py). A `SerialBridge` swaps
-the pending HRAM bytes between sides in-process. Useful for local
-trade-simulation, debugging, and the integration test suite.
+When a peer session is configured with `POKERED_PEER_*` variables, the
+link-related tools are also exposed. The peer is constructed at startup but
+is not paired automatically.
 
-Peer env vars (all three optional — unset means single-session mode):
+## Link cable modes
+
+The bundled PyBoy fork provides the bit-accurate serial backend required by
+Gen I Pokémon. Real sessions use that backend for in-process and TCP links;
+the older semantic bridge remains only as a compatibility path for test
+doubles that do not expose the native serial object.
+
+Native attach only installs the serial backend and its transport callbacks. It
+does not write Pokémon HRAM such as `hSerialConnectionStatus` or install
+symbol-level exchange hooks: the ROM's own serial ISR must establish the role
+from native serial traffic. The semantic bridge is therefore not production
+evidence for `link_pair`, `link_listen`, or `link_connect`.
+
+### In-process pair
+
+`link_pair` owns two sessions in one process and uses the native bit-accurate
+serial coordinator for real PyBoy sessions. The canonical Red/Yellow local
+trade and battle acceptance cases pass; other rows remain diagnostic until
+their exact ROM, fixture, and runtime combination is separately certified.
+Configure the peer before launching the MCP server:
 
 ```bash
-POKERED_PEER_ROM_PATH=rom/blue/pokemon-blue.gb \
-POKERED_PEER_SYM_PATH=rom/blue/pokemon-blue.sym \
-POKERED_PEER_ROM_SHA1=<see VERSIONS.md>
+export POKERED_PEER_ROM_PATH=rom/yellow/pokemon-yellow.gbc
+export POKERED_PEER_SYM_PATH=rom/yellow/pokemon-yellow.sym
+export POKERED_PEER_ROM_SHA1=cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1
 ```
 
-MCP tools for Mode A:
+Then call `link_pair`, use `link_step`, and call `link_unpair` when finished.
+The exact fixture, runtime, and game-flow requirements are in the runbook.
 
-- `link_pair` — build the bridge and install hooks.
-- `link_step {"count": 60}` — advance both sides 60 ticks, interleaved.
-- `link_peer_press / link_peer_hold / link_peer_release` — drive the peer.
-- `link_unpair` — drop the bridge.
+### Remote TCP pair
 
-### Mode B: two agents, one ROM each (`RemoteLinkEndpoint`)
+Two independent MCP servers can use `link_listen` and `link_connect`. The
+listener is the internal-clock side; the connector is the external-clock
+side. Poll `link_status` until it reports `remote_mode` as `connected`, then
+call `link_disconnect` at teardown.
 
-Two independent MCP servers, each owning exactly one `Session`, connected
-by a TCP `SerialLink`. Each server installs a
-[`RemoteLinkEndpoint`](src/pokered_harness/link/remote.py) pointed at
-the link; serial routines that fire on one side block on a
-`link.exchange(...)` RPC until the other side fires the matching routine.
-This is the deployment where **two independent AI agents each drive
-their own Pokémon** and trade or battle each other — no shared state, no
-shared memory, just the cable.
+The MCP remote-link API enforces localhost-only binding and connection
+(`127.0.0.1`, `localhost`, or `::1`). The transport has no authentication or
+encryption and must not be exposed to an untrusted LAN, the public internet,
+or a WAN until an authenticated encrypted channel is added. Treat this as a
+security boundary, not as cross-host support.
 
-Cross-version correctness: the RPC `kind` is a *symbol name* resolved on
-each side against its own `.sym` file. Blue's `wSerialPlayerDataBlock`
-at `0xD152` and Yellow's at `0xD151` both serialize as
-`exchange_bytes/wSerialPlayerDataBlock` on the wire, so a Blue ↔ Yellow
-trade is wire-compatible and the bytes land at the correct per-version
-address on each side.
+The current evidence boundary is deliberately narrow:
 
-MCP tools for Mode B:
+| Test surface | What it can establish | What it cannot establish |
+|---|---|---|
+| `tests/test_link_protocol.py` | ROM-free Pokémon serial constants and synthetic exchange behavior | Emulator or game compatibility |
+| `tests/test_link_transport.py` and `tests/test_network_backend.py` | In-process queues and TCP edge/response primitives | A real game trade or battle |
+| `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
+| `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
+| `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
+| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus color Red/Blue native-serial trade and no-hook battle acceptance | Repeated trade stability, reversed roles, and unclaimed ROM/variant rows |
+| `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus strict local Red/Yellow trade and battle acceptance | Full Red/Blue/Yellow coverage or a release result from a skipped, RAM-mutated, or unpinned path |
 
-- `link_listen {"port": 9999}` — bind TCP (internal-clock master role).
-  Returns immediately; poll `link_status` for `remote_mode=="connected"`.
-- `link_connect {"host": "peer.host", "port": 9999}` — connect to a
-  listening peer (external-clock slave role).
-- `link_status` — snapshot of local state (paired/listening/connected).
-- `link_disconnect` — close the link.
+Do not describe a transport milestone as “trade complete.” A full trade or
+battle needs an acceptance result from the actual release runtime, matching
+ROMs, matching save-state fixtures, bounded deadlines, a clean teardown, and
+an explicit statement about any test-driver menu control. The current remote
+battle result uses ordinary menu input and proves native serial move exchange;
+the trade result remains stability-sensitive and does not prove every remote
+menu/role combination.
 
-Typical flow for two-agent trading, assuming both servers have
-`POKERED_ROM_PATH` set to their respective ROM:
+## Walkthrough scripts
 
-1. Agent A (listener): call `link_listen {"port": 9999}`.
-2. Agent B (connector): call `link_connect {"host": "A's host", "port": 9999}`.
-3. Both poll `link_status` until `remote_mode == "connected"`.
-4. Both agents drive their own sessions into Cerulean Pokémon Center
-   → Cable Club attendant using normal `press` / `step` tools. When the
-   game runs `Serial_ExchangeBytes` it's transparently wired to the
-   peer's matching call over TCP.
-5. `link_disconnect` when done.
+The scripts are useful diagnostics and fixture producers, not a substitute
+for the release gate. The `--option-b` paths and any direct game-memory writes
+are intentionally outside the supported gameplay claim:
 
-### Label / symbol validation
+- [`scripts/full_to_brock.py`](scripts/full_to_brock.py) drives the Red
+  pipeline and can fall back to a RAM-based party top-up when the honest
+  grind does not reach its target.
+- [`scripts/blue_forest_to_brock.py`](scripts/blue_forest_to_brock.py)
+  defaults to a Route 2 grind and retains `--option-b` as a diagnostic RAM
+  boost.
+- [`scripts/yellow_to_brock.py`](scripts/yellow_to_brock.py) has the same
+  distinction between its honest-grind path and the `--option-b` diagnostic.
 
-Label set is validated against real `pokered.sym`, `pokeblue.sym`, and
-`pokeyellow.sym` by
-[`tests/test_link_symbols_real_roms.py`](tests/test_link_symbols_real_roms.py)
-(skipped when the matching ROM's `.sym` is absent). Mode A handshake is
-smoke-tested in
-[`tests/test_link_integration.py`](tests/test_link_integration.py);
-Mode B is covered end-to-end by
-[`tests/test_link_integration_remote.py`](tests/test_link_integration_remote.py).
+Any run that writes party, event, repel, or other game state directly is a
+plumbing diagnostic. It must not be reported as an untouched, human-valid
+playthrough. Outputs should go to an ignored directory such as
+`walkthrough_output/`; do not commit ROM-derived states, screenshots, or
+logs.
 
-### Mode B coverage matrix
+For link fixtures, use the existing producer
+[`scripts/produce_cable_club_fixture.py`](scripts/produce_cable_club_fixture.py)
+with a source state captured against the same ROM bytes. There is no separate
+Yellow-specific producer in this repository; documentation must not point to
+one. The producer creates only the ordinary Cable Club state. Battle-start
+states must be captured manually for each exact ROM and remain local, ignored
+inputs. See [`scripts/WALKTHROUGH_README.md`](scripts/WALKTHROUGH_README.md)
+for the diagnostic walkthrough notes.
 
-Listener × connector, with the milestones driven end-to-end over
-localhost TCP. Role matters: listener is the internal-clock master,
-connector the external-clock slave — a reversed pair is a distinct
-wire configuration.
+## Development test command
 
-| Listener | Connector | Handshake | Nybble → LinkMenu | Nybble RPC obs | Menu-sel RPC obs | TRADE_CENTER warp |
-|---|---|---|---|---|---|---|
-| blue | blue | ✅ | ✅ | ✅ | ✅ | ✅ |
-| blue | yellow | ✅ | ✅ | ✅ | ✅ | ✅ |
-| yellow | blue | ✅ | ✅ | ✅ | ✅ | ✅ |
-| yellow | yellow | ✅ | ✅ | ✅ | ✅ | ✅ |
-| red | red | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
-| red | blue | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
-| blue | red | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
-| red | yellow | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
-| yellow | red | ⏭ fixture gap | ⏭ | ⏭ | ⏭ | ⏭ |
+For development diagnostics, the broad local command is:
 
-Every non-red row now hits every transport-testable milestone.
-Menu-selection RPC counts are balanced on both sides within ±1 for
-all 4 working pairs (measured: blue↔blue 65/64, blue↔yellow 113/112,
-yellow↔blue 60/59, yellow↔yellow 97/96) — the byte exchange through
-`Serial_ExchangeLinkMenuSelection` round-trips correctly regardless of
-version pairing.
+```bash
+python -m pytest -q -ra
+```
 
-Fixture gaps:
-
-- **Red** — no `tests/fixtures/link/red/cable_club.state` exists.
-  Mt. Moon → Cerulean progression is not yet scripted in the Red
-  harness, so the fixture has never been produced.
-- **Yellow** — `tests/fixtures/link/yellow/cable_club.state` (git-
-  ignored along with all `*.state` files per the BYO-ROM policy) is
-  produced locally by running
-  [`scripts/produce_yellow_cable_club_fixture.py`](scripts/produce_yellow_cable_club_fixture.py).
-  That script expects the sibling worktree's
-  `walkthrough_to_cerulean/milestones/cerulean_pc.state` as input —
-  a state the Yellow walkthrough harness produces via a blackout-warp
-  shortcut to the Cerulean Pokecenter with correct CGB palette (via
-  the nurse-heal trigger). From there the script encodes the
-  `up×4, left×2, down, right-until-x=11, up` route that sidesteps the
-  nurse NPC at (4, 3) and lands the player on the only tile where
-  pressing A fires `CableClubNPC` on Yellow (discovered by hooking
-  `01:7035 CableClubNPC` across x=5..12 — only x=11 triggers).
-
-Transport-layer behaviour past LinkMenu
-(`Serial_ExchangeLinkMenuSelection`, `Serial_ExchangeBytes` for the
-three RNG/player-data/patch-list blocks inside `CableClub_DoBattleOrTrade`)
-is covered across multiple levels:
-
-- In-process, end-to-end on real ROMs:
-  `test_link_integration.test_link_trade_roundtrip` (blue) —
-  reaches `TradeCenter_DrawPartyLists` via the full trade protocol.
-- Remote, unit-level on `InProcessSerialLink`:
-  `test_remote_endpoint.test_exchange_menu_selection_exchanges_two_bytes`
-  and `test_exchange_bytes_cross_version_translates_via_symbol`.
-- Remote, over actual TCP, real ROMs:
-  - `test_remote_rpc_flow_past_link_menu_over_tcp` drives each of
-    the 4 working pairs to LinkMenu and observes
-    `menu_selection/wLinkMenuSelectionSendBuffer` RPCs flowing with
-    balanced counts on both sides.
-  - `test_remote_menu_vote_converges_and_warps_to_trade_center_blue`
-    installs the same auto-select-TRADE hook that
-    `LinkPair._install_linkmenu_autoselect_trade` uses
-    (pre-plants `0xD4` in `wLinkMenuSelectionReceiveBuffer`),
-    simulating two agents cooperatively voting TRADE. Both peers
-    warp to map `0xEF` (TRADE_CENTER) — transport-level proof that
-    the full `Serial_ExchangeLinkMenuSelection` byte exchange
-    round-trips correctly over TCP and drives the post-menu warp.
-  - Generic `test_serial_link.test_tcp_exchange_round_trip` +
-    `test_tcp_larger_payload` cover arbitrary byte payloads.
-
-The `exchange_bytes/wSerialRandomNumberListBlock` round-trip
-(the first of the three post-menu exchanges inside
-`CableClub_DoBattleOrTradeAgain`) is now additionally tested
-two-process on real TCP in
-`test_remote_exchange_bytes_fires_in_trade_center_blue_blue`. It
-uses the same auto-select-TRADE hook the in-process LinkPair relies
-on, driven by a deterministic `LockstepOrchestrator` (one thread per
-session + per-frame barrier + button-inject-at-frame-boundary).
-The 2nd and 3rd exchanges reliably desync after the bypass — see
-the "deployment timing" section below — and are covered
-transitively by the in-process `test_link_trade_roundtrip`.
-
-### Deployment timing for two independent MCP agents
-
-The transport (`TcpSerialLink` + `RemoteLinkEndpoint` + symbol-
-translated RPC `kind`) is proven up to the first post-menu byte
-exchange. Beyond that, completing a full trade or battle between two
-**independent** MCP processes needs an application-layer sync
-mechanism — the game was designed for hardware where both Game Boys
-are locked to a physical 8192 Hz clock. PyBoy has no such external
-clock, so two separate Python processes stepping their own emulators
-drift in game-frame alignment unless one of the following is in
-place:
-
-1. **Shared tick broker (collapses remote → LinkPair).** Wire both
-   processes so a single orchestrator decides when each advances a
-   frame. Defeats the "two truly independent agents" model; equivalent
-   to just running in-process.
-
-2. **Agent-layer rendezvous (implemented, recommended).** Each agent
-   calls [`AgentSync.rendezvous(label, payload)`](src/pokered_harness/link/agent_sync.py)
-   before issuing any button press that needs cross-agent sync:
-
-   ```python
-   from pokered_harness.link import AgentSync
-   sync = AgentSync(link)  # same TcpSerialLink the game uses
-   peer_tick = sync.rendezvous("about_to_press_a", str(session.current_tick()).encode())
-   # Both agents now know each other's current tick and are wall-clock
-   # synchronized. Issue the coordinated press here.
-   session.press("a")
-   ```
-
-   The rendezvous piggybacks on the existing `SerialLink` transport
-   via a namespaced `agent_sync/<label>` kind, so it never collides
-   with game RPC kinds (`exchange_bytes/…`, `exchange_nybble/…`,
-   `menu_selection/…`). Per-kind FIFO within `SerialLink` guarantees
-   that two back-to-back rendezvous calls at the same label pair up
-   in order. Demonstrated end-to-end over real TCP on real ROMs by
-   `test_remote_agent_sync_coordinates_link_menu_vote_blue_blue`.
-
-   What rendezvous proves vs. what it doesn't: rendezvous aligns
-   agents to a *wall-clock moment* — enough for both to then press a
-   button "now" with sub-millisecond skew. It does NOT retroactively
-   align the two sides' game-tick clocks. Menu voting in pokered
-   runs `Serial_ExchangeLinkMenuSelection` every frame; if the two
-   sides' game-clocks have drifted (side A has issued 30 menu_selection
-   RPCs while side B issued 5), FIFO pairing matches stale votes
-   from different game-states and the vote doesn't converge.
-   Completing a full trade or battle therefore also needs one of:
-   (a) the transport-level `endpoint` hijack (what LinkPair's
-   `_install_linkmenu_autoselect_trade` does — force-plant votes
-   without going through the per-frame loop), or (b) a sync-every-N-
-   frames policy where both agents pause and re-rendezvous often
-   enough that the FIFO stays fresh.
-
-3. **Designated-driver turn-based (simplest).** One agent owns the
-   "I'll press A this tick" decision each turn; the other follows on
-   the same relative tick offset. Essentially turn-based multiplayer
-   where only one side's button-press matters per game phase.
-
-Option 2 is the production-minded answer — it preserves agent
-autonomy, uses the existing transport, and matches how humans
-coordinate over a physical cable ("ready?" "ready" → both press).
-Option 3 is a fallback for simpler use cases.
-
-Until application-layer sync is wired up, two-agent trades complete
-up to the TRADE_CENTER warp (status bytes, nybble sync, menu-vote
-convergence, and first post-menu RNG exchange all verified end-to-
-end over TCP on real ROMs) — from there, the in-process
-`test_link_trade_roundtrip` covers the UI flow, and
-`test_link_integration_remote.py` documents the remote limitations
-alongside the transport tests.
-
-### Producing Cable Club save states
-
-Actual trade / link-battle testing needs both sides sitting at the
-Cerulean Pokémon Center Cable Club attendant with 2+ Pokémon in party.
-The first accessible Cable Club is in Cerulean City (after Brock →
-Mt. Moon). The repo ships harness scripts through Boulder Badge; Mt.
-Moon → Cerulean progression is not yet automated.
-
-Until that lands, produce each fixture manually:
-
-1. Launch `scripts/walkthrough.py --view` (or any interactive script)
-   with the target ROM.
-2. Play through to Cerulean Pokémon Center, enter the Cable Club,
-   stand in front of the trade attendant.
-3. At a Python prompt (or mid-script), call
-   `open("tests/fixtures/link/<version>/cable_club.state", "wb").write(session.save_state())`.
-4. Repeat for the peer version.
-5. Run `python scripts/link_trade_demo.py --primary blue --peer yellow --view`.
-
-Current limitations: PyBoy 2.7.0 has no `hook_deregister`, so unpair
-leaves dormant callbacks in place; Mt. Moon → Cerulean progression is
-not yet scripted so Cable Club fixtures must be produced manually;
-trade-only — link battle reuses the same transport but the UI-side
-wiring is deferred.
-
-## Color rendering
-
-The harness constructs `PyBoy(..., cgb=True)`. Stock Red/Blue render
-through the CGB auto-palette (uniform tint). For authentic per-sprite
-coloring, apply the respective Full Color Hack IPS with
-`scripts/apply_color_patch.py` — it auto-recomputes ROM header and
-global checksums so PyBoy accepts the output.
-
-The default window driver is `null` (headless) for tests and MCP. Pass
-`view=True` to `Session` (or `--view` to `scripts/walkthrough.py`) to
-open PyBoy's SDL2 viewer and watch the game live.
+Use the tiered commands in [`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md)
+when ROMs, symbols, fixtures, or the bundled link runtime are present. The
+current diagnostic matrix is known to stall on `blue↔blue` and `blue→red`
+battle rows, so a broad run is not currently a production result. A green unit
+suite alone is not a production result; every required tier must run with no
+unexpected failures, skips, xfails, or timeouts.
 
 ## License
 
-The harness code in this repo is LGPL-3.0-only to match PyBoy's license.
-No game-derived assets are distributed.
+The harness code is LGPL-3.0-only. No game-derived assets are distributed.

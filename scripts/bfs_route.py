@@ -20,13 +20,11 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from collections import deque
 from pathlib import Path
 
-from pokered_harness.session import Session
 from pokered_harness.mcp_server import register_default_hooks
-
+from pokered_harness.session import Session
 
 DIRS = [("u", "up"), ("d", "down"), ("l", "left"), ("r", "right")]
 

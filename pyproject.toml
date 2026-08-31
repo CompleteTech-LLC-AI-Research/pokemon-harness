@@ -6,33 +6,77 @@ build-backend = "setuptools.build_meta"
 name = "pokered-harness"
 version = "0.1.0"
 description = "Memory-first automation harness for Pokémon Red via PyBoy, exposed over MCP."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 readme = "README.md"
-license = { text = "LGPL-3.0-only" }
+license = "LGPL-3.0-only"
 dependencies = [
-    "pyboy==2.7.0",
-    "pydantic>=2.6",
+    # These are the versions used by the certified gate. Bump them as a
+    # tested set; open-ended requirements can silently change the emulator
+    # or MCP contract on a clean install.
+    "mcp==1.29.1",
+    "cython==3.0.12",
+    "numpy==2.5.2",
+    "pydantic==2.13.5",
+    "pysdl2==0.9.17",
+    "pysdl2-dll==2.32.10",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8",
-    "pytest-asyncio>=0.23",
-    "pytest-cov>=5",
-    "ruff>=0.5",
-]
-mcp = [
-    "mcp>=1.0",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.5",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+include-package-data = true
+
+# Package the pinned PyBoy fork into the same distribution as the harness.
+# This keeps editable installs and wheels on the identical runtime without a
+# local-path dependency (which is not valid in wheel metadata).
+packages = [
+    "pokered_harness",
+    "pokered_harness.events",
+    "pokered_harness.link",
+    "pokered_harness.state",
+    "pokered_harness.symbols",
+    "pyboy",
+    "pyboy.api",
+    "pyboy.core",
+    "pyboy.core.cartridge",
+    "pyboy.logging",
+    "pyboy.plugins",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+pyboy = "vendor/pyboy-src/pyboy"
+
+[tool.setuptools.package-data]
+"pyboy.core" = ["*.bin"]
+"pyboy.plugins" = ["font.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
+markers = [
+    "unit: ROM-free deterministic tests",
+    "real_rom: requires a BYO ROM and symbol file",
+    "local_link: real-ROM in-process link tests",
+    "remote_link: real-ROM TCP or subprocess link tests",
+    "mcp_stdio: real-ROM MCP stdio integration tests",
+    "acceptance: real-ROM trade or battle acceptance",
+    "trade: real-ROM trade coverage",
+    "battle: real-ROM battle coverage",
+    "timing_sensitive: repeatable scheduling-sensitive regression",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# PyBoy is a pinned third-party source fork. Keep product lint scoped to
+# src/, tests/, and scripts/; audit the vendored runtime separately with
+# explicit Ruff/compile/import checks rather than mass-rewriting upstream code.
+extend-exclude = ["vendor/pyboy-src"]

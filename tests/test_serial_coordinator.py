@@ -12,17 +12,16 @@ from __future__ import annotations
 
 import pytest
 
+from pokered_harness.link.serial_coordinator import (
+    CoordinatedBackend,
+    LockstepCoordinator,
+)
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
     CYCLES_PER_EDGE_DMG,
     NullBackend,
     SerialCore,
 )
-from pokered_harness.link.serial_coordinator import (
-    CoordinatedBackend,
-    LockstepCoordinator,
-)
-
 
 # ---------------------------------------------------------------------------
 # Basic pairing

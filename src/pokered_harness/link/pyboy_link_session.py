@@ -25,8 +25,8 @@ Usage
     link.attach(b)
 
     # In-game code on both sides now sees a bit-accurate serial bridge.
-    # Drive both emulators in interleaved chunks so their serial edges
-    # stay near-aligned:
+    # Drive both emulators through the interleaved scheduler so serial-heavy
+    # ROM routines stay near-aligned:
     while not done:
         link.step(frames=1)
 
@@ -46,11 +46,12 @@ Design notes
   in Pokémon's own link-cable code.
 * ``detach`` restores each serial's original ``backend`` (normally
   :class:`NullBackend`); PyBoy returns to disconnected-cable behavior.
-* ``step`` interleaves the two emulators in small frame chunks. Per-edge
-  lockstep (mGBA-style) is a later refinement — per-frame is sufficient
-  for Gen I Pokémon because the protocol uses software timing loops
-  that tolerate modest skew and the :class:`CoordinatedBackend` falls
-  back to pull-up when one side isn't armed yet.
+* ``step_interleaved`` interleaves the two emulators in bounded cycle chunks
+  and re-evaluates the internal/external clock order. This is the required
+  path for serial-heavy ROM routines; ``step`` remains the public frame
+  convenience method for ordinary UI work. A bounded local re-arm callback
+  reduces transient slave gaps, while a genuinely disconnected peer still
+  receives the documented keep-alive behavior.
 
 This class is the natural extension point for the network backend
 (milestone 8): :meth:`listen` / :meth:`connect` classmethods would
@@ -64,7 +65,12 @@ from typing import Protocol, runtime_checkable
 
 from pokered_harness.link.network_backend import NetworkBackend
 from pokered_harness.link.serial_coordinator import LockstepCoordinator
-from pokered_harness.link.serial_core import NullBackend
+from pokered_harness.link.serial_core import (
+    SC_CLOCK_SOURCE,
+    SC_TRANSFER_ENABLE,
+    NullBackend,
+    SerialCore,
+)
 
 
 @runtime_checkable
@@ -87,11 +93,25 @@ class PyBoyLinkSession:
 
     #: Max attached instances. Gen I Pokémon is strictly 2-player.
     MAX_ATTACHED: int = 2
+    # PyBoy's LCD uses 70224 CPU cycles for a normal DMG frame. This is only
+    # a fallback for test doubles or older integrations which do not expose
+    # the LCD's next-frame cycle hint; real PyBoy instances use that hint.
+    _DEFAULT_LCD_FRAME_CYCLES: int = 70224
+    # Keep an individual singlestepped chunk bounded even if a caller
+    # supplies an unusually large ``chunk_cycles`` value.
+    _MAX_SINGLE_STEP_TICKS: int = 4096
+    # These are the wire markers from pret/pokered's serial_constants.asm.
+    # They are written to the native FF01/FF02 serial registers through
+    # Serial.set_SB/set_SC, never to the ROM-owned hSerialConnectionStatus.
+    _ESTABLISH_CONNECTION_WITH_INTERNAL_CLOCK: int = 0x01
+    _ESTABLISH_CONNECTION_WITH_EXTERNAL_CLOCK: int = 0x02
 
     def __init__(
         self,
         network_backend: NetworkBackend | None = None,
         *,
+        network_is_internal_clock: bool | None = None,
+        local_rom_version: str | None = None,
         view: bool = False,
     ) -> None:
         self._pyboys: list[object] = []
@@ -102,8 +122,14 @@ class PyBoyLinkSession:
         # Per-attach backend we installed; saved so detach() can restore
         # whatever was on ``mb.serial.backend`` before we touched it.
         self._prev_backends: list[object] = []
+        # When attaching to a legacy/no-backend serial object, we promote
+        # it to a SerialCore and keep the original here so detach() can put
+        # the motherboard back exactly as it was.
+        self._prev_serials: list[object | None] = []
         self._coord: LockstepCoordinator | None = None
         self._network_backend: NetworkBackend | None = network_backend
+        self._network_is_internal_clock = network_is_internal_clock
+        self._local_rom_version = local_rom_version
         # When True, per-frame stepping keeps the LCD renderer on and calls
         # each PyBoy's _post_tick (via pyboy.tick(0, True, False)) so the
         # SDL2 window actually flips and pumps events. Without this the
@@ -114,7 +140,7 @@ class PyBoyLinkSession:
     # --- construction --------------------------------------------------
 
     @classmethod
-    def local(cls, *, view: bool = False) -> "PyBoyLinkSession":
+    def local(cls, *, view: bool = False) -> PyBoyLinkSession:
         """Create a local two-instance session.
 
         Both PyBoys attach into the same process; they're paired via
@@ -124,8 +150,12 @@ class PyBoyLinkSession:
 
     @classmethod
     def listen(
-        cls, port: int, *, host: str = "127.0.0.1"
-    ) -> "PyBoyLinkSession":
+        cls,
+        port: int,
+        *,
+        host: str = "127.0.0.1",
+        local_rom_version: str | None = None,
+    ) -> PyBoyLinkSession:
         """Bind ``(host, port)``, accept one peer, return the session.
 
         Single-instance mode: the session holds a :class:`NetworkBackend`;
@@ -135,26 +165,46 @@ class PyBoyLinkSession:
 
         Blocks until a peer connects.
         """
-        backend, _listener = NetworkBackend.listen(port, host=host)
+        backend, _listener = NetworkBackend.listen(
+            port, host=host, local_rom_version=local_rom_version
+        )
         # Close the listener — we only accept one connection.
         try:
             _listener.close()
         except OSError:
             pass
-        return cls(network_backend=backend)
+        return cls(
+            network_backend=backend,
+            network_is_internal_clock=True,
+            local_rom_version=local_rom_version,
+        )
 
     @classmethod
     def connect(
-        cls, host: str, port: int, *, timeout_s: float = 10.0
-    ) -> "PyBoyLinkSession":
+        cls,
+        host: str,
+        port: int,
+        *,
+        timeout_s: float = 10.0,
+        local_rom_version: str | None = None,
+    ) -> PyBoyLinkSession:
         """Connect to a peer running :meth:`listen` on ``(host, port)``.
 
         Returns a single-instance network-mode session; call
         :meth:`attach` to wire the session's NetworkBackend onto the
         local PyBoy's ``mb.serial.backend``.
         """
-        backend = NetworkBackend.connect(host, port, timeout_s=timeout_s)
-        return cls(network_backend=backend)
+        backend = NetworkBackend.connect(
+            host,
+            port,
+            timeout_s=timeout_s,
+            local_rom_version=local_rom_version,
+        )
+        return cls(
+            network_backend=backend,
+            network_is_internal_clock=False,
+            local_rom_version=local_rom_version,
+        )
 
     # --- attach / detach -----------------------------------------------
 
@@ -187,21 +237,32 @@ class PyBoyLinkSession:
             )
 
         mb = pyboy.mb
-        core = mb.serial  # reuse the existing PyBoy Serial instance
+        core = mb.serial  # prefer reusing the existing PyBoy Serial instance
         # Save whatever backend the serial currently has so detach()
         # can restore it. On a freshly constructed PyBoy this is
         # ``NullBackend``; mid-game attaches preserve whatever was set.
         prev_backend = getattr(core, "backend", None)
+        prev_serial = None
+        if not hasattr(core, "backend"):
+            prev_serial = core
+            core = self._promote_legacy_serial(core)
+            mb.serial = core
+            prev_backend = getattr(core, "backend", None)
 
         self._pyboys.append(pyboy)
         self._cores.append(core)
         self._prev_backends.append(prev_backend)
+        self._prev_serials.append(prev_serial)
 
         if self._network_backend is not None:
             # Network-mode: hook the local core up to the TCP backend
             # and fire the slave-IRQ via this pyboy's CPU flag register
-            # when peer-driven edges complete our transfer.
+            # when peer-driven edges complete our transfer. The ROM owns
+            # connection-role negotiation: its serial ISR records the first
+            # native handshake byte in hSerialConnectionStatus. Do not write
+            # that HRAM cell here; doing so would bypass the ROM protocol.
             core.backend = self._network_backend
+            self._initialize_network_clock_role(core)
             self._network_backend.start_receiver(
                 local_core=core,
                 irq_callback=self._make_serial_irq_raiser(pyboy),
@@ -220,8 +281,33 @@ class PyBoyLinkSession:
                 on_b_transfer_complete=self._make_serial_irq_raiser(
                     self._pyboys[1]
                 ),
+                on_a_peer_unarmed=self._make_peer_progressor(self._pyboys[1]),
+                on_b_peer_unarmed=self._make_peer_progressor(self._pyboys[0]),
             )
 
+        return core
+
+    @staticmethod
+    def _promote_legacy_serial(serial: object) -> object:
+        """Best-effort compatibility path for pre-backend serial objects.
+
+        Older tests and partial PyBoy integrations may still expose a
+        serial object without a runtime-settable ``backend`` attribute.
+        Promote that object to a ``SerialCore`` while preserving the
+        visible register state we can observe from Python.
+        """
+        if SerialCore is None:
+            raise RuntimeError("SerialCore is unavailable; can't promote legacy serial")
+        core = SerialCore(getattr(serial, "cgb_mode", False))
+        if hasattr(serial, "SB"):
+            core.set_SB(getattr(serial, "SB"))
+        if hasattr(serial, "SC"):
+            raw_sc = getattr(serial, "SC")
+            core.set_SC(raw_sc)
+            core.SC = raw_sc
+        for attr in ("last_cycles", "clock"):
+            if hasattr(serial, attr):
+                setattr(core, attr, getattr(serial, attr))
         return core
 
     @staticmethod
@@ -244,6 +330,100 @@ class PyBoyLinkSession:
 
         return _raise
 
+    @staticmethod
+    def _make_peer_progressor(pyboy):
+        """Return a bounded one-instruction progress callback.
+
+        A TCP peer continues running while the local master waits for an
+        edge response. A same-process pair has no second OS thread, so a
+        master edge can otherwise observe the peer between its serial IRQ
+        handler and the next SB/SC arm. The coordinator calls this callback
+        only on that narrow path; it advances the peer's motherboard one
+        instruction and mirrors the hook bookkeeping used by
+        :meth:`_interleave_one_frame`.
+
+        Test doubles that do not expose a motherboard tick simply return
+        ``False`` and retain the historical pull-up behavior.
+        """
+
+        def _progress() -> bool:
+            mb = getattr(pyboy, "mb", None)
+            tick = getattr(mb, "tick", None)
+            if not callable(tick):
+                return False
+            lcd = getattr(mb, "lcd", None)
+            # ``_interleave_one_frame`` normally stops a side as soon as
+            # it reaches its LCD boundary. The other side can still be in
+            # its current frame and hit a serial edge during that small
+            # window. Allow this bounded re-arm callback to advance the
+            # already-finished side a few instructions into its next
+            # frame; the next outer frame setup re-establishes the normal
+            # boundary discipline.
+            if getattr(lcd, "frame_done", False):
+                lcd.frame_done = False
+            old_singlestep = getattr(mb, "breakpoint_singlestep", 0)
+            try:
+                mb.breakpoint_singlestep = 1
+                if tick():
+                    mb.breakpoint_reinject()
+                    bp = mb.breakpoint_reached()
+                    if bp != (-1, -1, -1):
+                        bank, addr, _ = bp
+                        mb.breakpoint_remove(bank, addr)
+                        mb.breakpoint_singlestep_latch = 0
+                        handle_hooks = getattr(pyboy, "_handle_hooks", None)
+                        if callable(handle_hooks):
+                            handle_hooks()
+                return True
+            finally:
+                mb.breakpoint_singlestep = old_singlestep
+
+        return _progress
+
+    def _initialize_network_clock_role(self, core: object) -> None:
+        """Arm the native serial handshake for the configured wire role.
+
+        A restored Cable Club fixture has both hardware serial ports waiting
+        as external-clock slaves (``SB=0x02``, ``SC=0xFC``). Real hardware
+        needs one endpoint to present the internal-clock establishment marker
+        on ``rSB`` and start ``rSC`` as the clock source; otherwise neither
+        endpoint can generate the first edge. This is register-level cable
+        setup, not a game-state shortcut: the ROM serial ISR still receives
+        the peer marker and writes ``hSerialConnectionStatus`` itself.
+
+        The method intentionally uses only the native PyBoy serial contract.
+        It does not inspect or mutate emulator memory and does not install
+        symbol-level hooks.
+        """
+        is_internal_clock = self._network_is_internal_clock
+        if is_internal_clock is None:
+            return
+        set_sb = getattr(core, "set_SB", None)
+        set_sc = getattr(core, "set_SC", None)
+        if not callable(set_sb) or not callable(set_sc):
+            raise RuntimeError(
+                "network role initialization requires native Serial.set_SB "
+                "and Serial.set_SC"
+            )
+
+        set_sb(
+            self._ESTABLISH_CONNECTION_WITH_INTERNAL_CLOCK
+            if is_internal_clock
+            else self._ESTABLISH_CONNECTION_WITH_EXTERNAL_CLOCK
+        )
+        # Preserve the CGB fast-serial selection bit if a caller restored a
+        # state with it set, while deterministically selecting the requested
+        # clock source and re-arming the native transfer.
+        try:
+            current_sc = int(getattr(core, "SC", 0))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError("native Serial.SC is not an integer") from exc
+        next_sc = current_sc & 0x02
+        next_sc |= SC_TRANSFER_ENABLE
+        if is_internal_clock:
+            next_sc |= SC_CLOCK_SOURCE
+        set_sc(next_sc)
+
     def detach(self, pyboy: _PyBoyLike) -> None:
         """Restore ``pyboy.mb.serial.backend`` and (if paired) tear
         down the coordinator. No-op if ``pyboy`` isn't attached."""
@@ -257,23 +437,40 @@ class PyBoyLinkSession:
             self._coord = None
         idx = self._pyboys.index(pyboy)
         prev_backend = self._prev_backends[idx]
+        prev_serial = self._prev_serials[idx]
         core = self._cores[idx]
-        # Restore whatever backend the serial had before we touched it
-        # (NullBackend by default on a fresh PyBoy).
-        try:
-            core.backend = prev_backend if prev_backend is not None else NullBackend()
-        except AttributeError:
-            # If PyBoy's Serial doesn't expose a settable ``backend``
-            # yet (partial Agent-A merge), there's nothing to restore.
-            pass
+        if prev_serial is not None:
+            pyboy.mb.serial = prev_serial
+        else:
+            # Restore whatever backend the serial had before we touched it
+            # (NullBackend by default on a fresh PyBoy).
+            try:
+                core.backend = prev_backend if prev_backend is not None else NullBackend()
+            except AttributeError:
+                # If PyBoy's Serial doesn't expose a settable ``backend``
+                # yet (partial Agent-A merge), there's nothing to restore.
+                pass
         self._pyboys.pop(idx)
         self._cores.pop(idx)
         self._prev_backends.pop(idx)
+        self._prev_serials.pop(idx)
 
     def detach_all(self) -> None:
-        """Detach every attached PyBoy in reverse order."""
-        for pyboy in list(reversed(self._pyboys)):
-            self.detach(pyboy)
+        """Detach every attached PyBoy and close the session transport.
+
+        A network backend is a session-level resource, rather than a
+        per-PyBoy attachment.  Stop it after the attachments have been
+        restored so its reader and edge-worker threads cannot retain the
+        detached serial core.  Keep this in ``detach_all`` (the terminal
+        session cleanup path) so ``detach`` retains its existing behavior of
+        only restoring one PyBoy's serial backend.
+        """
+        try:
+            for pyboy in list(reversed(self._pyboys)):
+                self.detach(pyboy)
+        finally:
+            if self._network_backend is not None:
+                self._network_backend.stop()
 
     # --- accessors -----------------------------------------------------
 
@@ -324,18 +521,23 @@ class PyBoyLinkSession:
             )
         effective_render = render or self._view
         for _ in range(frames):
-            for pyboy in self._pyboys:
+            for pyboy in self._serial_step_order(*self._pyboys):
                 pyboy.tick(1, effective_render)
 
     def step_interleaved(
-        self, frames: int = 1, *, chunk_cycles: int = 256
+        self,
+        frames: int = 1,
+        *,
+        chunk_cycles: int = 256,
+        render: bool | None = None,
     ) -> None:
         """Advance both PyBoys by ``frames`` frames with sub-frame
         interleaving for tight serial-sync phases.
 
         Instead of ticking one whole frame on each side, this alternates
-        ~``chunk_cycles`` CPU cycles per side. That keeps the two CPUs
-        close enough that a Pokémon serial-sync loop — which oscillates
+        ~``chunk_cycles`` normal-speed hardware cycles per side. The raw CPU
+        budget is scaled for each motherboard's CGB speed, keeping the two
+        CPUs close enough that a Pokémon serial-sync loop — which oscillates
         a side between SC=0x80 (slave) and SC=0x81 (master) several
         times per byte — sees its peer in the matching role. Per-frame
         interleaving (``step``) is too coarse for this because each
@@ -352,14 +554,21 @@ class PyBoyLinkSession:
                 f"step_interleaved() requires {self.MAX_ATTACHED} "
                 f"attached instances, have {len(self._pyboys)}"
             )
-        # ~7 cycles per single-stepped mb.tick call (empirical).
-        ticks_per_chunk = max(1, chunk_cycles // 7)
+        if not isinstance(chunk_cycles, int) or isinstance(chunk_cycles, bool):
+            raise ValueError("chunk_cycles must be a positive integer")
+        if chunk_cycles <= 0:
+            raise ValueError("chunk_cycles must be a positive integer")
+        # ``mb.tick`` returns after one CPU instruction in singlestep mode,
+        # but instruction lengths vary. Pass a normal-speed hardware-time
+        # budget to the frame driver; it scales that budget for each side's
+        # current CGB CPU speed rather than comparing raw CPU counters.
+        effective_view = self._view if render is None else bool(render) or self._view
         a, b = self._pyboys[0], self._pyboys[1]
         for _ in range(frames):
-            self._interleave_one_frame(a, b, ticks_per_chunk, view=self._view)
+            self._interleave_one_frame(a, b, chunk_cycles, view=effective_view)
 
     @staticmethod
-    def _interleave_one_frame(a, b, ticks_per_chunk: int, *, view: bool = False) -> None:
+    def _interleave_one_frame(a, b, chunk_cycles: int, *, view: bool = False) -> None:
         """Drive ``a`` and ``b`` through one frame each, interleaved.
 
         When ``view`` is True the LCD renderer stays on and each PyBoy's
@@ -374,41 +583,30 @@ class PyBoyLinkSession:
             p.mb.sound.disable_sampling = True
             p.mb.sound.clear_buffer()
 
-        # Drive both through mb.tick with singlestep on. Replicates the
-        # hook-firing logic from pyboy._tick's inner while-loop so our
-        # test-side hook counters still fire.
-        def _step_chunk(p, n: int) -> bool:
-            """Advance ``p`` up to ``n`` mb.tick()s or until frame_done.
-            Returns True if the frame completed."""
-            for _ in range(n):
-                if p.mb.lcd.frame_done:
-                    return True
-                # Re-arm singlestep every iteration so mb.tick returns
-                # after a single CPU instruction — breakpoint handling
-                # below may clear it.
-                p.mb.breakpoint_singlestep = 1
-                if p.mb.tick():
-                    # Breakpoint/singlestep return. Mirror pyboy._tick's
-                    # hook-firing logic (best-effort — skips plugin
-                    # manager, which isn't load-bearing for tests).
-                    p.mb.breakpoint_reinject()
-                    bp = p.mb.breakpoint_reached()
-                    if bp != (-1, -1, -1):
-                        bank, addr, _ = bp
-                        p.mb.breakpoint_remove(bank, addr)
-                        p.mb.breakpoint_singlestep_latch = 0
-                        p._handle_hooks()
-            return p.mb.lcd.frame_done
-
-        a_done = b_done = False
-        while not (a_done and b_done):
-            if not a_done:
-                a_done = _step_chunk(a, ticks_per_chunk)
-            if not b_done:
-                b_done = _step_chunk(b, ticks_per_chunk)
+        try:
+            a_cycles = PyBoyLinkSession._cpu_cycles(a)
+            b_cycles = PyBoyLinkSession._cpu_cycles(b)
+            if a_cycles is not None and b_cycles is not None:
+                PyBoyLinkSession._advance_to_shared_cycle_horizon(
+                    a,
+                    b,
+                    a_cycles,
+                    b_cycles,
+                    chunk_cycles,
+                )
+            else:
+                # Keep lightweight legacy doubles usable. They do not have
+                # a common emulated-time counter, so their only safe frame
+                # boundary is the LCD flag; the outer bound prevents a
+                # broken double from turning this loop into an infinite one.
+                PyBoyLinkSession._advance_to_lcd_boundaries(
+                    a, b, chunk_cycles
+                )
+        finally:
+            for p in (a, b):
+                p.mb.breakpoint_singlestep = 0
 
         for p in (a, b):
-            p.mb.breakpoint_singlestep = 0
             p.frame_count += 1
             p._post_handle_events()
             if view:
@@ -417,6 +615,287 @@ class PyBoyLinkSession:
                 # and pumps events. tick(0) skips the inner _tick loop
                 # but still reaches _post_tick.
                 p.tick(0, True, False)
+
+    @staticmethod
+    def _cpu_cycles(pyboy: object) -> int | None:
+        """Return a PyBoy CPU's absolute cycle counter when available."""
+        cpu = getattr(getattr(pyboy, "mb", None), "cpu", None)
+        cycles = getattr(cpu, "cycles", None)
+        if cycles is None:
+            return None
+        try:
+            return int(cycles)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _lcd_speed_shift(pyboy: object) -> int:
+        """Return the LCD/CPU speed ratio exposed by a PyBoy instance.
+
+        PyBoy's ``LCD.speed_shift`` is zero at normal speed and one while a
+        CGB CPU is in double-speed mode.  Lightweight test doubles often do
+        not expose it, so the conservative fallback is normal speed.
+        """
+        lcd = getattr(getattr(pyboy, "mb", None), "lcd", None)
+        value = getattr(lcd, "speed_shift", 0)
+        try:
+            return max(0, min(1, int(value)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    @classmethod
+    def _normalized_frame_delta(cls, pyboy: object) -> int:
+        """Return the next LCD boundary in normal-speed cycles.
+
+        ``_cycles_to_frame`` is stored in the motherboard's CPU-cycle unit,
+        which is twice as large for a CGB double-speed CPU.  Normalize it to
+        the LCD hardware domain before comparing two emulators.
+        """
+        lcd = getattr(getattr(pyboy, "mb", None), "lcd", None)
+        remaining = getattr(lcd, "_cycles_to_frame", None)
+        try:
+            remaining_cycles = max(1, int(remaining))
+        except (TypeError, ValueError, OverflowError):
+            remaining_cycles = cls._DEFAULT_LCD_FRAME_CYCLES
+        shift = cls._lcd_speed_shift(pyboy)
+        return max(1, (remaining_cycles + (1 << shift) - 1) >> shift)
+
+    @classmethod
+    def _advance_to_shared_cycle_horizon(
+        cls,
+        a: object,
+        b: object,
+        a_start: int,
+        b_start: int,
+        chunk_cycles: int,
+    ) -> None:
+        """Advance both sides through one common hardware-time horizon.
+
+        A local ``lcd.frame_done`` is a one-shot notification, not a safe
+        point at which to freeze one emulator. The peer may still be in the
+        preceding LCD phase, and ROM code which samples ``rLY`` can then
+        observe an impossible phase relationship. Both sides therefore run
+        toward the later of their two next LCD boundaries. If one reaches
+        its local boundary first, ``_step_single_step_chunk`` clears that
+        notification before continuing; it is never used as the shared stop
+        condition.
+        """
+        # CPU counters are absolute to each emulator's own lifetime and may
+        # differ substantially after independently captured save states.
+        # Normalize each relative LCD boundary to normal-speed hardware
+        # cycles before choosing the common horizon.  A CGB double-speed CPU
+        # therefore advances roughly twice as many raw CPU cycles as a DMG
+        # CPU for the same game frame, while both ROMs still execute one
+        # frame's worth of DelayFrame/VBlank work.
+        horizon = max(
+            cls._normalized_frame_delta(a),
+            cls._normalized_frame_delta(b),
+        )
+        a_target = a_start + (horizon << cls._lcd_speed_shift(a))
+        b_target = b_start + (horizon << cls._lcd_speed_shift(b))
+        chunk = max(4, chunk_cycles)
+        # Four times the nominal chunk count leaves room for variable-length
+        # instructions and a transient breakpoint return. It is an absolute
+        # bound on scheduler rounds, not a wall-clock wait.
+        max_rounds = max(1, ((horizon + chunk - 1) // chunk) * 4 + 4)
+        # An instruction may overshoot the target, but must not run an
+        # unbounded amount beyond it. The per-chunk tick cap below and this
+        # absolute cycle limit make a stuck/broken PyBoy fail closed.
+        # A singlestepped motherboard can cross the target by more than one
+        # nominal instruction when an interrupt/HDMA boundary is serviced in
+        # the same tick. Keep the guard finite, but allow a bounded multiple
+        # of the caller's chunk so a legitimate CGB/DMG phase boundary does
+        # not become a false scheduler failure.
+        max_cycle_overshoot = max(32, chunk * 8)
+        # Retain a finite amount of instruction/peer-handoff slack at the
+        # fastest supported CPU ratio.  The normal Gen I CGB path is stable
+        # for the duration of a scheduler frame; the current speed is still
+        # read for every chunk so a transition takes effect immediately.
+        max_cycles_a = a_target + (max_cycle_overshoot << 1)
+        max_cycles_b = b_target + (max_cycle_overshoot << 1)
+        reached_a = reached_b = False
+        rounds = 0
+
+        while not (reached_a and reached_b):
+            if rounds >= max_rounds:
+                current_a = cls._cpu_cycles(a)
+                current_b = cls._cpu_cycles(b)
+                raise TimeoutError(
+                    "PyBoy pair did not reach the shared LCD cycle horizon "
+                    f"within {max_rounds} rounds "
+                    f"(target_delta={horizon}, a={current_a}, b={current_b})"
+                )
+            rounds += 1
+
+            # Let the slave reach its SC=0x80 arm point before the
+            # internal-clock side can emit an edge. Re-evaluate this order
+            # after every chunk because Pokémon swaps roles between serial
+            # transfers.
+            for pyboy in cls._serial_step_order(a, b):
+                current = cls._cpu_cycles(pyboy)
+                if current is None:
+                    raise TimeoutError(
+                        "PyBoy CPU cycle counter disappeared during "
+                        "interleaved stepping"
+                    )
+                max_cycles = max_cycles_a if pyboy is a else max_cycles_b
+                if current > max_cycles:
+                    raise TimeoutError(
+                        "PyBoy pair exceeded the bounded LCD cycle horizon "
+                        f"(target_delta={horizon}, limit={max_cycles}, "
+                        f"current={current})"
+                    )
+                target = a_target if pyboy is a else b_target
+                reached = current >= target
+                if reached:
+                    if pyboy is a:
+                        reached_a = True
+                    else:
+                        reached_b = True
+                    continue
+
+                # Express the public chunk in normal-speed hardware cycles,
+                # then scale it for the current CPU speed. This keeps the
+                # two instruction streams close in the same time domain.
+                budget = min(
+                    chunk << cls._lcd_speed_shift(pyboy),
+                    target - current,
+                )
+                cls._step_single_step_chunk(
+                    pyboy,
+                    budget,
+                    stop_on_frame=False,
+                )
+                current = cls._cpu_cycles(pyboy)
+                if current is None:
+                    raise TimeoutError(
+                        "PyBoy CPU cycle counter disappeared during "
+                        "interleaved stepping"
+                    )
+                if current > max_cycles:
+                    raise TimeoutError(
+                        "PyBoy pair exceeded the bounded LCD cycle horizon "
+                        f"(target_delta={horizon}, limit={max_cycles}, "
+                        f"current={current})"
+                    )
+                reached = current >= target
+                if pyboy is a:
+                    reached_a = reached
+                else:
+                    reached_b = reached
+
+    @classmethod
+    def _advance_to_lcd_boundaries(
+        cls, a: object, b: object, chunk_cycles: int
+    ) -> None:
+        """Bounded fallback for test doubles without CPU cycle counters."""
+        chunk = max(4, chunk_cycles)
+        max_rounds = max(
+            1,
+            ((cls._DEFAULT_LCD_FRAME_CYCLES + chunk - 1) // chunk) * 4 + 4,
+        )
+        a_done = b_done = False
+        rounds = 0
+        while not (a_done and b_done):
+            if rounds >= max_rounds:
+                raise TimeoutError(
+                    "PyBoy pair did not reach both LCD frame boundaries "
+                    f"within {max_rounds} rounds"
+                )
+            rounds += 1
+            for pyboy in cls._serial_step_order(a, b):
+                if pyboy is a and a_done:
+                    continue
+                if pyboy is b and b_done:
+                    continue
+                done = cls._step_single_step_chunk(
+                    pyboy,
+                    chunk,
+                    stop_on_frame=True,
+                )
+                if pyboy is a:
+                    a_done = done
+                else:
+                    b_done = done
+
+    @staticmethod
+    def _step_single_step_chunk(
+        p: object,
+        cycle_budget: int,
+        *,
+        stop_on_frame: bool = True,
+    ) -> bool:
+        """Advance ``p`` up to ``cycle_budget`` CPU cycles.
+
+        Single-stepped instructions have variable lengths, so a fixed
+        instruction count creates role-dependent timing skew. Real PyBoy
+        exposes the CPU cycle counter; the instruction-count fallback keeps
+        lightweight legacy test doubles usable. When ``stop_on_frame`` is
+        false, a local LCD frame notification is consumed and stepping
+        continues toward the caller's shared cycle horizon.
+        """
+        cpu = getattr(p.mb, "cpu", None)
+        start_cycles = getattr(cpu, "cycles", None)
+        fallback_ticks = max(1, cycle_budget // 7)
+        max_ticks = min(
+            max(fallback_ticks, cycle_budget * 4),
+            PyBoyLinkSession._MAX_SINGLE_STEP_TICKS,
+        )
+        ticks = 0
+        while ticks < max_ticks:
+            lcd = getattr(p.mb, "lcd", None)
+            if stop_on_frame and getattr(lcd, "frame_done", False):
+                return True
+            if not stop_on_frame and getattr(lcd, "frame_done", False):
+                # PyBoy's motherboard stops immediately while this flag is
+                # set. Consume the one-shot notification only when the
+                # caller explicitly asked us to cross that boundary.
+                lcd.frame_done = False
+            # Re-arm singlestep every iteration so mb.tick returns after a
+            # single CPU instruction — breakpoint handling below may clear
+            # it.
+            p.mb.breakpoint_singlestep = 1
+            if p.mb.tick():
+                # Breakpoint/singlestep return. Mirror pyboy._tick's
+                # hook-firing logic (best-effort — skips plugin manager,
+                # which isn't load-bearing for tests).
+                p.mb.breakpoint_reinject()
+                bp = p.mb.breakpoint_reached()
+                if bp != (-1, -1, -1):
+                    bank, addr, _ = bp
+                    p.mb.breakpoint_remove(bank, addr)
+                    p.mb.breakpoint_singlestep_latch = 0
+                    p._handle_hooks()
+            ticks += 1
+            if start_cycles is not None:
+                current_cycles = getattr(cpu, "cycles", start_cycles)
+                if int(current_cycles) - int(start_cycles) >= cycle_budget:
+                    break
+            elif ticks >= fallback_ticks:
+                break
+        return bool(getattr(lcd, "frame_done", False))
+
+    @staticmethod
+    def _serial_step_order(a: object, b: object) -> tuple[object, object]:
+        """Return a role-aware cooperative stepping order.
+
+        The serial master generates the clock, but it is the slave that
+        must first execute the ROM instructions which arm SC. Advancing
+        the slave before the master prevents a local scheduler race from
+        turning a valid first edge into a disconnected-cable pull-up.
+        When the two roles are not distinguishable (idle, both armed as
+        masters, or test doubles without serial metadata), preserve the
+        historical ``(a, b)`` order.
+        """
+        serial_a = getattr(getattr(a, "mb", None), "serial", None)
+        serial_b = getattr(getattr(b, "mb", None), "serial", None)
+        a_internal = bool(getattr(serial_a, "internal_clock", False))
+        b_internal = bool(getattr(serial_b, "internal_clock", False))
+        if a_internal and not b_internal:
+            return b, a
+        if b_internal and not a_internal:
+            return a, b
+        return a, b
 
 
 __all__ = [

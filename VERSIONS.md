@@ -1,220 +1,219 @@
-# Pinned versions
+# Version and asset pins
 
-This file is the single source of truth for every version the harness depends
-on. The session manager reads the expected values from here (currently by
-caller code; a loader is planned) and refuses to run if the loaded ROM or
-PyBoy version does not match.
+This file records the candidate runtime and ROM inputs used by the harness. A
+pin identifies bytes or a dependency version; it is not, by itself, a release
+certification. The repository does not distribute ROMs, symbol files, save
+states, or other ROM-derived artifacts.
 
-## Emulator
+Status: `PARTIAL` current audit candidate; the functional source boundary is
+`3aad196` (2026-08-31). The current full-gate snapshot is unit 457/457, local
+46/46, remote 13/13, strict trade 2/2, strict battle 2/2, and timing 35/35
+across five repetitions. The remote tier and the canonical strict trade and
+battle roles pass; load-stable full-matrix support remains open.
+The historical complete real-ROM snapshot at
+`1046a541e0003923aec6000b6b383c6eaafeaa48` remains separate evidence, not
+current sign-off. Uncommitted worktree changes are excluded.
 
-| Component | Pin | Notes |
+The historical full-gate snapshot is unit 372/372, timing 35/35 across five
+repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
+2/2. Current local Red/Yellow trade and battle pass, and the exact-head
+Red/Blue remote battle smoke passes with ordinary menu input and native serial
+move exchange. Other link rows remain unsupported or unverified.
+
+Symbol hashes and audited generator provenance for the inputs are recorded
+below. The remaining release decision is `PARTIAL` because the complete
+implementation-revision gate output is not retained in the release tree,
+product lint and the broad matrix are not clean,
+per-ROM and reversed-role coverage is incomplete, and independent
+review/native-platform evidence is missing.
+The current Lane G audit at `3aad196` leaves 79 product Ruff findings under
+the default `ruff check .` boundary; the pinned vendored runtime is excluded
+from that product audit and has 227 findings when checked explicitly.
+
+## Runtime
+
+| Component | Pin | Source of truth |
 |---|---|---|
-| PyBoy | `2.7.0` | v2 API — `window="null"`, `tick(n, render=...)`, `memory[...]`, `hook_register`, `symbol_lookup`. CGB mode is used to enable color rendering for stock DMG Red/Blue. |
+| Python | `>=3.12` | `pyproject.toml` |
+| PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `pyproject.toml` |
+| MCP | `1.29.1` | `pyproject.toml` and the stdio acceptance test |
 
-## Target ROMs
+The project distribution bundles the pinned PyBoy source runtime. It exposes
+the Python-accessible `mb.serial` backend used by the bit-accurate link
+coordinator and remote TCP transport. A pre-existing standalone PyBoy wheel
+must not be allowed to shadow this package; verify the runtime identity before
+release. See the [production runbook](docs/PRODUCTION_RUNBOOK.md).
 
-BYO-ROM — this repo ships neither any ROM nor any build-derived artifact.
-ROM files live under `rom/<version>/` (gitignored).
+## ROM pins
 
-### Pokémon Red (UE) — internal title `POKEMON RED`
+ROMs are BYO inputs and belong under `rom/<version>/`, which is gitignored.
+The SHA-1 rows below are the pins currently recorded for the candidate files.
+`pokered_harness.config.load_versions()` indexes rows by their documented
+`Path`, so a launch can be checked against the selected ROM rather than the
+first row in this file. Explicit `POKERED_ROM_SHA1` values remain preferred
+for release evidence.
+
+### Pokémon Red (UE)
 
 | Field | Value |
 |---|---|
 | SHA-1 | `ea9bcae617fdf159b045185467ae58b2e4a48b9a` |
-| Size | 1,048,576 bytes (1 MiB) |
+| Size | 1,048,576 bytes |
 | Path | `rom/red/pokemon-red.gb` |
-| Release | Red UE v1.0 (canonical mainline) |
+| Symbols | `rom/red/pokemon-red.sym` |
+| Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
+| Role | Hash-pinned single-session input; selected checks only; link gameplay not claimed |
 
-#### Optional: Pokémon Red Full Color Hack (vanilla variant)
-
-For authentic colorized playback the harness also accepts the **Full
-Color Hack v1.2** vanilla IPS applied via `scripts/apply_color_patch.py`.
-Patch source: `romhacking.net/hacks/1385/`. The patch explicitly avoids
-data shifting, so WRAM addresses and the pret-generated `.sym` are
-unchanged — the same memory parsers work against this variant.
+### Pokémon Red color variant
 
 | Field | Value |
 |---|---|
 | SHA-1 | `e1deed63080bc24cad5fba18ecb3184f905d16d4` |
-| Size | 1,048,576 bytes (1 MiB, unchanged) |
+| Size | 1,048,576 bytes |
 | Path | `rom/red/pokemon-red-color.gb` |
-| Base | Stock Red UE + `pokered_color_vanilla.ips` |
-| `.sym` | Same `pokered.sym` as stock |
+| Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
+| Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
+| Role | Color-Red input for the passing local Red/Yellow role and canonical remote listener role; overall release support remains partial |
 
-### Pokémon Blue (UE) — internal title `POKEMON BLUE`
-
-Blue is built from the same `pret/pokered` tree as Red (via
-`make blue DEBUG=1`) and shares WRAM addresses. All harness state
-parsers and event hooks work on Blue unchanged.
+### Pokémon Blue (UE)
 
 | Field | Value |
 |---|---|
 | SHA-1 | `d7037c83e1ae5b39bde3c30787637ba1d4c48ce2` |
-| Size | 1,048,576 bytes (1 MiB) |
+| Size | 1,048,576 bytes |
 | Path | `rom/blue/pokemon-blue.gb` |
-| Release | Blue UE v1.0 (canonical mainline) |
-| `.sym` | `rom/blue/pokemon-blue.sym` (from `pokeblue.sym`, 21,137 lines) |
+| Symbols | `rom/blue/pokemon-blue.sym` |
+| Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
+| Role | Hash-pinned single-session input; selected checks only; link gameplay not claimed |
 
-#### Optional: Pokémon Blue color IPS (vanilla variant)
-
-`scripts/apply_color_patch.py` applies
-`rom/blue/patch/pokeblue_color/pokeblue_color_vanilla.ips` and
-recomputes the ROM header checksum at `0x14D` and global checksum at
-`0x14E-0x14F` automatically — the shipped IPS leaves both stale, which
-PyBoy rejects. Output is emulator-ready.
+### Pokémon Blue color variant
 
 | Field | Value |
 |---|---|
 | SHA-1 | `5f4b05725a860e04077045462176d3e2771c5022` |
-| Size | 1,048,576 bytes (1 MiB, unchanged) |
+| Size | 1,048,576 bytes |
 | Path | `rom/blue/pokemon-blue-color.gb` |
-| Base | Stock Blue UE + `pokeblue_color_vanilla.ips` (+ checksum fix) |
-| `.sym` | Same `pokeblue.sym` as stock Blue |
+| Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
+| Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
+| Role | Color-Blue input for the canonical remote connector role; isolated trade evidence only |
 
-### Pokémon Yellow — end-to-end supported (2026-04-19)
-
-Yellow is a native Game Boy Color cartridge (`.gbc`) built from the
-separate [`pret/pokeyellow`](https://github.com/pret/pokeyellow) repo.
-Full intro → rival battle → Pallet → Viridian → Forest → Pewter →
-Brock pipeline lives at `scripts/yellow_to_brock.py`.
+### Pokémon Yellow (UE)
 
 | Field | Value |
 |---|---|
 | SHA-1 | `cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1` |
-| Size | 1,048,576 bytes (1 MiB) |
+| Size | 1,048,576 bytes |
 | Path | `rom/yellow/pokemon-yellow.gbc` |
-| Release | Yellow UE v1.0 |
-| `.sym` | `rom/yellow/pokemon-yellow.sym` (built from `pret/pokeyellow`, 24,470 lines) |
-| Color patch | Not needed — native CGB cartridge already has per-sprite palettes |
+| Symbols | `rom/yellow/pokemon-yellow.sym` |
+| Symbol SHA-1 | `7c4205723943e7722230dcf014e5e8a2012474aa` |
+| Role | Yellow session input and passing local Red/Yellow acceptance peer |
 
-**Yellow symbol audit (2026-04-19):** All 52 WRAM symbols the harness
-reads are present in `pokeyellow.sym` under unchanged names. Yellow
-shifts most WRAM addresses down by 1 byte (extra Pikachu-follower
-state inserted early in the block) — e.g. `wCurMap` is at `0xd35d` on
-Yellow vs `0xd35e` on Red/Blue. Since our readers are name-driven via
-`symbols.addr_of(...)`, no parser code changes are required. All
-hook labels (`DisplayTextID`, `YesNoChoice`, `TryEvolvingMon`,
-`SetLastBlackoutMap`) resolve on Yellow too (at Yellow-specific
-offsets, handled identically).
+Other localisations, hacks, and variants are out of scope unless they receive
+their own ROM hash, matching symbols, fixture provenance, and acceptance
+result. File size alone does not establish compatibility.
 
-**Build notes:** The dev machine currently uses
-`ezwinports.make` and `MartinStorsjo.LLVM-MinGW.UCRT` (both winget
-packages, user-scope) for the `pret/pokeyellow` build, with a
-`clang.exe` → `gcc.exe` copy in the LLVM bin dir because pokeyellow's
-`tools/Makefile` hardcodes `gcc`. Built ROM SHA-1 matches stock Yellow
-byte-for-byte.
+## Symbol-file contract
 
-### Local dev-machine paths (not committed)
+Symbol files are generated inputs, not committed release assets. The audited
+files byte-match the generated outputs identified in the provenance table
+below. The harness loader checks that the requested labels can be parsed; it
+does not establish the source provenance of an arbitrary `.sym` file.
 
-For the laptop that authored this repo:
+The link symbol registry contains required, optional, and reserved labels in
+`src/pokered_harness/link/symbols.py`. A symbol-file audit or real-ROM test must
+be run for each version before claiming link support. No blanket cross-version
+symbol-coverage claim is made here.
 
-- Red ROM: `G:\project\pokemon\PokemonRed.gb`
-- Red symbol file: `G:\project\pokemon\PokemonRed.sym` (rgblink-generated, 21,137 lines, ~20,213 harness-loadable symbols)
-- Vendored pokered source: `G:\project\pokemon\_vendor\pokered\`
-  - Produces `pokered.sym`, `pokeblue.sym`, `pokeblue_debug.sym`.
+## Verified symbol provenance
 
-- Vendored pokeyellow source: `G:\project\pokemon\_vendor\pokeyellow\` (cloned 2026-04-19, depth 1).
+The symbol files used for the 2026-08-30 audit were compared byte-for-byte
+with the matching generated files in the local source checkouts before their
+hashes were recorded above. The source repositories and build inputs were:
 
-These live in a parallel workspace on a different drive and are **not**
-part of this repo — record them in your personal `.env` or a local-only
-config file, never in a committed file.
-
-## pret upstream (for symbol generation)
-
-| Field | Value |
-|---|---|
-| pret/pokered | `https://github.com/pret/pokered` — produces both `pokered.sym` (Red) and `pokeblue.sym` (Blue). Commit SHA: `<FILL-IN from: git -C G:/project/pokemon/_vendor/pokered rev-parse HEAD>` |
-| pret/pokeyellow | `https://github.com/pret/pokeyellow` — Yellow only. Vendored at `G:\project\pokemon\_vendor\pokeyellow\`. Commit SHA: `bfa7170107eea23b89febb60bfb2ce39173bf2e1` (fetched 2026-04-19, `--depth=1`). |
-| Build flag | `make DEBUG=1` (produces `.sym` and `.map`) |
-| Toolchain | rgbds — bundled at `_vendor/rgbds-1.0.1-src/` on the dev machine. |
-
-Generated `.sym` files are **not** committed to this repo.
-
-## Symbol coverage (verified end-to-end on Red + Blue)
-
-Every symbol the v1 harness reads or plans to hook has been confirmed
-present in both `pokered.sym` and `pokeblue.sym`:
-
-Overworld/menu/text: `wCurMap`, `wXCoord`, `wYCoord`, `wWalkCounter`,
-`wSpritePlayerStateData1FacingDirection`, `wCurrentMapScriptFlags`,
-`wCurMapScript`, `wStatusFlags5`, `wCurrentMenuItem`, `wMaxMenuItem`,
-`wMenuWatchedKeys`, `wListScrollOffset`, `wPartyAndBillsPCSavedMenuItem`,
-`wBagSavedMenuItem`, `wBattleAndStartSavedMenuItem`, `wTextDest`,
-`wDoNotWaitForButtonPressAfterDisplayingText`.
-
-Battle/party: `wIsInBattle`, `wBattleType`, `wEngagedTrainerClass`,
-`wEngagedTrainerSet`, `wMoveMenuType`, `wPlayerSelectedMove`,
-`wEnemySelectedMove`, `wPlayerMonNumber`, `wActionResultOrTookBattleTurn`,
-`wPartyCount`, `wPartyMons`.
-
-Progress/bag: `wObtainedBadges`, `wPlayerID`, `wPlayerMoney`,
-`wPlayTimeHours`, `wPlayTimeMaxed`, `wPlayTimeMinutes`, `wPlayTimeSeconds`,
-`wEventFlags`, `wNumBagItems`, `wBagItems`, `wRepelRemainingSteps`.
-
-Hooks: `DisplayTextID` (bank 0, $2920), `YesNoChoice` (bank 0, $35ec),
-`TryEvolvingMon` (bank 0x0e, $6d0e), `SetLastBlackoutMap` (bank 1, $7078).
-
-Yellow symbol coverage: **all 52 WRAM symbols + 4 hook labels present
-in `pokeyellow.sym`** under unchanged names (verified 2026-04-19).
-Addresses differ from Red/Blue but the name-based resolver masks that.
-
-## Performance floor (measured on dev machine)
-
-- Headless throughput: **~13,400 ticks/sec** (render=False, window="null").
-- Game Boy native rate: 59.7 fps → ≈ 224× real-time on this machine.
-- ADR floor was ≥ 30× real-time; we comfortably clear it.
-
-## Startup assertion
-
-`Session.from_files(..., expected_rom_sha1=...)` hashes the provided ROM
-and raises `VersionMismatch` on any deviation from the pins above.
-
-## Link-cable symbol coverage
-
-**Status: unverified — pending real-ROM validation.** The labels below
-were taken from the pret community sources (`home/serial.asm` and
-`engine/link/*.asm`) and are *believed* stable across Red/Blue/Yellow,
-but none have been confirmed against actual `.sym` files produced by
-`make DEBUG=1` on each version. When validating: any label that turns
-out to be renamed or missing on a given ROM should be patched in
-`src/pokered_harness/link/symbols.py` via the entry's `per_version` map.
-
-### BRIDGE (bridge mutates memory when hooked)
-
-| Key | Label | Required | Expected on |
+| Game symbols | Source commit | Generator/toolchain | Build flags |
 |---|---|---|---|
-| `exchange_bytes` | `Serial_ExchangeBytes` | yes | red, blue, yellow |
-| `send_zero_byte` | `Serial_SendZeroByte` | no | red, blue, yellow |
-| `exchange_nybble` | `Serial_SyncAndExchangeNybble` | no | red, blue, yellow |
+| Red `pokered.sym` and Blue `pokeblue.sym` | `pret/pokered` `fbcf7d0e19a3a2db505440d3ccd3d40ca996c15c` | `rgblink` from RGBDS `v1.0.1` | `make DEBUG=1 red blue`; default `RGBASMFLAGS` plus `-Q8 -P includes.asm -E`, with `_RED`/`_BLUE` targets |
+| Yellow `pokeyellow.sym` | `pret/pokeyellow` `bfa7170107eea23b89febb60bfb2ce39173bf2e1` | `rgblink` from RGBDS `v1.0.1` | `make DEBUG=1 yellow`; default `RGBASMFLAGS` plus `-Q8 -P includes.asm -E` |
 
-### HANDSHAKE (bridge short-circuits to "linked")
+The source repositories are `https://github.com/pret/pokered` and
+`https://github.com/pret/pokeyellow`. The color ROMs use the corresponding
+base-game symbols because the color patch preserves the symbol-address ABI;
+their ROM hashes remain independently pinned above.
 
-| Key | Label | Required | Expected on |
-|---|---|---|---|
-| `handshake` | `Serial_TryEstablishingLink` | yes | red, blue, yellow |
-| `cable_club_return` | `CableClub_DoBattleOrTradeAgain` | no | red, blue, yellow |
+## Hash and version enforcement
 
-### PROGRESS (fires as event, no memory mutation)
+`Session.from_files(..., expected_rom_sha1=...)` hashes the ROM and raises
+`VersionMismatch` on a mismatch. `expected_symbol_sha1` performs the matching
+symbol-file check, and `expected_pyboy_version` plus
+`expected_pyboy_revision` verify the bundled PyBoy version and exact nonempty
+fork revision when a caller supplies them. The MCP entry point:
 
-| Key | Label | Required | Expected on |
-|---|---|---|---|
-| `trade_select_mon` | `TradeCenter_SelectMon` | no | red, blue, yellow |
-| `trade_load_data` | `LoadTradingData` | no | red, blue, yellow |
-| `trade_show_player_mon` | `Trade_ShowPlayerMon` | no | red, blue, yellow |
-| `trade_show_enemy_mon` | `Trade_ShowEnemyMon` | no | red, blue, yellow |
-| `print_trainer_info` | `PrintTrainerInfo` | no | red, blue, yellow |
+1. uses `POKERED_ROM_SHA1` when set;
+2. otherwise selects the SHA-1 whose `Path` matches the configured ROM; and
+3. enforces the matching symbol SHA-1 and exact PyBoy revision when
+   `VERSIONS.md` is available; and
+4. fails closed when no matching pin is available, unless
+   `POKERED_SKIP_SHA1` is explicitly set for diagnostics.
 
-### BATTLE (reserved — link-battle milestone, not wired yet)
+An explicit hash is still required by release policy, and a release run must
+not set `POKERED_SKIP_SHA1=1`.
 
-| Key | Label | Required | Expected on |
-|---|---|---|---|
-| `link_battle_versus` | `LinkBattleVersusTextString` | no | red, blue, yellow |
+## Link and fixture boundary
 
-### HRAM labels (required on all ROMs)
+Save states are tied to the exact ROM bytes and symbol layout used to capture
+them. A fixture named `cable_club.state` is therefore not interchangeable
+between stock, color-variant, and Yellow inputs. Keep fixtures local under
+`tests/fixtures/link/<version>/`; do not commit them.
 
-| Label | Purpose |
-|---|---|
-| `hSerialSendData` | Outgoing byte cell |
-| `hSerialReceiveData` | Incoming byte cell |
-| `hSerialConnectionStatus` | Connection status cell (bridge writes 0x01) |
+The existing producer is
+[`scripts/produce_cable_club_fixture.py`](scripts/produce_cable_club_fixture.py).
+It requires a matching, user-generated `cerulean_pc.state` source and accepts
+explicit `--version`, `--variant`, `--source`, `--rom`, `--sym`, and `--out`
+arguments. There is no separate Yellow producer. The producer's successful
+output only establishes a fixture at the expected map/tile; it does not prove
+that a trade or battle works.
 
+The strict local acceptance fixtures and remote acceptance/diagnostic fixtures are
+distinct from the default Cable Club fixtures:
+
+| Path | ROMs | Required fixture files |
+|---|---|---|
+| Local strict trade | color Red + Yellow | `red/cable_club.state`, `yellow/cable_club.state` |
+| Local strict battle | color Red + Yellow | `red/cable_club-battle.state`, `yellow/cable_club-battle.state` |
+| Remote isolated trade diagnostic | color Red listener + color Blue connector | `red/cable_club.state`, `blue/cable_club.state` |
+| Remote no-hook battle smoke | color Red listener + color Blue connector | `red/cable_club-battle.state`, `blue/cable_club-battle.state` |
+
+The battle files are separately captured legal states; the existing producer
+does not create them. Every state must be captured from the exact ROM bytes it
+loads, and the release record must include each fixture hash, source-state
+provenance, runtime identity, and capture command. The three default fixture
+hashes observed in the full-gate audit were:
+
+| Fixture | Observed SHA-1 | Evidence boundary |
+|---|---|---|
+| `red/cable_club.state` | `546d7edaf7c3a987f86ae86a97066c7d619eefbb` | External fixture used by the audit; not committed |
+| `blue/cable_club.state` | `0809d2f8e514c7fb714a73a7b13f120b26a40c38` | External fixture used by the audit; not committed |
+| `yellow/cable_club.state` | `37df4dbdb512cd3febdc2d536281683476291d3b` | External fixture used by the audit; not committed |
+
+Battle-fixture hashes and complete source-state provenance were not retained in
+this tree, so fixture provenance remains an open release item. Vanilla
+variant fixtures (`cable_club-vanilla.state` and
+`cable_club-battle-vanilla.state`) are also not part of the certified scope.
+
+The current repository has diagnostic local/remote matrices plus strict local
+Red/Yellow trade and battle acceptance tests, an independent-process Red/Blue
+trade assertion, and a no-hook Red/Blue remote battle smoke. The current strict
+trade and battle tiers pass, but the separate remote tier fails its LinkMenu
+subprocess row in repeated runs, so full remote stability is open. The remote
+battle case reaches native move exchange/execution through ordinary menu input;
+broader role and version coverage remains unverified. Consult
+the test-surface table in the
+[README](README.md) and run the required tiers in the
+[production runbook](docs/PRODUCTION_RUNBOOK.md) before using any other row as
+release evidence.
+
+## Performance
+
+No machine-specific throughput floor is pinned here. Performance evidence must
+record the exact commit, Python/PyBoy build, host, render mode, workload, warmup
+policy, and sample distribution. A single local timing is not a release gate.
