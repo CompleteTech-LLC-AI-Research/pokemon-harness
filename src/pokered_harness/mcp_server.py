@@ -1522,16 +1522,16 @@ def _cleanup_unpublished_remote(
         try:
             with session.locked():
                 network_session.detach_all()
-        except BaseException:
+        except BaseException:  # noqa: BLE001, S110 - cleanup must not mask the original error
             pass
     if transport is not None:
         try:
             _close_serial_link(transport)
-        except BaseException:
+        except BaseException:  # noqa: BLE001, S110 - cleanup must not mask the original error
             pass
     try:
         _deactivate_link_hooks(session)
-    except BaseException:
+    except BaseException:  # noqa: BLE001, S110 - cleanup must not mask the original error
         pass
 
 
