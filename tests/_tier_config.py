@@ -13,6 +13,7 @@ unlisted module is intentional: silently classifying a newly added ROM test as
 
 from __future__ import annotations
 
+import runpy
 from pathlib import Path
 
 MARKERS = (
@@ -184,60 +185,24 @@ BATTLE_ACCEPTANCE_TESTS = frozenset(
 )
 
 # These are the ordered, real-ROM matrix rows that the production gate must
-# never silently lose.  For the remote rows the first version is the listener
-# (internal clock) and the second is the connector (external clock); therefore
-# both ``red-blue`` and ``blue-red`` are required cases rather than aliases.
-SUPPORTED_VERSIONS = ("red", "blue", "yellow")
-REMOTE_VERSION_PAIR_NODEIDS = frozenset(
-    "tests/test_link_integration_remote.py::"
-    f"test_remote_handshake_writes_status_on_both_sides[{listener}-{connector}]"
-    for listener in SUPPORTED_VERSIONS
-    for connector in SUPPORTED_VERSIONS
+# never silently lose.  Keep their construction in the collection-only
+# auditor as the single source of truth so the executable audit and the gate
+# manifest cannot drift apart.  The first remote version is the listener
+# (internal-clock master) and the second is the connector (external-clock
+# slave); therefore ``red-blue`` and ``blue-red`` remain distinct cases.
+_MATRIX = runpy.run_path(
+    str(Path(__file__).resolve().parents[1] / "scripts" / "tcp_link_matrix.py")
 )
-LOCAL_VERSION_PAIR_NODEIDS = frozenset(
-    "tests/test_pyboy_link_session_roms.py::"
-    f"test_pair_reaches_link_menu_via_pyboy_link_session[{version_a}-{version_b}]"
-    for version_a in SUPPORTED_VERSIONS
-    for version_b in SUPPORTED_VERSIONS
-)
-
-_ROM_VARIANTS = (
-    ("red", ("vanilla", "color")),
-    ("blue", ("vanilla", "color")),
-    ("yellow", ("cgb",)),
-)
-LOCAL_VARIANT_NODEIDS = frozenset(
-    "tests/test_pyboy_link_session_roms.py::"
-    f"test_same_version_variants_reach_link_menu[{version}-{variant_a}-x-{variant_b}]"
-    for version, variants in _ROM_VARIANTS
-    for variant_a in variants
-    for variant_b in variants
-)
+SUPPORTED_VERSIONS = _MATRIX["SUPPORTED_VERSIONS"]
+REMOTE_VERSION_PAIR_NODEIDS = _MATRIX["REMOTE_VERSION_PAIR_NODEIDS"]
+LOCAL_VERSION_PAIR_NODEIDS = _MATRIX["LOCAL_VERSION_PAIR_NODEIDS"]
+LOCAL_VARIANT_NODEIDS = _MATRIX["LOCAL_VARIANT_NODEIDS"]
 
 # A positive aggregate count is not enough to prove matrix coverage: pytest
 # deselection or a removed parametrization can still leave one passing case.
 # Keep these exact node IDs separate from the broader diagnostic marker sets.
 TIER_REQUIRED_NODEIDS = {
-    "local": LOCAL_VERSION_PAIR_NODEIDS | LOCAL_VARIANT_NODEIDS,
-    "remote": REMOTE_VERSION_PAIR_NODEIDS
-    | frozenset(
-        {
-            "tests/test_mcp_real_link.py::test_mcp_remote_link_attaches_native_serial_backend",
-            "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_reaches_link_menu_over_tcp",
-        }
-    ),
-    "trade": frozenset(
-        {
-            "tests/test_pyboy_link_session_roms.py::test_red_yellow_trade_swaps_real_party_records",
-            "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_completes_trade_over_tcp",
-        }
-    ),
-    "battle": frozenset(
-        {
-            "tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved",
-            "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp",
-        }
-    ),
+    **_MATRIX["required_matrix_nodeids"](),
 }
 
 # The gate uses these keys to prove that each strict acceptance tier still

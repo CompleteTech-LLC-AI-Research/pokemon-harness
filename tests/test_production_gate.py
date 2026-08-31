@@ -11,6 +11,15 @@ from pathlib import Path
 
 import pytest
 
+from scripts.tcp_link_matrix import (
+    LOCAL_VARIANT_NODEIDS,
+    LOCAL_VERSION_PAIR_NODEIDS,
+    REMOTE_REVERSED_ROLE_NODEIDS,
+    REMOTE_VERSION_PAIR_NODEIDS,
+    acceptance_matrix_gaps,
+    audit_collection,
+    required_matrix_nodeids,
+)
 from tests._rom_assets import (
     find_fixture_root,
     find_rom_root,
@@ -118,10 +127,46 @@ def test_pyboy_version_parser_accepts_revision_annotation(tmp_path):
 def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert len(TIER_REQUIRED_NODEIDS["remote"]) == 11
     assert len(TIER_REQUIRED_NODEIDS["local"]) == 18
+    assert TIER_REQUIRED_NODEIDS == required_matrix_nodeids()
+    assert len(LOCAL_VERSION_PAIR_NODEIDS) == 9
+    assert len(REMOTE_VERSION_PAIR_NODEIDS) == 9
+    assert len(REMOTE_REVERSED_ROLE_NODEIDS) == 6
+    assert len(LOCAL_VARIANT_NODEIDS) == 9
     assert any("[red-blue]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
     assert any("[blue-red]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
     assert any("[red-vanilla-x-color]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["local"])
     assert any("[blue-color-x-vanilla]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["local"])
+
+
+def test_matrix_audit_fails_closed_on_missing_cases_and_reports_unrun_runtime():
+    expected = set(required_matrix_nodeids()["remote"])
+    missing = next(iter(REMOTE_VERSION_PAIR_NODEIDS))
+
+    audit = audit_collection(expected - {missing})
+
+    assert audit["structural_pass"] is False
+    assert missing in audit["groups"]["remote-role-pairs"]["missing"]
+    assert audit["acceptance_matrix_complete"] is False
+    assert audit["runtime"] == "not-run"
+
+
+def test_matrix_audit_surfaces_collection_skips_even_when_they_are_described():
+    audit = audit_collection(
+        required_matrix_nodeids()["local"],
+        collection_skips=("optional dependency unavailable",),
+    )
+
+    assert audit["structural_pass"] is False
+    assert audit["collection_skips"] == ("optional dependency unavailable",)
+
+
+def test_strict_acceptance_gap_report_keeps_uncovered_ordered_cases_explicit():
+    gaps = acceptance_matrix_gaps()
+
+    assert len(gaps["trade"]) == 16
+    assert len(gaps["battle"]) == 16
+    assert ("remote", "blue", "red") in gaps["trade"]
+    assert ("remote", "blue", "red") in gaps["battle"]
 
 
 def test_required_nodeid_checker_preserves_parameterized_case_identity():
