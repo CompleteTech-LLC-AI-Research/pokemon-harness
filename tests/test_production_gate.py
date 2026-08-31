@@ -87,6 +87,15 @@ def test_versions_sha_parser_pairs_each_rom_path(tmp_path):
     }
 
 
+def test_pyboy_version_parser_accepts_revision_annotation(tmp_path):
+    versions = tmp_path / "VERSIONS.md"
+    versions.write_text(
+        "| PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` |\n",
+        encoding="utf-8",
+    )
+    assert gate.parse_expected_pyboy_version(versions) == "2.7.0"
+
+
 def test_asset_inspection_reports_hash_mismatch_and_missing_inputs(tmp_path):
     rom_root = tmp_path / "rom"
     fixture_root = tmp_path / "fixtures"

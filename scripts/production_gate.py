@@ -101,7 +101,7 @@ _SYMBOL_SHA1_RE = re.compile(
     r"^\|\s*Symbol\s+SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|"
 )
 _SYMBOL_PATH_RE = re.compile(r"^\|\s*Symbols?\s*\|\s*`([^`]+)`\s*\|")
-_PYBOY_RE = re.compile(r"^\|\s*PyBoy\s*\|\s*`([^`]+)`\s*\|")
+_PYBOY_RE = re.compile(r"^\|\s*PyBoy\s*\|\s*`([^`]+)`")
 _CREDENTIAL_TEXT_RE = re.compile(
     r"(?i)\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|"
     r"credential|password|passwd|private[_-]?key|secret|token)\b"
