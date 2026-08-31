@@ -162,25 +162,6 @@ STRICT_ACCEPTANCE_CASES = {
     ),
 }
 
-# Keep the original no-argument helper's prospective-report contract for
-# callers in the existing production-gate unit suite.  The executable audit
-# uses ``acceptance_declaration_gaps`` below, which includes the newly proven
-# reversed remote role.
-_LEGACY_STRICT_ACCEPTANCE_CASES = {
-    "trade": frozenset(
-        {
-            ("local", "red", "yellow"),
-            ("remote", "red", "blue"),
-        }
-    ),
-    "battle": frozenset(
-        {
-            ("local", "red", "yellow"),
-            ("remote", "red", "blue"),
-        }
-    ),
-}
-
 # The remote version-level tests cover the complete ordered 3x3 handshake
 # matrix.  These are the current LinkMenu/strict results at the exact
 # candidate boundary.  The strict color Red/Blue rows prove the two Red/Blue
@@ -318,22 +299,20 @@ def _acceptance_gaps_for(
 
 
 def acceptance_matrix_gaps() -> dict[str, tuple[tuple[str, str, str], ...]]:
-    """Return the original prospective full-matrix gap report.
+    """Return the current prospective full-matrix gap report.
 
     This is a declaration-level gap report, not runtime evidence.  A missing
     case means the current strict acceptance manifest has no dedicated test
-    for that transport/version ordering.  This no-argument form remains
-    backward-compatible with the pre-reversal audit; the executable audit
-    calls ``acceptance_declaration_gaps`` for the current manifest.
+    for that transport/version ordering.
     """
-    return _acceptance_gaps_for(_LEGACY_STRICT_ACCEPTANCE_CASES)
+    return _acceptance_gaps_for(STRICT_ACCEPTANCE_CASES)
 
 
 def acceptance_declaration_gaps() -> dict[
     str, tuple[tuple[str, str, str], ...]
 ]:
     """Return current strict rows without a dedicated acceptance entry point."""
-    return _acceptance_gaps_for(STRICT_ACCEPTANCE_CASES)
+    return acceptance_matrix_gaps()
 
 
 def audit_collection(

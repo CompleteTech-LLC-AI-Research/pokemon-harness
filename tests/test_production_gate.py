@@ -204,10 +204,12 @@ def test_matrix_audit_surfaces_collection_skips_even_when_they_are_described():
 def test_strict_acceptance_gap_report_keeps_uncovered_ordered_cases_explicit():
     gaps = acceptance_matrix_gaps()
 
-    assert len(gaps["trade"]) == 16
-    assert len(gaps["battle"]) == 16
-    assert ("remote", "blue", "red") in gaps["trade"]
-    assert ("remote", "blue", "red") in gaps["battle"]
+    assert len(gaps["trade"]) == 15
+    assert len(gaps["battle"]) == 15
+    assert ("remote", "blue", "red") not in gaps["trade"]
+    assert ("remote", "blue", "red") not in gaps["battle"]
+    assert ("remote", "yellow", "blue") in gaps["trade"]
+    assert ("remote", "yellow", "blue") in gaps["battle"]
 
 
 def test_required_nodeid_checker_preserves_parameterized_case_identity():
