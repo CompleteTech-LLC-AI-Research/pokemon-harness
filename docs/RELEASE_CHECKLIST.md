@@ -16,7 +16,7 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current functional candidate boundary is `034e34e` (2026-08-31). The asset-free command:
+The current functional candidate boundary is `bf06214` (2026-08-31). The asset-free command:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -29,7 +29,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-returned scoped `PASS`: collection 624, unit 483/483, and timing 35/35 in
+returned scoped `PASS`: collection 628, unit 487/487, and timing 35/35 in
 each of five repetitions. It used bundled source PyBoy 2.7.0, fork
 `c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
 ten-entry fixture manifest. No ROM-backed tier ran in this command.
@@ -46,15 +46,16 @@ rows cover both color Red/Blue listener/connector directions. Those results
 predate the current transport hardening and expanded current-candidate matrix
 and must be rerun for current-candidate sign-off; they are not a full-gate
 result because current runtime coverage remains incomplete. Exact-head spot
-checks passed Yellow-listener to Red-color and Blue-color remote trade. The
-current local canonical battle matrix completed 9/9. The current
+checks passed Yellow-listener to Red-color and Blue-color remote trade. A
+non-retained local canonical battle probe reported 9/9. The current
 Yellow-listener to Blue-color remote battle completed a turn in 224.64s, while
 the Yellow-listener to Red-color run diverged at the pre-battle warp: Red
 reached Colosseum while Yellow remained in Cable Club, so neither reached the
 battle menu.
-A fresh exact-head strict-trade tier attempt timed out after 3600.2s before
-producing a pytest report (0 passed, 0 failed, 1 gate error), so it supplies no
-current trade acceptance result.
+A fresh strict-trade tier attempt timed out after 3600.2s before producing a
+pytest report; its raw output ended after 16 progress dots and its gate
+summary could not verify test selection or a passing outcome. The bundle has
+no candidate SHA, so it supplies no current trade acceptance result.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
@@ -65,14 +66,15 @@ evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The functional source candidate boundary is identified as `034e34e`; the final
-  release commit must be recorded after documentation integration.
+- [x] The functional source candidate boundary is identified as `bf06214`;
+  documentation is committed on top of that source.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
 - [x] Documentation keeps BYO assets and external evidence outside the source
   tree and uses relative paths or placeholders rather than machine paths.
-- [x] The final release candidate is clean after the documentation commit;
-  its exact commit is retained with the release handoff.
+- [x] The source candidate `bf06214` was clean in the isolated worktree before
+  this documentation commit; its exact commit is retained with the release
+  handoff.
 
 ## Runtime and dependency identity
 
@@ -106,8 +108,8 @@ evidence, and independent review.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete in the scoped
-  `034e34e` gate; 624 tests were collected with no collection errors.
-- [x] ROM-free unit tests pass 483/483 in the scoped gate.
+  `bf06214` gate; 628 tests were collected with no collection errors.
+- [x] ROM-free unit tests pass 487/487 in the scoped gate.
 - [x] Timing tests pass 35/35 across five repetitions in the scoped gate.
 - [x] `ruff check .` is clean at the functional source candidate boundary.
 - [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
@@ -115,8 +117,8 @@ evidence, and independent review.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every advertised
   ROM variant. The clean-wheel 3/3 color-Red smoke is not five-row sign-off.
 - [ ] The current candidate rerun of the real-ROM local and remote tiers passes
-  with no fixture or runtime skips. The current local canonical battle matrix
-  completed 9/9, but the strict trade tier timed out after 3600.2s without a
+  with no fixture or runtime skips. A non-retained local canonical battle probe
+  reported 9/9, but the strict trade tier timed out after 3600.2s without a
   pytest report and the complete remote matrix remains unverified; repeated
   cross-family battle runs diverge at the pre-battle warp.
 - [x] Controlled canonical local evidence exists for color Red plus Yellow,

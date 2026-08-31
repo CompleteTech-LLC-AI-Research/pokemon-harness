@@ -11,10 +11,11 @@ symbol files, save states, or other ROM-derived artifacts.
 
 This repository is an audited production-readiness candidate, not a production
 release. Unless explicitly labelled historical, the facts below refer to
-functional source candidate commit `034e34e` on 2026-08-31. This includes the
+functional source candidate commit `bf06214` on 2026-08-31. This includes the
 transport/runtime hardening at `d8198ef`, the Cython-safe serial control typing
-fix, native cross-family startup clock-role negotiation, and fail-closed
-cross-family battle-warp rendezvous. The baseline at `e219fb5` was not
+fix, native cross-family startup clock-role negotiation, fail-closed
+cross-family battle-warp rendezvous, bounded session shutdown, and durable
+gate-progress reporting. The baseline at `e219fb5` was not
 production-certified.
 
 Status semantics are deliberately scoped:
@@ -29,10 +30,10 @@ Status semantics are deliberately scoped:
   assets, complete strict acceptance coverage, retained evidence, and no open
   release blockers.
 
-The latest asset-free gate for the source boundary `034e34e` used
-`scripts/production_gate.py --unit-only --repeat-timing 5`: unit was 483/483,
+The latest asset-free gate for the source boundary `bf06214` used
+`scripts/production_gate.py --unit-only --repeat-timing 5`: unit was 487/487,
 timing was 35/35 in five repetitions, and the scoped gate result was `PASS`.
-The latest collection-only matrix audit collected 624 tests with structural
+The latest collection-only matrix audit collected 628 tests with structural
 coverage and the strict declaration both `PASS`: all nine ordered local pairs,
 all nine ordered remote listener/connector pairs, all nine local ROM-variant
 rows, and 19 strict trade plus 19 strict battle entrypoints were present. The
@@ -40,27 +41,34 @@ matrix command does not execute ROM gameplay; its runtime is `NOT RUN`.
 
 Fresh exact-head runtime checks have exercised selected cross-family rows. The
 Yellow-listener/Red-color-connector and Yellow-listener/Blue-color-connector
-native remote trade rows passed in 240.32s and 228.00s. The current local
-canonical battle matrix completed 9/9. For remote battle, the current
+native remote trade rows passed in 240.32s and 228.00s. A non-retained local
+canonical battle probe reported 9/9; it is not candidate-bound evidence. For
+remote battle, the prior
 `034e34e` spot run passed Yellow-listener/Blue-color-connector in 224.64s, but
 the Yellow-listener/Red-color-connector run failed after Red reached Colosseum
 while Yellow remained in Cable Club (`map_id=0x40`); neither reached
 `MainInBattleLoop`/`DisplayBattleMenu` and no turn completed. Repeated
 cross-family runs have therefore exposed a timing-sensitive pre-battle
 warp/phase failure; the complete strict trade/battle matrices remain pending
-and these selected rows are not production sign-off. A fresh exact-head strict
-trade tier attempt ran for 3600.2s and failed closed before producing a pytest
-report: 0 tests passed, 0 failed, 1 gate error, and the required acceptance
-nodes were not selected. Trade runtime evidence therefore remains incomplete.
+and these selected rows are not production sign-off. A fresh strict-trade tier
+attempt ran for 3600.2s and failed closed before producing a pytest report; its
+raw output ended after 16 progress dots. The gate therefore recorded a timeout
+and no accepted trade outcome. Its synthetic `0`-selected/`1`-error summary
+does not prove pytest selected no tests, and the report contains no candidate
+SHA, so trade runtime evidence remains incomplete and non-candidate-bound.
+The gate now writes an atomic per-test progress checkpoint, so future bounded
+runs can retain the selected node set and completed outcomes even if pytest is
+terminated before its final report; this does not retroactively complete the
+timed-out run above.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
-| ROM-free unit and timing regressions | `PASS` (scoped) | At `034e34e`: unit 483/483 and timing 35/35 across five repetitions. |
+| ROM-free unit and timing regressions | `PASS` (scoped) | At `bf06214`: unit 487/487 and timing 35/35 across five repetitions. |
 | Runtime/package identity | `PASS` (scoped) | The gate resolves bundled source PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PASS` (five-input smoke) | Current explicit Red stock/color, Blue stock/color, and Yellow ROM/SYM MCP stdio and golden-path checks passed; this is not full release sign-off. |
-| In-process link acceptance | `PARTIAL` (battle 9/9; trade timed out) | The current candidate declares all 9 local trade and 9 local battle rows; the local battle matrix completed 9/9, while the full strict trade tier timed out at 3600.2s without a pytest report or passing outcome. |
-| Remote TCP and MCP lifecycle | `PARTIAL` (selected rows) | Exact-head Yellow-listener trade passed against Red-color and Blue-color; the selected current battle run passed against Blue-color but failed against Red-color during a pre-battle warp/phase divergence. The complete 9-pair trade/battle runtime matrices remain unverified. |
+| In-process link acceptance | `PARTIAL` (diagnostic battle probe; trade timed out) | The current candidate declares all 9 local trade and 9 local battle rows; an unretained local battle probe reported 9/9, while the full strict trade tier timed out at 3600.2s without a pytest report or accepted outcome. The probe is not candidate-bound release evidence. |
+| Remote TCP and MCP lifecycle | `PARTIAL` (selected diagnostics) | Exact-head Yellow-listener trade passed against Red-color and Blue-color; the selected current battle run passed against Blue-color but failed against Red-color during a pre-battle warp/phase divergence. The complete 9-pair trade/battle runtime matrices remain unverified. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
 The historical complete real-ROM snapshot at
@@ -211,7 +219,9 @@ Before starting a session, compare the ROM's SHA-1 with its matching path row
 in [`VERSIONS.md`](VERSIONS.md). Always set `POKERED_ROM_SHA1` explicitly for
 release evidence; the loader also selects a matching documented path when the
 variable is omitted and fails closed when no pin exists. Never use
-`POKERED_SKIP_SHA1=1` for a release run.
+`POKERED_SKIP_SHA1=1` for a release run. The MCP production entry point
+rejects that variable outright; use a separate explicitly diagnostic driver
+for non-production experiments.
 
 ## Run one MCP server
 
@@ -271,9 +281,9 @@ evidence for `link_pair`, `link_listen`, or `link_connect`.
 `link_pair` owns two sessions in one process and uses the native bit-accurate
 serial coordinator for real PyBoy sessions. The canonical Red/Yellow local
 trade and battle cases passed at the historical `db72be6` boundary; the
-current exact-head local matrix is still running. Other rows remain diagnostic
-until their exact ROM, fixture, and runtime combination is separately
-certified.
+current exact-head full local matrix remains unverified. Other rows remain
+diagnostic until their exact ROM, fixture, and runtime combination is
+separately certified.
 Configure the peer before launching the MCP server:
 
 ```bash

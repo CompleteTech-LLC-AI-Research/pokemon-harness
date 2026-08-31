@@ -27,9 +27,10 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current functional candidate boundary is `78e5bbe`. Its asset-free gate
-passed 477/477 unit tests and 35/35 timing cases across five repetitions. The release
-runtime is the bundled PyBoy source snapshot pinned in `VERSIONS.md` (`2.7.0`,
+The current functional source candidate is `bf06214`. Its asset-free gate
+passed 487/487 unit tests and 35/35
+timing cases across five repetitions. The release runtime is the bundled
+PyBoy source snapshot pinned in `VERSIONS.md` (`2.7.0`,
 harness revision `c565df66c3731fad2856169a90f6bbec99925915`) with
 `mcp==1.29.1`. The source runtime is the only link-acceptance mode currently
 exercised in passing evidence. The pinned Cython build and serial-object

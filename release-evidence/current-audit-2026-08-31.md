@@ -3,31 +3,37 @@
 Status: `PARTIAL` — not production-ready.
 
 This record describes the isolated candidate's functional boundary at
-`034e34e` (`d8198ef` transport/runtime hardening, Cython-safe serial control
-typing, native cross-family startup clock-role negotiation, and fail-closed
-cross-family battle-warp rendezvous). No ROM,
+`bf06214` (`d8198ef` transport/runtime hardening, Cython-safe serial control
+typing, native cross-family startup clock-role negotiation, fail-closed
+cross-family battle-warp rendezvous, bounded shutdown, and durable gate
+progress). No ROM,
 symbol, fixture, save-state, or secret is included here. External assets are
 supplied through the documented ROM and fixture roots.
 
 ## Passing evidence
 
 - `scripts/production_gate.py --unit-only --repeat-timing 5` passed both
-  collection paths, unit `483/483`, and timing `35/35` in all five repeats
-  (624 collected tests).
+  collection paths, unit `487/487`, and timing `35/35` in all five repeats
+  (628 collected tests).
 - With explicit ROM/SYM/SHA-1 inputs, MCP stdio and golden-path smoke checks
   exited successfully for Red stock, Red color, Blue stock, Blue color, and
   Yellow.
-- The current local canonical battle matrix completed `9/9`. Exact-head spot
-  checks passed Yellow-listener to Red-color and Blue-color remote trade in
-  `240.32s` and `228.00s`. At `034e34e`, Yellow-listener to Blue-color remote
-  battle completed a turn in `224.64s`; Yellow-listener to Red-color remote
-  battle diverged at the pre-battle warp, with Red reaching Colosseum while
-  Yellow remained in Cable Club. Repeated cross-family runs remain timing-
-  sensitive, and the complete local/remote strict matrices remain pending.
-- A fresh exact-head `--tier trade --repeat-timing 5` attempt ran for `3600.2s`
-  and failed closed before producing a pytest report: `0` passed, `0` failed,
-  and `1` gate error. The required trade nodes were not selected, so this run
-  supplies no current trade acceptance result.
+- A non-retained local canonical battle probe reported `9/9`; no candidate-
+  bound report proving all nine rows was found. Exact-head spot checks passed
+  Yellow-listener to Red-color and Blue-color remote trade in `240.32s` and
+  `228.00s`. At `034e34e`, Yellow-listener to Blue-color remote battle
+  completed a turn in `224.64s`; Yellow-listener to Red-color remote battle
+  diverged at the pre-battle warp, with Red reaching Colosseum while Yellow
+  remained in Cable Club. Repeated cross-family runs remain timing-sensitive,
+  and the complete local/remote strict matrices remain pending.
+- A fresh strict-trade attempt ran for `3600.2s` and failed closed before
+  producing a pytest report; its raw output ended after 16 progress dots. The
+  gate summary's synthetic `0`-selected/`1`-error counters do not prove that
+  pytest selected no tests, and the bundle contains no candidate SHA, so this
+  run supplies no candidate-bound trade acceptance result.
+- The current source candidate adds bounded session shutdown, finite default
+  TCP listener acceptance, rejection of `POKERED_SKIP_SHA1` by the MCP
+  production entry point, and atomic per-test gate progress checkpoints.
 - The fixture manifest schema and all 10 external fixture byte records passed
   validation. Canonical color Red, color Blue, and Yellow ordinary/battle
   bytes are recorded; vanilla source provenance remains partial.

@@ -5,14 +5,15 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate; the current source boundary is
-`78e5bbe` (2026-08-31). Its latest asset-free production gate passed unit
-477/477 and timing 35/35 across five repetitions. The gate's scoped result is
-`PASS`; it does not run ROM-backed tiers. The latest collection-only matrix
-audit collected 618 tests with structural coverage and the strict declaration
-both `PASS`: all nine ordered local pairs, all nine ordered remote role pairs,
-all nine local variant rows, and 19 strict trade plus 19 strict battle
-entrypoints are present. Collection-only matrix runtime was not run.
+Status: `PARTIAL` current audit candidate; the functional source boundary is
+`bf06214` (2026-08-31). Its latest asset-free production gate passed unit
+487/487 and timing 35/35 across five
+repetitions. The gate's scoped result is `PASS`; it does not run ROM-backed
+tiers. The latest collection-only matrix audit collected 628 tests with
+structural coverage and the strict declaration both `PASS`: all nine ordered
+local pairs, all nine ordered remote role pairs, all nine local variant rows,
+and 19 strict trade plus 19 strict battle entrypoints are present.
+Collection-only matrix runtime was not run.
 
 The pinned fork's Cython build and runtime contract also passed in a disposable
 Python 3.12 environment; Cython mode does not expose the Python-side
@@ -24,7 +25,9 @@ assets. The remote strict rows cover both color Red/Blue listener/connector
 directions. These results predate the current transport hardening and Cython
 compatibility fix and must be rerun for current-candidate sign-off; they do not
 constitute a full-gate result because the current 9x9 strict runtime matrix is
-not yet executed. The historical complete
+not yet executed. A fresh strict-trade attempt timed out after 3600.2s before
+writing a pytest report; its gate summary is diagnostic only and contains no
+candidate SHA. The historical complete
 real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` is also separate evidence.
 

@@ -3,15 +3,15 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
 historical, the current candidate facts refer to functional source candidate
-`034e34e` on 2026-08-31. This includes the transport/runtime hardening at
+`bf06214` on 2026-08-31. This includes the transport/runtime hardening at
 `d8198ef`, the Cython-safe serial control typing fix, native cross-family
-startup clock-role negotiation, and fail-closed cross-family battle-warp
-rendezvous.
+startup clock-role negotiation, fail-closed cross-family battle-warp
+rendezvous, bounded session shutdown, and durable gate-progress reporting.
 Uncommitted worktree changes and external BYO assets are excluded from the
 tracked source tree.
 
-The latest asset-free gate at `034e34e` passed unit 483/483 and timing 35/35
-across five repetitions; its collection preflight collected 624 tests and its
+The latest asset-free gate at `bf06214` passed unit 487/487 and timing 35/35
+across five repetitions; its collection preflight collected 628 tests and its
 scoped result was `PASS`. This proves only the ROM-free and timing scope. The
 matrix audit collected nine ordered local pairs, nine ordered remote role
 pairs, nine local variant rows, and 19 strict trade plus 19 strict battle
@@ -25,16 +25,22 @@ directions. Those results predate the current transport hardening and expanded
 current-candidate matrix and must be rerun for current-candidate sign-off;
 they are not a full-gate result because current runtime coverage remains
 incomplete. Fresh exact-head spot checks passed Yellow-listener to Red-color
-and Blue-color remote trade. The current local canonical battle matrix
-completed 9/9. At `034e34e`, the Yellow-listener to Blue-color remote battle
+and Blue-color remote trade. A non-retained local canonical battle probe
+reported 9/9. At `034e34e`, the Yellow-listener to Blue-color remote battle
 completed a turn in 224.64s, while the Yellow-listener to Red-color run
 diverged at the pre-battle warp: Red reached Colosseum while Yellow remained
 in Cable Club, so neither reached the battle menu. Repeated cross-family runs
 remain timing-sensitive and the full current matrix remains pending.
-A fresh exact-head `--tier trade --repeat-timing 5` attempt ran for 3600.2s and
-failed closed before producing a pytest report: 0 tests passed, 0 failed, and
-1 gate error, with the required acceptance nodes absent from the selected
-items. Trade runtime evidence therefore remains incomplete.
+A fresh `--tier trade --repeat-timing 5` attempt ran for 3600.2s and failed
+closed before producing a pytest report; its raw output ended after 16
+progress dots. The gate summary recorded a timeout and no accepted trade
+outcome, but its synthetic 0-selected/1-error counters do not prove that
+pytest selected no tests. The bundle contains no candidate SHA, so trade
+runtime evidence remains incomplete and non-candidate-bound.
+The gate now records an atomic per-test progress checkpoint; future interrupted
+runs will retain completed outcomes and the full selected node set even when
+pytest cannot reach its final report. This improvement does not change the
+status of the older timed-out run above.
 Symbol hashes and fixture byte/provenance records are in
 [`VERSIONS.md`](../VERSIONS.md) and the tracked
 [`fixture-manifest.json`](../release-evidence/fixture-manifest.json). Overall
@@ -223,7 +229,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `034e34e`, this command collected 624 tests, passed unit 483/483, passed
+At `bf06214`, this command collected 628 tests, passed unit 487/487, passed
 timing 35/35 in each of five repetitions, and returned scoped `PASS`. It also
 performed schema-only validation of the ten-entry fixture manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
@@ -557,18 +563,19 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current `034e34e` asset-free gate passed unit 483/483 and timing 35/35
+1. The current `bf06214` asset-free gate passed unit 487/487 and timing 35/35
    across five repetitions. The prior `db72be6` selected real-ROM tiers passed
    local 46/46, remote 13/13, strict trade 3/3, and strict battle 3/3, but
    those results predate the current transport hardening and the expanded
    current-candidate matrix. Exact-head spot checks passed Yellow-listener to
-   Red-color and Blue-color remote trade; the current local canonical battle
-   matrix completed 9/9, and the selected Yellow-listener to Blue-color remote
+   Red-color and Blue-color remote trade; a non-retained local canonical battle
+   probe reported 9/9, and the selected Yellow-listener to Blue-color remote
    battle completed a turn. The selected Yellow-listener to Red-color remote
    battle diverged at the pre-battle warp before the battle menu. Repeated
    cross-family runs remain timing-sensitive. A fresh strict-trade tier attempt
-   also timed out at 3600.2s before producing a pytest report (0 passed, 0
-   failed, 1 gate error).
+   also timed out at 3600.2s before producing a pytest report; its raw output
+   ended after 16 progress dots and the gate could not verify a passing
+   outcome.
 2. The strict matrix declaration is now complete: the collection audit has
    nine ordered local pairs, nine ordered remote role pairs, nine local
    variant rows, and 19 strict entrypoints for each operation. Collection-only
@@ -580,7 +587,7 @@ are:
    `PARTIAL`. The manifest is external and untracked; its complete byte
    validation and a retained sanitized evidence bundle still need to be
    associated with the release candidate.
-4. `ruff check .` is clean at `034e34e`; the broad suite, all advertised
+4. `ruff check .` is clean at `bf06214`; the broad suite, all advertised
    single-session rows, native-platform coverage, load-stable full-matrix
    behavior, and independent review remain open.
 5. Remote TCP has no authentication or encryption. Loopback-only operation is
