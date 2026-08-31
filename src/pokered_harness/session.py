@@ -115,6 +115,7 @@ class Session:
         expected_rom_sha1: str | None = None,
         expected_symbol_sha1: str | None = None,
         expected_pyboy_version: str | None = None,
+        expected_pyboy_revision: str | None = None,
         pyboy_factory: Callable[[str], PyBoyLike] | None = None,
         view: bool = False,
     ) -> "Session":
@@ -172,6 +173,17 @@ class Session:
                 raise VersionMismatch(
                     "PyBoy runtime is not the pinned pokered-harness build; "
                     "install this project's bundled PyBoy source"
+                )
+            actual_revision = getattr(
+                _pyboy_module, "__pokered_harness_revision__", None
+            )
+            expected_pyboy_revision = _normalise_sha1(
+                expected_pyboy_revision, label="PyBoy revision"
+            )
+            if actual_revision != expected_pyboy_revision:
+                raise VersionMismatch(
+                    f"PyBoy revision mismatch: expected {expected_pyboy_revision}, "
+                    f"got {actual_revision}"
                 )
 
         try:

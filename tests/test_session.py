@@ -317,6 +317,30 @@ def test_expected_pyboy_version_rejects_unmarked_runtime(tmp_path, monkeypatch):
         )
 
 
+def test_expected_pyboy_revision_rejects_wrong_runtime(tmp_path, monkeypatch):
+    import pyboy
+
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_text("00:D35E wCurMap\n", encoding="utf-8")
+    monkeypatch.setattr(
+        pyboy,
+        "__pokered_harness_revision__",
+        "0" * 40,
+        raising=False,
+    )
+
+    with pytest.raises(VersionMismatch, match="revision mismatch"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_pyboy_version="2.7.0",
+            expected_pyboy_revision="c565df66c3731fad2856169a90f6bbec99925915",
+            pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+        )
+
+
 # -- view flag -----------------------------------------------------------
 
 

@@ -19,7 +19,7 @@ _VALID = """\
 
 | Component | Pin | Notes |
 |---|---|---|
-| PyBoy | `2.7.0` | v2 API. |
+| PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | v2 API. |
 
 ## Target ROM
 
@@ -40,6 +40,7 @@ def test_load_versions_parses_valid_file(tmp_path):
     assert isinstance(cfg, VersionsConfig)
     assert cfg.rom_sha1 == "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
     assert cfg.pyboy_version == "2.7.0"
+    assert cfg.pyboy_revision == "c565df66c3731fad2856169a90f6bbec99925915"
     assert cfg.symbol_sha1_for_path("rom/red/pokemon-red.sym") == (
         "03783c86a42588bd77f73bd7814cf8d70e590118"
     )
@@ -90,6 +91,7 @@ def test_repo_versions_md_parses():
     regression that prevents silent drift between docs and the loader."""
     cfg = load_versions("VERSIONS.md")
     assert cfg.pyboy_version == "2.7.0"
+    assert cfg.pyboy_revision == "c565df66c3731fad2856169a90f6bbec99925915"
     assert cfg.rom_sha1 == "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
 
 

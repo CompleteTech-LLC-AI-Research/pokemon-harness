@@ -1060,32 +1060,27 @@ def _dispatch_link_tool(
                 link.remote_bind_port = None
                 link._remote_error = None
         except McpHarnessError:
-            if network_session is not None:
-                network_session.detach_all()
-            if transport is not None:
-                _close_serial_link(transport)
-            _deactivate_link_hooks(session)
+            _cleanup_unpublished_remote(session, network_session, transport)
             raise
         except _ListenerCancelled as exc:
-            if network_session is not None:
-                network_session.detach_all()
-            if transport is not None:
-                _close_serial_link(transport)
-            _deactivate_link_hooks(session)
+            _cleanup_unpublished_remote(session, network_session, transport)
             raise McpHarnessError(
                 "link_cancelled", "remote connection cancelled"
             ) from exc
         except (SerialLinkError, NetworkBackendError, OSError, TimeoutError) as exc:
-            if network_session is not None:
-                network_session.detach_all()
-            if transport is not None:
-                _close_serial_link(transport)
-            _deactivate_link_hooks(session)
+            _cleanup_unpublished_remote(session, network_session, transport)
             if connect_cancel.is_set():
                 raise McpHarnessError(
                     "link_cancelled", "remote connection cancelled"
                 ) from exc
             raise McpHarnessError("link_connect_failed", str(exc)) from exc
+        except BaseException:
+            # Until state publication succeeds, this call owns every
+            # transport/backend it has created.  Always release unpublished
+            # resources even when an unexpected runtime or hook failure
+            # escapes the protocol-specific handlers above.
+            _cleanup_unpublished_remote(session, network_session, transport)
+            raise
         finally:
             with link.state():
                 if link._generation == generation and link.remote_link is None:
@@ -1113,11 +1108,21 @@ def _dispatch_link_tool(
 
 def _require_remote_idle(link: LinkState) -> None:
     with link.state():
+        listener_thread = link._listener_thread
+        if listener_thread is not None and not listener_thread.is_alive():
+            link._listener_thread = None
+            listener_thread = None
         if link.remote_mode != "idle" or link._disconnecting or link._connect_in_progress:
             raise McpHarnessError(
                 "remote_busy",
                 f"remote link busy (mode={link.remote_mode!r}); call "
                 f"link_disconnect first",
+            )
+        if listener_thread is not None:
+            raise McpHarnessError(
+                "remote_busy",
+                "remote listener cleanup is still in progress; retry after "
+                "the listener worker exits",
             )
 
 
@@ -1500,6 +1505,36 @@ def _close_serial_link(
     )
 
 
+def _cleanup_unpublished_remote(
+    session: Session,
+    network_session: PyBoyLinkSession | None,
+    transport: Any | None,
+) -> None:
+    """Release resources created before a remote connection was published.
+
+    Connection setup has several failure points after the socket and native
+    serial backend exist. Cleanup must be best-effort and independent: a
+    failing detach must not prevent the transport from closing, and a close
+    failure must not leave raw link hooks active. The original connection
+    exception remains the client-visible failure.
+    """
+    if network_session is not None:
+        try:
+            with session.locked():
+                network_session.detach_all()
+        except BaseException:
+            pass
+    if transport is not None:
+        try:
+            _close_serial_link(transport)
+        except BaseException:
+            pass
+    try:
+        _deactivate_link_hooks(session)
+    except BaseException:
+        pass
+
+
 def _deactivate_link_hooks(session: Session, peer: Session | None = None) -> None:
     sessions: list[Session] = [session]
     if peer is not None and peer is not session:
@@ -1622,7 +1657,14 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             else:
                 link._listener_error = None
                 link._remote_error = None
-            link._listener_thread = None
+            if listener_thread is None or not listener_thread.is_alive():
+                link._listener_thread = None
+            else:
+                # Retain ownership of a worker that outlived the bounded
+                # join. _require_remote_idle() blocks a new listener until
+                # this handle becomes non-live, avoiding overlap with stale
+                # socket/backend cleanup.
+                link._listener_thread = listener_thread
             link._listener_cancel = threading.Event()
             if not connect_in_progress or connect_done.is_set():
                 link._connect_cancel = threading.Event()
@@ -1962,8 +2004,14 @@ def main() -> None:
             )
     if versions is not None:
         expected_pyboy = versions.pyboy_version
+        expected_pyboy_revision = versions.pyboy_revision
+        if expected_pyboy_revision is None:
+            raise SystemExit(
+                "VERSIONS.md is missing the pinned PyBoy fork revision"
+            )
     elif _env_flag("POKERED_SKIP_SHA1"):
         expected_pyboy = None
+        expected_pyboy_revision = None
     else:
         # Keep the runtime identity check active for a wheel launched without
         # a checkout-local VERSIONS.md. The vendored runtime exposes both
@@ -1987,6 +2035,7 @@ def main() -> None:
                 "identity; provide VERSIONS.md or install the bundled "
                 "runtime"
             )
+        expected_pyboy_revision = revision
 
     # CRITICAL: PyBoy's init writes ~70KB of `.sym`-skip warnings to
     # stdout via a logging handler it installs before we get a chance
@@ -2005,6 +2054,7 @@ def main() -> None:
                 expected_rom_sha1=expected_sha,
                 expected_symbol_sha1=primary_symbol_sha,
                 expected_pyboy_version=expected_pyboy,
+                expected_pyboy_revision=expected_pyboy_revision,
             )
             register_default_hooks(session)
             if peer_rom is not None and peer_sym is not None:
@@ -2014,6 +2064,7 @@ def main() -> None:
                     expected_rom_sha1=peer_expected_sha,
                     expected_symbol_sha1=peer_symbol_sha,
                     expected_pyboy_version=expected_pyboy,
+                    expected_pyboy_revision=expected_pyboy_revision,
                 )
                 register_default_hooks(peer_session)
 

@@ -697,6 +697,89 @@ def test_link_disconnect_cancels_in_progress_connect(monkeypatch):
     assert link.remote_mode == "idle"
 
 
+def test_link_connect_cleans_unpublished_resources_on_unexpected_failure(monkeypatch):
+    s, _ = _endpoint_session()
+    link = LinkState(primary_version="red")
+    transport = type("FakeTransport", (), {})()
+    transport.closed = False
+
+    def close_transport():
+        transport.closed = True
+
+    transport.close = close_transport
+    detached = threading.Event()
+
+    class FakeNetworkSession:
+        def detach_all(self):
+            detached.set()
+            raise RuntimeError("detach failed")
+
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._supports_bit_accurate_network",
+        lambda _session: True,
+    )
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server.NetworkBackend.connect",
+        lambda *_args, **_kwargs: transport,
+    )
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._attach_network_backend",
+        lambda *_args, **_kwargs: FakeNetworkSession(),
+    )
+
+    def fail_handshake(*_args, **_kwargs):
+        raise RuntimeError("unexpected handshake fault")
+
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._wait_for_network_hello",
+        fail_handshake,
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected handshake fault"):
+        dispatch_tool(
+            s,
+            "link_connect",
+            {"host": "127.0.0.1", "port": _free_port()},
+            link=link,
+        )
+
+    assert detached.is_set()
+    assert transport.closed is True
+    assert link.remote_mode == "idle"
+    assert link.remote_link is None
+    assert link.network_session is None
+
+
+def test_link_listen_rejects_live_previous_listener_worker():
+    s, _ = _endpoint_session()
+    link = LinkState()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def stale_worker():
+        entered.set()
+        release.wait(timeout=2.0)
+
+    worker = threading.Thread(target=stale_worker, daemon=True)
+    worker.start()
+    assert entered.wait(timeout=1.0)
+    link._listener_thread = worker
+    try:
+        with pytest.raises(
+            McpHarnessError, match="cleanup is still in progress"
+        ):
+            dispatch_tool(
+                s,
+                "link_listen",
+                {"port": _free_port()},
+                link=link,
+            )
+        assert link._listener_thread is worker
+    finally:
+        release.set()
+        worker.join(timeout=1.0)
+
+
 def test_link_listen_rejects_concurrent_call():
     s, _ = _endpoint_session()
     link = LinkState()

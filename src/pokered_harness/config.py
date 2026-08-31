@@ -29,6 +29,7 @@ class VersionsConfigError(ValueError):
 class VersionsConfig:
     rom_sha1: str
     pyboy_version: str
+    pyboy_revision: str | None = None
     rom_sha1_by_path: tuple[tuple[str, str], ...] = ()
     symbol_sha1_by_path: tuple[tuple[str, str], ...] = ()
 
@@ -55,7 +56,9 @@ class VersionsConfig:
 
 _SHA1_ROW = re.compile(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|", re.MULTILINE)
 _PYBOY_ROW = re.compile(
-    r"^\|\s*PyBoy\s*\|\s*`([^`]+)`[^|]*\|", re.MULTILINE
+    r"^\|\s*PyBoy\s*\|\s*`(?P<version>[^`]+)`"
+    r"(?:\s*\+\s*fork\s*`(?P<revision>[0-9A-Fa-f]{40})`)?\s*\|",
+    re.MULTILINE,
 )
 
 
@@ -130,7 +133,12 @@ def load_versions(path: str | Path | None = None) -> VersionsConfig:
 
     return VersionsConfig(
         rom_sha1=sha.group(1).lower(),
-        pyboy_version=pyboy.group(1),
+        pyboy_version=pyboy.group("version"),
+        pyboy_revision=(
+            pyboy.group("revision").lower()
+            if pyboy.group("revision") is not None
+            else None
+        ),
         rom_sha1_by_path=tuple(rom_pins),
         symbol_sha1_by_path=tuple(symbol_pins),
     )
