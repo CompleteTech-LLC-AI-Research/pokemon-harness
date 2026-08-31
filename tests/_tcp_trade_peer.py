@@ -358,15 +358,14 @@ def main() -> int:
         last_progress = time.monotonic()
         serial_phase_ticks = 0
         peer_link_menu_ready = False
-        peer_link_menu_ready_grace = 0
         while time.monotonic() < deadline:
-            # LinkMenu is a terminal milestone for this child, but the ROM
-            # that reaches it first may still need a final serial IRQ/re-arm
-            # turn before the peer can reach its own LinkMenu. Keep ticking
-            # while waiting for the peer's marker, then use a second marker
-            # only after this native clock is idle. Both sides can
-            # therefore leave the test without closing an in-flight edge.
-            if args.goal == "link_menu" and link_menu_announced:
+            # LinkMenu is a phase boundary, but the ROM that reaches it
+            # first may still need a final serial IRQ/re-arm turn before the
+            # peer can reach its own LinkMenu. Keep ticking while waiting for
+            # the peer's marker, then use a second marker only after this
+            # native clock is idle. Both sides can therefore leave the phase
+            # without closing an in-flight edge.
+            if link_menu_announced:
                 if not peer_link_menu_ready:
                     peer_link_menu_ready = (
                         link._network_backend.poll_peer_sync(sync_id=121)
@@ -418,43 +417,19 @@ def main() -> int:
                 # for safe UI/phase boundaries below.
                 session.step(4)
                 serial_phase_ticks += 1
-                if counters["LinkMenu"][0] > 0:
-                    if not link_menu_announced:
-                        link_menu_announced = True
-                        log("phase 1 local LinkMenu fired")
-                        shot("01_link_menu")
-                        if args.goal == "link_menu":
-                            link._network_backend.announce_sync(sync_id=121)
-                            log("phase 1 LinkMenu readiness sent")
-                    if (
-                        args.goal != "link_menu"
-                        and link._network_backend.poll_peer_sync(sync_id=121)
-                    ):
-                        peer_link_menu_ready = True
-                    if peer_link_menu_ready and args.goal != "link_menu":
-                        peer_link_menu_ready_grace += 1
-                        if peer_link_menu_ready_grace >= 20:
-                            log("phase 1 done: LinkMenu fired on both peers")
-                            break
+                if counters["LinkMenu"][0] > 0 and not link_menu_announced:
+                    link_menu_announced = True
+                    log("phase 1 local LinkMenu fired")
+                    shot("01_link_menu")
+                    link._network_backend.announce_sync(sync_id=121)
+                    log("phase 1 LinkMenu readiness sent")
             else:
-                if counters["LinkMenu"][0] > 0:
-                    if not link_menu_announced:
-                        link_menu_announced = True
-                        log("phase 1 local LinkMenu fired")
-                        shot("01_link_menu")
-                        if args.goal == "link_menu":
-                            link._network_backend.announce_sync(sync_id=121)
-                            log("phase 1 LinkMenu readiness sent")
-                    if (
-                        args.goal != "link_menu"
-                        and link._network_backend.poll_peer_sync(sync_id=121)
-                    ):
-                        peer_link_menu_ready = True
-                    if peer_link_menu_ready and args.goal != "link_menu":
-                        peer_link_menu_ready_grace += 1
-                        if peer_link_menu_ready_grace >= 5:
-                            log("phase 1 done: LinkMenu fired on both peers")
-                            break
+                if counters["LinkMenu"][0] > 0 and not link_menu_announced:
+                    link_menu_announced = True
+                    log("phase 1 local LinkMenu fired")
+                    shot("01_link_menu")
+                    link._network_backend.announce_sync(sync_id=121)
+                    log("phase 1 LinkMenu readiness sent")
                 session.press("a", duration=4)
                 session.step(40)
             if time.monotonic() - last_progress > 10.0:
@@ -466,11 +441,6 @@ def main() -> int:
                     f"LinkMenu={counters['LinkMenu'][0]}"
                 )
                 last_progress = time.monotonic()
-
-        if link_menu_announced and args.goal != "link_menu":
-            for _ in range(64):
-                link._network_backend.announce_sync(sync_id=120)
-                session.step(1)
 
         if args.goal == "trade":
             # Phase barrier: both sides at LinkMenu before voting Trade
