@@ -7,6 +7,7 @@
         "POKERED_ROM_PATH": "${PWD}/rom/red/pokemon-red-color.gb",
         "POKERED_SYM_PATH": "${PWD}/rom/red/pokemon-red.sym",
         "POKERED_ROM_SHA1": "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+        "POKERED_SYM_SHA1": "03783c86a42588bd77f73bd7814cf8d70e590118",
         "POKERED_VERSIONS_PATH": "${PWD}/VERSIONS.md"
       }
     }

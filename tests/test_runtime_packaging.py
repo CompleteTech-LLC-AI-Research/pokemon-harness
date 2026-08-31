@@ -97,6 +97,7 @@ def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
     assert '"--check"' in bootstrap
     assert 'env["PYBOY_NO_CYTHON"] = "1"' in bootstrap
     assert '"-m", "ensurepip", "--upgrade"' in bootstrap
+    assert '"--no-deps"' in bootstrap
     assert "apply_external_edge" in bootstrap
     assert "cython_compiled" in bootstrap
 
@@ -129,12 +130,75 @@ def test_bootstrap_rehydrates_missing_pip(monkeypatch) -> None:
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
-    assert module._pip_command() == [sys.executable, "-m", "pip"]
+    assert module._pip_command() == [sys.executable, "-m", "pip", "install"]
     assert calls == [
         [sys.executable, "-m", "pip", "--version"],
         [sys.executable, "-m", "ensurepip", "--upgrade"],
         [sys.executable, "-m", "pip", "--version"],
     ]
+
+
+def test_bootstrap_uses_uv_when_pip_and_ensurepip_are_unavailable(monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "pokered_bootstrap_uv_test", ROOT / "scripts" / "bootstrap_pyboy.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 1
+
+    def fake_run(command, **_kwargs):
+        calls.append(list(command))
+        return Result()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/opt/uv" if name == "uv" else None)
+
+    assert module._pip_command() == ["/opt/uv", "pip", "install", "--python", sys.executable]
+    assert calls == [
+        [sys.executable, "-m", "pip", "--version"],
+        [sys.executable, "-m", "ensurepip", "--upgrade"],
+    ]
+
+
+def test_bootstrap_reinstalls_only_the_pinned_runtime_without_dependency_drift(monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "pokered_bootstrap_command_test", ROOT / "scripts" / "bootstrap_pyboy.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    calls: list[tuple[list[str], dict]] = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), kwargs))
+        return Result()
+
+    monkeypatch.setattr(module, "_validate_source", lambda: None)
+    monkeypatch.setattr(module, "_verify_runtime", lambda _mode: None)
+    monkeypatch.setattr(module, "_pip_command", lambda: ["pip", "install"])
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module.main(["--mode", "source"]) == 0
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[:4] == [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+    ]
+    assert command[-2:] == [module.CYTHON_REQUIREMENT, str(module.PYBOY_SOURCE)]
+    assert kwargs["cwd"] == module.ROOT
+    assert kwargs["env"]["PYBOY_NO_CYTHON"] == "1"
 
 
 def test_mcp_config_uses_the_installed_runtime_without_absolute_paths() -> None:
@@ -146,6 +210,7 @@ def test_mcp_config_uses_the_installed_runtime_without_absolute_paths() -> None:
     assert all(not Path(value).is_absolute() for value in server["env"].values())
     assert server["env"]["POKERED_ROM_PATH"] == "${PWD}/rom/red/pokemon-red-color.gb"
     assert server["env"]["POKERED_SYM_PATH"] == "${PWD}/rom/red/pokemon-red.sym"
+    assert server["env"]["POKERED_SYM_SHA1"] == "03783c86a42588bd77f73bd7814cf8d70e590118"
 
 
 def test_pyboy_runtime_exposes_the_harness_serial_contract() -> None:
