@@ -186,6 +186,14 @@ class LinkState:
         self._listener_socket: socket.socket | None = None
         self._listener_cancel = threading.Event()
         self._connect_cancel = threading.Event()
+        # Resources that could not be fully torn down remain owned by the
+        # LinkState until a later link_disconnect retry completes.  Dropping
+        # these references would let a live worker/socket outlive the MCP
+        # lifecycle while the public state incorrectly returned to idle.
+        self._pending_remote_link: Any | None = None
+        self._pending_remote_endpoint: RemoteLinkEndpoint | None = None
+        self._pending_network_session: PyBoyLinkSession | None = None
+        self._pending_listener_socket: socket.socket | None = None
         self._disconnect_done = threading.Event()
         self._disconnect_done.set()
         self._disconnect_owner: int | None = None
@@ -500,6 +508,12 @@ def _error_reply(exc: Exception) -> mcp_types.CallToolResult:
 def _error_code(exc: Exception) -> str:
     if isinstance(exc, McpHarnessError):
         return exc.code
+    # Session boundary exceptions carry their stable wire code.  Keep this
+    # lookup before the broad ValueError/OSError branches so missing assets
+    # and distinct ROM/SYM hash failures retain actionable MCP semantics.
+    declared_code = getattr(exc, "code", None)
+    if isinstance(declared_code, str) and declared_code:
+        return declared_code
     if isinstance(exc, SessionClosedError):
         return "session_closed"
     if isinstance(exc, VersionMismatch):
@@ -1204,6 +1218,10 @@ def _require_remote_idle_locked(link: LinkState) -> None:
         or link.remote_link is not None
         or link.remote_endpoint is not None
         or link.network_session is not None
+        or link._pending_remote_link is not None
+        or link._pending_remote_endpoint is not None
+        or link._pending_network_session is not None
+        or link._pending_listener_socket is not None
     ):
         raise McpHarnessError(
             "remote_busy",
@@ -1682,27 +1700,38 @@ def _detach_local_link_session(
             local_link_session.detach_all()
 
 
-def _deactivate_link_hooks(session: Session, peer: Session | None = None) -> None:
+def _deactivate_link_hooks(
+    session: Session, peer: Session | None = None
+) -> list[Exception]:
+    """Disable and deregister link callbacks, retaining cleanup failures."""
+    errors: list[Exception] = []
     sessions: list[Session] = [session]
     if peer is not None and peer is not session:
         sessions.append(peer)
     for target in sessions:
         try:
             target.deactivate_serial_hooks()
-        except Exception:  # noqa: BLE001, S110 - cleanup is best effort
-            pass
+        except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+            errors.append(exc)
         # A few legacy endpoint hooks are installed directly on PyBoy and
         # cannot be reached through Session.serial_hook. Remove those by
         # symbol where the runtime supports hook_deregister.
         for symbol_name in _DIRECT_LINK_HOOKS:
             try:
                 target.deactivate_hooks_at(symbol_name)
-            except Exception:  # noqa: BLE001, S110 - cleanup is best effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+                errors.append(exc)
+    return errors
 
 
 def _disconnect_remote(link: LinkState, session: Session) -> None:
-    """Cancel listener/connect work, close sockets, and join workers."""
+    """Cancel listener/connect work, close sockets, and join workers.
+
+    A teardown failure is not allowed to look like a clean idle transition.
+    Any resource whose close/detach/join did not complete remains owned by the
+    ``LinkState`` as a pending cleanup handle, so a later ``link_disconnect``
+    can retry it and reconnect cannot overlap a live worker or socket.
+    """
     current_thread_id = threading.get_ident()
     with link.state():
         if link._disconnecting:
@@ -1726,6 +1755,10 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             or link.remote_link is not None
             or link.remote_endpoint is not None
             or link.network_session is not None
+            or link._pending_remote_link is not None
+            or link._pending_remote_endpoint is not None
+            or link._pending_network_session is not None
+            or link._pending_listener_socket is not None
             or link._connect_in_progress
             or link._listener_start_in_progress
             or listener_thread is not None
@@ -1740,17 +1773,35 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             link._disconnect_done.clear()
             link._generation += 1
             listener = link._listener_socket
-            remote = link.remote_link
-            remote_endpoint = link.remote_endpoint
-            network_session = link.network_session
+            if listener is None:
+                listener = link._pending_listener_socket
+            remote = (
+                link.remote_link
+                if link.remote_link is not None
+                else link._pending_remote_link
+            )
+            remote_endpoint = (
+                link.remote_endpoint
+                if link.remote_endpoint is not None
+                else link._pending_remote_endpoint
+            )
+            network_session = (
+                link.network_session
+                if link.network_session is not None
+                else link._pending_network_session
+            )
             connect_in_progress = link._connect_in_progress
             connect_done = link._connect_done
             link._listener_cancel.set()
             link._connect_cancel.set()
             link._listener_socket = None
+            link._pending_listener_socket = None
             link.remote_link = None
             link.remote_endpoint = None
             link.network_session = None
+            link._pending_remote_link = None
+            link._pending_remote_endpoint = None
+            link._pending_network_session = None
             link.remote_mode = "disconnecting"
             link.remote_role = None
             link.remote_bind_port = None
@@ -1772,29 +1823,50 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
         return
 
     cleanup_errors: list[Exception] = []
+    cleanup_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+    listener_close_failed = False
+    remote_close_failed = False
+    network_detach_failed = False
+    hook_cleanup_failed = False
     try:
         if listener is not None:
             try:
                 listener.close()
-            except OSError:
-                pass
-        if remote is not None and not _close_serial_link(remote):
-            cleanup_errors.append(
-                TimeoutError("remote link worker did not stop before cleanup deadline")
-            )
+            except Exception as exc:  # noqa: BLE001 - preserve the handle for retry
+                listener_close_failed = True
+                cleanup_errors.append(exc)
+        if remote is not None:
+            try:
+                remote_closed = _close_serial_link(
+                    remote,
+                    timeout_s=max(0.0, cleanup_deadline - time.monotonic()),
+                )
+            except Exception as exc:  # noqa: BLE001 - cleanup must continue
+                remote_closed = False
+                cleanup_errors.append(exc)
+            if not remote_closed:
+                remote_close_failed = True
+                cleanup_errors.append(
+                    TimeoutError(
+                        "remote link worker did not stop before cleanup deadline"
+                    )
+                )
         if network_session is not None:
             try:
                 with session.locked():
                     network_session.detach_all()
             except Exception as exc:  # noqa: BLE001
+                network_detach_failed = True
                 cleanup_errors.append(exc)
         if (
             isinstance(listener_thread, threading.Thread)
             and listener_thread is not threading.current_thread()
         ):
-            listener_thread.join(timeout=_DEFAULT_CLEANUP_TIMEOUT_S)
+            listener_thread.join(
+                timeout=max(0.0, cleanup_deadline - time.monotonic())
+            )
         if connect_in_progress and not connect_done.wait(
-            timeout=_DEFAULT_CLEANUP_TIMEOUT_S
+            timeout=max(0.0, cleanup_deadline - time.monotonic())
         ):
             cleanup_errors.append(
                 TimeoutError(
@@ -1805,7 +1877,10 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
         # accepted a peer does not. This conditional also preserves an active
         # in-process pair when link_disconnect is called in its idle state.
         if remote_endpoint is not None or network_session is not None:
-            _deactivate_link_hooks(session)
+            hook_errors = _deactivate_link_hooks(session)
+            if hook_errors:
+                hook_cleanup_failed = True
+                cleanup_errors.extend(hook_errors)
     finally:
         with link.state():
             if listener_thread is not None and listener_thread.is_alive():
@@ -1817,10 +1892,37 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             if cleanup_errors:
                 link._listener_error = cleanup_errors[0]
                 link._remote_error = cleanup_errors[0]
+                # Keep every resource that still needs another cleanup pass.
+                # The public remote fields stay empty while this state is
+                # disconnecting, so no emulator operation can use a resource
+                # during teardown.
+                link._pending_listener_socket = (
+                    listener if listener_close_failed else None
+                )
+                link._pending_remote_link = (
+                    remote if remote_close_failed else None
+                )
+                link._pending_remote_endpoint = (
+                    remote_endpoint
+                    if hook_cleanup_failed
+                    else None
+                )
+                link._pending_network_session = (
+                    network_session
+                    if network_detach_failed or hook_cleanup_failed
+                    else None
+                )
             else:
                 link._listener_error = None
                 link._remote_error = None
-            link.remote_mode = "idle"
+                link._pending_listener_socket = None
+                link._pending_remote_link = None
+                link._pending_remote_endpoint = None
+                link._pending_network_session = None
+            # Failed cleanup remains visibly non-idle and can be retried by a
+            # subsequent link_disconnect. A clean teardown is the only path
+            # that returns the lifecycle to idle.
+            link.remote_mode = "disconnecting" if cleanup_errors else "idle"
             link.remote_role = None
             link.remote_bind_port = None
             if listener_thread is None or not listener_thread.is_alive():
