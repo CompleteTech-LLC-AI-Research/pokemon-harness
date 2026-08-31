@@ -87,6 +87,7 @@ _FRAME = struct.Struct(">BB")  # opcode, payload (1-byte id for SYNC)
 _LEN = struct.Struct(">H")
 _EDGE_RESPONSE_TIMEOUT_SECONDS = 10.0
 _DEFAULT_SEND_TIMEOUT_SECONDS = 10.0
+_DEFAULT_ACCEPT_TIMEOUT_SECONDS = 30.0
 _SEND_POLL_SECONDS = 0.05
 _CONTROL_QUEUE_MAXSIZE = 256
 _REARM_WAIT_SECONDS = 0.100
@@ -384,7 +385,7 @@ class NetworkBackend:
         host: str = "127.0.0.1",
         backlog: int = 1,
         local_rom_version: str | None = None,
-        accept_timeout_s: float | None = None,
+        accept_timeout_s: float | None = _DEFAULT_ACCEPT_TIMEOUT_SECONDS,
         cancel_event: threading.Event | None = None,
     ) -> tuple[NetworkBackend, socket.socket]:
         """Bind to ``(host, port)`` and wait until a peer connects.
@@ -392,9 +393,10 @@ class NetworkBackend:
         Returns ``(backend, listener_sock)``; the caller keeps the
         listener socket to close later if needed. A fresh accepted
         socket is wrapped by the backend. ``accept_timeout_s`` and
-        ``cancel_event`` make the accept cancellable for lifecycle owners;
-        with both omitted, the historical indefinite accept behavior is
-        preserved.
+        ``cancel_event`` make the accept cancellable for lifecycle owners.
+        The default accept deadline is finite; explicitly passing ``None``
+        without cancellation retains the legacy unbounded behavior for
+        diagnostic use only.
         """
         normalized_host = validate_loopback_host(host)
         accept_timeout_s = _validate_optional_timeout(

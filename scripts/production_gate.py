@@ -837,8 +837,16 @@ def _load_gate_report(
     path: Path,
     *,
     expected_returncode: int | None = None,
+    allow_partial: bool = False,
 ) -> GateReport:
-    """Read and validate the report produced by the gate pytest plugin."""
+    """Read and validate a report produced by the gate pytest plugin.
+
+    A timed-out pytest process cannot run ``pytest_sessionfinish``.  The
+    plugin therefore maintains a separate progress report while tests run;
+    that report is allowed to contain the selected node set plus only the
+    terminal outcomes observed before termination.  It is never accepted as
+    a complete report.
+    """
 
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -894,7 +902,7 @@ def _load_gate_report(
             raise ValueError("pytest report nodeids is invalid")
         if collected != len(nodeids) or len(set(nodeids)) != len(nodeids):
             raise ValueError("pytest report collected/nodeids are inconsistent")
-        if not collection_only and collected != len(records):
+        if not collection_only and not allow_partial and collected != len(records):
             raise ValueError(
                 "pytest report collected item count does not match reported test outcomes: "
                 f"{collected} != {len(records)}"
@@ -940,8 +948,14 @@ def _load_gate_report(
         ) + (derived.errors - len(collection_errors)):
             raise ValueError("pytest report test outcomes do not add up to total")
 
-        if not collection_only and seen_nodeids != set(nodeids):
+        if (
+            not collection_only
+            and not allow_partial
+            and seen_nodeids != set(nodeids)
+        ):
             raise ValueError("pytest report nodeids do not match test records")
+        if allow_partial and not seen_nodeids.issubset(set(nodeids)):
+            raise ValueError("partial pytest report contains an unselected test outcome")
         if counts != derived:
             raise ValueError(
                 "pytest report count fields do not match individual outcomes: "
@@ -1449,6 +1463,8 @@ def run_pytest_once(
     ]
     child_environment = dict(environment)
     child_environment["POKERED_GATE_REPORT"] = str(report_path)
+    progress_path = report_path.with_suffix(".progress.json")
+    child_environment["POKERED_GATE_PROGRESS_REPORT"] = str(progress_path)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         report_path.unlink()
@@ -1460,6 +1476,23 @@ def run_pytest_once(
             GateReport(
                 Counts(errors=1),
                 error=f"could not prepare pytest report path: {type(exc).__name__}: {exc}",
+            ),
+            "",
+            command,
+        )
+    try:
+        progress_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return (
+            127,
+            GateReport(
+                Counts(errors=1),
+                error=(
+                    "could not prepare pytest progress report path: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
             ),
             "",
             command,
@@ -1502,6 +1535,10 @@ def run_pytest_once(
         report_path,
         expected_returncode=None if timed_out else returncode,
     )
+    if report.error:
+        progress_report = _load_gate_report(progress_path, allow_partial=True)
+        if not progress_report.error:
+            report = progress_report
     if timed_out:
         timeout_reason = f"pytest timed out after {timeout_seconds:.1f}s"
         report = GateReport(

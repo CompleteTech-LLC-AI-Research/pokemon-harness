@@ -34,6 +34,11 @@ def pytest_collection_finish(session: Any) -> None:
     """Capture the post-selection item set used by this pytest process."""
 
     _ACTIVE_COLLECTED_NODEIDS[:] = [item.nodeid for item in session.items]
+    _write_report(
+        session,
+        target_name="POKERED_GATE_PROGRESS_REPORT",
+        exitstatus=-1,
+    )
 
 
 def pytest_runtest_logreport(report: Any) -> None:
@@ -88,12 +93,42 @@ def pytest_collectreport(report: Any) -> None:
         )
 
 
+def pytest_runtest_logfinish(nodeid: str, location: Any) -> None:
+    """Persist terminal test progress so a killed worker remains auditable."""
+
+    del nodeid, location
+    target = os.environ.get("POKERED_GATE_PROGRESS_REPORT")
+    if not target:
+        return
+    _write_report(
+        None,
+        target_name="POKERED_GATE_PROGRESS_REPORT",
+        exitstatus=-1,
+    )
+
+
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
-    target = os.environ.get("POKERED_GATE_REPORT")
+    _write_report(
+        session,
+        target_name="POKERED_GATE_REPORT",
+        exitstatus=exitstatus,
+    )
+
+
+def _write_report(
+    session: Any | None,
+    *,
+    target_name: str,
+    exitstatus: int,
+) -> None:
+    target = os.environ.get(target_name)
     if not target:
         return
 
-    collection_only = bool(getattr(getattr(session.config, "option", None), "collectonly", False))
+    config = getattr(session, "config", None)
+    collection_only = bool(
+        getattr(getattr(config, "option", None), "collectonly", False)
+    )
     records = list(_records().values())
     counts = {
         "passed": 0,
@@ -130,7 +165,11 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     }
     path = Path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    os.replace(temporary, path)
 
 
 # The plugin hooks receive reports, not the Config object.  Pytest invokes
@@ -175,6 +214,7 @@ __all__ = [
     "pytest_collection_finish",
     "pytest_collectreport",
     "pytest_configure",
+    "pytest_runtest_logfinish",
     "pytest_runtest_logreport",
     "pytest_sessionfinish",
 ]

@@ -1967,7 +1967,9 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
                 )
         if network_session is not None:
             try:
-                with session.locked():
+                with session.locked(
+                    timeout_s=max(0.0, cleanup_deadline - time.monotonic())
+                ):
                     network_session.detach_all()
             except Exception as exc:  # noqa: BLE001
                 network_detach_failed = True
@@ -2318,8 +2320,9 @@ def main() -> None:
     * ``POKERED_SYM_SHA1`` / ``POKERED_PEER_SYM_SHA1`` — explicit symbol-file
       pins for wheel launches without a local ``VERSIONS.md``. In a source
       checkout, matching per-path symbol pins are selected automatically.
-    * ``POKERED_SKIP_SHA1=1`` — opt out of ROM and symbol SHA-1 enforcement
-      entirely (useful only for ad-hoc testing on non-stock assets).
+    * ``POKERED_SKIP_SHA1=1`` — rejected by this production entry point;
+      ad-hoc diagnostics must use a separate, explicitly non-production
+      driver.
     * ``POKERED_PEER_ROM_PATH`` / ``POKERED_PEER_SYM_PATH`` /
       ``POKERED_PEER_ROM_SHA1`` — when set, a peer Session is constructed
       at startup and the link-cable tools become usable. The pair is NOT
@@ -2331,6 +2334,13 @@ def main() -> None:
         load_primary_env,
         load_versions,
     )
+
+    if _env_flag("POKERED_SKIP_SHA1"):
+        raise SystemExit(
+            "POKERED_SKIP_SHA1 is diagnostic-only and rejected by the MCP "
+            "production entry point; unset it and provide the documented "
+            "ROM and symbol SHA-1 pins"
+        )
 
     primary_env = load_primary_env()
     peer_env = load_peer_env()

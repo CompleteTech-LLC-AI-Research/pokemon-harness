@@ -10,6 +10,7 @@ between "emulator control" (this module) and "policy" (external).
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import threading
 from collections.abc import Callable, Iterable, Iterator
@@ -36,6 +37,18 @@ class SessionClosedError(SessionError):
     """Raised when an operation is attempted after session shutdown."""
 
     code = "session_closed"
+
+
+class SessionCloseTimeout(SessionError):
+    """Raised when shutdown cannot acquire the emulator lock in time."""
+
+    code = "session_close_timeout"
+
+
+class SessionLockTimeout(SessionError):
+    """Raised when a bounded compound-operation lock cannot be acquired."""
+
+    code = "session_lock_timeout"
 
 
 class SessionConfigurationError(ValueError):
@@ -78,6 +91,9 @@ class SymbolHashMismatch(VersionMismatch):
     """Raised when the symbol bytes do not match the configured SHA-1 pin."""
 
     code = "symbol_hash_mismatch"
+
+
+_DEFAULT_CLOSE_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,7 +275,9 @@ class Session:
 
     # --- lifecycle -----------------------------------------------------
 
-    def close(self, save: bool = False) -> None:
+    def close(
+        self, save: bool = False, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
+    ) -> None:
         """Stop the emulator exactly once, serialized with all operations.
 
         The closed flag is published before waiting for ``_lock`` so a raw
@@ -268,7 +286,13 @@ class Session:
         ``PyBoy.stop`` runs; otherwise stop could race a tick or memory access.
         Remote link owners close their transport before closing the Session,
         which wakes a callback blocked in a serial exchange.
+
+        ``timeout_s`` bounds both waiting for an in-flight operation and
+        waiting for another thread's close. On timeout the session remains
+        closed and no unsafe ``PyBoy.stop`` call is attempted while an
+        emulator operation may still be active.
         """
+        timeout_s = _validate_timeout(timeout_s, "timeout_s")
         current_thread_id = threading.get_ident()
         with self._lifecycle_lock:
             if self._closed:
@@ -284,13 +308,25 @@ class Session:
                 owned_by_current_thread = True
 
         if close_done is not None:
-            if not owned_by_current_thread:
-                close_done.wait()
+            if not owned_by_current_thread and not close_done.wait(
+                timeout=timeout_s
+            ):
+                raise SessionCloseTimeout(
+                    "another session close is still in progress after "
+                    f"the {timeout_s:g}s shutdown deadline"
+                )
             return
 
         try:
-            with self._lock:
+            if not self._lock.acquire(timeout=timeout_s):
+                raise SessionCloseTimeout(
+                    "an emulator operation is still active after "
+                    f"the {timeout_s:g}s shutdown deadline"
+                )
+            try:
                 self._pyboy.stop(save=save)
+            finally:
+                self._lock.release()
         finally:
             with self._lifecycle_lock:
                 self._close_owner = None
@@ -301,16 +337,29 @@ class Session:
         return self._closed
 
     @contextmanager
-    def locked(self) -> Iterator[Session]:
+    def locked(self, *, timeout_s: float | None = None) -> Iterator[Session]:
         """Serialize a compound operation that touches this emulator.
 
         Individual session methods already take this same re-entrant lock.
         This context manager is for callers that need a consistent snapshot
         across more than one method without exposing the lock object itself.
         """
-        with self._lock:
+        if timeout_s is None:
+            acquired = self._lock.acquire()
+        else:
+            acquired = self._lock.acquire(
+                timeout=_validate_timeout(timeout_s, "timeout_s")
+            )
+        if not acquired:
+            raise SessionLockTimeout(
+                "could not acquire the emulator lock before the "
+                f"{timeout_s:g}s deadline"
+            )
+        try:
             self._ensure_open()
             yield self
+        finally:
+            self._lock.release()
 
     def __enter__(self) -> Self:
         return self
@@ -567,6 +616,18 @@ def sha1_of_file(path: str | Path, *, chunk_size: int = 1 << 20) -> str:
 
 
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _validate_timeout(value: float, name: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be finite and non-negative")
+    try:
+        candidate = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be finite and non-negative") from exc
+    if not math.isfinite(candidate) or candidate < 0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return candidate
 
 
 def _normalise_sha1(value: str, *, label: str = "ROM SHA-1") -> str:

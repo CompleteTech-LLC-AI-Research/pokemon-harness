@@ -8,6 +8,7 @@ must remain safe when a request, worker, or asset fails.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -18,11 +19,14 @@ from pokered_harness.mcp_server import (
     _error_code,
     _error_reply,
     dispatch_tool,
+    main,
 )
 from pokered_harness.session import (
     RomHashMismatch,
     RomNotFoundError,
     Session,
+    SessionCloseTimeout,
+    SessionLockTimeout,
     SymbolHashMismatch,
     SymbolNotFoundError,
 )
@@ -130,6 +134,62 @@ def test_session_close_serializes_stop_after_an_inflight_tick() -> None:
     assert close_errors == []
     assert pyboy.stop_called.is_set()
     assert pyboy.stop_during_tick is False
+
+
+def test_session_close_fails_closed_with_bounded_deadline() -> None:
+    pyboy = _BlockingPyBoy()
+    session, _ = _session(pyboy=pyboy)
+    step_errors: list[Exception] = []
+    step_thread = threading.Thread(
+        target=lambda: _capture_error(session.step, step_errors),
+        name="test-session-step-stubborn",
+    )
+    step_thread.start()
+    assert pyboy.tick_entered.wait(timeout=1.0)
+
+    started = time.monotonic()
+    with pytest.raises(SessionCloseTimeout, match="shutdown deadline"):
+        session.close(timeout_s=0.05)
+    assert time.monotonic() - started < 0.5
+    assert session.closed is True
+    assert not pyboy.stop_called.is_set()
+
+    pyboy.release_tick.set()
+    step_thread.join(timeout=2.0)
+    assert not step_thread.is_alive()
+    assert step_errors == []
+
+
+def test_session_locked_timeout_is_bounded() -> None:
+    session, _ = _session()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with session.locked():
+            entered.set()
+            release.wait(timeout=2.0)
+
+    owner = threading.Thread(target=hold_lock, name="test-session-lock-owner")
+    owner.start()
+    assert entered.wait(timeout=1.0)
+
+    started = time.monotonic()
+    with pytest.raises(SessionLockTimeout, match="deadline"), session.locked(
+        timeout_s=0.05
+    ):
+        raise AssertionError("the bounded lock should not be acquired")
+    assert time.monotonic() - started < 0.5
+
+    release.set()
+    owner.join(timeout=2.0)
+    assert not owner.is_alive()
+
+
+def test_mcp_entrypoint_rejects_hash_bypass(monkeypatch) -> None:
+    monkeypatch.setenv("POKERED_SKIP_SHA1", "1")
+    with pytest.raises(SystemExit, match="rejected by the MCP production"):
+        main()
 
 
 def _capture_error(call, errors: list[Exception]) -> None:

@@ -562,6 +562,52 @@ def test_gate_report_loader_accepts_collection_only_inventory(tmp_path):
     assert loaded.nodeids == ("tests/test_one.py::test_one",)
 
 
+def test_gate_report_loader_accepts_only_explicit_partial_progress(tmp_path):
+    report = tmp_path / "progress.json"
+    report.write_text(
+        json.dumps(
+            {
+                "collection_only": False,
+                "counts": {
+                    "total": 1,
+                    "passed": 1,
+                    "failed": 0,
+                    "skipped": 0,
+                    "xfailed": 0,
+                    "xpassed": 0,
+                    "errors": 0,
+                },
+                "tests": [
+                    {
+                        "nodeid": "tests/test_one.py::test_one",
+                        "outcome": "passed",
+                        "when": "call",
+                        "reason": "",
+                        "was_xfail": False,
+                    }
+                ],
+                "collection_errors": [],
+                "collection_skips": [],
+                "collected": 2,
+                "nodeids": [
+                    "tests/test_one.py::test_one",
+                    "tests/test_two.py::test_two",
+                ],
+                "exitstatus": -1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    partial = gate._load_gate_report(report, allow_partial=True)
+    assert partial.error == ""
+    assert partial.counts == gate.Counts(total=1, passed=1)
+    assert len(partial.nodeids) == 2
+
+    complete = gate._load_gate_report(report)
+    assert complete.error.startswith("invalid pytest report:")
+
+
 def test_runtime_problems_reject_a_manifest_revision_mismatch(tmp_path):
     versions = tmp_path / "VERSIONS.md"
     versions.write_text(

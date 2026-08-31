@@ -96,6 +96,7 @@ _MAX_INBOUND_KINDS = 256
 _MAX_INBOUND_FRAMES_PER_KIND = 32
 _MAX_INBOUND_FRAMES = 256
 _MAX_INBOUND_BYTES = 4 * 1024 * 1024
+_DEFAULT_ACCEPT_TIMEOUT_SECONDS = 30.0
 
 # Socket I/O is non-blocking so closing a link cannot strand a writer behind a
 # full kernel buffer.  These short polls also let cancellation/close state be
@@ -418,17 +419,18 @@ class TcpSerialLink:
         local_rom_version: str,
         *,
         host: str = "127.0.0.1",
-        accept_timeout_s: float | None = None,
+        accept_timeout_s: float | None = _DEFAULT_ACCEPT_TIMEOUT_SECONDS,
         cancel_event: threading.Event | None = None,
         ready_event: threading.Event | None = None,
     ) -> TcpSerialLink:
         """Bind ``(host, port)`` and wait for one peer connection.
 
-        The historical call with no timeout or cancellation arguments keeps
-        its blocking behavior.  Lifecycle owners can provide
-        ``accept_timeout_s`` and/or ``cancel_event`` to make the wait
-        bounded.  ``ready_event`` is set after the listener is bound and
-        accepting, which lets a connector start without a guessed sleep.
+        The default accept deadline is finite. Lifecycle owners can provide
+        ``accept_timeout_s`` and/or ``cancel_event`` to use a shorter or
+        cancellable wait; explicitly passing ``None`` without cancellation
+        retains the legacy unbounded behavior for diagnostic use only.
+        ``ready_event`` is set after the listener is bound and accepting,
+        which lets a connector start without a guessed sleep.
         """
         host = validate_loopback_host(host)
         if accept_timeout_s is not None:
