@@ -221,14 +221,12 @@ class LinkPair:
             rf.B = 0
             rf.C = 0
 
-        try:
-            pba.hook_deregister(bank, addr)
-        except Exception:
-            pass
-        try:
-            pbb.hook_deregister(bank, addr)
-        except Exception:
-            pass
+        deregister_a = getattr(pba, "hook_deregister", None)
+        if callable(deregister_a):
+            deregister_a(bank, addr)
+        deregister_b = getattr(pbb, "hook_deregister", None)
+        if callable(deregister_b):
+            deregister_b(bank, addr)
         pba.hook_register(bank, addr, lambda _: skip(pba, mem_a, mem_b), None)
         pbb.hook_register(bank, addr, lambda _: skip(pbb, mem_b, mem_a), None)
 

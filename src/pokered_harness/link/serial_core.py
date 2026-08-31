@@ -64,7 +64,7 @@ if _PYBOY_AVAILABLE:
 
     # ``Serial`` is the bit-accurate class post-Agent-A. Alias it as
     # ``SerialCore`` for back-compat.
-    _PyBoySerial = getattr(_pyboy_serial, "Serial")
+    _PyBoySerial = _pyboy_serial.Serial
 
     # Prefer PyBoy's own ``SerialCore`` alias if Agent A exported one;
     # otherwise use ``Serial`` directly.
@@ -159,14 +159,14 @@ __all__ = [
     "CYCLES_PER_BYTE_DMG",
     "CYCLES_PER_EDGE_DMG",
     "IF_SERIAL",
-    "LocalBackend",
     "MAX_CYCLES",
-    "NullBackend",
     "ROLE_EXTERNAL",
     "ROLE_INTERNAL",
     "SC_CLOCK_SOURCE",
     "SC_CLOCK_SPEED",
     "SC_TRANSFER_ENABLE",
+    "LocalBackend",
+    "NullBackend",
     "SerialBackend",
     "SerialCore",
 ]

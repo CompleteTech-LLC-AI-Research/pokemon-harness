@@ -300,9 +300,9 @@ class PyBoyLinkSession:
             raise RuntimeError("SerialCore is unavailable; can't promote legacy serial")
         core = SerialCore(getattr(serial, "cgb_mode", False))
         if hasattr(serial, "SB"):
-            core.set_SB(getattr(serial, "SB"))
+            core.set_SB(serial.SB)
         if hasattr(serial, "SC"):
-            raw_sc = getattr(serial, "SC")
+            raw_sc = serial.SC
             core.set_SC(raw_sc)
             core.SC = raw_sc
         for attr in ("last_cycles", "clock"):
@@ -401,7 +401,7 @@ class PyBoyLinkSession:
         set_sb = getattr(core, "set_SB", None)
         set_sc = getattr(core, "set_SC", None)
         if not callable(set_sb) or not callable(set_sc):
-            raise RuntimeError(
+            raise TypeError(
                 "network role initialization requires native Serial.set_SB "
                 "and Serial.set_SC"
             )
@@ -555,7 +555,7 @@ class PyBoyLinkSession:
                 f"attached instances, have {len(self._pyboys)}"
             )
         if not isinstance(chunk_cycles, int) or isinstance(chunk_cycles, bool):
-            raise ValueError("chunk_cycles must be a positive integer")
+            raise TypeError("chunk_cycles must be a positive integer")
         if chunk_cycles <= 0:
             raise ValueError("chunk_cycles must be a positive integer")
         # ``mb.tick`` returns after one CPU instruction in singlestep mode,

@@ -95,10 +95,9 @@ class Party:
 
 def parse_party(memory: MemoryLike, symbols: SymbolTable) -> Party:
     count = symbols.read_u8(memory, "wPartyCount")
-    if count > MAX_PARTY_SLOTS:
-        # Defensive clamp: engine invariant, but we never want to scan into
-        # the name table past slot 6 if a save is corrupt or uninitialised.
-        count = MAX_PARTY_SLOTS
+    # Defensive clamp: engine invariant, but we never want to scan into
+    # the name table past slot 6 if a save is corrupt or uninitialised.
+    count = min(count, MAX_PARTY_SLOTS)
 
     if count == 0:
         return Party(count=0, mons=())
