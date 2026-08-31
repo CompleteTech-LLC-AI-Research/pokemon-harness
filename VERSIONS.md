@@ -6,12 +6,11 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: `PARTIAL` current audit candidate; the functional source boundary is
-`23ea392` (2026-08-31). The final-head fast gate at that boundary is unit
-415/415 and timing 35/35 across five repetitions. The
-stateful evidence was collected at the code-equivalent `2ac09fb` boundary:
-local 46/46 and remote 11/11 passed for the canonical color-Red listener and
-color-Blue connector roles. An isolated remote Red/Blue trade passed 1/1 in
-229.37 seconds, but the same trade timed out under concurrent stateful load.
+`db86a34` (2026-08-31). The exact-head fast gate at that boundary is unit
+444/444 and timing 35/35 across five repetitions. Source-equivalent stateful
+evidence at `23ea392` is local 46/46, remote 11/11, and trade 2/2 for the
+canonical color-Red listener and color-Blue connector roles. A concurrent
+trade later took 480.5 seconds, so load stability remains open.
 The historical complete real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` remains separate evidence, not
 current sign-off. Uncommitted worktree changes are excluded.
@@ -21,7 +20,8 @@ repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
 2/2. Current local Red/Yellow trade and battle pass, while the remote battle
 case is only a controlled native-serial diagnostic because its driver selects
 LinkMenu through `_install_linkmenu_autoselect` and
-`_force_linkmenu_selection`. Other link rows remain unsupported or unverified.
+`_force_linkmenu_selection`. A no-hook rerun timed out after 902.36 seconds.
+Other link rows remain unsupported or unverified.
 
 Symbol hashes and audited generator provenance for the inputs are recorded
 below. The remaining release decision is `PARTIAL` because the complete

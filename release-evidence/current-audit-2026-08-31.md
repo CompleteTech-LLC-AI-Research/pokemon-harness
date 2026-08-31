@@ -3,26 +3,29 @@
 Status: `PARTIAL` — not production-ready.
 
 This record describes the isolated candidate with functional source at
-`23ea392`. The stateful real-ROM tiers were collected at the code-equivalent
-`2ac09fb` boundary; the final-head fast unit/remote rerun was at `23ea392`.
-Later commits only update audit records. Intervening functional commits fix
-production-gate parsing, preserve virtualenv paths, or annotate deliberate
-cleanup exception suppression. No ROM, symbol, fixture, save-state, or secret
+`db86a34`. Source-equivalent stateful real-ROM tiers were collected at
+`23ea392`; the exact-head fast unit gate was rerun at `db86a34`. Later commits
+only update audit records. Intervening functional commits harden runtime
+bootstrap, MCP lifecycle/cancellation, production-gate coverage, and evidence
+verification. No ROM, symbol, fixture, save-state, or secret
 is included here.
 
 ## Passing evidence
 
-- The locked unit gate passed `415/415` tests.
+- The locked exact-head unit gate passed `444/444` tests.
 - Timing passed `35/35` cases across five repetitions.
 - The gate preflight validated all five pinned ROM inputs, three symbol files,
   and three ordinary link fixtures by SHA-1.
-- The stateful local tier passed `46/46` with real ROMs and matching fixtures.
-- The canonical remote transport tier passed `11/11` for color Red as the
+- The source-equivalent stateful local tier passed `46/46` with real ROMs and
+  matching fixtures.
+- The source-equivalent canonical remote transport tier passed `11/11` for
+  color Red as the
   listener/internal-clock and color Blue as the connector/external-clock.
 - The local strict Red/Yellow trade and battle paths passed. The trade compares
   complete game-owned party records and the battle reaches a real move turn.
-- An isolated Red/Blue subprocess trade passed `1/1` in `229.37` seconds,
-  including full party-record equality and native bit-level serial traffic.
+- The source-equivalent trade tier passed `2/2`, including full party-record
+  equality and native bit-level serial traffic; a concurrent trade later took
+  `480.5` seconds.
 - A wheel built from the candidate installed in a clean environment outside
   the checkout. The MCP stdio smoke passed `3/3` for an explicit color-Red
   ROM/SYM pair without checkout-local `PYTHONPATH` or `VERSIONS.md`.
@@ -36,7 +39,8 @@ is included here.
   production load stability and no-flake behavior are not established.
 - The mechanical battle tier passed `2/2`, but its remote subprocess driver
   selects LinkMenu with `_install_linkmenu_autoselect` and
-  `_force_linkmenu_selection`. It is controlled native-serial diagnostic
+  `_force_linkmenu_selection`. A no-hook rerun timed out after `902.36` seconds
+  before both peers reached battle. It is controlled native-serial diagnostic
   evidence, not authentic user-driven remote battle acceptance.
 - The broad suite is not a clean release gate, and locked repository-wide Ruff
   reports `528` findings, including legacy and vendored-runtime code.

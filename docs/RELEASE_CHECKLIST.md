@@ -32,26 +32,25 @@ Full-gate snapshot:
   battle passed, including both full party-record swaps and move-turn progress.
 
 Current candidate rerun evidence (2026-08-31, source-hardening, teardown,
-packaging, and evidence fixes included):
+packaging, gate, and evidence fixes included):
 
-- unit: 415/415 passed;
+- exact-head unit: 444/444 passed;
 - timing: 35/35 passed across five repetitions;
-- local: 46/46 passed at the default scheduler slice;
-- remote: 11/11 passed for the canonical color-Red listener and color-Blue
-  connector roles; and
-- strict local Red/Yellow trade and battle passed at the library's default
-  scheduler slice (the tighter 64-cycle rerun also passed); and
-- an isolated Red/Blue subprocess trade passed 1/1 in 229.37 seconds, while
-  the same trade timed out when the stateful tiers ran concurrently; and
+- source-equivalent stateful local: 46/46 passed at the default scheduler
+  slice;
+- source-equivalent remote: 11/11 passed for the canonical color-Red listener
+  and color-Blue connector roles;
+- source-equivalent strict trade: 2/2 passed, including the subprocess trade;
+- current MCP lifecycle: 74/74 passed; and
 - the mechanical battle tier passed 2/2, but its remote case uses a
   deterministic LinkMenu RAM/hook selector and is not user-driven evidence.
 
 These current counts supersede the corresponding historical unit count for
-this candidate. The stateful counts were collected at the code-equivalent
-`2ac09fb` boundary; the final-head fast unit/remote rerun was at functional
-source boundary `23ea392`. Later candidate commits only update the audit
-records. The intervening functional commits fix gate parsing, preserve
-virtualenv paths, and annotate deliberate cleanup suppression. Sanitized
+this candidate. The stateful counts were collected at the source-equivalent
+`23ea392` boundary; the exact-head fast unit rerun was at functional source
+boundary `db86a34`. The intervening functional commits harden runtime
+bootstrap, MCP lifecycle/cancellation, gate coverage, and evidence
+verification. Sanitized
 per-tier evidence bundles were retained outside the checkout with
 `--evidence-dir`; a single complete release evidence bundle is still not
 attached to this tree.
@@ -61,8 +60,9 @@ Yellow fixture pair, and the remote transport pass is evidence for the exact
 color-Red listener / color-Blue connector subprocess pair. The isolated remote
 trade uses native serial payloads and full party-record checks, but the
 concurrent timeout means load-stable trade is not certified. The remote battle
-driver uses a LinkMenu selection hook; native serial payload checks do not turn
-that into fully user-driven gameplay. None of this certifies unrun or
+driver uses a LinkMenu selection hook; a no-hook rerun timed out after 902.36
+seconds, and native serial payload checks do not turn the controlled diagnostic
+into fully user-driven gameplay. None of this certifies unrun or
 reversed-role rows.
 
 These are evidence boundaries, not waived checklist items. The candidate

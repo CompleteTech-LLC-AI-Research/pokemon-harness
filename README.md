@@ -10,7 +10,7 @@ symbol files, save states, or other ROM-derived artifacts.
 ## Release status
 
 This repository is an audited candidate, not a production release. The
-current functional source boundary is `23ea392`; the historical implementation
+current functional source boundary is `db86a34`; the historical implementation
 boundary at `1046a541e0003923aec6000b6b383c6eaafeaa48` is retained separately.
 The baseline at
 `e219fb5` was not production-certified.
@@ -22,15 +22,17 @@ boundary, not a claim that every listed capability is a finished product:
 |---|---|---|
 | Single-session loading, input, state parsing, and save/load | Clean wheel MCP smoke: 3/3 | On 2026-08-31, an installed wheel outside the checkout passed tool discovery, stepping, game-state parsing, and save/load with explicit Red color ROM/SYM hashes. The wider five-ROM smoke evidence remains historical. |
 | MCP stdio server for one session | Current startup pinning is strict | MCP enforces ROM, symbol, PyBoy version, and exact vendored fork revision when `VERSIONS.md` is available; wheel launches also require explicit ROM/SYM pins. |
-| In-process `LinkPair` | Red/Yellow strict trade and battle pass | The current local real-ROM gate passed 46/46, including strict Red/Yellow party swap and one complete battle turn; the broader Red/Blue/Yellow matrix remains diagnostic. |
-| Remote TCP transport and MCP lifecycle | 11/11 canonical remote tests pass | Native MCP attach/HELLO, two-process LinkMenu, and native serial paths pass for color-Red listener + color-Blue connector on localhost. Reversed roles remain uncertified. |
-| Remote full trade | Isolated Red/Blue subprocess pass; concurrency-sensitive | The standalone subprocess test passed full 44-byte party-record exchange in 229.37s. The same acceptance tier timed out when four expensive tiers were run concurrently, so load robustness is not signed off. |
+| In-process `LinkPair` | Source-equivalent Red/Yellow strict trade and battle pass | The stateful gate passed 46/46 at the `23ea392` source-equivalent boundary, including strict Red/Yellow party swap and one complete battle turn. The broader matrix remains diagnostic and requires a final exact-head rerun. |
+| Remote TCP transport and MCP lifecycle | Source-equivalent 11/11; current MCP lifecycle 74/74 | Native MCP attach/HELLO, two-process LinkMenu, and native serial paths pass for color-Red listener + color-Blue connector on localhost; the current lifecycle suite also passes 74/74. Reversed roles remain uncertified. |
+| Remote full trade | Source-equivalent 2/2; concurrency-sensitive | The isolated trade tier passed full party-record exchange at the `23ea392` boundary, but a concurrent run timed out once and a later concurrent run took 480.5s. Load robustness is not signed off. |
 | Link battle | Local authentic pass; remote controlled diagnostic only | The mechanical battle tier passed 2/2, but the remote half uses `_install_linkmenu_autoselect`/`_force_linkmenu_selection`; it is not user-driven production evidence. |
 | Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
 The candidate includes the explicit `tests/__init__.py` package boundary and
 the bundled PyBoy source tree. Symbol hashes and audited generator provenance
-are recorded in [`VERSIONS.md`](VERSIONS.md). Full release sign-off remains
+are recorded in [`VERSIONS.md`](VERSIONS.md). The exact-head unit gate passes
+444/444 and the timing tier passes 35/35 across five repetitions. Full release
+sign-off remains
 `PARTIAL`: per-tier evidence bundles are retained outside the checkout, but
 the broad lint/matrix gates, remote no-bypass battle path, load-stable remote
 trade, reversed roles, fixture provenance, and independent review remain open.
@@ -48,14 +50,15 @@ unverified.
 
 Current exact-head evidence and blockers are explicit:
 
-- unit 415/415 and timing 35/35 across five repetitions pass; local 46/46 and
-  remote 11/11 pass, while the concurrent four-tier run produced only 1/2
-  trade passes before the isolated remote trade rerun passed;
+- unit 444/444 and timing 35/35 across five repetitions pass at `db86a34`;
+  source-equivalent stateful evidence is local 46/46, remote 11/11, and trade
+  2/2 at `23ea392`, while a concurrent trade later took 480.5s;
 - the repository-wide Ruff audit reports 528 findings under the locked Ruff
   version, and the broad suite has
   not become a clean production gate;
-- the battle tier's remote subprocess path uses a LinkMenu RAM/hook selector,
-  so it cannot be counted as authentic user-driven battle acceptance;
+- the no-hook remote battle attempt timed out after 902.36s before both peers
+  reached the battle path; the existing controlled diagnostic still uses a
+  LinkMenu RAM/hook selector and cannot be counted as authentic acceptance;
 - per-ROM single-session coverage, reversed listener/connector roles, native
   platform coverage, battle-fixture provenance, load-stable remote trade, and
   independent review remain incomplete; and

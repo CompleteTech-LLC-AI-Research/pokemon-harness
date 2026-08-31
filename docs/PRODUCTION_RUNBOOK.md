@@ -13,17 +13,16 @@ record.
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
 2/2. The current source-hardening candidate's functional changes reach
-`23ea392`. Its final-head fast gate at that boundary passes unit 415/415 and
-timing 35/35 across five repetitions; the stateful gate at the code-equivalent
-`2ac09fb` boundary passed local 46/46 and remote
-11/11 for the canonical color-Red listener/internal-clock and color-Blue
-connector/external-clock roles. The strict local Red/Yellow trade and battle
-cases pass. An isolated Red/Blue subprocess trade also passed 1/1 in 229.37
-seconds, but the same stateful tiers run concurrently timed out that trade, so
-load stability is not certified. The mechanical battle tier passed 2/2, but
-its remote case uses `_install_linkmenu_autoselect` and
+`db86a34`. Its exact-head fast gate passes unit 444/444 and timing 35/35
+across five repetitions. Source-equivalent stateful evidence at `23ea392`
+passed local 46/46, remote 11/11, and trade 2/2 for the canonical color-Red
+listener/internal-clock and color-Blue connector/external-clock roles. The
+current MCP lifecycle suite passes 74/74. A concurrent trade later took
+480.5 seconds, so load stability is not certified. The mechanical battle tier
+passed 2/2, but its remote case uses `_install_linkmenu_autoselect` and
 `_force_linkmenu_selection`; it is controlled native-serial evidence, not
-user-driven battle acceptance. Symbol hashes and audited generator provenance are in
+user-driven battle acceptance. A no-hook rerun timed out after 902.36 seconds
+before both peers reached battle. Symbol hashes and audited generator provenance are in
 [`VERSIONS.md`](../VERSIONS.md). Overall status is `PARTIAL`; the exact open
 items are listed in [the release checklist](RELEASE_CHECKLIST.md).
 
@@ -432,12 +431,13 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The fast current gate passes unit 415/415 and timing 35/35 across five
-   repetitions; the stateful code-equivalent run passed local 46/46 and
-   remote 11/11. The isolated remote trade passed, but the concurrent
-   stateful run timed it out. The broader Blue/Red/Yellow battle matrix is
-   not certified, and the remote battle result uses a LinkMenu selector hook.
-   Blue↔Blue and Blue→Red remain diagnostic only.
+1. The exact-head fast gate passes unit 444/444 and timing 35/35 across five
+   repetitions; the source-equivalent stateful run passed local 46/46 and
+   remote 11/11, and the source-equivalent trade tier passed 2/2. A
+   concurrent trade later took 480.5 seconds. The no-hook remote battle
+   attempt timed out after 902.36 seconds; the existing remote battle result
+   uses a LinkMenu selector hook. The broader Blue/Red/Yellow battle matrix is
+   not certified, and Blue↔Blue and Blue→Red remain diagnostic only.
 2. The historical full real-ROM gate passed, but its complete output was not
    retained as a release evidence bundle. Current per-tier runs use
    `--evidence-dir` and retain sanitized bundles outside the checkout; a single
