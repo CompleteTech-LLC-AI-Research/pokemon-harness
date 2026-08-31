@@ -12,20 +12,17 @@ record.
 
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
-2/2. Current candidate evidence on the scheduler-fix boundary is 398/398 unit
-tests, 35/35 timing cases across five repetitions, and current strict local
-Red/Yellow trade plus battle passes at the library's default scheduler slice
-(the tighter `POKERED_LINK_CHUNK_CYCLES=64` rerun also passes); the broader
-local matrix is now 46/46 at the default slice. The current remote tier has
-now passed
-11/11 tests for the canonical color-Red listener/internal-clock and color-Blue
-connector/external-clock roles. Strict local evidence covers color Red +
-Yellow; strict remote evidence covers color Red as listener/internal-clock and
-color Blue as connector/external-clock. The current strict trade and battle
-tiers each pass 2/2 (local Red/Yellow plus controlled remote Red/Blue).
-The remote subprocess driver controls the LinkMenu choice with a test hook, so
-the remote result is controlled native-serial acceptance, not full user-driven
-menu gameplay. Symbol hashes and audited generator provenance are in
+2/2. The current source-hardening candidate reaches `ab89c39`. Its fast gate
+passes unit 414/414 and timing 35/35 across five repetitions; the stateful
+gate at the code-equivalent `2ac09fb` boundary passed local 46/46 and remote
+11/11 for the canonical color-Red listener/internal-clock and color-Blue
+connector/external-clock roles. The strict local Red/Yellow trade and battle
+cases pass. An isolated Red/Blue subprocess trade also passed 1/1 in 229.37
+seconds, but the same stateful tiers run concurrently timed out that trade, so
+load stability is not certified. The mechanical battle tier passed 2/2, but
+its remote case uses `_install_linkmenu_autoselect` and
+`_force_linkmenu_selection`; it is controlled native-serial evidence, not
+user-driven battle acceptance. Symbol hashes and audited generator provenance are in
 [`VERSIONS.md`](../VERSIONS.md). Overall status is `PARTIAL`; the exact open
 items are listed in [the release checklist](RELEASE_CHECKLIST.md).
 
@@ -167,7 +164,7 @@ The default gate checks five pinned ROM paths, three symbol paths, and three
 default fixture paths before running all required tiers.
 
 The current candidate has not passed a repository-wide Ruff audit: the locked
-`ruff check .` reports 529 findings, including legacy and vendored-runtime
+`ruff check .` reports 528 findings, including legacy and vendored-runtime
 code. Treat lint cleanup as a remaining release task even when the scoped
 production gate is green. The current full-gate counts below must not be read
 as evidence that the broad suite or lint gate is clean.
@@ -240,9 +237,11 @@ python -m pytest -q -ra \
 ```
 
 Repeat with the appropriate path, symbol file, and hash for each release input
-that will be advertised. On 2026-08-30, this MCP stdio module passed for all
-five explicit rows: stock/color Red, stock/color Blue, and Yellow. These tests
-prove only the tested boot/state/MCP surface; they do not prove link gameplay.
+that will be advertised. On 2026-08-31, a clean wheel installed outside the
+checkout passed this module 3/3 for the explicit color-Red input. The wider
+five-row stock/color Red, stock/color Blue, and Yellow smoke evidence remains
+an earlier snapshot, not current all-row sign-off. These tests prove only the
+tested boot/state/MCP surface; they do not prove link gameplay.
 
 ### Tier C: real symbol and local-link smoke
 
@@ -316,15 +315,15 @@ python -m pytest -q -ra \
 ```
 
 The LinkMenu test is a transport smoke test. The strict subprocess trade test
-also compares complete party-mon records, and the strict subprocess battle
-test requires both processes to reach move exchange and execution. The current
-tests use a hook in each test driver to select the same LinkMenu mode; that
-controlled setup is not a user-driven menu acceptance. Once setup is complete,
-the trade and battle payloads travel through native bit-level serial traffic,
-and the tests reject the out-of-band exchange counter. Their live-serial driver
-uses cooperative phase rendezvous so a waiting process continues servicing
-serial IRQs. Record both child traces and the exact deadline when investigating
-a regression.
+uses cooperative phase rendezvous and compares complete party-mon records; its
+isolated run passed, but its concurrent-tier timeout remains a load-stability
+blocker. The strict subprocess battle test requires both processes to reach
+move exchange and execution, but its driver currently selects LinkMenu through
+`_install_linkmenu_autoselect` and `_force_linkmenu_selection`. That is a
+controlled battle diagnostic, not user-driven menu acceptance. Once setup is
+complete, both payloads travel through native bit-level serial traffic, and the
+tests reject the out-of-band exchange counter. Record both child traces and the
+exact deadline when investigating a regression.
 
 ## 5. Generate link fixtures safely
 
@@ -423,15 +422,17 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current required runtime tiers pass in separate bounded runs (unit
-   398/398, local 46/46, remote 11/11, strict trade 2/2, and strict battle
-   2/2), but the broader Blue/Red/Yellow battle matrix is not certified.
+1. The fast current gate passes unit 414/414 and timing 35/35 across five
+   repetitions; the stateful code-equivalent run passed local 46/46 and
+   remote 11/11. The isolated remote trade passed, but the concurrent
+   stateful run timed it out. The broader Blue/Red/Yellow battle matrix is
+   not certified, and the remote battle result uses a LinkMenu selector hook.
    Blue↔Blue and Blue→Red remain diagnostic only.
 2. The historical full real-ROM gate passed, but its complete output was not
    retained as a release evidence bundle. Current per-tier runs use
    `--evidence-dir` and retain sanitized bundles outside the checkout; a single
    complete release bundle still needs to be assembled from one full run.
-3. The locked `ruff check .` reports 529 findings, and the broad suite is not a clean
+3. The locked `ruff check .` reports 528 findings, and the broad suite is not a clean
    production gate.
 4. The five-row single-session matrix, reversed listener/connector roles,
    native-platform builds, battle-fixture provenance, and an independent review

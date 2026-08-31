@@ -5,20 +5,22 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: historical audit snapshot from 2026-08-30 against implementation
-revision `1046a541e0003923aec6000b6b383c6eaafeaa48`. The complete real-ROM
-gate was rerun at that exact clean revision after the runtime, link, MCP, and
-gate integration commits. The current candidate has since changed the link
-scheduler, transport lifecycle, battle driver, and fixture evidence; its
-affected gates must be rerun before release. Uncommitted worktree changes are
-excluded from this historical snapshot.
+Status: `PARTIAL` current audit candidate through `ab89c39` (2026-08-31).
+The fast gate is unit 414/414 and timing 35/35 across five repetitions. The
+stateful evidence was collected at the code-equivalent `2ac09fb` boundary:
+local 46/46 and remote 11/11 passed for the canonical color-Red listener and
+color-Blue connector roles. An isolated remote Red/Blue trade passed 1/1 in
+229.37 seconds, but the same trade timed out under concurrent stateful load.
+The historical complete real-ROM snapshot at
+`1046a541e0003923aec6000b6b383c6eaafeaa48` remains separate evidence, not
+current sign-off. Uncommitted worktree changes are excluded.
 
-The full-gate snapshot is unit 372/372, timing 35/35 across five repetitions,
-local 46/46, remote 11/11, strict trade 2/2, and strict battle 2/2. The
-stateful evidence is limited to local color Red/Yellow and remote color Red
-listener + color Blue connector. Remote acceptance uses a test-driver
-LinkMenu selection hook; it is native-serial payload evidence, not full
-user-driven gameplay. Other link rows remain unsupported or unverified.
+The historical full-gate snapshot is unit 372/372, timing 35/35 across five
+repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
+2/2. Current local Red/Yellow trade and battle pass, while the remote battle
+case is only a controlled native-serial diagnostic because its driver selects
+LinkMenu through `_install_linkmenu_autoselect` and
+`_force_linkmenu_selection`. Other link rows remain unsupported or unverified.
 
 Symbol hashes and audited generator provenance for the inputs are recorded
 below. The remaining release decision is `PARTIAL` because the complete
@@ -140,12 +142,16 @@ their ROM hashes remain independently pinned above.
 ## Hash and version enforcement
 
 `Session.from_files(..., expected_rom_sha1=...)` hashes the ROM and raises
-`VersionMismatch` on a mismatch. `expected_pyboy_version` performs the
-corresponding PyBoy check when a caller supplies it. The MCP entry point:
+`VersionMismatch` on a mismatch. `expected_symbol_sha1` performs the matching
+symbol-file check, and `expected_pyboy_version` plus
+`expected_pyboy_revision` verify the bundled PyBoy version and exact nonempty
+fork revision when a caller supplies them. The MCP entry point:
 
 1. uses `POKERED_ROM_SHA1` when set;
 2. otherwise selects the SHA-1 whose `Path` matches the configured ROM; and
-3. fails closed when no matching pin is available, unless
+3. enforces the matching symbol SHA-1 and exact PyBoy revision when
+   `VERSIONS.md` is available; and
+4. fails closed when no matching pin is available, unless
    `POKERED_SKIP_SHA1` is explicitly set for diagnostics.
 
 An explicit hash is still required by release policy, and a release run must
@@ -195,10 +201,12 @@ variant fixtures (`cable_club-vanilla.state` and
 
 The current repository has diagnostic local/remote matrices plus strict local
 Red/Yellow trade and battle acceptance tests and strict independent-process
-Red/Blue trade and battle acceptance tests. Those acceptance cases pass in the
-bundled source-compatible runtime, including full party-record equality after
-the remote trade and real move exchange/execution during the remote battle.
-Consult the test-surface table in the
+Red/Blue trade and battle acceptance tests. The isolated remote trade passes
+in the bundled source-compatible runtime, including full party-record equality,
+but its concurrent-tier timeout leaves load stability open. The remote battle
+case reaches native move exchange/execution, yet its deterministic LinkMenu
+RAM/hook selector makes it controlled diagnostic evidence rather than a
+user-driven acceptance. Consult the test-surface table in the
 [README](README.md) and run the required tiers in the
 [production runbook](docs/PRODUCTION_RUNBOOK.md) before using any other row as
 release evidence.

@@ -10,32 +10,30 @@ symbol files, save states, or other ROM-derived artifacts.
 ## Release status
 
 This repository is an audited candidate, not a production release. The
-historical implementation snapshot `1046a541e0003923aec6000b6b383c6eaafeaa48`
-passed the complete real-ROM gate once; the current candidate has since
-changed the link scheduler, transport lifecycle, battle driver, and fixture
-evidence. Those historical counts are retained as a boundary, not as current
-sign-off. The baseline at `e219fb5` was not production-certified.
+current source-hardening candidate reaches `ab89c39` and preserves the
+historical implementation boundary at
+`1046a541e0003923aec6000b6b383c6eaafeaa48` separately. The baseline at
+`e219fb5` was not production-certified.
 
 The counts below are therefore an evidence snapshot with an explicit commit
 boundary, not a claim that every listed capability is a finished product:
 
 | Capability | Current status | Evidence boundary |
 |---|---|---|
-| Single-session loading, input, state parsing, and save/load | Current five-row MCP stdio evidence pass | On 2026-08-30, `tests/test_mcp_stdio_integration.py` passed with explicit ROM, symbol, and SHA-1 values for stock/color Red, stock/color Blue, and Yellow. The scripted intro walkthrough remains Red-specific. |
-| MCP stdio server for one session | Current five-row explicit-ROM smoke pass | Each of the five ROM rows passed tool discovery, stepping, game-state resource parsing, and save/load roundtrip with the constrained MCP 1.x dependency. |
-| In-process `LinkPair` | Candidate-tested; Red/Yellow strict trade and battle pass | The current candidate passes the strict color-Red/Yellow party swap and one complete battle turn with the normalized scheduler; the broader Red/Blue/Yellow matrix remains diagnostic. |
-| Remote TCP transport and MCP lifecycle | Current candidate 11/11 remote gate pass for canonical localhost roles | The current gate passed native MCP attach/HELLO, two-process LinkMenu, and native serial paths for color Red listener + color Blue connector. The LinkMenu choice is controlled by the acceptance driver. |
-| Remote full trade | Current controlled native-serial acceptance: 2/2 | The current independent-process color Red/Blue test compares both full 44-byte party-mon records; it uses a test-driver LinkMenu selection hook, not full user-driven gameplay. |
-| Link battle | Current Red/Yellow + Red/Blue controlled acceptance; broader matrix incomplete | The current candidate resolves one strict local Red/Yellow move turn and one strict remote Red/Blue move turn. Blue↔Blue, Blue→Red, reversed roles, and other rows are not certified. |
+| Single-session loading, input, state parsing, and save/load | Clean wheel MCP smoke: 3/3 | On 2026-08-31, an installed wheel outside the checkout passed tool discovery, stepping, game-state parsing, and save/load with explicit Red color ROM/SYM hashes. The wider five-ROM smoke evidence remains historical. |
+| MCP stdio server for one session | Current startup pinning is strict | MCP enforces ROM, symbol, PyBoy version, and exact vendored fork revision when `VERSIONS.md` is available; wheel launches also require explicit ROM/SYM pins. |
+| In-process `LinkPair` | Red/Yellow strict trade and battle pass | The current local real-ROM gate passed 46/46, including strict Red/Yellow party swap and one complete battle turn; the broader Red/Blue/Yellow matrix remains diagnostic. |
+| Remote TCP transport and MCP lifecycle | 11/11 canonical remote tests pass | Native MCP attach/HELLO, two-process LinkMenu, and native serial paths pass for color-Red listener + color-Blue connector on localhost. Reversed roles remain uncertified. |
+| Remote full trade | Isolated Red/Blue subprocess pass; concurrency-sensitive | The standalone subprocess test passed full 44-byte party-record exchange in 229.37s. The same acceptance tier timed out when four expensive tiers were run concurrently, so load robustness is not signed off. |
+| Link battle | Local authentic pass; remote controlled diagnostic only | The mechanical battle tier passed 2/2, but the remote half uses `_install_linkmenu_autoselect`/`_force_linkmenu_selection`; it is not user-driven production evidence. |
 | Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
 The candidate includes the explicit `tests/__init__.py` package boundary and
 the bundled PyBoy source tree. Symbol hashes and audited generator provenance
 are recorded in [`VERSIONS.md`](VERSIONS.md). Full release sign-off remains
-`PARTIAL`: current per-tier evidence bundles are retained outside the
-checkout, but a single complete release bundle and independent review are not
-attached, the broad lint and diagnostic matrix are not clean, and several
-matrix, fixture-provenance, role, and security boundaries remain open.
+`PARTIAL`: per-tier evidence bundles are retained outside the checkout, but
+the broad lint/matrix gates, remote no-bypass battle path, load-stable remote
+trade, reversed roles, fixture provenance, and independent review remain open.
 
 The historical local diagnostic matrix reached LinkMenu and completed the trade
 route for all nine ordered Red/Blue/Yellow version pairs. Seven of nine battle
@@ -48,19 +46,19 @@ acceptance rerun also passes); targeted Blue↔Blue and Blue→Red checks reach
 LinkMenu, but their complete battle behavior and reversed roles remain
 unverified.
 
-Current release blockers are explicit:
+Current exact-head evidence and blockers are explicit:
 
-- the current required runtime gates are green (unit 398/398, local 46/46,
-  remote 11/11, strict trade 2/2, and strict battle 2/2), but the broader
-  product matrix and a single retained full-gate evidence bundle are not
-  certified;
-- the repository-wide Ruff audit reports 529 findings under the locked Ruff
+- unit 414/414 and timing 35/35 across five repetitions pass; local 46/46 and
+  remote 11/11 pass, while the concurrent four-tier run produced only 1/2
+  trade passes before the isolated remote trade rerun passed;
+- the repository-wide Ruff audit reports 528 findings under the locked Ruff
   version, and the broad suite has
   not become a clean production gate;
-- the audited implementation gate output is not retained in this tree as a
-  complete evidence bundle;
+- the battle tier's remote subprocess path uses a LinkMenu RAM/hook selector,
+  so it cannot be counted as authentic user-driven battle acceptance;
 - per-ROM single-session coverage, reversed listener/connector roles, native
-  platform coverage, and independent review remain incomplete; and
+  platform coverage, battle-fixture provenance, load-stable remote trade, and
+  independent review remain incomplete; and
 - TCP is deliberately localhost-only because it has no authentication or
   encryption. Cross-host use is unsupported until an authenticated encrypted
   channel exists.
