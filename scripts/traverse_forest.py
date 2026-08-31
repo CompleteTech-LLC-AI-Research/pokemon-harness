@@ -30,6 +30,7 @@ def pathfind(s: Session, goal: tuple[int, int]) -> str | None:
              "--state", tp, "--goal-xy", f"{goal[0]},{goal[1]}",
              "--save-path-to", op],
             env=os.environ, capture_output=True, text=True, timeout=30,
+            check=False,
         )
         if r.returncode != 0:
             return None

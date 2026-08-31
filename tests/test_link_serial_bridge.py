@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from pokered_harness.events import EventBus
@@ -239,7 +241,7 @@ def test_from_sessions_missing_required_link_symbol_propagates():
 def test_bridge_endpoint_is_frozen_dataclass():
     sa, _, _ = _make_session()
     ep = BridgeEndpoint(session=sa, send_addr=1, receive_addr=2, status_addr=3)
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         ep.send_addr = 99  # type: ignore[misc]
 
 

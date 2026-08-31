@@ -6,7 +6,10 @@ bootstrap is for the two explicit runtime modes used by development and
 performance testing:
 
 * ``source`` (default): disable Cython and install the same Python sources;
-* ``cython``: build the same sources with PyBoy's Cython extensions.
+* ``cython``: attempt to build the same sources with PyBoy's Cython
+  extensions. This is an optional diagnostic mode; source mode is the
+  supported production runtime and a Cython compile failure is reported
+  without weakening the source-runtime contract.
 
 Both modes use the checked-in source snapshot.  No network VCS checkout,
 ``PYTHONPATH`` override, or machine-specific path is involved.
@@ -18,6 +21,7 @@ import argparse
 import importlib
 import importlib.machinery
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,7 +41,7 @@ RUNTIME_MODULES = (
 
 
 def _pip_command() -> list[str]:
-    """Return a usable pip command for the active interpreter.
+    """Return a usable install-command prefix for the active interpreter.
 
     ``uv venv`` and some embedded Python distributions intentionally omit
     pip.  The bootstrap command must still work in those environments, so
@@ -52,16 +56,23 @@ def _pip_command() -> list[str]:
         check=False,
     )
     if probe.returncode == 0:
-        return command
+        return [*command, "install"]
 
     bootstrap = subprocess.run(
         [sys.executable, "-m", "ensurepip", "--upgrade"],
         check=False,
     )
     if bootstrap.returncode != 0:
+        # ``uv venv`` deliberately omits pip unless seeded, and distro Python
+        # builds may omit ensurepip altogether. Use uv's interpreter-targeted
+        # installer when it is available rather than silently falling back to
+        # a different Python executable.
+        uv = shutil.which("uv")
+        if uv is not None:
+            return [uv, "pip", "install", "--python", sys.executable]
         raise SystemExit(
             "pip is unavailable and ensurepip failed; install pip in the "
-            "active environment before running bootstrap_pyboy.py"
+            "active environment (or install uv) before running bootstrap_pyboy.py"
         )
 
     verify = subprocess.run(
@@ -74,7 +85,7 @@ def _pip_command() -> list[str]:
         raise SystemExit(
             "ensurepip completed but the active interpreter still cannot run python -m pip"
         )
-    return command
+    return [*command, "install"]
 
 
 def _validate_source() -> None:
@@ -156,7 +167,10 @@ def main(argv: list[str] | None = None) -> int:
         "--mode",
         choices=("source", "cython"),
         default="source",
-        help="runtime build mode (default: source)",
+        help=(
+            "runtime build mode (default: source); source is the supported "
+            "production mode, cython is optional diagnostic validation"
+        ),
     )
     parser.add_argument(
         "--check",
@@ -178,13 +192,19 @@ def main(argv: list[str] | None = None) -> int:
 
     command = [
         *_pip_command(),
-        "install",
         "--force-reinstall",
+        "--no-deps",
         CYTHON_REQUIREMENT,
         str(PYBOY_SOURCE),
     ]
     result = subprocess.run(command, cwd=ROOT, env=env, check=False)
     if result.returncode:
+        if args.mode == "cython":
+            print(
+                "Cython runtime build failed for the pinned PyBoy source; "
+                "the supported production runtime remains --mode source.",
+                file=sys.stderr,
+            )
         return result.returncode
     _verify_runtime(args.mode)
     return 0

@@ -7,6 +7,7 @@ import socket as _socket
 import threading
 import time as _time
 from contextlib import asynccontextmanager, suppress
+from types import SimpleNamespace
 
 import pytest
 
@@ -323,6 +324,24 @@ def test_link_pair_without_peer_raises():
     link = LinkState(peer_session=None)
     with pytest.raises(ValueError, match="peer session not configured"):
         dispatch_tool(s, "link_pair", {}, link=link)
+
+
+def test_real_pyboy_without_native_serial_contract_fails_closed():
+    primary, _, _ = _session()
+    peer, _, _ = _session()
+
+    RealPyBoy = type(
+        "RealPyBoy",
+        (),
+        {"__module__": "pyboy.pyboy"},
+    )
+    primary._pyboy = RealPyBoy()
+    primary._pyboy.mb = SimpleNamespace(serial=SimpleNamespace())
+
+    link = LinkState(peer_session=peer)
+    with pytest.raises(McpHarnessError, match="bit-accurate serial contract") as exc_info:
+        dispatch_tool(primary, "link_pair", {}, link=link)
+    assert exc_info.value.code == "unsupported_runtime"
 
 
 def test_link_pair_transitions_to_paired():

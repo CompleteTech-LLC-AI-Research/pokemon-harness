@@ -96,7 +96,7 @@ def run_pathfinder(state_path, goal, out_path, rom, sym, sha1):
     kw = ["--state", str(state_path), "--save-path-to", str(out_path),
           "--goal-xy", goal]
     r = subprocess.run([sys.executable, "-u", str(script), *kw],
-                       env=env, capture_output=True, text=True)
+                       env=env, capture_output=True, text=True, check=False)
     if r.returncode != 0:
         raise RuntimeError(f"pathfinder failed: {r.stderr}")
     return out_path.read_text().strip()
@@ -244,8 +244,8 @@ def main() -> int:
                 if drv.gs().overworld.map_id == 0x2F:
                     break
             continue
-        result = ftb.walk_path(drv, path, label=f"forest{attempt}",
-                               stop_map_ids=(0x2F,))
+        ftb.walk_path(drv, path, label=f"forest{attempt}",
+                      stop_map_ids=(0x2F,))
         # After walking, if we're on the warp row but didn't transition
         # (goal tile was reached but UP not pressed), nudge.
         gs = drv.gs()

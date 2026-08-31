@@ -38,6 +38,7 @@ def pathfind(session: Session, goal_xy: tuple[int, int]) -> str | None:
              "--goal-xy", f"{goal_xy[0]},{goal_xy[1]}",
              "--save-path-to", out_path],
             env=env, capture_output=True, text=True, timeout=30,
+            check=False,
         )
         if r.returncode != 0:
             print(f"pathfinder error: {r.stderr[-500:]}", flush=True)
@@ -119,7 +120,6 @@ def apply_path_with_recompute(drv, label: str, goal_xy: tuple[int, int] | None,
             print(f"[{label}] pathfinder found no route", flush=True)
             return False
         print(f"[{label}] attempt {attempt}: {len(path)} steps", flush=True)
-        made_progress = False
         for c in path:
             gs = drv.gs()
             if gs.overworld.map_id in goal_map_ids:
@@ -129,10 +129,7 @@ def apply_path_with_recompute(drv, label: str, goal_xy: tuple[int, int] | None,
                 resolve_battle_vw(drv)
                 # path might be stale now — recompute
                 break
-            before = (gs.overworld.x, gs.overworld.y)
             drv.press(DIR[c])
-            if (drv.gs().overworld.x, drv.gs().overworld.y) != before:
-                made_progress = True
         # If we consumed the path and are at/near goal_xy, try pushing one more tile
         if goal_xy:
             gs = drv.gs()

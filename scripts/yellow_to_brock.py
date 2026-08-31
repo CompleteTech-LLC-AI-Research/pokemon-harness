@@ -92,7 +92,6 @@ def run_intro_to_bedroom(session: Session) -> None:
     cmi_addr = session.symbols.addr_of("wCurrentMenuItem")
     presets_picked = 0
     menu_picked = False
-    prev_mmi = mem[mmi_addr]
     for i in range(600):
         mmi = mem[mmi_addr]
         # Preset menus use wCurrentMenuItem=0 on open (cursor top) and
@@ -108,14 +107,12 @@ def run_intro_to_bedroom(session: Session) -> None:
             menu_picked = True
             print(f"  intro: picked preset #{presets_picked} at A-press {i}",
                   flush=True)
-            prev_mmi = mem[mmi_addr]
             continue
         # Re-arm pick detection once the menu is no longer showing its
         # first-open state (cursor moved off top by us, or menu closed
         # entirely).
         if menu_picked and not (mmi == 3 and cmi == 0):
             menu_picked = False
-        prev_mmi = mmi
         # Text advances slowly — step 60+ ticks per A-press so each
         # press actually completes a line rather than being eaten as
         # fast-forward.
@@ -376,7 +373,7 @@ def run_pathfinder(state_path, goal, out_path, rom, sym, sha1):
     kw = ["--state", str(state_path), "--save-path-to", str(out_path),
           "--goal-xy", goal]
     r = subprocess.run([sys.executable, "-u", str(script), *kw],
-                       env=env, capture_output=True, text=True)
+                       env=env, capture_output=True, text=True, check=False)
     if r.returncode != 0:
         raise RuntimeError(f"pathfinder failed: {r.stderr}")
     return out_path.read_text().strip()
@@ -577,7 +574,7 @@ def run_route2_grind(session: Session, outdir: Path,
             print(f"  [grind] grafted Double Kick + restored moves: "
                   f"L{m.level} moves={list(m.moves)} pp={list(m.pp)}",
                   flush=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - optional RAM graft is best effort
             print(f"  [grind] move-restore failed: {e}", flush=True)
     # Option-B top-up if we didn't reach L15 — same pattern as Red/Blue.
     need_topup = getattr(result, "final_level", 0) < 15

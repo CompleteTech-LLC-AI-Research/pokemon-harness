@@ -39,11 +39,13 @@ from pokered_harness.link.symbols import LinkRole
 from pokered_harness.link.transport import LinkTransport
 
 __all__ = [
+    "CYCLES_PER_BYTE_DMG",
+    "CYCLES_PER_EDGE_DMG",
+    "STATUS_EXTERNAL",
+    "STATUS_INTERNAL",
     "AgentSync",
     "BridgeEndpoint",
     "CoordinatedBackend",
-    "CYCLES_PER_BYTE_DMG",
-    "CYCLES_PER_EDGE_DMG",
     "InProcessSerialLink",
     "LinkPair",
     "LinkRole",
@@ -52,12 +54,9 @@ __all__ = [
     "LockstepCoordinator",
     "NetworkBackend",
     "NetworkBackendError",
-    "validate_loopback_host",
     "NullBackend",
     "PyBoyLinkSession",
     "RemoteLinkEndpoint",
-    "STATUS_EXTERNAL",
-    "STATUS_INTERNAL",
     "SerialBackend",
     "SerialBridge",
     "SerialCore",
@@ -67,4 +66,5 @@ __all__ = [
     "SerialLinkProtocolError",
     "SerialLinkTimeout",
     "TcpSerialLink",
+    "validate_loopback_host",
 ]

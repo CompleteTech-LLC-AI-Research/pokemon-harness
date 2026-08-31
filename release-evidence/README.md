@@ -5,10 +5,11 @@ files observed in the operator-managed `tests/fixtures/link` root. It records
 file size, SHA-1, SHA-256, the expected ROM/symbol pins, and the provenance
 known at the time of the audit.
 
-[`current-audit-2026-08-30.md`](current-audit-2026-08-30.md) records the
+[`current-audit-2026-08-31.md`](current-audit-2026-08-31.md) records the
 current isolated-candidate gate counts, runtime identity, explicit-ROM MCP
-coverage, and known non-gates. It is a sanitized evidence summary, not a copy
-of emulator traces or ROM-derived artifacts.
+coverage, and known non-gates. The 2026-08-30 file is retained as a
+superseded historical snapshot. These are sanitized evidence summaries, not
+copies of emulator traces or ROM-derived artifacts.
 
 The `.state` files are ROM-derived, ignored by Git, and intentionally not
 distributed by this repository. The manifest is an evidence index, not a

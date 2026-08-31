@@ -44,6 +44,7 @@ def _pathfind(state_bytes: bytes, goal_xy: tuple[int, int]) -> str | None:
              "--goal-xy", f"{goal_xy[0]},{goal_xy[1]}",
              "--save-path-to", out_path],
             env=env, capture_output=True, text=True, timeout=30,
+            check=False,
         )
         if r.returncode != 0:
             return None
@@ -180,13 +181,11 @@ def nav_to_route2_grass(drv, max_steps: int = 100) -> bool:
                 # Use the first portion of ROUTE2_TO_FOREST_GATE_PATH
                 # (up×9, left, up×5, left×2, up, left, up×5) lands at (4, 51)
                 short_path = ["up"]*9 + ["left"] + ["up"]*5 + ["left"]*2 + ["up"] + ["left"] + ["up"]*5
-                steps_done = 0
                 for d in short_path:
                     gs = drv.gs()
                     if gs.battle.active: drv.resolve_battle(); break
                     if gs.overworld.y <= 52 and gs.overworld.x <= 5: break
                     drv.press(d)
-                    steps_done += 1
                 continue
             # In grass area
             return True

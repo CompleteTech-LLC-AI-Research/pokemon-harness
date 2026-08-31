@@ -61,6 +61,7 @@ of a second local core.
 
 from __future__ import annotations
 
+import threading
 from typing import Protocol, runtime_checkable
 
 from pokered_harness.link.network_backend import NetworkBackend
@@ -155,6 +156,8 @@ class PyBoyLinkSession:
         *,
         host: str = "127.0.0.1",
         local_rom_version: str | None = None,
+        accept_timeout_s: float = 10.0,
+        cancel_event: threading.Event | None = None,
     ) -> PyBoyLinkSession:
         """Bind ``(host, port)``, accept one peer, return the session.
 
@@ -163,10 +166,16 @@ class PyBoyLinkSession:
         ``mb.serial.backend``. The peer process is expected to have
         used :meth:`connect` and to be driving its own PyBoy.
 
-        Blocks until a peer connects.
+        Blocks until a peer connects, the bounded accept deadline expires, or
+        ``cancel_event`` is set. The bounded default prevents a forgotten
+        listener from retaining a thread and socket forever.
         """
         backend, _listener = NetworkBackend.listen(
-            port, host=host, local_rom_version=local_rom_version
+            port,
+            host=host,
+            local_rom_version=local_rom_version,
+            accept_timeout_s=accept_timeout_s,
+            cancel_event=cancel_event,
         )
         # Close the listener — we only accept one connection.
         try:
@@ -187,6 +196,7 @@ class PyBoyLinkSession:
         *,
         timeout_s: float = 10.0,
         local_rom_version: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> PyBoyLinkSession:
         """Connect to a peer running :meth:`listen` on ``(host, port)``.
 
@@ -199,6 +209,7 @@ class PyBoyLinkSession:
             port,
             timeout_s=timeout_s,
             local_rom_version=local_rom_version,
+            cancel_event=cancel_event,
         )
         return cls(
             network_backend=backend,
@@ -300,9 +311,9 @@ class PyBoyLinkSession:
             raise RuntimeError("SerialCore is unavailable; can't promote legacy serial")
         core = SerialCore(getattr(serial, "cgb_mode", False))
         if hasattr(serial, "SB"):
-            core.set_SB(getattr(serial, "SB"))
+            core.set_SB(serial.SB)
         if hasattr(serial, "SC"):
-            raw_sc = getattr(serial, "SC")
+            raw_sc = serial.SC
             core.set_SC(raw_sc)
             core.SC = raw_sc
         for attr in ("last_cycles", "clock"):
@@ -401,7 +412,7 @@ class PyBoyLinkSession:
         set_sb = getattr(core, "set_SB", None)
         set_sc = getattr(core, "set_SC", None)
         if not callable(set_sb) or not callable(set_sc):
-            raise RuntimeError(
+            raise TypeError(
                 "network role initialization requires native Serial.set_SB "
                 "and Serial.set_SC"
             )
@@ -465,12 +476,20 @@ class PyBoyLinkSession:
         session cleanup path) so ``detach`` retains its existing behavior of
         only restoring one PyBoy's serial backend.
         """
+        detach_error: BaseException | None = None
         try:
             for pyboy in list(reversed(self._pyboys)):
                 self.detach(pyboy)
+        except BaseException as exc:
+            detach_error = exc
+            raise
         finally:
             if self._network_backend is not None:
-                self._network_backend.stop()
+                stopped = self._network_backend.stop()
+                if not stopped and detach_error is None:
+                    raise RuntimeError(
+                        "network backend workers did not stop before cleanup deadline"
+                    )
 
     # --- accessors -----------------------------------------------------
 
@@ -555,7 +574,7 @@ class PyBoyLinkSession:
                 f"attached instances, have {len(self._pyboys)}"
             )
         if not isinstance(chunk_cycles, int) or isinstance(chunk_cycles, bool):
-            raise ValueError("chunk_cycles must be a positive integer")
+            raise TypeError("chunk_cycles must be a positive integer")
         if chunk_cycles <= 0:
             raise ValueError("chunk_cycles must be a positive integer")
         # ``mb.tick`` returns after one CPU instruction in singlestep mode,

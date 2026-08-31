@@ -5,30 +5,30 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate; the functional source boundary is
-`3aad196` (2026-08-31). The current full-gate snapshot is unit 457/457, local
-46/46, remote 13/13, strict trade 2/2, strict battle 2/2, and timing 35/35
-across five repetitions. The remote tier and the canonical strict trade and
-battle roles pass; load-stable full-matrix support remains open.
-The historical complete real-ROM snapshot at
-`1046a541e0003923aec6000b6b383c6eaafeaa48` remains separate evidence, not
-current sign-off. Uncommitted worktree changes are excluded.
+Status: `PARTIAL` current audit candidate; the current source boundary is
+`d8198ef` (2026-08-31). Its asset-free production gate collected 604 tests,
+passed unit 477/477, and passed timing 35/35 across five repetitions. The
+gate's scoped result is `PASS`; it does not run ROM-backed tiers. Its matrix
+audit collected all nine ordered pairs, six reversed-role rows, nine local
+variant rows, and three strict trade plus three strict battle entry points,
+but the strict acceptance declaration is incomplete with 15 uncovered cases
+per operation; collection-only matrix runtime was not run.
 
-The historical full-gate snapshot is unit 372/372, timing 35/35 across five
-repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
-2/2. Current local Red/Yellow trade and battle pass, and the exact-head
-Red/Blue remote battle smoke passes with ordinary menu input and native serial
-move exchange. Other link rows remain unsupported or unverified.
+The previously recorded selected-tier run at `db72be6` passed local 46/46,
+remote 13/13, strict trade 3/3, and strict battle 3/3 with the pinned BYO
+assets. The remote strict rows cover both color Red/Blue listener/connector
+directions. These results predate the current transport hardening and must be
+rerun for current-candidate sign-off; they do not constitute a full-gate result
+because the strict matrix declaration remains incomplete. The historical complete
+real-ROM snapshot at
+`1046a541e0003923aec6000b6b383c6eaafeaa48` is also separate evidence.
 
-Symbol hashes and audited generator provenance for the inputs are recorded
-below. The remaining release decision is `PARTIAL` because the complete
-implementation-revision gate output is not retained in the release tree,
-product lint and the broad matrix are not clean,
-per-ROM and reversed-role coverage is incomplete, and independent
-review/native-platform evidence is missing.
-The current Lane G audit at `3aad196` leaves 79 product Ruff findings under
-the default `ruff check .` boundary; the pinned vendored runtime is excluded
-from that product audit and has 227 findings when checked explicitly.
+Symbol hashes and fixture byte/provenance records are recorded below and in
+[`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
+The remaining release decision is `PARTIAL` because strict matrix declaration
+and full runtime coverage, vanilla source provenance, broad-suite coverage,
+native-platform coverage, retained complete evidence, and independent review
+are incomplete. `ruff check .` is clean for the configured product boundary.
 
 ## Runtime
 
@@ -165,11 +165,14 @@ them. A fixture named `cable_club.state` is therefore not interchangeable
 between stock, color-variant, and Yellow inputs. Keep fixtures local under
 `tests/fixtures/link/<version>/`; do not commit them.
 
-The existing producer is
+The bounded, pinned ordinary-fixture producer is
 [`scripts/produce_cable_club_fixture.py`](scripts/produce_cable_club_fixture.py).
 It requires a matching, user-generated `cerulean_pc.state` source and accepts
 explicit `--version`, `--variant`, `--source`, `--rom`, `--sym`, and `--out`
-arguments. There is no separate Yellow producer. The producer's successful
+arguments. It validates ROM and symbol hashes plus the bundled PyBoy version
+and fork revision from this file. Its default wall-clock budget is 180 seconds
+and its default movement budget is 64 directional inputs; either budget can be
+overridden explicitly. There is no separate Yellow producer. A successful
 output only establishes a fixture at the expected map/tile; it does not prove
 that a trade or battle works.
 
@@ -183,33 +186,48 @@ distinct from the default Cable Club fixtures:
 | Remote isolated trade diagnostic | color Red listener + color Blue connector | `red/cable_club.state`, `blue/cable_club.state` |
 | Remote no-hook battle smoke | color Red listener + color Blue connector | `red/cable_club-battle.state`, `blue/cable_club-battle.state` |
 
-The battle files are separately captured legal states; the existing producer
-does not create them. Every state must be captured from the exact ROM bytes it
-loads, and the release record must include each fixture hash, source-state
-provenance, runtime identity, and capture command. The three default fixture
-hashes observed in the full-gate audit were:
+The tracked
+[`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)
+creates a separate derived battle state from an ordinary state. It validates
+the selected ROM, creates a legal multi-mon party, and the acceptance runner
+loads the resulting immutable bytes without preparing or mutating party state
+at runtime. This is deterministic fixture preparation, not proof of a human
+captured battle state.
 
-| Fixture | Observed SHA-1 | Evidence boundary |
+The tracked
+[`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json)
+is the source of truth for fixture sizes, SHA-1/SHA-256 values, expected ROM
+and symbol pins, source-state hashes, runtime identity, and capture command
+templates. The states remain operator-managed, ignored, and outside the
+repository. Its current entries are:
+
+| Fixture | Observed SHA-1 | Provenance boundary |
 |---|---|---|
-| `red/cable_club.state` | `546d7edaf7c3a987f86ae86a97066c7d619eefbb` | External fixture used by the audit; not committed |
-| `blue/cable_club.state` | `0809d2f8e514c7fb714a73a7b13f120b26a40c38` | External fixture used by the audit; not committed |
-| `yellow/cable_club.state` | `37df4dbdb512cd3febdc2d536281683476291d3b` | External fixture used by the audit; not committed |
+| `red/cable_club.state` | `546d7edaf7c3a987f86ae86a97066c7d619eefbb` | `verified`, canonical color-Red ordinary reproduction |
+| `red/cable_club-vanilla.state` | `affd77c20bf4600b8057ea33683ed58a2ac86157` | `partial`, retained source is not proven vanilla-ROM captured |
+| `red/cable_club-battle.state` | `4343278b018187ed4bf7c4eda3b202097456f048` | `verified`, derived from canonical color-Red ordinary state |
+| `red/cable_club-battle-vanilla.state` | `63d00b469b07e3969bcd82be1047031265be0b3a` | `partial`, derived from partial vanilla ordinary provenance |
+| `blue/cable_club.state` | `0809d2f8e514c7fb714a73a7b13f120b26a40c38` | `verified`, canonical color-Blue ordinary reproduction |
+| `blue/cable_club-vanilla.state` | `cff5349b55f8fdf47a5af63d674977103aeb44d6` | `partial`, retained source is not proven vanilla-ROM captured |
+| `blue/cable_club-battle.state` | `6aac3aabe0f6ad662dec218682c2254b3954a10a` | `verified`, derived from canonical color-Blue ordinary state |
+| `blue/cable_club-battle-vanilla.state` | `442c1497c0398f7e54ceade9739ddd1b5b9456fc` | `partial`, derived from partial vanilla ordinary provenance |
+| `yellow/cable_club.state` | `37df4dbdb512cd3febdc2d536281683476291d3b` | `verified`, canonical Yellow ordinary reproduction |
+| `yellow/cable_club-battle.state` | `78c7d0b32006b11baa9ac9c71efc73b0a8d807b9` | `verified`, derived from canonical Yellow ordinary state |
 
-Battle-fixture hashes and complete source-state provenance were not retained in
-this tree, so fixture provenance remains an open release item. Vanilla
-variant fixtures (`cable_club-vanilla.state` and
-`cable_club-battle-vanilla.state`) are also not part of the certified scope.
+The canonical color Red, color Blue, and Yellow fixture rows have byte-level
+reproduction evidence. The vanilla ordinary reproduction attempt was bounded
+and did not establish that the retained source was captured against the
+vanilla ROM; vanilla rows therefore remain `PARTIAL` and are not supported
+release rows. Manifest byte validation still requires every listed entry when
+the manifest is checked with `--fixture-root`.
 
-The current repository has diagnostic local/remote matrices plus strict local
-Red/Yellow trade and battle acceptance tests, an independent-process Red/Blue
-trade assertion, and a no-hook Red/Blue remote battle smoke. The current strict
-trade and battle tiers pass, but the separate remote tier fails its LinkMenu
-subprocess row in repeated runs, so full remote stability is open. The remote
-battle case reaches native move exchange/execution through ordinary menu input;
-broader role and version coverage remains unverified. Consult
-the test-surface table in the
-[README](README.md) and run the required tiers in the
-[production runbook](docs/PRODUCTION_RUNBOOK.md) before using any other row as
+The repository has strict local Red/Yellow trade and battle entry points and
+strict remote color-Red/color-Blue trade and battle entry points in both
+listener/connector directions, plus broader diagnostic matrices. Their
+passing results do not certify the uncovered ordered pairs. Consult the
+test-surface table in
+the [README](README.md) and run the required tiers in the
+[production runbook](docs/PRODUCTION_RUNBOOK.md) before using any row as
 release evidence.
 
 ## Performance

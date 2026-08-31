@@ -71,6 +71,7 @@ _SYM = """\
 00:D31D wNumBagItems
 00:D31E wBagItems
 00:6AB1 Trade_ShowPlayerMon
+00:216F Serial_ExchangeBytes
 """
 
 
@@ -155,6 +156,18 @@ def test_pair_silently_skips_missing_progress_symbol():
     pair.pair()  # must not raise
     # And the firing-able hook (Trade_ShowPlayerMon) should still be there.
     assert (0x00, 0x6AB1) in pb_a._hooks
+
+
+def test_pair_tolerates_missing_exchange_bytes_hook():
+    pair, _, _, _, pb_b, _ = _make_pair()
+
+    def _missing_hook(_bank: int, _addr: int) -> None:
+        raise ValueError("Breakpoint not found for bank and addr")
+
+    pb_b.hook_deregister = _missing_hook
+    pair.pair()
+
+    assert (0x00, 0x216F) in pb_b._hooks
 
 
 def test_pair_progress_hook_emits_events():

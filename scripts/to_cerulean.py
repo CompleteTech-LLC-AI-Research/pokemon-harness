@@ -481,7 +481,6 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
             drv.resolve_battle()
         if drv.joy_locked():
             session.step(120, render=True)
-        after = (drv.gs().overworld.x, drv.gs().overworld.y)
         # No A-mash on stall here — would trigger adjacent-NPC dialog
         # and absorb subsequent direction presses. If we're genuinely
         # in dialog we'll clear it via the B-mash at the TOP of the
@@ -550,7 +549,7 @@ def _run_pathfinder_ex(state_path: Path, goal: str, out_path: Path,
     if expand_npc_neighbors:
         kw += ["--expand-npc-neighbors"]
     r = subprocess.run([sys.executable, "-u", str(script), *kw],
-                       env=env, capture_output=True, text=True)
+                       env=env, capture_output=True, text=True, check=False)
     if r.returncode != 0:
         raise RuntimeError(f"pathfinder failed: {r.stderr}")
     return out_path.read_text().strip()
@@ -877,8 +876,7 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             return False
         # Try A* waypoints first, then greedy_east as fallback.
         ftb._activate_repel(drv)
-        start_x = drv.gs().overworld.x
-        a_star_progressed = False
+
         for goal, label in waypoints:
             goal_x = int(goal.split(",")[0])
             goal_y = int(goal.split(",")[1])
@@ -909,7 +907,6 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             print(f"  {label}_b{blackouts}: {res} -> "
                   f"{_gs_summary(session)}", flush=True)
             if res in ("done", "stop", "map", "reached"):
-                a_star_progressed = True
                 # If we reached the final north-edge waypoint (60, 0),
                 # try the UP press now to trigger the Route 4 map
                 # connection. Otherwise subsequent waypoints may walk
@@ -996,7 +993,7 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
                 mem[base + _OFFSET_HP + 1] = 1
                 mem[base + _OFFSET_STATUS] = 1 << 3  # PSN
                 print("  poked Pikachu HP=1 + POISON", flush=True)
-            except Exception as e:
+            except (AttributeError, LookupError, TypeError) as e:
                 print(f"  poke failed: {e}", flush=True)
             forced = False
             for _ in range(120):
@@ -1051,8 +1048,8 @@ def _perturb_rng(session: Session, seed_hash: int) -> None:
         mem = session._pyboy.memory  # type: ignore[attr-defined]
         mem[0xFFD3] = (seed_hash * 37 + 123) & 0xFF
         mem[0xFFD4] = (seed_hash * 211 + 17) & 0xFF
-    except Exception:
-        pass
+    except (AttributeError, LookupError, TypeError):
+        return
 
 
 def _recover_to_route4_west(drv: rtb.Driver, session: Session,
@@ -1081,9 +1078,9 @@ def _recover_to_route4_west(drv: rtb.Driver, session: Session,
             break
     # East to Route 3
     ftb._activate_repel(drv)
-    res = _pathfind_walk(drv, session, outdir, "35,19",
-                         "rec_pewter_east",
-                         rom, sym, sha1, stop_map_ids=(M_ROUTE_3,))
+    _pathfind_walk(drv, session, outdir, "35,19",
+                   "rec_pewter_east",
+                   rom, sym, sha1, stop_map_ids=(M_ROUTE_3,))
     for _ in range(8):
         if drv.gs().overworld.map_id == M_ROUTE_3:
             break
@@ -1162,7 +1159,7 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                         mem[base + _OFFSET_HP + 0] = 0
                         mem[base + _OFFSET_HP + 1] = 1
                         mem[base + _OFFSET_STATUS] = 1 << 3
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110 - optional poison poke must not abort navigation
                         pass
                     for _ in range(120):
                         if drv.gs().overworld.map_id != cur_map:

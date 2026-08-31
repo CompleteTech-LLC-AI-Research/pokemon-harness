@@ -16,7 +16,7 @@ class _FakeRegisterFile:
     and write ``PC``/``SP`` to simulate a ``ret``. The remote link
     endpoint relies on this; tests need the same shape."""
 
-    __slots__ = ("A", "B", "C", "D", "E", "F", "HL", "SP", "PC")
+    __slots__ = ("A", "B", "C", "D", "E", "F", "HL", "PC", "SP")
 
     def __init__(self) -> None:
         self.A = 0

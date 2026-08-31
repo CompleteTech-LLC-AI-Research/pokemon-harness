@@ -221,14 +221,21 @@ class LinkPair:
             rf.B = 0
             rf.C = 0
 
-        try:
-            pba.hook_deregister(bank, addr)
-        except Exception:
-            pass
-        try:
-            pbb.hook_deregister(bank, addr)
-        except Exception:
-            pass
+        deregister_a = getattr(pba, "hook_deregister", None)
+        if callable(deregister_a):
+            try:
+                deregister_a(bank, addr)
+            except ValueError:
+                # PyBoy raises when no callback is registered at the
+                # address.  That is a normal case for a ROM/session whose
+                # legacy hook was never installed.
+                pass
+        deregister_b = getattr(pbb, "hook_deregister", None)
+        if callable(deregister_b):
+            try:
+                deregister_b(bank, addr)
+            except ValueError:
+                pass
         pba.hook_register(bank, addr, lambda _: skip(pba, mem_a, mem_b), None)
         pbb.hook_register(bank, addr, lambda _: skip(pbb, mem_b, mem_a), None)
 

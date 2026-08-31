@@ -2,56 +2,51 @@
 
 Status: `PARTIAL` — not production-ready.
 
-This record describes the isolated candidate with functional source at
-`25e231c`. The exact-head fast, local, and remote gates were rerun at that
-boundary. The exact-head no-hook Red/Blue remote battle smoke also passed.
-The exact-head trade tier finished 1/2 because its TCP subprocess exceeded its
-720-second child bound. Intervening functional commits harden runtime
-bootstrap, MCP lifecycle/cancellation, production-gate coverage, lint scope,
-and evidence verification. No ROM, symbol, fixture, save-state, or secret
-is included here.
+This record describes the isolated candidate's functional boundary at
+`d8198ef` (`d8198ef` transport/runtime hardening commit; this documentation
+update follows). No ROM, symbol, fixture, save-state, or
+secret is included here. External assets are supplied through the documented
+ROM and fixture roots.
 
 ## Passing evidence
 
-- The locked exact-head unit gate passed `445/445` tests.
-- Timing passed `35/35` cases across five repetitions.
-- The gate preflight validated all five pinned ROM inputs, three symbol files,
-  and three ordinary link fixtures by SHA-1.
-- The exact-head stateful local tier passed `46/46` with real ROMs and matching
-  fixtures.
-- The exact-head canonical remote transport tier passed `11/11` for color Red as the
-  listener/internal-clock and color Blue as the connector/external-clock.
-- The local strict Red/Yellow trade and battle paths passed. The trade compares
-  complete game-owned party records and the battle reaches a real move turn.
-- The exact-head no-hook Red/Blue remote battle smoke passed with ordinary menu
-  input and native bit-level move exchange.
-- The latest exact-head trade tier finished `1/2`; its local trade passed, but
-  the TCP subprocess exceeded its 720-second child bound. An earlier isolated
-  run passed, so load stability is not established.
-- A wheel built from the candidate installed in a clean environment outside
-  the checkout. The MCP stdio smoke passed `3/3` for an explicit color-Red
-  ROM/SYM pair without checkout-local `PYTHONPATH` or `VERSIONS.md`.
-- `uv lock --check`, `uv pip check`, source compilation, and the focused
-  configuration/session/MCP/link test set passed.
+- `scripts/production_gate.py --unit-only --repeat-timing 5` passed both
+  collection paths, unit `477/477`, and timing `35/35` in all five repeats
+  (604 collected tests).
+- With explicit ROM/SYM/SHA-1 inputs, MCP stdio and golden-path smoke checks
+  exited successfully for Red stock, Red color, Blue stock, Blue color, and
+  Yellow.
+- The selected real-ROM local tier passed `46/46` in `878.66s`; the selected
+  remote tier passed `13/13` in `48.54s`; strict trade passed `3/3` in
+  `576.47s`; strict battle passed `3/3` in `646.94s`. These selected results
+  were recorded at the prior functional boundary `db72be6` and require rerun
+  after the current transport hardening.
+- The fixture manifest schema and all 10 external fixture byte records passed
+  validation. Canonical color Red, color Blue, and Yellow ordinary/battle
+  bytes are recorded; vanilla source provenance remains partial.
+- `uv lock --check`, `uv pip check`, `ruff check .`, compilation, and focused
+  lifecycle/link tests passed. A clean exported editable install and wheel
+  install also passed `pip check`, source-runtime bootstrap, and MCP stdio
+  smoke (`3/3`).
+- Native link selection now fails closed for a real PyBoy that lacks the
+  bit-accurate serial contract. Network sends, public listener waits, and
+  worker teardown use bounded deadlines; remote MCP callers can require an
+  expected peer ROM label.
 
 ## Not signed off
 
-- The latest exact-head remote trade run timed out its 720-second child bound;
-  the tier finished 1/2 after local trade passed. An earlier isolated run
-  passed, but production load stability and no-flake behavior are not
-  established.
-- The broader battle matrix is not a clean release gate; unrun/reversed rows
-  remain outside the exact-head evidence.
-- The broad suite is not a clean release gate. Product Ruff leaves `101`
-  findings under the locked scope, while the explicitly audited vendored
-  runtime has `227` findings.
-- Reversed listener/connector roles, the complete Red/Blue/Yellow stateful
-  matrix, native Windows/Cython certification, and independent review remain
-  incomplete.
-- Battle-fixture hashes and source-state provenance were not retained in the
-  release record.
-- The complete current gate output is not retained as one in-tree evidence
-  bundle; sanitized per-tier bundles exist outside the checkout.
+- The strict declaration covers only three local/remote trade cases and three
+  local/remote battle cases; the matrix audit reports 15 undeclared cases per
+  operation. The collection-only audit is structural and does not run ROMs.
+- The current-candidate local, remote, trade, and battle real-ROM tiers have
+  not yet been rerun after `d8198ef`; the prior selected results are retained
+  as historical evidence, not current sign-off.
+- The full broad suite, native Windows/Cython attachment, load-stability
+  reruns, and independent review remain incomplete.
+- Vanilla ordinary fixture source provenance remains partial, and complete
+  sanitized per-tier gate output is not retained in-tree.
+- Cython mode does not expose the Python-visible serial contract required by
+  the current link layer; source mode is the only verified production mode.
 - TCP remains loopback-only and unauthenticated/unencrypted. Cross-host use is
   unsupported.
 

@@ -12,7 +12,11 @@ from collections import deque
 def _validate_byte(byte: int) -> int:
     # bool is an int subclass; reject it explicitly to avoid silent True→1 coercion.
     if not isinstance(byte, int) or isinstance(byte, bool):
-        raise ValueError(f"byte must be int in 0..255, got {type(byte).__name__}")
+        # Preserve the public transport contract: all invalid byte values
+        # use ValueError, including values with the wrong Python type.
+        raise ValueError(  # noqa: TRY004 - preserve the public ValueError contract
+            f"byte must be int in 0..255, got {type(byte).__name__}"
+        )
     if byte < 0 or byte > 0xFF:
         raise ValueError(f"byte must be in 0..255, got {byte}")
     return byte
