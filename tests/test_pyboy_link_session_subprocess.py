@@ -29,8 +29,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from tests._rom_assets import fixture_path, rom_path, sym_path
 
+from tests._rom_assets import fixture_path, rom_path, sym_path
 
 _REPO = Path(__file__).resolve().parents[1]
 
@@ -329,12 +329,10 @@ def test_subprocess_pair_resolves_battle_turn_over_tcp():
     """Strict Red/Blue remote battle acceptance with native serial traffic.
 
     The peer processes load legal, ROM-matched battle fixtures and drive the
-    real Cable Club battle path. The current peer driver selects the LinkMenu
-    mode with the deterministic `_install_linkmenu_autoselect` /
-    `_force_linkmenu_selection` RAM/hook path, so this is controlled native-
-    serial diagnostic evidence rather than user-driven battle acceptance. No
-    semantic byte/nibble exchange is installed; all exchange traffic must pass
-    through NetworkBackend's native bit-level serial transport.
+    real Cable Club battle path using ordinary directional/A input to select
+    Battle in LinkMenu. No semantic byte/nibble exchange or test-only game
+    state bypass is installed; all exchange traffic must pass through
+    NetworkBackend's native bit-level serial transport.
     """
     if not _battle_fixtures_ready():
         pytest.skip("Red and Blue color battle fixtures are required")

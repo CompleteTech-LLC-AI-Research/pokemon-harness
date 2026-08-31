@@ -136,33 +136,6 @@ def _validate_battle_party_fixture(session) -> str:
     return f"party_count={int(count)} species={species}"
 
 
-def _force_linkmenu_selection(session, selection: int) -> None:
-    """Write a concrete LinkMenu A-button choice into both vote buffers."""
-    recv_addr = session.symbols.addr_of("wLinkMenuSelectionReceiveBuffer")
-    send_addr = session.symbols.addr_of("wLinkMenuSelectionSendBuffer")
-    current_addr = session.symbols.addr_of("wCurrentMenuItem")
-    mem = session._pyboy.memory
-    mem[recv_addr] = selection
-    mem[recv_addr + 1] = selection
-    mem[send_addr] = selection
-    mem[send_addr + 1] = selection
-    mem[current_addr] = selection & 0x03
-
-
-def _install_linkmenu_autoselect(session, selection: int) -> bool:
-    """Force both LinkMenu vote buffers to a concrete A-button choice."""
-    label = "LinkMenu.exchangeMenuSelectionLoop"
-    if label not in session.symbols:
-        return False
-    bank, addr = session.symbols.bank_addr(label)
-
-    def _force(_ctx):
-        _force_linkmenu_selection(session, selection)
-
-    session._pyboy.hook_register(bank, addr + 3, _force, None)
-    return True
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--role", choices=("listen", "connect"), required=True)
@@ -664,12 +637,21 @@ def main() -> int:
             cooperative_sync(sync_id=11, timeout=120.0)
             log("sync: past link_menu battle barrier")
 
-            # Force A-on-COLOSSEUM (0xD5). This mirrors the forced
-            # trade hook used by the transport tests, but selects item 1
-            # instead of item 0.
-            forced = _install_linkmenu_autoselect(session, 0xD5)
-            log(f"battle link menu autoselect installed={forced}")
-            _force_linkmenu_selection(session, 0xD5)
+            # LinkMenu opens with TRADE selected (item 0); BATTLE is the
+            # next item (item 1). Select it with ordinary directional input
+            # in case a fixture or a prior menu leaves the cursor elsewhere,
+            # then commit the choice with A. No RAM writes or execution hooks
+            # may select the battle mode: this is the same user-input path
+            # an MCP client would use.
+            initial_item = current_menu_item()
+            for _ in range(3):
+                if initial_item in (None, 1):
+                    break
+                session.press("down", duration=4)
+                session.step(20)
+                initial_item = current_menu_item()
+            log(f"battle LinkMenu input selection; initial_item={initial_item}")
+            session.press("a", duration=4)
             session.step(20)
             shot("02_battle_menu")
 
@@ -680,7 +662,6 @@ def main() -> int:
                     and counters["CableClub_DoBattleOrTrade"][0] == 0
                 ):
                     break
-                _force_linkmenu_selection(session, 0xD5)
                 session.press("a", duration=4)
                 session.step(20)
             log("colosseum warp complete")
