@@ -6,11 +6,12 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: `PARTIAL` current audit candidate; the functional source boundary is
-`25e231c` (2026-08-31). The exact-head fast gate at that boundary is unit
-445/445 and timing 35/35 across five repetitions. Exact-head stateful evidence
-is local 46/46 and remote 11/11 for the canonical color-Red listener and
-color-Blue connector roles. The latest trade tier finished 1/2 because the TCP
-subprocess exceeded its 720-second child bound; load stability remains open.
+`b0791ee` (2026-08-31). The current full-gate snapshot is unit 453/453, local
+46/46, remote 12/13, strict trade 2/2, strict battle 2/2, and timing 35/35
+across five repetitions. The remote tier is red because the TCP LinkMenu
+subprocess row fails in repeated current runs; the strict trade and battle
+tiers pass independently for the canonical color-Red listener and color-Blue
+connector roles. Load-stable full-matrix support remains open.
 The historical complete real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` remains separate evidence, not
 current sign-off. Uncommitted worktree changes are excluded.
@@ -22,12 +23,12 @@ Red/Blue remote battle smoke passes with ordinary menu input and native serial
 move exchange. Other link rows remain unsupported or unverified.
 
 Symbol hashes and audited generator provenance for the inputs are recorded
-below. The remaining release decision is `PARTIAL` because the complete
-implementation-revision gate output is not retained as an evidence bundle,
-product lint and the broad matrix are not clean, per-ROM and
-reversed-role coverage is incomplete, and independent review/native-platform
-evidence is missing.
-The Lane G audit at `25e231c` leaves 101 product Ruff findings under the
+below. The remaining release decision is `PARTIAL` because the current remote
+tier is red, the complete implementation-revision gate output is not retained
+as an evidence bundle, product lint and the broad matrix are not clean,
+per-ROM and reversed-role coverage is incomplete, and independent
+review/native-platform evidence is missing.
+The Lane G audit at `b0791ee` leaves 101 product Ruff findings under the
 default `ruff check .` boundary; the pinned vendored runtime is excluded from
 that product audit and has 227 findings when checked explicitly.
 
@@ -203,11 +204,11 @@ variant fixtures (`cable_club-vanilla.state` and
 
 The current repository has diagnostic local/remote matrices plus strict local
 Red/Yellow trade and battle acceptance tests, an independent-process Red/Blue
-trade assertion, and a no-hook Red/Blue remote battle smoke. The latest exact-
-head remote trade exceeded its child deadline after the local trade passed,
-including full party-record equality in an earlier run, so load stability is
-open. The remote battle case reaches native move exchange/execution through
-ordinary menu input; broader role and version coverage remains unverified. Consult
+trade assertion, and a no-hook Red/Blue remote battle smoke. The current strict
+trade and battle tiers pass, but the separate remote tier fails its LinkMenu
+subprocess row in repeated runs, so full remote stability is open. The remote
+battle case reaches native move exchange/execution through ordinary menu input;
+broader role and version coverage remains unverified. Consult
 the test-surface table in the
 [README](README.md) and run the required tiers in the
 [production runbook](docs/PRODUCTION_RUNBOOK.md) before using any other row as

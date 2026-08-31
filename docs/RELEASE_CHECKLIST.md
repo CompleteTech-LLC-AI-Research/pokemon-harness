@@ -32,39 +32,41 @@ Full-gate snapshot:
   battle passed, including both full party-record swaps and move-turn progress.
 
 Current candidate rerun evidence (2026-08-31, source-hardening, teardown,
-packaging, gate, lint-boundary, and evidence fixes included):
+packaging, gate, lint-boundary, evidence, native trade, and native battle fixes
+included; candidate boundary `b0791ee`):
 
-- exact-head unit: 445/445 passed;
+- exact-head unit: 453/453 passed;
 - timing: 35/35 passed across five repetitions;
 - exact-head stateful local: 46/46 passed at the default scheduler slice;
-- exact-head remote: 11/11 passed for the canonical color-Red listener and
-  color-Blue connector roles;
-- exact-head no-hook Red/Blue remote battle smoke passed with ordinary menu
-  input and native serial move exchange;
+- exact-head remote: 12/13, with the LinkMenu subprocess row failing in
+  repeated current runs for the canonical color-Red listener and color-Blue
+  connector roles;
+- strict native trade: 2/2 passed;
+- strict no-hook Red/Blue remote battle: 2/2 passed with ordinary menu input
+  and native serial move exchange;
 - current MCP lifecycle: 74/74 passed; and
-- the latest exact-head trade tier finished 1/2 because its TCP subprocess
-  exceeded the 720-second child bound.
+- the current full gate is therefore red despite the passing local, trade,
+  battle, and timing tiers.
 
 These current counts supersede the corresponding historical unit count for
 this candidate. The exact-head fast and local/remote reruns were collected at
-functional source boundary `25e231c`. The exact-head trade result is retained
-as a failure because its TCP subprocess exceeded its child deadline; an
-earlier isolated trade pass does not establish stability. The intervening
-functional commits harden runtime bootstrap, MCP lifecycle/cancellation, gate
-coverage, lint boundaries, and evidence verification. Sanitized
+functional source boundary `b0791ee`. The remote LinkMenu failure is retained
+as a failure because it reproduced in the standalone remote rerun; passing
+strict trade and battle tiers do not override that red transport tier. The
+intervening functional commits harden runtime bootstrap, MCP lifecycle/cancellation,
+gate coverage, lint boundaries, native trade/battle drivers, and evidence
+verification. Sanitized
 per-tier evidence bundles were retained outside the checkout with
 `--evidence-dir`; a single complete release evidence bundle is still not
 attached to this tree.
 
 The local passes are real stateful acceptance evidence for the exact color-Red /
-Yellow fixture pair, and the remote transport pass is evidence for the exact
-color-Red listener / color-Blue connector subprocess pair. The isolated remote
-trade uses native serial payloads and full party-record checks, but the
-concurrent and exact-head timeout results mean load-stable trade is not
-certified. The exact-head remote battle driver uses ordinary menu input and
-passed without RAM writes or selection hooks; native serial payload checks and
-that single pass do not certify unrun or
-reversed-role rows.
+Yellow fixture pair. The remote transport evidence is partial for the exact
+color-Red listener / color-Blue connector subprocess pair because the LinkMenu
+row is red. The strict remote trade uses native serial payloads and full
+party-record checks, and the strict remote battle driver uses ordinary menu
+input without RAM writes or selection hooks; these passing tiers do not certify
+unrun or reversed-role rows.
 
 These are evidence boundaries, not waived checklist items. The candidate
 includes `tests/__init__.py`, the pinned vendor source files, and the gate
@@ -122,15 +124,18 @@ script, and the results were reproduced from the isolated clean checkout.
   snapshot. The scripted intro golden path remains specific to Red.
 - [x] Local link tests pass with matching ROM-specific fixtures and the
   release runtime.
-- [x] Remote transport tests pass with the color-Red listener/internal-clock
-  and color-Blue connector/external-clock roles recorded.
+- [ ] The required remote transport tier is green with the color-Red
+  listener/internal-clock and color-Blue connector/external-clock roles
+  recorded; the current result is 12/13 because the LinkMenu subprocess row
+  fails in repeated runs.
 - [ ] Reversed listener/connector roles are independently tested and certified.
 - [ ] Native-serial remote trade acceptance is repeatable in separate
   processes without fixture/runtime skips and asserts both sides received the
-  peer's Pokémon; an earlier isolated run passed, but the latest exact-head
-  run exceeded the 720-second child bound.
+  peer's Pokémon. The current strict trade tier is 2/2, but repeatability and
+  full remote-tier stability remain open while the LinkMenu row is red.
 - [ ] Remote trade remains green when the required stateful tiers run
-  concurrently; the current run timed out the trade tier.
+  concurrently; the current strict trade tier passes, but this stability
+  condition has not been certified.
 - [x] The canonical local link battle is claimed only after the release-runtime
   test resolves a complete turn on both sides; LinkMenu or transport
   milestones do not count.
@@ -189,8 +194,8 @@ product sign-off remains pending:
 - a retained complete implementation-revision real-ROM gate evidence bundle;
 - a retained evidence bundle, including battle-fixture hashes/provenance;
 - a retained current local/remote gate and strict subprocess evidence bundle,
-  plus resolution of the exact-head remote-trade timeout and the Blue↔Blue and
-  Blue→Red diagnostic battle gaps
+  plus resolution of the repeated remote LinkMenu failure and the Blue↔Blue
+  and Blue→Red diagnostic battle gaps
   or an explicitly limited product scope that excludes them;
 - repository-wide lint/broad-suite closure, per-ROM single-session coverage,
   reversed roles, native-platform certification, and independent review; and

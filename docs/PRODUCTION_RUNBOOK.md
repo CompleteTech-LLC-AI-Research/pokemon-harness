@@ -13,14 +13,13 @@ record.
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
 2/2. The current source-hardening candidate's functional changes reach
-`25e231c`. Its exact-head fast gate passes unit 445/445 and timing 35/35
-across five repetitions. Exact-head stateful evidence passes local 46/46 and
-remote 11/11 for the canonical color-Red listener/internal-clock and color-Blue
-connector/external-clock roles; the MCP lifecycle suite passes 74/74. The
-latest trade tier finished 1/2 because its TCP subprocess exceeded the
-720-second child bound, so load stability is not certified. The strict local
-Red/Yellow battle and exact-head Red/Blue remote battle smoke both use ordinary
-input and native serial move exchange; broader battle rows remain unverified.
+`b0791ee`. Its current full-gate snapshot is unit 453/453, local 46/46,
+remote 12/13, strict trade 2/2, strict battle 2/2, and timing 35/35 across
+five repetitions. The MCP lifecycle suite passes 74/74. The remote tier is
+red because its TCP LinkMenu subprocess row fails in repeated current runs;
+the strict local Red/Yellow trade and battle and the Red/Blue remote battle
+acceptance still pass using ordinary input and native serial move exchange.
+Broader battle rows and load-stable full remote coverage remain unverified.
 Symbol hashes and audited generator provenance are in
 [`VERSIONS.md`](../VERSIONS.md). Overall status is `PARTIAL`; the exact open
 items are listed in [the release checklist](RELEASE_CHECKLIST.md).
@@ -172,7 +171,7 @@ default fixture paths before running all required tiers.
 
 The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
 explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. At the Lane G audit boundary (`25e231c`), the
+default `ruff check .` audit. At the Lane G audit boundary (`b0791ee`), the
 default product audit reports 101 findings after safe mechanical cleanup. An
 explicit `ruff check vendor/pyboy-src` still reports 227 upstream findings;
 the vendored runtime is instead covered by revision pinning, compileall, and
@@ -441,12 +440,11 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The exact-head fast gate passes unit 445/445 and timing 35/35 across five
-   repetitions; exact-head stateful evidence passes local 46/46 and remote
-   11/11, and the exact-head no-hook Red/Blue battle smoke passes. The latest
-   trade tier finished 1/2 because the TCP subprocess exceeded its 720-second
-   child bound. The broader Blue/Red/Yellow battle matrix is not certified,
-   and Blue↔Blue and Blue→Red remain diagnostic only.
+1. The current full gate passes unit 453/453, local 46/46, strict trade 2/2,
+   strict battle 2/2, and timing 35/35 across five repetitions. The remote
+   tier is 12/13 because `test_subprocess_pair_reaches_link_menu_over_tcp`
+   fails in repeated current runs. The broader Blue/Red/Yellow battle matrix
+   is not certified, and Blue↔Blue and Blue→Red remain diagnostic only.
 2. The historical full real-ROM gate passed, but its complete output was not
    retained as a release evidence bundle. Current per-tier runs use
    `--evidence-dir` and retain sanitized bundles outside the checkout; a single
