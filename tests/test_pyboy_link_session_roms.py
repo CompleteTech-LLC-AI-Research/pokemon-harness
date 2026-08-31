@@ -1311,13 +1311,13 @@ def _drive_complete_battle_turn(
     5. Read the ROM-populated active move/PP buffers, move the real menu
        cursor to the first move with PP remaining, and press A once.
     6. ``LinkBattleExchangeData`` nibble-exchanges both sides' moves.
-    7. ``ExecutePlayerMove`` / ``ExecuteEnemyMove`` / ``PlayerCalcMoveDamage``
-       fire as the turn resolves.
+    7. ``ExecutePlayerMove`` / ``ExecuteEnemyMove`` fire as the turn resolves.
 
-    The acceptance hook is ``PlayerCalcMoveDamage`` — its firing means
-    a move was selected, transmitted to the peer, and resolved into
-    damage computation. That's "one turn complete" for the v1
-    acceptance criteria.
+    The broad matrix acceptance requires the native
+    ``LinkBattleExchangeData`` move exchange plus at least one execute path on
+    each side. The focused Red/Yellow release case additionally requires
+    ``PlayerCalcMoveDamage``; the damage hook is intentionally not required
+    here because valid Gen I moves can resolve without that routine.
     """
     cct = counters["CableClub_DoBattleOrTrade"]
     vs = counters["DisplayLinkBattleVersusTextBox"]
