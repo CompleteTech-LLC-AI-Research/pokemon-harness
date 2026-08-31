@@ -8,12 +8,21 @@ pair together and drives both sides in lockstep.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
+from pokered_harness.events.hooks import (
+    HookRegistration,
+    RawHookRegistration,
+    hooks_added_since,
+    snapshot_hooks,
+)
 from pokered_harness.link.symbols import LinkRole, symbols_for_role
 from pokered_harness.link.transport import LinkTransport
 from pokered_harness.session import RunUntilResult
+
+_LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from pokered_harness.session import Session
@@ -59,6 +68,10 @@ class LinkPair:
         self._transport = LinkTransport()
         self._bridge_factory = bridge_factory or _default_bridge_factory
         self._bridge: object | None = None
+        self._owned_hooks: list[HookRegistration] = []
+        self._owned_raw_hooks: list[RawHookRegistration] = []
+        self._owned_serial_hooks: list[tuple[object, tuple[object, int, int, str]]] = []
+        self._bridge_hook_addresses: list[tuple[object, int, int]] = []
 
     # --- properties ----------------------------------------------------
 
@@ -90,6 +103,8 @@ class LinkPair:
         if self._bridge is not None:
             raise RuntimeError("LinkPair is already paired; call unpair() first")
 
+        hook_baselines = self._hook_baselines()
+        serial_baselines = self._serial_baselines()
         bridge = self._bridge_factory(
             self._primary,
             self._peer,
@@ -97,27 +112,313 @@ class LinkPair:
             version_a=self._version_primary,
             version_b=self._version_peer,
         )
-        bridge.install()
+        owned_hooks: list[HookRegistration] = []
+        owned_raw_hooks: list[RawHookRegistration] = []
+        owned_serial_hooks: list[tuple[object, tuple[object, int, int, str]]] = []
+        bridge_hook_addresses: list[tuple[object, int, int]] = []
+        bridge_fallback_addresses: list[tuple[object, int, int]] = []
+        try:
+            # Resolve before install so a partially installing bridge can be
+            # cleaned from its known role addresses if enumeration is absent.
+            bridge_hook_addresses = self._bridge_hook_addresses_for(bridge)
+            bridge.install()
+            bridge_fallback_addresses = self._capture_bridge_hooks(
+                hook_baselines, bridge_hook_addresses, owned_raw_hooks
+            )
+            self._capture_serial_hooks(serial_baselines, owned_serial_hooks)
+
+            for link_sym in symbols_for_role(LinkRole.PROGRESS):
+                if link_sym.event_name is None:
+                    continue
+                for session, version in (
+                    (self._primary, self._version_primary),
+                    (self._peer, self._version_peer),
+                ):
+                    label = link_sym.per_version.get(version)
+                    if label is None:
+                        continue
+                    try:
+                        handle = session.events.register(
+                            pyboy=session._pyboy,
+                            symbols=session.symbols,
+                            symbol_name=label,
+                            event_name=link_sym.event_name,
+                            tick_source=session.current_tick,
+                        )
+                    except (KeyError, LookupError, ValueError):
+                        # Optional progress labels can be absent or already
+                        # owned by unrelated code. Preserve the existing hook.
+                        continue
+                    owned_hooks.append(handle)
+
+            self._install_semantic_bridges(owned_hooks, owned_raw_hooks)
+        except BaseException as exc:
+            # Re-snapshot so a bridge that failed part-way through install is
+            # still cleaned by callback identity when the runtime exposes it.
+            fallback_addresses = self._capture_bridge_hooks(
+                hook_baselines, bridge_hook_addresses, owned_raw_hooks
+            )
+            for address in fallback_addresses:
+                if address not in bridge_fallback_addresses:
+                    bridge_fallback_addresses.append(address)
+            self._capture_serial_hooks(serial_baselines, owned_serial_hooks)
+            self._deactivate_serial_hooks(owned_serial_hooks)
+            cleanup_errors = self._close_owned_hooks(owned_hooks)
+            cleanup_errors.extend(self._close_owned_raw_hooks(owned_raw_hooks))
+            self._deregister_hook_addresses(bridge_fallback_addresses)
+            self._uninstall_bridge(bridge)
+            for cleanup_error in cleanup_errors:
+                exc.add_note(f"pair rollback cleanup failed: {cleanup_error!r}")
+            self._bridge = None
+            self._owned_hooks = []
+            self._owned_raw_hooks = []
+            self._owned_serial_hooks = []
+            self._bridge_hook_addresses = []
+            self._transport.reset()
+            raise
+
+        self._owned_hooks = owned_hooks
+        self._owned_raw_hooks = owned_raw_hooks
+        self._owned_serial_hooks = owned_serial_hooks
+        self._bridge_hook_addresses = bridge_fallback_addresses
         self._bridge = bridge
 
-        for link_sym in symbols_for_role(LinkRole.PROGRESS):
-            if link_sym.event_name is None:
+    @staticmethod
+    def _uninstall_bridge(bridge: object) -> None:
+        uninstall = getattr(bridge, "uninstall", None)
+        if callable(uninstall):
+            try:
+                uninstall()
+            except Exception:
+                _LOGGER.debug("bridge uninstall failed", exc_info=True)
+
+    @staticmethod
+    def _close_owned_hooks(handles: Iterable[HookRegistration]) -> list[Exception]:
+        errors: list[Exception] = []
+        for handle in reversed(tuple(handles)):
+            try:
+                handle.close()
+            except Exception as exc:
+                errors.append(exc)
+                _LOGGER.debug("owned link hook close failed", exc_info=True)
+        return errors
+
+    @staticmethod
+    def _close_owned_raw_hooks(
+        handles: Iterable[RawHookRegistration],
+    ) -> list[Exception]:
+        errors: list[Exception] = []
+        for handle in reversed(tuple(handles)):
+            try:
+                handle.close()
+            except Exception as exc:
+                errors.append(exc)
+                _LOGGER.debug("owned raw link hook close failed", exc_info=True)
+        return errors
+
+    def _hook_baselines(
+        self,
+    ) -> tuple[
+        tuple[
+            object,
+            dict[
+                tuple[int, int],
+                tuple[tuple[Callable[[object], None], object], ...],
+            ]
+            | None,
+        ],
+        ...,
+    ]:
+        return tuple(
+            (session._pyboy, snapshot_hooks(session._pyboy))
+            for session in (self._primary, self._peer)
+        )
+
+    def _serial_baselines(self) -> tuple[tuple[object, int], ...]:
+        return tuple(
+            (session, len(getattr(session, "_serial_hooks", ())))
+            for session in (self._primary, self._peer)
+        )
+
+    @staticmethod
+    def _capture_bridge_hooks(
+        baselines: tuple[
+            tuple[
+                object,
+                dict[
+                    tuple[int, int],
+                    tuple[tuple[Callable[[object], None], object], ...],
+                ]
+                | None,
+            ],
+            ...,
+        ],
+        addresses: Iterable[tuple[object, int, int]],
+        owned: list[RawHookRegistration],
+    ) -> list[tuple[object, int, int]]:
+        """Capture callbacks added by the bridge during its install phase."""
+        addresses = tuple(addresses)
+        fallback: list[tuple[object, int, int]] = []
+        for pyboy, before in baselines:
+            after = snapshot_hooks(pyboy)
+            if before is None or after is None:
+                fallback.extend(
+                    address
+                    for address in addresses
+                    if id(address[0]) == id(pyboy)
+                )
                 continue
-            for session, version in (
-                (self._primary, self._version_primary),
-                (self._peer, self._version_peer),
-            ):
-                label = link_sym.per_version.get(version)
-                if label is None:
+            for bank, addr, callback, context in hooks_added_since(before, after):
+                if any(
+                    existing.pyboy is pyboy
+                    and existing.bank == bank
+                    and existing.addr == addr
+                    and existing.callback is callback
+                    and existing.context is context
+                    for existing in owned
+                ):
                     continue
-                try:
-                    session.register_hook(label, link_sym.event_name)
-                except (KeyError, LookupError):
-                    pass
+                owned.append(
+                    RawHookRegistration(
+                        pyboy=pyboy,
+                        bank=bank,
+                        addr=addr,
+                        callback=callback,
+                        context=context,
+                    )
+                )
+        return fallback
 
-        self._install_semantic_bridges()
+    @staticmethod
+    def _capture_serial_hooks(
+        baselines: tuple[tuple[object, int], ...],
+        owned: list[tuple[object, tuple[object, int, int, str]]],
+    ) -> None:
+        """Record only guarded serial callbacks added by bridge.install()."""
+        for session, start in baselines:
+            serial_hooks = getattr(session, "_serial_hooks", ())
+            for record in serial_hooks[start:]:
+                if len(record) != 4:
+                    continue
+                if any(
+                    existing_session is session and existing_record[0] is record[0]
+                    for existing_session, existing_record in owned
+                ):
+                    continue
+                owned.append((session, record))
 
-    def _install_semantic_bridges(self) -> None:
+    @staticmethod
+    def _deactivate_serial_hooks(
+        owned: Iterable[tuple[object, tuple[object, int, int, str]]],
+    ) -> None:
+        """Disable and remove only the bridge's guarded serial records."""
+        for session, record in owned:
+            state = record[0]
+            if hasattr(state, "active"):
+                state.active = False
+            serial_hooks = getattr(session, "_serial_hooks", None)
+            if isinstance(serial_hooks, list):
+                state_id = id(state)
+                serial_hooks[:] = [
+                    candidate
+                    for candidate in serial_hooks
+                    if not candidate or id(candidate[0]) != state_id
+                ]
+
+    @staticmethod
+    def _close_owned_raw_hooks_at(
+        owned_raw_hooks: Iterable[RawHookRegistration],
+        pyboy: object,
+        bank: int,
+        addr: int,
+    ) -> tuple[list[Exception], bool]:
+        """Close pair-owned raw hooks before an intentional replacement."""
+        errors: list[Exception] = []
+        removed_any = False
+        for handle in reversed(tuple(owned_raw_hooks)):
+            if handle.pyboy is not pyboy or handle.bank != bank or handle.addr != addr:
+                continue
+            try:
+                removed_any = handle.close() or removed_any
+            except Exception as exc:  # noqa: BLE001 - continue all cleanup attempts
+                errors.append(exc)
+        return errors, removed_any
+
+    def _bridge_hook_addresses_for(
+        self, bridge: object
+    ) -> list[tuple[object, int, int]]:
+        """Return exact bridge hook addresses when its resolved map is exposed."""
+        addresses: list[tuple[object, int, int]] = []
+        resolved_pairs = (
+            (self._primary, getattr(bridge, "_resolved_a", None)),
+            (self._peer, getattr(bridge, "_resolved_b", None)),
+        )
+        bridge_roles = (
+            *symbols_for_role(LinkRole.BRIDGE),
+            *symbols_for_role(LinkRole.HANDSHAKE),
+        )
+        for session, resolved in resolved_pairs:
+            if not isinstance(resolved, dict):
+                continue
+            for link_sym in bridge_roles:
+                location = resolved.get(link_sym.key)
+                if location is not None:
+                    bank, addr = location
+                    addresses.append((session._pyboy, bank, addr))
+        return addresses
+
+    def _register_owned_symbol_hook(
+        self,
+        session: Session,
+        symbol_name: str,
+        callback: Callable[[object], None],
+        *,
+        replace_existing: bool = False,
+    ) -> HookRegistration:
+        bank, addr = session.symbols.bank_addr(symbol_name)
+        return session.events.register_at(
+            session._pyboy,
+            bank,
+            addr,
+            callback,
+            symbol_name=symbol_name,
+            replace_existing=replace_existing,
+        )
+
+    def _register_owned_address_hook(
+        self,
+        session: Session,
+        bank: int,
+        addr: int,
+        callback: Callable[[object], None],
+    ) -> HookRegistration:
+        return session.events.register_at(session._pyboy, bank, addr, callback)
+
+    @staticmethod
+    def _deregister_hook_addresses(
+        addresses: Iterable[tuple[object, int, int]],
+    ) -> None:
+        seen: set[tuple[int, int, int]] = set()
+        for pyboy, bank, addr in addresses:
+            key = (id(pyboy), bank, addr)
+            if key in seen:
+                continue
+            seen.add(key)
+            deregister = getattr(pyboy, "hook_deregister", None)
+            if not callable(deregister):
+                continue
+            try:
+                deregister(bank, addr)
+            except (ValueError, LookupError):
+                pass
+            except Exception:
+                _LOGGER.debug("bridge hook deregistration failed", exc_info=True)
+
+    def _install_semantic_bridges(
+        self,
+        owned_hooks: list[HookRegistration],
+        owned_raw_hooks: list[RawHookRegistration],
+    ) -> None:
         """Hook pret-level link protocol routines and bridge their WRAM
         data cells between the two peers.
 
@@ -169,19 +470,31 @@ class LinkPair:
                     for i in range(_w):
                         mem_b[_r + i] = mem_a[_s + i]
 
-                try:
-                    pa.serial_hook(label, _copy_to_a)
-                    pb.serial_hook(label, _copy_to_b)
-                except (KeyError, LookupError):
-                    pass
+                for session, callback in (
+                    (pa, _copy_to_a),
+                    (pb, _copy_to_b),
+                ):
+                    try:
+                        handle = self._register_owned_symbol_hook(
+                            session, label, callback
+                        )
+                    except (KeyError, LookupError, ValueError):
+                        # Optional semantic labels may be absent or occupied
+                        # by unrelated code; leave those addresses alone.
+                        continue
+                    owned_hooks.append(handle)
 
         _install_pair("Serial_ExchangeNybble", {"ExchangeNybble": 1})
         _install_pair("Serial_ExchangeLinkMenuSelection", {"MenuSelection": 2})
 
-        self._install_linkmenu_autoselect_trade()
-        self._install_exchange_bytes_skip()
+        self._install_linkmenu_autoselect_trade(owned_hooks)
+        self._install_exchange_bytes_skip(owned_hooks, owned_raw_hooks)
 
-    def _install_exchange_bytes_skip(self) -> None:
+    def _install_exchange_bytes_skip(
+        self,
+        owned_hooks: list[HookRegistration],
+        owned_raw_hooks: list[RawHookRegistration],
+    ) -> None:
         """Short-circuit ``Serial_ExchangeBytes`` to copy peer's send buffer
         into this side's receive buffer and RET immediately.
 
@@ -198,11 +511,6 @@ class LinkPair:
         """
         pa, pb = self._primary, self._peer
         mem_a, mem_b = pa._pyboy.memory, pb._pyboy.memory
-        pba, pbb = pa._pyboy, pb._pyboy
-
-        if "Serial_ExchangeBytes" not in pa.symbols:
-            return
-        bank, addr = pa.symbols.bank_addr("Serial_ExchangeBytes")
 
         def skip(this_pb, this_mem, peer_mem):
             rf = this_pb.register_file
@@ -221,25 +529,50 @@ class LinkPair:
             rf.B = 0
             rf.C = 0
 
-        deregister_a = getattr(pba, "hook_deregister", None)
-        if callable(deregister_a):
-            try:
-                deregister_a(bank, addr)
-            except ValueError:
-                # PyBoy raises when no callback is registered at the
-                # address.  That is a normal case for a ROM/session whose
-                # legacy hook was never installed.
-                pass
-        deregister_b = getattr(pbb, "hook_deregister", None)
-        if callable(deregister_b):
-            try:
-                deregister_b(bank, addr)
-            except ValueError:
-                pass
-        pba.hook_register(bank, addr, lambda _: skip(pba, mem_a, mem_b), None)
-        pbb.hook_register(bank, addr, lambda _: skip(pbb, mem_b, mem_a), None)
+        for session, this_pb, this_mem, peer_mem in (
+            (pa, pa._pyboy, mem_a, mem_b),
+            (pb, pb._pyboy, mem_b, mem_a),
+        ):
+            if "Serial_ExchangeBytes" not in session.symbols:
+                continue
 
-    def _install_linkmenu_autoselect_trade(self) -> None:
+            def _skip_callback(
+                _ctx: object,
+                *,
+                _this_pb=this_pb,
+                _this_mem=this_mem,
+                _peer_mem=peer_mem,
+            ) -> None:
+                skip(_this_pb, _this_mem, _peer_mem)
+
+            bank, addr = session.symbols.bank_addr("Serial_ExchangeBytes")
+            cleanup_errors, removed_any = self._close_owned_raw_hooks_at(
+                owned_raw_hooks, this_pb, bank, addr
+            )
+            if cleanup_errors:
+                raise RuntimeError(
+                    "could not replace the pair-owned Serial_ExchangeBytes hook"
+                ) from cleanup_errors[0]
+            try:
+                handle = self._register_owned_symbol_hook(
+                    session,
+                    "Serial_ExchangeBytes",
+                    _skip_callback,
+                    # SerialBridge normally owns this address first. If its
+                    # identity-owned callback was removed above, avoid a
+                    # second address-level removal that could erase an
+                    # unrelated callback on a multi-hook runtime.
+                    replace_existing=(
+                        not removed_any and snapshot_hooks(this_pb) is None
+                    ),
+                )
+            except (KeyError, LookupError, ValueError):
+                continue
+            owned_hooks.append(handle)
+
+    def _install_linkmenu_autoselect_trade(
+        self, owned_hooks: list[HookRegistration]
+    ) -> None:
         """Auto-select TRADE in the Cable Club LinkMenu.
 
         LinkMenu's ``.exchangeMenuSelectionLoop`` calls
@@ -272,7 +605,8 @@ class LinkPair:
         ):
             if label not in session.symbols:
                 return
-        recv_addr = pa.symbols.addr_of("wLinkMenuSelectionReceiveBuffer")
+        recv_addr_a = pa.symbols.addr_of("wLinkMenuSelectionReceiveBuffer")
+        recv_addr_b = pb.symbols.addr_of("wLinkMenuSelectionReceiveBuffer")
 
         # Locate the post-exchange read instruction. Both Blue and Yellow
         # label ``LinkMenu.exchangeMenuSelectionLoop`` — the first
@@ -286,35 +620,55 @@ class LinkPair:
         addr_a += 3
         addr_b += 3
 
-        def force_trade_a(_ctx):
-            mem_a[recv_addr] = 0xd4
-            mem_a[recv_addr + 1] = 0xd4
+        def force_trade_a(_ctx: object) -> None:
+            mem_a[recv_addr_a] = 0xd4
+            mem_a[recv_addr_a + 1] = 0xd4
 
-        def force_trade_b(_ctx):
-            mem_b[recv_addr] = 0xd4
-            mem_b[recv_addr + 1] = 0xd4
+        def force_trade_b(_ctx: object) -> None:
+            mem_b[recv_addr_b] = 0xd4
+            mem_b[recv_addr_b + 1] = 0xd4
 
         try:
-            pa._pyboy.hook_register(bank_a, addr_a, force_trade_a, None)
-        except ValueError:
+            owned_hooks.append(
+                self._register_owned_address_hook(pa, bank_a, addr_a, force_trade_a)
+            )
+        except (KeyError, LookupError, ValueError):
             pass
         try:
-            pb._pyboy.hook_register(bank_b, addr_b, force_trade_b, None)
-        except ValueError:
+            owned_hooks.append(
+                self._register_owned_address_hook(pb, bank_b, addr_b, force_trade_b)
+            )
+        except (KeyError, LookupError, ValueError):
             pass
 
     def unpair(self) -> None:
-        """Drop the bridge reference and clear the transport.
+        """Remove pair-owned callbacks and clear the link transport.
 
-        PyBoy 2.7.0 has no ``hook_deregister``, so the hook callbacks that
-        ``install()`` registered on the underlying PyBoy remain in place —
-        but they closed over the now-dropped bridge object, so they become
-        effectively no-ops once nothing else holds a reference. After
-        unpair, :meth:`pair` may be called again; it will install a NEW
-        bridge with NEW callbacks.
+        EventBus registrations are removed by logical ownership; raw bridge
+        callbacks are removed by identity when the runtime exposes its hook
+        table. Exact bridge addresses provide the fallback for runtimes that
+        do not expose callback enumeration.
         """
+        owned_hooks = self._owned_hooks
+        owned_raw_hooks = self._owned_raw_hooks
+        owned_serial_hooks = self._owned_serial_hooks
+        bridge_hook_addresses = self._bridge_hook_addresses
+        bridge = self._bridge
+        self._owned_hooks = []
+        self._owned_raw_hooks = []
+        self._owned_serial_hooks = []
+        self._bridge_hook_addresses = []
         self._bridge = None
         self._transport.reset()
+
+        self._deactivate_serial_hooks(owned_serial_hooks)
+        cleanup_errors = self._close_owned_hooks(owned_hooks)
+        cleanup_errors.extend(self._close_owned_raw_hooks(owned_raw_hooks))
+        self._deregister_hook_addresses(bridge_hook_addresses)
+        if bridge is not None:
+            self._uninstall_bridge(bridge)
+        if cleanup_errors:
+            raise RuntimeError("one or more pair hooks could not be removed") from cleanup_errors[0]
 
     # --- stepping ------------------------------------------------------
 
