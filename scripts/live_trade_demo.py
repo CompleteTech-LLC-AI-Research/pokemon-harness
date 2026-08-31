@@ -305,7 +305,7 @@ def _render_tilemap_from_vram(pyboy, layer: str, out_path: Path, *, color: bool 
     try:
         import numpy as np
         from PIL import Image
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional image dependencies must fail soft
         return False
     lcdc = pyboy.memory[0xFF40]
     unsigned = bool(lcdc & 0x10)
@@ -427,7 +427,7 @@ def _make_side_by_side(left_path: Path, right_path: Path, out_path: Path) -> boo
     image's height)."""
     try:
         from PIL import Image
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional image dependencies must fail soft
         return False
     if not left_path.exists() or not right_path.exists():
         return False
@@ -588,7 +588,6 @@ def _drive_two_sessions_to_link_menu(
             sampler("A_walk_up")
 
     prev_save = [counters["SaveGameData"][0], counters["SaveGameData"][1]]
-    prev_link = [counters["LinkMenu"][0], counters["LinkMenu"][1]]
     save_dwelt = False
     linkmenu_shown = False
 
@@ -806,8 +805,8 @@ def _drive_complete_trade(
 
         now = {k: list(counters[k]) for k in (stats_key, trade_key, menu_key, tct_key)}
         for idx, sess in enumerate((a, b)):
-            def ticked(key, _idx=idx):
-                return now[key][_idx] > prev[key][_idx]
+            def ticked(key, _idx=idx, _now=now, _prev=prev):
+                return _now[key][_idx] > _prev[key][_idx]
 
             if ticked(trade_key):
                 # STATS/TRADE/CANCEL cursor landed on TRADE. Natural:
@@ -940,7 +939,7 @@ def _lead_ot_fingerprint(session) -> bytes:
     pb = session._pyboy
     try:
         addr = session.symbols.addr_of("wPartyMonOT")
-    except Exception:
+    except (AttributeError, LookupError):
         return b""
     return bytes(pb.memory[addr + i] for i in range(11))
 
@@ -1333,8 +1332,8 @@ def main() -> int:
                     paths = shoot.shoot_pair(a, b, tag)
                     for p in paths:
                         print(f"  wrote {p}", flush=True)
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001, S112 - screenshots are best-effort diagnostics
+                    continue
             # Post-trade idle hold so the viewer can watch the tail
             # end without the windows closing. Deliberately NOT
             # interactive — ``sys.stdin.isatty()`` lies under
@@ -1398,11 +1397,11 @@ def main() -> int:
     finally:
         try:
             a.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - cleanup must attempt both sessions
             pass
         try:
             b.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - cleanup must attempt both sessions
             pass
 
 

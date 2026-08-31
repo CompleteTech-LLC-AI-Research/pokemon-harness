@@ -241,7 +241,6 @@ def run_phase_pick_starter(drv: WalkthroughDriver) -> None:
     # confirm we've escaped dialog (dialog pressing DOWN is a no-op,
     # but cursor in a menu moves with DOWN too — a second press moves
     # the player).
-    control_attempts = 0
     for iteration in range(80):
         drv.press("a", note="lab: Oak speech", step_ticks=30)
         gs_before = drv.session.read_game_state()
