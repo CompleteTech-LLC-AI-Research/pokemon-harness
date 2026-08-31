@@ -48,7 +48,7 @@ unverified.
 
 Current exact-head evidence and blockers are explicit:
 
-- unit 414/414 and timing 35/35 across five repetitions pass; local 46/46 and
+- unit 415/415 and timing 35/35 across five repetitions pass; local 46/46 and
   remote 11/11 pass, while the concurrent four-tier run produced only 1/2
   trade passes before the isolated remote trade rerun passed;
 - the repository-wide Ruff audit reports 528 findings under the locked Ruff

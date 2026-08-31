@@ -10,7 +10,7 @@ is included here.
 
 ## Passing evidence
 
-- The locked unit gate passed `414/414` tests.
+- The locked unit gate passed `415/415` tests.
 - Timing passed `35/35` cases across five repetitions.
 - The gate preflight validated all five pinned ROM inputs, three symbol files,
   and three ordinary link fixtures by SHA-1.

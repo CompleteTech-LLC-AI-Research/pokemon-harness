@@ -13,7 +13,7 @@ record.
 The historical full-gate snapshot is unit 372/372, timing 35/35 across five
 repetitions, local 46/46, remote 11/11, strict trade 2/2, and strict battle
 2/2. The current source-hardening candidate reaches `ab89c39`. Its fast gate
-passes unit 414/414 and timing 35/35 across five repetitions; the stateful
+passes unit 415/415 and timing 35/35 across five repetitions; the stateful
 gate at the code-equivalent `2ac09fb` boundary passed local 46/46 and remote
 11/11 for the canonical color-Red listener/internal-clock and color-Blue
 connector/external-clock roles. The strict local Red/Yellow trade and battle
@@ -422,7 +422,7 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The fast current gate passes unit 414/414 and timing 35/35 across five
+1. The fast current gate passes unit 415/415 and timing 35/35 across five
    repetitions; the stateful code-equivalent run passed local 46/46 and
    remote 11/11. The isolated remote trade passed, but the concurrent
    stateful run timed it out. The broader Blue/Red/Yellow battle matrix is
