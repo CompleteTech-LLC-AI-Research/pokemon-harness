@@ -164,6 +164,10 @@ TRADE_ACCEPTANCE_TESTS = frozenset(
     {
         (
             "test_pyboy_link_session_roms.py",
+            "test_pair_completes_trade_end_to_end",
+        ),
+        (
+            "test_pyboy_link_session_roms.py",
             "test_red_yellow_trade_swaps_real_party_records",
         ),
         (
@@ -175,6 +179,10 @@ TRADE_ACCEPTANCE_TESTS = frozenset(
 
 BATTLE_ACCEPTANCE_TESTS = frozenset(
     {
+        (
+            "test_pyboy_link_session_roms.py",
+            "test_pair_completes_battle_turn",
+        ),
         (
             "test_pyboy_link_session_roms.py",
             "test_red_yellow_battle_turn_is_resolved",

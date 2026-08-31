@@ -27,13 +27,15 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current functional candidate boundary is `d8198ef`. Its asset-free gate
+The current functional candidate boundary is `78e5bbe`. Its asset-free gate
 passed 477/477 unit tests and 35/35 timing cases across five repetitions. The release
 runtime is the bundled PyBoy source snapshot pinned in `VERSIONS.md` (`2.7.0`,
 harness revision `c565df66c3731fad2856169a90f6bbec99925915`) with
 `mcp==1.29.1`. The source runtime is the only link-acceptance mode currently
-exercised in passing evidence. A Cython build that hides `mb.serial` is
-diagnostic until it passes its own attachment and acceptance checks. Use
+exercised in passing evidence. The pinned Cython build and serial-object
+contract pass in a disposable Python 3.12 environment, but a Cython build that
+hides `mb.serial` does not support Python-side link attachment; source mode
+remains the only link-acceptance runtime. Use
 explicit ROM, symbol, and SHA-1 values; never use `POKERED_SKIP_SHA1=1` for
 release evidence.
 
@@ -42,15 +44,19 @@ release evidence.
 - Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
   fixture bytes have recorded reproduction evidence; the external states are
   never committed and their hashes do not prove gameplay compatibility.
-- Controlled local stateful evidence covers color Red + Yellow for the strict
-  trade and battle cases; this does not certify every version pairing.
-- Controlled remote evidence covers color Red as listener/internal-clock and
-  color Blue as connector/external-clock, plus the reversed role, over
-  localhost TCP, including strict trade and battle paths. Concurrent load
-  stability and other rows remain unverified.
-- The strict acceptance declaration remains incomplete: 15 trade and 15
-  battle rows lack dedicated strict entry points. A collection-only row or
-  LinkMenu milestone is not a gameplay acceptance.
+- Controlled local stateful evidence currently covers color Red + Yellow for
+  the strict trade and battle cases at the prior functional boundary; this
+  does not certify the newly declared remaining version pairings.
+- Controlled remote evidence currently covers color Red as
+  listener/internal-clock and color Blue as connector/external-clock, plus
+  the reversed role, over localhost TCP, including strict trade and battle
+  paths. The current tree declares all canonical Red/Blue/Yellow listener and
+  connector orderings, but their runtime results and concurrent-load
+  stability remain unverified.
+- The strict acceptance declaration now has a dedicated entry point for every
+  canonical ordered local and remote pair (19 trade and 19 battle nodes).
+  Collection is declaration evidence only; a LinkMenu milestone is not a
+  gameplay acceptance.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or

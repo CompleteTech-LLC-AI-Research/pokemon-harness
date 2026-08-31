@@ -3,8 +3,8 @@
 Status: `PARTIAL` — not production-ready.
 
 This record describes the isolated candidate's functional boundary at
-`d8198ef` (`d8198ef` transport/runtime hardening commit; this documentation
-update follows). No ROM, symbol, fixture, save-state, or
+`78e5bbe` (`d8198ef` transport/runtime hardening plus Cython-safe serial
+control typing; this documentation update follows). No ROM, symbol, fixture, save-state, or
 secret is included here. External assets are supplied through the documented
 ROM and fixture roots.
 
@@ -12,7 +12,7 @@ ROM and fixture roots.
 
 - `scripts/production_gate.py --unit-only --repeat-timing 5` passed both
   collection paths, unit `477/477`, and timing `35/35` in all five repeats
-  (604 collected tests).
+  (618 collected tests).
 - With explicit ROM/SYM/SHA-1 inputs, MCP stdio and golden-path smoke checks
   exited successfully for Red stock, Red color, Blue stock, Blue color, and
   Yellow.
@@ -28,6 +28,10 @@ ROM and fixture roots.
   lifecycle/link tests passed. A clean exported editable install and wheel
   install also passed `pip check`, source-runtime bootstrap, and MCP stdio
   smoke (`3/3`).
+- In a disposable Python 3.12 environment, the pinned PyBoy Cython wheel built
+  successfully and `scripts/bootstrap_pyboy.py --mode cython --check` plus
+  `pip check` passed. Cython mode still does not expose the Python-side
+  motherboard serial attachment used by link acceptance.
 - Native link selection now fails closed for a real PyBoy that lacks the
   bit-accurate serial contract. Network sends, public listener waits, and
   worker teardown use bounded deadlines; remote MCP callers can require an
@@ -35,11 +39,12 @@ ROM and fixture roots.
 
 ## Not signed off
 
-- The strict declaration covers only three local/remote trade cases and three
-  local/remote battle cases; the matrix audit reports 15 undeclared cases per
-  operation. The collection-only audit is structural and does not run ROMs.
+- The strict declaration now has 19 local/remote trade entrypoints and 19
+  local/remote battle entrypoints, covering every ordered canonical
+  Red/Blue/Yellow pair. The collection-only audit is structural and does not
+  run ROMs; current gameplay execution of those rows remains pending.
 - The current-candidate local, remote, trade, and battle real-ROM tiers have
-  not yet been rerun after `d8198ef`; the prior selected results are retained
+  not yet been rerun after `78e5bbe`; the prior selected results are retained
   as historical evidence, not current sign-off.
 - The full broad suite, native Windows/Cython attachment, load-stability
   reruns, and independent review remain incomplete.

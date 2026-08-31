@@ -3,24 +3,26 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
 historical, the current candidate facts refer to functional source candidate
-`d8198ef` on 2026-08-31.
+`78e5bbe` on 2026-08-31. This includes the transport/runtime hardening at
+`d8198ef` and the Cython-safe serial control typing fix.
 Uncommitted worktree changes and external BYO assets are excluded from the
 tracked source tree.
 
-The asset-free gate at `d8198ef` passed unit 477/477 and timing 35/35 across
-five repetitions; its collection preflight collected 604 tests and its scoped
-result was `PASS`. This proves only the ROM-free and timing scope. The matrix
-audit collected nine ordered pairs, six reversed-role rows, nine local variant
-rows, and three strict trade plus three strict battle entry points, but the
-strict acceptance declaration remains incomplete with 15 uncovered cases per
-operation. The collection-only matrix runtime is `NOT RUN`.
+The latest asset-free gate at `78e5bbe` passed unit 477/477 and timing 35/35
+across five repetitions; its collection preflight collected 618 tests and its
+scoped result was `PASS`. This proves only the ROM-free and timing scope. The
+matrix audit collected nine ordered local pairs, nine ordered remote role
+pairs, nine local variant rows, and 19 strict trade plus 19 strict battle
+entrypoints. Structural and declaration checks pass; the collection-only
+matrix runtime is `NOT RUN`.
 
 The previously recorded selected-tier real-ROM run at `db72be6` recorded local
 46/46, remote 13/13, strict trade 3/3, and strict battle 3/3 using the pinned
 BYO assets. The strict remote rows cover both color Red/Blue listener/connector
-directions. Those results predate the current transport hardening and must be
-rerun for current-candidate sign-off; they are not a full-gate result because
-the strict matrix declaration remains incomplete.
+directions. Those results predate the current transport hardening and expanded
+current-candidate matrix and must be rerun for current-candidate sign-off;
+they are not a full-gate result because current runtime coverage remains
+incomplete.
 Symbol hashes and fixture byte/provenance records are in
 [`VERSIONS.md`](../VERSIONS.md) and the tracked
 [`fixture-manifest.json`](../release-evidence/fixture-manifest.json). Overall
@@ -209,7 +211,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `d8198ef`, this command collected 604 tests, passed unit 477/477, passed
+At `78e5bbe`, this command collected 618 tests, passed unit 477/477, passed
 timing 35/35 in each of five repetitions, and returned scoped `PASS`. It also
 performed schema-only validation of the ten-entry fixture manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
@@ -229,7 +231,7 @@ acceptance matrix declaration is incomplete.
 
 The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
 explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. At `d8198ef`, `ruff check .` is clean. The
+default `ruff check .` audit. At `78e5bbe`, `ruff check .` is clean. The
 vendored runtime is covered by revision pinning, compile/import checks, and
 the serial contract.
 
@@ -237,8 +239,9 @@ The release tree includes `tests/__init__.py`; otherwise environments that do
 not treat `tests/` as a namespace package can fail collection. Run both
 invocation forms for every release candidate.
 
-The standalone matrix command is collection-only and intentionally returns
-nonzero while the acceptance declaration is incomplete:
+The standalone matrix command is collection-only. It returns zero only when
+the required node IDs and strict declaration are present; a zero result still
+does not execute ROM gameplay:
 
 ```bash
 python scripts/tcp_link_matrix.py \
@@ -347,19 +350,18 @@ python -m pytest -q -ra \
 ```
 
 The diagnostic matrix in this module is broader than the release acceptance
-scope. A historical audit reached LinkMenu and completed the diagnostic trade
-route for all nine R/B/Y version orderings. Seven of nine diagnostic battle
-rows reached a complete turn at that historical boundary; `blue↔blue` and the
-`blue→red` attach ordering did not reach both move-exchange hooks. A targeted
-re-audit reached LinkMenu for Blue↔Blue and Blue→Red, but that is not a strict
-gameplay result. A prior controlled run passed the strict Red↔Yellow trade and
-battle cases at the library's default scheduler slice; the remaining matrix is
-not certified. The strict local cases are:
+assertions. A historical audit reached LinkMenu and completed the diagnostic
+trade route for all nine R/B/Y version orderings. Seven of nine diagnostic
+battle rows reached a complete turn at that historical boundary; `blue↔blue`
+and the `blue→red` attach ordering did not reach both move-exchange hooks. A
+targeted re-audit reached LinkMenu for Blue↔Blue and Blue→Red, but that is not
+a strict gameplay result. The current strict local acceptance is parametrized
+over all nine canonical Red/Blue/Yellow ordered pairs:
 
 ```bash
 python -m pytest -q \
-  tests/test_pyboy_link_session_roms.py::test_red_yellow_trade_swaps_real_party_records \
-  tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved
+  tests/test_pyboy_link_session_roms.py::test_pair_completes_trade_end_to_end \
+  tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn
 ```
 
 They require the pinned source-compatible PyBoy runtime, ROM-specific Cable
@@ -369,8 +371,9 @@ uses a legal derived three-mon fixture and requires both sides to reach move
 exchange and turn execution. It does not require the optional damage
 calculation hook. Neither case writes party or battle state during acceptance.
 A skipped or partially parameterized matrix is not full Red/Blue/Yellow
-coverage, and the current strict declaration remains incomplete with 15
-unverified trade and 15 unverified battle cases.
+coverage. The dedicated Red/Yellow assertions remain useful focused checks,
+but the production gate also requires every parametrized local row and every
+remote row below to execute without skips.
 
 ### Tier E: remote transport and subprocess acceptance/diagnostics
 
@@ -385,21 +388,22 @@ This module exercises remote TCP plumbing and selected real-ROM milestones.
 Some cases stop at LinkMenu or use controlled menu/fixture setup; that is not
 the same as a user-driven full trade or battle.
 
-The separate-process acceptance uses the same bundled runtime as the normal
-package and explicit color Red/Blue fixtures:
+The separate-process acceptance uses the same bundled source runtime as the
+normal package and the canonical color Red, color Blue, and Yellow fixtures:
 
 ```bash
 python -m pytest -q -ra \
   tests/test_pyboy_link_session_subprocess.py
 ```
 
-The LinkMenu test is a transport smoke test. The current strict subprocess
-trade and battle runs use cooperative phase rendezvous, compare complete
-party-mon records or execute a battle turn, and cover both color Red/Blue
-listener/connector directions. Both payloads travel through native bit-level
-serial traffic, and the tests reject the out-of-band exchange counter.
-Concurrent-load stability and the other ordered pairs remain open. Record both
-child traces and the exact deadline when investigating a regression.
+The LinkMenu test is a transport smoke test. The strict subprocess trade and
+battle tests use cooperative phase rendezvous, compare complete party-mon
+records or execute a battle turn, and are parametrized over all nine ordered
+canonical listener/connector pairs. Both payloads travel through native
+bit-level serial traffic, and the tests reject the out-of-band exchange
+counter. Current-candidate runtime results and concurrent-load stability must
+still be recorded before release. Record both child traces and the exact
+deadline when investigating a regression.
 
 The native MCP link path only installs the pinned PyBoy serial backend and
 transport callbacks. It must not seed `hSerialConnectionStatus` (the ROM-owned
@@ -536,21 +540,22 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current `d8198ef` asset-free gate passed unit 477/477 and timing 35/35
-   across five repetitions. Selected current real-ROM tiers also passed local
-   46/46, remote 13/13, strict trade 3/3, and strict battle 3/3, but the full
-   gate still fails closed on the incomplete strict declaration.
-2. The strict matrix declaration is incomplete: the collection audit has
-   nine ordered pairs, six reversed-role rows, and nine local variant rows,
-   but 15 supported trade cases and 15 supported battle cases lack strict
-   entry points. Collection-only matrix runtime is `NOT RUN`; selected strict
-   runtime covers three trade and three battle rows.
+1. The current `78e5bbe` asset-free gate passed unit 477/477 and timing 35/35
+   across five repetitions. The prior `db72be6` selected real-ROM tiers passed
+   local 46/46, remote 13/13, strict trade 3/3, and strict battle 3/3, but
+   those results predate the current transport hardening and the expanded
+   current-candidate matrix.
+2. The strict matrix declaration is now complete: the collection audit has
+   nine ordered local pairs, nine ordered remote role pairs, nine local
+   variant rows, and 19 strict entrypoints for each operation. Collection-only
+   matrix runtime is `NOT RUN`; current gameplay execution of all declared
+   local and remote rows remains required.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
    reproduction evidence, while the vanilla ordinary source provenance is
    `PARTIAL`. The manifest is external and untracked; its complete byte
    validation and a retained sanitized evidence bundle still need to be
    associated with the release candidate.
-4. `ruff check .` is clean at `d8198ef`; the broad suite, all advertised
+4. `ruff check .` is clean at `78e5bbe`; the broad suite, all advertised
    single-session rows, native-platform coverage, load-stable full-matrix
    behavior, and independent review remain open.
 5. Remote TCP has no authentication or encryption. Loopback-only operation is

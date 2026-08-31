@@ -173,6 +173,8 @@ def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert len(REMOTE_VERSION_PAIR_NODEIDS) == 9
     assert len(REMOTE_REVERSED_ROLE_NODEIDS) == 6
     assert len(LOCAL_VARIANT_NODEIDS) == 9
+    assert len(TIER_REQUIRED_NODEIDS["trade"]) == 19
+    assert len(TIER_REQUIRED_NODEIDS["battle"]) == 19
     assert any("[red-blue]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
     assert any("[blue-red]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
     assert any("[red-vanilla-x-color]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["local"])
@@ -187,7 +189,7 @@ def test_matrix_audit_fails_closed_on_missing_cases_and_reports_unrun_runtime():
 
     assert audit["structural_pass"] is False
     assert missing in audit["groups"]["remote-role-pairs"]["missing"]
-    assert audit["acceptance_matrix_complete"] is False
+    assert audit["acceptance_matrix_complete"] is True
     assert audit["runtime"] == "not-run"
 
 
@@ -201,15 +203,11 @@ def test_matrix_audit_surfaces_collection_skips_even_when_they_are_described():
     assert audit["collection_skips"] == ("optional dependency unavailable",)
 
 
-def test_strict_acceptance_gap_report_keeps_uncovered_ordered_cases_explicit():
+def test_strict_acceptance_gap_report_has_an_entrypoint_for_each_ordered_case():
     gaps = acceptance_matrix_gaps()
 
-    assert len(gaps["trade"]) == 15
-    assert len(gaps["battle"]) == 15
-    assert ("remote", "blue", "red") not in gaps["trade"]
-    assert ("remote", "blue", "red") not in gaps["battle"]
-    assert ("remote", "yellow", "blue") in gaps["trade"]
-    assert ("remote", "yellow", "blue") in gaps["battle"]
+    assert gaps["trade"] == ()
+    assert gaps["battle"] == ()
 
 
 def test_required_nodeid_checker_preserves_parameterized_case_identity():
