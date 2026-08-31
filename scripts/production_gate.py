@@ -101,7 +101,10 @@ _SYMBOL_SHA1_RE = re.compile(
     r"^\|\s*Symbol\s+SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|"
 )
 _SYMBOL_PATH_RE = re.compile(r"^\|\s*Symbols?\s*\|\s*`([^`]+)`\s*\|")
-_PYBOY_RE = re.compile(r"^\|\s*PyBoy\s*\|\s*`([^`]+)`")
+_PYBOY_RE = re.compile(
+    r"^\|\s*PyBoy\s*\|\s*`([^`]+)`"
+    r"(?:\s*\+\s*fork\s*`([0-9A-Fa-f]{40})`)?"
+)
 _CREDENTIAL_TEXT_RE = re.compile(
     r"(?i)\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|"
     r"credential|password|passwd|private[_-]?key|secret|token)\b"
@@ -176,6 +179,7 @@ class GateReport:
     nodeids: tuple[str, ...] = ()
     collection_errors: tuple[dict[str, str], ...] = ()
     collection_skips: tuple[dict[str, str], ...] = ()
+    collection_only: bool = False
     error: str = ""
 
 
@@ -205,6 +209,7 @@ class CollectionResult:
     command: list[str]
     status: str
     returncode: int | None
+    nodeids: tuple[str, ...] = ()
     duration_seconds: float = 0.0
     output_tail: str = ""
     reason: str = ""
@@ -324,6 +329,18 @@ def parse_expected_pyboy_version(versions_file: Path) -> str | None:
         match = _PYBOY_RE.match(line)
         if match:
             return match.group(1).strip()
+    return None
+
+
+def parse_expected_pyboy_revision(versions_file: Path) -> str | None:
+    """Return the exact pinned PyBoy fork revision, if one is documented."""
+
+    if not versions_file.is_file():
+        return None
+    for line in versions_file.read_text(encoding="utf-8").splitlines():
+        match = _PYBOY_RE.match(line)
+        if match and match.group(2):
+            return match.group(2).lower()
     return None
 
 
@@ -599,7 +616,9 @@ def runtime_problems(project_root: Path, runtime: dict[str, Any]) -> list[str]:
         problems.append(f"runtime probe failed: {runtime['probe_error']}")
         return problems
 
-    expected_version = parse_expected_pyboy_version(project_root / "VERSIONS.md")
+    versions_file = project_root / "VERSIONS.md"
+    expected_version = parse_expected_pyboy_version(versions_file)
+    expected_manifest_revision = parse_expected_pyboy_revision(versions_file)
     actual_version = runtime.get("pyboy_version")
     if not actual_version:
         problems.append("PyBoy version was not reported by the selected interpreter")
@@ -623,6 +642,15 @@ def runtime_problems(project_root: Path, runtime: dict[str, Any]) -> list[str]:
                 problems.append(
                     "PyBoy revision mismatch: "
                     f"expected {expected_revision!r}, got {runtime.get('pyboy_revision')!r}"
+                )
+            if (
+                expected_manifest_revision
+                and runtime.get("pyboy_revision") != expected_manifest_revision
+            ):
+                problems.append(
+                    "PyBoy revision does not match VERSIONS.md: "
+                    f"expected {expected_manifest_revision!r}, "
+                    f"got {runtime.get('pyboy_revision')!r}"
                 )
 
     if runtime.get("serial_contract") != "bit-accurate-backend":
@@ -750,6 +778,38 @@ def load_required_test_keys(
     return result, ""
 
 
+def load_required_nodeids(
+    project_root: Path,
+) -> tuple[dict[str, frozenset[str]], str]:
+    """Load exact matrix/role node IDs required by the production gate."""
+
+    config_path = project_root / "tests" / "_tier_config.py"
+    if not config_path.is_file():
+        return {}, f"tier configuration is missing: {config_path}"
+    try:
+        namespace = runpy.run_path(str(config_path))
+    except Exception as exc:
+        return {}, f"tier configuration could not be loaded: {type(exc).__name__}: {exc}"
+
+    raw = namespace.get("TIER_REQUIRED_NODEIDS")
+    if not isinstance(raw, dict):
+        return {}, "tier configuration has no TIER_REQUIRED_NODEIDS manifest"
+
+    result: dict[str, frozenset[str]] = {}
+    for tier_name, raw_nodeids in raw.items():
+        if not isinstance(tier_name, str) or not isinstance(
+            raw_nodeids, (set, frozenset, tuple, list)
+        ):
+            return {}, f"invalid required-nodeid manifest entry for {tier_name!r}"
+        normalized: set[str] = set()
+        for nodeid in raw_nodeids:
+            if not isinstance(nodeid, str) or not nodeid or "::" not in nodeid:
+                return {}, f"invalid required node ID in tier {tier_name!r}: {nodeid!r}"
+            normalized.add(_normalize_nodeid(nodeid))
+        result[tier_name] = frozenset(normalized)
+    return result, ""
+
+
 def _reason_counter(payload: dict[str, Any]) -> dict[str, int]:
     reasons = Counter()
     for record in payload.get("tests", []):
@@ -781,6 +841,9 @@ def _load_gate_report(
         records = payload.get("tests")
         if not isinstance(records, list):
             raise ValueError("pytest report has no tests list")
+        collection_only = payload.get("collection_only", False)
+        if not isinstance(collection_only, bool):
+            raise ValueError("pytest report collection_only is not boolean")
 
         collection_errors = payload.get("collection_errors")
         if not isinstance(collection_errors, list):
@@ -814,11 +877,13 @@ def _load_gate_report(
             raise ValueError("pytest report nodeids is invalid")
         if collected != len(nodeids) or len(set(nodeids)) != len(nodeids):
             raise ValueError("pytest report collected/nodeids are inconsistent")
-        if collected != len(records):
+        if not collection_only and collected != len(records):
             raise ValueError(
                 "pytest report collected item count does not match reported test outcomes: "
                 f"{collected} != {len(records)}"
             )
+        if collection_only and records:
+            raise ValueError("collection-only pytest report contains test outcomes")
 
         derived = Counts(total=len(records), errors=len(collection_errors))
         seen_nodeids: set[str] = set()
@@ -858,7 +923,7 @@ def _load_gate_report(
         ) + (derived.errors - len(collection_errors)):
             raise ValueError("pytest report test outcomes do not add up to total")
 
-        if seen_nodeids != set(nodeids):
+        if not collection_only and seen_nodeids != set(nodeids):
             raise ValueError("pytest report nodeids do not match test records")
         if counts != derived:
             raise ValueError(
@@ -874,6 +939,7 @@ def _load_gate_report(
         nodeids=tuple(nodeids),
         collection_errors=tuple(collection_errors),
         collection_skips=tuple(collection_skips),
+        collection_only=collection_only,
     )
 
 
@@ -1010,46 +1076,93 @@ def run_collection_preflight(
     commands: list[tuple[str, list[str]]] = [
         (
             "python-module",
-            [str(python_executable), "-m", "pytest", "--collect-only", "-q"],
+            [
+                str(python_executable),
+                "-m",
+                "pytest",
+                "tests",
+                "--collect-only",
+                "-q",
+                "-p",
+                "tests._gate_report",
+            ],
         )
     ]
     console_script = _pytest_console_script(python_executable)
-    if console_script is None:
-        return [
-            CollectionResult(
-                name="pytest-console",
-                command=[str(python_executable.parent / "pytest")],
-                status="FAIL",
-                returncode=None,
-                reason=(
-                    "pytest console script was not found beside the selected "
-                    f"interpreter {python_executable}"
-                ),
-            ),
-            *[
+    console_missing = console_script is None
+    if console_missing:
+        commands.append(
+            (
+                "pytest-console",
+                [
+                    str(python_executable.parent / "pytest"),
+                    "tests",
+                    "--collect-only",
+                    "-q",
+                    "-p",
+                    "tests._gate_report",
+                ],
+            )
+        )
+    else:
+        commands.append(
+            (
+                "pytest-console",
+                [
+                    str(console_script),
+                    "tests",
+                    "--collect-only",
+                    "-q",
+                    "-p",
+                    "tests._gate_report",
+                ],
+            )
+        )
+
+    with tempfile.TemporaryDirectory(prefix="pokered-collection-") as directory:
+        results: list[CollectionResult] = []
+        for index, (name, command) in enumerate(commands):
+            if name == "pytest-console" and console_missing:
+                results.append(
+                    CollectionResult(
+                        name=name,
+                        command=command,
+                        status="FAIL",
+                        returncode=None,
+                        reason=(
+                            "pytest console script was not found beside the selected "
+                            f"interpreter {python_executable}"
+                        ),
+                    )
+                )
+                continue
+            results.append(
                 _run_collection_command(
                     name=name,
                     command=command,
                     project_root=project_root,
                     environment=environment,
                     timeout_seconds=timeout_seconds,
+                    report_path=Path(directory) / f"{index}.json",
                 )
-                for name, command in commands
-            ],
-        ]
-    commands.append(
-        ("pytest-console", [str(console_script), "--collect-only", "-q"])
-    )
-    return [
-        _run_collection_command(
-            name=name,
-            command=command,
-            project_root=project_root,
-            environment=environment,
-            timeout_seconds=timeout_seconds,
-        )
-        for name, command in commands
-    ]
+            )
+
+    if all(result.status == "PASS" for result in results):
+        first, second = results
+        first_nodes = set(first.nodeids)
+        second_nodes = set(second.nodeids)
+        if first_nodes != second_nodes:
+            missing_from_second = sorted(first_nodes - second_nodes)
+            missing_from_first = sorted(second_nodes - first_nodes)
+            reason = (
+                "pytest collection entry points selected different test trees: "
+                f"missing_from_console={missing_from_second!r}; "
+                f"missing_from_module={missing_from_first!r}"
+            )
+            for result in results:
+                result.status = "FAIL"
+                result.reason = reason
+    return results
 
 
 def _run_collection_command(
@@ -1059,10 +1172,25 @@ def _run_collection_command(
     project_root: Path,
     environment: dict[str, str],
     timeout_seconds: float,
+    report_path: Path,
 ) -> CollectionResult:
     started = time.monotonic()
     child_environment = dict(environment)
-    child_environment.pop("POKERED_GATE_REPORT", None)
+    child_environment["POKERED_GATE_REPORT"] = str(report_path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        report_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return CollectionResult(
+            name=name,
+            command=command,
+            status="FAIL",
+            returncode=None,
+            duration_seconds=time.monotonic() - started,
+            reason=f"could not prepare collection report: {type(exc).__name__}: {exc}",
+        )
     try:
         process = subprocess.Popen(
             command,
@@ -1103,18 +1231,27 @@ def _run_collection_command(
 
     raw_returncode = process.returncode
     returncode = int(raw_returncode) if raw_returncode is not None else 125
+    report = _load_gate_report(report_path, expected_returncode=returncode)
+    problems: list[str] = []
+    if report.error:
+        problems.append(report.error)
+    if returncode != 0:
+        problems.append(f"pytest collection returned exit code {returncode}")
+    if not report.collection_only:
+        problems.append("pytest collection report did not identify a collection-only run")
+    if report.collection_errors:
+        problems.append(f"pytest reported {len(report.collection_errors)} collection error(s)")
+    if report.collection_skips:
+        problems.append(f"pytest reported {len(report.collection_skips)} collection skip(s)")
     return CollectionResult(
         name=name,
         command=command,
-        status="PASS" if returncode == 0 else "FAIL",
+        status="PASS" if not problems else "FAIL",
         returncode=returncode,
+        nodeids=report.nodeids,
         duration_seconds=time.monotonic() - started,
         output_tail=output[-8000:],
-        reason=(
-            ""
-            if returncode == 0
-            else "pytest collection returned a non-zero exit code"
-        ),
+        reason="; ".join(problems),
     )
 
 
@@ -1234,6 +1371,20 @@ def _test_key_from_nodeid(nodeid: str) -> tuple[str, str] | None:
     return Path(path).name, test_name.split("[", 1)[0]
 
 
+def _normalize_nodeid(nodeid: str) -> str:
+    """Normalize the path portion of a pytest node ID for manifest checks."""
+
+    path, separator, test_name = nodeid.partition("::")
+    normalized_path = path.replace("\\", "/")
+    while normalized_path.startswith("./"):
+        normalized_path = normalized_path[2:]
+    return (
+        f"{normalized_path}::{test_name}"
+        if separator
+        else normalized_path
+    )
+
+
 def _required_test_problems(
     nodeids: Iterable[str],
     required_test_keys: Iterable[tuple[str, str]],
@@ -1251,6 +1402,20 @@ def _required_test_problems(
     ]
 
 
+def _required_nodeid_problems(
+    nodeids: Iterable[str],
+    required_nodeids: Iterable[str],
+) -> list[str]:
+    actual = {_normalize_nodeid(nodeid) for nodeid in nodeids}
+    missing = sorted(
+        {_normalize_nodeid(nodeid) for nodeid in required_nodeids} - actual
+    )
+    return [
+        f"required matrix case is absent from selected items: {nodeid}"
+        for nodeid in missing
+    ]
+
+
 def run_tier(
     *,
     name: str,
@@ -1262,6 +1427,7 @@ def run_tier(
     timeout_override: float | None,
     report_directory: Path,
     required_test_keys: Iterable[tuple[str, str]] = (),
+    required_nodeids: Iterable[str] = (),
 ) -> TierResult:
     required = name not in OPTIONAL_TIERS
     if required and name in REQUIRED_TIER_ASSETS and required_problems:
@@ -1347,6 +1513,7 @@ def run_tier(
 
         required_problems = _required_test_problems(report.nodeids, required_test_keys)
         problems.extend(required_problems)
+        problems.extend(_required_nodeid_problems(report.nodeids, required_nodeids))
         current_nodeids = set(report.nodeids)
         if baseline_nodeids is None:
             baseline_nodeids = current_nodeids
@@ -1642,6 +1809,9 @@ def _safe_collection(
 ) -> dict[str, Any]:
     data = asdict(collection)
     data["command"] = _safe_command(collection.command, roots) or []
+    data["nodeids"] = [
+        _safe_diagnostic(nodeid, roots, limit=1000) for nodeid in collection.nodeids
+    ]
     data["output_tail"] = _safe_diagnostic(collection.output_tail, roots)
     data["reason"] = _safe_diagnostic(collection.reason, roots, limit=2000)
     return data
@@ -1818,6 +1988,73 @@ def _evidence_file_metadata(path: Path, relative_name: str) -> dict[str, Any]:
     }
 
 
+def verify_evidence_bundle(evidence_dir: Path) -> None:
+    """Verify the metadata and content hashes of a retained evidence bundle."""
+
+    evidence_dir = evidence_dir.expanduser().resolve(strict=False)
+    manifest_path = evidence_dir / EVIDENCE_MANIFEST_FILENAME
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"could not read evidence manifest: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("evidence manifest root is not an object")
+    if manifest.get("schema_version") != EVIDENCE_SCHEMA_VERSION:
+        raise ValueError("evidence manifest schema version is unsupported")
+
+    entries = manifest.get("files")
+    if not isinstance(entries, list):
+        raise ValueError("evidence manifest files is not a list")
+    expected_names = {EVIDENCE_REPORT_FILENAME, EVIDENCE_TEXT_FILENAME}
+    actual_names: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("evidence manifest file entry is not an object")
+        relative_name = entry.get("path")
+        if not isinstance(relative_name, str) or not relative_name:
+            raise ValueError("evidence manifest file path is invalid")
+        if relative_name in actual_names:
+            raise ValueError(f"evidence manifest repeats file {relative_name!r}")
+        actual_names.add(relative_name)
+        relative_path = Path(relative_name)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ValueError(f"evidence manifest file escapes its directory: {relative_name!r}")
+        path = (evidence_dir / relative_path).resolve(strict=False)
+        try:
+            path.relative_to(evidence_dir)
+        except ValueError as exc:
+            raise ValueError(f"evidence manifest file escapes its directory: {relative_name!r}") from exc
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise ValueError(
+                f"could not read evidence file {relative_name!r}: {type(exc).__name__}: {exc}"
+            ) from exc
+        if entry.get("size") != len(content):
+            raise ValueError(f"evidence file size mismatch for {relative_name!r}")
+        if entry.get("sha256") != hashlib.sha256(content).hexdigest():
+            raise ValueError(f"evidence file sha256 mismatch for {relative_name!r}")
+
+    if actual_names != expected_names:
+        raise ValueError(
+            "evidence manifest must cover exactly gate-report.json and gate-report.txt"
+        )
+    try:
+        report = json.loads(
+            (evidence_dir / EVIDENCE_REPORT_FILENAME).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"could not read retained gate report: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(report, dict):
+        raise ValueError("retained gate report root is not an object")
+    if report.get("overall") != manifest.get("overall"):
+        raise ValueError("evidence manifest overall status does not match gate report")
+
+
 def write_evidence_bundle(
     evidence_dir: Path,
     payload: dict[str, Any],
@@ -1849,6 +2086,7 @@ def write_evidence_bundle(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    verify_evidence_bundle(evidence_dir)
     return {
         "report": report_path,
         "text": text_path,
@@ -1943,6 +2181,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     required_tests_by_tier, tier_config_error = load_required_test_keys(project_root)
     if tier_config_error:
         gate_problems.append(tier_config_error)
+    required_nodeids_by_tier, nodeid_config_error = load_required_nodeids(project_root)
+    if nodeid_config_error:
+        gate_problems.append(nodeid_config_error)
     collections = run_collection_preflight(
         project_root=project_root,
         python_executable=python_executable,
@@ -1978,6 +2219,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     timeout_override=args.timeout_seconds,
                     report_directory=report_directory,
                     required_test_keys=required_tests_by_tier.get(name, ()),
+                    required_nodeids=required_nodeids_by_tier.get(name, ()),
                 )
             )
 

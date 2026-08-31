@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-
 _VALID_OUTCOMES = frozenset({"passed", "failed", "skipped"})
 
 
@@ -94,6 +93,7 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     if not target:
         return
 
+    collection_only = bool(getattr(getattr(session.config, "option", None), "collectonly", False))
     records = list(_records().values())
     counts = {
         "passed": 0,
@@ -126,6 +126,7 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
         "collection_skips": list(_collection_skips()),
         "collected": len(_ACTIVE_COLLECTED_NODEIDS),
         "nodeids": list(_ACTIVE_COLLECTED_NODEIDS),
+        "collection_only": collection_only,
     }
     path = Path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,8 +172,8 @@ def _combine_reasons(previous: str, current: str) -> str:
 
 
 __all__ = [
-    "pytest_collectreport",
     "pytest_collection_finish",
+    "pytest_collectreport",
     "pytest_configure",
     "pytest_runtest_logreport",
     "pytest_sessionfinish",

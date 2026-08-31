@@ -5,6 +5,9 @@
 *.map
 *.sav
 *.state
+*.ram
+*.sqlite
+*.sqlite3
 rom/
 roms/
 pokered/

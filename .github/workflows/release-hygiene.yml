@@ -12,7 +12,7 @@ jobs:
   unit-and-manifest:
     name: Unit tests and fixture-manifest schema
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -29,5 +29,40 @@ jobs:
       - name: Validate fixture-manifest schema
         run: python scripts/validate_fixture_manifest.py --schema-only
 
-      - name: Run ROM-free unit tier
-        run: python -m pytest -q -m unit
+      - name: Run ROM-free production gate
+        run: >-
+          python scripts/production_gate.py --unit-only --repeat-timing 5
+          --evidence-dir "$RUNNER_TEMP/pokered-unit-evidence"
+
+      - name: Build wheel without ROM-derived artifacts
+        run: python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/pokered-wheels" .
+
+      - name: Verify clean wheel installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          clean_venv="$RUNNER_TEMP/pokered-clean-venv"
+          python -m venv "$clean_venv"
+          clean_python="$clean_venv/bin/python"
+          "$clean_python" -m pip install --no-cache-dir "$RUNNER_TEMP"/pokered-wheels/*.whl
+          "$clean_python" -m pip check
+          "$clean_python" - <<'PY'
+          import pyboy
+          from pyboy.core.serial import Serial
+          import pokered_harness
+
+          assert pyboy.__version__ == "2.7.0"
+          assert getattr(pyboy, "__pokered_harness_revision__", "")
+          serial = Serial(False)
+          assert all(hasattr(serial, name) for name in ("backend", "apply_external_edge"))
+          print(pokered_harness.__file__)
+          print(pyboy.__file__)
+          PY
+
+      - name: Upload sanitized production-gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pokered-unit-gate-evidence
+          path: ${{ runner.temp }}/pokered-unit-evidence
+          if-no-files-found: ignore

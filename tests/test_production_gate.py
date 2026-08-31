@@ -18,7 +18,7 @@ from tests._rom_assets import (
     rom_path,
     sym_path,
 )
-from tests._tier_config import classify_test
+from tests._tier_config import TIER_REQUIRED_NODEIDS, classify_test
 
 _GATE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "production_gate.py"
 _SPEC = importlib.util.spec_from_file_location("pokered_production_gate", _GATE_PATH)
@@ -112,6 +112,92 @@ def test_pyboy_version_parser_accepts_revision_annotation(tmp_path):
         encoding="utf-8",
     )
     assert gate.parse_expected_pyboy_version(versions) == "2.7.0"
+    assert gate.parse_expected_pyboy_revision(versions) == (
+        "c565df66c3731fad2856169a90f6bbec99925915"
+    )
+
+
+def test_required_matrix_manifest_covers_ordered_versions_and_variants():
+    assert len(TIER_REQUIRED_NODEIDS["remote"]) == 11
+    assert len(TIER_REQUIRED_NODEIDS["local"]) == 18
+    assert any("[red-blue]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
+    assert any("[blue-red]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
+    assert any("[red-vanilla-x-color]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["local"])
+    assert any("[blue-color-x-vanilla]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["local"])
+
+
+def test_required_nodeid_checker_preserves_parameterized_case_identity():
+    required = ("tests/test_matrix.py::test_pair[red-blue]",)
+    assert gate._required_nodeid_problems(required, required) == []
+    problems = gate._required_nodeid_problems(
+        ("tests/test_matrix.py::test_pair[red-red]",), required
+    )
+    assert problems == [
+        (
+            "required matrix case is absent from selected items: "
+            "tests/test_matrix.py::test_pair[red-blue]"
+        )
+    ]
+
+
+def test_run_tier_fails_when_a_required_matrix_case_is_missing(tmp_path, monkeypatch):
+    def fake_run_pytest_once(**kwargs):
+        return (
+            0,
+            gate.GateReport(
+                counts=gate.Counts(total=1, passed=1),
+                nodeids=("tests/test_matrix.py::test_pair[red-red]",),
+            ),
+            "",
+            ["python", "-m", "pytest"],
+        )
+
+    monkeypatch.setattr(gate, "run_pytest_once", fake_run_pytest_once)
+    result = gate.run_tier(
+        name="unit",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+        required_nodeids=("tests/test_matrix.py::test_pair[red-blue]",),
+    )
+
+    assert result.status == "FAIL"
+    assert any("red-blue" in failure for failure in result.iteration_failures)
+
+
+def test_run_tier_repeats_timing_cases_at_least_five_times(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run_pytest_once(**kwargs):
+        calls.append(kwargs)
+        return (
+            0,
+            gate.GateReport(
+                counts=gate.Counts(total=1, passed=1),
+                nodeids=("tests/test_timing.py::test_rearm",),
+            ),
+            "",
+            ["python", "-m", "pytest"],
+        )
+
+    monkeypatch.setattr(gate, "run_pytest_once", fake_run_pytest_once)
+    result = gate.run_tier(
+        name="timing",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+    )
+
+    assert result.status == "PASS"
+    assert len(calls) == 5
 
 
 def test_asset_inspection_reports_hash_mismatch_and_missing_inputs(tmp_path):
@@ -294,9 +380,115 @@ def test_collection_preflight_runs_module_and_console_commands(tmp_path, monkeyp
 
     assert [result.name for result in results] == ["python-module", "pytest-console"]
     assert [call["command"] for call in calls] == [
-        [str(python), "-m", "pytest", "--collect-only", "-q"],
-        [str(console), "--collect-only", "-q"],
+        [
+            str(python),
+            "-m",
+            "pytest",
+            "tests",
+            "--collect-only",
+            "-q",
+            "-p",
+            "tests._gate_report",
+        ],
+        [
+            str(console),
+            "tests",
+            "--collect-only",
+            "-q",
+            "-p",
+            "tests._gate_report",
+        ],
     ]
+    assert all(call["report_path"].is_absolute() for call in calls)
+
+
+def test_collection_preflight_rejects_different_entry_point_test_trees(tmp_path, monkeypatch):
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    (python.parent / "pytest").write_text("", encoding="utf-8")
+
+    def fake_run_collection_command(**kwargs):
+        nodeids = (
+            "tests/test_one.py::test_one",
+            "tests/test_two.py::test_two",
+        )
+        if kwargs["name"] == "pytest-console":
+            nodeids = nodeids[:1]
+        return gate.CollectionResult(
+            name=kwargs["name"],
+            command=kwargs["command"],
+            status="PASS",
+            returncode=0,
+            nodeids=nodeids,
+        )
+
+    monkeypatch.setattr(gate, "_run_collection_command", fake_run_collection_command)
+    results = gate.run_collection_preflight(
+        project_root=tmp_path,
+        python_executable=python,
+        environment={},
+    )
+
+    assert [result.status for result in results] == ["FAIL", "FAIL"]
+    assert all("different test trees" in result.reason for result in results)
+
+
+def test_gate_report_loader_accepts_collection_only_inventory(tmp_path):
+    report = tmp_path / "collection.json"
+    report.write_text(
+        json.dumps(
+            {
+                "collection_only": True,
+                "counts": {
+                    "total": 0,
+                    "passed": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "xfailed": 0,
+                    "xpassed": 0,
+                    "errors": 0,
+                },
+                "tests": [],
+                "collection_errors": [],
+                "collection_skips": [],
+                "collected": 1,
+                "nodeids": ["tests/test_one.py::test_one"],
+                "exitstatus": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = gate._load_gate_report(report, expected_returncode=0)
+    assert loaded.error == ""
+    assert loaded.collection_only is True
+    assert loaded.nodeids == ("tests/test_one.py::test_one",)
+
+
+def test_runtime_problems_reject_a_manifest_revision_mismatch(tmp_path):
+    versions = tmp_path / "VERSIONS.md"
+    versions.write_text(
+        "| PyBoy | `2.7.0` + fork `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |\n",
+        encoding="utf-8",
+    )
+    vendor = tmp_path / "vendor" / "pyboy-src"
+    vendor.mkdir(parents=True)
+    (vendor / "POKERED_HARNESS_PYBOY_REVISION").write_text(
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        encoding="ascii",
+    )
+    runtime = {
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "serial_contract": "bit-accurate-backend",
+        "pyboy_module": "pyboy",
+        "harness_module": "pokered_harness",
+    }
+
+    problems = gate.runtime_problems(tmp_path, runtime)
+
+    assert any("does not match VERSIONS.md" in problem for problem in problems)
 
 
 def test_evidence_bundle_is_portable_sanitized_and_diagnostic(tmp_path):
@@ -318,6 +510,10 @@ def test_evidence_bundle_is_portable_sanitized_and_diagnostic(tmp_path):
             command=[str(project_root / ".venv" / "bin" / "python"), "-m", "pytest"],
             status="PASS",
             returncode=0,
+            nodeids=(
+                "tests/test_gate.py::test_case[password=topsecret]",
+                str(project_root / "tests" / "test_gate.py") + "::test_path",
+            ),
         )
     ]
     tiers = [
@@ -361,6 +557,8 @@ def test_evidence_bundle_is_portable_sanitized_and_diagnostic(tmp_path):
     assert str(tmp_path) not in serialized
     assert "/sensitive/path" not in serialized
     assert payload["assets"][0]["path"] == "<rom-root>/red/pokemon-red.gb"
+    assert all("topsecret" not in nodeid for nodeid in payload["collections"][0]["nodeids"])
+    assert all(str(tmp_path) not in nodeid for nodeid in payload["collections"][0]["nodeids"])
     assert payload["tiers"][0]["status"] == "FAIL"
     assert "assertion failed" in payload["tiers"][0]["output_tail"]
 
@@ -390,6 +588,14 @@ def test_evidence_bundle_is_portable_sanitized_and_diagnostic(tmp_path):
     assert "assertion failed" in text
     assert "topsecret" not in text
     assert "ROM_BYTES" not in text
+    gate.verify_evidence_bundle(evidence_dir)
+
+    paths["report"].write_text(
+        paths["report"].read_text(encoding="utf-8") + "tampered\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="(?:size|sha256) mismatch"):
+        gate.verify_evidence_bundle(evidence_dir)
 
 
 def test_parser_accepts_evidence_directory():

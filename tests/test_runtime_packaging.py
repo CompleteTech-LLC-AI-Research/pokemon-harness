@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -63,6 +64,25 @@ def test_project_direct_dependencies_are_exactly_pinned() -> None:
 
     assert dependencies == EXPECTED_RUNTIME_DEPENDENCIES
     assert dev_dependencies == EXPECTED_DEV_DEPENDENCIES
+
+
+def test_lockfile_records_the_same_exact_project_requirements() -> None:
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    project = next(
+        package for package in lock["package"] if package["name"] == "pokered-harness"
+    )
+    locked_requirements = {
+        item["name"].lower(): item["specifier"]
+        for item in project["metadata"]["requires-dist"]
+        if "marker" not in item
+    }
+    locked_dev_requirements = {
+        item["name"].lower(): item["specifier"]
+        for item in project["metadata"]["requires-dist"]
+        if item.get("marker") == "extra == 'dev'"
+    }
+    assert locked_requirements == EXPECTED_RUNTIME_DEPENDENCIES
+    assert locked_dev_requirements == EXPECTED_DEV_DEPENDENCIES
 
 
 def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
@@ -138,3 +158,58 @@ def test_vendored_runtime_contains_no_game_rom_artifacts() -> None:
     source = ROOT / "vendor" / "pyboy-src" / "pyboy"
     forbidden = tuple(source.rglob("*.gb")) + tuple(source.rglob("*.gbc"))
     assert not forbidden
+
+
+def test_git_tracked_tree_excludes_rom_and_generated_runtime_artifacts() -> None:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z"],
+        check=False,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    tracked = [Path(raw) for raw in result.stdout.decode().split("\0") if raw]
+    forbidden_suffixes = {
+        ".gb",
+        ".gbc",
+        ".map",
+        ".ram",
+        ".sav",
+        ".state",
+        ".sym",
+        ".sqlite",
+        ".sqlite3",
+        ".so",
+        ".pyd",
+    }
+    forbidden = [
+        path.as_posix() for path in tracked if path.suffix.lower() in forbidden_suffixes
+    ]
+    assert forbidden == []
+
+
+def test_gitignore_protects_rom_derived_inputs_and_outputs() -> None:
+    ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    for pattern in (
+        "*.gb",
+        "*.gbc",
+        "*.sym",
+        "*.state",
+        "*.ram",
+        "*.sav",
+        "*.sqlite",
+        "*.sqlite3",
+    ):
+        assert pattern in ignored
+
+
+def test_ci_runs_gate_clean_install_and_retains_sanitized_evidence() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release-hygiene.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "scripts/production_gate.py" in workflow
+    assert "--unit-only" in workflow
+    assert "--repeat-timing 5" in workflow
+    assert "pip wheel" in workflow
+    assert "python -m venv" in workflow
+    assert "pip check" in workflow
+    assert "upload-artifact@v4" in workflow
