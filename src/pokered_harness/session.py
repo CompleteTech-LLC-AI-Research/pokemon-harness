@@ -50,7 +50,7 @@ class InvalidStateError(ValueError):
 
 
 class VersionMismatch(SessionError):
-    """Raised when the loaded ROM or PyBoy version does not match the pin."""
+    """Raised when a loaded ROM, symbol file, or PyBoy version misses its pin."""
 
     code = "version_mismatch"
 
@@ -113,6 +113,7 @@ class Session:
         sym_path: str | Path,
         *,
         expected_rom_sha1: str | None = None,
+        expected_symbol_sha1: str | None = None,
         expected_pyboy_version: str | None = None,
         pyboy_factory: Callable[[str], PyBoyLike] | None = None,
         view: bool = False,
@@ -134,6 +135,23 @@ class Session:
                 raise VersionMismatch(
                     f"ROM SHA-1 mismatch: expected {expected_rom_sha1}, "
                     f"got {actual} for {rom_path}"
+                )
+
+        if expected_symbol_sha1 is not None:
+            expected_symbol_sha1 = _normalise_sha1(
+                expected_symbol_sha1, label="symbol SHA-1"
+            )
+            try:
+                actual = sha1_of_file(sym_path)
+            except OSError as exc:
+                raise SessionConfigurationError(
+                    f"unable to read symbol file {sym_path} for SHA-1 "
+                    f"verification: {exc}"
+                ) from exc
+            if actual.lower() != expected_symbol_sha1.lower():
+                raise VersionMismatch(
+                    f"symbol SHA-1 mismatch: expected {expected_symbol_sha1}, "
+                    f"got {actual} for {sym_path}"
                 )
 
         if expected_pyboy_version is not None:
@@ -464,11 +482,11 @@ def sha1_of_file(path: str | Path, *, chunk_size: int = 1 << 20) -> str:
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
-def _normalise_sha1(value: str) -> str:
+def _normalise_sha1(value: str, *, label: str = "ROM SHA-1") -> str:
     candidate = value.strip()
     if not _SHA1_RE.fullmatch(candidate):
         raise SessionConfigurationError(
-            f"ROM SHA-1 must be exactly 40 hexadecimal characters, got {value!r}"
+            f"{label} must be exactly 40 hexadecimal characters, got {value!r}"
         )
     return candidate.lower()
 

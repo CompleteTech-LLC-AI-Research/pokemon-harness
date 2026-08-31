@@ -27,6 +27,9 @@ _VALID = """\
 |---|---|
 | SHA-1 | `ea9bcae617fdf159b045185467ae58b2e4a48b9a` |
 | Size | 1,048,576 bytes |
+| Path | `rom/red/pokemon-red.gb` |
+| Symbols | `rom/red/pokemon-red.sym` |
+| Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
 """
 
 
@@ -37,6 +40,9 @@ def test_load_versions_parses_valid_file(tmp_path):
     assert isinstance(cfg, VersionsConfig)
     assert cfg.rom_sha1 == "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
     assert cfg.pyboy_version == "2.7.0"
+    assert cfg.symbol_sha1_for_path("rom/red/pokemon-red.sym") == (
+        "03783c86a42588bd77f73bd7814cf8d70e590118"
+    )
 
 
 def test_load_versions_is_case_insensitive_for_sha(tmp_path):
@@ -96,6 +102,17 @@ def test_repo_versions_selects_hash_by_rom_path():
         "/isolated/worktree/rom/yellow/pokemon-yellow.gbc"
     ) == "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
     assert cfg.sha1_for_path("rom/unknown/custom.gb") is None
+
+
+def test_repo_versions_selects_symbol_hash_by_symbol_path():
+    cfg = load_versions("VERSIONS.md")
+    assert cfg.symbol_sha1_for_path("rom/red/pokemon-red.sym") == (
+        "03783c86a42588bd77f73bd7814cf8d70e590118"
+    )
+    assert cfg.symbol_sha1_for_path(
+        r"C:\isolated\worktree\rom\yellow\pokemon-yellow.sym"
+    ) == "7c4205723943e7722230dcf014e5e8a2012474aa"
+    assert cfg.symbol_sha1_for_path("rom/unknown/custom.sym") is None
 
 
 # -- per-session env vars --------------------------------------------------
