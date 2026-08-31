@@ -11,7 +11,7 @@ symbol files, save states, or other ROM-derived artifacts.
 
 This repository is an audited production-readiness candidate, not a production
 release. Unless explicitly labelled historical, the facts below refer to
-candidate commit `c3c1d8e` on 2026-08-31. The baseline at `e219fb5` was not
+source candidate commit `db72be6` on 2026-08-31. The baseline at `e219fb5` was not
 production-certified.
 
 Status semantics are deliberately scoped:
@@ -26,35 +26,34 @@ Status semantics are deliberately scoped:
   assets, complete strict acceptance coverage, retained evidence, and no open
   release blockers.
 
-The exact current asset-free gate was run from `c3c1d8e` with
-`scripts/production_gate.py --unit-only --repeat-timing 5`: collection was
-594 tests, unit was 469/469, timing was 35/35 in five repetitions, and the
-scoped gate result was `PASS`. It also verified the fixture manifest schema
-(10 entries) and reported a structural matrix audit, but did not run ROM-backed
-tiers. The matrix declaration remains incomplete: all nine ordered version
-pairs, six reversed-role rows, nine local variant rows, and two strict trade
-and two strict battle entry points were collected; the matrix auditor reports
-16 uncovered trade cases and 16 uncovered battle cases, and runtime was
-`NOT RUN`. Lane B's final matrix report is required before this boundary can
-change.
+The exact current asset-free gate was run from `db72be6` with
+`scripts/production_gate.py --unit-only --repeat-timing 5`: both collection
+paths found 599 tests, unit was 472/472, timing was 35/35 in five repetitions,
+and the scoped gate result was `PASS`. It also verified the fixture manifest
+schema (10 entries) and reported a structural matrix audit, but did not run
+ROM-backed tiers. The matrix declaration remains incomplete: all nine ordered
+version pairs, six reversed-role rows, nine local variant rows, and three
+strict trade and three strict battle entry points were collected; the matrix
+auditor reports 15 uncovered trade cases and 15 uncovered battle cases, and
+the collection-only runtime is `NOT RUN`.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
-| ROM-free unit and timing regressions | `PASS` (scoped) | At `c3c1d8e`: unit 469/469 and timing 35/35 across five repetitions. |
+| ROM-free unit and timing regressions | `PASS` (scoped) | At `db72be6`: unit 472/472 and timing 35/35 across five repetitions. |
 | Runtime/package identity | `PASS` (scoped) | The gate resolves bundled source PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PARTIAL` | A clean wheel smoke passed 3/3 for explicit color-Red ROM/SYM inputs. Wider five-input evidence is historical and is not current all-row sign-off. |
-| In-process link acceptance | `PARTIAL` | Controlled evidence includes the color-Red/Yellow local trade and battle path; other pairs and variants remain unverified. |
-| Remote TCP and MCP lifecycle | `PARTIAL` | Controlled evidence includes localhost color-Red listener/internal-clock and color-Blue connector/external-clock trade/battle paths. Reversed roles, load stability, and the full matrix remain open. |
+| In-process link acceptance | `PASS` (selected tier) | The current local tier passed 46/46; strict color-Red/Yellow trade and battle passed, while the broader matrix remains unverified. |
+| Remote TCP and MCP lifecycle | `PASS` (selected tier) | The current remote tier passed 13/13, and strict color-Red/color-Blue trade and battle passed in both listener/connector directions; the full matrix remains open. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
 The historical complete real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` and the earlier controlled
-stateful rerun are retained as evidence boundaries, not current `c3c1d8e`
-sign-off. The current product Ruff check still reports seven findings, and
-the broad suite, full strict matrix declaration/runtime coverage, vanilla
-fixture provenance, reversed roles, native-platform coverage, and independent
-review remain open. TCP is deliberately localhost-only because it has no
+stateful rerun are retained as historical evidence boundaries. The current
+product Ruff check is clean for the configured source, test, and script
+boundary. The broad suite, full strict matrix declaration/runtime coverage,
+vanilla fixture provenance, native-platform coverage, and independent review
+remain open. TCP is deliberately localhost-only because it has no
 authentication or encryption.
 
 The required setup, test tiers, evidence format, and sign-off rules are in
@@ -77,12 +76,11 @@ The intended release inputs are the exact ROM variants listed in
 
 The controlled stateful evidence scope is the local color-Red/Yellow pair and
 the independent-process color-Red/color-Blue pair for the tested trade and
-battle paths, using the bundled source-runtime build. The remote evidence
-fixes the roles as Red listener/internal-clock and Blue connector/external-
-clock. This is a capability snapshot, not blanket support: stock ROM link
-pairs, Blue/Yellow pairs, reversed listener/connector roles, and other
-unlisted rows remain unsupported or unverified until they receive fresh
-fixtures and acceptance results.
+battle paths, using the bundled source-runtime build. Remote evidence covers
+both Red-listener/Blue-connector and Blue-listener/Red-connector roles. This
+is a capability snapshot, not blanket support: stock ROM link pairs,
+Blue/Yellow pairs, and other unlisted rows remain unsupported or unverified
+until they receive fresh fixtures and acceptance results.
 
 ## Requirements and clean install
 
@@ -285,7 +283,7 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus color Red/Blue native-serial trade and no-hook battle acceptance | Repeated trade stability, reversed roles, and unclaimed ROM/variant rows |
+| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus color Red/Blue native-serial trade and no-hook battle acceptance | Concurrent-load stability and unclaimed ROM/variant rows |
 | `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus strict local Red/Yellow trade and battle acceptance | Full Red/Blue/Yellow coverage or a release result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
@@ -368,17 +366,17 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `c3c1d8e` this scoped command passed 469/469 unit tests and 35/35 timing
+At `db72be6` this scoped command passed 472/472 unit tests and 35/35 timing
 cases in each of five repetitions. It is a `PASS` for the selected scope, not
 a production sign-off: the full gate additionally requires the BYO assets,
 fixture-byte/provenance checks, real-ROM tiers, and complete strict matrix.
 
 Use the tiered commands in [`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md)
 when ROMs, symbols, fixtures, or the bundled link runtime are present. The
-the current diagnostic matrix remains broader than the certified acceptance
-scope. The strict declaration/runtime matrix is incomplete pending Lane B's
-report. A green unit suite alone is not a production result; every required
-tier must run with no unexpected failures, skips, xfails, or timeouts.
+current diagnostic matrix remains broader than the certified acceptance
+scope, and its strict declaration is incomplete. A green unit suite alone is
+not a production result; every required tier must run with no unexpected
+failures, skips, xfails, or timeouts.
 
 ## License
 

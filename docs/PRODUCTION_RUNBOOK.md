@@ -2,22 +2,24 @@
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
-historical, the current candidate facts refer to `c3c1d8e` on 2026-08-31.
+historical, the current candidate facts refer to source candidate `db72be6` on
+2026-08-31.
 Uncommitted worktree changes and external BYO assets are excluded from the
 tracked source tree.
 
-The asset-free gate at `c3c1d8e` passed unit 469/469 and timing 35/35 across
-five repetitions; its collection preflight collected 594 tests and its scoped
+The asset-free gate at `db72be6` passed unit 472/472 and timing 35/35 across
+five repetitions; its collection preflight collected 599 tests and its scoped
 result was `PASS`. This proves only the ROM-free and timing scope. The matrix
-audit in that run collected nine ordered pairs, six reversed-role rows, nine
-local variant rows, and two strict trade plus two strict battle entry points,
-but the strict acceptance declaration was incomplete and matrix runtime was
-`NOT RUN`. Lane B's final matrix report is still required.
+audit collected nine ordered pairs, six reversed-role rows, nine local variant
+rows, and three strict trade plus three strict battle entry points, but the
+strict acceptance declaration remains incomplete with 15 uncovered cases per
+operation. The collection-only matrix runtime is `NOT RUN`.
 
-A prior controlled real-ROM snapshot at `3aad196` recorded local 46/46,
-remote 13/13, strict trade 2/2, and strict battle 2/2 for the canonical
-color-Red/Yellow local and color-Red/color-Blue remote roles. Those results
-are historical evidence boundaries, not a current `c3c1d8e` full-gate result.
+A current selected-tier real-ROM run at `db72be6` recorded local 46/46,
+remote 13/13, strict trade 3/3, and strict battle 3/3 using the pinned BYO
+assets. The strict remote rows cover both color Red/Blue listener/connector
+directions. Those selected tiers are not a full-gate result because the strict
+matrix declaration remains incomplete.
 Symbol hashes and fixture byte/provenance records are in
 [`VERSIONS.md`](../VERSIONS.md) and the tracked
 [`fixture-manifest.json`](../release-evidence/fixture-manifest.json). Overall
@@ -206,7 +208,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `c3c1d8e`, this command collected 594 tests, passed unit 469/469, passed
+At `db72be6`, this command collected 599 tests, passed unit 472/472, passed
 timing 35/35 in each of five repetitions, and returned scoped `PASS`. It also
 performed schema-only validation of the ten-entry fixture manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
@@ -226,10 +228,9 @@ acceptance matrix declaration is incomplete.
 
 The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
 explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. At `c3c1d8e`, `ruff check .` reports seven
-findings in the product surface, so lint is not a release pass. The vendored
-runtime is covered by revision pinning, compile/import checks, and the serial
-contract rather than by the product lint count.
+default `ruff check .` audit. At `db72be6`, `ruff check .` is clean. The
+vendored runtime is covered by revision pinning, compile/import checks, and
+the serial contract.
 
 The release tree includes `tests/__init__.py`; otherwise environments that do
 not treat `tests/` as a namespace package can fail collection. Run both
@@ -367,7 +368,8 @@ uses a legal derived three-mon fixture and requires both sides to reach move
 exchange and turn execution. It does not require the optional damage
 calculation hook. Neither case writes party or battle state during acceptance.
 A skipped or partially parameterized matrix is not full Red/Blue/Yellow
-coverage, and the current strict declaration remains incomplete pending Lane B.
+coverage, and the current strict declaration remains incomplete with 15
+unverified trade and 15 unverified battle cases.
 
 ### Tier E: remote transport and subprocess acceptance/diagnostics
 
@@ -390,17 +392,13 @@ python -m pytest -q -ra \
   tests/test_pyboy_link_session_subprocess.py
 ```
 
-The LinkMenu test is a transport smoke test. A prior controlled strict
-subprocess trade run used cooperative phase rendezvous and compared complete
-party-mon records; concurrent load stability remains open. The strict
-subprocess battle test requires both processes to
-reach move exchange and execution, and now selects LinkMenu through ordinary
-directional/A input without RAM writes or selection hooks. Both payloads travel
-through native bit-level serial traffic, and the tests reject the out-of-band
-exchange counter. Record both child traces and the exact deadline when
-investigating a regression. These results cover only the canonical color-Red
-listener/internal-clock and color-Blue connector/external-clock roles; they do
-not close the unrun ordered pairs or reversed roles.
+The LinkMenu test is a transport smoke test. The current strict subprocess
+trade and battle runs use cooperative phase rendezvous, compare complete
+party-mon records or execute a battle turn, and cover both color Red/Blue
+listener/connector directions. Both payloads travel through native bit-level
+serial traffic, and the tests reject the out-of-band exchange counter.
+Concurrent-load stability and the other ordered pairs remain open. Record both
+child traces and the exact deadline when investigating a regression.
 
 The native MCP link path only installs the pinned PyBoy serial backend and
 transport callbacks. It must not seed `hSerialConnectionStatus` (the ROM-owned
@@ -532,30 +530,28 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current `c3c1d8e` gate result is only the asset-free scoped result:
-   unit 469/469 and timing 35/35 across five repetitions. No current full
-   real-ROM gate result is claimed here. The prior controlled stateful
-   snapshot covers only the canonical color-Red/Yellow local and
-   color-Red/color-Blue remote roles.
+1. The current `db72be6` asset-free gate passed unit 472/472 and timing 35/35
+   across five repetitions. Selected current real-ROM tiers also passed local
+   46/46, remote 13/13, strict trade 3/3, and strict battle 3/3, but the full
+   gate still fails closed on the incomplete strict declaration.
 2. The strict matrix declaration is incomplete: the collection audit has
    nine ordered pairs, six reversed-role rows, and nine local variant rows,
-   but 16 supported trade cases and 16 supported battle cases lack strict
-   entry points. Matrix runtime is `NOT RUN`, and Lane B's final report is
-   required before this boundary changes.
+   but 15 supported trade cases and 15 supported battle cases lack strict
+   entry points. Collection-only matrix runtime is `NOT RUN`; selected strict
+   runtime covers three trade and three battle rows.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
    reproduction evidence, while the vanilla ordinary source provenance is
    `PARTIAL`. The manifest is external and untracked; its complete byte
    validation and a retained sanitized evidence bundle still need to be
    associated with the release candidate.
-4. `ruff check .` reports seven product findings at `c3c1d8e`; the broad suite,
-   all advertised single-session rows, reversed roles, native-platform
-   coverage, load-stable full-matrix behavior, and independent review remain
-   open.
+4. `ruff check .` is clean at `db72be6`; the broad suite, all advertised
+   single-session rows, native-platform coverage, load-stable full-matrix
+   behavior, and independent review remain open.
 5. Remote TCP has no authentication or encryption. Loopback-only operation is
    enforced and is the only supported network boundary; cross-host operation
    is blocked until secure transport is added.
 
-The smallest next actions are to obtain Lane B's complete declaration/runtime
-report, run the full gate with all required BYO assets, retain its sanitized
-and raw output, resolve or explicitly scope the remaining matrix and lint
-items, and obtain independent/native-platform review.
+The smallest next actions are to complete or explicitly scope the remaining
+strict matrix rows, run and retain a full gate result with all required BYO
+assets, establish native-platform and concurrent-load evidence, and obtain
+independent release review.

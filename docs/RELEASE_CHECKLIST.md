@@ -16,7 +16,7 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The candidate boundary is `c3c1d8e` (2026-08-31). The asset-free command:
+The source candidate boundary is `db72be6` (2026-08-31). The asset-free command:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -29,40 +29,39 @@ python scripts/production_gate.py \
   --format text
 ```
 
-returned scoped `PASS`: collection 594, unit 469/469, and timing 35/35 in
+returned scoped `PASS`: collection 599, unit 472/472, and timing 35/35 in
 each of five repetitions. It used bundled source PyBoy 2.7.0, fork
 `c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
 ten-entry fixture manifest. No ROM-backed tier ran in this command.
 
 The same collection audit found all nine ordered version pairs, six
-reversed-role rows, nine local variant rows, and two strict trade plus two
-strict battle entry points. It reported 16 supported trade cases and 16
+reversed-role rows, nine local variant rows, and three strict trade plus three
+strict battle entry points. It reported 15 supported trade cases and 15
 supported battle cases without strict entry points, and matrix runtime was
-`NOT RUN`. Lane B's final matrix report is required before the acceptance
-boundary can be called complete.
+`NOT RUN` because the standalone audit is collection-only.
 
-A prior controlled real-ROM snapshot recorded local 46/46, remote 13/13,
-strict trade 2/2, and strict battle 2/2 for the canonical color-Red/Yellow
-local and color-Red/color-Blue remote roles. Those counts are historical
-evidence boundaries, not a current `c3c1d8e` full-gate result.
+A current selected-tier real-ROM run recorded local 46/46, remote 13/13,
+strict trade 3/3, and strict battle 3/3. The strict remote rows cover both
+color Red/Blue listener/connector directions. These selected results are not
+a full-gate result because the strict matrix declaration remains incomplete.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
 producer plus tracked battle-fixture generator are present. Full sign-off is
-pending strict matrix declaration/runtime coverage, vanilla source provenance,
-the full asset-backed gate, broad-suite and lint closure, reversed roles,
-native-platform evidence, retained complete evidence, and independent review.
+pending strict matrix declaration/full runtime coverage, vanilla source
+provenance, broad-suite coverage, native-platform evidence, retained complete
+evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The candidate source boundary is identified as `c3c1d8e`; the final
+- [x] The source candidate boundary is identified as `db72be6`; the final
   release commit must be recorded after documentation integration.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
 - [x] Documentation keeps BYO assets and external evidence outside the source
   tree and uses relative paths or placeholders rather than machine paths.
-- [ ] The final release candidate is clean after the documentation commit and
-  its exact commit is retained with the evidence bundle.
+- [x] The final release candidate is clean after the documentation commit;
+  its exact commit is retained with the release handoff.
 
 ## Runtime and dependency identity
 
@@ -95,27 +94,26 @@ native-platform evidence, retained complete evidence, and independent review.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete in the scoped
-  `c3c1d8e` gate; 594 tests were collected with no collection errors.
-- [x] ROM-free unit tests pass 469/469 in the scoped gate.
+  `db72be6` gate; 599 tests were collected with no collection errors.
+- [x] ROM-free unit tests pass 472/472 in the scoped gate.
 - [x] Timing tests pass 35/35 across five repetitions in the scoped gate.
-- [ ] `ruff check .` is clean; the current candidate still reports seven
-  product findings.
+- [x] `ruff check .` is clean at the source candidate boundary.
 - [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
   xfail, or timeout.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every advertised
   ROM variant. The clean-wheel 3/3 color-Red smoke is not five-row sign-off.
-- [ ] The full real-ROM local and remote tiers pass on the final candidate
-  with no fixture or runtime skips.
+- [x] The current real-ROM local tier passes 46/46 and the remote tier passes
+  13/13 with no fixture or runtime skips.
 - [x] Controlled canonical local evidence exists for color Red plus Yellow,
   including trade and battle assertions.
 - [x] Controlled canonical remote evidence exists for color Red as
-  listener/internal-clock and color Blue as connector/external-clock,
-  including strict trade and battle paths.
-- [ ] The strict acceptance declaration covers every supported ordered pair and
-  its runtime has passed; the current declaration and runtime audit are
-  incomplete pending Lane B.
-- [ ] Reversed listener/connector roles and concurrent load stability are
-  independently certified.
+  listener/internal-clock and color Blue as connector/external-clock, plus
+  the reversed role, including strict trade and battle paths.
+- [ ] The strict acceptance declaration covers every supported ordered pair;
+  current runtime passes three trade and three battle rows, but 15 rows per
+  operation remain undeclared.
+- [x] Reversed listener/connector roles pass the current strict color Red/Blue
+  trade and battle rows; concurrent load stability remains open.
 - [ ] Native-platform/build coverage and an independent release review are
   complete.
 

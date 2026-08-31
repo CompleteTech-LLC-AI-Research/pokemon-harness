@@ -6,28 +6,28 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: `PARTIAL` current audit candidate; the current source boundary is
-`c3c1d8e` (2026-08-31). Its asset-free production gate collected 594 tests,
-passed unit 469/469, and passed timing 35/35 across five repetitions. The
+`db72be6` (2026-08-31). Its asset-free production gate collected 599 tests,
+passed unit 472/472, and passed timing 35/35 across five repetitions. The
 gate's scoped result is `PASS`; it does not run ROM-backed tiers. Its matrix
 audit collected all nine ordered pairs, six reversed-role rows, nine local
-variant rows, and two strict trade plus two strict battle entry points, but
-the strict acceptance declaration is incomplete and matrix runtime was not
-run. Lane B's final matrix report is still required.
+variant rows, and three strict trade plus three strict battle entry points,
+but the strict acceptance declaration is incomplete with 15 uncovered cases
+per operation; collection-only matrix runtime was not run.
 
-A previous controlled real-ROM snapshot at `3aad196` recorded local 46/46,
-remote 13/13, strict trade 2/2, strict battle 2/2, and the canonical
-color-Red/Yellow and color-Red/color-Blue roles. Those counts are historical
-evidence and are not a current `c3c1d8e` full-gate sign-off. The historical
-complete real-ROM snapshot at
+A current selected-tier run at `db72be6` passed local 46/46, remote 13/13,
+strict trade 3/3, and strict battle 3/3 with the pinned BYO assets. The
+remote strict rows cover both color Red/Blue listener/connector directions.
+These selected tiers do not constitute a full-gate sign-off because the
+strict matrix declaration remains incomplete. The historical complete
+real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` is also separate evidence.
 
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
 The remaining release decision is `PARTIAL` because strict matrix declaration
-and runtime coverage, vanilla source provenance, broad-suite/product-lint
-closure, reversed-role and native-platform coverage, retained complete
-evidence, and independent review are incomplete. The current product Ruff
-check reports seven findings under the configured product boundary.
+and full runtime coverage, vanilla source provenance, broad-suite coverage,
+native-platform coverage, retained complete evidence, and independent review
+are incomplete. `ruff check .` is clean for the configured product boundary.
 
 ## Runtime
 
@@ -221,9 +221,10 @@ release rows. Manifest byte validation still requires every listed entry when
 the manifest is checked with `--fixture-root`.
 
 The repository has strict local Red/Yellow trade and battle entry points and
-strict remote color-Red/color-Blue trade and battle entry points, plus broader
-diagnostic matrices. Their prior passing snapshots do not certify the
-uncovered ordered pairs or reversed roles. Consult the test-surface table in
+strict remote color-Red/color-Blue trade and battle entry points in both
+listener/connector directions, plus broader diagnostic matrices. Their
+passing results do not certify the uncovered ordered pairs. Consult the
+test-surface table in
 the [README](README.md) and run the required tiers in the
 [production runbook](docs/PRODUCTION_RUNBOOK.md) before using any row as
 release evidence.

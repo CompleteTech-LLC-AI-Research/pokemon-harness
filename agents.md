@@ -27,8 +27,8 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current candidate boundary is `c3c1d8e`. Its asset-free gate passed
-469/469 unit tests and 35/35 timing cases across five repetitions. The release
+The current candidate boundary is `db72be6`. Its asset-free gate passed
+472/472 unit tests and 35/35 timing cases across five repetitions. The release
 runtime is the bundled PyBoy source snapshot pinned in `VERSIONS.md` (`2.7.0`,
 harness revision `c565df66c3731fad2856169a90f6bbec99925915`) with
 `mcp==1.29.1`. The source runtime is the only link-acceptance mode currently
@@ -45,12 +45,12 @@ release evidence.
 - Controlled local stateful evidence covers color Red + Yellow for the strict
   trade and battle cases; this does not certify every version pairing.
 - Controlled remote evidence covers color Red as listener/internal-clock and
-  color Blue as connector/external-clock over localhost TCP, including strict
-  trade and battle paths. Reversed roles, concurrent load stability, and other
-  rows remain unverified.
-- The strict acceptance declaration and runtime matrix are incomplete pending
-  Lane B's final report. A collection-only row or LinkMenu milestone is not a
-  gameplay acceptance.
+  color Blue as connector/external-clock, plus the reversed role, over
+  localhost TCP, including strict trade and battle paths. Concurrent load
+  stability and other rows remain unverified.
+- The strict acceptance declaration remains incomplete: 15 trade and 15
+  battle rows lack dedicated strict entry points. A collection-only row or
+  LinkMenu milestone is not a gameplay acceptance.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or
