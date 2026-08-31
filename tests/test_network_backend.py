@@ -62,6 +62,11 @@ def test_network_backend_rejects_non_loopback_hosts():
         NetworkBackend.connect("192.0.2.1", 1)
 
 
+def test_network_backend_rejects_unbounded_accept():
+    with pytest.raises(ValueError, match="finite and positive"):
+        NetworkBackend.listen(0, accept_timeout_s=None)
+
+
 def test_localhost_resolution_must_remain_loopback(monkeypatch):
     def unsafe_resolution(*_args, **_kwargs):
         return [(

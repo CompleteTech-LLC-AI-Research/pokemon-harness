@@ -385,7 +385,7 @@ class NetworkBackend:
         host: str = "127.0.0.1",
         backlog: int = 1,
         local_rom_version: str | None = None,
-        accept_timeout_s: float | None = _DEFAULT_ACCEPT_TIMEOUT_SECONDS,
+        accept_timeout_s: float = _DEFAULT_ACCEPT_TIMEOUT_SECONDS,
         cancel_event: threading.Event | None = None,
     ) -> tuple[NetworkBackend, socket.socket]:
         """Bind to ``(host, port)`` and wait until a peer connects.
@@ -394,14 +394,14 @@ class NetworkBackend:
         listener socket to close later if needed. A fresh accepted
         socket is wrapped by the backend. ``accept_timeout_s`` and
         ``cancel_event`` make the accept cancellable for lifecycle owners.
-        The default accept deadline is finite; explicitly passing ``None``
-        without cancellation retains the legacy unbounded behavior for
-        diagnostic use only.
+        The accept deadline is always finite; cancellation may end it sooner.
         """
         normalized_host = validate_loopback_host(host)
         accept_timeout_s = _validate_optional_timeout(
             accept_timeout_s, "accept_timeout_s"
         )
+        if accept_timeout_s is None:
+            raise ValueError("accept_timeout_s must be finite and positive")
         family = _socket_family(normalized_host)
         listener = socket.socket(family, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -414,32 +414,20 @@ class NetworkBackend:
         try:
             listener.bind(bind_address)
             listener.listen(backlog)
-            if accept_timeout_s is None and cancel_event is None:
-                conn, _ = listener.accept()
-            else:
-                deadline = (
-                    None
-                    if accept_timeout_s is None
-                    else time.monotonic() + accept_timeout_s
-                )
-                while conn is None:
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise NetworkBackendError("listener accept cancelled")
-                    remaining = (
-                        None
-                        if deadline is None
-                        else deadline - time.monotonic()
+            deadline = time.monotonic() + accept_timeout_s
+            while conn is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise NetworkBackendError("listener accept cancelled")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise NetworkBackendError(
+                        f"listener accept timed out after {accept_timeout_s:g}s"
                     )
-                    if remaining is not None and remaining <= 0:
-                        raise NetworkBackendError(
-                            f"listener accept timed out after {accept_timeout_s:g}s"
-                        )
-                    wait_s = 0.25 if remaining is None else min(0.25, remaining)
-                    listener.settimeout(wait_s)
-                    try:
-                        conn, _ = listener.accept()
-                    except TimeoutError:
-                        continue
+                listener.settimeout(min(0.25, remaining))
+                try:
+                    conn, _ = listener.accept()
+                except TimeoutError:
+                    continue
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             backend = cls(conn, local_rom_version=local_rom_version)
         except BaseException:

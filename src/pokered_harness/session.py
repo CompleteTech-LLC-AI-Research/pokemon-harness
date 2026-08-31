@@ -21,7 +21,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Self
 
-from pokered_harness.events.hooks import EventBus, GameEvent
+from pokered_harness.events.hooks import EventBus, GameEvent, HookRegistration
 from pokered_harness.input import Button, validate_button
 from pokered_harness.pyboy_protocol import PyBoyLike
 from pokered_harness.state import GameState, parse_game_state
@@ -472,18 +472,67 @@ class Session:
     def symbols(self) -> SymbolTable:
         return self._symbols
 
-    def register_hook(self, symbol_name: str, event_name: str) -> None:
+    def register_hook(self, symbol_name: str, event_name: str) -> HookRegistration:
         """Register an execution hook at a symbol label, tagging fired
         events with the current tick. Encapsulates the ``EventBus``
         interaction so callers don't reach into ``_pyboy``."""
         with self._lock:
             self._ensure_open()
-            self._events.register(
+            return self._events.register(
                 pyboy=self._pyboy,
                 symbols=self._symbols,
                 symbol_name=symbol_name,
                 event_name=event_name,
                 tick_source=self.current_tick,
+            )
+
+    def register_hook_at(
+        self,
+        symbol_name: str,
+        callback: Callable[[object], None],
+        *,
+        context: object | None = None,
+        replace_existing: bool = False,
+    ) -> HookRegistration:
+        """Register a session-serialized callback at a symbol address.
+
+        Link orchestration uses this for callbacks that mutate serial WRAM or
+        CPU state rather than emitting a :class:`GameEvent`.  The EventBus
+        dispatcher still gives each callback an owned, independently closable
+        registration and avoids duplicate physical PyBoy breakpoints.
+        """
+        with self._lock:
+            self._ensure_open()
+            bank, addr = self._symbols.bank_addr(symbol_name)
+            return self._events.register_at(
+                self._pyboy,
+                bank,
+                addr,
+                callback,
+                context,
+                symbol_name=symbol_name,
+                replace_existing=replace_existing,
+            )
+
+    def register_hook_at_address(
+        self,
+        bank: int,
+        addr: int,
+        callback: Callable[[object], None],
+        *,
+        context: object | None = None,
+        replace_existing: bool = False,
+    ) -> HookRegistration:
+        """Register a session-serialized callback at a raw address."""
+        with self._lock:
+            self._ensure_open()
+            return self._events.register_at(
+                self._pyboy,
+                bank,
+                addr,
+                callback,
+                context,
+                replace_existing=replace_existing,
             )
 
     def serial_hook(
@@ -572,14 +621,7 @@ class Session:
             for state, hook_bank, hook_addr, _hook_symbol in self._serial_hooks:
                 if hook_bank == bank and hook_addr == addr:
                     state.active = False
-            deregister = getattr(self._pyboy, "hook_deregister", None)
-            if deregister is not None:
-                try:
-                    deregister(bank, addr)
-                except ValueError:
-                    # PyBoy reports an absent breakpoint as ValueError. A
-                    # best-effort cleanup is already complete in that case.
-                    pass
+            self._events.deactivate_at(self._pyboy, bank, addr)
         finally:
             self._lock.release()
 
