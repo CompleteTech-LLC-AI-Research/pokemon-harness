@@ -7,6 +7,7 @@ end-to-end byte exchange without loading a real ROM.
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -81,6 +82,33 @@ def test_attach_installs_serial_core():
     assert a.mb.serial is core
     assert link.attached == (a,)
     assert link.paired is False  # only one side; no coordinator yet
+
+
+def test_listen_can_be_cancelled_before_a_peer_connects():
+    cancel = threading.Event()
+    result: list[BaseException] = []
+
+    def listen() -> None:
+        try:
+            PyBoyLinkSession.listen(
+                0,
+                local_rom_version="red",
+                accept_timeout_s=5.0,
+                cancel_event=cancel,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            result.append(exc)
+
+    worker = threading.Thread(target=listen, daemon=True)
+    worker.start()
+    # Port 0 is valid for binding; cancellation should be observed by the
+    # bounded accept loop without requiring a connector.
+    cancel.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result
+    assert "cancelled" in str(result[0]).lower()
 
 
 def test_attach_preserves_register_state_from_legacy_serial():

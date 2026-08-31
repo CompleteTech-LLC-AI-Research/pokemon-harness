@@ -91,6 +91,42 @@ def test_versioned_handshake_reports_each_peer_rom():
         b.stop()
 
 
+def test_versioned_handshake_rejects_unexpected_peer_rom():
+    a_sock, b_sock = _socket.socketpair()
+    a = NetworkBackend(a_sock, local_rom_version="red")
+    b = NetworkBackend(b_sock, local_rom_version="blue")
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        with pytest.raises(NetworkBackendError, match="does not match"):
+            a.wait_for_hello(
+                timeout=1.0,
+                expected_peer_rom_version="yellow",
+            )
+        assert not a.connected
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_frame_send_deadline_does_not_block_on_silent_peer():
+    a_sock, b_sock = _socket.socketpair()
+    a_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_SNDBUF, 4096)
+    backend = NetworkBackend(a_sock)
+    try:
+        started = time.monotonic()
+        with pytest.raises(NetworkBackendError, match="send timed out"):
+            backend._send_frame(
+                b"x" * (1024 * 1024),
+                timeout=0.05,
+                operation="TEST",
+            )
+        assert time.monotonic() - started < 0.5
+    finally:
+        backend.stop()
+        b_sock.close()
+
+
 def test_stop_wakes_blocked_edge_waiter():
     a, b = NetworkBackend.pair()
     a.start_receiver(local_core=None)
@@ -115,6 +151,53 @@ def test_stop_wakes_blocked_edge_waiter():
         assert result and isinstance(result[0], NetworkBackendError)
     finally:
         b.stop()
+
+
+def test_stop_applies_one_total_deadline_to_workers():
+    a, b = NetworkBackend.pair()
+    started = threading.Event()
+    release = threading.Event()
+
+    class StubbornCore:
+        transfer_enabled = 1
+        internal_clock = 0
+        SB = 0
+        SC = 0x80
+
+        def peek_out_bit(self) -> int:
+            return 0
+
+        def apply_external_edge(self, _peer_bit: int) -> bool:
+            started.set()
+            release.wait(timeout=2.0)
+            return False
+
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=StubbornCore())
+    edge_done = threading.Event()
+
+    def send_edge() -> None:
+        try:
+            a.on_edge(our_bit=1, our_role=1)
+        except NetworkBackendError:
+            pass
+        finally:
+            edge_done.set()
+
+    sender = threading.Thread(target=send_edge, daemon=True)
+    sender.start()
+    assert started.wait(timeout=1.0)
+
+    started_stop = time.monotonic()
+    stopped = b.stop(timeout_s=0.05)
+    elapsed = time.monotonic() - started_stop
+    assert stopped is False
+    assert elapsed < 0.5
+
+    release.set()
+    sender.join(timeout=1.0)
+    edge_done.wait(timeout=1.0)
+    a.stop()
 
 
 # ---------------------------------------------------------------------------

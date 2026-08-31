@@ -86,6 +86,8 @@ _ROM_VERSION_NAMES: dict[int, str] = {
 _FRAME = struct.Struct(">BB")  # opcode, payload (1-byte id for SYNC)
 _LEN = struct.Struct(">H")
 _EDGE_RESPONSE_TIMEOUT_SECONDS = 10.0
+_DEFAULT_SEND_TIMEOUT_SECONDS = 10.0
+_SEND_POLL_SECONDS = 0.05
 _CONTROL_QUEUE_MAXSIZE = 256
 _REARM_WAIT_SECONDS = 0.100
 _POST_BYTE_REARM_GRACE_SECONDS = 1.500
@@ -274,6 +276,18 @@ class NetworkBackend:
 
     def __init__(self, sock: socket.socket, *, local_rom_version: str | None = None) -> None:
         self._sock = sock
+        # Keep both directions non-blocking.  The reader uses short
+        # select-polling below, while writers use the same bounded polling
+        # primitive.  This makes a saturated peer unable to wedge either the
+        # emulator thread or lifecycle teardown in ``sendall``/``recv``.
+        try:
+            self._sock.setblocking(False)
+        except OSError:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            raise
         self._write_lock = threading.Lock()
         # A Game Boy serial core has one outstanding master edge at a time.
         # EDGE_RESP has no request id, so a late/duplicate response cannot
@@ -470,7 +484,7 @@ class NetworkBackend:
 
     @property
     def peer_rom_version(self) -> str:
-        """Return the peer's authenticated protocol ROM label.
+        """Return the peer's versioned protocol ROM label.
 
         The label is available only when both sides opted into the
         versioned handshake. Legacy in-process test pairs intentionally have
@@ -480,15 +494,31 @@ class NetworkBackend:
             raise NetworkBackendError("peer HELLO has not completed")
         return self._peer_rom_version
 
-    def wait_for_hello(self, timeout: float = 10.0) -> str | None:
+    def wait_for_hello(
+        self,
+        timeout: float = 10.0,
+        *,
+        expected_peer_rom_version: str | None = None,
+    ) -> str | None:
         """Wait for the optional versioned handshake.
 
         Unversioned ``NetworkBackend.pair()`` users get ``None`` so the
         historical ROM-free backend tests remain valid. Production TCP
         callers pass ``local_rom_version`` and therefore fail closed if the
-        peer does not present a compatible protocol/ROM identity.
+        peer does not present a compatible protocol/ROM identity. Callers that
+        know the expected peer label can pass it explicitly to reject a
+        mismatched announcement.
         """
+        expected = (
+            _validate_rom_version(expected_peer_rom_version)
+            if expected_peer_rom_version is not None
+            else None
+        )
         if self._local_rom_version is None:
+            if expected is not None:
+                raise NetworkBackendError(
+                    "cannot validate peer ROM without a local versioned HELLO"
+                )
             return None
         if not self._hello_received.wait(timeout=max(0.0, timeout)):
             raise NetworkBackendError(
@@ -504,7 +534,15 @@ class NetworkBackend:
             raise NetworkBackendError(
                 f"peer HELLO failed: {self._reader_exc}"
             ) from self._reader_exc
-        return self.peer_rom_version
+        peer_version = self.peer_rom_version
+        if expected is not None and peer_version != expected:
+            error = NetworkBackendError(
+                f"peer ROM version {peer_version!r} does not match "
+                f"expected {expected!r}"
+            )
+            self._mark_closed(error)
+            raise error
+        return peer_version
 
     # --- slave-side receiver ------------------------------------------
 
@@ -570,7 +608,11 @@ class NetworkBackend:
                 with self._write_lock:
                     if self._closed:
                         raise NetworkBackendError("backend closed")
-                    self._sock.sendall(frame_out)
+                    self._send_frame(
+                        frame_out,
+                        timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                        operation="EDGE_REQ",
+                    )
                 bit = self._queue_get(
                     self._resp_queue,
                     timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
@@ -615,8 +657,10 @@ class NetworkBackend:
         Raises :class:`NetworkBackendError` if the peer's SYNC doesn't
         arrive within ``timeout`` seconds.
         """
+        timeout = _validate_optional_timeout(timeout, "timeout")
+        assert timeout is not None
         q = self._sync_queue(sync_id)
-        self._send_sync(sync_id)
+        self._send_sync_with_timeout(sync_id, timeout=timeout)
         self._queue_get(
             q,
             timeout=timeout,
@@ -661,6 +705,8 @@ class NetworkBackend:
             raise ValueError(f"kind_id must fit in uint8, got {kind_id}")
         if len(payload) > 0xFFFF:
             raise ValueError(f"payload too large: {len(payload)} bytes")
+        timeout = _validate_optional_timeout(timeout, "timeout")
+        assert timeout is not None
         q = self._exchange_queue(kind_id)
         frame = _FRAME.pack(_OP_EXCHANGE, kind_id) + _LEN.pack(len(payload)) + payload
         self._stats["exchange_sent"] = int(self._stats["exchange_sent"]) + 1
@@ -668,10 +714,18 @@ class NetworkBackend:
             with self._write_lock:
                 if self._closed:
                     raise NetworkBackendError("backend closed")
-                self._sock.sendall(frame)
-        except OSError as exc:
-            error = NetworkBackendError(
-                f"failed to send OP_EXCHANGE({kind_id}): {exc}"
+                self._send_frame(
+                    frame,
+                    timeout=timeout,
+                    operation=f"OP_EXCHANGE({kind_id})",
+                )
+        except (OSError, NetworkBackendError) as exc:
+            error = (
+                exc
+                if isinstance(exc, NetworkBackendError)
+                else NetworkBackendError(
+                    f"failed to send OP_EXCHANGE({kind_id}): {exc}"
+                )
             )
             self._mark_closed(error)
             raise error from exc
@@ -766,15 +820,26 @@ class NetworkBackend:
             )
 
     def _send_sync(self, sync_id: int) -> None:
+        self._send_sync_with_timeout(sync_id, timeout=_DEFAULT_SEND_TIMEOUT_SECONDS)
+
+    def _send_sync_with_timeout(self, sync_id: int, *, timeout: float) -> None:
         self._stats["sync_sent"] = int(self._stats["sync_sent"]) + 1
         try:
             with self._write_lock:
                 if self._closed:
                     raise NetworkBackendError("backend closed")
-                self._sock.sendall(_FRAME.pack(_OP_SYNC, sync_id))
-        except OSError as exc:
-            error = NetworkBackendError(
-                f"failed to send OP_SYNC({sync_id}): {exc}"
+                self._send_frame(
+                    _FRAME.pack(_OP_SYNC, sync_id),
+                    timeout=timeout,
+                    operation=f"OP_SYNC({sync_id})",
+                )
+        except (OSError, NetworkBackendError) as exc:
+            error = (
+                exc
+                if isinstance(exc, NetworkBackendError)
+                else NetworkBackendError(
+                    f"failed to send OP_SYNC({sync_id}): {exc}"
+                )
             )
             self._mark_closed(error)
             raise error from exc
@@ -785,9 +850,17 @@ class NetworkBackend:
             with self._write_lock:
                 if self._closed:
                     raise NetworkBackendError("backend closed")
-                self._sock.sendall(_FRAME.pack(_OP_HELLO, payload))
-        except OSError as exc:
-            error = NetworkBackendError(f"failed to send HELLO: {exc}")
+                self._send_frame(
+                    _FRAME.pack(_OP_HELLO, payload),
+                    timeout=_DEFAULT_SEND_TIMEOUT_SECONDS,
+                    operation="HELLO",
+                )
+        except (OSError, NetworkBackendError) as exc:
+            error = (
+                exc
+                if isinstance(exc, NetworkBackendError)
+                else NetworkBackendError(f"failed to send HELLO: {exc}")
+            )
             self._mark_closed(error)
             raise error from exc
 
@@ -818,10 +891,13 @@ class NetworkBackend:
         except OSError:
             pass
 
-    def close(self) -> None:
-        self.stop()
+    def close(self, *, timeout_s: float = 2.0) -> bool:
+        return self.stop(timeout_s=timeout_s)
 
-    def stop(self) -> None:
+    def stop(self, *, timeout_s: float = 2.0) -> bool:
+        timeout_s = _validate_optional_timeout(timeout_s, "timeout_s")
+        assert timeout_s is not None
+        deadline = time.monotonic() + timeout_s
         self._closed = True
         self._closed_event.set()
         self._hello_received.set()
@@ -847,14 +923,20 @@ class NetworkBackend:
             isinstance(edge_worker, threading.Thread)
             and edge_worker is not threading.current_thread()
         ):
-            edge_worker.join(timeout=2.0)
+            edge_worker.join(timeout=max(0.0, deadline - time.monotonic()))
 
         reader = self._reader
         if (
             isinstance(reader, threading.Thread)
             and reader is not threading.current_thread()
         ):
-            reader.join(timeout=2.0)
+            reader.join(timeout=max(0.0, deadline - time.monotonic()))
+        return not any(
+            isinstance(worker, threading.Thread)
+            and worker is not threading.current_thread()
+            and worker.is_alive()
+            for worker in (edge_worker, reader)
+        )
 
     # --- internals ----------------------------------------------------
 
@@ -1118,11 +1200,15 @@ class NetworkBackend:
         try:
             with self._write_lock:
                 if not self._closed:
-                    self._sock.sendall(_FRAME.pack(_OP_EDGE_RESP, our_bit & 1))
+                    self._send_frame(
+                        _FRAME.pack(_OP_EDGE_RESP, our_bit & 1),
+                        timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                        operation="EDGE_RESP",
+                    )
                     self._stats["edge_resp_sent"] = (
                         int(self._stats["edge_resp_sent"]) + 1
                     )
-        except OSError:
+        except (OSError, NetworkBackendError):
             self._mark_closed()
             return
         if completed and self._irq_callback is not None:
@@ -1164,13 +1250,80 @@ class NetworkBackend:
     def _recv_exactly(self, n: int) -> bytes:
         buf = bytearray()
         while len(buf) < n:
-            chunk = self._sock.recv(n - len(buf))
+            if self._closed or self._closed_event.is_set():
+                raise NetworkBackendError("backend closed")
+            try:
+                chunk = self._sock.recv(n - len(buf))
+            except BlockingIOError:
+                try:
+                    select.select(
+                        [self._sock], [], [], _SEND_POLL_SECONDS
+                    )
+                except (OSError, ValueError) as exc:
+                    if self._closed or self._closed_event.is_set():
+                        raise NetworkBackendError("backend closed") from exc
+                    raise
+                continue
+            except InterruptedError:
+                continue
             if not chunk:
                 if buf:
                     raise NetworkBackendError("peer closed socket mid-frame")
                 raise NetworkBackendError("peer closed socket")
             buf.extend(chunk)
         return bytes(buf)
+
+    def _send_frame(self, frame: bytes, *, timeout: float, operation: str) -> None:
+        """Send one framed message with a cancellation-aware deadline.
+
+        ``socket.sendall`` is deliberately avoided: it can block in the
+        caller for an unbounded period when a peer stops reading.  The socket
+        is non-blocking, so each partial write is followed by a short
+        writability poll and a closed-event check.
+        """
+        timeout = _validate_optional_timeout(timeout, "timeout")
+        assert timeout is not None
+        view = memoryview(frame)
+        offset = 0
+        deadline = time.monotonic() + timeout
+        while offset < len(view):
+            if self._closed or self._closed_event.is_set():
+                raise NetworkBackendError(f"{operation}: backend closed")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise NetworkBackendError(
+                    f"{operation} send timed out after {timeout:g}s"
+                )
+            try:
+                sent = self._sock.send(view[offset:])
+            except BlockingIOError:
+                sent = 0
+            except InterruptedError:
+                continue
+            except OSError as exc:
+                raise NetworkBackendError(
+                    f"failed to send {operation}: {exc}"
+                ) from exc
+            if sent > 0:
+                offset += sent
+                continue
+            try:
+                _readable, writable, exceptional = select.select(
+                    [], [self._sock], [self._sock],
+                    min(_SEND_POLL_SECONDS, remaining),
+                )
+            except (OSError, ValueError) as exc:
+                if self._closed or self._closed_event.is_set():
+                    raise NetworkBackendError(
+                        f"{operation}: backend closed"
+                    ) from exc
+                raise NetworkBackendError(
+                    f"failed to poll socket for {operation}: {exc}"
+                ) from exc
+            if exceptional and not writable:
+                raise NetworkBackendError(
+                    f"socket became exceptional while sending {operation}"
+                )
 
     def _queue_get(
         self,
