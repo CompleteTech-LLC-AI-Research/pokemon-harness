@@ -48,7 +48,10 @@ while Yellow remained in Cable Club (`map_id=0x40`); neither reached
 `MainInBattleLoop`/`DisplayBattleMenu` and no turn completed. Repeated
 cross-family runs have therefore exposed a timing-sensitive pre-battle
 warp/phase failure; the complete strict trade/battle matrices remain pending
-and these selected rows are not production sign-off.
+and these selected rows are not production sign-off. A fresh exact-head strict
+trade tier attempt ran for 3600.2s and failed closed before producing a pytest
+report: 0 tests passed, 0 failed, 1 gate error, and the required acceptance
+nodes were not selected. Trade runtime evidence therefore remains incomplete.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
@@ -56,8 +59,8 @@ and these selected rows are not production sign-off.
 | Runtime/package identity | `PASS` (scoped) | The gate resolves bundled source PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PASS` (five-input smoke) | Current explicit Red stock/color, Blue stock/color, and Yellow ROM/SYM MCP stdio and golden-path checks passed; this is not full release sign-off. |
-| In-process link acceptance | `PARTIAL` (battle 9/9; trade pending) | The current candidate declares all 9 local trade and 9 local battle rows; the local battle matrix completed 9/9, while the strict trade matrix remains in progress and is not yet release evidence. |
-| Remote TCP and MCP lifecycle | `PARTIAL` (selected rows) | Exact-head Yellow-listener trade passed against Red-color and Blue-color; the selected current battle run passed against Blue-color but failed against Red-color during a pre-battle warp/phase divergence. The complete 9-pair trade/battle runtime matrices remain pending. |
+| In-process link acceptance | `PARTIAL` (battle 9/9; trade timed out) | The current candidate declares all 9 local trade and 9 local battle rows; the local battle matrix completed 9/9, while the full strict trade tier timed out at 3600.2s without a pytest report or passing outcome. |
+| Remote TCP and MCP lifecycle | `PARTIAL` (selected rows) | Exact-head Yellow-listener trade passed against Red-color and Blue-color; the selected current battle run passed against Blue-color but failed against Red-color during a pre-battle warp/phase divergence. The complete 9-pair trade/battle runtime matrices remain unverified. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
 The historical complete real-ROM snapshot at
@@ -324,7 +327,8 @@ Yellow/Blue row completed a turn at `034e34e`, while the selected Yellow/Red
 row stalled before the battle intro because its peers diverged at the
 Colosseum warp; neither result proves every remote menu/role combination.
 Repeated cross-family runs remain stability-sensitive, and the selected trade
-rows also remain unqualified until the full matrix is complete.
+rows also remain unqualified after the current strict-trade tier timed out
+before reporting results.
 
 ## Walkthrough scripts
 

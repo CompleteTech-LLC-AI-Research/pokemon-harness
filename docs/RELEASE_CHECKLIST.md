@@ -52,6 +52,9 @@ Yellow-listener to Blue-color remote battle completed a turn in 224.64s, while
 the Yellow-listener to Red-color run diverged at the pre-battle warp: Red
 reached Colosseum while Yellow remained in Cable Club, so neither reached the
 battle menu.
+A fresh exact-head strict-trade tier attempt timed out after 3600.2s before
+producing a pytest report (0 passed, 0 failed, 1 gate error), so it supplies no
+current trade acceptance result.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
@@ -113,8 +116,9 @@ evidence, and independent review.
   ROM variant. The clean-wheel 3/3 color-Red smoke is not five-row sign-off.
 - [ ] The current candidate rerun of the real-ROM local and remote tiers passes
   with no fixture or runtime skips. The current local canonical battle matrix
-  completed 9/9, but the strict trade matrix and complete remote matrix remain
-  pending; repeated cross-family battle runs diverge at the pre-battle warp.
+  completed 9/9, but the strict trade tier timed out after 3600.2s without a
+  pytest report and the complete remote matrix remains unverified; repeated
+  cross-family battle runs diverge at the pre-battle warp.
 - [x] Controlled canonical local evidence exists for color Red plus Yellow,
   including trade and battle assertions.
 - [x] Controlled canonical remote evidence exists for color Red as

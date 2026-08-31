@@ -24,6 +24,10 @@ supplied through the documented ROM and fixture roots.
   battle diverged at the pre-battle warp, with Red reaching Colosseum while
   Yellow remained in Cable Club. Repeated cross-family runs remain timing-
   sensitive, and the complete local/remote strict matrices remain pending.
+- A fresh exact-head `--tier trade --repeat-timing 5` attempt ran for `3600.2s`
+  and failed closed before producing a pytest report: `0` passed, `0` failed,
+  and `1` gate error. The required trade nodes were not selected, so this run
+  supplies no current trade acceptance result.
 - The fixture manifest schema and all 10 external fixture byte records passed
   validation. Canonical color Red, color Blue, and Yellow ordinary/battle
   bytes are recorded; vanilla source provenance remains partial.
@@ -47,6 +51,9 @@ supplied through the documented ROM and fixture roots.
   Red/Blue/Yellow pair. The collection-only audit is structural and does not
   run ROMs; current gameplay execution of the complete matrix remains
   pending.
+- The current strict-trade runtime attempt timed out before any pytest outcome;
+  its external gate report is retained outside the source tree for diagnosis,
+  but it is not release evidence of a passing trade tier.
 - The selected exact-head remote results above are retained as current spot
   evidence, not full sign-off. Repeated cross-family battle runs expose an
   open pre-battle warp/phase issue (the current driver now fails closed at the

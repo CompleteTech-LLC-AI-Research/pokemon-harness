@@ -31,6 +31,10 @@ completed a turn in 224.64s, while the Yellow-listener to Red-color run
 diverged at the pre-battle warp: Red reached Colosseum while Yellow remained
 in Cable Club, so neither reached the battle menu. Repeated cross-family runs
 remain timing-sensitive and the full current matrix remains pending.
+A fresh exact-head `--tier trade --repeat-timing 5` attempt ran for 3600.2s and
+failed closed before producing a pytest report: 0 tests passed, 0 failed, and
+1 gate error, with the required acceptance nodes absent from the selected
+items. Trade runtime evidence therefore remains incomplete.
 Symbol hashes and fixture byte/provenance records are in
 [`VERSIONS.md`](../VERSIONS.md) and the tracked
 [`fixture-manifest.json`](../release-evidence/fixture-manifest.json). Overall
@@ -562,12 +566,15 @@ are:
    matrix completed 9/9, and the selected Yellow-listener to Blue-color remote
    battle completed a turn. The selected Yellow-listener to Red-color remote
    battle diverged at the pre-battle warp before the battle menu. Repeated
-   cross-family runs remain timing-sensitive.
+   cross-family runs remain timing-sensitive. A fresh strict-trade tier attempt
+   also timed out at 3600.2s before producing a pytest report (0 passed, 0
+   failed, 1 gate error).
 2. The strict matrix declaration is now complete: the collection audit has
    nine ordered local pairs, nine ordered remote role pairs, nine local
    variant rows, and 19 strict entrypoints for each operation. Collection-only
-   matrix runtime is `NOT RUN`; current gameplay execution of all declared
-   local and remote rows remains required.
+   matrix runtime is `NOT RUN`; the current strict-trade attempt timed out
+   before producing any passing pytest outcome, and gameplay execution of all
+   declared local and remote rows remains required.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
    reproduction evidence, while the vanilla ordinary source provenance is
    `PARTIAL`. The manifest is external and untracked; its complete byte
