@@ -291,7 +291,14 @@ def main() -> int:
     log("attached; starting drive loop")
 
     deadline = time.monotonic() + args.deadline_seconds
+    drive_status = "ok"
+    drive_error: str | None = None
+    deadline_exceeded = False
     select_mon_announced = False
+    link_menu_announced = False
+    peer_link_menu_ready = False
+    damage_announced = False
+    peer_damage_ready = False
     party_after_trade: dict[str, object] | None = None
 
     def state_snapshot() -> dict[str, int]:
@@ -348,7 +355,6 @@ def main() -> int:
         log("phase 1 start")
         last_progress = time.monotonic()
         serial_phase_ticks = 0
-        link_menu_announced = False
         peer_link_menu_ready = False
         peer_link_menu_ready_grace = 0
         while time.monotonic() < deadline:
@@ -624,6 +630,8 @@ def main() -> int:
                     log("sync: past post-trade barrier")
                     shot("07_post_trade")
                 except Exception as exc:  # noqa: BLE001
+                    drive_status = "error"
+                    drive_error = f"{type(exc).__name__}: {exc}"
                     log(f"post-trade sync raised {type(exc).__name__}: {exc}")
                 # After rendezvous both sides have fired
                 # _AddEnemyMonToPlayerParty. Keep ticking briefly so
@@ -689,8 +697,6 @@ def main() -> int:
             )
             shot("04_battle_launch")
 
-            damage_announced = False
-            peer_damage_ready = False
             while time.monotonic() < deadline:
                 if counters["EndOfBattle"][0] > 0:
                     break
@@ -715,6 +721,8 @@ def main() -> int:
                     log("sync: past battle damage barrier")
                     shot("06_battle_synced")
                 except Exception as exc:  # noqa: BLE001
+                    drive_status = "error"
+                    drive_error = f"{type(exc).__name__}: {exc}"
                     log(f"battle damage sync raised {type(exc).__name__}: {exc}")
                 post_deadline = min(deadline, time.monotonic() + 10.0)
                 while time.monotonic() < post_deadline:
@@ -727,17 +735,53 @@ def main() -> int:
                     f"backend={backend_snapshot()}"
                 )
     except Exception as exc:  # noqa: BLE001
+        drive_status = "error"
+        drive_error = f"{type(exc).__name__}: {exc}"
         log(f"EXCEPTION in drive loop: {type(exc).__name__}: {exc}")
+
     finally:
         try:
             session.close()
         except Exception as exc:  # noqa: BLE001
+            if drive_status == "ok":
+                drive_status = "error"
+                drive_error = f"session cleanup {type(exc).__name__}: {exc}"
             log(f"session cleanup raised {type(exc).__name__}: {exc}")
         try:
             if link._network_backend is not None:
                 link._network_backend.stop()
         except Exception as exc:  # noqa: BLE001
+            if drive_status == "ok":
+                drive_status = "error"
+                drive_error = f"backend cleanup {type(exc).__name__}: {exc}"
             log(f"backend cleanup raised {type(exc).__name__}: {exc}")
+
+    if drive_status == "ok":
+        if args.goal == "link_menu":
+            goal_complete = link_menu_announced and peer_link_menu_ready
+        elif args.goal == "trade":
+            goal_complete = counters["_AddEnemyMonToPlayerParty"][0] > 0
+        else:
+            required_battle_hooks = (
+                "DisplayLinkBattleVersusTextBox",
+                "MoveSelectionMenu",
+                "LinkBattleExchangeData",
+            )
+            goal_complete = (
+                damage_announced
+                and peer_damage_ready
+                and all(counters[name][0] > 0 for name in required_battle_hooks)
+                and (
+                    counters["ExecutePlayerMove"][0]
+                    + counters["ExecuteEnemyMove"][0]
+                    > 0
+                )
+            )
+        if not goal_complete:
+            drive_status = "deadline"
+            deadline_exceeded = True
+            drive_error = f"{args.goal} did not complete before deadline"
+            log(drive_error)
 
     result = {s: counters[s][0] for s in _TRADE_DIAG_SYMBOLS}
     result["_role"] = args.role
@@ -746,11 +790,14 @@ def main() -> int:
     result["party_after"] = party_after_trade or _party_summary(session)
     result["_shots"] = shots
     result["_backend_stats"] = backend_snapshot()
+    result["_drive_status"] = drive_status
+    result["_drive_error"] = drive_error
+    result["_deadline_exceeded"] = deadline_exceeded
     log(f"final counters: {result}")
     # Sentinel-delimited JSON line so the parent can grep it out of
     # the ROM-loading warning spam on stdout.
     print(f"__TCP_TRADE_RESULT__ {json.dumps(result)}")
-    return 0
+    return 0 if drive_status == "ok" else 1
 
 
 if __name__ == "__main__":
