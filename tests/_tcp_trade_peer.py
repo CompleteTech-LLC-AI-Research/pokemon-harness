@@ -211,6 +211,11 @@ def main() -> int:
         ),
     }
     rom, sym, fixture_version, trade_fixture_name, battle_fixture_name = rom_paths[args.version]
+    # The color Red/Blue Cable Club menu has three choices (0..2), while
+    # Yellow adds a fourth (0..3).  Keep the readiness predicate ROM-aware;
+    # a hard-coded bound can otherwise leave a valid peer spinning until the
+    # outer gameplay deadline without ever announcing the phase.
+    link_menu_max = 3 if fixture_version == "yellow" else 2
     fixture_name = battle_fixture_name if args.goal == "battle" else trade_fixture_name
     state = (
         fixture_root / fixture_version / fixture_name
@@ -308,6 +313,8 @@ def main() -> int:
     battle_turn_announced = False
     peer_battle_turn_ready = False
     party_after_trade: dict[str, object] | None = None
+    final_state: dict[str, int] = {}
+    final_cpu: dict[str, object] = {}
 
     def state_snapshot() -> dict[str, int]:
         snapshot = {
@@ -592,54 +599,49 @@ def main() -> int:
         # Start the receptionist interaction from a synchronized input
         # boundary so both processes enter the Cable Club dialog at
         # nearly the same game phase.
-        link._network_backend.sync_with_peer(sync_id=100, timeout=60.0)
+        # The initial movement boundary can still overlap the ROM's final
+        # connection-role negotiation. Keep ticking while waiting for the
+        # peer marker so a slave IRQ can re-arm instead of freezing one
+        # process inside a blocking transport barrier.
+        cooperative_sync(sync_id=100, timeout=60.0)
         log("phase 1 start")
         last_progress = time.monotonic()
         serial_phase_ticks = 0
         peer_link_menu_ready = False
         while time.monotonic() < deadline:
-            # LinkMenu is a phase boundary, but the ROM that reaches it
-            # first may still need a final serial IRQ/re-arm turn before the
-            # peer can reach its own LinkMenu. Keep ticking while waiting for
-            # the peer's marker, then use a second marker only after this
-            # native clock is idle. Both sides can therefore leave the phase
-            # without closing an in-flight edge.
+            # LinkMenu is a phase boundary, but the ROM can leave SC bit 7
+            # armed while waiting for the next peer clock. Keep ticking until
+            # both peers announce LinkMenu, then stop the emulators and drain
+            # only the transport work already admitted by the reader. This
+            # avoids closing an in-flight edge without requiring an impossible
+            # ROM-level "serial idle" state.
             if link_menu_announced:
                 if not peer_link_menu_ready:
                     peer_link_menu_ready = (
                         link._network_backend.poll_peer_sync(sync_id=121)
                     )
                 if peer_link_menu_ready:
-                    serial = getattr(
-                        getattr(session._pyboy, "mb", None), "serial", None
-                    )
-                    local_master_active = bool(
-                        getattr(serial, "transfer_enabled", False)
-                        and getattr(serial, "internal_clock", False)
-                    )
-                    if (
-                        not link_menu_quiet_announced
-                        and not local_master_active
-                    ):
+                    if not link_menu_quiet_announced:
+                        link._network_backend.wait_for_wire_idle(timeout=10.0)
                         link._network_backend.announce_sync(sync_id=122)
                         link_menu_quiet_announced = True
-                        log("phase 1 native serial quiet acknowledgement sent")
+                        log("phase 1 wire-idle acknowledgement sent")
                     if link_menu_quiet_announced and not peer_link_menu_quiet_ready:
                         peer_link_menu_quiet_ready = (
                             link._network_backend.poll_peer_sync(sync_id=122)
                         )
                 if peer_link_menu_quiet_ready:
+                    link._network_backend.wait_for_wire_idle(
+                        timeout=10.0, allow_peer_close=True
+                    )
                     log("phase 1 done: LinkMenu fired on both peers")
                     break
                 if not link_menu_quiet_announced:
                     session.step(4)
                 else:
-                    # After advertising native serial quiescence, do not
-                    # enter another emulator tick while the peer's quiet
-                    # marker is in flight. The peer is allowed to close
-                    # immediately after observing our marker; only the
-                    # network reader needs to remain alive to receive its
-                    # matching marker.
+                    # After the transport-idle acknowledgement, do not enter
+                    # another emulator tick: the peer may close as soon as it
+                    # observes marker 122.
                     time.sleep(0.001)
                 continue
             in_serial_phase = (
@@ -659,7 +661,10 @@ def main() -> int:
                 if (
                     counters["LinkMenu.waitForInputLoop"][0] > 0
                     and menu_fields_ready(
-                        min_item=0, max_item=2, expected_max=2, required_keys=0x01
+                        min_item=0,
+                        max_item=link_menu_max,
+                        expected_max=link_menu_max,
+                        required_keys=0x01,
                     )
                     and not link_menu_announced
                 ):
@@ -672,7 +677,10 @@ def main() -> int:
                 if (
                     counters["LinkMenu.waitForInputLoop"][0] > 0
                     and menu_fields_ready(
-                        min_item=0, max_item=2, expected_max=2, required_keys=0x01
+                        min_item=0,
+                        max_item=link_menu_max,
+                        expected_max=link_menu_max,
+                        required_keys=0x01,
                     )
                     and not link_menu_announced
                 ):
@@ -689,9 +697,22 @@ def main() -> int:
                     f"CableClubNPC={counters['CableClubNPC'][0]} "
                     f"SaveGameData={counters['SaveGameData'][0]} "
                     f"Serial_SyncAndExchangeNybble={counters['Serial_SyncAndExchangeNybble'][0]} "
-                    f"LinkMenu={counters['LinkMenu'][0]}"
+                    f"LinkMenu={counters['LinkMenu'][0]} "
+                    f"waitForInputLoop={counters['LinkMenu.waitForInputLoop'][0]} "
+                    f"menu={menu_snapshot()}"
                 )
                 last_progress = time.monotonic()
+
+        if not link_menu_announced or not peer_link_menu_quiet_ready:
+            raise RuntimeError(
+                "LinkMenu rendezvous did not converge before the gameplay phase: "
+                f"local_announced={link_menu_announced} "
+                f"peer_ready={peer_link_menu_ready} "
+                f"local_quiet_announced={link_menu_quiet_announced} "
+                f"peer_quiet_ready={peer_link_menu_quiet_ready} "
+                f"menu={menu_snapshot()} state={state_snapshot()} "
+                f"backend={backend_snapshot()}"
+            )
 
         if args.goal == "trade":
             # Phase barrier: both sides at LinkMenu before voting Trade
@@ -935,8 +956,8 @@ def main() -> int:
             link_menu_before = wait_for_menu_ready(
                 label="battle LinkMenu",
                 min_item=0,
-                max_item=2,
-                expected_max=2,
+                max_item=link_menu_max,
+                expected_max=link_menu_max,
                 required_keys=0x01,
                 timeout=60.0,
             )
@@ -944,7 +965,7 @@ def main() -> int:
             move_menu_to_item(
                 target=1,
                 min_item=0,
-                max_item=2,
+                max_item=link_menu_max,
                 label="battle LinkMenu",
             )
             selected_item = current_menu_item()
@@ -1231,6 +1252,11 @@ def main() -> int:
 
     finally:
         try:
+            final_state = state_snapshot()
+            final_cpu = cpu_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            log(f"final state snapshot raised {type(exc).__name__}: {exc}")
+        try:
             session.close()
         except Exception as exc:  # noqa: BLE001
             if drive_status == "ok":
@@ -1283,6 +1309,8 @@ def main() -> int:
     result["_version"] = args.version
     result["party_before"] = party_before
     result["party_after"] = party_after_trade or _party_summary(session)
+    result["_final_state"] = final_state
+    result["_final_cpu"] = final_cpu
     result["_shots"] = shots
     result["_backend_stats"] = backend_snapshot()
     result["_drive_status"] = drive_status

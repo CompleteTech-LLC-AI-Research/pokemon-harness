@@ -206,7 +206,18 @@ class Serial:
         Bit 7 arms a transfer. Bit 0 picks internal (master) vs
         external (slave) clock. Bit 1 (CGB fast clock) is stored but
         not acted on in this milestone. Unused hardware bits read as 1.
+
+        Rewriting an already-armed transfer with the same clock source
+        updates the visible control register without restarting the byte.
+        Pokémon's connection probe legitimately rewrites ``SC=$80`` while
+        waiting for an external clock; restarting the shift register on
+        each probe would prevent the eight hardware edges from completing.
+        A newly armed transfer, or a write that changes the clock source,
+        starts a fresh byte from ``SB``.
         """
+        was_transfer_enabled = self.transfer_enabled
+        was_internal_clock = self.internal_clock
+
         if self.cgb_mode:
             self.SC = (value & 0xFF) | 0b01111100
         else:
@@ -216,7 +227,17 @@ class Serial:
         self.internal_clock = 1 if (self.SC & 0x01) else 0
         self.double_speed = 1 if (self.SC & 0x02) else 0
 
-        if self.transfer_enabled:
+        fresh_transfer = (
+            not was_transfer_enabled
+            or not self.transfer_enabled
+            or bool(was_internal_clock) != bool(self.internal_clock)
+            or self._bits_remaining == 0
+        )
+
+        if not self.transfer_enabled:
+            self._bits_remaining = 0
+            self.clock_target = (1 << 31)
+        elif fresh_transfer:
             # Fresh transfer: snapshot SB into the shift register.
             self._shift_register = self.SB
             self._bits_remaining = 8
@@ -228,11 +249,19 @@ class Serial:
                 # Literal to stay nogil-safe (cpdef void ... nogil can't
                 # touch Python-module globals like MAX_CYCLES).
                 self.clock_target = (1 << 31)
+        elif self.internal_clock:
+            # Same-role writes do not disturb an active master transfer or
+            # its next edge deadline. Recompute only the derived countdown.
+            pass
         else:
-            self._bits_remaining = 0
-            self.clock_target = (1 << 31)
+            # Same-role writes do not disturb an active slave transfer.
+            # There is no local timebase to reschedule.
+            pass
 
-        self._cycles_to_interrupt = self.clock_target - self.clock
+        if self.clock_target > self.clock:
+            self._cycles_to_interrupt = self.clock_target - self.clock
+        else:
+            self._cycles_to_interrupt = 0
 
     # --- tick (master / idle) -------------------------------------------
 

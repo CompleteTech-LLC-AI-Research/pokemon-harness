@@ -419,6 +419,74 @@ class _CompletingSlaveCore:
         return True
 
 
+class _BlockingSlaveCore:
+    """Pause edge application so a transport-idle timeout is observable."""
+
+    def __init__(self) -> None:
+        self.transfer_enabled = 1
+        self.internal_clock = 0
+        self.SB = 0
+        self.SC = 0x80
+        self.edge_started = threading.Event()
+        self.release_edge = threading.Event()
+
+    def peek_out_bit(self) -> int:
+        return 0
+
+    def apply_external_edge(self, _peer_bit: int) -> bool:
+        self.edge_started.set()
+        if not self.release_edge.wait(timeout=2.0):
+            raise RuntimeError("test edge release timed out")
+        return False
+
+
+def test_wait_for_wire_idle_is_bounded_while_edge_worker_is_busy():
+    """The phase barrier must expose a blocked edge instead of hanging."""
+    a, b = NetworkBackend.pair()
+    core = _BlockingSlaveCore()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=core)
+    result: list[int] = []
+
+    def send_edge() -> None:
+        result.append(a.on_edge(our_bit=1, our_role=1))
+
+    worker = threading.Thread(target=send_edge, daemon=True)
+    worker.start()
+    try:
+        assert core.edge_started.wait(timeout=1.0)
+        with pytest.raises(NetworkBackendError, match="wire did not become idle"):
+            b.wait_for_wire_idle(timeout=0.01)
+        assert b.debug_snapshot()["pending_edge_requests"] == 1
+
+        core.release_edge.set()
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert result == [0]
+        b.wait_for_wire_idle(timeout=1.0)
+        assert b.debug_snapshot()["pending_edge_requests"] == 0
+    finally:
+        core.release_edge.set()
+        a.stop()
+        b.stop()
+
+
+def test_wait_for_wire_idle_can_accept_orderly_peer_close():
+    """A completed application barrier may be followed by peer teardown."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        a.stop()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and b.connected:
+            time.sleep(0.01)
+        b.wait_for_wire_idle(timeout=1.0, allow_peer_close=True)
+        assert b._reader_exc is None
+    finally:
+        b.stop()
+
+
 def test_post_byte_fallback_is_visible_in_debug_snapshot():
     """A keep-alive immediately after a completed byte is tagged separately."""
     a, b = NetworkBackend.pair()

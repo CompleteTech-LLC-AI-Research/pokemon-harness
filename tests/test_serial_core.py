@@ -64,6 +64,51 @@ def test_set_SC_arms_slave_transfer_with_no_timebase():
     assert s.clock_target == MAX_CYCLES
 
 
+def test_rewriting_active_same_role_SC_does_not_restart_transfer():
+    """A repeated external-clock arm preserves the in-flight byte.
+
+    The Pokémon overworld connection probe writes ``SC=$80`` repeatedly
+    while waiting for the peer's clock.  Those writes must not reset the
+    serial shift count or discard bits already exchanged.
+    """
+    s = SerialCore()
+    s.set_SB(0xA5)
+    s.set_SC(0x80)
+    s.apply_external_edge(1)
+    s.apply_external_edge(0)
+    shift_before = s._shift_register
+    bits_before = s._bits_remaining
+
+    s.set_SB(0x5A)  # Mid-transfer SB writes do not replace the snapshot.
+    s.set_SC(0x80)
+
+    assert s._shift_register == shift_before
+    assert s._bits_remaining == bits_before
+    assert s.transfer_enabled == 1
+    assert s.internal_clock == 0
+
+    for _ in range(bits_before):
+        completed = s.apply_external_edge(0)
+    assert completed is True
+    assert s.transfer_enabled == 0
+
+
+def test_switching_clock_source_while_armed_starts_fresh_transfer():
+    """A role change is a new native transfer, not a continuation."""
+    s = SerialCore()
+    s.set_SB(0xA5)
+    s.set_SC(0x80)
+    s.apply_external_edge(1)
+    assert s._bits_remaining == 7
+
+    s.set_SC(0x81)
+
+    assert s.internal_clock == 1
+    assert s._bits_remaining == 8
+    assert s._shift_register == 0xA5
+    assert s.clock_target == s.clock + CYCLES_PER_EDGE_DMG
+
+
 # ---------------------------------------------------------------------------
 # Master mode with NullBackend (disconnected cable)
 # ---------------------------------------------------------------------------

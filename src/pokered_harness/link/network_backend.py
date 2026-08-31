@@ -288,6 +288,12 @@ class NetworkBackend:
         # as SYNC or HELLO. The master sends one EDGE_REQ at a time, so a
         # bounded queue is sufficient and makes overload fail closed.
         self._edge_queue: queue.Queue[int | None] = queue.Queue(maxsize=256)
+        # Counts EDGE_REQ frames from enqueue until their response has been
+        # written.  A phase barrier can therefore wait for the wire work
+        # already admitted by the reader without mistaking an armed-but-idle
+        # ROM SC register for an in-flight transfer.
+        self._edge_pending_condition = threading.Condition()
+        self._edge_pending = 0
         # Peer SYNC events, indexed by sync-id. queue.Queue per id
         # lets multiple pending syncs coexist (unusual but defensively
         # modeled).
@@ -590,6 +596,8 @@ class NetworkBackend:
             finally:
                 with self._edge_response_lock:
                     self._edge_inflight = False
+                with self._edge_pending_condition:
+                    self._edge_pending_condition.notify_all()
 
     # --- out-of-band rendezvous ---------------------------------------
 
@@ -683,7 +691,60 @@ class NetworkBackend:
         snap["active_exchange"] = now < self._active_exchange_until
         snap["post_byte_rearm_grace"] = now < self._post_byte_rearm_until
         snap["consecutive_armed_edges"] = self._consecutive_armed_edges
+        with self._edge_pending_condition:
+            snap["pending_edge_requests"] = self._edge_pending
         return snap
+
+    def wait_for_wire_idle(
+        self, timeout: float = 10.0, *, allow_peer_close: bool = False
+    ) -> None:
+        """Wait until all already-received edge work has drained.
+
+        This is a transport barrier, not a ROM-state barrier.  Pokémon can
+        leave ``SC`` bit 7 armed while waiting for the next peer clock, so
+        requiring the emulated register to look idle would deadlock a valid
+        LinkMenu rendezvous.  The barrier instead waits for queued and
+        currently handled ``EDGE_REQ`` frames, plus any outstanding local
+        response, to finish within a bounded deadline.  ``allow_peer_close``
+        is intended only for a caller that has already completed an
+        application-level close marker and therefore expects the peer to
+        tear down immediately.
+        """
+        timeout = _validate_optional_timeout(timeout, "timeout")
+        assert timeout is not None
+        deadline = time.monotonic() + timeout
+        with self._edge_pending_condition:
+            while True:
+                with self._edge_response_lock:
+                    edge_inflight = self._edge_inflight
+                    response_pending = not self._resp_queue.empty()
+                if self._edge_pending == 0 and not edge_inflight and not response_pending:
+                    if self._closed:
+                        if allow_peer_close and self._reader_exc is None:
+                            return
+                        if self._reader_exc is not None:
+                            raise NetworkBackendError(
+                                f"backend closed while waiting for wire idle: "
+                                f"{self._reader_exc}"
+                            ) from self._reader_exc
+                        raise NetworkBackendError("backend closed while waiting for wire idle")
+                    return
+                if self._closed:
+                    if self._reader_exc is not None:
+                        raise NetworkBackendError(
+                            f"backend closed while waiting for wire idle: "
+                            f"{self._reader_exc}"
+                        ) from self._reader_exc
+                    raise NetworkBackendError("backend closed while waiting for wire idle")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise NetworkBackendError(
+                        "wire did not become idle within "
+                        f"{timeout:g}s (pending_edge_requests={self._edge_pending}, "
+                        f"edge_inflight={edge_inflight}, "
+                        f"response_pending={response_pending})"
+                    )
+                self._edge_pending_condition.wait(timeout=min(0.05, remaining))
 
     def _sync_queue(self, sync_id: int) -> queue.Queue[int]:
         if not 0 <= sync_id <= 255:
@@ -743,6 +804,8 @@ class NetworkBackend:
         self._closed = True
         self._closed_event.set()
         self._hello_received.set()
+        with self._edge_pending_condition:
+            self._edge_pending_condition.notify_all()
         self._signal_edge_worker_stop()
         try:
             self._sock.shutdown(socket.SHUT_RDWR)
@@ -760,6 +823,8 @@ class NetworkBackend:
         self._closed = True
         self._closed_event.set()
         self._hello_received.set()
+        with self._edge_pending_condition:
+            self._edge_pending_condition.notify_all()
         try:
             self._edge_queue.put_nowait(None)
         except queue.Full:
@@ -818,9 +883,14 @@ class NetworkBackend:
                         raise NetworkBackendError(
                             f"invalid EDGE_REQ bit payload {payload}"
                         )
+                    with self._edge_pending_condition:
+                        self._edge_pending += 1
                     try:
                         self._edge_queue.put_nowait(payload & 1)
                     except queue.Full as exc:
+                        with self._edge_pending_condition:
+                            self._edge_pending -= 1
+                            self._edge_pending_condition.notify_all()
                         raise NetworkBackendError(
                             "incoming EDGE_REQ queue is full"
                         ) from exc
@@ -870,7 +940,13 @@ class NetworkBackend:
                         f"unknown NetworkBackend opcode 0x{opcode:02x}"
                     )
         except NetworkBackendError as exc:
-            self._mark_closed(exc)
+            # EOF exactly on a frame boundary is an orderly peer shutdown.
+            # Keep it distinguishable from a truncated frame so a lifecycle
+            # barrier can accept the former without masking protocol damage.
+            if str(exc) == "peer closed socket":
+                self._mark_closed()
+            else:
+                self._mark_closed(exc)
         except OSError as exc:
             self._mark_closed(exc)
         except Exception as exc:  # noqa: BLE001
@@ -887,13 +963,19 @@ class NetworkBackend:
                 peer_bit = self._edge_queue.get(timeout=0.25)
             except queue.Empty:
                 continue
-            if peer_bit is None or self._closed:
+            if peer_bit is None:
                 return
             try:
+                if self._closed:
+                    return
                 self._handle_edge_req(peer_bit)
             except Exception as exc:  # noqa: BLE001
                 self._mark_closed(exc)
                 return
+            finally:
+                with self._edge_pending_condition:
+                    self._edge_pending -= 1
+                    self._edge_pending_condition.notify_all()
 
     def _signal_edge_worker_stop(self) -> None:
         try:
@@ -920,7 +1002,6 @@ class NetworkBackend:
         """
         core = self._local_core
         self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
-
         def armed() -> bool:
             return (
                 core is not None
@@ -1078,7 +1159,9 @@ class NetworkBackend:
         while len(buf) < n:
             chunk = self._sock.recv(n - len(buf))
             if not chunk:
-                raise NetworkBackendError("peer closed socket mid-frame")
+                if buf:
+                    raise NetworkBackendError("peer closed socket mid-frame")
+                raise NetworkBackendError("peer closed socket")
             buf.extend(chunk)
         return bytes(buf)
 
