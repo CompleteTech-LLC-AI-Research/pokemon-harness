@@ -36,6 +36,47 @@ RUNTIME_MODULES = (
 )
 
 
+def _pip_command() -> list[str]:
+    """Return a usable pip command for the active interpreter.
+
+    ``uv venv`` and some embedded Python distributions intentionally omit
+    pip.  The bootstrap command must still work in those environments, so
+    install the standard-library copy first instead of assuming that
+    ``python -m pip`` is already available.
+    """
+    command = [sys.executable, "-m", "pip"]
+    probe = subprocess.run(
+        [*command, "--version"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if probe.returncode == 0:
+        return command
+
+    bootstrap = subprocess.run(
+        [sys.executable, "-m", "ensurepip", "--upgrade"],
+        check=False,
+    )
+    if bootstrap.returncode != 0:
+        raise SystemExit(
+            "pip is unavailable and ensurepip failed; install pip in the "
+            "active environment before running bootstrap_pyboy.py"
+        )
+
+    verify = subprocess.run(
+        [*command, "--version"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise SystemExit(
+            "ensurepip completed but the active interpreter still cannot run python -m pip"
+        )
+    return command
+
+
 def _validate_source() -> None:
     if not PYBOY_SOURCE.is_dir():
         raise SystemExit(f"vendored PyBoy source is missing: {PYBOY_SOURCE}")
@@ -65,9 +106,9 @@ def _verify_runtime(mode: str) -> None:
     try:
         modules = {name: importlib.import_module(name) for name in RUNTIME_MODULES}
         import pyboy
-        from pyboy.core.serial import Serial
         from pyboy import utils
-    except Exception as exc:  # noqa: BLE001 - turn import failures into an actionable CLI error
+        from pyboy.core.serial import Serial
+    except Exception as exc:
         raise SystemExit(
             "PyBoy runtime cannot be imported after bootstrap; install the "
             f"harness dependencies first or inspect the build output: {type(exc).__name__}: {exc}"
@@ -106,11 +147,7 @@ def _verify_runtime(mode: str) -> None:
         problems.append(f"serial contract missing {', '.join(missing)}")
 
     if problems:
-        raise SystemExit(
-            "PyBoy runtime contract failed for "
-            f"--mode {mode}: "
-            + "; ".join(problems)
-        )
+        raise SystemExit(f"PyBoy runtime contract failed for --mode {mode}: " + "; ".join(problems))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -140,9 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         env.pop("PYBOY_NO_CYTHON", None)
 
     command = [
-        sys.executable,
-        "-m",
-        "pip",
+        *_pip_command(),
         "install",
         "--force-reinstall",
         CYTHON_REQUIREMENT,
