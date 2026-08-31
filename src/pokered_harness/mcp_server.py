@@ -769,7 +769,12 @@ def _dispatch_link_tool(
             try:
                 # Use a stable lock order; both sessions are owned by this
                 # MCP server and no callback is invoked while attaching.
-                with link._pair_lock, session.locked(), peer.locked():
+                lock_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+                with (
+                    link._pair_lock,
+                    session.locked(timeout_s=_remaining(lock_deadline)),
+                    peer.locked(timeout_s=_remaining(lock_deadline)),
+                ):
                     local_link_session.attach(session._pyboy)
                     local_link_session.attach(peer._pyboy)
             except Exception:
@@ -819,10 +824,16 @@ def _dispatch_link_tool(
             pair = link.pair
             local_link_session = link.local_link_session
         cleanup_errors: list[Exception] = []
+        cleanup_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
         if local_link_session is not None:
             try:
                 with link._pair_lock:
-                    _detach_local_link_session(link, session, local_link_session)
+                    _detach_local_link_session(
+                        link,
+                        session,
+                        local_link_session,
+                        timeout_s=_remaining(cleanup_deadline),
+                    )
             except Exception as exc:  # noqa: BLE001
                 cleanup_errors.append(exc)
             else:
@@ -858,12 +869,17 @@ def _dispatch_link_tool(
         count = _bounded_positive_int(
             arguments["count"], "count", _MAX_STEP_TICKS
         )
+        # A TCP reader can observe EOF between requests. Reconcile that
+        # background state before taking a snapshot so a stale endpoint is
+        # never stepped after its transport has closed.
+        _refresh_remote_state(link, session)
         with link.state():
             network_session = link.network_session
             local_link_session = link.local_link_session
             remote_endpoint = link.remote_endpoint
             remote_mode = link.remote_mode
             remote_link = link.remote_link
+            remote_error = link._remote_error
         if network_session is not None:
             session.step(count, render=bool(arguments.get("render", False)))
             return {"primary_tick": session.current_tick(), "peer_tick": None}
@@ -873,7 +889,7 @@ def _dispatch_link_tool(
             # memory mutation inside the same emulator lock as the frame so
             # status/resource readers and disconnect cannot observe a half
             # completed endpoint step.
-            with session.locked():
+            with session.locked(timeout_s=_DEFAULT_CLEANUP_TIMEOUT_S):
                 remote_endpoint.step(
                     count, render=bool(arguments.get("render", False))
                 )
@@ -886,7 +902,11 @@ def _dispatch_link_tool(
                 # explicitly. This prevents an ordinary MCP
                 # step/save/load/resource call from mutating either
                 # motherboard concurrently with link stepping.
-                with session.locked(), peer.locked():
+                lock_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+                with (
+                    session.locked(timeout_s=_remaining(lock_deadline)),
+                    peer.locked(timeout_s=_remaining(lock_deadline)),
+                ):
                     local_link_session.step_interleaved(
                         count, render=bool(arguments.get("render", False))
                     )
@@ -899,7 +919,7 @@ def _dispatch_link_tool(
                         "primary_tick": session.current_tick(),
                         "peer_tick": peer.current_tick(),
                     }
-        if remote_mode != "idle" or remote_link is not None:
+        if remote_mode != "idle" or remote_link is not None or remote_error is not None:
             raise McpHarnessError(
                 "remote_not_connected",
                 f"remote link is not ready for stepping (mode={remote_mode!r})",
@@ -1477,7 +1497,7 @@ def _attach_network_backend(
         network_is_internal_clock=is_internal_clock,
         local_rom_version=local_rom_version,
     )
-    with session.locked():
+    with session.locked(timeout_s=_DEFAULT_CLEANUP_TIMEOUT_S):
         network_session.attach(session._pyboy)
     return network_session
 
@@ -1696,8 +1716,14 @@ def _accept_remote(
                 # as the only owners.  Always release them here, including
                 # the cancellation path, or the transport reader can outlive
                 # the MCP link and retain the peer socket indefinitely.
+                cleanup_deadline = (
+                    time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+                )
                 if transport is not None:
-                    _close_serial_link(transport)
+                    _close_serial_link(
+                        transport,
+                        timeout_s=_remaining(cleanup_deadline),
+                    )
                 if endpoint is not None:
                     # A semantic endpoint installs raw PyBoy callbacks before
                     # publication. If installation or publication fails,
@@ -1706,7 +1732,9 @@ def _accept_remote(
                     _deactivate_link_hooks(session)
                 if network_session is not None:
                     try:
-                        with session.locked():
+                        with session.locked(
+                            timeout_s=_remaining(cleanup_deadline)
+                        ):
                             network_session.detach_all()
                     except Exception:  # noqa: BLE001, S110
                         pass
@@ -1782,15 +1810,19 @@ def _cleanup_unpublished_remote(
     failure must not leave raw link hooks active. The original connection
     exception remains the client-visible failure.
     """
+    cleanup_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
     if network_session is not None:
         try:
-            with session.locked():
+            with session.locked(timeout_s=_remaining(cleanup_deadline)):
                 network_session.detach_all()
         except BaseException:  # noqa: BLE001, S110 - cleanup must not mask the original error
             pass
     if transport is not None:
         try:
-            _close_serial_link(transport)
+            _close_serial_link(
+                transport,
+                timeout_s=_remaining(cleanup_deadline),
+            )
         except BaseException:  # noqa: BLE001, S110 - cleanup must not mask the original error
             pass
     try:
@@ -1803,12 +1835,15 @@ def _detach_local_link_session(
     link: LinkState,
     session: Session,
     local_link_session: PyBoyLinkSession,
+    *,
+    timeout_s: float = _DEFAULT_CLEANUP_TIMEOUT_S,
 ) -> None:
     """Detach a local native link while both owned emulators are locked."""
     peer = link.peer_session
-    with session.locked():
+    lock_deadline = time.monotonic() + max(0.0, timeout_s)
+    with session.locked(timeout_s=_remaining(lock_deadline)):
         if peer is not None and peer is not session:
-            with peer.locked():
+            with peer.locked(timeout_s=_remaining(lock_deadline)):
                 local_link_session.detach_all()
         else:
             local_link_session.detach_all()
@@ -2148,6 +2183,55 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
 # -- server wiring -----------------------------------------------------------
 
 
+def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+    """Retrieve a late task outcome after its owner timed out or cancelled."""
+    if task.cancelled():
+        return
+    task.exception()
+
+
+async def _wait_task_until(
+    task: asyncio.Task[Any],
+    deadline: float,
+) -> bool:
+    """Wait for a task without cancelling it, bounded by ``deadline``."""
+    remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+    if remaining <= 0.0:
+        task.add_done_callback(_consume_task_exception)
+        return False
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+    except TimeoutError:
+        # ``shield`` deliberately leaves the thread-backed task alive. It
+        # still owns the emulator operation and must be allowed to settle;
+        # consume its eventual result so a late exception is not reported as
+        # an unhandled asyncio task failure.
+        task.add_done_callback(_consume_task_exception)
+        return False
+    except BaseException:  # noqa: BLE001 - cancellation cleanup is best effort
+        return True
+    return True
+
+
+def _close_sessions_independently(
+    peer_session: Session | None,
+    session: Session | None,
+) -> list[tuple[str, Exception]]:
+    """Close each owned session even when another close attempt fails."""
+    errors: list[tuple[str, Exception]] = []
+    for role, target in (
+        ("peer", peer_session),
+        ("primary", session),
+    ):
+        if target is None:
+            continue
+        try:
+            target.close(timeout_s=_DEFAULT_CLEANUP_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 - preserve independent cleanup
+            errors.append((role, exc))
+    return errors
+
+
 def build_server(
     session: Session,
     *,
@@ -2201,18 +2285,16 @@ def build_server(
             # to status/resource requests while a bounded TCP call waits.
             result = await asyncio.shield(worker)
         except asyncio.CancelledError:
+            cleanup_deadline = (
+                asyncio.get_running_loop().time()
+                + _DEFAULT_CLEANUP_TIMEOUT_S
+            )
             if name != "link_status":
                 cleanup = asyncio.create_task(
                     asyncio.to_thread(_disconnect_remote, link, session)
                 )
-                try:
-                    await asyncio.shield(cleanup)
-                except BaseException:  # noqa: BLE001, S110 - preserve request cancellation
-                    pass
-            try:
-                await asyncio.shield(worker)
-            except BaseException:  # noqa: BLE001, S110 - retrieve the worker outcome
-                pass
+                await _wait_task_until(cleanup, cleanup_deadline)
+            await _wait_task_until(worker, cleanup_deadline)
             raise
         except Exception as exc:  # noqa: BLE001
             return _error_reply(exc)
@@ -2508,10 +2590,19 @@ def main() -> None:
             )
         )
     finally:
-        if peer_session is not None:
-            peer_session.close()
-        if session is not None:
-            session.close()
+        active_exception = sys.exc_info()[1]
+        cleanup_errors = _close_sessions_independently(peer_session, session)
+        if cleanup_errors:
+            details = "; ".join(
+                f"{role} {type(exc).__name__}: {exc}"
+                for role, exc in cleanup_errors
+            )
+            if active_exception is not None:
+                active_exception.add_note(
+                    f"MCP session cleanup failed: {details}"
+                )
+            else:
+                raise McpHarnessError("server_cleanup_failed", details)
 
 
 def _env_flag(name: str) -> bool:
