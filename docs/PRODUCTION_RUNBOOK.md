@@ -2,24 +2,25 @@
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
-historical, the current candidate facts refer to source candidate `db72be6` on
-2026-08-31.
+historical, the current candidate facts refer to functional source candidate
+`d8198ef` on 2026-08-31.
 Uncommitted worktree changes and external BYO assets are excluded from the
 tracked source tree.
 
-The asset-free gate at `db72be6` passed unit 472/472 and timing 35/35 across
-five repetitions; its collection preflight collected 599 tests and its scoped
+The asset-free gate at `d8198ef` passed unit 477/477 and timing 35/35 across
+five repetitions; its collection preflight collected 604 tests and its scoped
 result was `PASS`. This proves only the ROM-free and timing scope. The matrix
 audit collected nine ordered pairs, six reversed-role rows, nine local variant
 rows, and three strict trade plus three strict battle entry points, but the
 strict acceptance declaration remains incomplete with 15 uncovered cases per
 operation. The collection-only matrix runtime is `NOT RUN`.
 
-A current selected-tier real-ROM run at `db72be6` recorded local 46/46,
-remote 13/13, strict trade 3/3, and strict battle 3/3 using the pinned BYO
-assets. The strict remote rows cover both color Red/Blue listener/connector
-directions. Those selected tiers are not a full-gate result because the strict
-matrix declaration remains incomplete.
+The previously recorded selected-tier real-ROM run at `db72be6` recorded local
+46/46, remote 13/13, strict trade 3/3, and strict battle 3/3 using the pinned
+BYO assets. The strict remote rows cover both color Red/Blue listener/connector
+directions. Those results predate the current transport hardening and must be
+rerun for current-candidate sign-off; they are not a full-gate result because
+the strict matrix declaration remains incomplete.
 Symbol hashes and fixture byte/provenance records are in
 [`VERSIONS.md`](../VERSIONS.md) and the tracked
 [`fixture-manifest.json`](../release-evidence/fixture-manifest.json). Overall
@@ -208,7 +209,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `db72be6`, this command collected 599 tests, passed unit 472/472, passed
+At `d8198ef`, this command collected 604 tests, passed unit 477/477, passed
 timing 35/35 in each of five repetitions, and returned scoped `PASS`. It also
 performed schema-only validation of the ten-entry fixture manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
@@ -228,7 +229,7 @@ acceptance matrix declaration is incomplete.
 
 The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
 explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. At `db72be6`, `ruff check .` is clean. The
+default `ruff check .` audit. At `d8198ef`, `ruff check .` is clean. The
 vendored runtime is covered by revision pinning, compile/import checks, and
 the serial contract.
 
@@ -405,7 +406,10 @@ transport callbacks. It must not seed `hSerialConnectionStatus` (the ROM-owned
 HRAM status populated by its serial ISR) or install semantic exchange hooks;
 the listener/connector role must emerge from native serial traffic. The
 semantic endpoint remains a compatibility path for non-native test doubles and
-is not production acceptance evidence.
+is not production acceptance evidence. A real PyBoy with an incomplete native
+serial contract fails closed. Native socket writes, public listener waits, and
+worker teardown are bounded; `peer_rom_version` can be supplied to reject an
+unexpected HELLO label.
 
 ## 5. Generate link fixtures safely
 
@@ -507,6 +511,8 @@ bundled PyBoy runtime identity is still checked.
 The MCP remote TCP tools enforce localhost-only hosts (`127.0.0.1`,
 `localhost`, or `::1`). They provide no authentication or encryption; do not
 expose the raw transport or server to a public address, untrusted LAN, or WAN.
+The optional `peer_rom_version` argument checks the announced ROM label but is
+not cryptographic authentication.
 
 ## 7. Record release evidence
 
@@ -530,7 +536,7 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current `db72be6` asset-free gate passed unit 472/472 and timing 35/35
+1. The current `d8198ef` asset-free gate passed unit 477/477 and timing 35/35
    across five repetitions. Selected current real-ROM tiers also passed local
    46/46, remote 13/13, strict trade 3/3, and strict battle 3/3, but the full
    gate still fails closed on the incomplete strict declaration.
@@ -544,7 +550,7 @@ are:
    `PARTIAL`. The manifest is external and untracked; its complete byte
    validation and a retained sanitized evidence bundle still need to be
    associated with the release candidate.
-4. `ruff check .` is clean at `db72be6`; the broad suite, all advertised
+4. `ruff check .` is clean at `d8198ef`; the broad suite, all advertised
    single-session rows, native-platform coverage, load-stable full-matrix
    behavior, and independent review remain open.
 5. Remote TCP has no authentication or encryption. Loopback-only operation is

@@ -11,7 +11,8 @@ symbol files, save states, or other ROM-derived artifacts.
 
 This repository is an audited production-readiness candidate, not a production
 release. Unless explicitly labelled historical, the facts below refer to
-source candidate commit `db72be6` on 2026-08-31. The baseline at `e219fb5` was not
+functional source candidate commit `d8198ef` on 2026-08-31. The baseline at
+`e219fb5` was not
 production-certified.
 
 Status semantics are deliberately scoped:
@@ -26,9 +27,9 @@ Status semantics are deliberately scoped:
   assets, complete strict acceptance coverage, retained evidence, and no open
   release blockers.
 
-The exact current asset-free gate was run from `db72be6` with
+The exact current asset-free gate was run from `d8198ef` with
 `scripts/production_gate.py --unit-only --repeat-timing 5`: both collection
-paths found 599 tests, unit was 472/472, timing was 35/35 in five repetitions,
+paths found 604 tests, unit was 477/477, timing was 35/35 in five repetitions,
 and the scoped gate result was `PASS`. It also verified the fixture manifest
 schema (10 entries) and reported a structural matrix audit, but did not run
 ROM-backed tiers. The matrix declaration remains incomplete: all nine ordered
@@ -39,10 +40,10 @@ the collection-only runtime is `NOT RUN`.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
-| ROM-free unit and timing regressions | `PASS` (scoped) | At `db72be6`: unit 472/472 and timing 35/35 across five repetitions. |
+| ROM-free unit and timing regressions | `PASS` (scoped) | At `d8198ef`: unit 477/477 and timing 35/35 across five repetitions. |
 | Runtime/package identity | `PASS` (scoped) | The gate resolves bundled source PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
-| Single-session/MCP | `PARTIAL` | A clean wheel smoke passed 3/3 for explicit color-Red ROM/SYM inputs. Wider five-input evidence is historical and is not current all-row sign-off. |
+| Single-session/MCP | `PASS` (five-input smoke) | Current explicit Red stock/color, Blue stock/color, and Yellow ROM/SYM MCP stdio and golden-path checks passed; this is not full release sign-off. |
 | In-process link acceptance | `PASS` (selected tier) | The current local tier passed 46/46; strict color-Red/Yellow trade and battle passed, while the broader matrix remains unverified. |
 | Remote TCP and MCP lifecycle | `PASS` (selected tier) | The current remote tier passed 13/13, and strict color-Red/color-Blue trade and battle passed in both listener/connector directions; the full matrix remains open. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
@@ -236,7 +237,9 @@ is not paired automatically.
 The bundled PyBoy fork provides the bit-accurate serial backend required by
 Gen I Pokémon. Real sessions use that backend for in-process and TCP links;
 the older semantic bridge remains only as a compatibility path for test
-doubles that do not expose the native serial object.
+doubles that intentionally do not model a PyBoy motherboard. A real PyBoy
+session with an incomplete serial contract fails closed instead of silently
+switching to semantic exchange.
 
 Native attach only installs the serial backend and its transport callbacks. It
 does not write Pokémon HRAM such as `hSerialConnectionStatus` or install
@@ -272,7 +275,10 @@ The MCP remote-link API enforces localhost-only binding and connection
 (`127.0.0.1`, `localhost`, or `::1`). The transport has no authentication or
 encryption and must not be exposed to an untrusted LAN, the public internet,
 or a WAN until an authenticated encrypted channel is added. Treat this as a
-security boundary, not as cross-host support.
+security boundary, not as cross-host support. `link_listen` and `link_connect`
+accept an optional `peer_rom_version` expectation; a mismatched HELLO is
+rejected. Socket writes, public listener waits, and worker teardown all have
+bounded deadlines.
 
 The current evidence boundary is deliberately narrow:
 
@@ -366,7 +372,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `db72be6` this scoped command passed 472/472 unit tests and 35/35 timing
+At `d8198ef` this scoped command passed 477/477 unit tests and 35/35 timing
 cases in each of five repetitions. It is a `PASS` for the selected scope, not
 a production sign-off: the full gate additionally requires the BYO assets,
 fixture-byte/provenance checks, real-ROM tiers, and complete strict matrix.

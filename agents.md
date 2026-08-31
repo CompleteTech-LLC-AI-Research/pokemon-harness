@@ -27,8 +27,8 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current candidate boundary is `db72be6`. Its asset-free gate passed
-472/472 unit tests and 35/35 timing cases across five repetitions. The release
+The current functional candidate boundary is `d8198ef`. Its asset-free gate
+passed 477/477 unit tests and 35/35 timing cases across five repetitions. The release
 runtime is the bundled PyBoy source snapshot pinned in `VERSIONS.md` (`2.7.0`,
 harness revision `c565df66c3731fad2856169a90f6bbec99925915`) with
 `mcp==1.29.1`. The source runtime is the only link-acceptance mode currently

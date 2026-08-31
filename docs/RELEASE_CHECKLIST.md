@@ -16,7 +16,7 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The source candidate boundary is `db72be6` (2026-08-31). The asset-free command:
+The current functional candidate boundary is `d8198ef` (2026-08-31). The asset-free command:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -29,7 +29,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-returned scoped `PASS`: collection 599, unit 472/472, and timing 35/35 in
+returned scoped `PASS`: collection 604, unit 477/477, and timing 35/35 in
 each of five repetitions. It used bundled source PyBoy 2.7.0, fork
 `c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
 ten-entry fixture manifest. No ROM-backed tier ran in this command.
@@ -40,10 +40,12 @@ strict battle entry points. It reported 15 supported trade cases and 15
 supported battle cases without strict entry points, and matrix runtime was
 `NOT RUN` because the standalone audit is collection-only.
 
-A current selected-tier real-ROM run recorded local 46/46, remote 13/13,
-strict trade 3/3, and strict battle 3/3. The strict remote rows cover both
-color Red/Blue listener/connector directions. These selected results are not
-a full-gate result because the strict matrix declaration remains incomplete.
+The previously recorded selected-tier real-ROM run at `db72be6` recorded local
+46/46, remote 13/13, strict trade 3/3, and strict battle 3/3. The strict remote
+rows cover both color Red/Blue listener/connector directions. Those results
+predate the current transport hardening and must be rerun for current-candidate
+sign-off; they are not a full-gate result because the strict matrix declaration
+remains incomplete.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
@@ -54,7 +56,7 @@ evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The source candidate boundary is identified as `db72be6`; the final
+- [x] The functional source candidate boundary is identified as `d8198ef`; the final
   release commit must be recorded after documentation integration.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
@@ -94,10 +96,10 @@ evidence, and independent review.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete in the scoped
-  `db72be6` gate; 599 tests were collected with no collection errors.
-- [x] ROM-free unit tests pass 472/472 in the scoped gate.
+  `d8198ef` gate; 604 tests were collected with no collection errors.
+- [x] ROM-free unit tests pass 477/477 in the scoped gate.
 - [x] Timing tests pass 35/35 across five repetitions in the scoped gate.
-- [x] `ruff check .` is clean at the source candidate boundary.
+- [x] `ruff check .` is clean at the functional source candidate boundary.
 - [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
   xfail, or timeout.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every advertised

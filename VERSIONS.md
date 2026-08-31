@@ -6,19 +6,20 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: `PARTIAL` current audit candidate; the current source boundary is
-`db72be6` (2026-08-31). Its asset-free production gate collected 599 tests,
-passed unit 472/472, and passed timing 35/35 across five repetitions. The
+`d8198ef` (2026-08-31). Its asset-free production gate collected 604 tests,
+passed unit 477/477, and passed timing 35/35 across five repetitions. The
 gate's scoped result is `PASS`; it does not run ROM-backed tiers. Its matrix
 audit collected all nine ordered pairs, six reversed-role rows, nine local
 variant rows, and three strict trade plus three strict battle entry points,
 but the strict acceptance declaration is incomplete with 15 uncovered cases
 per operation; collection-only matrix runtime was not run.
 
-A current selected-tier run at `db72be6` passed local 46/46, remote 13/13,
-strict trade 3/3, and strict battle 3/3 with the pinned BYO assets. The
-remote strict rows cover both color Red/Blue listener/connector directions.
-These selected tiers do not constitute a full-gate sign-off because the
-strict matrix declaration remains incomplete. The historical complete
+The previously recorded selected-tier run at `db72be6` passed local 46/46,
+remote 13/13, strict trade 3/3, and strict battle 3/3 with the pinned BYO
+assets. The remote strict rows cover both color Red/Blue listener/connector
+directions. These results predate the current transport hardening and must be
+rerun for current-candidate sign-off; they do not constitute a full-gate result
+because the strict matrix declaration remains incomplete. The historical complete
 real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` is also separate evidence.
 
