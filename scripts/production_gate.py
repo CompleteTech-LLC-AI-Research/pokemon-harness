@@ -29,8 +29,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -84,6 +85,15 @@ DEFAULT_TIMEOUT_SECONDS: dict[str, float] = {
     "battle": 3600.0,
     "timing": 900.0,
 }
+# Strict acceptance rows are independent subprocess pairs.  Keep their
+# individual deadlines aligned with the deadlines enforced by the tests while
+# allowing the gate to make progress on several isolated rows at once.
+DEFAULT_MATRIX_WORKERS = 4
+MATRIX_CASE_TIMEOUT_SECONDS: dict[str, float] = {
+    "trade": 900.0,
+    "battle": 1200.0,
+}
+MATRIX_AGGREGATE_GRACE_SECONDS = 10.0
 COLLECTION_TIMEOUT_SECONDS = 300.0
 EVIDENCE_SCHEMA_VERSION = 1
 EVIDENCE_REPORT_FILENAME = "gate-report.json"
@@ -191,6 +201,22 @@ class GateReport:
 
 
 @dataclass
+class MatrixCaseResult:
+    """Retained result for one independently scheduled acceptance row."""
+
+    nodeid: str
+    status: str
+    returncode: int | None
+    duration_seconds: float
+    counts: Counts = field(default_factory=Counts)
+    reason: str = ""
+    output_tail: str = ""
+    deadline_seconds: float = 0.0
+    report_kind: str = "final"
+    partial: bool = False
+
+
+@dataclass
 class TierResult:
     name: str
     description: str
@@ -206,6 +232,7 @@ class TierResult:
     reason: str = ""
     iteration_failures: list[str] = field(default_factory=list)
     selected_nodeids: list[str] = field(default_factory=list)
+    case_results: list[MatrixCaseResult] = field(default_factory=list)
 
 
 @dataclass
@@ -1448,19 +1475,20 @@ def run_pytest_once(
     expression: str,
     timeout_seconds: float,
     report_path: Path,
+    selectors: Sequence[str] = (),
 ) -> tuple[int, GateReport, str, list[str]]:
-    command = [
-        str(python_executable),
-        "-m",
-        "pytest",
-        "tests",
-        "-m",
-        expression,
-        "-p",
-        "tests._gate_report",
-        "-rA",
-        "--maxfail=0",
-    ]
+    command = [str(python_executable), "-m", "pytest"]
+    command.extend(selectors or ("tests",))
+    command.extend(
+        (
+            "-m",
+            expression,
+            "-p",
+            "tests._gate_report",
+            "-rA",
+            "--maxfail=0",
+        )
+    )
     child_environment = dict(environment)
     child_environment["POKERED_GATE_REPORT"] = str(report_path)
     progress_path = report_path.with_suffix(".progress.json")
@@ -1535,7 +1563,11 @@ def run_pytest_once(
         report_path,
         expected_returncode=None if timed_out else returncode,
     )
-    if report.error:
+    # A progress report is evidence of the tests that had reached a terminal
+    # outcome only after an actual timeout.  A missing or malformed final
+    # report on an otherwise exited process must remain an error; falling back
+    # to stale/partial progress there could turn a broken runner green.
+    if timed_out and report.error:
         progress_report = _load_gate_report(progress_path, allow_partial=True)
         if not progress_report.error:
             report = progress_report
@@ -1610,6 +1642,438 @@ def _required_nodeid_problems(
     return [f"required matrix case is absent from selected items: {nodeid}" for nodeid in missing]
 
 
+def _add_counts(target: Counts, source: Counts) -> None:
+    """Add one validated pytest result to an aggregate counter."""
+
+    for field_name in Counts.__dataclass_fields__:
+        setattr(target, field_name, getattr(target, field_name) + getattr(source, field_name))
+
+
+def _matrix_report_path(report_directory: Path, nodeid: str) -> Path:
+    """Return a collision-resistant report path for one matrix selector."""
+
+    digest = hashlib.sha256(nodeid.encode("utf-8")).hexdigest()[:20]
+    return report_directory / f"matrix-{digest}.json"
+
+
+def _drain_matrix_stream(stream: Any, chunks: list[str]) -> None:
+    """Drain one matrix child stream without coupling it to the supervisor."""
+
+    try:
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                return
+            chunks.append(chunk)
+    except (OSError, ValueError):
+        return
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _kill_matrix_process(process: subprocess.Popen[str]) -> None:
+    """Kill a matrix child process group without waiting on guest code."""
+
+    pid = getattr(process, "pid", None)
+    if pid is None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    else:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=0)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    stream = getattr(process, "stdout", None)
+    if stream is not None:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def run_matrix_tier(
+    *,
+    name: str,
+    project_root: Path,
+    python_executable: Path,
+    environment: dict[str, str],
+    required_problems: list[str],
+    timeout_override: float | None,
+    report_directory: Path,
+    required_test_keys: Iterable[tuple[str, str]] = (),
+    required_nodeids: Iterable[str] = (),
+    matrix_workers: int = DEFAULT_MATRIX_WORKERS,
+    matrix_timeout_override: float | None = None,
+) -> TierResult:
+    """Run strict acceptance rows under hard per-case and aggregate bounds.
+
+    Each selector gets its own pytest process and report files.  A small
+    supervisor keeps at most ``matrix_workers`` processes active, kills active
+    process groups at the aggregate cutoff, and records queued rows as
+    ``NOT_STARTED``.  It never relies on an executor context whose shutdown
+    could wait indefinitely for an emulator child.
+    """
+
+    required = name not in OPTIONAL_TIERS
+    nodeids = tuple(sorted(set(required_nodeids)))
+    if not nodeids:
+        return TierResult(
+            name=name,
+            description=TIER_DESCRIPTIONS[name],
+            expression=TIER_EXPRESSIONS[name],
+            required=required,
+            status="FAIL",
+            reason="strict matrix tier has no required node IDs",
+        )
+    if matrix_workers <= 0:
+        raise ValueError("matrix_workers must be positive")
+    if required and name in REQUIRED_TIER_ASSETS and required_problems:
+        reason = "required assets unavailable: " + "; ".join(required_problems)
+        return TierResult(
+            name=name,
+            description=TIER_DESCRIPTIONS[name],
+            expression=TIER_EXPRESSIONS[name],
+            required=True,
+            status="BLOCKED",
+            reason=reason,
+            selected_nodeids=list(nodeids),
+        )
+
+    selected_keys = {
+        key
+        for nodeid in nodeids
+        if (key := _test_key_from_nodeid(nodeid)) is not None
+    }
+    failures = [
+        f"required acceptance test is absent from matrix selectors: {module}::{test_name}"
+        for module, test_name in sorted(set(required_test_keys) - selected_keys)
+    ]
+    timeout = timeout_override or MATRIX_CASE_TIMEOUT_SECONDS.get(
+        name, DEFAULT_TIMEOUT_SECONDS[name]
+    )
+    max_workers = min(matrix_workers, len(nodeids))
+    waves = (len(nodeids) + max_workers - 1) // max_workers
+    aggregate_timeout = matrix_timeout_override or (
+        timeout * waves + MATRIX_AGGREGATE_GRACE_SECONDS
+    )
+    if aggregate_timeout <= 0:
+        raise ValueError("matrix aggregate timeout must be positive")
+    started = time.monotonic()
+    aggregate_deadline = started + aggregate_timeout
+    aggregate = Counts()
+    aggregate_reasons: Counter[str] = Counter()
+    case_results_by_nodeid: dict[str, MatrixCaseResult] = {}
+    output_tails: list[str] = []
+    pending = deque(nodeids)
+    active: dict[str, dict[str, Any]] = {}
+
+    def record_case(
+        *,
+        nodeid: str,
+        returncode: int | None,
+        report: GateReport,
+        output: str,
+        duration: float,
+        timed_out: bool = False,
+        timeout_reason: str = "",
+        report_kind: str = "final",
+    ) -> None:
+        _add_counts(aggregate, report.counts)
+        aggregate_reasons.update(report.skip_reasons)
+        problems: list[str] = []
+        if timed_out:
+            problems.append(timeout_reason or f"matrix case timed out after {timeout:.1f}s")
+        if report.error:
+            problems.append(report.error)
+        if returncode not in (None, 0) and not timed_out:
+            problems.append(f"pytest returned exit code {returncode}")
+        if report.collection_errors:
+            problems.append(f"pytest reported {len(report.collection_errors)} collection error(s)")
+        if report.collection_skips:
+            problems.append(f"pytest reported {len(report.collection_skips)} collection skip(s)")
+        if report.counts.total == 0:
+            problems.append("pytest selected no tests for matrix selector")
+        if report.counts.total != 1:
+            problems.append(
+                f"matrix selector produced {report.counts.total} test outcomes; expected exactly 1"
+            )
+        normalized_report_nodeids = {_normalize_nodeid(item) for item in report.nodeids}
+        if _normalize_nodeid(nodeid) not in normalized_report_nodeids:
+            problems.append(f"matrix selector was not collected: {nodeid}")
+        if (
+            report.counts.failed
+            or report.counts.errors
+            or report.counts.xfailed
+            or report.counts.xpassed
+        ):
+            problems.append(
+                "unexpected outcomes: "
+                f"failed={report.counts.failed} errors={report.counts.errors} "
+                f"xfailed={report.counts.xfailed} xpassed={report.counts.xpassed}"
+            )
+        if required and report.counts.skipped:
+            problems.append("required matrix case produced a test skip")
+        if report.counts.passed != 1:
+            problems.append(
+                f"matrix case did not produce exactly one pass: passed={report.counts.passed}"
+            )
+        if problems:
+            failures.extend(f"{nodeid}: {problem}" for problem in problems)
+            if output.strip():
+                output_tails.append(f"{nodeid}\n{output[-4000:]}")
+        case_results_by_nodeid[nodeid] = MatrixCaseResult(
+            nodeid=nodeid,
+            status="TIMEOUT" if timed_out else ("PASS" if not problems else "FAIL"),
+            returncode=124 if timed_out else returncode,
+            duration_seconds=duration,
+            counts=report.counts,
+            reason="; ".join(problems),
+            output_tail=output[-4000:],
+            deadline_seconds=timeout,
+            report_kind=report_kind,
+            partial=timed_out or report_kind == "partial",
+        )
+
+    def record_not_started(nodeid: str, reason: str) -> None:
+        failures.append(f"{nodeid}: {reason}")
+        case_results_by_nodeid[nodeid] = MatrixCaseResult(
+            nodeid=nodeid,
+            status="NOT_STARTED",
+            returncode=None,
+            duration_seconds=0.0,
+            reason=reason,
+            deadline_seconds=timeout,
+            report_kind="not-started",
+            partial=True,
+        )
+
+    def load_case_report(
+        state: dict[str, Any],
+        *,
+        returncode: int,
+        timed_out: bool,
+    ) -> tuple[GateReport, str]:
+        final_report = _load_gate_report(
+            state["report_path"],
+            expected_returncode=None if timed_out else returncode,
+        )
+        if not timed_out:
+            return final_report, "final"
+        if not final_report.error:
+            return final_report, "final"
+        progress_report = _load_gate_report(
+            state["progress_path"], allow_partial=True
+        )
+        if not progress_report.error:
+            return progress_report, "partial"
+        return GateReport(
+            Counts(errors=1),
+            error=(
+                f"{final_report.error}; progress report: {progress_report.error}"
+            ),
+        ), "missing"
+
+    def start_case(nodeid: str) -> None:
+        report_path = _matrix_report_path(report_directory, nodeid)
+        progress_path = report_path.with_suffix(".progress.json")
+        for path in (report_path, progress_path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                record_case(
+                    nodeid=nodeid,
+                    returncode=None,
+                    report=GateReport(
+                        Counts(errors=1),
+                        error=f"could not prepare matrix report path: {type(exc).__name__}: {exc}",
+                    ),
+                    output="",
+                    duration=0.0,
+                    report_kind="missing",
+                )
+                return
+        child_environment = dict(environment)
+        child_environment["POKERED_GATE_REPORT"] = str(report_path)
+        child_environment["POKERED_GATE_PROGRESS_REPORT"] = str(progress_path)
+        command = [str(python_executable), "-m", "pytest", nodeid]
+        command.extend(
+            (
+                "-m",
+                TIER_EXPRESSIONS[name],
+                "-p",
+                "tests._gate_report",
+                "-rA",
+                "--maxfail=0",
+            )
+        )
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=project_root,
+                env=child_environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                **_process_creation_kwargs(),
+            )
+        except OSError as exc:
+            record_case(
+                nodeid=nodeid,
+                returncode=None,
+                report=GateReport(
+                    Counts(errors=1),
+                    error=f"could not start matrix pytest: {type(exc).__name__}: {exc}",
+                ),
+                output="",
+                duration=0.0,
+                report_kind="missing",
+            )
+            return
+        chunks: list[str] = []
+        reader = threading.Thread(
+            target=_drain_matrix_stream,
+            args=(process.stdout, chunks),
+            name=f"pokered-gate-output-{name}",
+            daemon=True,
+        )
+        reader.start()
+        now = time.monotonic()
+        active[nodeid] = {
+            "process": process,
+            "chunks": chunks,
+            "reader": reader,
+            "started_at": now,
+            "deadline_at": now + timeout,
+            "report_path": report_path,
+            "progress_path": progress_path,
+        }
+
+    def finish_case(nodeid: str, *, timed_out: bool, reason: str = "") -> None:
+        state = active.pop(nodeid)
+        process = state["process"]
+        if timed_out:
+            _kill_matrix_process(process)
+            returncode = 124
+        else:
+            returncode = process.poll()
+            if returncode is None:
+                returncode = 125
+        report, report_kind = load_case_report(
+            state,
+            returncode=int(returncode),
+            timed_out=timed_out,
+        )
+        record_case(
+            nodeid=nodeid,
+            returncode=int(returncode),
+            report=report,
+            output="".join(state["chunks"]),
+            duration=time.monotonic() - state["started_at"],
+            timed_out=timed_out,
+            timeout_reason=reason,
+            report_kind=report_kind,
+        )
+
+    while pending or active:
+        now = time.monotonic()
+        for nodeid, state in list(active.items()):
+            process = state["process"]
+            if process.poll() is not None:
+                finish_case(nodeid, timed_out=False)
+            elif now >= state["deadline_at"]:
+                finish_case(
+                    nodeid,
+                    timed_out=True,
+                    reason=f"matrix case timed out after {timeout:.1f}s",
+                )
+
+        if time.monotonic() >= aggregate_deadline:
+            for nodeid in list(active):
+                finish_case(
+                    nodeid,
+                    timed_out=True,
+                    reason=(
+                        "matrix aggregate deadline exceeded after "
+                        f"{aggregate_timeout:.1f}s"
+                    ),
+                )
+            while pending:
+                record_not_started(
+                    pending.popleft(),
+                    "matrix aggregate deadline expired before the case started",
+                )
+            break
+
+        while pending and len(active) < max_workers:
+            if time.monotonic() >= aggregate_deadline:
+                break
+            start_case(pending.popleft())
+
+        if not active:
+            continue
+        remaining = aggregate_deadline - time.monotonic()
+        if remaining > 0:
+            next_deadline = min(
+                [state["deadline_at"] for state in active.values()]
+                + [aggregate_deadline]
+            )
+            time.sleep(min(0.05, max(0.0, next_deadline - time.monotonic())))
+
+    case_results = [case_results_by_nodeid[nodeid] for nodeid in sorted(nodeids)]
+    unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
+    status = (
+        "PASS"
+        if not failures
+        and not unexpected
+        and len(case_results) == len(nodeids)
+        and aggregate.total == len(nodeids)
+        and aggregate.skipped == 0
+        and aggregate.passed == len(nodeids)
+        else "FAIL"
+    )
+    return TierResult(
+        name=name,
+        description=TIER_DESCRIPTIONS[name],
+        expression=TIER_EXPRESSIONS[name],
+        required=required,
+        status=status,
+        counts=aggregate,
+        returncodes=[
+            case.returncode for case in case_results if case.returncode is not None
+        ],
+        duration_seconds=time.monotonic() - started,
+        skip_reasons=dict(sorted(aggregate_reasons.items())),
+        command=[
+            str(python_executable),
+            "-m",
+            "pytest",
+            "<one-required-nodeid-per-worker>",
+            "-m",
+            TIER_EXPRESSIONS[name],
+            f"--matrix-workers={max_workers}",
+            f"--case-timeout={timeout:.1f}",
+            f"--aggregate-timeout={aggregate_timeout:.1f}",
+        ],
+        output_tail="\n\n".join(output_tails)[-8000:],
+        iteration_failures=failures,
+        selected_nodeids=list(nodeids),
+        case_results=case_results,
+    )
+
+
 def run_tier(
     *,
     name: str,
@@ -1622,7 +2086,24 @@ def run_tier(
     report_directory: Path,
     required_test_keys: Iterable[tuple[str, str]] = (),
     required_nodeids: Iterable[str] = (),
+    matrix_workers: int = DEFAULT_MATRIX_WORKERS,
+    matrix_timeout_override: float | None = None,
 ) -> TierResult:
+    if name in {"trade", "battle"} and required_nodeids:
+        return run_matrix_tier(
+            name=name,
+            project_root=project_root,
+            python_executable=python_executable,
+            environment=environment,
+            required_problems=required_problems,
+            timeout_override=timeout_override,
+            report_directory=report_directory,
+            required_test_keys=required_test_keys,
+            required_nodeids=required_nodeids,
+            matrix_workers=matrix_workers,
+            matrix_timeout_override=matrix_timeout_override,
+        )
+
     required = name not in OPTIONAL_TIERS
     if required and name in REQUIRED_TIER_ASSETS and required_problems:
         reason = "required assets unavailable: " + "; ".join(required_problems)
@@ -1881,6 +2362,14 @@ def render_text(
             lines.append(f"    skip[{count}]: {reason}")
         for failure in tier.iteration_failures:
             lines.append(f"    iteration-failure: {failure}")
+        for case in tier.case_results:
+            lines.append(
+                f"    case {case.status:4} {case.nodeid}: "
+                f"{_format_counts(case.counts)} "
+                f"returncode={case.returncode} duration={case.duration_seconds:.1f}s"
+            )
+            if case.reason:
+                lines.append(f"      reason: {case.reason}")
         if tier.status in {"FAIL", "BLOCKED"} and tier.output_tail:
             lines.append("    output tail:")
             lines.extend(f"      {line}" for line in tier.output_tail.splitlines()[-60:])
@@ -2119,6 +2608,13 @@ def _safe_tier(
         _safe_diagnostic(reason, roots, limit=2000): count
         for reason, count in tier.skip_reasons.items()
     }
+    data["case_results"] = []
+    for case in tier.case_results:
+        safe_case = asdict(case)
+        safe_case["nodeid"] = _safe_diagnostic(case.nodeid, roots, limit=1000)
+        safe_case["reason"] = _safe_diagnostic(case.reason, roots, limit=2000)
+        safe_case["output_tail"] = _safe_diagnostic(case.output_tail, roots)
+        data["case_results"].append(safe_case)
     return data
 
 
@@ -2285,6 +2781,18 @@ def render_evidence_text(payload: dict[str, Any]) -> str:
             lines.append(f"    skip[{count}]: {reason}")
         for failure in tier.get("iteration_failures", []):
             lines.append(f"    iteration-failure: {failure}")
+        for case in tier.get("case_results", []):
+            if not isinstance(case, dict):
+                continue
+            counts = case.get("counts", {})
+            lines.append(
+                f"    case {case.get('status', 'UNKNOWN'):4} "
+                f"{case.get('nodeid', '')}: {_payload_counts_text(counts)} "
+                f"returncode={case.get('returncode')} "
+                f"duration={case.get('duration_seconds', 0.0):.1f}s"
+            )
+            if case.get("reason"):
+                lines.append(f"      reason: {case['reason']}")
         if tier.get("status") in {"FAIL", "BLOCKED"} and tier.get("output_tail"):
             lines.append("    output tail:")
             lines.extend(f"      {line}" for line in tier["output_tail"].splitlines())
@@ -2436,6 +2944,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="number of timing-tier repetitions (minimum 5; default: 5)",
     )
     parser.add_argument(
+        "--matrix-workers",
+        type=int,
+        default=DEFAULT_MATRIX_WORKERS,
+        help=(
+            "parallel subprocess workers for strict trade/battle matrix rows "
+            f"(default: {DEFAULT_MATRIX_WORKERS})"
+        ),
+    )
+    parser.add_argument(
+        "--matrix-timeout-seconds",
+        type=float,
+        help=(
+            "hard aggregate timeout for each strict trade/battle matrix tier; "
+            "otherwise it is derived from row timeout and worker count"
+        ),
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=float,
         help="override the per-run timeout for every selected tier",
@@ -2464,6 +2989,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--repeat-timing must be at least 5")
     if args.timeout_seconds is not None and args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
+    if args.matrix_workers <= 0:
+        parser.error("--matrix-workers must be positive")
+    if args.matrix_timeout_seconds is not None and args.matrix_timeout_seconds <= 0:
+        parser.error("--matrix-timeout-seconds must be positive")
     if args.unit_only and args.tier:
         parser.error("--unit-only cannot be combined with --tier")
 
@@ -2574,6 +3103,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     report_directory=report_directory,
                     required_test_keys=required_tests_by_tier.get(name, ()),
                     required_nodeids=required_nodeids_by_tier.get(name, ()),
+                    matrix_workers=args.matrix_workers,
+                    matrix_timeout_override=args.matrix_timeout_seconds,
                 )
             )
 
