@@ -1,4 +1,8 @@
-# Current audit evidence — 2026-08-30
+# Historical audit evidence — 2026-08-30
+
+This is a superseded historical snapshot. The current evidence boundary is
+`52eac342c6709d8a8cc6bd90caa90c8343d25813`; see
+`current-audit-2026-08-31.md` for the reconciled status.
 
 This record is for the isolated scheduler-fix candidate. ROMs, symbols, and
 save states remain operator-managed external inputs; no ROM-derived bytes are
@@ -46,7 +50,7 @@ and save/load roundtrip for:
 - stock Blue and color Blue; and
 - Yellow.
 
-## Known non-gates and limitations
+## Historical limitations
 
 - The formerly failing Blue↔Blue natural LinkMenu diagnostic now passes in
   targeted reruns, as do the Blue↔Yellow and Yellow↔Blue natural paths. The

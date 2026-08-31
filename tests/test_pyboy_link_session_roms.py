@@ -470,7 +470,7 @@ PARTY_MON_SIZE = 44  # bytes per party-mon record (wPartyMon1..6)
 
 
 def _party_raw_summary(session) -> dict[str, object]:
-    """Return the game-owned party lists for transfer diagnostics."""
+    """Return game-owned party lists and records for transfer assertions."""
     pb = session._pyboy
     addr_of = session.symbols.addr_of
     count = int(pb.memory[addr_of("wPartyCount")])
@@ -480,7 +480,19 @@ def _party_raw_summary(session) -> dict[str, object]:
     mon_species = [
         int(pb.memory[mons_addr + slot * PARTY_MON_SIZE]) for slot in range(count)
     ]
-    return {"count": count, "species": species, "mon_species": mon_species}
+    mon_records = [
+        bytes(
+            pb.memory[mons_addr + slot * PARTY_MON_SIZE + offset]
+            for offset in range(PARTY_MON_SIZE)
+        ).hex()
+        for slot in range(count)
+    ]
+    return {
+        "count": count,
+        "species": species,
+        "mon_species": mon_species,
+        "mon_records": mon_records,
+    }
 
 
 def _assert_battle_fixture_is_legal(session) -> None:
@@ -1088,8 +1100,10 @@ def test_red_yellow_trade_swaps_real_party_records():
         assert after_b["count"] == before_b["count"]
         assert after_a["species"][0] == expected_a
         assert after_a["mon_species"][0] == expected_a
+        assert after_a["mon_records"][0] == before_b["mon_records"][0]
         assert after_b["species"][0] == expected_b
         assert after_b["mon_species"][0] == expected_b
+        assert after_b["mon_records"][0] == before_a["mon_records"][0]
         assert after_a["species"][-1] == 0xFF
         assert after_b["species"][-1] == 0xFF
     finally:
