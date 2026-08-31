@@ -10,9 +10,9 @@ symbol files, save states, or other ROM-derived artifacts.
 ## Release status
 
 This repository is an audited candidate, not a production release. The
-current source-hardening candidate includes functional changes through
-`23ea392`; the historical implementation boundary at
-`1046a541e0003923aec6000b6b383c6eaafeaa48` separately. The baseline at
+current functional source boundary is `23ea392`; the historical implementation
+boundary at `1046a541e0003923aec6000b6b383c6eaafeaa48` is retained separately.
+The baseline at
 `e219fb5` was not production-certified.
 
 The counts below are therefore an evidence snapshot with an explicit commit
@@ -74,11 +74,11 @@ The intended release inputs are the exact ROM variants listed in
 
 | Game | Input | Status |
 |---|---|---|
-| Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Hash-pinned input; five-row MCP stdio evidence includes this row; link gameplay not claimed |
-| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Certified in the local Red/Yellow and remote Red/Blue acceptance roles |
-| Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Hash-pinned input; five-row MCP stdio evidence includes this row; link gameplay not claimed |
-| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Certified as the remote Red/Blue acceptance connector |
-| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Certified as the local Red/Yellow acceptance peer |
+| Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Hash-pinned input; historical five-row MCP stdio evidence includes this row; link gameplay not claimed |
+| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Passing local Red/Yellow role; canonical remote listener role tested, but overall release support remains partial |
+| Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Hash-pinned input; historical five-row MCP stdio evidence includes this row; link gameplay not claimed |
+| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Canonical remote connector role tested; isolated trade evidence only, with full remote support not signed off |
+| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Passing local Red/Yellow peer role; other pairings remain unverified |
 | Other localisations and ROM hacks | — | Out of scope |
 
 The historical stateful evidence scope is the local color-Red/Yellow pair and
@@ -110,6 +110,13 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 python -m pip check
 ```
+
+The standard-library `venv` module must include `ensurepip`. On Debian or
+Ubuntu, install the matching OS package (for example, `python3.12-venv` or
+`python3-venv`) first if `python3 -m venv` reports that `ensurepip` is
+unavailable. The commands above assume the resulting environment provides
+`python -m pip`; an environment created by another tool must provide the same
+pip/install contract before it is used for the release gate.
 
 On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1` and use
 `python -m pip` for the remaining commands. Keep the environment used for
@@ -261,7 +268,7 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus controlled color Red/Blue native-serial trade and battle acceptance | User-driven menu input, reversed roles, and unclaimed ROM/variant rows |
+| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus controlled color Red/Blue native-serial trade and battle diagnostics | User-driven menu input, reversed roles, and unclaimed ROM/variant rows |
 | `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus strict local Red/Yellow trade and battle acceptance | Full Red/Blue/Yellow coverage or a release result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
@@ -296,7 +303,10 @@ For link fixtures, use the existing producer
 [`scripts/produce_cable_club_fixture.py`](scripts/produce_cable_club_fixture.py)
 with a source state captured against the same ROM bytes. There is no separate
 Yellow-specific producer in this repository; documentation must not point to
-one.
+one. The producer creates only the ordinary Cable Club state. Battle-start
+states must be captured manually for each exact ROM and remain local, ignored
+inputs. See [`scripts/WALKTHROUGH_README.md`](scripts/WALKTHROUGH_README.md)
+for the diagnostic walkthrough notes.
 
 ## Development test command
 

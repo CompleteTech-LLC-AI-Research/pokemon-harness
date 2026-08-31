@@ -29,20 +29,22 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 The release runtime is the bundled PyBoy source snapshot pinned in
 `VERSIONS.md` (`2.7.0`, harness revision
-`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp>=1.27,<2`. The source
-runtime is the only link-acceptance mode currently certified. A Cython build
+`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. The source
+runtime is the only link-acceptance mode currently exercised in the passing
+evidence. A Cython build
 that hides `mb.serial` is diagnostic until it passes its own attachment and
 acceptance checks. Use explicit ROM, symbol, and SHA-1 values; never use
 `POKERED_SKIP_SHA1=1` for release evidence.
 
 ## Supported-scope boundary
 
-- The certified local stateful path is color Red + Yellow for the strict trade
-  and battle cases.
-- The certified remote evidence is color Red as listener/internal-clock and
-  color Blue as connector/external-clock, using localhost TCP.
-- Remote acceptance currently controls the LinkMenu choice in the test driver;
-  do not describe it as fully user-driven gameplay.
+- The passing local stateful evidence is color Red + Yellow for the strict
+  trade and battle cases; this does not certify every version pairing.
+- The passing remote transport evidence is color Red as listener/internal-clock
+  and color Blue as connector/external-clock, using localhost TCP. An isolated
+  remote trade passes, but concurrent-tier load stability is open.
+- The remote battle diagnostic controls the LinkMenu choice in the test driver;
+  do not describe it as fully user-driven gameplay or production support.
 - Blue/Blue and Blue/Red local battle rows are known diagnostic stalls. Stock
   link pairs, other version pairs, reversed roles, and unlisted variants are
   unsupported or unverified until separately gated.

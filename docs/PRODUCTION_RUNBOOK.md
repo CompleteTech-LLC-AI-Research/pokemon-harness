@@ -44,7 +44,15 @@ python3 -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 python -m pip check
+python -c 'import pokered_harness, pyboy; print(pokered_harness.__file__); print(pyboy.__version__, pyboy.__pokered_harness_revision__)'
 ```
+
+The standard-library `venv` module must include `ensurepip`. On Debian or
+Ubuntu, install the matching OS package (for example, `python3.12-venv` or
+`python3-venv`) first if `python3 -m venv` reports that `ensurepip` is
+unavailable. These commands assume the resulting environment provides
+`python -m pip`; an environment created by another tool must provide the same
+pip/install contract before it is used for the release gate.
 
 For a historical reproduction, revision
 `1046a541e0003923aec6000b6b383c6eaafeaa48` must be present before collecting
@@ -178,7 +186,8 @@ For a machine-readable report plus the human-readable report and manifest, run
 the gate from the repository root:
 
 ```bash
-python scripts/production_gate.py --evidence-dir /tmp/pokered-gate-evidence
+EVIDENCE_DIR="$(mktemp -d)"
+python scripts/production_gate.py --evidence-dir "$EVIDENCE_DIR"
 ```
 
 The command fails closed when required ROMs, symbols, fixtures, or acceptance
@@ -294,7 +303,7 @@ calculation hook. Neither case writes party or battle state to make the
 assertion pass. A skipped or partially parameterized matrix is not full
 Red/Blue/Yellow coverage.
 
-### Tier E: remote transport and subprocess acceptance
+### Tier E: remote transport and controlled subprocess diagnostics
 
 First run the transport/serial milestones:
 

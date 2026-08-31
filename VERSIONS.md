@@ -73,7 +73,7 @@ for release evidence.
 | Path | `rom/red/pokemon-red-color.gb` |
 | Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
 | Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
-| Role | Color-Red input for the certified local Red/Yellow pair and remote listener role |
+| Role | Color-Red input for the passing local Red/Yellow role and canonical remote listener role; overall release support remains partial |
 
 ### Pokémon Blue (UE)
 
@@ -95,7 +95,7 @@ for release evidence.
 | Path | `rom/blue/pokemon-blue-color.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
 | Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
-| Role | Color-Blue input for the certified remote connector role |
+| Role | Color-Blue input for the canonical remote connector role; isolated trade evidence only |
 
 ### Pokémon Yellow (UE)
 
@@ -106,7 +106,7 @@ for release evidence.
 | Path | `rom/yellow/pokemon-yellow.gbc` |
 | Symbols | `rom/yellow/pokemon-yellow.sym` |
 | Symbol SHA-1 | `7c4205723943e7722230dcf014e5e8a2012474aa` |
-| Role | Yellow session input and certified local Red/Yellow acceptance peer |
+| Role | Yellow session input and passing local Red/Yellow acceptance peer |
 
 Other localisations, hacks, and variants are out of scope unless they receive
 their own ROM hash, matching symbols, fixture provenance, and acceptance
@@ -173,15 +173,15 @@ arguments. There is no separate Yellow producer. The producer's successful
 output only establishes a fixture at the expected map/tile; it does not prove
 that a trade or battle works.
 
-The strict acceptance fixtures are distinct from the default Cable Club
-fixtures:
+The strict local acceptance fixtures and controlled remote diagnostics are
+distinct from the default Cable Club fixtures:
 
-| Acceptance path | ROMs | Required fixture files |
+| Path | ROMs | Required fixture files |
 |---|---|---|
 | Local strict trade | color Red + Yellow | `red/cable_club.state`, `yellow/cable_club.state` |
 | Local strict battle | color Red + Yellow | `red/cable_club-battle.state`, `yellow/cable_club-battle.state` |
-| Remote strict trade | color Red listener + color Blue connector | `red/cable_club.state`, `blue/cable_club.state` |
-| Remote strict battle | color Red listener + color Blue connector | `red/cable_club-battle.state`, `blue/cable_club-battle.state` |
+| Remote isolated trade diagnostic | color Red listener + color Blue connector | `red/cable_club.state`, `blue/cable_club.state` |
+| Remote controlled battle diagnostic | color Red listener + color Blue connector | `red/cable_club-battle.state`, `blue/cable_club-battle.state` |
 
 The battle files are separately captured legal states; the existing producer
 does not create them. Every state must be captured from the exact ROM bytes it
@@ -201,13 +201,14 @@ variant fixtures (`cable_club-vanilla.state` and
 `cable_club-battle-vanilla.state`) are also not part of the certified scope.
 
 The current repository has diagnostic local/remote matrices plus strict local
-Red/Yellow trade and battle acceptance tests and strict independent-process
-Red/Blue trade and battle acceptance tests. The isolated remote trade passes
-in the bundled source-compatible runtime, including full party-record equality,
-but its concurrent-tier timeout leaves load stability open. The remote battle
-case reaches native move exchange/execution, yet its deterministic LinkMenu
-RAM/hook selector makes it controlled diagnostic evidence rather than a
-user-driven acceptance. Consult the test-surface table in the
+Red/Yellow trade and battle acceptance tests, an isolated independent-process
+Red/Blue trade assertion, and a controlled remote battle diagnostic. The
+isolated remote trade passes in the bundled source-compatible runtime,
+including full party-record equality, but its concurrent-tier timeout leaves
+load stability open. The remote battle case reaches native move
+exchange/execution, yet its deterministic LinkMenu RAM/hook selector makes it
+controlled diagnostic evidence rather than a user-driven acceptance. Consult
+the test-surface table in the
 [README](README.md) and run the required tiers in the
 [production runbook](docs/PRODUCTION_RUNBOOK.md) before using any other row as
 release evidence.
