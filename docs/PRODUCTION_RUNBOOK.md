@@ -337,6 +337,13 @@ through native bit-level serial traffic, and the tests reject the out-of-band
 exchange counter. Record both child traces and the exact deadline when
 investigating a regression.
 
+The native MCP link path only installs the pinned PyBoy serial backend and
+transport callbacks. It must not seed `hSerialConnectionStatus` (the ROM-owned
+HRAM status populated by its serial ISR) or install semantic exchange hooks;
+the listener/connector role must emerge from native serial traffic. The
+semantic endpoint remains a compatibility path for non-native test doubles and
+is not production acceptance evidence.
+
 ## 5. Generate link fixtures safely
 
 Save states are emulator artifacts and are tied to the exact ROM bytes. Keep

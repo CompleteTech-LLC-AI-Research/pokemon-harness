@@ -93,6 +93,8 @@ def test_mcp_remote_link_attaches_native_serial_backend() -> None:
         assert connector_link.network_session is not None
         assert listener_link.remote_endpoint is None
         assert connector_link.remote_endpoint is None
+        assert listener_session._serial_hooks == []
+        assert connector_session._serial_hooks == []
     finally:
         dispatch_tool(listener_session, "link_disconnect", {}, link=listener_link)
         dispatch_tool(connector_session, "link_disconnect", {}, link=connector_link)

@@ -200,6 +200,32 @@ def test_detach_all_stops_session_network_backend_workers():
         peer.stop()
 
 
+@pytest.mark.parametrize("is_internal_clock", [True, False])
+def test_network_attach_does_not_seed_game_role_status(is_internal_clock):
+    """Native attach leaves ROM-owned serial role state untouched.
+
+    ``hSerialConnectionStatus`` is populated by the ROM's serial interrupt
+    handler after the native handshake. It is not a hardware role register,
+    so the transport adapter must never prefill it for either network role.
+    """
+    backend, peer = NetworkBackend.pair()
+    pyboy = _FakePyBoy(serial=SerialCore())
+    pyboy.memory = {0xFFAA: 0xFF}
+    link = PyBoyLinkSession(
+        network_backend=backend,
+        network_is_internal_clock=is_internal_clock,
+        local_rom_version="red",
+    )
+
+    try:
+        link.attach(pyboy)
+        assert pyboy.memory[0xFFAA] == 0xFF
+        assert pyboy.mb.serial.backend is backend
+    finally:
+        link.detach_all()
+        peer.stop()
+
+
 def test_detach_all_stops_network_backend_when_detach_raises(monkeypatch):
     """Transport shutdown must be unconditional when detaching fails."""
     backend, peer = NetworkBackend.pair()

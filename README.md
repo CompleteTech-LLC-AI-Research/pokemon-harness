@@ -233,6 +233,12 @@ Gen I Pokémon. Real sessions use that backend for in-process and TCP links;
 the older semantic bridge remains only as a compatibility path for test
 doubles that do not expose the native serial object.
 
+Native attach only installs the serial backend and its transport callbacks. It
+does not write Pokémon HRAM such as `hSerialConnectionStatus` or install
+symbol-level exchange hooks: the ROM's own serial ISR must establish the role
+from native serial traffic. The semantic bridge is therefore not production
+evidence for `link_pair`, `link_listen`, or `link_connect`.
+
 ### In-process pair
 
 `link_pair` owns two sessions in one process and uses the native bit-accurate

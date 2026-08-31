@@ -95,9 +95,6 @@ class PyBoyLinkSession:
     # Keep an individual singlestepped chunk bounded even if a caller
     # supplies an unusually large ``chunk_cycles`` value.
     _MAX_SINGLE_STEP_TICKS: int = 4096
-    _HRAM_SERIAL_CONNECTION_STATUS: int = 0xFFAA
-    _STATUS_EXTERNAL: int = 0x01
-    _STATUS_INTERNAL: int = 0x02
 
     def __init__(
         self,
@@ -250,9 +247,11 @@ class PyBoyLinkSession:
         if self._network_backend is not None:
             # Network-mode: hook the local core up to the TCP backend
             # and fire the slave-IRQ via this pyboy's CPU flag register
-            # when peer-driven edges complete our transfer.
+            # when peer-driven edges complete our transfer. The ROM owns
+            # connection-role negotiation: its serial ISR records the first
+            # native handshake byte in hSerialConnectionStatus. Do not write
+            # that HRAM cell here; doing so would bypass the ROM protocol.
             core.backend = self._network_backend
-            self._seed_network_role_status(pyboy)
             self._network_backend.start_receiver(
                 local_core=core,
                 irq_callback=self._make_serial_irq_raiser(pyboy),
@@ -369,29 +368,6 @@ class PyBoyLinkSession:
                 mb.breakpoint_singlestep = old_singlestep
 
         return _progress
-
-    def _seed_network_role_status(self, pyboy: _PyBoyLike) -> None:
-        """Best-effort role seed for two-process sessions.
-
-        The old remote endpoint wrote ``hSerialConnectionStatus`` as part
-        of its clock-role handshake. The TCP-backed SerialCore path still
-        benefits from the same role hint so the game enters the Cable Club
-        flow with consistent listener/master vs connector/slave state.
-        """
-        if self._network_is_internal_clock is None:
-            return
-        memory = getattr(pyboy, "memory", None)
-        if memory is None:
-            return
-        status = (
-            self._STATUS_INTERNAL
-            if self._network_is_internal_clock
-            else self._STATUS_EXTERNAL
-        )
-        try:
-            memory[self._HRAM_SERIAL_CONNECTION_STATUS] = status
-        except Exception:
-            pass
 
     def detach(self, pyboy: _PyBoyLike) -> None:
         """Restore ``pyboy.mb.serial.backend`` and (if paired) tear
