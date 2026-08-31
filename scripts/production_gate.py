@@ -214,6 +214,14 @@ def project_root_from_script() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _python_path_from_argument(value: Path, cwd: Path) -> Path:
+    """Make a CLI Python path absolute without dereferencing its symlinks."""
+    path = value.expanduser()
+    if path.is_absolute():
+        return path
+    return cwd / path
+
+
 def _path_from_env(name: str) -> Path | None:
     value = os.environ.get(name)
     return Path(value).expanduser() if value else None
@@ -1908,10 +1916,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     project_root = args.repo_root.expanduser().resolve()
     # Do not call ``resolve()`` here: POSIX virtualenv interpreters are often
     # symlinks to the system interpreter, and resolving would silently drop
-    # the environment containing pytest/PyBoy.  Only resolve relative paths.
-    python_executable = args.python_executable.expanduser()
-    if not python_executable.is_absolute():
-        python_executable = (Path.cwd() / python_executable).resolve()
+    # the environment containing pytest/PyBoy.
+    python_executable = _python_path_from_argument(
+        args.python_executable, Path.cwd()
+    )
     rom_root = find_rom_root(project_root, args.rom_root)
     fixture_root = find_fixture_root(project_root, args.fixture_root)
     expected_sha1 = parse_expected_sha1(project_root / "VERSIONS.md")

@@ -56,6 +56,24 @@ def test_tier_classifier_marks_late_rearm_as_timing_sensitive():
     assert "timing_sensitive" in marks
 
 
+def test_relative_python_path_does_not_dereference_virtualenv_symlink(tmp_path):
+    target = tmp_path / "system-python"
+    target.write_text("placeholder", encoding="utf-8")
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    try:
+        venv_python.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlinks are unavailable on this platform")
+
+    selected = gate._python_path_from_argument(
+        Path(".venv/bin/python"), tmp_path
+    )
+
+    assert selected == venv_python
+    assert selected.is_symlink()
+
+
 def test_tier_classifier_reserves_strict_acceptance_markers_for_gate():
     trade = classify_test(
         "tests/test_pyboy_link_session_roms.py",
