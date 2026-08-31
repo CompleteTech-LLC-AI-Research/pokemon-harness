@@ -11,10 +11,10 @@ symbol files, save states, or other ROM-derived artifacts.
 
 This repository is an audited production-readiness candidate, not a production
 release. Unless explicitly labelled historical, the facts below refer to
-functional source candidate commit `a220732` on 2026-08-31. This includes the
+functional source candidate commit `034e34e` on 2026-08-31. This includes the
 transport/runtime hardening at `d8198ef`, the Cython-safe serial control typing
-fix, and native cross-family startup clock-role negotiation. The baseline at
-`e219fb5` was not
+fix, native cross-family startup clock-role negotiation, and fail-closed
+cross-family battle-warp rendezvous. The baseline at `e219fb5` was not
 production-certified.
 
 Status semantics are deliberately scoped:
@@ -29,7 +29,7 @@ Status semantics are deliberately scoped:
   assets, complete strict acceptance coverage, retained evidence, and no open
   release blockers.
 
-The latest asset-free gate for the source boundary `a220732` used
+The latest asset-free gate for the source boundary `034e34e` used
 `scripts/production_gate.py --unit-only --repeat-timing 5`: unit was 483/483,
 timing was 35/35 in five repetitions, and the scoped gate result was `PASS`.
 The latest collection-only matrix audit collected 624 tests with structural
@@ -40,22 +40,24 @@ matrix command does not execute ROM gameplay; its runtime is `NOT RUN`.
 
 Fresh exact-head runtime checks have exercised selected cross-family rows. The
 Yellow-listener/Red-color-connector and Yellow-listener/Blue-color-connector
-native remote trade rows passed in 240.32s and 228.00s. The corresponding
-Yellow-listener/Red-color-connector battle row passed in 268.85s; the
-Yellow-listener/Blue-color-connector battle row failed after both peers
-completed native pre-battle traffic but before `MainInBattleLoop`/
-`DisplayBattleMenu` (18,024 native serial edges, no completed turn). The full
-current local and remote strict runtime matrices remain pending; these selected
-rows are not production sign-off.
+native remote trade rows passed in 240.32s and 228.00s. The current local
+canonical battle matrix completed 9/9. For remote battle, the current
+`034e34e` spot run passed Yellow-listener/Blue-color-connector in 224.64s, but
+the Yellow-listener/Red-color-connector run failed after Red reached Colosseum
+while Yellow remained in Cable Club (`map_id=0x40`); neither reached
+`MainInBattleLoop`/`DisplayBattleMenu` and no turn completed. Repeated
+cross-family runs have therefore exposed a timing-sensitive pre-battle
+warp/phase failure; the complete strict trade/battle matrices remain pending
+and these selected rows are not production sign-off.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
-| ROM-free unit and timing regressions | `PASS` (scoped) | At `a220732`: unit 483/483 and timing 35/35 across five repetitions. |
+| ROM-free unit and timing regressions | `PASS` (scoped) | At `034e34e`: unit 483/483 and timing 35/35 across five repetitions. |
 | Runtime/package identity | `PASS` (scoped) | The gate resolves bundled source PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PASS` (five-input smoke) | Current explicit Red stock/color, Blue stock/color, and Yellow ROM/SYM MCP stdio and golden-path checks passed; this is not full release sign-off. |
-| In-process link acceptance | `PARTIAL` (current matrix pending) | The current candidate declares all 9 local trade and 9 local battle rows; the exact-head local matrix is still running and is not yet release evidence. |
-| Remote TCP and MCP lifecycle | `PARTIAL` (selected rows) | Exact-head Yellow-listener trade passed against Red-color and Blue-color; Yellow-listener battle passed against Red-color but failed against Blue-color before the battle menu. The complete 9-pair trade/battle runtime matrices remain pending. |
+| In-process link acceptance | `PARTIAL` (battle 9/9; trade pending) | The current candidate declares all 9 local trade and 9 local battle rows; the local battle matrix completed 9/9, while the strict trade matrix remains in progress and is not yet release evidence. |
+| Remote TCP and MCP lifecycle | `PARTIAL` (selected rows) | Exact-head Yellow-listener trade passed against Red-color and Blue-color; the selected current battle run passed against Blue-color but failed against Red-color during a pre-battle warp/phase divergence. The complete 9-pair trade/battle runtime matrices remain pending. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
 The historical complete real-ROM snapshot at
@@ -64,8 +66,10 @@ stateful rerun are retained as historical evidence boundaries. The current
 product Ruff check is clean for the configured source, test, and script
 boundary. The broad suite, full strict matrix runtime coverage, vanilla
 fixture provenance, native-platform coverage, and independent review remain
-open. The Blue/Yellow battle failure also needs diagnosis or explicit scope
-before a full battle claim can be made. TCP is deliberately localhost-only because it has no
+open. Repeated cross-family battle runs still show a timing-sensitive
+warp/phase failure and need diagnosis or explicit scope before a full battle
+claim can be made. TCP is deliberately
+localhost-only because it has no
 authentication or encryption.
 
 The required setup, test tiers, evidence format, and sign-off rules are in
@@ -316,10 +320,11 @@ battle needs an acceptance result from the actual release runtime, matching
 ROMs, matching save-state fixtures, bounded deadlines, a clean teardown, and
 an explicit statement about any test-driver menu control. The current remote
 battle checks use ordinary menu input and native serial transport. The selected
-Yellow/Red row completes a turn, while the selected Yellow/Blue row currently
-stops before the battle menu; neither result proves every remote menu/role
-combination. The selected trade rows also remain stability-sensitive until the
-full matrix is complete.
+Yellow/Blue row completed a turn at `034e34e`, while the selected Yellow/Red
+row stalled before the battle intro because its peers diverged at the
+Colosseum warp; neither result proves every remote menu/role combination.
+Repeated cross-family runs remain stability-sensitive, and the selected trade
+rows also remain unqualified until the full matrix is complete.
 
 ## Walkthrough scripts
 
@@ -393,7 +398,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `a220732` this scoped command passed 483/483 unit tests and 35/35 timing
+At `034e34e` this scoped command passed 483/483 unit tests and 35/35 timing
 cases in each of five repetitions. It is a `PASS` for the selected scope, not
 a production sign-off: the full gate additionally requires the BYO assets,
 fixture-byte/provenance checks, real-ROM tiers, and complete strict matrix.

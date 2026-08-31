@@ -3,8 +3,9 @@
 Status: `PARTIAL` — not production-ready.
 
 This record describes the isolated candidate's functional boundary at
-`a220732` (`d8198ef` transport/runtime hardening, Cython-safe serial control
-typing, and native cross-family startup clock-role negotiation). No ROM,
+`034e34e` (`d8198ef` transport/runtime hardening, Cython-safe serial control
+typing, native cross-family startup clock-role negotiation, and fail-closed
+cross-family battle-warp rendezvous). No ROM,
 symbol, fixture, save-state, or secret is included here. External assets are
 supplied through the documented ROM and fixture roots.
 
@@ -16,15 +17,13 @@ supplied through the documented ROM and fixture roots.
 - With explicit ROM/SYM/SHA-1 inputs, MCP stdio and golden-path smoke checks
   exited successfully for Red stock, Red color, Blue stock, Blue color, and
   Yellow.
-- Exact-head spot checks passed Yellow-listener to Red-color and Blue-color
-  remote trade in `240.32s` and `228.00s`, and Yellow-listener to Red-color
-  remote battle in `268.85s`. The Yellow-listener to Blue-color remote battle
-  failed after both peers completed native pre-battle traffic but before
-  `MainInBattleLoop`/`DisplayBattleMenu` (18,024 native serial edges; no
-  completed turn). The full current local and remote strict matrices remain
-  pending. The selected real-ROM local `46/46`, remote `13/13`, strict trade
-  `3/3`, and strict battle `3/3` results were recorded at the prior functional
-  boundary `db72be6` and remain historical.
+- The current local canonical battle matrix completed `9/9`. Exact-head spot
+  checks passed Yellow-listener to Red-color and Blue-color remote trade in
+  `240.32s` and `228.00s`. At `034e34e`, Yellow-listener to Blue-color remote
+  battle completed a turn in `224.64s`; Yellow-listener to Red-color remote
+  battle diverged at the pre-battle warp, with Red reaching Colosseum while
+  Yellow remained in Cable Club. Repeated cross-family runs remain timing-
+  sensitive, and the complete local/remote strict matrices remain pending.
 - The fixture manifest schema and all 10 external fixture byte records passed
   validation. Canonical color Red, color Blue, and Yellow ordinary/battle
   bytes are recorded; vanilla source provenance remains partial.
@@ -49,9 +48,9 @@ supplied through the documented ROM and fixture roots.
   run ROMs; current gameplay execution of the complete matrix remains
   pending.
 - The selected exact-head remote results above are retained as current spot
-  evidence, not full sign-off. The Blue/Yellow battle failure remains an open
-  compatibility or fixture/driver issue requiring diagnosis or explicit
-  product-scope treatment.
+  evidence, not full sign-off. Repeated cross-family battle runs expose an
+  open pre-battle warp/phase issue (the current driver now fails closed at the
+  map boundary); it requires diagnosis or explicit product-scope treatment.
 - The full broad suite, native Windows/Cython attachment, load-stability
   reruns, and independent review remain incomplete.
 - Vanilla ordinary fixture source provenance remains partial, and complete

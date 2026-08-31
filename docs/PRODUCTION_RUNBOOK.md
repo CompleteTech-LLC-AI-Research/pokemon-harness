@@ -3,13 +3,14 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
 historical, the current candidate facts refer to functional source candidate
-`a220732` on 2026-08-31. This includes the transport/runtime hardening at
-`d8198ef`, the Cython-safe serial control typing fix, and native cross-family
-startup clock-role negotiation.
+`034e34e` on 2026-08-31. This includes the transport/runtime hardening at
+`d8198ef`, the Cython-safe serial control typing fix, native cross-family
+startup clock-role negotiation, and fail-closed cross-family battle-warp
+rendezvous.
 Uncommitted worktree changes and external BYO assets are excluded from the
 tracked source tree.
 
-The latest asset-free gate at `a220732` passed unit 483/483 and timing 35/35
+The latest asset-free gate at `034e34e` passed unit 483/483 and timing 35/35
 across five repetitions; its collection preflight collected 624 tests and its
 scoped result was `PASS`. This proves only the ROM-free and timing scope. The
 matrix audit collected nine ordered local pairs, nine ordered remote role
@@ -24,9 +25,12 @@ directions. Those results predate the current transport hardening and expanded
 current-candidate matrix and must be rerun for current-candidate sign-off;
 they are not a full-gate result because current runtime coverage remains
 incomplete. Fresh exact-head spot checks passed Yellow-listener to Red-color
-and Blue-color remote trade, and Yellow-listener to Red-color remote battle;
-the Yellow-listener to Blue-color remote battle stopped before the battle menu
-after native pre-battle traffic. The full current matrix remains pending.
+and Blue-color remote trade. The current local canonical battle matrix
+completed 9/9. At `034e34e`, the Yellow-listener to Blue-color remote battle
+completed a turn in 224.64s, while the Yellow-listener to Red-color run
+diverged at the pre-battle warp: Red reached Colosseum while Yellow remained
+in Cable Club, so neither reached the battle menu. Repeated cross-family runs
+remain timing-sensitive and the full current matrix remains pending.
 Symbol hashes and fixture byte/provenance records are in
 [`VERSIONS.md`](../VERSIONS.md) and the tracked
 [`fixture-manifest.json`](../release-evidence/fixture-manifest.json). Overall
@@ -215,7 +219,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `a220732`, this command collected 624 tests, passed unit 483/483, passed
+At `034e34e`, this command collected 624 tests, passed unit 483/483, passed
 timing 35/35 in each of five repetitions, and returned scoped `PASS`. It also
 performed schema-only validation of the ten-entry fixture manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
@@ -235,7 +239,7 @@ acceptance matrix declaration is incomplete.
 
 The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
 explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. At `a220732`, `ruff check .` is clean. The
+default `ruff check .` audit. At `034e34e`, `ruff check .` is clean. The
 vendored runtime is covered by revision pinning, compile/import checks, and
 the serial contract.
 
@@ -549,14 +553,16 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current `a220732` asset-free gate passed unit 483/483 and timing 35/35
+1. The current `034e34e` asset-free gate passed unit 483/483 and timing 35/35
    across five repetitions. The prior `db72be6` selected real-ROM tiers passed
    local 46/46, remote 13/13, strict trade 3/3, and strict battle 3/3, but
    those results predate the current transport hardening and the expanded
    current-candidate matrix. Exact-head spot checks passed Yellow-listener to
-   Red-color and Blue-color remote trade and Yellow-listener to Red-color
-   remote battle; Yellow-listener to Blue-color remote battle failed before
-   the battle menu after native pre-battle traffic.
+   Red-color and Blue-color remote trade; the current local canonical battle
+   matrix completed 9/9, and the selected Yellow-listener to Blue-color remote
+   battle completed a turn. The selected Yellow-listener to Red-color remote
+   battle diverged at the pre-battle warp before the battle menu. Repeated
+   cross-family runs remain timing-sensitive.
 2. The strict matrix declaration is now complete: the collection audit has
    nine ordered local pairs, nine ordered remote role pairs, nine local
    variant rows, and 19 strict entrypoints for each operation. Collection-only
@@ -567,7 +573,7 @@ are:
    `PARTIAL`. The manifest is external and untracked; its complete byte
    validation and a retained sanitized evidence bundle still need to be
    associated with the release candidate.
-4. `ruff check .` is clean at `a220732`; the broad suite, all advertised
+4. `ruff check .` is clean at `034e34e`; the broad suite, all advertised
    single-session rows, native-platform coverage, load-stable full-matrix
    behavior, and independent review remain open.
 5. Remote TCP has no authentication or encryption. Loopback-only operation is
