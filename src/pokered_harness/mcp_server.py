@@ -75,6 +75,13 @@ class _ListenerCancelled(Exception):
 _DEFAULT_REMOTE_HELLO_TIMEOUT_S = 10.0
 _DEFAULT_CLEANUP_TIMEOUT_S = 5.0
 _MAX_REMOTE_TIMEOUT_S = 300.0
+_MAX_STEP_TICKS = 10_000
+_MAX_BUTTON_DURATION = 10_000
+_MAX_RUN_TICKS = 100_000
+_MAX_RUN_CHUNK = 1_000
+_MAX_STATE_BYTES = 16 * 1024 * 1024
+_MAX_EVENT_NAMES = 64
+_MAX_EVENT_NAME_LENGTH = 128
 _DIRECT_LINK_HOOKS = (
     "Serial_ExchangeBytes",
     "Serial_ExchangeNybble",
@@ -207,7 +214,11 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "count": {"type": "integer", "minimum": 1},
+                    "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_STEP_TICKS,
+                    },
                     "render": {"type": "boolean", "default": False},
                 },
                 "required": ["count"],
@@ -226,7 +237,12 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
                             "up", "down", "left", "right",
                         ],
                     },
-                    "duration": {"type": "integer", "minimum": 1, "default": 1},
+                    "duration": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_BUTTON_DURATION,
+                        "default": 1,
+                    },
                 },
                 "required": ["button"],
             },
@@ -259,7 +275,12 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
             description="Restore emulator from a base64-encoded save-state.",
             inputSchema={
                 "type": "object",
-                "properties": {"data": {"type": "string"}},
+                "properties": {
+                    "data": {
+                        "type": "string",
+                        "maxLength": ((_MAX_STATE_BYTES + 2) // 3) * 4,
+                    }
+                },
                 "required": ["data"],
             },
         ),
@@ -274,11 +295,24 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
                 "properties": {
                     "event_names": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string",
+                            "maxLength": _MAX_EVENT_NAME_LENGTH,
+                        },
                         "minItems": 1,
+                        "maxItems": _MAX_EVENT_NAMES,
                     },
-                    "max_ticks": {"type": "integer", "minimum": 1},
-                    "chunk": {"type": "integer", "minimum": 1, "default": 16},
+                    "max_ticks": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_RUN_TICKS,
+                    },
+                    "chunk": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_RUN_CHUNK,
+                        "default": 16,
+                    },
                 },
                 "required": ["event_names", "max_ticks"],
             },
@@ -303,7 +337,11 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "count": {"type": "integer", "minimum": 1},
+                    "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_STEP_TICKS,
+                    },
                     "render": {"type": "boolean", "default": False},
                 },
                 "required": ["count"],
@@ -316,7 +354,12 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
                 "type": "object",
                 "properties": {
                     "button": {"type": "string"},
-                    "duration": {"type": "integer", "minimum": 1, "default": 1},
+                    "duration": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_BUTTON_DURATION,
+                        "default": 1,
+                    },
                 },
                 "required": ["button"],
             },
@@ -469,12 +512,73 @@ def _decode_state_data(value: Any) -> bytes:
         raise McpHarnessError(
             "invalid_state", "load_state.data must be a base64 string"
         )
+    max_encoded = ((_MAX_STATE_BYTES + 2) // 3) * 4
+    if len(value) > max_encoded:
+        raise McpHarnessError(
+            "invalid_state",
+            f"load_state.data exceeds the {_MAX_STATE_BYTES} byte limit",
+        )
     try:
-        return base64.b64decode(value.encode("ascii"), validate=True)
+        decoded = base64.b64decode(value.encode("ascii"), validate=True)
     except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
         raise McpHarnessError(
             "invalid_state", "load_state.data is not valid base64"
         ) from exc
+    if len(decoded) > _MAX_STATE_BYTES:
+        raise McpHarnessError(
+            "invalid_state",
+            f"load_state.data exceeds the {_MAX_STATE_BYTES} byte limit",
+        )
+    return decoded
+
+
+def _bounded_positive_int(value: Any, name: str, maximum: int) -> int:
+    """Validate a finite positive integer accepted by a direct tool caller."""
+    if isinstance(value, bool):
+        raise McpHarnessError("invalid_argument", f"{name} must be an integer")
+    if isinstance(value, float) and not value.is_integer():
+        raise McpHarnessError("invalid_argument", f"{name} must be an integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise McpHarnessError(
+            "invalid_argument", f"{name} must be an integer"
+        ) from exc
+    if result <= 0:
+        raise McpHarnessError(
+            "invalid_argument", f"{name} must be positive, got {result}"
+        )
+    if result > maximum:
+        raise McpHarnessError(
+            "invalid_argument",
+            f"{name} must be <= {maximum}, got {result}",
+        )
+    return result
+
+
+def _event_names(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        raise McpHarnessError(
+            "invalid_argument", "event_names must be a non-empty array"
+        )
+    if not value or len(value) > _MAX_EVENT_NAMES:
+        raise McpHarnessError(
+            "invalid_argument",
+            f"event_names must contain 1..{_MAX_EVENT_NAMES} names",
+        )
+    names: list[str] = []
+    for name in value:
+        if not isinstance(name, str) or not name:
+            raise McpHarnessError(
+                "invalid_argument", "event_names must contain non-empty strings"
+            )
+        if len(name) > _MAX_EVENT_NAME_LENGTH:
+            raise McpHarnessError(
+                "invalid_argument",
+                f"event names must be <= {_MAX_EVENT_NAME_LENGTH} characters",
+            )
+        names.append(name)
+    return names
 
 
 def _require_peer(link: LinkState) -> Session:
@@ -497,11 +601,17 @@ def _dispatch_session_tool(
     session: Session, name: str, arguments: dict[str, Any]
 ) -> Any:
     if name == "step":
-        session.step(int(arguments["count"]), render=bool(arguments.get("render", False)))
+        count = _bounded_positive_int(
+            arguments["count"], "count", _MAX_STEP_TICKS
+        )
+        session.step(count, render=bool(arguments.get("render", False)))
         return {"tick": session.current_tick()}
 
     if name == "press":
-        session.press(arguments["button"], duration=int(arguments.get("duration", 1)))
+        duration = _bounded_positive_int(
+            arguments.get("duration", 1), "duration", _MAX_BUTTON_DURATION
+        )
+        session.press(arguments["button"], duration=duration)
         return {"ok": True}
 
     if name == "hold":
@@ -521,10 +631,16 @@ def _dispatch_session_tool(
         return {"ok": True}
 
     if name == "run_until_event":
+        max_ticks = _bounded_positive_int(
+            arguments["max_ticks"], "max_ticks", _MAX_RUN_TICKS
+        )
+        chunk = _bounded_positive_int(
+            arguments.get("chunk", 16), "chunk", _MAX_RUN_CHUNK
+        )
         result = session.run_until_event(
-            list(arguments["event_names"]),
-            max_ticks=int(arguments["max_ticks"]),
-            chunk=int(arguments.get("chunk", 16)),
+            _event_names(arguments["event_names"]),
+            max_ticks=max_ticks,
+            chunk=chunk,
         )
         return {
             "reached": result.reached,
@@ -678,24 +794,22 @@ def _dispatch_link_tool(
         return {"paired": False}
 
     if name == "link_step":
+        count = _bounded_positive_int(
+            arguments["count"], "count", _MAX_STEP_TICKS
+        )
         with link.state():
             network_session = link.network_session
             local_link_session = link.local_link_session
             remote_endpoint = link.remote_endpoint
         if network_session is not None:
-            count = int(arguments["count"])
             session.step(count, render=bool(arguments.get("render", False)))
             return {"primary_tick": session.current_tick(), "peer_tick": None}
         if remote_endpoint is not None:
-            count = int(arguments["count"])
             remote_endpoint.step(
                 count, render=bool(arguments.get("render", False))
             )
             return {"primary_tick": session.current_tick(), "peer_tick": None}
         if local_link_session is not None:
-            count = int(arguments["count"])
-            if count <= 0:
-                raise ValueError(f"count must be positive, got {count}")
             peer = _require_peer(link)
             # The interleaved path drives PyBoy directly rather than through
             # Session.step(), so acquire both Session locks explicitly. This
@@ -715,7 +829,7 @@ def _dispatch_link_tool(
                     "peer_tick": peer.current_tick(),
                 }
         pair = _require_pair(link)
-        pair.step(int(arguments["count"]), render=bool(arguments.get("render", False)))
+        pair.step(count, render=bool(arguments.get("render", False)))
         return {
             "primary_tick": session.current_tick(),
             "peer_tick": link.peer_session.current_tick() if link.peer_session else None,
@@ -723,7 +837,10 @@ def _dispatch_link_tool(
 
     if name == "link_peer_press":
         peer = _require_peer(link)
-        peer.press(arguments["button"], duration=int(arguments.get("duration", 1)))
+        duration = _bounded_positive_int(
+            arguments.get("duration", 1), "duration", _MAX_BUTTON_DURATION
+        )
+        peer.press(arguments["button"], duration=duration)
         return {"ok": True}
 
     if name == "link_peer_hold":

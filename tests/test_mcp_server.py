@@ -83,6 +83,12 @@ def test_dispatch_step_render_flag():
     assert pb.tick_calls == [(1, True)]
 
 
+def test_dispatch_step_rejects_unbounded_count():
+    s, _, _ = _session()
+    with pytest.raises(McpHarnessError, match="count must be <="):
+        dispatch_tool(s, "step", {"count": 10_001})
+
+
 def test_dispatch_press_forwards_button():
     s, pb, _ = _session()
     assert dispatch_tool(s, "press", {"button": "a", "duration": 4}) == {"ok": True}
@@ -93,6 +99,12 @@ def test_dispatch_press_default_duration_is_one():
     s, pb, _ = _session()
     dispatch_tool(s, "press", {"button": "start"})
     assert pb.button_calls == [("start", 1)]
+
+
+def test_dispatch_press_rejects_unbounded_duration():
+    s, _, _ = _session()
+    with pytest.raises(McpHarnessError, match="duration must be <="):
+        dispatch_tool(s, "press", {"button": "a", "duration": 10_001})
 
 
 def test_dispatch_hold_release_roundtrip():
@@ -121,6 +133,16 @@ def test_dispatch_load_state_rejects_non_base64_payload():
     s, _, _ = _session()
     with pytest.raises(McpHarnessError, match="not valid base64") as exc_info:
         dispatch_tool(s, "load_state", {"data": "%%%"})
+    assert exc_info.value.code == "invalid_state"
+
+
+def test_dispatch_load_state_rejects_oversized_payload():
+    s, _, _ = _session()
+    # The dispatcher rejects the encoded length before allocating a decoded
+    # state buffer, so this remains a cheap adversarial boundary test.
+    oversized = "A" * (22_369_624 + 1)
+    with pytest.raises(McpHarnessError, match="byte limit") as exc_info:
+        dispatch_tool(s, "load_state", {"data": oversized})
     assert exc_info.value.code == "invalid_state"
 
 
@@ -160,6 +182,22 @@ def test_dispatch_run_until_event_timeout_path():
     assert result["reached"] is False
     assert result["event"] is None
     assert result["ticks_spent"] == 16
+
+
+def test_dispatch_run_until_event_rejects_unbounded_budget_and_names():
+    s, _, _ = _session()
+    with pytest.raises(McpHarnessError, match="max_ticks must be <="):
+        dispatch_tool(
+            s,
+            "run_until_event",
+            {"event_names": ["dialog_open"], "max_ticks": 100_001},
+        )
+    with pytest.raises(McpHarnessError, match="event_names must contain"):
+        dispatch_tool(
+            s,
+            "run_until_event",
+            {"event_names": ["dialog_open"] * 65, "max_ticks": 1},
+        )
 
 
 def test_dispatch_unknown_tool_raises():
