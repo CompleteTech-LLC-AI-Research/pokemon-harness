@@ -2041,6 +2041,13 @@ def _safe_matrix_audit(result: dict[str, Any]) -> dict[str, Any]:
             for name, entries in raw_gaps.items()
             if isinstance(entries, (tuple, list))
         }
+    for key in ("acceptance_classifications", "remote_link_menu_classifications"):
+        raw_classifications = result.get(key)
+        if isinstance(raw_classifications, dict):
+            safe[key] = {
+                str(name): _safe_diagnostic(status, (), limit=500)
+                for name, status in raw_classifications.items()
+            }
     return safe
 
 
