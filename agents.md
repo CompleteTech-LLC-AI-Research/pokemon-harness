@@ -43,8 +43,9 @@ acceptance checks. Use explicit ROM, symbol, and SHA-1 values; never use
 - The passing remote transport evidence is color Red as listener/internal-clock
   and color Blue as connector/external-clock, using localhost TCP. An isolated
   remote trade passes, but concurrent-tier load stability is open.
-- The remote battle diagnostic controls the LinkMenu choice in the test driver;
-  do not describe it as fully user-driven gameplay or production support.
+- The exact-head remote battle smoke selects LinkMenu with ordinary directional
+  and A input and exercises native serial move exchange; it does not certify
+  every remote battle row or repeated-load stability.
 - Blue/Blue and Blue/Red local battle rows are known diagnostic stalls. Stock
   link pairs, other version pairs, reversed roles, and unlisted variants are
   unsupported or unverified until separately gated.
