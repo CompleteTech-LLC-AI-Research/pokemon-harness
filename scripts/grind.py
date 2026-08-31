@@ -130,8 +130,8 @@ def _clear_repel(drv) -> None:
     try:
         base = drv.sym.addr_of("wRepelRemainingSteps")
         drv.mem[base] = 0
-    except Exception:
-        pass
+    except (AttributeError, LookupError, TypeError):
+        return
 
 
 def _pathfind(drv, session: Session, outdir: Path, goal_xy: str,
@@ -208,7 +208,7 @@ def _battle_turn(drv: rtb.Driver, *, flee_below_hp_frac: float = 0.55,
             hp_frac = bm_hp / bm_mhp
         else:
             hp_frac = party_hp_frac
-    except Exception:
+    except (AttributeError, LookupError, TypeError):
         hp_frac = party_hp_frac
 
     gs = drv.gs()
@@ -320,11 +320,12 @@ def _battle_turn(drv: rtb.Driver, *, flee_below_hp_frac: float = 0.55,
                 base_emhp = drv.sym.addr_of("wEnemyMonMaxHP")
                 ehp = (drv.mem[base_ehp] << 8) | drv.mem[base_ehp + 1]
                 emhp = (drv.mem[base_emhp] << 8) | drv.mem[base_emhp + 1]
-                if emhp > 0 and ehp >= emhp:
-                    drv.press("b", step=20)
-                    continue
-            except Exception:
-                pass
+                enemy_at_full_hp = emhp > 0 and ehp >= emhp
+            except (AttributeError, LookupError, TypeError):
+                enemy_at_full_hp = False
+            if enemy_at_full_hp:
+                drv.press("b", step=20)
+                continue
             drv.press("a", step=20)
             continue
         drv.press("a", step=20)
@@ -668,7 +669,6 @@ def _ensure_in_grass(drv: rtb.Driver,
         + ["up"] * 5     # (4, 56) -> (4, 51)  -- into grass
         + ["right"] * 2  # (4, 51) -> (6, 51)
     )
-    last = None
     stall = 0
     for d in path:
         gs = drv.gs()
@@ -908,7 +908,7 @@ def grind_to(
                         outdir=outdir / "_blackout_exit",
                     )
                     wt.run_phase_exit_house(wt_drv)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - recovery must continue after a best-effort house exit
                     print(f"  [grind] wt.exit_house failed: {e}",
                           flush=True)
                 session.step(60, render=True)

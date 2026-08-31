@@ -421,7 +421,7 @@ def main():
 
     start = time.time()
     try:
-        final_level = grind_to_level(
+        grind_to_level(
             session,
             target_level=args.target_level,
             max_battles=args.max_battles,

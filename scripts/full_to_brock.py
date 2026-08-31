@@ -53,6 +53,7 @@ def run_pathfinder(state_path: Path, goal: str, out_path: Path,
     r = subprocess.run(
         [sys.executable, "-u", str(script), *kw],
         env=env, capture_output=True, text=True,
+        check=False,
     )
     if r.returncode != 0:
         raise RuntimeError(f"pathfinder failed: {r.stderr}")
@@ -235,7 +236,7 @@ def _activate_repel(drv, steps: int = 255) -> None:
         base = drv.sym.addr_of("wRepelRemainingSteps")
         drv.mem[base] = steps & 0xff
         print(f"  [repel] wRepelRemainingSteps = {steps}", flush=True)
-    except Exception as e:
+    except (AttributeError, LookupError, TypeError) as e:
         print(f"  [repel] failed to set: {e}", flush=True)
 
 
@@ -565,7 +566,7 @@ def main() -> int:
                 if drv.gs().overworld.map_id == 0x33:
                     break
                 drv.press("up")
-        forest_entry = save_milestone(session, outdir, "forest_entry")
+        save_milestone(session, outdir, "forest_entry")
 
         # Path through forest using A*, recomputing after battles desync us.
         # Step UP off the forest's own warp row (y=47) first — A*'s first
