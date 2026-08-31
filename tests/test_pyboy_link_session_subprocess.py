@@ -73,6 +73,52 @@ def _battle_fixtures_ready() -> bool:
     )
 
 
+_REMOTE_STRICT_PROFILE_CASES = (
+    pytest.param(
+        "red_color",
+        "blue_color",
+        id="red_color-listen-blue_color-connect",
+    ),
+    pytest.param(
+        "blue_color",
+        "red_color",
+        id="blue_color-listen-red_color-connect",
+    ),
+)
+
+
+def _strict_fixture_path(version: str, *, battle: bool) -> Path:
+    """Return the exact ignored fixture selected by a subprocess profile."""
+    fixture_version = {
+        "red_color": "red",
+        "blue_color": "blue",
+    }.get(version)
+    if fixture_version is None:
+        raise ValueError(f"unsupported strict subprocess profile: {version}")
+    name = "cable_club-battle.state" if battle else "cable_club.state"
+    return fixture_path(fixture_version, name)
+
+
+def _strict_fixtures_ready(
+    listener_version: str,
+    connector_version: str,
+    *,
+    battle: bool,
+) -> bool:
+    """Check assets for one strict, profile-specific subprocess row."""
+    required = []
+    for version in (listener_version, connector_version):
+        rom_version = {"red_color": "red", "blue_color": "blue"}[version]
+        required.extend(
+            (
+                rom_path(rom_version, color=True),
+                sym_path(rom_version),
+                _strict_fixture_path(version, battle=battle),
+            )
+        )
+    return all(path.is_file() for path in required)
+
+
 def _non_cython_pyboy_available() -> bool:
     """Return whether the configured production subprocess interpreter exists."""
     return _noncython_python().is_file()
@@ -394,9 +440,15 @@ def test_subprocess_pair_reaches_link_menu_over_tcp():
     )
 
 
+@pytest.mark.parametrize(
+    ("listener_version", "connector_version"),
+    _REMOTE_STRICT_PROFILE_CASES,
+)
 @_REMOTE_INTEGRATION
-def test_subprocess_pair_completes_trade_over_tcp():
-    """Two-subprocess Red/Blue trade with real party-record checks.
+def test_subprocess_pair_completes_trade_over_tcp(
+    listener_version: str, connector_version: str
+):
+    """Two-subprocess color Red/Blue trade with real party-record checks.
 
     End-to-end proof that the NetworkBackend transport carries a
     complete Pokemon trade between two independent PyBoy processes.
@@ -424,8 +476,15 @@ def test_subprocess_pair_completes_trade_over_tcp():
     Serial_ExchangeBytes loops without desyncing on the missing
     bytes the peer skipped over while busy elsewhere.
     """
-    if not _trade_fixtures_ready():
-        pytest.skip("Red and Blue color Cable Club fixtures are required")
+    if not _strict_fixtures_ready(
+        listener_version,
+        connector_version,
+        battle=False,
+    ):
+        pytest.skip(
+            "color Red/Blue Cable Club fixtures are required for "
+            f"{listener_version}/{connector_version}"
+        )
 
     port = _free_port()
     deadline = 720.0
@@ -436,7 +495,7 @@ def test_subprocess_pair_completes_trade_over_tcp():
         port,
         goal="trade",
         deadline_seconds=deadline,
-        version="red_color",
+        version=listener_version,
     )
     time.sleep(1.0)
     connector = _spawn_peer(
@@ -444,7 +503,7 @@ def test_subprocess_pair_completes_trade_over_tcp():
         port,
         goal="trade",
         deadline_seconds=deadline,
-        version="blue_color",
+        version=connector_version,
     )
 
     result_a, result_b = _collect_pair(
@@ -494,9 +553,15 @@ def test_subprocess_pair_completes_trade_over_tcp():
     )
 
 
+@pytest.mark.parametrize(
+    ("listener_version", "connector_version"),
+    _REMOTE_STRICT_PROFILE_CASES,
+)
 @_REMOTE_INTEGRATION
-def test_subprocess_pair_resolves_battle_turn_over_tcp():
-    """Strict Red/Blue remote battle acceptance with native serial traffic.
+def test_subprocess_pair_resolves_battle_turn_over_tcp(
+    listener_version: str, connector_version: str
+):
+    """Strict color Red/Blue remote battle acceptance with native serial traffic.
 
     The peer processes load legal, ROM-matched battle fixtures and drive the
     real Cable Club battle path using ordinary directional/A input to select
@@ -504,8 +569,15 @@ def test_subprocess_pair_resolves_battle_turn_over_tcp():
     state bypass is installed; all exchange traffic must pass through
     NetworkBackend's native bit-level serial transport.
     """
-    if not _battle_fixtures_ready():
-        pytest.skip("Red and Blue color battle fixtures are required")
+    if not _strict_fixtures_ready(
+        listener_version,
+        connector_version,
+        battle=True,
+    ):
+        pytest.skip(
+            "color Red/Blue battle fixtures are required for "
+            f"{listener_version}/{connector_version}"
+        )
 
     port = _free_port()
     deadline = 900.0
@@ -516,7 +588,7 @@ def test_subprocess_pair_resolves_battle_turn_over_tcp():
         port,
         goal="battle",
         deadline_seconds=deadline,
-        version="red_color",
+        version=listener_version,
     )
     time.sleep(1.0)
     connector = _spawn_peer(
@@ -524,7 +596,7 @@ def test_subprocess_pair_resolves_battle_turn_over_tcp():
         port,
         goal="battle",
         deadline_seconds=deadline,
-        version="blue_color",
+        version=connector_version,
     )
 
     result_a, result_b = _collect_pair(
