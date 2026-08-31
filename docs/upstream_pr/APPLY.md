@@ -106,7 +106,7 @@ This recipe does not establish that:
 
 - the branch exists or is ready;
 - PyBoy CI is green;
-- the stock Cython wheel accepts Python-side serial replacement;
+- an arbitrary stock Cython wheel accepts Python-side serial replacement;
 - a Pokémon trade or battle completes; or
 - any Red/Blue/Yellow matrix has passed.
 

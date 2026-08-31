@@ -27,16 +27,15 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current functional source candidate is `bf06214`. Its asset-free gate
-passed 487/487 unit tests and 35/35
-timing cases across five repetitions. The release runtime is the bundled
-PyBoy source snapshot pinned in `VERSIONS.md` (`2.7.0`,
-harness revision `c565df66c3731fad2856169a90f6bbec99925915`) with
-`mcp==1.29.1`. The source runtime is the only link-acceptance mode currently
-exercised in passing evidence. The pinned Cython build and serial-object
-contract pass in a disposable Python 3.12 environment, but a Cython build that
-hides `mb.serial` does not support Python-side link attachment; source mode
-remains the only link-acceptance runtime. Use
+The current committed source candidate is `dfee2ec`. Its clean asset-free gate
+passed 507/507 unit tests and 35/35 timing cases in each of five repetitions,
+with 648 tests collected. The release runtime is the bundled PyBoy source
+snapshot pinned in `VERSIONS.md` (`2.7.0`, harness revision
+`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode is
+the documented release default. The pinned Cython build also passed its runtime
+identity and serial-contract checks, exposed `mb.serial`, and passed a
+real-ROM attach/detach/close smoke; full trade/battle acceptance has not been
+run in Cython mode. Use
 explicit ROM, symbol, and SHA-1 values; never use `POKERED_SKIP_SHA1=1` for
 release evidence.
 
@@ -45,19 +44,18 @@ release evidence.
 - Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
   fixture bytes have recorded reproduction evidence; the external states are
   never committed and their hashes do not prove gameplay compatibility.
-- Controlled local stateful evidence currently covers color Red + Yellow for
-  the strict trade and battle cases at the prior functional boundary; this
-  does not certify the newly declared remaining version pairings.
-- Controlled remote evidence currently covers color Red as
-  listener/internal-clock and color Blue as connector/external-clock, plus
-  the reversed role, over localhost TCP, including strict trade and battle
-  paths. The current tree declares all canonical Red/Blue/Yellow listener and
-  connector orderings, but their runtime results and concurrent-load
-  stability remain unverified.
-- The strict acceptance declaration now has a dedicated entry point for every
+- Prior controlled local and remote stateful results are historical diagnostics;
+  they do not certify the current committed candidate or the newly declared
+  pairings.
+- The current tree declares all canonical Red/Blue/Yellow listener and
+  connector orderings over localhost TCP, but their current runtime results and
+  concurrent-load stability remain unverified. A prior strict-trade timeout and
+  a repeated cross-family pre-battle warp/phase divergence remain open risks.
+- The strict acceptance declaration has a dedicated entry point for every
   canonical ordered local and remote pair (19 trade and 19 battle nodes).
   Collection is declaration evidence only; a LinkMenu milestone is not a
-  gameplay acceptance.
+  gameplay acceptance, and no complete current-candidate strict trade or
+  battle result is recorded.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or
@@ -71,6 +69,10 @@ Use `scripts/production_gate.py` with the same interpreter used by installation
 and MCP. `--unit-only` is an asset-free scoped gate, not a release gate; the
 default command additionally requires the five ROMs, three symbols, external
 fixture bytes, complete strict matrix declaration, and required real-ROM tiers.
+The clean-install baseline is `python3 -m venv .venv`, activation, `python -m
+pip install -e ".[dev]"`, `python -m pip check`, and
+`python scripts/bootstrap_pyboy.py --mode source --check`; `uv sync --locked
+--extra dev` is the lockfile-resolved alternative when `uv` is available.
 Required real-ROM tiers must have no skips, xfails, failures, errors, or
 timeouts. Retain complete output with commit, runtime, ROM/SYM/fixture hashes,
 fixture provenance, roles, deadlines, and teardown results. The ordinary
