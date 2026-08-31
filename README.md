@@ -10,7 +10,7 @@ symbol files, save states, or other ROM-derived artifacts.
 ## Release status
 
 This repository is an audited candidate, not a production release. The
-current source-hardening candidate reaches `ab89c39` and preserves the
+current source-hardening candidate reaches `c45e3de` and preserves the
 historical implementation boundary at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` separately. The baseline at
 `e219fb5` was not production-certified.

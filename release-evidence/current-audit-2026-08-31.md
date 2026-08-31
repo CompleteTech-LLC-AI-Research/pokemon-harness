@@ -2,11 +2,12 @@
 
 Status: `PARTIAL` — not production-ready.
 
-This record describes the isolated candidate through `ab89c39`. The stateful
-real-ROM tiers were collected at the code-equivalent `2ac09fb` boundary;
-`9db9bb2` fixes only production-gate parsing and `ab89c39` annotates deliberate
-cleanup exception suppression. No ROM, symbol, fixture, save-state, or secret
-is included here.
+This record describes the isolated candidate through `c45e3de`. The stateful
+real-ROM tiers were collected at the code-equivalent `2ac09fb` boundary; the
+final-head fast unit/remote rerun was at `23ea392`. Intervening commits fix
+production-gate parsing, preserve virtualenv paths, annotate deliberate cleanup
+exception suppression, or update audit records. No ROM, symbol, fixture,
+save-state, or secret is included here.
 
 ## Passing evidence
 

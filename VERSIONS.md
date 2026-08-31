@@ -5,8 +5,8 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate through `ab89c39` (2026-08-31).
-The fast gate is unit 415/415 and timing 35/35 across five repetitions. The
+Status: `PARTIAL` current audit candidate through `c45e3de` (2026-08-31).
+The final-head fast gate at `23ea392` is unit 415/415 and timing 35/35 across five repetitions. The
 stateful evidence was collected at the code-equivalent `2ac09fb` boundary:
 local 46/46 and remote 11/11 passed for the canonical color-Red listener and
 color-Blue connector roles. An isolated remote Red/Blue trade passed 1/1 in

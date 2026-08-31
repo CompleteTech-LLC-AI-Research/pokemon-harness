@@ -48,10 +48,12 @@ packaging, and evidence fixes included):
 
 These current counts supersede the corresponding historical unit count for
 this candidate. The stateful counts were collected at the code-equivalent
-`2ac09fb` boundary; subsequent candidate commits through `ab89c39` only fix
-gate parsing or annotate deliberate cleanup suppression. Sanitized per-tier
-evidence bundles were retained outside the checkout with `--evidence-dir`; a
-single complete release evidence bundle is still not attached to this tree.
+`2ac09fb` boundary; the final-head fast unit/remote rerun was at `23ea392`.
+Subsequent candidate commit `c45e3de` only updates the audit records. The
+intervening candidate commits fix gate parsing, preserve virtualenv paths, and
+annotate deliberate cleanup suppression. Sanitized per-tier evidence bundles
+were retained outside the checkout with `--evidence-dir`; a single complete
+release evidence bundle is still not attached to this tree.
 
 The local passes are real stateful acceptance evidence for the exact color-Red /
 Yellow fixture pair, and the remote transport pass is evidence for the exact
