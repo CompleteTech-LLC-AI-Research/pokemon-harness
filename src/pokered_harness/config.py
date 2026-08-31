@@ -30,6 +30,7 @@ class VersionsConfig:
     rom_sha1: str
     pyboy_version: str
     rom_sha1_by_path: tuple[tuple[str, str], ...] = ()
+    symbol_sha1_by_path: tuple[tuple[str, str], ...] = ()
 
     def sha1_for_path(self, path: str | Path) -> str | None:
         """Return the pin whose documented ROM path is a suffix of ``path``.
@@ -39,13 +40,17 @@ class VersionsConfig:
         Suffix matching accepts both repository-relative paths and absolute
         paths rooted at a checkout without storing machine-local paths.
         """
-        candidate = _normalise_path_key(path)
-        for documented_path, sha1 in self.rom_sha1_by_path:
-            if candidate == documented_path or candidate.endswith(
-                "/" + documented_path
-            ):
-                return sha1
-        return None
+        return _sha1_for_path(self.rom_sha1_by_path, path)
+
+    def symbol_sha1_for_path(self, path: str | Path) -> str | None:
+        """Return the symbol-file pin selected by a symbol path.
+
+        Symbol paths are kept separately from ROM paths because a color ROM
+        can intentionally share the base game's symbol file. Like
+        :meth:`sha1_for_path`, matching accepts repository-relative paths and
+        absolute paths rooted at a checkout.
+        """
+        return _sha1_for_path(self.symbol_sha1_by_path, path)
 
 
 _SHA1_ROW = re.compile(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|", re.MULTILINE)
@@ -82,10 +87,15 @@ def load_versions(path: str | Path | None = None) -> VersionsConfig:
         )
 
     rom_pins: list[tuple[str, str]] = []
+    symbol_pins: list[tuple[str, str]] = []
     pending_sha: str | None = None
+    pending_symbol_path: str | None = None
+    pending_symbol_sha: str | None = None
     for line in text.splitlines():
         if line.startswith("##"):
             pending_sha = None
+            pending_symbol_path = None
+            pending_symbol_sha = None
             continue
         sha_row = re.match(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|", line)
         if sha_row is not None:
@@ -95,11 +105,34 @@ def load_versions(path: str | Path | None = None) -> VersionsConfig:
         if path_row is not None and pending_sha is not None:
             rom_pins.append((_normalise_path_key(path_row.group(1)), pending_sha))
             pending_sha = None
+            continue
+        symbols_row = re.match(
+            r"^\|\s*Symbols?\s*\|\s*`([^`]+)`\s*\|", line
+        )
+        if symbols_row is not None:
+            pending_symbol_path = _normalise_path_key(symbols_row.group(1))
+            if pending_symbol_sha is not None:
+                symbol_pins.append((pending_symbol_path, pending_symbol_sha))
+                pending_symbol_path = None
+                pending_symbol_sha = None
+            continue
+        symbol_sha_row = re.match(
+            r"^\|\s*Symbol\s+SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|",
+            line,
+        )
+        if symbol_sha_row is not None:
+            pending_symbol_sha = symbol_sha_row.group(1).lower()
+            if pending_symbol_path is not None:
+                symbol_pins.append((pending_symbol_path, pending_symbol_sha))
+                pending_symbol_path = None
+                pending_symbol_sha = None
+            continue
 
     return VersionsConfig(
         rom_sha1=sha.group(1).lower(),
         pyboy_version=pyboy.group(1),
         rom_sha1_by_path=tuple(rom_pins),
+        symbol_sha1_by_path=tuple(symbol_pins),
     )
 
 
@@ -237,6 +270,18 @@ def _resolve_path(value: str | None, base: Path) -> Path | None:
 
 def _normalise_path_key(value: str | Path) -> str:
     return str(value).replace("\\", "/").lstrip("./").lower()
+
+
+def _sha1_for_path(
+    pins: tuple[tuple[str, str], ...], path: str | Path
+) -> str | None:
+    candidate = _normalise_path_key(path)
+    for documented_path, sha1 in pins:
+        if candidate == documented_path or candidate.endswith(
+            "/" + documented_path
+        ):
+            return sha1
+    return None
 
 
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")

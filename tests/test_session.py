@@ -8,6 +8,7 @@ from pokered_harness.events import EventBus
 from pokered_harness.input import Button
 from pokered_harness.session import (
     SessionClosedError,
+    SessionConfigurationError,
     Session,
     VersionMismatch,
     _default_pyboy_factory,
@@ -241,6 +242,59 @@ def test_sha1_helper_and_mismatch_path(tmp_path):
             rom,
             sym,
             expected_rom_sha1="0" * 40,
+            pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+        )
+
+
+def test_expected_symbol_sha1_validates_symbol_bytes(tmp_path):
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    symbol_bytes = b"00:D35E wCurMap\n"
+    sym.write_bytes(symbol_bytes)
+    expected = hashlib.sha1(symbol_bytes).hexdigest()
+
+    s = Session.from_files(
+        rom,
+        sym,
+        expected_symbol_sha1=expected.upper(),
+        pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+    )
+    assert s.symbols["wCurMap"].addr == 0xD35E
+
+
+def test_expected_symbol_sha1_mismatch_fails_before_emulator_creation(tmp_path):
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_bytes(b"00:D35E wCurMap\n")
+    factory_calls: list[str] = []
+
+    def factory(path: str) -> FakePyBoy:
+        factory_calls.append(path)
+        return FakePyBoy(DictMemory())
+
+    with pytest.raises(VersionMismatch, match="symbol SHA-1 mismatch"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_symbol_sha1="0" * 40,
+            pyboy_factory=factory,
+        )
+    assert factory_calls == []
+
+
+def test_expected_symbol_sha1_rejects_invalid_pin(tmp_path):
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_bytes(b"00:D35E wCurMap\n")
+
+    with pytest.raises(SessionConfigurationError, match="symbol SHA-1"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_symbol_sha1="not-a-sha1",
             pyboy_factory=lambda path: FakePyBoy(DictMemory()),
         )
 
