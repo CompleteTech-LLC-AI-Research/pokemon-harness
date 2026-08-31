@@ -27,8 +27,9 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 import mcp.types as mcp_types
 from mcp.server import Server
@@ -36,14 +37,14 @@ from mcp.server.stdio import stdio_server
 
 from pokered_harness.config import SUPPORTED_ROM_VERSIONS
 from pokered_harness.events.hooks import GameEvent
-from pokered_harness.link.pair import LinkPair
-from pokered_harness.link.remote import RemoteLinkEndpoint
 from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
     validate_loopback_host,
 )
+from pokered_harness.link.pair import LinkPair
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
+from pokered_harness.link.remote import RemoteLinkEndpoint
 from pokered_harness.link.serial_link import (
     SerialLink,
     SerialLinkError,
@@ -148,10 +149,14 @@ class LinkState:
     errors. ``remote_mode`` tracks the remote lifecycle:
 
     - ``"idle"`` — no remote link at all.
+    - ``"starting"`` — a listener has reserved the lifecycle while its
+      socket is being bound (transient).
     - ``"listening"`` — :meth:`TcpSerialLink.listen` running on a
       background thread; no peer yet.
+    - ``"connecting"`` — an outbound connection and HELLO are in progress.
     - ``"connected"`` — peer attached; ``remote_endpoint`` installed and
       ready for in-game serial exchanges.
+    - ``"disconnecting"`` — teardown has claimed the lifecycle (transient).
     """
 
     def __init__(
@@ -174,6 +179,8 @@ class LinkState:
         self.remote_role: str | None = None  # "listener" | "connector"
         self.remote_bind_port: int | None = None
         self._listener_thread: threading.Thread | None = None
+        self._listener_start_in_progress = False
+        self._listener_start_owner: int | None = None
         self._listener_error: Exception | None = None
         self._remote_error: Exception | None = None
         self._listener_socket: socket.socket | None = None
@@ -187,6 +194,11 @@ class LinkState:
         self._connect_in_progress = False
         self._state_lock = threading.RLock()
         self._operation_lock = threading.Lock()
+        # Pair/native-link mutations and transport snapshots must not race.
+        # This is deliberately separate from ``_operation_lock`` so a
+        # read-only status request stays responsive while a remote connect is
+        # waiting on the network.
+        self._pair_lock = threading.RLock()
         self._disconnecting = False
         self._generation = 0
 
@@ -432,7 +444,12 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
                         "description": "Local ROM version announced in HELLO; "
                                        "defaults to primary_version at startup.",
                     },
-                    "timeout_s": {"type": "number", "default": 10.0},
+                    "timeout_s": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": _MAX_REMOTE_TIMEOUT_S,
+                        "default": _DEFAULT_REMOTE_HELLO_TIMEOUT_S,
+                    },
                 },
                 "required": ["host", "port"],
             },
@@ -691,10 +708,7 @@ def _dispatch_link_tool(
     if name == "link_pair":
         peer = _require_peer(link)
         with link.state():
-            if link._disconnecting:
-                raise McpHarnessError(
-                    "link_busy", "link teardown is still in progress"
-                )
+            _require_remote_idle_locked(link)
             if link.pair is not None and link.pair.paired:
                 raise McpHarnessError(
                     "already_paired", "already paired; call link_unpair first"
@@ -719,12 +733,17 @@ def _dispatch_link_tool(
             try:
                 # Use a stable lock order; both sessions are owned by this
                 # MCP server and no callback is invoked while attaching.
-                with session.locked():
-                    with peer.locked():
-                        local_link_session.attach(session._pyboy)
-                        local_link_session.attach(peer._pyboy)
+                with link._pair_lock, session.locked(), peer.locked():
+                    local_link_session.attach(session._pyboy)
+                    local_link_session.attach(peer._pyboy)
             except Exception:
-                local_link_session.detach_all()
+                try:
+                    _detach_local_link_session(link, session, local_link_session)
+                except Exception:  # noqa: BLE001, S110 - preserve attach failure
+                    # Preserve the attach failure; the caller still gets a
+                    # deterministic failure and the session close path can
+                    # make a second cleanup attempt.
+                    pass
                 raise
             with link.state():
                 link.local_link_session = local_link_session
@@ -744,7 +763,8 @@ def _dispatch_link_tool(
             with link.state():
                 link.pair = pair
         try:
-            pair.pair()
+            with link._pair_lock:
+                pair.pair()
         except Exception:
             if created:
                 with link.state():
@@ -765,7 +785,8 @@ def _dispatch_link_tool(
         cleanup_errors: list[Exception] = []
         if local_link_session is not None:
             try:
-                local_link_session.detach_all()
+                with link._pair_lock:
+                    _detach_local_link_session(link, session, local_link_session)
             except Exception as exc:  # noqa: BLE001
                 cleanup_errors.append(exc)
             else:
@@ -774,14 +795,18 @@ def _dispatch_link_tool(
                         link.local_link_session = None
         if pair is not None and pair.paired:
             try:
-                pair.unpair()
+                with link._pair_lock:
+                    pair.unpair()
             except Exception as exc:  # noqa: BLE001
                 cleanup_errors.append(exc)
             else:
-                _deactivate_link_hooks(session, pair.peer)
                 with link.state():
                     if link.pair is pair:
                         link.pair = None
+            finally:
+                # Even a partially failing pair teardown must not leave raw
+                # callbacks able to reach a discarded bridge.
+                _deactivate_link_hooks(session, pair.peer)
         elif pair is not None:
             with link.state():
                 if link.pair is pair:
@@ -801,35 +826,51 @@ def _dispatch_link_tool(
             network_session = link.network_session
             local_link_session = link.local_link_session
             remote_endpoint = link.remote_endpoint
+            remote_mode = link.remote_mode
+            remote_link = link.remote_link
         if network_session is not None:
             session.step(count, render=bool(arguments.get("render", False)))
             return {"primary_tick": session.current_tick(), "peer_tick": None}
         if remote_endpoint is not None:
-            remote_endpoint.step(
-                count, render=bool(arguments.get("render", False))
-            )
-            return {"primary_tick": session.current_tick(), "peer_tick": None}
-        if local_link_session is not None:
-            peer = _require_peer(link)
-            # The interleaved path drives PyBoy directly rather than through
-            # Session.step(), so acquire both Session locks explicitly. This
-            # prevents an ordinary MCP step/save/load/resource call from
-            # mutating either motherboard concurrently with link stepping.
-            with session.locked(), peer.locked():
-                local_link_session.step_interleaved(
+            # The semantic endpoint ticks through Session.step() but performs
+            # its hardware serial tick immediately afterward. Keep that
+            # memory mutation inside the same emulator lock as the frame so
+            # status/resource readers and disconnect cannot observe a half
+            # completed endpoint step.
+            with session.locked():
+                remote_endpoint.step(
                     count, render=bool(arguments.get("render", False))
                 )
-                # PyBoyLinkSession drives the underlying emulators directly;
-                # keep Session-level bookkeeping aligned with the same frame
-                # count.
-                session.reset_tick(session.current_tick() + count)
-                peer.reset_tick(peer.current_tick() + count)
-                return {
-                    "primary_tick": session.current_tick(),
-                    "peer_tick": peer.current_tick(),
-                }
+            return {"primary_tick": session.current_tick(), "peer_tick": None}
+        if local_link_session is not None:
+            with link._pair_lock:
+                peer = _require_peer(link)
+                # The interleaved path drives PyBoy directly rather than
+                # through Session.step(), so acquire both Session locks
+                # explicitly. This prevents an ordinary MCP
+                # step/save/load/resource call from mutating either
+                # motherboard concurrently with link stepping.
+                with session.locked(), peer.locked():
+                    local_link_session.step_interleaved(
+                        count, render=bool(arguments.get("render", False))
+                    )
+                    # PyBoyLinkSession drives the underlying emulators
+                    # directly; keep Session-level bookkeeping aligned with
+                    # the same frame count.
+                    session.reset_tick(session.current_tick() + count)
+                    peer.reset_tick(peer.current_tick() + count)
+                    return {
+                        "primary_tick": session.current_tick(),
+                        "peer_tick": peer.current_tick(),
+                    }
+        if remote_mode != "idle" or remote_link is not None:
+            raise McpHarnessError(
+                "remote_not_connected",
+                f"remote link is not ready for stepping (mode={remote_mode!r})",
+            )
         pair = _require_pair(link)
-        pair.step(count, render=bool(arguments.get("render", False)))
+        with link._pair_lock:
+            pair.step(count, render=bool(arguments.get("render", False)))
         return {
             "primary_tick": session.current_tick(),
             "peer_tick": link.peer_session.current_tick() if link.peer_session else None,
@@ -861,19 +902,22 @@ def _dispatch_link_tool(
         with link.state():
             pair = link.pair
             local_link_session = link.local_link_session
-            paired = pair is not None and pair.paired
-            paired = paired or (
-                local_link_session is not None and local_link_session.paired
-            )
             remote_mode = link.remote_mode
             remote_role = link.remote_role
             remote_bind_port = link.remote_bind_port
             remote_link = link.remote_link
             network_session = link.network_session
             remote_error = link._remote_error or link._listener_error
-        transport_snapshot: dict[str, Any] = (
-            pair.transport.snapshot() if pair is not None else {"a_to_b": [], "b_to_a": []}
-        )
+        with link._pair_lock:
+            paired = pair is not None and pair.paired
+            paired = paired or (
+                local_link_session is not None and local_link_session.paired
+            )
+            transport_snapshot: dict[str, Any] = (
+                pair.transport.snapshot()
+                if pair is not None
+                else {"a_to_b": [], "b_to_a": []}
+            )
         peer_rom: str | None = None
         if remote_link is not None and remote_mode == "connected":
             try:
@@ -902,97 +946,137 @@ def _dispatch_link_tool(
         }
 
     if name == "link_listen":
-        _require_remote_idle(link)
-        _require_pair_inactive(link)
-        port = _positive_port(arguments.get("port"))
-        host = _validate_remote_host(str(arguments.get("host", "127.0.0.1")))
-        rom_version = _validate_rom_version(
-            str(arguments.get("rom_version") or link.primary_version)
-        )
-        _require_primary_rom_version(link, rom_version)
-        timeout_s = _validate_timeout(
-            arguments.get("timeout_s", _DEFAULT_REMOTE_HELLO_TIMEOUT_S)
-        )
-
-        listener = _bind_listener(host, port)
         cancel = threading.Event()
+        start_owner = threading.get_ident()
         with link.state():
-            if link._disconnecting:
-                listener.close()
-                raise McpHarnessError(
-                    "link_busy", "link teardown is still in progress"
-                )
+            # The idle check and reservation must be one critical section.
+            # Otherwise link_disconnect can observe an apparently idle state,
+            # return, and then race this call into publishing a listener it
+            # never had a chance to cancel.
+            _require_remote_idle_locked(link)
+            _require_pair_inactive_locked(link)
+            port = _positive_port(arguments.get("port"))
+            host = _validate_remote_host(
+                str(arguments.get("host", "127.0.0.1"))
+            )
+            rom_version = _validate_rom_version(
+                str(arguments.get("rom_version") or link.primary_version)
+            )
+            _require_primary_rom_version(link, rom_version)
+            timeout_s = _validate_timeout(
+                arguments.get("timeout_s", _DEFAULT_REMOTE_HELLO_TIMEOUT_S)
+            )
+
             generation = link._generation
             link._listener_cancel = cancel
-            link._listener_socket = listener
-            link.remote_mode = "listening"
+            link._listener_start_in_progress = True
+            link._listener_start_owner = start_owner
+            link.remote_mode = "starting"
             link.remote_role = "listener"
             link.remote_bind_port = port
             link._listener_error = None
             link._remote_error = None
 
-        def _accept() -> None:
-            _accept_remote(
-                link,
-                session,
-                listener,
-                cancel,
-                generation,
-                rom_version,
-                timeout_s,
-            )
-
-        t = threading.Thread(
-            target=_accept, name="mcp-link-listen", daemon=True
-        )
         try:
-            # Keep publication and start under the same lifecycle lock. If
-            # disconnect races this point, it must not close the listener and
-            # then leave us returning a stale "listening" state with a worker
-            # that was started against a dead socket.
-            with link.state():
-                if link._disconnecting or link._generation != generation:
-                    raise McpHarnessError(
-                        "link_cancelled", "remote listener cancelled"
-                    )
-                link._listener_thread = t
-                t.start()
-        except Exception:
-            cancel.set()
             try:
-                listener.close()
-            except OSError:
-                pass
+                listener = _bind_listener(host, port)
+            except Exception:
+                cancel.set()
+                with link.state():
+                    if (
+                        link._generation == generation
+                        and link.remote_mode == "starting"
+                    ):
+                        link.remote_mode = "idle"
+                        link.remote_role = None
+                        link.remote_bind_port = None
+                        if link._listener_cancel is cancel:
+                            link._listener_cancel = threading.Event()
+                raise
+
+            def _accept() -> None:
+                _accept_remote(
+                    link,
+                    session,
+                    listener,
+                    cancel,
+                    generation,
+                    rom_version,
+                    timeout_s,
+                )
+
+            t = threading.Thread(
+                target=_accept, name="mcp-link-listen", daemon=True
+            )
+            try:
+                # Keep publication and start under the same lifecycle lock. If
+                # disconnect races this point, it must not close the listener and
+                # then leave us returning a stale "listening" state with a worker
+                # that was started against a dead socket.
+                with link.state():
+                    if (
+                        link._disconnecting
+                        or link._generation != generation
+                        or link.remote_mode != "starting"
+                    ):
+                        raise McpHarnessError(
+                            "link_cancelled", "remote listener cancelled"
+                        )
+                    link._listener_socket = listener
+                    link.remote_mode = "listening"
+                    link._listener_thread = t
+                    t.start()
+            except Exception:
+                cancel.set()
+                try:
+                    listener.close()
+                except OSError:
+                    pass
+                with link.state():
+                    if link._listener_socket is listener:
+                        link._listener_socket = None
+                    if link._listener_thread is t:
+                        link._listener_thread = None
+                    if (
+                        link._generation == generation
+                        and not link._disconnecting
+                    ):
+                        link.remote_mode = "idle"
+                        link.remote_role = None
+                        link.remote_bind_port = None
+                        if link._listener_cancel is cancel:
+                            link._listener_cancel = threading.Event()
+                raise
+            return {
+                "remote_mode": "listening",
+                "remote_role": "listener",
+                "remote_bind_port": port,
+                "host": host,
+                "rom_version": rom_version,
+                "timeout_s": timeout_s,
+            }
+        finally:
+            # A listener bind runs in the caller's thread, so it cannot be
+            # joined by link_disconnect. Keep reconnects out until this call
+            # has unwound and the cancelled socket has been closed.
             with link.state():
-                if link._listener_socket is listener:
-                    link._listener_socket = None
-                if link._listener_thread is t:
-                    link._listener_thread = None
-                if link._generation == generation and not link._disconnecting:
-                    link.remote_mode = "idle"
-                    link.remote_role = None
-                    link.remote_bind_port = None
-            raise
-        return {
-            "remote_mode": "listening",
-            "remote_role": "listener",
-            "remote_bind_port": port,
-            "host": host,
-            "rom_version": rom_version,
-            "timeout_s": timeout_s,
-        }
+                if link._listener_start_owner == start_owner:
+                    link._listener_start_in_progress = False
+                    link._listener_start_owner = None
 
     if name == "link_connect":
-        _require_remote_idle(link)
-        _require_pair_inactive(link)
-        host = _validate_remote_host(str(arguments["host"]))
-        port = _positive_port(arguments.get("port"))
-        rom_version = _validate_rom_version(
-            str(arguments.get("rom_version") or link.primary_version)
-        )
-        _require_primary_rom_version(link, rom_version)
-        timeout_s = _validate_timeout(arguments.get("timeout_s", 10.0))
         with link.state():
+            # Claim the remote lifecycle before releasing the state lock so
+            # a concurrent disconnect cannot miss an in-progress connect.
+            _require_remote_idle_locked(link)
+            _require_pair_inactive_locked(link)
+            host = _validate_remote_host(str(arguments["host"]))
+            port = _positive_port(arguments.get("port"))
+            rom_version = _validate_rom_version(
+                str(arguments.get("rom_version") or link.primary_version)
+            )
+            _require_primary_rom_version(link, rom_version)
+            timeout_s = _validate_timeout(arguments.get("timeout_s", 10.0))
             generation = link._generation
             link._connect_cancel = threading.Event()
             connect_cancel = link._connect_cancel
@@ -1106,28 +1190,48 @@ def _dispatch_link_tool(
     raise ValueError(f"unknown tool: {name!r}")
 
 
+def _require_remote_idle_locked(link: LinkState) -> None:
+    """Validate the remote lifecycle while ``link.state()`` is held."""
+    listener_thread = link._listener_thread
+    if listener_thread is not None and not listener_thread.is_alive():
+        link._listener_thread = None
+        listener_thread = None
+    if (
+        link.remote_mode != "idle"
+        or link._disconnecting
+        or link._connect_in_progress
+        or link._listener_socket is not None
+        or link.remote_link is not None
+        or link.remote_endpoint is not None
+        or link.network_session is not None
+    ):
+        raise McpHarnessError(
+            "remote_busy",
+            f"remote link busy (mode={link.remote_mode!r}); call "
+            f"link_disconnect first",
+        )
+    if listener_thread is not None:
+        raise McpHarnessError(
+            "remote_busy",
+            "remote listener cleanup is still in progress; retry after "
+            "the listener worker exits",
+        )
+    if link._listener_start_in_progress:
+        raise McpHarnessError(
+            "remote_busy",
+            "remote listener startup is still in progress; retry after "
+            "the listener call unwinds",
+        )
+
+
 def _require_remote_idle(link: LinkState) -> None:
     with link.state():
-        listener_thread = link._listener_thread
-        if listener_thread is not None and not listener_thread.is_alive():
-            link._listener_thread = None
-            listener_thread = None
-        if link.remote_mode != "idle" or link._disconnecting or link._connect_in_progress:
-            raise McpHarnessError(
-                "remote_busy",
-                f"remote link busy (mode={link.remote_mode!r}); call "
-                f"link_disconnect first",
-            )
-        if listener_thread is not None:
-            raise McpHarnessError(
-                "remote_busy",
-                "remote listener cleanup is still in progress; retry after "
-                "the listener worker exits",
-            )
+        _require_remote_idle_locked(link)
 
 
-def _require_pair_inactive(link: LinkState) -> None:
-    with link.state():
+def _require_pair_inactive_locked(link: LinkState) -> None:
+    """Validate the in-process mode while ``link.state()`` is held."""
+    with link._pair_lock:
         if (link.pair is not None and link.pair.paired) or (
             link.local_link_session is not None
         ):
@@ -1136,6 +1240,11 @@ def _require_pair_inactive(link: LinkState) -> None:
                 "in-process pair is active; call link_unpair before using "
                 "remote link tools",
             )
+
+
+def _require_pair_inactive(link: LinkState) -> None:
+    with link.state():
+        _require_pair_inactive_locked(link)
 
 
 def _refresh_remote_state(link: LinkState, session: Session) -> None:
@@ -1153,24 +1262,27 @@ def _refresh_remote_state(link: LinkState, session: Session) -> None:
             or rl.connected
         ):
             return
-        link.remote_mode = "idle"
-        link.remote_role = None
-        link.remote_bind_port = None
-        link.remote_link = None
-        link.remote_endpoint = None
-        network_session = link.network_session
-        link.network_session = None
-        link._remote_error = getattr(rl, "_reader_exc", None)
-    # Close the dead transport first so an in-flight serial operation wakes;
-    # then restore the emulator backend under the owning Session lock.
-    _close_serial_link(rl, timeout_s=0.25)
-    if network_session is not None:
-        try:
-            with session.locked():
-                network_session.detach_all()
-        except Exception:  # noqa: BLE001, S110
-            pass
-    _deactivate_link_hooks(session)
+        stale_generation = link._generation
+        stale_error = getattr(rl, "_reader_exc", None)
+    # Reuse the lifecycle owner so status cleanup marks the link as
+    # disconnecting until socket/backend/callback cleanup has completed. This
+    # prevents a concurrent reconnect from overlapping a dead transport.
+    try:
+        _disconnect_remote(link, session)
+    except McpHarnessError:
+        # Cleanup failures are retained on LinkState for the next status poll;
+        # status itself should remain a read-mostly diagnostic operation.
+        pass
+    with link.state():
+        # A new lifecycle may have started after teardown. Never attach the
+        # old reader error to that new connection.
+        if (
+            link._generation == stale_generation + 1
+            and link.remote_mode == "idle"
+            and stale_error is not None
+            and link._remote_error is None
+        ):
+            link._remote_error = stale_error
 
 
 def _positive_port(value: Any) -> int:
@@ -1315,6 +1427,10 @@ def _wait_for_remote_hello(
             _ = link.peer_rom_version
         except SerialLinkError as exc:
             raise McpHarnessError("link_handshake_failed", str(exc)) from exc
+        if not link.connected:
+            raise McpHarnessError(
+                "link_handshake_failed", "remote link closed during HELLO"
+            )
         return
 
     deadline = time.monotonic() + timeout_s
@@ -1333,6 +1449,10 @@ def _wait_for_remote_hello(
         raise McpHarnessError("link_handshake_failed", str(exc)) from exc
     if not peer_version:
         raise McpHarnessError("link_handshake_failed", "peer HELLO had no ROM version")
+    if not link.connected:
+        raise McpHarnessError(
+            "link_handshake_failed", "remote link closed during HELLO"
+        )
 
 
 def _wait_for_network_hello(
@@ -1356,10 +1476,12 @@ def _wait_for_network_hello(
                 f"peer HELLO not received within {timeout_s:g}s"
             )
         hello_event.wait(timeout=min(0.05, remaining))
-    if link._reader_exc is not None and not link._peer_rom_version:
+    if link._reader_exc is not None:
         raise NetworkBackendError(
             f"peer HELLO failed: {link._reader_exc}"
         ) from link._reader_exc
+    if not link.connected:
+        raise NetworkBackendError("peer link closed during HELLO")
     return link.peer_rom_version
 
 
@@ -1376,10 +1498,11 @@ def _accept_remote(
         while not cancel.is_set():
             transport: Any | None = None
             network_session: PyBoyLinkSession | None = None
+            endpoint: RemoteLinkEndpoint | None = None
             accepted_conn: socket.socket | None = None
             try:
                 accepted_conn, _peer_addr = listener.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError as exc:
                 if cancel.is_set():
@@ -1400,7 +1523,6 @@ def _accept_remote(
                         local_rom_version=rom_version,
                     )
                     _wait_for_network_hello(transport, cancel, timeout_s)
-                    endpoint: RemoteLinkEndpoint | None = None
                 else:
                     transport = TcpSerialLink(accepted_conn, rom_version)
                     accepted_conn = None
@@ -1427,6 +1549,7 @@ def _accept_remote(
                 # not detach or close the live transport.
                 transport = None
                 network_session = None
+                endpoint = None
                 return
             except _ListenerCancelled:
                 return
@@ -1448,6 +1571,12 @@ def _accept_remote(
                 # the MCP link and retain the peer socket indefinitely.
                 if transport is not None:
                     _close_serial_link(transport)
+                if endpoint is not None:
+                    # A semantic endpoint installs raw PyBoy callbacks before
+                    # publication. If installation or publication fails,
+                    # those callbacks are still owned by this worker and
+                    # must be disabled before the next peer is accepted.
+                    _deactivate_link_hooks(session)
                 if network_session is not None:
                     try:
                         with session.locked():
@@ -1489,20 +1618,23 @@ def _close_serial_link(
     close_ok = True
     try:
         link.close()
-    except Exception:
+    except Exception:  # noqa: BLE001 - cleanup must report failure, not mask it
         close_ok = False
-    workers = [
-        getattr(link, "_reader", None),
-        getattr(link, "_edge_worker", None),
-    ]
-    join_timeout = max(0.0, timeout_s)
+    workers: list[threading.Thread] = []
+    seen_workers: set[int] = set()
+    for attr in ("_reader", "_edge_worker"):
+        worker = getattr(link, attr, None)
+        if not isinstance(worker, threading.Thread):
+            continue
+        if id(worker) in seen_workers:
+            continue
+        seen_workers.add(id(worker))
+        workers.append(worker)
+    deadline = time.monotonic() + max(0.0, timeout_s)
     for worker in workers:
-        if isinstance(worker, threading.Thread) and worker is not threading.current_thread():
-            worker.join(timeout=join_timeout)
-    return close_ok and not any(
-        isinstance(worker, threading.Thread) and worker.is_alive()
-        for worker in workers
-    )
+        if worker is not threading.current_thread():
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+    return close_ok and not any(worker.is_alive() for worker in workers)
 
 
 def _cleanup_unpublished_remote(
@@ -1535,6 +1667,21 @@ def _cleanup_unpublished_remote(
         pass
 
 
+def _detach_local_link_session(
+    link: LinkState,
+    session: Session,
+    local_link_session: PyBoyLinkSession,
+) -> None:
+    """Detach a local native link while both owned emulators are locked."""
+    peer = link.peer_session
+    with session.locked():
+        if peer is not None and peer is not session:
+            with peer.locked():
+                local_link_session.detach_all()
+        else:
+            local_link_session.detach_all()
+
+
 def _deactivate_link_hooks(session: Session, peer: Session | None = None) -> None:
     sessions: list[Session] = [session]
     if peer is not None and peer is not session:
@@ -1542,7 +1689,7 @@ def _deactivate_link_hooks(session: Session, peer: Session | None = None) -> Non
     for target in sessions:
         try:
             target.deactivate_serial_hooks()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - cleanup is best effort
             pass
         # A few legacy endpoint hooks are installed directly on PyBoy and
         # cannot be reached through Session.serial_hook. Remove those by
@@ -1550,7 +1697,7 @@ def _deactivate_link_hooks(session: Session, peer: Session | None = None) -> Non
         for symbol_name in _DIRECT_LINK_HOOKS:
             try:
                 target.deactivate_hooks_at(symbol_name)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - cleanup is best effort
                 pass
 
 
@@ -1564,6 +1711,10 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
         else:
             done = None
             owned_by_current_thread = False
+        listener_thread = link._listener_thread
+        if listener_thread is not None and not listener_thread.is_alive():
+            link._listener_thread = None
+            listener_thread = None
         if link._disconnecting:
             # A second disconnect should not report success while the first
             # caller is still tearing down sockets and callbacks. A
@@ -1576,6 +1727,8 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             or link.remote_endpoint is not None
             or link.network_session is not None
             or link._connect_in_progress
+            or link._listener_start_in_progress
+            or listener_thread is not None
         ):
             # In particular, do not deactivate local-pair hooks when the
             # caller uses the remote disconnect tool while no remote link is
@@ -1587,7 +1740,6 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             link._disconnect_done.clear()
             link._generation += 1
             listener = link._listener_socket
-            listener_thread = link._listener_thread
             remote = link.remote_link
             remote_endpoint = link.remote_endpoint
             network_session = link.network_session
@@ -1599,13 +1751,24 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             link.remote_link = None
             link.remote_endpoint = None
             link.network_session = None
-            link.remote_mode = "idle"
+            link.remote_mode = "disconnecting"
             link.remote_role = None
             link.remote_bind_port = None
 
     if done is not None:
         if not owned_by_current_thread:
-            done.wait(timeout=_DEFAULT_CLEANUP_TIMEOUT_S)
+            if not done.wait(timeout=_DEFAULT_CLEANUP_TIMEOUT_S):
+                raise McpHarnessError(
+                    "link_teardown_timeout",
+                    "another link teardown is still in progress after the "
+                    f"{_DEFAULT_CLEANUP_TIMEOUT_S:g}s cleanup deadline",
+                )
+            with link.state():
+                teardown_error = link._remote_error or link._listener_error
+            if teardown_error is not None:
+                raise McpHarnessError(
+                    "link_teardown_failed", str(teardown_error)
+                )
         return
 
     cleanup_errors: list[Exception] = []
@@ -1657,6 +1820,9 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             else:
                 link._listener_error = None
                 link._remote_error = None
+            link.remote_mode = "idle"
+            link.remote_role = None
+            link.remote_bind_port = None
             if listener_thread is None or not listener_thread.is_alive():
                 link._listener_thread = None
             else:
@@ -1697,11 +1863,18 @@ def read_resource(
             peer = link.peer_session
         return json.dumps(to_jsonable(peer.read_game_state()))
     if uri == _URI_LINK_TRANSPORT:
-        if link is None or link.pair is None:
+        if link is None:
             return json.dumps({"a_to_b": [], "b_to_a": []})
         with link.state():
             pair = link.pair
-        return json.dumps(pair.transport.snapshot())
+        if pair is None:
+            return json.dumps({"a_to_b": [], "b_to_a": []})
+        # The pair object can be unpaired concurrently with a resource read.
+        # Keep the snapshot serialized with pair stepping/unpairing, but do
+        # not take the global operation lock: status/resources must remain
+        # responsive while a remote operation is waiting on TCP.
+        with link._pair_lock:
+            return json.dumps(pair.transport.snapshot())
     if uri == _URI_LINK_STATUS:
         if link is None:
             link = LinkState()
@@ -1794,15 +1967,34 @@ def build_server(
         name: str, arguments: dict[str, Any] | None
     ) -> mcp_types.CallToolResult:
         args = arguments or {}
+        # ``asyncio.to_thread`` cannot cancel a Python worker that is already
+        # executing. Keep an explicit Task and shield it so a cancelled MCP
+        # request does not orphan an emulator operation. For link-related
+        # work, close the remote transport from a second thread to wake a
+        # serial hook or an in-progress connect before waiting for the worker
+        # to settle.
+        worker = asyncio.create_task(
+            asyncio.to_thread(dispatch_tool, session, name, args, link)
+        )
         try:
             # The emulator is not asyncio-aware. Run the blocking operation
             # off the event loop while the Session/LinkState locks preserve
             # single-emulator ordering. This also leaves the loop responsive
             # to status/resource requests while a bounded TCP call waits.
-            result = await asyncio.to_thread(
-                dispatch_tool, session, name, args, link
-            )
+            result = await asyncio.shield(worker)
         except asyncio.CancelledError:
+            if name != "link_status":
+                cleanup = asyncio.create_task(
+                    asyncio.to_thread(_disconnect_remote, link, session)
+                )
+                try:
+                    await asyncio.shield(cleanup)
+                except BaseException:  # noqa: BLE001, S110 - preserve request cancellation
+                    pass
+            try:
+                await asyncio.shield(worker)
+            except BaseException:  # noqa: BLE001, S110 - retrieve the worker outcome
+                pass
             raise
         except Exception as exc:  # noqa: BLE001
             return _error_reply(exc)
@@ -1868,15 +2060,28 @@ async def serve_stdio(
                     server.create_initialization_options(),
                 )
     finally:
+        active_exception = sys.exc_info()[1]
+        cleanup_errors: list[Exception] = []
         with contextlib.redirect_stdout(sys.stderr):
-            _disconnect_remote(owned_link, session)
+            try:
+                _disconnect_remote(owned_link, session)
+            except Exception as exc:  # noqa: BLE001
+                cleanup_errors.append(exc)
             # A stdio client can terminate while either link mode is active.
             # Restore native serial backends before the owning Sessions are
             # closed by main().
             try:
                 dispatch_tool(session, "link_unpair", {}, link=owned_link)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                cleanup_errors.append(exc)
+        if cleanup_errors:
+            details = "; ".join(
+                f"{type(exc).__name__}: {exc}" for exc in cleanup_errors
+            )
+            if active_exception is not None:
+                active_exception.add_note(f"MCP cleanup failed: {details}")
+            else:
+                raise McpHarnessError("server_cleanup_failed", details)
 
 
 def main() -> None:
