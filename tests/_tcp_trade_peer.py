@@ -28,6 +28,7 @@ _TRADE_DIAG_SYMBOLS = (
     "SaveGameData",
     "Serial_SyncAndExchangeNybble",
     "LinkMenu",
+    "LinkMenu.waitForInputLoop",
     "CableClubLeftGameboy",
     "CableClubRightGameboy",
     "CableClub_DoBattleOrTrade",
@@ -48,7 +49,12 @@ _TRADE_DIAG_SYMBOLS = (
     "DisplayLinkBattleVersusTextBox",
     "BattleTransition",
     "MainInBattleLoop",
+    "MainInBattleLoop.selectEnemyMove",
+    "DisplayBattleMenu",
+    "DisplayBattleMenu.leftColumn_WaitForInput",
+    "DisplayBattleMenu.rightColumn_WaitForInput",
     "MoveSelectionMenu",
+    "MoveSelectionMenu.menuset",
     "LinkBattleExchangeData",
     "ExecutePlayerMove",
     "ExecuteEnemyMove",
@@ -299,12 +305,12 @@ def main() -> int:
     link_menu_quiet_announced = False
     peer_link_menu_ready = False
     peer_link_menu_quiet_ready = False
-    damage_announced = False
-    peer_damage_ready = False
+    battle_turn_announced = False
+    peer_battle_turn_ready = False
     party_after_trade: dict[str, object] | None = None
 
     def state_snapshot() -> dict[str, int]:
-        return {
+        snapshot = {
             "map_id": session.read_game_state().overworld.map_id,
             "hSerialConnectionStatus": session._pyboy.memory[
                 session.symbols.addr_of("hSerialConnectionStatus")
@@ -313,11 +319,61 @@ def main() -> int:
                 session.symbols.addr_of("wLinkState")
             ],
         }
+        for name in (
+            "wIsInBattle",
+            "wBattleType",
+            "wActionResultOrTookBattleTurn",
+            "wMoveMenuType",
+            "wPlayerSelectedMove",
+        ):
+            try:
+                snapshot[name] = int(session._pyboy.memory[session.symbols.addr_of(name)])
+            except (AttributeError, KeyError, TypeError):
+                pass
+        return snapshot
 
     def backend_snapshot() -> dict[str, object]:
         if link._network_backend is None:
             return {}
         return link._network_backend.debug_snapshot()
+
+    def cpu_snapshot() -> dict[str, object]:
+        """Capture bounded CPU/serial state for a stalled native run."""
+        cpu = getattr(getattr(session._pyboy, "mb", None), "cpu", None)
+        serial = getattr(getattr(session._pyboy, "mb", None), "serial", None)
+        result: dict[str, object] = {}
+        for name in (
+            "PC",
+            "SP",
+            "A",
+            "F",
+            "B",
+            "C",
+            "D",
+            "E",
+            "H",
+            "L",
+            "cycles",
+            "halted",
+            "stopped",
+            "interrupt_master_enable",
+            "interrupts_enabled_register",
+            "interrupts_flag_register",
+        ):
+            if hasattr(cpu, name):
+                result[name] = getattr(cpu, name)
+        for name in (
+            "SB",
+            "SC",
+            "transfer_enabled",
+            "internal_clock",
+            "_bits_remaining",
+            "clock",
+            "clock_target",
+        ):
+            if hasattr(serial, name):
+                result[f"serial.{name}"] = getattr(serial, name)
+        return result
 
     def cooperative_sync(sync_id: int, *, timeout: float = 60.0) -> None:
         """Rendezvous without freezing the local emulator thread.
@@ -344,6 +400,189 @@ def main() -> int:
             return session._pyboy.memory[session.symbols.addr_of("wCurrentMenuItem")]
         except (AttributeError, KeyError, TypeError):
             return None
+
+    def menu_snapshot() -> dict[str, int]:
+        memory = session._pyboy.memory
+        snapshot: dict[str, int] = {}
+        for name in (
+            "wCurrentMenuItem",
+            "wMaxMenuItem",
+            "wMenuWatchedKeys",
+            "wMenuJoypadPollCount",
+            "wMenuWrappingEnabled",
+            "wMenuWatchMovingOutOfBounds",
+        ):
+            try:
+                snapshot[name] = int(memory[session.symbols.addr_of(name)])
+            except (AttributeError, KeyError, TypeError):
+                pass
+        return snapshot
+
+    def wait_for_menu_ready(
+        *,
+        label: str,
+        min_item: int,
+        max_item: int,
+        expected_max: int | None = None,
+        required_keys: int = 0x01,
+        timeout: float = 60.0,
+    ) -> dict[str, int]:
+        """Wait until ROM menu fields describe an input-ready menu."""
+        deadline_at = time.monotonic() + timeout
+        while time.monotonic() < deadline_at:
+            snapshot = menu_snapshot()
+            current = snapshot.get("wCurrentMenuItem")
+            configured_max = snapshot.get("wMaxMenuItem")
+            watched = snapshot.get("wMenuWatchedKeys", 0)
+            if (
+                current is not None
+                and configured_max is not None
+                and min_item <= current <= max_item
+                and (expected_max is None or configured_max == expected_max)
+                and watched & required_keys == required_keys
+            ):
+                return snapshot
+            session.step(2)
+        raise RuntimeError(
+            f"{label} did not become input-ready: "
+            f"menu={menu_snapshot()} state={state_snapshot()} "
+            f"cpu={cpu_snapshot()} backend={backend_snapshot()}"
+        )
+
+    def menu_fields_ready(
+        *,
+        min_item: int,
+        max_item: int,
+        expected_max: int | None = None,
+        required_keys: int = 0x01,
+    ) -> bool:
+        snapshot = menu_snapshot()
+        current = snapshot.get("wCurrentMenuItem")
+        configured_max = snapshot.get("wMaxMenuItem")
+        watched = snapshot.get("wMenuWatchedKeys", 0)
+        return bool(
+            current is not None
+            and configured_max is not None
+            and min_item <= current <= max_item
+            and (expected_max is None or configured_max == expected_max)
+            and watched & required_keys == required_keys
+        )
+
+    def move_menu_to_item(
+        *,
+        target: int,
+        min_item: int,
+        max_item: int,
+        label: str,
+        timeout: float = 30.0,
+    ) -> None:
+        """Move a ROM-owned cursor with bounded one-shot directions."""
+        deadline_at = time.monotonic() + timeout
+        while time.monotonic() < deadline_at:
+            snapshot = wait_for_menu_ready(
+                label=label,
+                min_item=min_item,
+                max_item=max_item,
+                timeout=min(5.0, max(0.1, deadline_at - time.monotonic())),
+            )
+            current = snapshot["wCurrentMenuItem"]
+            if current == target:
+                return
+            if current < target:
+                button = "down"
+            else:
+                button = "up"
+            session.press(button, duration=2)
+            session.step(4)
+        raise RuntimeError(
+            f"{label} cursor did not reach {target}: "
+            f"menu={menu_snapshot()} state={state_snapshot()} "
+            f"cpu={cpu_snapshot()} backend={backend_snapshot()}"
+        )
+
+    def read_active_battle_moves() -> tuple[tuple[int, int], ...]:
+        """Read the ROM-populated active move/PP slots without mutation."""
+        memory = session._pyboy.memory
+        addr_of = session.symbols.addr_of
+        moves_addr = addr_of("wBattleMonMoves")
+        pp_addr = addr_of("wBattleMonPP")
+        return tuple(
+            (
+                int(memory[moves_addr + move_idx]),
+                int(memory[pp_addr + move_idx]) & 0x3F,
+            )
+            for move_idx in range(4)
+        )
+
+    def choose_first_usable_battle_move() -> int:
+        """Navigate the real move menu to the first move with PP."""
+        ready = wait_for_menu_ready(
+            label="battle move menu",
+            min_item=1,
+            max_item=4,
+            required_keys=0x01,
+            timeout=60.0,
+        )
+        active_moves = read_active_battle_moves()
+        move_count = ready.get("wMaxMenuItem", 0) - 1
+        if not 1 <= move_count <= len(active_moves):
+            raise RuntimeError(
+                "ROM move-menu count is invalid: "
+                f"menu={ready} moves={active_moves}"
+            )
+        usable_slots = [
+            index
+            for index, (move_id, pp) in enumerate(active_moves[:move_count])
+            if move_id != 0 and pp > 0
+        ]
+        if not usable_slots:
+            raise RuntimeError(
+                "active battle mon has no usable move: "
+                f"moves={active_moves}"
+            )
+        # Move-menu cursors are one-based. Let the ROM install the cursor
+        # before reading it; no RAM write or test-only selection hook is used.
+        target = usable_slots[0]
+        move_menu_to_item(
+            target=target + 1,
+            min_item=1,
+            max_item=move_count,
+            label="battle move menu",
+        )
+        # A legal move is committed through the normal input path. After this
+        # point the battle loop runs without synthetic input.  As with the
+        # command menu, the peer may still be leaving the phase rendezvous;
+        # retry only while the ROM continues to expose the move menu and stop
+        # as soon as the post-menu control-flow label fires.
+        prior_move_selection_phase = counters["MainInBattleLoop.selectEnemyMove"][0]
+        next_move_input_tick = -1
+        move_input_attempts = 0
+        selected_move_id = active_moves[target][0]
+        selection_deadline = min(time.monotonic() + 30.0, deadline)
+        while time.monotonic() < selection_deadline:
+            if counters["MainInBattleLoop.selectEnemyMove"][0] > prior_move_selection_phase:
+                return selected_move_id
+            if (
+                menu_fields_ready(
+                    min_item=1,
+                    max_item=move_count,
+                    required_keys=0x01,
+                )
+                and session.current_tick() >= next_move_input_tick
+            ):
+                session.press("a")
+                move_input_attempts += 1
+                next_move_input_tick = session.current_tick() + 8
+            session.step(2)
+        raise RuntimeError(
+            "ROM move-menu A input was not consumed: "
+            f"expected={selected_move_id} "
+            f"select_enemy_move={counters['MainInBattleLoop.selectEnemyMove'][0]} "
+            f"move_input_attempts={move_input_attempts} "
+            f"menu={menu_snapshot()} counters={counters} "
+            f"state={state_snapshot()} cpu={cpu_snapshot()} "
+            f"backend={backend_snapshot()}"
+        )
 
     try:
         # Phase 1: walk UP ×3 + A-mash to reach LinkMenu.
@@ -417,14 +656,26 @@ def main() -> int:
                 # for safe UI/phase boundaries below.
                 session.step(4)
                 serial_phase_ticks += 1
-                if counters["LinkMenu"][0] > 0 and not link_menu_announced:
+                if (
+                    counters["LinkMenu.waitForInputLoop"][0] > 0
+                    and menu_fields_ready(
+                        min_item=0, max_item=2, expected_max=2, required_keys=0x01
+                    )
+                    and not link_menu_announced
+                ):
                     link_menu_announced = True
                     log("phase 1 local LinkMenu fired")
                     shot("01_link_menu")
                     link._network_backend.announce_sync(sync_id=121)
                     log("phase 1 LinkMenu readiness sent")
             else:
-                if counters["LinkMenu"][0] > 0 and not link_menu_announced:
+                if (
+                    counters["LinkMenu.waitForInputLoop"][0] > 0
+                    and menu_fields_ready(
+                        min_item=0, max_item=2, expected_max=2, required_keys=0x01
+                    )
+                    and not link_menu_announced
+                ):
                     link_menu_announced = True
                     log("phase 1 local LinkMenu fired")
                     shot("01_link_menu")
@@ -677,16 +928,38 @@ def main() -> int:
             # then commit the choice with A. No RAM writes or execution hooks
             # may select the battle mode: this is the same user-input path
             # an MCP client would use.
-            initial_item = current_menu_item()
-            for _ in range(3):
-                if initial_item in (None, 1):
-                    break
-                session.press("down", duration=4)
-                session.step(20)
-                initial_item = current_menu_item()
-            log(f"battle LinkMenu input selection; initial_item={initial_item}")
-            session.press("a", duration=4)
-            session.step(20)
+            # LinkMenu's entry hook precedes its text rendering and menu
+            # initialization. Wait for the ROM-owned menu fields, navigate
+            # with bounded one-shot input, and verify the cursor before
+            # committing the choice.
+            link_menu_before = wait_for_menu_ready(
+                label="battle LinkMenu",
+                min_item=0,
+                max_item=2,
+                expected_max=2,
+                required_keys=0x01,
+                timeout=60.0,
+            )
+            initial_item = link_menu_before["wCurrentMenuItem"]
+            move_menu_to_item(
+                target=1,
+                min_item=0,
+                max_item=2,
+                label="battle LinkMenu",
+            )
+            selected_item = current_menu_item()
+            log(
+                "battle LinkMenu input selection; "
+                f"initial_item={initial_item} selected_item={selected_item}"
+            )
+            if selected_item != 1:
+                raise RuntimeError(
+                    "ordinary LinkMenu input did not select COLOSSEUM: "
+                    f"initial_item={initial_item} selected_item={selected_item} "
+                    f"state={state_snapshot()}"
+                )
+            session.press("a")
+            session.step(8)
             shot("02_battle_menu")
 
             COLOSSEUM = 0xF0
@@ -723,41 +996,232 @@ def main() -> int:
             )
             shot("04_battle_launch")
 
+            # The remaining trainer/party block is still a ROM-owned serial
+            # exchange. A side can return from the trigger routine before its
+            # peer has finished this block; keep the ordinary A input alive
+            # only until this local exchange milestone, then stop before the
+            # timed battle intro and menu.
+            prebattle_deadline = min(deadline, time.monotonic() + 240.0)
+            last_prebattle_log = time.monotonic()
+            while (
+                time.monotonic() < prebattle_deadline
+                and counters["CableClub_DoBattleOrTradeAgain.finishedEnemyMonsPatchListPart"][0]
+                < 2
+            ):
+                session.press("a", duration=4)
+                session.step(20)
+                if time.monotonic() - last_prebattle_log > 15.0:
+                    log(
+                        "battle prebattle progress: "
+                        f"counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} } "
+                        f"state={state_snapshot()} cpu={cpu_snapshot()} "
+                        f"backend={backend_snapshot()}"
+                    )
+                    last_prebattle_log = time.monotonic()
+            log(
+                "battle prebattle milestone reached; waiting for intro menu "
+                f"counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} } "
+                f"state={state_snapshot()} backend={backend_snapshot()}"
+            )
+
+            # The VS splash and transition are timed ROM work. Do not mash A
+            # through them: an input consumed in the transition can leave the
+            # two independent ROMs in different battle menu states. Wait for
+            # the ROM's own battle-menu hooks before selecting FIGHT.
+            intro_deadline = min(deadline, time.monotonic() + 180.0)
+            while time.monotonic() < intro_deadline:
+                if (
+                    counters["MainInBattleLoop"][0] > 0
+                    and counters["DisplayBattleMenu"][0] > 0
+                ):
+                    break
+                session.step(20)
+            if not (
+                counters["MainInBattleLoop"][0] > 0
+                and counters["DisplayBattleMenu"][0] > 0
+            ):
+                raise RuntimeError(
+                    "battle menu did not open after intro: "
+                    f"counters={counters} state={state_snapshot()} "
+                    f"cpu={cpu_snapshot()} backend={backend_snapshot()}"
+                )
+            log(
+                "battle menu hook reached; settling ROM menu fields "
+                f"menu={menu_snapshot()} state={state_snapshot()} "
+                f"backend={backend_snapshot()}"
+            )
+            # The DisplayBattleMenu hook fires before it installs
+            # wMaxMenuItem/wMenuWatchedKeys. Wait for those ROM-owned fields
+            # on this side before announcing the cross-process boundary.
+            battle_menu_ready_deadline = min(deadline, time.monotonic() + 60.0)
+            while time.monotonic() < battle_menu_ready_deadline:
+                if (
+                    counters["DisplayBattleMenu.leftColumn_WaitForInput"][0] > 0
+                    or counters["DisplayBattleMenu.rightColumn_WaitForInput"][0] > 0
+                ) and menu_fields_ready(
+                    min_item=0,
+                    max_item=1,
+                    expected_max=1,
+                    required_keys=0x01,
+                ):
+                    break
+                session.step(2)
+            if not (
+                (
+                    counters["DisplayBattleMenu.leftColumn_WaitForInput"][0] > 0
+                    or counters["DisplayBattleMenu.rightColumn_WaitForInput"][0] > 0
+                )
+                and menu_fields_ready(
+                    min_item=0,
+                    max_item=1,
+                    expected_max=1,
+                    required_keys=0x01,
+                )
+            ):
+                raise RuntimeError(
+                    "battle menu fields did not become input-ready: "
+                    f"counters={counters} menu={menu_snapshot()} "
+                    f"state={state_snapshot()} cpu={cpu_snapshot()} "
+                    f"backend={backend_snapshot()}"
+                )
+            log(
+                "battle menu fields ready; entering sync "
+                f"menu={menu_snapshot()} state={state_snapshot()}"
+            )
+            # Both ROMs now own a live battle menu. Rendezvous before either
+            # side commits FIGHT so a subprocess cannot consume A while its
+            # peer is still finishing DisplayTextBoxID/menu setup.
+            cooperative_sync(sync_id=12, timeout=120.0)
+            # Match the in-process acceptance driver: after the rendezvous,
+            # give both ROMs a short input-free window to finish entering
+            # HandleMenuInput before sending the single ordinary A event.
+            session.step(4)
+            move_menu_to_item(
+                target=0,
+                min_item=0,
+                max_item=1,
+                label="battle command menu",
+            )
+            log(
+                "battle menu ready; selecting FIGHT through ordinary input "
+                f"state={state_snapshot()} cpu={cpu_snapshot()}"
+            )
+            move_menu_deadline = min(deadline, time.monotonic() + 120.0)
+            next_fight_input_tick = -1
+            fight_input_attempts = 0
+            while (
+                time.monotonic() < move_menu_deadline
+                and (
+                    counters["MoveSelectionMenu"][0] == 0
+                    or counters["MoveSelectionMenu.menuset"][0] == 0
+                    or not menu_fields_ready(min_item=1, max_item=4)
+                )
+            ):
+                # A peer can still be returning from the rendezvous while
+                # this ROM is waiting in HandleMenuInput.  If the first
+                # one-frame event was sampled before that wait became active,
+                # retry it at a bounded frame interval, but only while the
+                # ROM still describes the command menu.  This remains the
+                # public directional/A path and stops as soon as the ROM's
+                # move-menu hook proves that FIGHT was consumed.
+                if (
+                    menu_fields_ready(
+                        min_item=0,
+                        max_item=1,
+                        expected_max=1,
+                        required_keys=0x01,
+                    )
+                    and session.current_tick() >= next_fight_input_tick
+                ):
+                    session.press("a")
+                    fight_input_attempts += 1
+                    next_fight_input_tick = session.current_tick() + 8
+                session.step(2)
+            if (
+                counters["MoveSelectionMenu"][0] == 0
+                or counters["MoveSelectionMenu.menuset"][0] == 0
+                or not menu_fields_ready(min_item=1, max_item=4)
+            ):
+                raise RuntimeError(
+                    "move menu did not open after FIGHT: "
+                    f"counters={counters} menu={menu_snapshot()} "
+                    f"state={state_snapshot()} "
+                    f"cpu={cpu_snapshot()} backend={backend_snapshot()} "
+                    f"fight_input_attempts={fight_input_attempts}"
+                )
+            log(
+                "battle move menu fields ready; entering sync "
+                f"menu={menu_snapshot()} state={state_snapshot()}"
+            )
+            # The move menu is another ROM-owned input boundary. Match the
+            # peers before reading its cursor or sending the legal move.
+            cooperative_sync(sync_id=13, timeout=120.0)
+            session.step(4)
+            selected_move_id = choose_first_usable_battle_move()
+            # Give the ROM a bounded opportunity to consume the ordinary A
+            # input and leave MoveSelectionMenu. Without this handoff one
+            # subprocess can log the selection before its input is actually
+            # processed, while the other begins LinkBattleExchangeData.
+            log(
+                "battle move selected through ROM menu; native exchange begins "
+                f"move_id={selected_move_id} state={state_snapshot()} "
+                f"cpu={cpu_snapshot()}"
+            )
+
+            last_battle_log = time.monotonic()
             while time.monotonic() < deadline:
                 if counters["EndOfBattle"][0] > 0:
                     break
-                if counters["PlayerCalcMoveDamage"][0] > 0 and not damage_announced:
+                battle_turn_complete = (
+                    counters["LinkBattleExchangeData"][0] > 0
+                    and (
+                        counters["ExecutePlayerMove"][0]
+                        + counters["ExecuteEnemyMove"][0]
+                        > 0
+                    )
+                )
+                if battle_turn_complete and not battle_turn_announced:
                     link._network_backend.announce_sync(sync_id=14)
-                    damage_announced = True
-                    shot("05_battle_damage")
+                    battle_turn_announced = True
+                    shot("05_battle_turn")
                     log(
-                        "announced battle damage "
-                        f"dmg={counters['PlayerCalcMoveDamage'][0]} "
+                        "announced battle turn completion "
                         f"lbe={counters['LinkBattleExchangeData'][0]} "
+                        f"execute_player={counters['ExecutePlayerMove'][0]} "
+                        f"execute_enemy={counters['ExecuteEnemyMove'][0]} "
                         f"backend={backend_snapshot()}"
                     )
-                if damage_announced and link._network_backend.poll_peer_sync(sync_id=14):
-                    peer_damage_ready = True
+                if battle_turn_announced and link._network_backend.poll_peer_sync(sync_id=14):
+                    peer_battle_turn_ready = True
                     break
-                session.press("a", duration=4)
                 session.step(20)
-            if damage_announced:
+                if time.monotonic() - last_battle_log > 15.0:
+                    log(
+                        "battle progress: "
+                        f"counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} } "
+                        f"state={state_snapshot()} cpu={cpu_snapshot()} "
+                        f"backend={backend_snapshot()}"
+                    )
+                    last_battle_log = time.monotonic()
+            if battle_turn_announced:
                 try:
                     cooperative_sync(sync_id=15, timeout=120.0)
-                    log("sync: past battle damage barrier")
+                    log("sync: past battle turn barrier")
                     shot("06_battle_synced")
                 except Exception as exc:  # noqa: BLE001
                     drive_status = "error"
                     drive_error = f"{type(exc).__name__}: {exc}"
-                    log(f"battle damage sync raised {type(exc).__name__}: {exc}")
+                    log(f"battle turn sync raised {type(exc).__name__}: {exc}")
                 post_deadline = min(deadline, time.monotonic() + 10.0)
                 while time.monotonic() < post_deadline:
                     session.press("a", duration=4)
                     session.step(20)
-            if not peer_damage_ready:
+            if not peer_battle_turn_ready:
                 log(
-                    "peer battle damage not observed before deadline "
-                    f"dmg={counters['PlayerCalcMoveDamage'][0]} "
+                    "peer battle turn completion not observed before deadline "
+                    f"lbe={counters['LinkBattleExchangeData'][0]} "
+                    f"execute_player={counters['ExecutePlayerMove'][0]} "
+                    f"execute_enemy={counters['ExecuteEnemyMove'][0]} "
                     f"backend={backend_snapshot()}"
                 )
     except Exception as exc:  # noqa: BLE001
@@ -799,8 +1263,8 @@ def main() -> int:
                 "LinkBattleExchangeData",
             )
             goal_complete = (
-                damage_announced
-                and peer_damage_ready
+                battle_turn_announced
+                and peer_battle_turn_ready
                 and all(counters[name][0] > 0 for name in required_battle_hooks)
                 and (
                     counters["ExecutePlayerMove"][0]
