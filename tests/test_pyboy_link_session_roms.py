@@ -181,7 +181,7 @@ def _pyboy_mb_swappable() -> bool:
             return hasattr(p, "mb")
         finally:
             p.stop(save=False)
-    except Exception:
+    except Exception:  # noqa: BLE001 - an unavailable probe must skip safely
         return False
 
 
@@ -888,8 +888,8 @@ def _drive_complete_trade(
 
         now = {k: list(counters[k]) for k in (stats_key, trade_key, menu_key, tct_key)}
         for idx, sess in enumerate((a, b)):
-            def ticked(key):
-                return now[key][idx] > prev[key][idx]
+            def ticked(key, *, _now=now, _idx=idx, _prev=prev):
+                return _now[key][_idx] > _prev[key][_idx]
 
             if ticked(trade_key):
                 # Cursor is on TRADE — confirm.

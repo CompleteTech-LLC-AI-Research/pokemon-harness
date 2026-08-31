@@ -487,7 +487,9 @@ class Session:
 
     def reset_tick(self, value: int = 0) -> None:
         if not isinstance(value, int) or isinstance(value, bool):
-            raise ValueError(f"tick must be a non-negative integer, got {value!r}")
+            raise ValueError(  # noqa: TRY004 - preserve the public ValueError contract
+                f"tick must be a non-negative integer, got {value!r}"
+            )
         if value < 0:
             raise ValueError(f"tick must be non-negative, got {value}")
         with self._lock:
