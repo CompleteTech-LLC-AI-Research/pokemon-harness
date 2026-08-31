@@ -205,11 +205,13 @@ def test_network_attach_does_not_seed_game_role_status(is_internal_clock):
     """Native attach leaves ROM-owned serial role state untouched.
 
     ``hSerialConnectionStatus`` is populated by the ROM's serial interrupt
-    handler after the native handshake. It is not a hardware role register,
-    so the transport adapter must never prefill it for either network role.
+    handler after the native handshake. Native attach may configure the
+    serial registers for the requested wire role, but it must never prefill
+    this ROM-owned HRAM byte for either network role.
     """
     backend, peer = NetworkBackend.pair()
-    pyboy = _FakePyBoy(serial=SerialCore())
+    serial = SerialCore()
+    pyboy = _FakePyBoy(serial=serial)
     pyboy.memory = {0xFFAA: 0xFF}
     link = PyBoyLinkSession(
         network_backend=backend,
@@ -221,6 +223,41 @@ def test_network_attach_does_not_seed_game_role_status(is_internal_clock):
         link.attach(pyboy)
         assert pyboy.memory[0xFFAA] == 0xFF
         assert pyboy.mb.serial.backend is backend
+        assert serial.transfer_enabled == 1
+        assert serial.internal_clock == int(is_internal_clock)
+    finally:
+        link.detach_all()
+        peer.stop()
+
+
+@pytest.mark.parametrize(
+    ("is_internal_clock", "expected_sb", "expected_sc_source"),
+    [(True, 0x01, 1), (False, 0x02, 0)],
+)
+def test_network_attach_arms_native_role_handshake(
+    is_internal_clock, expected_sb, expected_sc_source
+):
+    """Configure FF01/FF02 without touching the ROM's role-status HRAM."""
+    backend, peer = NetworkBackend.pair()
+    serial = SerialCore()
+    serial.set_SB(0x02)
+    serial.set_SC(0x80)
+    pyboy = _FakePyBoy(serial=serial)
+    pyboy.memory = {0xFFAA: 0xFF}
+    link = PyBoyLinkSession(
+        network_backend=backend,
+        network_is_internal_clock=is_internal_clock,
+        local_rom_version="red",
+    )
+
+    try:
+        link.attach(pyboy)
+        assert serial.SB == expected_sb
+        assert serial.transfer_enabled == 1
+        assert serial.internal_clock == expected_sc_source
+        assert serial.SC & 0x80
+        assert serial.SC & 0x01 == expected_sc_source
+        assert pyboy.memory[0xFFAA] == 0xFF
     finally:
         link.detach_all()
         peer.stop()

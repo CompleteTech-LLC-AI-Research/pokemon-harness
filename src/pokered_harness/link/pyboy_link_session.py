@@ -65,7 +65,12 @@ from typing import Protocol, runtime_checkable
 
 from pokered_harness.link.network_backend import NetworkBackend
 from pokered_harness.link.serial_coordinator import LockstepCoordinator
-from pokered_harness.link.serial_core import NullBackend, SerialCore
+from pokered_harness.link.serial_core import (
+    SC_CLOCK_SOURCE,
+    SC_TRANSFER_ENABLE,
+    NullBackend,
+    SerialCore,
+)
 
 
 @runtime_checkable
@@ -95,6 +100,11 @@ class PyBoyLinkSession:
     # Keep an individual singlestepped chunk bounded even if a caller
     # supplies an unusually large ``chunk_cycles`` value.
     _MAX_SINGLE_STEP_TICKS: int = 4096
+    # These are the wire markers from pret/pokered's serial_constants.asm.
+    # They are written to the native FF01/FF02 serial registers through
+    # Serial.set_SB/set_SC, never to the ROM-owned hSerialConnectionStatus.
+    _ESTABLISH_CONNECTION_WITH_INTERNAL_CLOCK: int = 0x01
+    _ESTABLISH_CONNECTION_WITH_EXTERNAL_CLOCK: int = 0x02
 
     def __init__(
         self,
@@ -252,6 +262,7 @@ class PyBoyLinkSession:
             # native handshake byte in hSerialConnectionStatus. Do not write
             # that HRAM cell here; doing so would bypass the ROM protocol.
             core.backend = self._network_backend
+            self._initialize_network_clock_role(core)
             self._network_backend.start_receiver(
                 local_core=core,
                 irq_callback=self._make_serial_irq_raiser(pyboy),
@@ -368,6 +379,50 @@ class PyBoyLinkSession:
                 mb.breakpoint_singlestep = old_singlestep
 
         return _progress
+
+    def _initialize_network_clock_role(self, core: object) -> None:
+        """Arm the native serial handshake for the configured wire role.
+
+        A restored Cable Club fixture has both hardware serial ports waiting
+        as external-clock slaves (``SB=0x02``, ``SC=0xFC``). Real hardware
+        needs one endpoint to present the internal-clock establishment marker
+        on ``rSB`` and start ``rSC`` as the clock source; otherwise neither
+        endpoint can generate the first edge. This is register-level cable
+        setup, not a game-state shortcut: the ROM serial ISR still receives
+        the peer marker and writes ``hSerialConnectionStatus`` itself.
+
+        The method intentionally uses only the native PyBoy serial contract.
+        It does not inspect or mutate emulator memory and does not install
+        symbol-level hooks.
+        """
+        is_internal_clock = self._network_is_internal_clock
+        if is_internal_clock is None:
+            return
+        set_sb = getattr(core, "set_SB", None)
+        set_sc = getattr(core, "set_SC", None)
+        if not callable(set_sb) or not callable(set_sc):
+            raise RuntimeError(
+                "network role initialization requires native Serial.set_SB "
+                "and Serial.set_SC"
+            )
+
+        set_sb(
+            self._ESTABLISH_CONNECTION_WITH_INTERNAL_CLOCK
+            if is_internal_clock
+            else self._ESTABLISH_CONNECTION_WITH_EXTERNAL_CLOCK
+        )
+        # Preserve the CGB fast-serial selection bit if a caller restored a
+        # state with it set, while deterministically selecting the requested
+        # clock source and re-arming the native transfer.
+        try:
+            current_sc = int(getattr(core, "SC", 0))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError("native Serial.SC is not an integer") from exc
+        next_sc = current_sc & 0x02
+        next_sc |= SC_TRANSFER_ENABLE
+        if is_internal_clock:
+            next_sc |= SC_CLOCK_SOURCE
+        set_sc(next_sc)
 
     def detach(self, pyboy: _PyBoyLike) -> None:
         """Restore ``pyboy.mb.serial.backend`` and (if paired) tear

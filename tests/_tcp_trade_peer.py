@@ -296,7 +296,9 @@ def main() -> int:
     deadline_exceeded = False
     select_mon_announced = False
     link_menu_announced = False
+    link_menu_quiet_announced = False
     peer_link_menu_ready = False
+    peer_link_menu_quiet_ready = False
     damage_announced = False
     peer_damage_ready = False
     party_after_trade: dict[str, object] | None = None
@@ -358,6 +360,50 @@ def main() -> int:
         peer_link_menu_ready = False
         peer_link_menu_ready_grace = 0
         while time.monotonic() < deadline:
+            # LinkMenu is a terminal milestone for this child, but the ROM
+            # that reaches it first may still need a final serial IRQ/re-arm
+            # turn before the peer can reach its own LinkMenu. Keep ticking
+            # while waiting for the peer's marker, then use a second marker
+            # only after this native clock is idle. Both sides can
+            # therefore leave the test without closing an in-flight edge.
+            if args.goal == "link_menu" and link_menu_announced:
+                if not peer_link_menu_ready:
+                    peer_link_menu_ready = (
+                        link._network_backend.poll_peer_sync(sync_id=121)
+                    )
+                if peer_link_menu_ready:
+                    serial = getattr(
+                        getattr(session._pyboy, "mb", None), "serial", None
+                    )
+                    local_master_active = bool(
+                        getattr(serial, "transfer_enabled", False)
+                        and getattr(serial, "internal_clock", False)
+                    )
+                    if (
+                        not link_menu_quiet_announced
+                        and not local_master_active
+                    ):
+                        link._network_backend.announce_sync(sync_id=122)
+                        link_menu_quiet_announced = True
+                        log("phase 1 native serial quiet acknowledgement sent")
+                    if link_menu_quiet_announced and not peer_link_menu_quiet_ready:
+                        peer_link_menu_quiet_ready = (
+                            link._network_backend.poll_peer_sync(sync_id=122)
+                        )
+                if peer_link_menu_quiet_ready:
+                    log("phase 1 done: LinkMenu fired on both peers")
+                    break
+                if not link_menu_quiet_announced:
+                    session.step(4)
+                else:
+                    # After advertising native serial quiescence, do not
+                    # enter another emulator tick while the peer's quiet
+                    # marker is in flight. The peer is allowed to close
+                    # immediately after observing our marker; only the
+                    # network reader needs to remain alive to receive its
+                    # matching marker.
+                    time.sleep(0.001)
+                continue
             in_serial_phase = (
                 counters["SaveGameData"][0] > 0
                 or counters["Serial_SyncAndExchangeNybble"][0] > 0
@@ -374,13 +420,18 @@ def main() -> int:
                 serial_phase_ticks += 1
                 if counters["LinkMenu"][0] > 0:
                     if not link_menu_announced:
-                        link._network_backend.announce_sync(sync_id=121)
                         link_menu_announced = True
                         log("phase 1 local LinkMenu fired")
                         shot("01_link_menu")
-                    if link._network_backend.poll_peer_sync(sync_id=121):
+                        if args.goal == "link_menu":
+                            link._network_backend.announce_sync(sync_id=121)
+                            log("phase 1 LinkMenu readiness sent")
+                    if (
+                        args.goal != "link_menu"
+                        and link._network_backend.poll_peer_sync(sync_id=121)
+                    ):
                         peer_link_menu_ready = True
-                    if peer_link_menu_ready:
+                    if peer_link_menu_ready and args.goal != "link_menu":
                         peer_link_menu_ready_grace += 1
                         if peer_link_menu_ready_grace >= 20:
                             log("phase 1 done: LinkMenu fired on both peers")
@@ -388,13 +439,18 @@ def main() -> int:
             else:
                 if counters["LinkMenu"][0] > 0:
                     if not link_menu_announced:
-                        link._network_backend.announce_sync(sync_id=121)
                         link_menu_announced = True
                         log("phase 1 local LinkMenu fired")
                         shot("01_link_menu")
-                    if link._network_backend.poll_peer_sync(sync_id=121):
+                        if args.goal == "link_menu":
+                            link._network_backend.announce_sync(sync_id=121)
+                            log("phase 1 LinkMenu readiness sent")
+                    if (
+                        args.goal != "link_menu"
+                        and link._network_backend.poll_peer_sync(sync_id=121)
+                    ):
                         peer_link_menu_ready = True
-                    if peer_link_menu_ready:
+                    if peer_link_menu_ready and args.goal != "link_menu":
                         peer_link_menu_ready_grace += 1
                         if peer_link_menu_ready_grace >= 5:
                             log("phase 1 done: LinkMenu fired on both peers")
@@ -758,7 +814,12 @@ def main() -> int:
 
     if drive_status == "ok":
         if args.goal == "link_menu":
-            goal_complete = link_menu_announced and peer_link_menu_ready
+            goal_complete = (
+                link_menu_announced
+                and peer_link_menu_ready
+                and link_menu_quiet_announced
+                and peer_link_menu_quiet_ready
+            )
         elif args.goal == "trade":
             goal_complete = counters["_AddEnemyMonToPlayerParty"][0] > 0
         else:
