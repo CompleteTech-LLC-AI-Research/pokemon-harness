@@ -45,7 +45,7 @@ MAX_CYCLES: int = 1 << 31
 # is missing entirely, fall back to local stubs so imports still work
 # for non-integration unit tests.
 try:
-    from pyboy.utils import MAX_CYCLES as _PYBOY_MAX_CYCLES  # noqa: F401
+    from pyboy.utils import MAX_CYCLES as _PYBOY_MAX_CYCLES
     MAX_CYCLES = _PYBOY_MAX_CYCLES
 except ImportError:  # pragma: no cover - exercised only without PyBoy
     pass
@@ -131,11 +131,11 @@ if LocalBackend is None:
         """Two in-process backends bridged bit-at-a-time."""
 
         def __init__(self) -> None:
-            self._peer: "LocalBackend | None" = None
+            self._peer: LocalBackend | None = None
             self._inbox: int | None = None
 
         @classmethod
-        def pair(cls) -> tuple["LocalBackend", "LocalBackend"]:
+        def pair(cls) -> tuple[LocalBackend, LocalBackend]:
             a, b = cls(), cls()
             a._peer = b
             b._peer = a

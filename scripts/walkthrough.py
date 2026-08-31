@@ -296,9 +296,8 @@ def run_phase_pick_starter(drv: WalkthroughDriver) -> None:
     sym = drv.session.symbols
     mem = drv.session._pyboy.memory  # type: ignore[attr-defined]
     for _ in range(100):
-        if "wOaksLabCurScript" in sym:
-            if sym.read_u8(mem, "wOaksLabCurScript") >= 10:
-                return
+        if "wOaksLabCurScript" in sym and sym.read_u8(mem, "wOaksLabCurScript") >= 10:
+            return
         drv.press("a", note="post-starter dialog", step_ticks=30)
 
 

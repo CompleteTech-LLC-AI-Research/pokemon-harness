@@ -25,7 +25,6 @@ from pokered_harness.link.symbols import (
 from pokered_harness.symbols.loader import load_sym_file
 from tests._rom_assets import sym_path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # Worktrees live under .claude/worktrees/<name>/; the shared rom/ directory
 # lives at the true repo root. Walk up until we find it.

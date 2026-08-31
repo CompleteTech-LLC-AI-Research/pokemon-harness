@@ -31,12 +31,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pokered_harness.session import Session
-from pokered_harness.mcp_server import register_default_hooks
-
-import run_to_brock as rtb
 import full_to_brock as ftb
+import run_to_brock as rtb
 import trainer_sight_cones
+
+from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 
 
 def _sight_cone_blockers(map_name: str) -> str | None:
@@ -160,7 +160,7 @@ def _b2f_fossil_sprites_present(session: Session) -> bool:
     return True
 
 
-def _clear_b2f_fossils(drv: "rtb.Driver", session: Session, outdir: Path,
+def _clear_b2f_fossils(drv: rtb.Driver, session: Session, outdir: Path,
                        rom: str, sym: str, sha1: str) -> bool:
     """Pick up DOME_FOSSIL on B2F to unlock the path to (5, 7).
 
@@ -220,7 +220,7 @@ def _clear_b2f_fossils(drv: "rtb.Driver", session: Session, outdir: Path,
                       f"{after} via {d}", flush=True)
                 break
         else:
-            print(f"  b2f_fossils: could not step off arrival warp",
+            print("  b2f_fossils: could not step off arrival warp",
                   flush=True)
             return False
     b2f_warp_blockers = ";".join(f"{x},{y}" for x, y in warp_cells)
@@ -239,7 +239,7 @@ def _clear_b2f_fossils(drv: "rtb.Driver", session: Session, outdir: Path,
               f" at {cur_xy}); bailing so outer loop re-warps", flush=True)
         return False
     if cur_xy != (12, 7):
-        print(f"  b2f_fossils: not at (12,7); trying (13,7) as fallback",
+        print("  b2f_fossils: not at (12,7); trying (13,7) as fallback",
               flush=True)
         res = _step_by_step_walk(drv, session, outdir, "13,7",
                                   "b2f_to_fossil2",
@@ -250,7 +250,7 @@ def _clear_b2f_fossils(drv: "rtb.Driver", session: Session, outdir: Path,
                                   stop_map_ids=())
         cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
         if drv.gs().overworld.map_id != M_MT_MOON_B2F:
-            print(f"  b2f_fossils: left B2F on fallback; bailing",
+            print("  b2f_fossils: left B2F on fallback; bailing",
                   flush=True)
             return False
         if cur_xy not in {(12, 7), (13, 7)}:
@@ -857,7 +857,7 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             session.step(60, render=True)
             cur_map = drv.gs().overworld.map_id
             if cur_map == 0x00:
-                print(f"  map still 0x00 after settle; bailing",
+                print("  map still 0x00 after settle; bailing",
                       flush=True)
                 return False
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
@@ -988,7 +988,8 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
                 drv.mem[drv.sym.addr_of("wRepelRemainingSteps")] = 0
                 drv.mem[drv.sym.addr_of("wLastBlackoutMap")] = M_PEWTER_CITY
                 from pokered_harness.state.party import (
-                    _OFFSET_HP, _OFFSET_STATUS,
+                    _OFFSET_HP,
+                    _OFFSET_STATUS,
                 )
                 base = drv.sym.addr_of("wPartyMons")
                 mem[base + _OFFSET_HP + 0] = 0
@@ -1130,7 +1131,7 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         cur_map = drv.gs().overworld.map_id
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
             if blackout_cycles >= 15:
-                print(f"  mt_moon: too many blackouts; bailing",
+                print("  mt_moon: too many blackouts; bailing",
                       flush=True)
                 return False
             blackout_cycles += 1
@@ -1154,7 +1155,8 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                         mem = session._pyboy.memory  # type: ignore
                         drv.mem[drv.sym.addr_of("wLastBlackoutMap")] = M_PEWTER_CITY
                         from pokered_harness.state.party import (
-                            _OFFSET_HP, _OFFSET_STATUS,
+                            _OFFSET_HP,
+                            _OFFSET_STATUS,
                         )
                         base = drv.sym.addr_of("wPartyMons")
                         mem[base + _OFFSET_HP + 0] = 0

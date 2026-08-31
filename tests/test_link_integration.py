@@ -20,11 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from pokered_harness.link import LinkPair
 from pokered_harness.config import load_versions
+from pokered_harness.link import LinkPair
 from pokered_harness.session import Session
 from tests._rom_assets import fixture_path, rom_path, sym_path
-
 
 ROM_PATHS = {
     # Blue Cable-Club fixture was captured against the color-patched Blue

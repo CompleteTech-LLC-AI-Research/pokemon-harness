@@ -11,13 +11,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.network_backend import NetworkBackend
+from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
+from pokered_harness.link.serial_coordinator import CoordinatedBackend
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
     SerialCore,
 )
-from pokered_harness.link.serial_coordinator import CoordinatedBackend
 
 
 class _FakeMB:

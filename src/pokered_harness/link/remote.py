@@ -94,7 +94,7 @@ class RemoteLinkEndpoint:
 
     def __init__(
         self,
-        session: "Session",
+        session: Session,
         serial_link: SerialLink,
         *,
         is_internal_clock: bool,
@@ -108,16 +108,16 @@ class RemoteLinkEndpoint:
 
     @classmethod
     def as_listener(
-        cls, session: "Session", serial_link: SerialLink
-    ) -> "RemoteLinkEndpoint":
+        cls, session: Session, serial_link: SerialLink
+    ) -> RemoteLinkEndpoint:
         """The peer that called ``TcpSerialLink.listen`` — drives the
         clock (status = USING_INTERNAL_CLOCK 0x02)."""
         return cls(session, serial_link, is_internal_clock=True)
 
     @classmethod
     def as_connector(
-        cls, session: "Session", serial_link: SerialLink
-    ) -> "RemoteLinkEndpoint":
+        cls, session: Session, serial_link: SerialLink
+    ) -> RemoteLinkEndpoint:
         """The peer that called ``TcpSerialLink.connect`` — follows the
         clock (status = USING_EXTERNAL_CLOCK 0x01)."""
         return cls(session, serial_link, is_internal_clock=False)
@@ -125,7 +125,7 @@ class RemoteLinkEndpoint:
     # --- public surface -----------------------------------------------
 
     @property
-    def session(self) -> "Session":
+    def session(self) -> Session:
         return self._session
 
     @property

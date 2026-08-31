@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from io import BytesIO
-from typing import BinaryIO, Callable
-
+from collections.abc import Callable
+from typing import BinaryIO
 
 HookKey = tuple[int, int]
 

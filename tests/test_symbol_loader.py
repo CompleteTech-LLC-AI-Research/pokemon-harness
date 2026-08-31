@@ -15,7 +15,6 @@ from pokered_harness.symbols.loader import (
     load_sym_text,
 )
 
-
 SYNTHETIC_SYM = """\
 ; RGBDS symbol file (synthetic, for tests)
 00:D35E wCurMap
@@ -67,7 +66,7 @@ def test_skips_comments_and_blank_lines():
         00:D361 wYCoord
         """
     )
-    assert set(s.name for s in t) == {"wCurMap", "wYCoord"}
+    assert {s.name for s in t} == {"wCurMap", "wYCoord"}
 
 
 def test_trailing_inline_comment_is_stripped():

@@ -171,11 +171,16 @@ proves only the ROM-free and timing tiers; it is not a production sign-off.
 The default gate checks five pinned ROM paths, three symbol paths, and three
 default fixture paths before running all required tiers.
 
-The current candidate has not passed a repository-wide Ruff audit: the locked
-`ruff check .` reports 528 findings, including legacy and vendored-runtime
-code. Treat lint cleanup as a remaining release task even when the scoped
-production gate is green. The current full-gate counts below must not be read
-as evidence that the broad suite or lint gate is clean.
+The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
+explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
+default `ruff check .` audit. At the Lane G audit boundary (`47195bd`), the
+default product audit reports 101 findings after safe mechanical cleanup. An
+explicit `ruff check vendor/pyboy-src` still reports 227 upstream findings;
+the vendored runtime is instead covered by revision pinning, compileall, and
+import/serial-contract tests. Product lint cleanup remains a release task even
+when the scoped production gate is green. The current full-gate counts below
+must not be read as evidence that the broad suite or product lint gate is
+clean.
 
 The release tree includes `tests/__init__.py`; otherwise environments that do
 not treat `tests/` as a namespace package can fail collection. Run both
@@ -442,8 +447,9 @@ are:
    retained as a release evidence bundle. Current per-tier runs use
    `--evidence-dir` and retain sanitized bundles outside the checkout; a single
    complete release bundle still needs to be assembled from one full run.
-3. The locked `ruff check .` reports 528 findings, and the broad suite is not a clean
-   production gate.
+3. The Lane G product lint audit leaves 101 findings under the locked default
+   `ruff check .` boundary; an explicit vendored-runtime audit reports 227
+   findings, and the broad suite is not a clean production gate.
 4. The five-row single-session matrix, reversed listener/connector roles,
    native-platform builds, battle-fixture provenance, and an independent review
    remain incomplete.

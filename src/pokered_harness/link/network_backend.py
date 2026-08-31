@@ -48,8 +48,8 @@ same socket.
 
 from __future__ import annotations
 
-import ipaddress
 import errno
+import ipaddress
 import math
 import queue
 import select
@@ -57,8 +57,8 @@ import socket
 import struct
 import threading
 import time
-from typing import Any, Callable, Optional
-
+from collections.abc import Callable
+from typing import Any
 
 # Opcodes:
 #   EDGE_REQ  = master → slave: "here's my outgoing bit"
@@ -306,10 +306,10 @@ class NetworkBackend:
         self._peer_rom_version: str | None = None
         self._hello_received = threading.Event()
         # Slave-mode config — set by start_receiver.
-        self._local_core: Optional[object] = None
-        self._irq_callback: Optional[Callable[[], None]] = None
-        self._reader: Optional[threading.Thread] = None
-        self._edge_worker: Optional[threading.Thread] = None
+        self._local_core: object | None = None
+        self._irq_callback: Callable[[], None] | None = None
+        self._reader: threading.Thread | None = None
+        self._edge_worker: threading.Thread | None = None
         # Keep-alive "fake slave" bit index. When our local core is
         # idle but the peer is still master-clocking (common during
         # trade/battle sequences where one side's CPU finishes a phase
@@ -364,7 +364,7 @@ class NetworkBackend:
         local_rom_version: str | None = None,
         accept_timeout_s: float | None = None,
         cancel_event: threading.Event | None = None,
-    ) -> tuple["NetworkBackend", socket.socket]:
+    ) -> tuple[NetworkBackend, socket.socket]:
         """Bind to ``(host, port)`` and wait until a peer connects.
 
         Returns ``(backend, listener_sock)``; the caller keeps the
@@ -414,7 +414,7 @@ class NetworkBackend:
                     listener.settimeout(wait_s)
                     try:
                         conn, _ = listener.accept()
-                    except socket.timeout:
+                    except TimeoutError:
                         continue
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             backend = cls(conn, local_rom_version=local_rom_version)
@@ -440,7 +440,7 @@ class NetworkBackend:
         timeout_s: float = 10.0,
         local_rom_version: str | None = None,
         cancel_event: threading.Event | None = None,
-    ) -> "NetworkBackend":
+    ) -> NetworkBackend:
         """Open an outbound connection to a ``listen``-ing peer."""
         normalized_host = validate_loopback_host(host)
         sock = _connect_socket(normalized_host, port, timeout_s, cancel_event)
@@ -449,7 +449,7 @@ class NetworkBackend:
         return cls(sock, local_rom_version=local_rom_version)
 
     @classmethod
-    def pair(cls) -> tuple["NetworkBackend", "NetworkBackend"]:
+    def pair(cls) -> tuple[NetworkBackend, NetworkBackend]:
         """Build a :func:`socket.socketpair` pair of backends — useful
         for in-process testing without real TCP."""
         a, b = socket.socketpair()
@@ -503,7 +503,7 @@ class NetworkBackend:
     def start_receiver(
         self,
         local_core: object,
-        irq_callback: Optional[Callable[[], None]] = None,
+        irq_callback: Callable[[], None] | None = None,
     ) -> None:
         """Start the reader thread.
 

@@ -50,7 +50,6 @@ from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_core import SerialCore
 from tests._rom_assets import fixture_path, rom_path, sym_path
 
-
 _REPO = Path(__file__).resolve().parents[1]
 for _parent in [_REPO, *_REPO.parents]:
     if (_parent / "rom").is_dir():
@@ -121,8 +120,8 @@ def _open_session_variant(version: str, rom_path, tag: str):
     variant-specific cable_club fixture. Used by the variant tests to
     exercise vanilla and color ROMs with their matching fixtures."""
     sys.path.insert(0, str(_REPO / "src"))
-    from pokered_harness.session import Session  # noqa: E402
-    from pokered_harness.config import load_versions  # noqa: E402
+    from pokered_harness.config import load_versions
+    from pokered_harness.session import Session
 
     _, sym = _ROM_PATHS[version]
     pins = load_versions(_REPO / "VERSIONS.md")
@@ -217,7 +216,7 @@ class _CountingBackend:
 
     def __init__(self, wrapped) -> None:
         self.wrapped = wrapped
-        self.peer_counter: "_CountingBackend | None" = None
+        self.peer_counter: _CountingBackend | None = None
         self.master_edges = 0
         self.slave_edges = 0
         self.bytes_sent_complete = 0
@@ -251,8 +250,8 @@ def _open_session(version: str, *, state_path=None):
     main-env pytest where the skipif above fires early).
     """
     sys.path.insert(0, str(_REPO / "src"))
-    from pokered_harness.session import Session  # noqa: E402
-    from pokered_harness.config import load_versions  # noqa: E402
+    from pokered_harness.config import load_versions
+    from pokered_harness.session import Session
 
     rom, sym = _ROM_PATHS[version]
     pins = load_versions("VERSIONS.md")
@@ -1405,13 +1404,12 @@ def _drive_complete_battle_turn(
         and battle_menu[0] > 0
         and battle_menu[1] > 0
     )
-    if menu_ready:
+    if menu_ready and tick_bounded(min(step_frames, 4)):
         # Let both ROMs finish drawing/entering HandleMenuInput, then select
         # FIGHT exactly once on each real battle menu.
-        if tick_bounded(min(step_frames, 4)):
-            a.press("a")
-            b.press("a")
-            wait_interleaved(lambda: mm[0] > 0 and mm[1] > 0)
+        a.press("a")
+        b.press("a")
+        wait_interleaved(lambda: mm[0] > 0 and mm[1] > 0)
 
     move_menu_ready = mm[0] > 0 and mm[1] > 0
     if move_menu_ready:

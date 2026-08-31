@@ -76,3 +76,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# PyBoy is a pinned third-party source fork. Keep product lint scoped to
+# src/, tests/, and scripts/; audit the vendored runtime separately with
+# explicit Ruff/compile/import checks rather than mass-rewriting upstream code.
+extend-exclude = ["vendor/pyboy-src"]

@@ -43,7 +43,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-
 _REPO = Path(__file__).resolve().parents[1]
 
 # TRADE_CENTER map id (verified via passing trade-matrix test;
@@ -189,7 +188,7 @@ def _win32_grab_window(hwnd: int, out_path: Path) -> bool:
     if sys.platform != "win32":
         return False
     import ctypes
-    from ctypes import wintypes
+
     from PIL import Image
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -437,7 +436,7 @@ def _make_side_by_side(left_path: Path, right_path: Path, out_path: Path) -> boo
     # Scale right to match left's height using nearest-neighbor (preserve pixel art look).
     target_h = left.height
     scale = target_h / right.height
-    target_w = int(round(right.width * scale))
+    target_w = round(right.width * scale)
     right = right.resize((target_w, target_h), Image.Resampling.NEAREST)
     out = Image.new("RGB", (left.width + right.width, target_h), (30, 30, 30))
     out.paste(left, (0, 0))
@@ -503,8 +502,9 @@ def _open_session(version: str, view: bool = False, window_pos: tuple[int, int] 
     """
     os.environ.setdefault("POKERED_SKIP_SHA1", "1")
     sys.path.insert(0, str(_REPO / "src"))
-    from pokered_harness.session import Session  # noqa: E402
-    from pyboy import PyBoy  # noqa: E402
+    from pyboy import PyBoy
+
+    from pokered_harness.session import Session
 
     rom, sym = _ROM_PATHS[version]
 
@@ -1060,7 +1060,7 @@ def main() -> int:
 
     # Ensure harness on sys.path before we import pokered_harness here.
     sys.path.insert(0, str(_REPO / "src"))
-    from pokered_harness.link.pyboy_link_session import PyBoyLinkSession  # noqa
+    from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 
     t_all_start = time.perf_counter()
 
@@ -1147,7 +1147,7 @@ def main() -> int:
             timeline_dir.mkdir(parents=True, exist_ok=True)
             state = {"counter": 0, "shots": 0}
             every = args.sample_every
-            def sampler(phase_tag: str):  # noqa: E306 — local closure
+            def sampler(phase_tag: str):
                 state["counter"] += 1
                 if state["counter"] % every != 0:
                     return

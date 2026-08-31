@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 from pokered_harness.link.agent_sync import AgentSync
+from pokered_harness.link.network_backend import (
+    NetworkBackend,
+    NetworkBackendError,
+    validate_loopback_host,
+)
 from pokered_harness.link.pair import LinkPair
+from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.remote import (
     STATUS_EXTERNAL,
     STATUS_INTERNAL,
     RemoteLinkEndpoint,
 )
 from pokered_harness.link.serial_bridge import BridgeEndpoint, SerialBridge
-from pokered_harness.link.network_backend import (
-    NetworkBackend,
-    NetworkBackendError,
-    validate_loopback_host,
-)
-from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_coordinator import (
     CoordinatedBackend,
     LockstepCoordinator,

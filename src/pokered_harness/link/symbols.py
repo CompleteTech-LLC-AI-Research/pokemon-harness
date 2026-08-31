@@ -152,7 +152,7 @@ LINK_SYMBOLS: tuple[LinkSymbol, ...] = (
 
 
 def resolve_link_symbols(
-    symbols: "SymbolTable", version: str
+    symbols: SymbolTable, version: str
 ) -> dict[str, tuple[int, int]]:
     """Resolve each :data:`LINK_SYMBOLS` entry's label for ``version``.
 

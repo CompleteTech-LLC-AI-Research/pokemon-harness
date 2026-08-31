@@ -7,16 +7,16 @@ fade-out state machine that tends to stall in save states."""
 
 from __future__ import annotations
 
-import sys
 import argparse
 import os
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pokered_harness.session import Session
 import run_to_brock as rtb
 
+from pokered_harness.session import Session
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ROM = REPO_ROOT / "rom/yellow/pokemon-yellow.gbc"

@@ -27,8 +27,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pokered_harness.session import Session
+import brock_gym as bg
+import full_to_brock as ftb
+import grind
+import run_to_brock as rtb
+
 from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 from pokered_harness.state.party import (
     _OFFSET_HP,
     _OFFSET_LEVEL,
@@ -36,12 +41,6 @@ from pokered_harness.state.party import (
     _OFFSET_MOVES,
     _OFFSET_PP,
 )
-
-import run_to_brock as rtb
-import full_to_brock as ftb
-import brock_gym as bg
-import grind
-
 
 # --- Yellow-specific map constants (identical to pokered — Kanto maps
 # share IDs across all Gen 1 mainline titles).
@@ -561,7 +560,8 @@ def run_route2_grind(session: Session, outdir: Path,
         # still get one-shot.
         try:
             from pokered_harness.state.party import (
-                _OFFSET_MOVES, _OFFSET_PP,
+                _OFFSET_MOVES,
+                _OFFSET_PP,
             )
             mem = session._pyboy.memory  # type: ignore[attr-defined]
             base = session.symbols.addr_of("wPartyMons")

@@ -39,14 +39,14 @@ import os
 import sys
 from pathlib import Path
 
-from pokered_harness.session import Session
 from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 
 # Reuse Driver (battle resolver, press/idle helpers) from run_to_brock.
 # That module also defines the map constants and the base move IDs, but
 # we re-export a preference-aware battle helper below.
 sys.path.insert(0, str(Path(__file__).parent))
-import run_to_brock as rtb  # noqa: E402
+import run_to_brock as rtb
 
 M_PEWTER = rtb.M_PEWTER
 M_PEWTER_GYM = rtb.M_PEWTER_GYM
@@ -103,7 +103,7 @@ class BrockDriver(rtb.Driver):
     RUN anyway.
     """
 
-    def battle_turn(self) -> None:  # noqa: C901 — mirrors parent shape
+    def battle_turn(self) -> None:
         try:
             from grind import _battle_turn as grind_battle_turn
         except ImportError:

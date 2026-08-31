@@ -20,7 +20,6 @@ from tests._link_orchestrator import LockstepOrchestrator
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
 
-
 _BLUE_SYM = """\
 00:22fa Serial_TryEstablishingExternallyClockedConnection
 00:216f Serial_ExchangeBytes
@@ -112,7 +111,7 @@ def test_orchestrator_press_a_and_press_b_independently():
 
 def test_orchestrator_surfaces_worker_exception():
     sa, pa = _make_session()
-    sb, pb = _make_session()
+    sb, _pb = _make_session()
     la, lb = InProcessSerialLink.pair("blue", "blue")
     ea = RemoteLinkEndpoint.as_listener(sa, la)
     eb = RemoteLinkEndpoint.as_connector(sb, lb)

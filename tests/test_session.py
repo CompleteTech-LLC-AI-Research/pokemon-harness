@@ -7,9 +7,9 @@ import pytest
 from pokered_harness.events import EventBus
 from pokered_harness.input import Button
 from pokered_harness.session import (
+    Session,
     SessionClosedError,
     SessionConfigurationError,
-    Session,
     VersionMismatch,
     _default_pyboy_factory,
     sha1_of_file,
@@ -17,7 +17,6 @@ from pokered_harness.session import (
 from pokered_harness.symbols.loader import load_sym_text
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
-
 
 # -- small helpers ---------------------------------------------------------
 

@@ -17,12 +17,12 @@ Typical wiring at session startup::
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Callable, Deque, Iterator
+from typing import Any
 
 from pokered_harness.pyboy_protocol import PyBoyLike
 from pokered_harness.symbols.loader import SymbolTable
-
 
 TickSource = Callable[[], int]
 DEFAULT_EVENT_LOG_CAPACITY = 4096
@@ -48,7 +48,7 @@ class EventBus:
     def __init__(self, capacity: int = DEFAULT_EVENT_LOG_CAPACITY) -> None:
         if capacity <= 0:
             raise ValueError(f"capacity must be positive, got {capacity}")
-        self._log: Deque[GameEvent] = deque(maxlen=capacity)
+        self._log: deque[GameEvent] = deque(maxlen=capacity)
         self._counts: dict[str, int] = {}
         self._latest: dict[str, GameEvent] = {}
         self._registered_symbols: set[str] = set()

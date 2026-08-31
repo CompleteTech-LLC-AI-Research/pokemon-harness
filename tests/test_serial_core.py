@@ -15,12 +15,11 @@ import pytest
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
     CYCLES_PER_EDGE_DMG,
-    LocalBackend,
     MAX_CYCLES,
+    LocalBackend,
     NullBackend,
     SerialCore,
 )
-
 
 # ---------------------------------------------------------------------------
 # Defaults & arming behavior

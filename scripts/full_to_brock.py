@@ -16,21 +16,21 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import subprocess
+import sys
 from pathlib import Path
 
 # Local imports require scripts/ on sys.path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pokered_harness.session import Session
-from pokered_harness.mcp_server import register_default_hooks
-
-import walkthrough as wt
-import run_to_brock as rtb
-import level_up as lu
 import brock_gym as bg
 import grind
+import level_up as lu
+import run_to_brock as rtb
+import walkthrough as wt
+
+from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 
 
 def run_pathfinder(state_path: Path, goal: str, out_path: Path,
@@ -167,8 +167,11 @@ def _option_b_topup(session) -> None:
     blue_forest_to_brock.py for full-override use; this is the
     minimum-viable graft."""
     from pokered_harness.state.party import (
-        _OFFSET_LEVEL, _OFFSET_HP, _OFFSET_MAX_HP,
-        _OFFSET_MOVES, _OFFSET_PP,
+        _OFFSET_HP,
+        _OFFSET_LEVEL,
+        _OFFSET_MAX_HP,
+        _OFFSET_MOVES,
+        _OFFSET_PP,
     )
     mem = session._pyboy.memory  # type: ignore[attr-defined]
     base = session.symbols.addr_of("wPartyMons")
@@ -252,7 +255,7 @@ def _pathfind_and_walk(drv, session, outdir, goal_xy: str, label: str,
     walk_path(drv, path, label=label, stop_map_ids=stop_map_ids)
 
 
-def navigate_to_viridian_with_retry(drv: "rtb.Driver", outdir: Path,
+def navigate_to_viridian_with_retry(drv: rtb.Driver, outdir: Path,
                                     rom: str, sym: str, sha1: str,
                                     session: Session,
                                     max_attempts: int = 20) -> bool:
@@ -461,8 +464,8 @@ def main() -> int:
                           or result.final_level < 13)
         if need_topup:
             if not args.skip_grind:
-                print(f"  [grind] applying Option-B top-up to "
-                      f"L13 + Vine Whip", flush=True)
+                print("  [grind] applying Option-B top-up to "
+                      "L13 + Vine Whip", flush=True)
             # Make sure we're out of any lingering battle before RAM-
             # poking the party struct. If the grinder bailed with
             # heal_failed the engine can still be sitting on a
@@ -681,7 +684,7 @@ def main() -> int:
     save_milestone(session, outdir, "after_brock")
 
     gs = session.read_game_state()
-    print(f"\n=== FINAL ===", flush=True)
+    print("\n=== FINAL ===", flush=True)
     print(f"map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
           f"badges=0x{gs.progress.badges_raw:02x} "
           f"party[0]=L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",

@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Optional
 
 from pokered_harness.link.remote import RemoteLinkEndpoint
 from pokered_harness.session import Session
@@ -60,9 +59,9 @@ class _Worker:
         self._go = threading.Event()
         self._done = threading.Event()
         self._stop = threading.Event()
-        self._pending_press: Optional[_PendingPress] = None
+        self._pending_press: _PendingPress | None = None
         self._chunk_frames: int = 1
-        self.exc: Optional[BaseException] = None
+        self.exc: BaseException | None = None
         self._thread = threading.Thread(
             target=self._run, name=f"lockstep-{name}", daemon=True
         )
@@ -234,7 +233,7 @@ def _pos(session: Session) -> tuple[int, int]:
 
 
 def walk_a_toward(
-    ork: "LockstepOrchestrator",
+    ork: LockstepOrchestrator,
     target_xy: tuple[int, int],
     *,
     max_tiles: int = 20,
@@ -251,7 +250,7 @@ def walk_a_toward(
 
 
 def walk_b_toward(
-    ork: "LockstepOrchestrator",
+    ork: LockstepOrchestrator,
     target_xy: tuple[int, int],
     *,
     max_tiles: int = 20,
@@ -265,7 +264,7 @@ def walk_b_toward(
 
 def _walk_toward(
     *,
-    ork: "LockstepOrchestrator",
+    ork: LockstepOrchestrator,
     target_xy: tuple[int, int],
     side: str,
     max_tiles: int,

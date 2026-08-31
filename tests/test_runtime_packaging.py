@@ -55,6 +55,13 @@ def test_project_bundles_the_pinned_pyboy_source() -> None:
     assert marker == EXPECTED_PYBOY_REVISION
 
 
+def test_product_lint_boundary_excludes_pinned_vendored_runtime() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    ruff = project["tool"]["ruff"]
+
+    assert "vendor/pyboy-src" in ruff["extend-exclude"]
+
+
 def test_project_direct_dependencies_are_exactly_pinned() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = dict(_split_exact_requirement(req) for req in project["project"]["dependencies"])

@@ -15,7 +15,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-
 SUPPORTED_ROM_VERSIONS: frozenset[str] = frozenset({"red", "blue", "yellow"})
 
 

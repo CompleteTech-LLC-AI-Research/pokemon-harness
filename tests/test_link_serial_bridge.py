@@ -16,7 +16,6 @@ from pokered_harness.symbols.loader import load_sym_text
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
 
-
 # Realistic-shape HRAM + link-symbol table. Addresses and banks are chosen to
 # be plausible (HRAM lives at 0xFFxx) but the tests only care about labels
 # resolving and the bridge writing the right bytes to the right cells.

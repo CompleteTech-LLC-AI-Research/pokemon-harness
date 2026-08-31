@@ -66,7 +66,7 @@ class AgentSync:
     the same label pair up in order.
     """
 
-    def __init__(self, link: "SerialLink") -> None:
+    def __init__(self, link: SerialLink) -> None:
         self._link = link
 
     def rendezvous(

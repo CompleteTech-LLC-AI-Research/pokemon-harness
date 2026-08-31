@@ -133,7 +133,7 @@ class PyBoyLinkSession:
     # --- construction --------------------------------------------------
 
     @classmethod
-    def local(cls, *, view: bool = False) -> "PyBoyLinkSession":
+    def local(cls, *, view: bool = False) -> PyBoyLinkSession:
         """Create a local two-instance session.
 
         Both PyBoys attach into the same process; they're paired via
@@ -148,7 +148,7 @@ class PyBoyLinkSession:
         *,
         host: str = "127.0.0.1",
         local_rom_version: str | None = None,
-    ) -> "PyBoyLinkSession":
+    ) -> PyBoyLinkSession:
         """Bind ``(host, port)``, accept one peer, return the session.
 
         Single-instance mode: the session holds a :class:`NetworkBackend`;
@@ -180,7 +180,7 @@ class PyBoyLinkSession:
         *,
         timeout_s: float = 10.0,
         local_rom_version: str | None = None,
-    ) -> "PyBoyLinkSession":
+    ) -> PyBoyLinkSession:
         """Connect to a peer running :meth:`listen` on ``(host, port)``.
 
         Returns a single-instance network-mode session; call

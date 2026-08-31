@@ -31,7 +31,6 @@ from pathlib import Path
 
 from pokered_harness.session import Session
 
-
 # wOverworldMap holds BLOCK ids with a 3-block border of the map's
 # background tile. Each block expands to a 4x4 block of tile ids via the
 # tileset's blockset (16 bytes per block).
@@ -338,7 +337,7 @@ def astar(
     best_g: dict[tuple[int, int], int] = {(sx, sy): 0}
 
     while pq:
-        f, g, x, y = heapq.heappop(pq)
+        _f, g, x, y = heapq.heappop(pq)
         if (x, y) == (gx, gy):
             # Reconstruct direction string.
             path_chars: list[str] = []
@@ -570,15 +569,14 @@ def main() -> int:
     print(f"walkable step cells: {walkable}/{total}", flush=True)
 
     # Sanity: the player's own step cell should be walkable.
-    if 0 <= px < w_steps and 0 <= py < h_steps:
-        if not passable_grid[py][px]:
-            tile_at_player = tile_grid[py * 2 + 1][px * 2]
-            print(
-                f"WARNING: player step cell ({px},{py}) feet tile "
-                f"0x{tile_at_player:02x} not in passable list; forcing walkable",
-                flush=True,
-            )
-            passable_grid[py][px] = True
+    if 0 <= px < w_steps and 0 <= py < h_steps and not passable_grid[py][px]:
+        tile_at_player = tile_grid[py * 2 + 1][px * 2]
+        print(
+            f"WARNING: player step cell ({px},{py}) feet tile "
+            f"0x{tile_at_player:02x} not in passable list; forcing walkable",
+            flush=True,
+        )
+        passable_grid[py][px] = True
 
     if args.dump_grid:
         for y in range(h_steps):
@@ -598,15 +596,14 @@ def main() -> int:
     # reachable. Force the goal cell walkable so A* will route onto it;
     # the game scripts handle the warp trigger.
     gx, gy = goal
-    if 0 <= gx < w_steps and 0 <= gy < h_steps:
-        if not passable_grid[gy][gx]:
-            t_id = tile_grid[gy * 2 + 1][gx * 2]
-            print(
-                f"note: goal step cell ({gx},{gy}) feet tile 0x{t_id:02x} "
-                f"not in passable list; forcing walkable (warps are common)",
-                flush=True,
-            )
-            passable_grid[gy][gx] = True
+    if 0 <= gx < w_steps and 0 <= gy < h_steps and not passable_grid[gy][gx]:
+        t_id = tile_grid[gy * 2 + 1][gx * 2]
+        print(
+            f"note: goal step cell ({gx},{gy}) feet tile 0x{t_id:02x} "
+            f"not in passable list; forcing walkable (warps are common)",
+            flush=True,
+        )
+        passable_grid[gy][gx] = True
 
     pair_collisions = _PAIR_COLLISIONS.get(tileset_id)
     if pair_collisions:

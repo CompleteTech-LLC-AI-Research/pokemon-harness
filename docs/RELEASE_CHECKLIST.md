@@ -107,9 +107,10 @@ script, and the results were reproduced from the isolated clean checkout.
 
 - [x] Both `python -m pytest --collect-only -q` and the
   `pytest` console-script collection path complete without collection errors.
-- [ ] Repository-wide Ruff audit is clean (`ruff check .` currently reports
-  528 findings under the locked Ruff version, including vendored-runtime and
-  legacy code).
+- [ ] Product-owned Ruff audit is clean (`ruff check .` leaves 101 findings
+  under the locked Ruff version at the Lane G audit boundary; the pinned
+  vendored runtime is explicitly audited separately and currently reports 227
+  findings).
 - [ ] The broad suite completes with no unexpected failure, skip, xfail, or
   timeout: `python -m pytest -q -ra`.
 - [x] ROM-free unit/protocol/transport tests pass.

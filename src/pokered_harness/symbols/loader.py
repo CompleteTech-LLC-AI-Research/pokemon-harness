@@ -16,9 +16,10 @@ lines and the exact set of those lines varies across toolchain versions.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Protocol
+from typing import Protocol
 
 
 @dataclass(frozen=True, slots=True)

@@ -23,7 +23,6 @@ from pokered_harness.symbols.loader import load_sym_text
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
 
-
 # --- symbol tables --------------------------------------------------------
 #
 # Two sessions with DIFFERENT addresses for the same symbols — proves
@@ -243,7 +242,7 @@ def test_exchange_bytes_cross_version_translates_via_symbol():
 
 
 def test_serial_tick_clears_sc_start_and_raises_if():
-    session, pb, mem = _make_session(_BLUE_SYM)
+    session, _pb, mem = _make_session(_BLUE_SYM)
     la, _lb = InProcessSerialLink.pair("blue", "blue")
     endpoint = RemoteLinkEndpoint.as_connector(session, la)
     endpoint.install()
@@ -255,7 +254,7 @@ def test_serial_tick_clears_sc_start_and_raises_if():
 
 
 def test_serial_tick_noop_when_sc_start_clear():
-    session, pb, mem = _make_session(_BLUE_SYM)
+    session, _pb, mem = _make_session(_BLUE_SYM)
     la, _lb = InProcessSerialLink.pair("blue", "blue")
     endpoint = RemoteLinkEndpoint.as_connector(session, la)
     endpoint.install()

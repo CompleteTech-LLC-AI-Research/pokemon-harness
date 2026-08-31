@@ -11,7 +11,6 @@ from pokered_harness.config import (
     load_versions,
 )
 
-
 _VALID = """\
 # Pinned versions
 

@@ -12,11 +12,12 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, Iterable, Iterator
+from typing import Self
 
 from pokered_harness.events.hooks import EventBus, GameEvent
 from pokered_harness.input import Button, validate_button
@@ -118,7 +119,7 @@ class Session:
         expected_pyboy_revision: str | None = None,
         pyboy_factory: Callable[[str], PyBoyLike] | None = None,
         view: bool = False,
-    ) -> "Session":
+    ) -> Session:
         rom_path = Path(rom_path)
         sym_path = Path(sym_path)
 
@@ -202,7 +203,7 @@ class Session:
             # the ROM path — it's responsible for its own window/cgb config.
             try:
                 pyboy = pyboy_factory(str(rom_path))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # Wrap factory errors at the session boundary.
                 raise SessionConfigurationError(
                     f"unable to create emulator for {rom_path}: {exc}"
                 ) from exc
@@ -214,7 +215,7 @@ class Session:
                 pyboy = _default_pyboy_factory(
                     str(rom_path), window=window, cgb=True
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # Wrap factory errors at the session boundary.
                 raise SessionConfigurationError(
                     f"unable to create emulator for {rom_path}: {exc}"
                 ) from exc
@@ -240,7 +241,7 @@ class Session:
         return self._closed
 
     @contextmanager
-    def locked(self) -> Iterator["Session"]:
+    def locked(self) -> Iterator[Session]:
         """Serialize a compound operation that touches this emulator.
 
         Individual session methods already take this same re-entrant lock.
@@ -251,7 +252,7 @@ class Session:
             self._ensure_open()
             yield self
 
-    def __enter__(self) -> "Session":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc) -> None:

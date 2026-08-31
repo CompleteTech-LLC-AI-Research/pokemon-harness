@@ -34,7 +34,7 @@ are recorded in [`VERSIONS.md`](VERSIONS.md). The exact-head unit gate passes
 444/444 and the timing tier passes 35/35 across five repetitions. Full release
 sign-off remains
 `PARTIAL`: per-tier evidence bundles are retained outside the checkout, but
-the broad lint/matrix gates, remote no-bypass battle path, load-stable remote
+the product lint/matrix gates, remote no-bypass battle path, load-stable remote
 trade, reversed roles, fixture provenance, and independent review remain open.
 
 The historical local diagnostic matrix reached LinkMenu and completed the trade
@@ -53,8 +53,9 @@ Current exact-head evidence and blockers are explicit:
 - unit 444/444 and timing 35/35 across five repetitions pass at `db86a34`;
   source-equivalent stateful evidence is local 46/46, remote 11/11, and trade
   2/2 at `23ea392`, while a concurrent trade later took 480.5s;
-- the repository-wide Ruff audit reports 528 findings under the locked Ruff
-  version, and the broad suite has
+- the Lane G audit at `47195bd` reduces the default product Ruff surface to
+  101 findings under locked Ruff; the explicit vendored-runtime audit remains
+  227 findings, and the broad suite has
   not become a clean production gate;
 - the no-hook remote battle attempt timed out after 902.36s before both peers
   reached the battle path; the existing controlled diagnostic still uses a

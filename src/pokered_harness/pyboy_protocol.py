@@ -10,10 +10,10 @@ without any declared inheritance.
 
 from __future__ import annotations
 
-from typing import BinaryIO, Callable, Protocol
+from collections.abc import Callable
+from typing import BinaryIO, Protocol
 
 from pokered_harness.symbols.loader import MemoryLike
-
 
 HookCallback = Callable[[object], None]
 

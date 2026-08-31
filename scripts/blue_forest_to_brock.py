@@ -17,21 +17,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pokered_harness.session import Session
+import brock_gym as bg
+import full_to_brock as ftb
+import grind
+import run_to_brock as rtb
+
 from pokered_harness.mcp_server import register_default_hooks
+from pokered_harness.session import Session
 from pokered_harness.state.party import (
-    PARTY_STRUCT_SIZE,
     _OFFSET_HP,
     _OFFSET_LEVEL,
     _OFFSET_MAX_HP,
     _OFFSET_MOVES,
     _OFFSET_PP,
 )
-
-import run_to_brock as rtb
-import brock_gym as bg
-import full_to_brock as ftb
-import grind
 
 
 def boost_bulbasaur(session: Session) -> None:
@@ -310,7 +309,7 @@ def main() -> int:
         session.step(60, render=True)
         m = drv.gs().party.mons[0] if drv.gs().party.mons else None
         if m and m.hp < m.max_hp:
-            print(f"\n=== phase: pewter_heal ===", flush=True)
+            print("\n=== phase: pewter_heal ===", flush=True)
             print(f"  HP {m.hp}/{m.max_hp} — routing to Pewter PC",
                   flush=True)
             ftb._activate_repel(drv)
@@ -392,7 +391,7 @@ def main() -> int:
     if drv.gs().overworld.map_id == 0x36:
         session.step(60, render=True)
         gs = drv.gs()
-        print(f"\n=== phase: gym_interior ===", flush=True)
+        print("\n=== phase: gym_interior ===", flush=True)
         print(f"  in gym: xy=({gs.overworld.x},{gs.overworld.y})",
               flush=True)
         seed = outdir / "_gym_interior.state"

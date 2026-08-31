@@ -23,7 +23,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 _OBJECT_RE = re.compile(
     r"object_event\s+"
     r"(\d+)\s*,\s*(\d+)\s*,\s*"
@@ -95,7 +94,6 @@ def sight_cone_tiles(map_name: str, pret_root: Path,
 
 def trainer_sight_cones_cli() -> int:
     import argparse
-    import sys
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("map", help="Map name (e.g. MtMoon1F, Route3)")
     p.add_argument("--pret-root", required=True,

@@ -26,9 +26,12 @@ Other link rows remain unsupported or unverified.
 Symbol hashes and audited generator provenance for the inputs are recorded
 below. The remaining release decision is `PARTIAL` because the complete
 implementation-revision gate output is not retained as an evidence bundle,
-repository-wide lint and the broad matrix are not clean, per-ROM and
+product lint and the broad matrix are not clean, per-ROM and
 reversed-role coverage is incomplete, and independent review/native-platform
 evidence is missing.
+The Lane G audit at `47195bd` leaves 101 product Ruff findings under the
+default `ruff check .` boundary; the pinned vendored runtime is excluded from
+that product audit and has 227 findings when checked explicitly.
 
 ## Runtime
 
