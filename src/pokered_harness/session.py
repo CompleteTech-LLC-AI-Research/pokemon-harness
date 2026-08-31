@@ -427,23 +427,24 @@ class Session:
         return self._closed
 
     @contextmanager
-    def locked(self, *, timeout_s: float | None = None) -> Iterator[Session]:
+    def locked(
+        self, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
+    ) -> Iterator[Session]:
         """Serialize a compound operation that touches this emulator.
 
         Individual session methods already take this same re-entrant lock.
         This context manager is for callers that need a consistent snapshot
         across more than one method without exposing the lock object itself.
+        Lock acquisition is bounded by ``timeout_s`` (five seconds by
+        default); callers that need a shorter request deadline should pass it
+        explicitly.
         """
-        if timeout_s is None:
-            acquired = self._lock.acquire()
-        else:
-            acquired = self._lock.acquire(
-                timeout=_validate_timeout(timeout_s, "timeout_s")
-            )
+        timeout = _validate_timeout(timeout_s, "timeout_s")
+        acquired = self._lock.acquire(timeout=timeout)
         if not acquired:
             raise SessionLockTimeout(
                 "could not acquire the emulator lock before the "
-                f"{timeout_s:g}s deadline"
+                f"{timeout:g}s deadline"
             )
         try:
             self._ensure_open()
@@ -515,29 +516,55 @@ class Session:
             self._pyboy.hook_register(bank, addr, _guarded_callback, context)
             self._serial_hooks.append((state, bank, addr, symbol_name))
 
-    def deactivate_serial_hooks(self) -> int:
+    def deactivate_serial_hooks(
+        self, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
+    ) -> int:
         """Disable all raw serial callbacks previously registered here.
 
         PyBoy 2.7 does not expose a stable per-callback removal API. The
         guarded callbacks therefore become no-ops, which makes reconnect and
-        shutdown safe even when the underlying emulator retains a hook.
-        Returns the number of callbacks deactivated.
+        shutdown safe even when the underlying emulator retains a hook. The
+        state transition is serialized with emulator operations and waits no
+        longer than ``timeout_s``. Returns the number of callbacks
+        deactivated.
         """
-        count = 0
-        for state, _bank, _addr, _symbol_name in self._serial_hooks:
-            if state.active:
-                state.active = False
-                count += 1
-        return count
+        timeout = _validate_timeout(timeout_s, "timeout_s")
+        if not self._lock.acquire(timeout=timeout):
+            raise SessionLockTimeout(
+                "could not acquire the emulator lock before the "
+                f"{timeout:g}s deactivation deadline"
+            )
+        try:
+            count = 0
+            for state, _bank, _addr, _symbol_name in self._serial_hooks:
+                if state.active:
+                    state.active = False
+                    count += 1
+            return count
+        finally:
+            self._lock.release()
 
-    def deactivate_hooks_at(self, symbol_name: str) -> None:
+    def deactivate_hooks_at(
+        self,
+        symbol_name: str,
+        *,
+        timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S,
+    ) -> None:
         """Best-effort removal of every PyBoy hook at ``symbol_name``.
 
         This is used for legacy link callbacks installed directly by the
         link endpoint. The guarded callbacks registered through
-        :meth:`serial_hook` are also disabled at the same address.
+        :meth:`serial_hook` are also disabled at the same address. Cleanup
+        waits at most ``timeout_s`` for the emulator lock, including when the
+        session is already closed and only hook teardown remains.
         """
-        with self._lock:
+        timeout = _validate_timeout(timeout_s, "timeout_s")
+        if not self._lock.acquire(timeout=timeout):
+            raise SessionLockTimeout(
+                "could not acquire the emulator lock before the "
+                f"{timeout:g}s deactivation deadline"
+            )
+        try:
             symbol = self._symbols.get(symbol_name)
             if symbol is None:
                 return
@@ -553,6 +580,8 @@ class Session:
                     # PyBoy reports an absent breakpoint as ValueError. A
                     # best-effort cleanup is already complete in that case.
                     pass
+        finally:
+            self._lock.release()
 
     # --- actions -------------------------------------------------------
 
