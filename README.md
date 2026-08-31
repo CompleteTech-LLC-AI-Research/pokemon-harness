@@ -275,8 +275,13 @@ The exact fixture, runtime, and game-flow requirements are in the runbook.
 ### Remote TCP pair
 
 Two independent MCP servers can use `link_listen` and `link_connect`. The
-listener is the internal-clock side; the connector is the external-clock
-side. Poll `link_status` until it reports `remote_mode` as `connected`, then
+listener starts with the internal-clock role and the connector starts with the
+external-clock role. After the versioned HELLO, native PyBoy sessions
+negotiate the compatible startup role for a cross-family pair: the Red/Blue
+endpoint provides the initial internal clock and Yellow waits as the external
+endpoint. Same-family pairs and Red/Blue pairs retain the listener/connector
+defaults. The ROM still owns its connection-status byte and any later role
+changes. Poll `link_status` until it reports `remote_mode` as `connected`, then
 call `link_disconnect` at teardown.
 
 The MCP remote-link API enforces localhost-only binding and connection

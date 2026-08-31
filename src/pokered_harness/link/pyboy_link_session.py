@@ -268,10 +268,11 @@ class PyBoyLinkSession:
         if self._network_backend is not None:
             # Network-mode: hook the local core up to the TCP backend
             # and fire the slave-IRQ via this pyboy's CPU flag register
-            # when peer-driven edges complete our transfer. The ROM owns
-            # connection-role negotiation: its serial ISR records the first
-            # native handshake byte in hSerialConnectionStatus. Do not write
-            # that HRAM cell here; doing so would bypass the ROM protocol.
+            # when peer-driven edges complete our transfer. The initial
+            # native clock role is negotiated after versioned HELLO; the ROM
+            # still owns its connection-status byte and all later role
+            # changes. Do not write that HRAM cell here; doing so would bypass
+            # the ROM protocol.
             core.backend = self._network_backend
             self._initialize_network_clock_role(core)
             self._network_backend.start_receiver(
@@ -434,6 +435,53 @@ class PyBoyLinkSession:
         if is_internal_clock:
             next_sc |= SC_CLOCK_SOURCE
         set_sc(next_sc)
+
+    def negotiate_network_clock_role(self, peer_rom_version: str) -> bool | None:
+        """Choose the native startup clock role after the HELLO exchange.
+
+        The TCP listener/connector role is a transport concern, not a
+        Pokémon hardware rule. Color Red/Blue and Yellow use different
+        startup paths in their connection probe; for a cross-family pair the
+        color Red/Blue endpoint must provide the first internal clock while
+        Yellow waits as the external-clock endpoint. Same-family pairs keep
+        the caller's listener/connector default.
+
+        This is deliberately limited to the native FF01/FF02 serial
+        registers. The ROM still observes the resulting bytes and owns
+        ``hSerialConnectionStatus`` and all subsequent role changes.
+
+        Returns the selected role, or ``None`` when this is not a network
+        session or the session was created without a default role.
+        """
+        if self._network_backend is None or self._network_is_internal_clock is None:
+            return None
+        if not isinstance(peer_rom_version, str):
+            raise TypeError("peer_rom_version must be a string")
+        peer = peer_rom_version.strip().lower()
+        local = self._local_rom_version
+        if local is None:
+            return bool(self._network_is_internal_clock)
+        local = local.strip().lower()
+        supported = {"red", "blue", "yellow"}
+        if local not in supported or peer not in supported:
+            raise ValueError(
+                "network clock negotiation requires ROM versions in "
+                f"{sorted(supported)}, got local={local!r}, peer={peer!r}"
+            )
+
+        selected_internal = bool(self._network_is_internal_clock)
+        cross_family = (local == "yellow") != (peer == "yellow")
+        if cross_family:
+            # Red/Blue's connection probe is the compatible initial clock
+            # source when it is paired with Yellow. The ROM remains free to
+            # swap roles once the native handshake has completed.
+            selected_internal = local != "yellow"
+
+        if selected_internal != self._network_is_internal_clock:
+            self._network_is_internal_clock = selected_internal
+            for core in self._cores:
+                self._initialize_network_clock_role(core)
+        return selected_internal
 
     def detach(self, pyboy: _PyBoyLike) -> None:
         """Restore ``pyboy.mb.serial.backend`` and (if paired) tear

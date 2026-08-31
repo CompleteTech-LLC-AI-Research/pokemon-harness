@@ -413,7 +413,9 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
             description=(
                 "Bind a TCP port and wait for a peer MCP server to connect. "
                 "Returns immediately; poll `link_status` until mode=='connected'. "
-                "Role: internal-clock master (status byte 0x02)."
+                "Default role: internal-clock master (status byte 0x02); "
+                "native HELLO negotiation selects the non-Yellow master for "
+                "cross-family pairs."
             ),
             inputSchema={
                 "type": "object",
@@ -444,8 +446,9 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
             name="link_connect",
             description=(
                 "Open a TCP connection to a peer MCP server's listener. "
-                "Blocks until HELLO completes. Role: external-clock slave "
-                "(status byte 0x01)."
+                "Blocks until HELLO completes. Default role: external-clock "
+                "slave (status byte 0x01); native HELLO negotiation selects "
+                "the non-Yellow master for cross-family pairs."
             ),
             inputSchema={
                 "type": "object",
@@ -1153,6 +1156,7 @@ def _dispatch_link_tool(
                     _remaining(deadline),
                     expected_peer_rom_version=expected_peer_version,
                 )
+                network_session.negotiate_network_clock_role(peer_version)
             else:
                 _require_native_network_contract(
                     session,
@@ -1628,6 +1632,9 @@ def _accept_remote(
                         cancel,
                         timeout_s,
                         expected_peer_rom_version=expected_peer_rom_version,
+                    )
+                    network_session.negotiate_network_clock_role(
+                        transport.peer_rom_version
                     )
                 else:
                     _require_native_network_contract(

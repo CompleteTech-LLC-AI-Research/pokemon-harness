@@ -14,10 +14,13 @@ The peer does the same on its side with its own symbol table — Yellow
 maps the symbol to a different physical address than Blue, but the
 wire byte format is identical so the exchange is correct.
 
-Clock-role negotiation: whoever calls :meth:`TcpSerialLink.listen` is
-treated as the internal-clock master (status byte = 0x02); whoever
-:meth:`connect`\\s is the external-clock slave (status byte = 0x01).
-See pret/pokered constants/serial_constants.asm.
+The compatibility endpoint's default clock convention is that whoever calls
+:meth:`TcpSerialLink.listen` is the internal-clock master (status byte =
+0x02), while whoever calls :meth:`connect` is the external-clock slave
+(status byte = 0x01). Native :class:`PyBoyLinkSession` TCP sessions perform a
+versioned HELLO negotiation and may select the non-Yellow endpoint as the
+initial master for a cross-family pair. See pret/pokered
+constants/serial_constants.asm.
 
 What this class deliberately does NOT do
 ----------------------------------------
@@ -77,8 +80,8 @@ _IF_SERIAL: int = 0x08
 class RemoteLinkEndpoint:
     """One side of a two-agent link-cable pair.
 
-    Build with :meth:`as_listener` (clock master / INTERNAL) or
-    :meth:`as_connector` (clock slave / EXTERNAL). Call :meth:`install`
+    Build with :meth:`as_listener` (default clock master / INTERNAL) or
+    :meth:`as_connector` (default clock slave / EXTERNAL). Call :meth:`install`
     once to register the hooks; after that, the local session's normal
     ``step`` / ``press`` calls will transparently block on serial
     exchanges when the game's link routines fire.

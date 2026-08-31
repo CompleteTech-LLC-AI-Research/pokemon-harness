@@ -407,13 +407,16 @@ deadline when investigating a regression.
 
 The native MCP link path only installs the pinned PyBoy serial backend and
 transport callbacks. It must not seed `hSerialConnectionStatus` (the ROM-owned
-HRAM status populated by its serial ISR) or install semantic exchange hooks;
-the listener/connector role must emerge from native serial traffic. The
-semantic endpoint remains a compatibility path for non-native test doubles and
-is not production acceptance evidence. A real PyBoy with an incomplete native
-serial contract fails closed. Native socket writes, public listener waits, and
-worker teardown are bounded; `peer_rom_version` can be supplied to reject an
-unexpected HELLO label.
+HRAM status populated by its serial ISR) or install semantic exchange hooks.
+The listener and connector provide default native clock roles, then the
+versioned HELLO may select the non-Yellow endpoint as the initial internal
+clock source for a Yellow/Red or Yellow/Blue pair. The ROM still owns its
+connection-status byte and any later role changes. The semantic endpoint
+remains a compatibility path for non-native test doubles and is not production
+acceptance evidence. A real PyBoy with an incomplete native serial contract
+fails closed. Native socket writes, public listener waits, and worker teardown
+are bounded; `peer_rom_version` can be supplied to reject an unexpected HELLO
+label.
 
 ## 5. Generate link fixtures safely
 
@@ -499,9 +502,11 @@ paired explicitly with `link_pair`; it is not proof of a working game flow.
 For a normal MCP lifecycle, initialize the server, list tools, and then use
 `step`, `press`, state resources, and save/load as needed. For a local pair,
 call `link_pair`, use `link_step`, and finish with `link_unpair`. For TCP,
-call `link_listen` on the internal-clock side or `link_connect` on the
-external-clock side, poll `link_status` until `remote_mode=connected`, and
-call `link_disconnect` before closing either server. A teardown is complete
+call `link_listen` and `link_connect` using their default roles, poll
+`link_status` until `remote_mode=connected`, and call `link_disconnect` before
+closing either server. For native Yellow/Red or Yellow/Blue pairs, the
+versioned HELLO selects the non-Yellow endpoint as the initial internal-clock
+side. A teardown is complete
 only when status is idle and no child peer, worker thread, socket, or callback
 remains.
 

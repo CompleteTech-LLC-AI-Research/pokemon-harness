@@ -295,9 +295,10 @@ def main() -> int:
     log("TCP established, attaching PyBoy")
     link.attach(session._pyboy)
     peer_version = link._network_backend.wait_for_hello(timeout=30.0)
+    selected_internal = link.negotiate_network_clock_role(peer_version)
     log(
         f"versioned handshake complete: local={fixture_version} "
-        f"peer={peer_version}"
+        f"peer={peer_version} native_internal_clock={selected_internal}"
     )
     log("attached; starting drive loop")
 

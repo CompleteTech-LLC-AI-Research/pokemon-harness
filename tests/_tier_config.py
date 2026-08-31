@@ -197,9 +197,11 @@ BATTLE_ACCEPTANCE_TESTS = frozenset(
 # These are the ordered, real-ROM matrix rows that the production gate must
 # never silently lose.  Keep their construction in the collection-only
 # auditor as the single source of truth so the executable audit and the gate
-# manifest cannot drift apart.  The first remote version is the listener
-# (internal-clock master) and the second is the connector (external-clock
-# slave); therefore ``red-blue`` and ``blue-red`` remain distinct cases.
+# manifest cannot drift apart. The first remote version is the listener and
+# the second is the connector; their defaults are internal-clock master and
+# external-clock slave, respectively. Native cross-family Yellow pairs may
+# negotiate the non-Yellow endpoint as the initial master, so ordered cases
+# remain distinct transport configurations.
 _MATRIX = runpy.run_path(
     str(Path(__file__).resolve().parents[1] / "scripts" / "tcp_link_matrix.py")
 )
