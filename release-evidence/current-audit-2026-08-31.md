@@ -3,24 +3,28 @@
 Status: `PARTIAL` — not production-ready.
 
 This record describes the isolated candidate's functional boundary at
-`78e5bbe` (`d8198ef` transport/runtime hardening plus Cython-safe serial
-control typing; this documentation update follows). No ROM, symbol, fixture, save-state, or
-secret is included here. External assets are supplied through the documented
-ROM and fixture roots.
+`a220732` (`d8198ef` transport/runtime hardening, Cython-safe serial control
+typing, and native cross-family startup clock-role negotiation). No ROM,
+symbol, fixture, save-state, or secret is included here. External assets are
+supplied through the documented ROM and fixture roots.
 
 ## Passing evidence
 
 - `scripts/production_gate.py --unit-only --repeat-timing 5` passed both
-  collection paths, unit `477/477`, and timing `35/35` in all five repeats
-  (618 collected tests).
+  collection paths, unit `483/483`, and timing `35/35` in all five repeats
+  (624 collected tests).
 - With explicit ROM/SYM/SHA-1 inputs, MCP stdio and golden-path smoke checks
   exited successfully for Red stock, Red color, Blue stock, Blue color, and
   Yellow.
-- The selected real-ROM local tier passed `46/46` in `878.66s`; the selected
-  remote tier passed `13/13` in `48.54s`; strict trade passed `3/3` in
-  `576.47s`; strict battle passed `3/3` in `646.94s`. These selected results
-  were recorded at the prior functional boundary `db72be6` and require rerun
-  after the current transport hardening.
+- Exact-head spot checks passed Yellow-listener to Red-color and Blue-color
+  remote trade in `240.32s` and `228.00s`, and Yellow-listener to Red-color
+  remote battle in `268.85s`. The Yellow-listener to Blue-color remote battle
+  failed after both peers completed native pre-battle traffic but before
+  `MainInBattleLoop`/`DisplayBattleMenu` (18,024 native serial edges; no
+  completed turn). The full current local and remote strict matrices remain
+  pending. The selected real-ROM local `46/46`, remote `13/13`, strict trade
+  `3/3`, and strict battle `3/3` results were recorded at the prior functional
+  boundary `db72be6` and remain historical.
 - The fixture manifest schema and all 10 external fixture byte records passed
   validation. Canonical color Red, color Blue, and Yellow ordinary/battle
   bytes are recorded; vanilla source provenance remains partial.
@@ -39,13 +43,15 @@ ROM and fixture roots.
 
 ## Not signed off
 
-- The strict declaration now has 19 local/remote trade entrypoints and 19
+- The strict declaration has 19 local/remote trade entrypoints and 19
   local/remote battle entrypoints, covering every ordered canonical
   Red/Blue/Yellow pair. The collection-only audit is structural and does not
-  run ROMs; current gameplay execution of those rows remains pending.
-- The current-candidate local, remote, trade, and battle real-ROM tiers have
-  not yet been rerun after `78e5bbe`; the prior selected results are retained
-  as historical evidence, not current sign-off.
+  run ROMs; current gameplay execution of the complete matrix remains
+  pending.
+- The selected exact-head remote results above are retained as current spot
+  evidence, not full sign-off. The Blue/Yellow battle failure remains an open
+  compatibility or fixture/driver issue requiring diagnosis or explicit
+  product-scope treatment.
 - The full broad suite, native Windows/Cython attachment, load-stability
   reruns, and independent review remain incomplete.
 - Vanilla ordinary fixture source provenance remains partial, and complete

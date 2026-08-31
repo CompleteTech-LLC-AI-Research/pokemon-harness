@@ -16,7 +16,7 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current functional candidate boundary is `78e5bbe` (2026-08-31). The asset-free command:
+The current functional candidate boundary is `a220732` (2026-08-31). The asset-free command:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -29,7 +29,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-returned scoped `PASS`: collection 618, unit 477/477, and timing 35/35 in
+returned scoped `PASS`: collection 624, unit 483/483, and timing 35/35 in
 each of five repetitions. It used bundled source PyBoy 2.7.0, fork
 `c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
 ten-entry fixture manifest. No ROM-backed tier ran in this command.
@@ -45,7 +45,10 @@ The previously recorded selected-tier real-ROM run at `db72be6` recorded local
 rows cover both color Red/Blue listener/connector directions. Those results
 predate the current transport hardening and expanded current-candidate matrix
 and must be rerun for current-candidate sign-off; they are not a full-gate
-result because current runtime coverage remains incomplete.
+result because current runtime coverage remains incomplete. Exact-head spot
+checks passed Yellow-listener to Red-color and Blue-color remote trade and
+Yellow-listener to Red-color remote battle; Yellow-listener to Blue-color
+remote battle failed before the battle menu after native pre-battle traffic.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
@@ -56,7 +59,7 @@ evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The functional source candidate boundary is identified as `78e5bbe`; the final
+- [x] The functional source candidate boundary is identified as `a220732`; the final
   release commit must be recorded after documentation integration.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
@@ -97,8 +100,8 @@ evidence, and independent review.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete in the scoped
-  `78e5bbe` gate; 618 tests were collected with no collection errors.
-- [x] ROM-free unit tests pass 477/477 in the scoped gate.
+  `a220732` gate; 624 tests were collected with no collection errors.
+- [x] ROM-free unit tests pass 483/483 in the scoped gate.
 - [x] Timing tests pass 35/35 across five repetitions in the scoped gate.
 - [x] `ruff check .` is clean at the functional source candidate boundary.
 - [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
@@ -106,13 +109,18 @@ evidence, and independent review.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every advertised
   ROM variant. The clean-wheel 3/3 color-Red smoke is not five-row sign-off.
 - [ ] The current candidate rerun of the real-ROM local and remote tiers passes
-  with no fixture or runtime skips. The recorded `db72be6` local `46/46` and
-  remote `13/13` results are historical because they predate `78e5bbe`.
+  with no fixture or runtime skips. Exact-head spot checks passed selected
+  Yellow-listener trade rows and the Red-color battle row, but the Blue-color
+  battle row failed before the battle menu; the recorded `db72be6` local
+  `46/46` and remote `13/13` results remain historical.
 - [x] Controlled canonical local evidence exists for color Red plus Yellow,
   including trade and battle assertions.
 - [x] Controlled canonical remote evidence exists for color Red as
   listener/internal-clock and color Blue as connector/external-clock, plus
-  the reversed role, including strict trade and battle paths.
+  the reversed role, including strict trade and battle paths. Current exact-
+  head spot checks additionally cover Yellow-listener trade to Red/Blue and
+  Yellow-listener battle to Red; Yellow-listener battle to Blue remains a
+  known failure.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
   ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
   IDs); runtime execution of every row is still required.

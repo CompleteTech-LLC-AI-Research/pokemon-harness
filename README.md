@@ -11,9 +11,9 @@ symbol files, save states, or other ROM-derived artifacts.
 
 This repository is an audited production-readiness candidate, not a production
 release. Unless explicitly labelled historical, the facts below refer to
-functional source candidate commit `78e5bbe` on 2026-08-31. This includes the
-transport/runtime hardening at `d8198ef` and the Cython-safe serial control
-typing fix. The baseline at
+functional source candidate commit `a220732` on 2026-08-31. This includes the
+transport/runtime hardening at `d8198ef`, the Cython-safe serial control typing
+fix, and native cross-family startup clock-role negotiation. The baseline at
 `e219fb5` was not
 production-certified.
 
@@ -29,29 +29,33 @@ Status semantics are deliberately scoped:
   assets, complete strict acceptance coverage, retained evidence, and no open
   release blockers.
 
-The latest asset-free gate for the source boundary `78e5bbe` used
-`scripts/production_gate.py --unit-only --repeat-timing 5`: unit was 477/477,
+The latest asset-free gate for the source boundary `a220732` used
+`scripts/production_gate.py --unit-only --repeat-timing 5`: unit was 483/483,
 timing was 35/35 in five repetitions, and the scoped gate result was `PASS`.
-The latest collection-only matrix audit collected 618 tests with structural
+The latest collection-only matrix audit collected 624 tests with structural
 coverage and the strict declaration both `PASS`: all nine ordered local pairs,
 all nine ordered remote listener/connector pairs, all nine local ROM-variant
 rows, and 19 strict trade plus 19 strict battle entrypoints were present. The
 matrix command does not execute ROM gameplay; its runtime is `NOT RUN`.
 
-The current candidate's real-ROM link tiers have not yet been rerun after
-`78e5bbe`. The last selected local `46/46`, remote `13/13`, strict trade
-`3/3`, and strict battle `3/3` results were recorded at the prior functional
-boundary `db72be6`; they are retained as historical evidence and are not
-current release sign-off.
+Fresh exact-head runtime checks have exercised selected cross-family rows. The
+Yellow-listener/Red-color-connector and Yellow-listener/Blue-color-connector
+native remote trade rows passed in 240.32s and 228.00s. The corresponding
+Yellow-listener/Red-color-connector battle row passed in 268.85s; the
+Yellow-listener/Blue-color-connector battle row failed after both peers
+completed native pre-battle traffic but before `MainInBattleLoop`/
+`DisplayBattleMenu` (18,024 native serial edges, no completed turn). The full
+current local and remote strict runtime matrices remain pending; these selected
+rows are not production sign-off.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
-| ROM-free unit and timing regressions | `PASS` (scoped) | At `78e5bbe`: unit 477/477 and timing 35/35 across five repetitions. |
+| ROM-free unit and timing regressions | `PASS` (scoped) | At `a220732`: unit 483/483 and timing 35/35 across five repetitions. |
 | Runtime/package identity | `PASS` (scoped) | The gate resolves bundled source PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PASS` (five-input smoke) | Current explicit Red stock/color, Blue stock/color, and Yellow ROM/SYM MCP stdio and golden-path checks passed; this is not full release sign-off. |
-| In-process link acceptance | `PARTIAL` (current rerun pending) | The prior `db72be6` local tier passed 46/46, with strict color-Red/Yellow trade and battle passing. The current candidate now declares all 9 local trade and 9 local battle rows, but current gameplay results are still pending. |
-| Remote TCP and MCP lifecycle | `PARTIAL` (current rerun pending) | The prior `db72be6` remote tier passed 13/13, with strict color-Red/color-Blue trade and battle passing in both listener/connector directions. The current candidate now declares all 9 remote profile pairs for each operation, but current gameplay results are still pending. |
+| In-process link acceptance | `PARTIAL` (current matrix pending) | The current candidate declares all 9 local trade and 9 local battle rows; the exact-head local matrix is still running and is not yet release evidence. |
+| Remote TCP and MCP lifecycle | `PARTIAL` (selected rows) | Exact-head Yellow-listener trade passed against Red-color and Blue-color; Yellow-listener battle passed against Red-color but failed against Blue-color before the battle menu. The complete 9-pair trade/battle runtime matrices remain pending. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
 The historical complete real-ROM snapshot at
@@ -60,7 +64,8 @@ stateful rerun are retained as historical evidence boundaries. The current
 product Ruff check is clean for the configured source, test, and script
 boundary. The broad suite, full strict matrix runtime coverage, vanilla
 fixture provenance, native-platform coverage, and independent review remain
-open. TCP is deliberately localhost-only because it has no
+open. The Blue/Yellow battle failure also needs diagnosis or explicit scope
+before a full battle claim can be made. TCP is deliberately localhost-only because it has no
 authentication or encryption.
 
 The required setup, test tiers, evidence format, and sign-off rules are in
@@ -259,8 +264,9 @@ evidence for `link_pair`, `link_listen`, or `link_connect`.
 `link_pair` owns two sessions in one process and uses the native bit-accurate
 serial coordinator for real PyBoy sessions. The canonical Red/Yellow local
 trade and battle cases passed at the historical `db72be6` boundary; the
-current candidate rerun is still required. Other rows remain diagnostic until
-their exact ROM, fixture, and runtime combination is separately certified.
+current exact-head local matrix is still running. Other rows remain diagnostic
+until their exact ROM, fixture, and runtime combination is separately
+certified.
 Configure the peer before launching the MCP server:
 
 ```bash
@@ -309,9 +315,11 @@ Do not describe a transport milestone as “trade complete.” A full trade or
 battle needs an acceptance result from the actual release runtime, matching
 ROMs, matching save-state fixtures, bounded deadlines, a clean teardown, and
 an explicit statement about any test-driver menu control. The current remote
-battle result uses ordinary menu input and proves native serial move exchange;
-the trade result remains stability-sensitive and does not prove every remote
-menu/role combination.
+battle checks use ordinary menu input and native serial transport. The selected
+Yellow/Red row completes a turn, while the selected Yellow/Blue row currently
+stops before the battle menu; neither result proves every remote menu/role
+combination. The selected trade rows also remain stability-sensitive until the
+full matrix is complete.
 
 ## Walkthrough scripts
 
@@ -385,7 +393,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `78e5bbe` this scoped command passed 477/477 unit tests and 35/35 timing
+At `a220732` this scoped command passed 483/483 unit tests and 35/35 timing
 cases in each of five repetitions. It is a `PASS` for the selected scope, not
 a production sign-off: the full gate additionally requires the BYO assets,
 fixture-byte/provenance checks, real-ROM tiers, and complete strict matrix.
