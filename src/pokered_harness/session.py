@@ -155,36 +155,41 @@ class Session:
                     f"got {actual} for {sym_path}"
                 )
 
-        if expected_pyboy_version is not None:
-            expected_pyboy_version = expected_pyboy_version.strip()
-            if not expected_pyboy_version:
-                raise SessionConfigurationError(
-                    "expected PyBoy version must not be empty"
-                )
+        if (
+            expected_pyboy_version is not None
+            or expected_pyboy_revision is not None
+        ):
             import pyboy as _pyboy_module
 
-            actual_version = getattr(_pyboy_module, "__version__", None)
-            if actual_version != expected_pyboy_version:
-                raise VersionMismatch(
-                    f"PyBoy version mismatch: expected {expected_pyboy_version}, "
-                    f"got {actual_version}"
-                )
-            if not getattr(_pyboy_module, "__pokered_harness_revision__", None):
+            if expected_pyboy_version is not None:
+                expected_pyboy_version = expected_pyboy_version.strip()
+                if not expected_pyboy_version:
+                    raise SessionConfigurationError(
+                        "expected PyBoy version must not be empty"
+                    )
+                actual_version = getattr(_pyboy_module, "__version__", None)
+                if actual_version != expected_pyboy_version:
+                    raise VersionMismatch(
+                        f"PyBoy version mismatch: expected {expected_pyboy_version}, "
+                        f"got {actual_version}"
+                    )
+            actual_revision = getattr(
+                _pyboy_module, "__pokered_harness_revision__", None
+            )
+            if not actual_revision:
                 raise VersionMismatch(
                     "PyBoy runtime is not the pinned pokered-harness build; "
                     "install this project's bundled PyBoy source"
                 )
-            actual_revision = getattr(
-                _pyboy_module, "__pokered_harness_revision__", None
-            )
-            expected_pyboy_revision = _normalise_sha1(
-                expected_pyboy_revision, label="PyBoy revision"
-            )
-            if actual_revision != expected_pyboy_revision:
-                raise VersionMismatch(
-                    f"PyBoy revision mismatch: expected {expected_pyboy_revision}, "
-                    f"got {actual_revision}"
+            if expected_pyboy_revision is not None:
+                expected_pyboy_revision = _normalise_sha1(
+                    expected_pyboy_revision, label="PyBoy revision"
                 )
+                if actual_revision != expected_pyboy_revision:
+                    raise VersionMismatch(
+                        f"PyBoy revision mismatch: expected {expected_pyboy_revision}, "
+                        f"got {actual_revision}"
+                    )
 
         try:
             symbols = load_sym_file(sym_path)
