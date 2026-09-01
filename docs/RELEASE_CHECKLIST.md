@@ -16,8 +16,8 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The latest candidate gate ran from the tree rooted at `ae8d63d` (2026-08-31)
-with `DEFAULT_MATRIX_WORKERS=1`. The earlier clean asset-free command:
+The latest candidate is merged as `f5c766e` (PR #7), from head `fdd24d2`, and
+used `DEFAULT_MATRIX_WORKERS=1`. The current clean asset-free command:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -30,8 +30,8 @@ python scripts/production_gate.py \
   --format text
 ```
 
-returned scoped `PASS` from a clean worktree: collection 648, unit 507/507,
-and timing 35/35 in each of five repetitions. It used bundled source PyBoy
+returned scoped `PASS` from the isolated candidate: collection 656, unit
+514/514, and timing 40/40 in each of five repetitions. It used bundled source PyBoy
 2.7.0, fork
 `c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
 ten-entry fixture manifest. No ROM-backed tier ran in this command.
@@ -42,24 +42,25 @@ rows, and 19 strict trade plus 19 strict battle entrypoints. Structural and
 declaration checks passed; matrix runtime was `NOT RUN` because the standalone
 audit is collection-only.
 
-The current candidate strict trade matrix passed 19/19 with no skips, xfails,
-or errors. The strict battle matrix passed 17/19 with no skips, xfails, or
-errors; the two failures were remote `red_color` listener rows connecting to
-color Blue and Yellow at the bounded LinkMenu phase. Earlier selected runs are
-historical diagnostics and do not replace this result.
+The current candidate asset-backed local tier passed 47/47, the remote
+transport/MCP tier passed 13/13, and the strict trade matrix passed 19/19 with
+no skips, xfails, or errors. The strict battle matrix is being executed
+separately; independent targeted Red/Blue and Red/Yellow remote battle samples
+passed 5/5 each. Earlier selected runs are historical diagnostics and do not
+replace the strict matrix result.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
 producer plus tracked battle-fixture generator are present. Full sign-off is
-pending the two failed remote battle rows, Cython gameplay coverage, vanilla
-source provenance, broad-suite coverage, native-platform evidence, retained
-complete evidence, and independent review.
+pending completion of the strict battle matrix, Cython gameplay coverage,
+vanilla source provenance, broad-suite coverage, native-platform evidence,
+retained complete evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The candidate evidence boundary is identified as the tree rooted at
-  `ae8d63d` plus the committed conservative matrix scheduling change; this
-  documentation is reviewed against that boundary.
+- [x] The candidate evidence boundary is identified as merged commit
+  `f5c766e` (head `fdd24d2`) plus the committed conservative matrix scheduling
+  change; this documentation is reviewed against that boundary.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
 - [x] Documentation keeps BYO assets and external evidence outside the source
@@ -101,31 +102,32 @@ complete evidence, and independent review.
 
 ## Test gates
 
-- [x] Both module and console-script collection paths complete in the scoped
-  `dfee2ec` gate; 648 tests were collected with no collection errors.
-- [x] ROM-free unit tests pass 507/507 in the scoped gate.
-- [x] Timing tests pass 35/35 in each of five repetitions in the scoped gate.
-- [x] `ruff check .` is clean at the committed source candidate boundary.
+- [x] Both module and console-script collection paths complete in the current
+  candidate gate; 656 tests were collected with no collection errors.
+- [x] ROM-free unit tests pass 514/514 in the scoped gate.
+- [x] Timing tests pass 40/40 in each of five repetitions in the scoped gate.
+- [x] The explicit production-file Ruff boundary is clean; broad legacy files
+  outside that boundary are not used as release evidence.
 - [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
   xfail, or timeout.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every advertised
   ROM variant. The current asset-free gate does not exercise this tier.
-- [ ] The current candidate rerun of the real-ROM local and remote tiers passes
-  with no fixture or runtime skips; strict trade is green, but two remote
-  Red-listener battle rows still fail at LinkMenu.
+- [x] The current candidate real-ROM local tier passes 47/47 and the remote
+  transport/MCP tier passes 13/13 with no fixture or runtime skips.
 - [x] Current-candidate controlled local evidence covers the complete canonical
   matrix: 9/9 ordered trade rows, 9/9 ordered battle rows, and both dedicated
   Red/Yellow assertions passed.
 - [ ] Current-candidate controlled remote evidence covers every ordered
-  listener/connector pair: trade is 9/9, while battle is 7/9 because the two
-  Red-listener rows remain failing.
+  listener/connector pair: trade is 9/9; the strict battle matrix is still
+  running, while independent Red/Blue and Red/Yellow battle samples are 5/5
+  each.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
   ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
-  IDs); every declared row was executed in the current candidate gate.
+  IDs).
 - [ ] Current-candidate local and remote strict runtime rows pass in both
-  listener/connector directions; local and trade rows are green, but the two
-  remote Red-listener battle rows remain open and concurrent-load stability is
-  not certified.
+  listener/connector directions; local and trade rows are green, but the
+  strict remote battle matrix remains open and concurrent-load stability is not
+  certified.
 - [ ] Native-platform/build coverage and an independent release review are
   complete.
 
