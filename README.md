@@ -19,6 +19,11 @@ source-only baseline at `dfee2ec` is called out where it is used. Any
 uncommitted follow-up in a working tree is outside the evidence and must be
 committed and rerun before it can be used for release sign-off.
 
+The latest repository tip is `cec560e`, merged through PR
+[#4](https://github.com/CompleteDotTech/pokemon/pull/4). That follow-up is
+documentation-only: it records isolated reruns of the two failing battle rows
+without changing the acceptance result or promoting the release status.
+
 Status semantics are deliberately scoped:
 
 - `PASS` means that the named command completed with clean collection and no
