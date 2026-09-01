@@ -11,11 +11,13 @@ symbol files, save states, or other ROM-derived artifacts.
 
 This repository is an audited production-readiness candidate, not a production
 release. The baseline at `e219fb5` was not production-certified. The latest
-ROM-backed evidence below was collected from the candidate rooted at `ae8d63d`
-with the conservative one-worker matrix setting now committed alongside this
-README; the earlier source-only baseline at `dfee2ec` is called out where it is
-used. Any uncommitted follow-up in a working tree is outside the evidence and
-must be committed and rerun before it can be used for release sign-off.
+ROM-backed evidence below was collected from feature head `291202a`, now merged
+to `CompleteDotTech/pokemon` as merge commit `e137a7f` (PR
+[#3](https://github.com/CompleteDotTech/pokemon/pull/3)), with the conservative
+one-worker matrix setting committed alongside this README. The earlier
+source-only baseline at `dfee2ec` is called out where it is used. Any
+uncommitted follow-up in a working tree is outside the evidence and must be
+committed and rerun before it can be used for release sign-off.
 
 Status semantics are deliberately scoped:
 
@@ -55,6 +57,13 @@ rendezvous before its bounded child deadline. The other 17 battle rows completed
 with native serial traffic. These results are current release evidence, but the
 two failures keep the overall release decision at `PARTIAL`; earlier strict-trade
 timeouts and cross-family warp/phase divergences remain historical diagnostics.
+
+Post-merge isolated reruns of both previously failing rows passed, including
+`red_color-listen-blue_color-connect` in 233.35 seconds and
+`red_color-listen-yellow-connect` in a separate captured run. This is useful
+reproducibility evidence but does not replace the full strict matrix result:
+both rows must pass together in a clean full run before the battle tier can be
+promoted.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
