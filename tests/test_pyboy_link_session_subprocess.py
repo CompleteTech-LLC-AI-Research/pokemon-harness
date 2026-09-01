@@ -44,36 +44,37 @@ def _fixtures_ready() -> bool:
 
 
 def _trade_fixtures_ready() -> bool:
-    """Return whether the strict Red/Blue subprocess fixtures exist."""
+    """Return whether the canonical Red/Blue/Yellow trade fixtures exist."""
     return all(
         path.is_file()
+        for version in ("red", "blue", "yellow")
         for path in (
-            rom_path("red", color=True),
-            sym_path("red"),
-            fixture_path("red"),
-            rom_path("blue", color=True),
-            sym_path("blue"),
-            fixture_path("blue"),
+            rom_path(version, color=version in ("red", "blue")),
+            sym_path(version),
+            fixture_path(version),
         )
     )
 
 
 def _battle_fixtures_ready() -> bool:
-    """Return whether the strict Red/Blue subprocess battle assets exist."""
+    """Return whether the canonical Red/Blue/Yellow battle assets exist."""
     return all(
         path.is_file()
+        for version in ("red", "blue", "yellow")
         for path in (
-            rom_path("red", color=True),
-            sym_path("red"),
-            fixture_path("red").parent / "cable_club-battle.state",
-            rom_path("blue", color=True),
-            sym_path("blue"),
-            fixture_path("blue").parent / "cable_club-battle.state",
+            rom_path(version, color=version in ("red", "blue")),
+            sym_path(version),
+            fixture_path(version, "cable_club-battle.state"),
         )
     )
 
 
 _REMOTE_STRICT_PROFILE_CASES = (
+    pytest.param(
+        "red_color",
+        "red_color",
+        id="red_color-listen-red_color-connect",
+    ),
     pytest.param(
         "red_color",
         "blue_color",
@@ -84,6 +85,36 @@ _REMOTE_STRICT_PROFILE_CASES = (
         "red_color",
         id="blue_color-listen-red_color-connect",
     ),
+    pytest.param(
+        "red_color",
+        "yellow",
+        id="red_color-listen-yellow-connect",
+    ),
+    pytest.param(
+        "blue_color",
+        "blue_color",
+        id="blue_color-listen-blue_color-connect",
+    ),
+    pytest.param(
+        "blue_color",
+        "yellow",
+        id="blue_color-listen-yellow-connect",
+    ),
+    pytest.param(
+        "yellow",
+        "red_color",
+        id="yellow-listen-red_color-connect",
+    ),
+    pytest.param(
+        "yellow",
+        "blue_color",
+        id="yellow-listen-blue_color-connect",
+    ),
+    pytest.param(
+        "yellow",
+        "yellow",
+        id="yellow-listen-yellow-connect",
+    ),
 )
 
 
@@ -92,6 +123,7 @@ def _strict_fixture_path(version: str, *, battle: bool) -> Path:
     fixture_version = {
         "red_color": "red",
         "blue_color": "blue",
+        "yellow": "yellow",
     }.get(version)
     if fixture_version is None:
         raise ValueError(f"unsupported strict subprocess profile: {version}")
@@ -108,10 +140,14 @@ def _strict_fixtures_ready(
     """Check assets for one strict, profile-specific subprocess row."""
     required = []
     for version in (listener_version, connector_version):
-        rom_version = {"red_color": "red", "blue_color": "blue"}[version]
+        rom_version = {
+            "red_color": "red",
+            "blue_color": "blue",
+            "yellow": "yellow",
+        }[version]
         required.extend(
             (
-                rom_path(rom_version, color=True),
+                rom_path(rom_version, color=version.endswith("_color")),
                 sym_path(rom_version),
                 _strict_fixture_path(version, battle=battle),
             )
@@ -448,7 +484,7 @@ def test_subprocess_pair_reaches_link_menu_over_tcp():
 def test_subprocess_pair_completes_trade_over_tcp(
     listener_version: str, connector_version: str
 ):
-    """Two-subprocess color Red/Blue trade with real party-record checks.
+    """Two-subprocess canonical Red/Blue/Yellow trade with real party-record checks.
 
     End-to-end proof that the NetworkBackend transport carries a
     complete Pokemon trade between two independent PyBoy processes.
@@ -482,7 +518,7 @@ def test_subprocess_pair_completes_trade_over_tcp(
         battle=False,
     ):
         pytest.skip(
-            "color Red/Blue Cable Club fixtures are required for "
+            "canonical Red/Blue/Yellow Cable Club fixtures are required for "
             f"{listener_version}/{connector_version}"
         )
 
@@ -522,6 +558,17 @@ def test_subprocess_pair_completes_trade_over_tcp(
     assert result_b.get("_AddEnemyMonToPlayerParty", 0) > 0, (
         f"connector never traded; {result_b}"
     )
+    for result in (result_a, result_b):
+        backend_stats = result.get("_backend_stats", {})
+        assert backend_stats.get("edge_req_sent", 0) + backend_stats.get(
+            "edge_req_received", 0
+        ) > 0, f"remote trade used no native serial edges; {result}"
+        assert backend_stats.get("exchange_sent", 0) == 0, (
+            f"remote trade used an out-of-band exchange; {result}"
+        )
+        assert backend_stats.get("exchange_received", 0) == 0, (
+            f"remote trade used an out-of-band exchange; {result}"
+        )
     before_a = result_a.get("party_before", {})
     before_b = result_b.get("party_before", {})
     after_a = result_a.get("party_after", {})
@@ -533,9 +580,17 @@ def test_subprocess_pair_completes_trade_over_tcp(
     assert lead_a is not None and lead_b is not None, (
         f"trade fixtures must contain a lead; A={before_a} B={before_b}"
     )
-    assert record_a is not None and record_b is not None and record_a != record_b, (
-        "trade fixtures must contain distinguishable lead records; "
+    assert record_a is not None and record_b is not None, (
+        "trade fixtures must contain lead records; "
         f"A={before_a} B={before_b}"
+    )
+    assert after_a.get("count") == before_a.get("count"), (
+        f"listener party count changed unexpectedly; before={before_a} "
+        f"after={after_a}"
+    )
+    assert after_b.get("count") == before_b.get("count"), (
+        f"connector party count changed unexpectedly; before={before_b} "
+        f"after={after_b}"
     )
     assert after_a.get("mon_records", [None])[0] == record_b, (
         f"listener did not receive connector's lead record; before={before_a} "
@@ -544,12 +599,18 @@ def test_subprocess_pair_completes_trade_over_tcp(
     assert after_a.get("species", [None])[0] == lead_b, (
         f"listener mon record is inconsistent; after={after_a}"
     )
+    assert after_a.get("mon_species", [None])[0] == lead_b, (
+        f"listener mon species is inconsistent; after={after_a}"
+    )
     assert after_b.get("mon_records", [None])[0] == record_a, (
         f"connector did not receive listener's lead record; before={before_b} "
         f"after={after_b}"
     )
     assert after_b.get("species", [None])[0] == lead_a, (
         f"connector mon record is inconsistent; after={after_b}"
+    )
+    assert after_b.get("mon_species", [None])[0] == lead_a, (
+        f"connector mon species is inconsistent; after={after_b}"
     )
 
 
@@ -561,7 +622,7 @@ def test_subprocess_pair_completes_trade_over_tcp(
 def test_subprocess_pair_resolves_battle_turn_over_tcp(
     listener_version: str, connector_version: str
 ):
-    """Strict color Red/Blue remote battle acceptance with native serial traffic.
+    """Strict canonical Red/Blue/Yellow remote battle acceptance with native serial traffic.
 
     The peer processes load legal, ROM-matched battle fixtures and drive the
     real Cable Club battle path using ordinary directional/A input to select
@@ -575,7 +636,7 @@ def test_subprocess_pair_resolves_battle_turn_over_tcp(
         battle=True,
     ):
         pytest.skip(
-            "color Red/Blue battle fixtures are required for "
+            "canonical Red/Blue/Yellow battle fixtures are required for "
             f"{listener_version}/{connector_version}"
         )
 

@@ -16,7 +16,8 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current functional candidate boundary is `d8198ef` (2026-08-31). The asset-free command:
+The latest candidate gate ran from the tree rooted at `ae8d63d` (2026-08-31)
+with `DEFAULT_MATRIX_WORKERS=1`. The earlier clean asset-free command:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -29,41 +30,43 @@ python scripts/production_gate.py \
   --format text
 ```
 
-returned scoped `PASS`: collection 604, unit 477/477, and timing 35/35 in
-each of five repetitions. It used bundled source PyBoy 2.7.0, fork
+returned scoped `PASS` from a clean worktree: collection 648, unit 507/507,
+and timing 35/35 in each of five repetitions. It used bundled source PyBoy
+2.7.0, fork
 `c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
 ten-entry fixture manifest. No ROM-backed tier ran in this command.
 
-The same collection audit found all nine ordered version pairs, six
-reversed-role rows, nine local variant rows, and three strict trade plus three
-strict battle entry points. It reported 15 supported trade cases and 15
-supported battle cases without strict entry points, and matrix runtime was
-`NOT RUN` because the standalone audit is collection-only.
+The same collection audit found all nine ordered local pairs, all nine ordered
+remote listener/connector pairs, six reversed-role rows, all nine local variant
+rows, and 19 strict trade plus 19 strict battle entrypoints. Structural and
+declaration checks passed; matrix runtime was `NOT RUN` because the standalone
+audit is collection-only.
 
-The previously recorded selected-tier real-ROM run at `db72be6` recorded local
-46/46, remote 13/13, strict trade 3/3, and strict battle 3/3. The strict remote
-rows cover both color Red/Blue listener/connector directions. Those results
-predate the current transport hardening and must be rerun for current-candidate
-sign-off; they are not a full-gate result because the strict matrix declaration
-remains incomplete.
+The current candidate strict trade matrix passed 19/19 with no skips, xfails,
+or errors. The strict battle matrix passed 17/19 with no skips, xfails, or
+errors; the two failures were remote `red_color` listener rows connecting to
+color Blue and Yellow at the bounded LinkMenu phase. Earlier selected runs are
+historical diagnostics and do not replace this result.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
 producer plus tracked battle-fixture generator are present. Full sign-off is
-pending strict matrix declaration/full runtime coverage, vanilla source
-provenance, broad-suite coverage, native-platform evidence, retained complete
-evidence, and independent review.
+pending the two failed remote battle rows, Cython gameplay coverage, vanilla
+source provenance, broad-suite coverage, native-platform evidence, retained
+complete evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The functional source candidate boundary is identified as `d8198ef`; the final
-  release commit must be recorded after documentation integration.
+- [x] The candidate evidence boundary is identified as the tree rooted at
+  `ae8d63d` plus the committed conservative matrix scheduling change; this
+  documentation is reviewed against that boundary.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
 - [x] Documentation keeps BYO assets and external evidence outside the source
   tree and uses relative paths or placeholders rather than machine paths.
-- [x] The final release candidate is clean after the documentation commit;
-  its exact commit is retained with the release handoff.
+- [x] The candidate evidence run used an isolated worktree and its exact
+  runtime, asset hashes, deadlines, and outcome are recorded in the README and
+  runbook; external evidence remains outside the source tree.
 
 ## Runtime and dependency identity
 
@@ -75,9 +78,12 @@ evidence, and independent review.
   bit-accurate serial contract.
 - [ ] Any release environment runs `python -m pip check` and records the
   interpreter/runtime identity from the same environment used by MCP.
-- [ ] Cython/native-accelerator mode has its own serial-attachment and
-  acceptance evidence; source mode remains the only documented production
-  link runtime.
+- [x] Cython/native-accelerator mode builds and passes its explicit runtime
+  serial contract in a seeded disposable Python 3.12 environment.
+- [x] The pinned Cython build exposes `mb.serial` and passes a real-ROM
+  attach/detach/close smoke.
+- [ ] Full Cython trade/battle acceptance is complete; source mode remains the
+  documented release default and neither mode has full strict-matrix sign-off.
 
 ## ROM, symbol, and BYO asset identity
 
@@ -96,26 +102,30 @@ evidence, and independent review.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete in the scoped
-  `d8198ef` gate; 604 tests were collected with no collection errors.
-- [x] ROM-free unit tests pass 477/477 in the scoped gate.
-- [x] Timing tests pass 35/35 across five repetitions in the scoped gate.
-- [x] `ruff check .` is clean at the functional source candidate boundary.
+  `dfee2ec` gate; 648 tests were collected with no collection errors.
+- [x] ROM-free unit tests pass 507/507 in the scoped gate.
+- [x] Timing tests pass 35/35 in each of five repetitions in the scoped gate.
+- [x] `ruff check .` is clean at the committed source candidate boundary.
 - [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
   xfail, or timeout.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every advertised
-  ROM variant. The clean-wheel 3/3 color-Red smoke is not five-row sign-off.
-- [x] The current real-ROM local tier passes 46/46 and the remote tier passes
-  13/13 with no fixture or runtime skips.
-- [x] Controlled canonical local evidence exists for color Red plus Yellow,
-  including trade and battle assertions.
-- [x] Controlled canonical remote evidence exists for color Red as
-  listener/internal-clock and color Blue as connector/external-clock, plus
-  the reversed role, including strict trade and battle paths.
-- [ ] The strict acceptance declaration covers every supported ordered pair;
-  current runtime passes three trade and three battle rows, but 15 rows per
-  operation remain undeclared.
-- [x] Reversed listener/connector roles pass the current strict color Red/Blue
-  trade and battle rows; concurrent load stability remains open.
+  ROM variant. The current asset-free gate does not exercise this tier.
+- [ ] The current candidate rerun of the real-ROM local and remote tiers passes
+  with no fixture or runtime skips; strict trade is green, but two remote
+  Red-listener battle rows still fail at LinkMenu.
+- [x] Current-candidate controlled local evidence covers the complete canonical
+  matrix: 9/9 ordered trade rows, 9/9 ordered battle rows, and both dedicated
+  Red/Yellow assertions passed.
+- [ ] Current-candidate controlled remote evidence covers every ordered
+  listener/connector pair: trade is 9/9, while battle is 7/9 because the two
+  Red-listener rows remain failing.
+- [x] The strict acceptance declaration has an entrypoint for every canonical
+  ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
+  IDs); every declared row was executed in the current candidate gate.
+- [ ] Current-candidate local and remote strict runtime rows pass in both
+  listener/connector directions; local and trade rows are green, but the two
+  remote Red-listener battle rows remain open and concurrent-load stability is
+  not certified.
 - [ ] Native-platform/build coverage and an independent release review are
   complete.
 
@@ -146,6 +156,10 @@ evidence, and independent review.
 - [x] MCP launch examples use explicit ROM, symbol, and SHA-1 values.
 - [x] The bundled runtime is the default path and no machine-local
   `PYTHONPATH` is required by `.mcp.json`.
+- [x] The portable `.mcp.json` contract is documented: the client expands
+  `${PWD}` (or an equivalent workspace variable), launches the installed
+  environment's `python`, and resolves the selected BYO assets from the
+  workspace root.
 - [x] MCP stdout remains the JSON-RPC channel; diagnostics are kept off the
   protocol stream.
 - [x] TCP binding and connection are restricted to loopback addresses.
@@ -181,8 +195,8 @@ python scripts/production_gate.py \
   --format text
 ```
 
-The matrix command is collection-only and intentionally returns nonzero while
-its strict declaration is incomplete. The asset-free gate may return `PASS`
+The matrix command is collection-only and returns zero when its structural and
+strict declaration checks pass. The asset-free gate may return `PASS`
 without ROMs because it selects only unit and timing; the default gate must
 return `PASS` only after assets, strict matrix, fixture, and all required
 real-ROM tiers pass. Keep the sanitized evidence bundle outside version

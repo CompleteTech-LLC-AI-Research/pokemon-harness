@@ -27,13 +27,18 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current functional candidate boundary is `d8198ef`. Its asset-free gate
-passed 477/477 unit tests and 35/35 timing cases across five repetitions. The release
-runtime is the bundled PyBoy source snapshot pinned in `VERSIONS.md` (`2.7.0`,
-harness revision `c565df66c3731fad2856169a90f6bbec99925915`) with
-`mcp==1.29.1`. The source runtime is the only link-acceptance mode currently
-exercised in passing evidence. A Cython build that hides `mb.serial` is
-diagnostic until it passes its own attachment and acceptance checks. Use
+The latest candidate gate ran from the tree rooted at `ae8d63d` with the
+conservative `DEFAULT_MATRIX_WORKERS=1` setting. Its strict trade tier passed
+19/19; strict battle passed 17/19 with two remote failures and no skips or
+xfails. The earlier clean asset-free gate at `dfee2ec` passed 507/507 unit tests
+and 35/35 timing cases in each of five repetitions, with 648 tests collected.
+The release runtime is the bundled PyBoy source
+snapshot pinned in `VERSIONS.md` (`2.7.0`, harness revision
+`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode is
+the documented release default. The pinned Cython build also passed its runtime
+identity and serial-contract checks, exposed `mb.serial`, and passed a
+real-ROM attach/detach/close smoke; full trade/battle acceptance has not been
+run in Cython mode. Use
 explicit ROM, symbol, and SHA-1 values; never use `POKERED_SKIP_SHA1=1` for
 release evidence.
 
@@ -42,15 +47,19 @@ release evidence.
 - Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
   fixture bytes have recorded reproduction evidence; the external states are
   never committed and their hashes do not prove gameplay compatibility.
-- Controlled local stateful evidence covers color Red + Yellow for the strict
-  trade and battle cases; this does not certify every version pairing.
-- Controlled remote evidence covers color Red as listener/internal-clock and
-  color Blue as connector/external-clock, plus the reversed role, over
-  localhost TCP, including strict trade and battle paths. Concurrent load
-  stability and other rows remain unverified.
-- The strict acceptance declaration remains incomplete: 15 trade and 15
-  battle rows lack dedicated strict entry points. A collection-only row or
-  LinkMenu milestone is not a gameplay acceptance.
+- The current candidate passed all 10 local/dedicated trade rows, all 10
+  local/dedicated battle rows, and all 9 remote trade rows. Remote battle passed
+  7/9; the two failures are the `red_color` listener rows connecting to
+  `blue_color` and Yellow.
+- The current tree declares all canonical Red/Blue/Yellow listener and
+  connector orderings over localhost TCP. The current runtime result is green
+  for trade and partial for battle; concurrent-load stability remains open, and
+  the two failed Red-listener battle rows require repair.
+- The strict acceptance declaration has a dedicated entry point for every
+  canonical ordered local and remote pair (19 trade and 19 battle nodes).
+  Collection is declaration evidence only; a LinkMenu milestone is not a
+  gameplay acceptance. Current execution recorded strict trade 19/19 and
+  strict battle 17/19, with the two failed remote rows retained as blockers.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or
@@ -64,6 +73,12 @@ Use `scripts/production_gate.py` with the same interpreter used by installation
 and MCP. `--unit-only` is an asset-free scoped gate, not a release gate; the
 default command additionally requires the five ROMs, three symbols, external
 fixture bytes, complete strict matrix declaration, and required real-ROM tiers.
+The default strict matrix worker count is one because each row runs an emulator
+pair; increase `--matrix-workers` only after measuring the host budget.
+The clean-install baseline is `python3 -m venv .venv`, activation, `python -m
+pip install -e ".[dev]"`, `python -m pip check`, and
+`python scripts/bootstrap_pyboy.py --mode source --check`; `uv sync --locked
+--extra dev` is the lockfile-resolved alternative when `uv` is available.
 Required real-ROM tiers must have no skips, xfails, failures, errors, or
 timeouts. Retain complete output with commit, runtime, ROM/SYM/fixture hashes,
 fixture provenance, roles, deadlines, and teardown results. The ordinary

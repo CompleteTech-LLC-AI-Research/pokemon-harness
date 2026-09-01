@@ -982,6 +982,8 @@ def test_pair_completes_trade_end_to_end(version_a, version_b):
         pre_b = b.read_game_state().party
         pre_a_lead = pre_a.lead.species if pre_a.lead else None
         pre_b_lead = pre_b.lead.species if pre_b.lead else None
+        before_a_raw = _party_raw_summary(a)
+        before_b_raw = _party_raw_summary(b)
 
         diag_counters = _install_trade_diag_counters(a, b)
 
@@ -991,6 +993,8 @@ def test_pair_completes_trade_end_to_end(version_a, version_b):
 
         trade_diag = _drive_complete_trade(a, b, link, counters=diag_counters)
 
+        after_a_raw = _party_raw_summary(a)
+        after_b_raw = _party_raw_summary(b)
         post_a_state = a.read_game_state()
         post_b_state = b.read_game_state()
         link_state_a = a._pyboy.memory[a.symbols.addr_of("wLinkState")]
@@ -1053,6 +1057,12 @@ def test_pair_completes_trade_end_to_end(version_a, version_b):
             f"B never ran _AddEnemyMonToPlayerParty; trade didn't complete "
             f"on side B. diagnostic={trade_diag}"
         )
+        assert after_a_raw["count"] == before_a_raw["count"]
+        assert after_b_raw["count"] == before_b_raw["count"]
+        assert after_a_raw["species"][0] == before_b_raw["mon_species"][0]
+        assert after_b_raw["species"][0] == before_a_raw["mon_species"][0]
+        assert after_a_raw["mon_records"][0] == before_b_raw["mon_records"][0]
+        assert after_b_raw["mon_records"][0] == before_a_raw["mon_records"][0]
     finally:
         a.close()
         b.close()
@@ -1301,13 +1311,13 @@ def _drive_complete_battle_turn(
     5. Read the ROM-populated active move/PP buffers, move the real menu
        cursor to the first move with PP remaining, and press A once.
     6. ``LinkBattleExchangeData`` nibble-exchanges both sides' moves.
-    7. ``ExecutePlayerMove`` / ``ExecuteEnemyMove`` / ``PlayerCalcMoveDamage``
-       fire as the turn resolves.
+    7. ``ExecutePlayerMove`` / ``ExecuteEnemyMove`` fire as the turn resolves.
 
-    The acceptance hook is ``PlayerCalcMoveDamage`` — its firing means
-    a move was selected, transmitted to the peer, and resolved into
-    damage computation. That's "one turn complete" for the v1
-    acceptance criteria.
+    The broad matrix acceptance requires the native
+    ``LinkBattleExchangeData`` move exchange plus at least one execute path on
+    each side. The focused Red/Yellow release case additionally requires
+    ``PlayerCalcMoveDamage``; the damage hook is intentionally not required
+    here because valid Gen I moves can resolve without that routine.
     """
     cct = counters["CableClub_DoBattleOrTrade"]
     vs = counters["DisplayLinkBattleVersusTextBox"]

@@ -8,6 +8,7 @@ must remain safe when a request, worker, or asset fails.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -18,11 +19,14 @@ from pokered_harness.mcp_server import (
     _error_code,
     _error_reply,
     dispatch_tool,
+    main,
 )
 from pokered_harness.session import (
     RomHashMismatch,
     RomNotFoundError,
     Session,
+    SessionCloseTimeout,
+    SessionLockTimeout,
     SymbolHashMismatch,
     SymbolNotFoundError,
 )
@@ -96,6 +100,20 @@ class _BlockingPyBoy(FakePyBoy):
         self.stopped = True
 
 
+class _BlockingStopPyBoy(FakePyBoy):
+    def __init__(self) -> None:
+        super().__init__(DictMemory())
+        self.stop_entered = threading.Event()
+        self.release_stop = threading.Event()
+
+    def stop(self, save: bool = False) -> None:
+        del save
+        self.stop_entered.set()
+        if not self.release_stop.wait(timeout=2.0):
+            raise AssertionError("test did not release PyBoy.stop")
+        self.stopped = True
+
+
 def test_session_close_serializes_stop_after_an_inflight_tick() -> None:
     pyboy = _BlockingPyBoy()
     session, _ = _session(pyboy=pyboy)
@@ -130,6 +148,100 @@ def test_session_close_serializes_stop_after_an_inflight_tick() -> None:
     assert close_errors == []
     assert pyboy.stop_called.is_set()
     assert pyboy.stop_during_tick is False
+
+
+def test_session_close_can_retry_after_inflight_operation_timeout() -> None:
+    pyboy = _BlockingPyBoy()
+    session, _ = _session(pyboy=pyboy)
+    step_thread = threading.Thread(
+        target=session.step, name="test-session-step-retry"
+    )
+    step_thread.start()
+    assert pyboy.tick_entered.wait(timeout=1.0)
+
+    with pytest.raises(SessionCloseTimeout):
+        session.close(timeout_s=0.05)
+    pyboy.release_tick.set()
+    step_thread.join(timeout=2.0)
+    assert not step_thread.is_alive()
+
+    session.close(timeout_s=1.0)
+    assert pyboy.stop_called.is_set()
+
+
+def test_session_close_bounds_a_blocking_pyboy_stop_and_retries() -> None:
+    pyboy = _BlockingStopPyBoy()
+    session, _ = _session(pyboy=pyboy)
+
+    started = time.monotonic()
+    with pytest.raises(SessionCloseTimeout, match="PyBoy.stop"):
+        session.close(timeout_s=0.05)
+    assert time.monotonic() - started < 0.5
+    assert session.closed is True
+    assert pyboy.stop_entered.wait(timeout=0.5)
+
+    with pytest.raises(SessionCloseTimeout):
+        session.close(timeout_s=0.05)
+
+    pyboy.release_stop.set()
+    session.close(timeout_s=1.0)
+    assert pyboy.stopped is True
+
+
+def test_session_close_fails_closed_with_bounded_deadline() -> None:
+    pyboy = _BlockingPyBoy()
+    session, _ = _session(pyboy=pyboy)
+    step_errors: list[Exception] = []
+    step_thread = threading.Thread(
+        target=lambda: _capture_error(session.step, step_errors),
+        name="test-session-step-stubborn",
+    )
+    step_thread.start()
+    assert pyboy.tick_entered.wait(timeout=1.0)
+
+    started = time.monotonic()
+    with pytest.raises(SessionCloseTimeout, match="shutdown deadline"):
+        session.close(timeout_s=0.05)
+    assert time.monotonic() - started < 0.5
+    assert session.closed is True
+    assert not pyboy.stop_called.is_set()
+
+    pyboy.release_tick.set()
+    step_thread.join(timeout=2.0)
+    assert not step_thread.is_alive()
+    assert step_errors == []
+
+
+def test_session_locked_timeout_is_bounded() -> None:
+    session, _ = _session()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with session.locked():
+            entered.set()
+            release.wait(timeout=2.0)
+
+    owner = threading.Thread(target=hold_lock, name="test-session-lock-owner")
+    owner.start()
+    assert entered.wait(timeout=1.0)
+
+    started = time.monotonic()
+    with pytest.raises(SessionLockTimeout, match="deadline"), session.locked(
+        timeout_s=0.05
+    ):
+        raise AssertionError("the bounded lock should not be acquired")
+    assert time.monotonic() - started < 0.5
+
+    release.set()
+    owner.join(timeout=2.0)
+    assert not owner.is_alive()
+
+
+def test_mcp_entrypoint_rejects_hash_bypass(monkeypatch) -> None:
+    monkeypatch.setenv("POKERED_SKIP_SHA1", "1")
+    with pytest.raises(SystemExit, match="rejected by the MCP production"):
+        main()
 
 
 def _capture_error(call, errors: list[Exception]) -> None:

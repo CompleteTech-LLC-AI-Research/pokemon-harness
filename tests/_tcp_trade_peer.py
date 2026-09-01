@@ -295,9 +295,10 @@ def main() -> int:
     log("TCP established, attaching PyBoy")
     link.attach(session._pyboy)
     peer_version = link._network_backend.wait_for_hello(timeout=30.0)
+    selected_internal = link.negotiate_network_clock_role(peer_version)
     log(
         f"versioned handshake complete: local={fixture_version} "
-        f"peer={peer_version}"
+        f"peer={peer_version} native_internal_clock={selected_internal}"
     )
     log("attached; starting drive loop")
 
@@ -984,15 +985,50 @@ def main() -> int:
             shot("02_battle_menu")
 
             COLOSSEUM = 0xF0
-            for _ in range(80):
-                if (
-                    session.read_game_state().overworld.map_id == COLOSSEUM
-                    and counters["CableClub_DoBattleOrTrade"][0] == 0
-                ):
+            # Do not treat the selection A press as proof of a warp.  A
+            # cross-version peer can leave LinkMenu first and continue to
+            # tick through Cable Club while this ROM is still waiting for its
+            # own ROM-owned selection exchange.  Keep the local emulator
+            # active, retry only through the public A-input path, and fail
+            # closed if the observable map never changes.
+            battle_warp_deadline = min(deadline, time.monotonic() + 120.0)
+            while time.monotonic() < battle_warp_deadline:
+                if session.read_game_state().overworld.map_id == COLOSSEUM:
                     break
                 session.press("a", duration=4)
                 session.step(20)
-            log("colosseum warp complete")
+            if session.read_game_state().overworld.map_id != COLOSSEUM:
+                raise RuntimeError(
+                    "battle LinkMenu selection did not reach Colosseum: "
+                    f"state={state_snapshot()} menu={menu_snapshot()} "
+                    f"backend={backend_snapshot()}"
+                )
+
+            # Hold the first peer at the verified map boundary while the
+            # other peer completes its own ordinary menu selection.  The
+            # cooperative wait continues stepping the ROM, so a native
+            # serial IRQ cannot be starved by the phase rendezvous.
+            battle_warp_announced = False
+            peer_battle_warp_ready = False
+            battle_warp_sync_deadline = min(deadline, time.monotonic() + 120.0)
+            while time.monotonic() < battle_warp_sync_deadline:
+                if not battle_warp_announced:
+                    link._network_backend.announce_sync(sync_id=112)
+                    battle_warp_announced = True
+                    log(
+                        "battle Colosseum warp verified; readiness sent "
+                        f"{state_snapshot()}"
+                    )
+                if link._network_backend.poll_peer_sync(sync_id=112):
+                    peer_battle_warp_ready = True
+                    break
+                session.step(20)
+            if not peer_battle_warp_ready:
+                raise RuntimeError(
+                    "battle Colosseum warp rendezvous did not converge: "
+                    f"local={state_snapshot()} backend={backend_snapshot()}"
+                )
+            log("battle Colosseum warp complete on both peers")
             shot("03_colosseum")
             session.step(120)
 

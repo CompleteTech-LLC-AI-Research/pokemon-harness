@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -35,6 +37,64 @@ assert _SPEC is not None and _SPEC.loader is not None
 gate = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = gate
 _SPEC.loader.exec_module(gate)
+
+
+def _matrix_report(nodeid: str, *, outcome: str = "passed") -> dict:
+    counts = {
+        "total": 1,
+        "passed": int(outcome == "passed"),
+        "failed": int(outcome == "failed"),
+        "skipped": int(outcome == "skipped"),
+        "xfailed": 0,
+        "xpassed": 0,
+        "errors": 0,
+    }
+    return {
+        "collection_only": False,
+        "counts": counts,
+        "tests": [
+            {
+                "nodeid": nodeid,
+                "outcome": outcome,
+                "when": "call",
+                "reason": "fixture missing" if outcome == "skipped" else "",
+                "was_xfail": False,
+            }
+        ],
+        "collection_errors": [],
+        "collection_skips": [],
+        "collected": 1,
+        "nodeids": [nodeid],
+        "exitstatus": 0,
+    }
+
+
+class _FakeMatrixPopen:
+    mode = "pass"
+    commands: ClassVar[list] = []
+
+    def __init__(self, command, *, env, **kwargs):
+        del kwargs
+        self.command = command
+        self.returncode = None if self.mode == "hang" else 0
+        self.pid = 999999999
+        self.stdout = io.StringIO("")
+        self.commands.append((command, env))
+        nodeid = command[3]
+        if self.mode != "hang":
+            outcome = "passed" if self.mode == "pass" else self.mode
+            payload = _matrix_report(nodeid, outcome=outcome)
+            Path(env["POKERED_GATE_REPORT"]).write_text(json.dumps(payload), encoding="utf-8")
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        del timeout
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
 
 
 def test_tier_classifier_rejects_unknown_test_modules():
@@ -173,6 +233,8 @@ def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert len(REMOTE_VERSION_PAIR_NODEIDS) == 9
     assert len(REMOTE_REVERSED_ROLE_NODEIDS) == 6
     assert len(LOCAL_VARIANT_NODEIDS) == 9
+    assert len(TIER_REQUIRED_NODEIDS["trade"]) == 19
+    assert len(TIER_REQUIRED_NODEIDS["battle"]) == 19
     assert any("[red-blue]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
     assert any("[blue-red]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
     assert any("[red-vanilla-x-color]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["local"])
@@ -187,7 +249,7 @@ def test_matrix_audit_fails_closed_on_missing_cases_and_reports_unrun_runtime():
 
     assert audit["structural_pass"] is False
     assert missing in audit["groups"]["remote-role-pairs"]["missing"]
-    assert audit["acceptance_matrix_complete"] is False
+    assert audit["acceptance_matrix_complete"] is True
     assert audit["runtime"] == "not-run"
 
 
@@ -201,15 +263,11 @@ def test_matrix_audit_surfaces_collection_skips_even_when_they_are_described():
     assert audit["collection_skips"] == ("optional dependency unavailable",)
 
 
-def test_strict_acceptance_gap_report_keeps_uncovered_ordered_cases_explicit():
+def test_strict_acceptance_gap_report_has_an_entrypoint_for_each_ordered_case():
     gaps = acceptance_matrix_gaps()
 
-    assert len(gaps["trade"]) == 15
-    assert len(gaps["battle"]) == 15
-    assert ("remote", "blue", "red") not in gaps["trade"]
-    assert ("remote", "blue", "red") not in gaps["battle"]
-    assert ("remote", "yellow", "blue") in gaps["trade"]
-    assert ("remote", "yellow", "blue") in gaps["battle"]
+    assert gaps["trade"] == ()
+    assert gaps["battle"] == ()
 
 
 def test_required_nodeid_checker_preserves_parameterized_case_identity():
@@ -284,6 +342,94 @@ def test_run_tier_repeats_timing_cases_at_least_five_times(tmp_path, monkeypatch
 
     assert result.status == "PASS"
     assert len(calls) == 5
+
+
+def test_strict_matrix_tier_runs_each_required_node_in_isolated_selector(tmp_path, monkeypatch):
+    _FakeMatrixPopen.mode = "pass"
+    _FakeMatrixPopen.commands = []
+    monkeypatch.setattr(gate.subprocess, "Popen", _FakeMatrixPopen)
+    required = (
+        "tests/test_matrix.py::test_pair[red-blue]",
+        "tests/test_matrix.py::test_pair[blue-red]",
+    )
+    result = gate.run_tier(
+        name="trade",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+        required_nodeids=required,
+        matrix_workers=2,
+    )
+
+    assert result.status == "PASS"
+    assert result.counts == gate.Counts(total=2, passed=2)
+    assert result.selected_nodeids == sorted(required)
+    assert [case.status for case in result.case_results] == ["PASS", "PASS"]
+    assert {command[3] for command, _env in _FakeMatrixPopen.commands} == set(required)
+    assert all(
+        command[5] == "real_rom and trade_acceptance" for command, _env in _FakeMatrixPopen.commands
+    )
+
+
+def test_strict_matrix_tier_rejects_a_skipped_required_row(tmp_path, monkeypatch):
+    _FakeMatrixPopen.mode = "skipped"
+    _FakeMatrixPopen.commands = []
+    monkeypatch.setattr(gate.subprocess, "Popen", _FakeMatrixPopen)
+    result = gate.run_tier(
+        name="battle",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+        required_nodeids=("tests/test_matrix.py::test_pair[red-blue]",),
+        matrix_workers=1,
+    )
+
+    assert result.status == "FAIL"
+    assert result.counts.skipped == 1
+    assert any(
+        "required matrix case produced a test skip" in failure
+        for failure in result.iteration_failures
+    )
+
+
+def test_strict_matrix_supervisor_marks_timeout_and_queued_rows(tmp_path, monkeypatch):
+    _FakeMatrixPopen.mode = "hang"
+    _FakeMatrixPopen.commands = []
+    monkeypatch.setattr(gate.subprocess, "Popen", _FakeMatrixPopen)
+    monkeypatch.setattr(gate.os, "killpg", lambda _pid, _signal: None)
+    monkeypatch.setattr(gate, "MATRIX_CASE_TIMEOUT_SECONDS", {"trade": 0.05, "battle": 0.05})
+    monkeypatch.setattr(gate, "MATRIX_AGGREGATE_GRACE_SECONDS", 0.0)
+
+    result = gate.run_tier(
+        name="trade",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=None,
+        report_directory=tmp_path,
+        required_nodeids=(
+            "tests/test_matrix.py::test_pair[red-blue]",
+            "tests/test_matrix.py::test_pair[blue-red]",
+            "tests/test_matrix.py::test_pair[yellow-red]",
+        ),
+        matrix_workers=1,
+        matrix_timeout_override=0.06,
+    )
+
+    assert result.status == "FAIL"
+    assert {case.status for case in result.case_results} == {"TIMEOUT", "NOT_STARTED"}
+    assert sum(case.status == "NOT_STARTED" for case in result.case_results) == 1
+    assert any("aggregate deadline expired" in failure for failure in result.iteration_failures)
 
 
 def test_asset_inspection_reports_hash_mismatch_and_missing_inputs(tmp_path):
@@ -562,6 +708,52 @@ def test_gate_report_loader_accepts_collection_only_inventory(tmp_path):
     assert loaded.error == ""
     assert loaded.collection_only is True
     assert loaded.nodeids == ("tests/test_one.py::test_one",)
+
+
+def test_gate_report_loader_accepts_only_explicit_partial_progress(tmp_path):
+    report = tmp_path / "progress.json"
+    report.write_text(
+        json.dumps(
+            {
+                "collection_only": False,
+                "counts": {
+                    "total": 1,
+                    "passed": 1,
+                    "failed": 0,
+                    "skipped": 0,
+                    "xfailed": 0,
+                    "xpassed": 0,
+                    "errors": 0,
+                },
+                "tests": [
+                    {
+                        "nodeid": "tests/test_one.py::test_one",
+                        "outcome": "passed",
+                        "when": "call",
+                        "reason": "",
+                        "was_xfail": False,
+                    }
+                ],
+                "collection_errors": [],
+                "collection_skips": [],
+                "collected": 2,
+                "nodeids": [
+                    "tests/test_one.py::test_one",
+                    "tests/test_two.py::test_two",
+                ],
+                "exitstatus": -1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    partial = gate._load_gate_report(report, allow_partial=True)
+    assert partial.error == ""
+    assert partial.counts == gate.Counts(total=1, passed=1)
+    assert len(partial.nodeids) == 2
+
+    complete = gate._load_gate_report(report)
+    assert complete.error.startswith("invalid pytest report:")
 
 
 def test_runtime_problems_reject_a_manifest_revision_mismatch(tmp_path):

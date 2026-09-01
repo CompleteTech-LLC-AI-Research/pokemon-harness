@@ -49,14 +49,19 @@ LOCAL_VARIANT_TEST = (
     "test_same_version_variants_reach_link_menu",
 )
 
-# Only these profile-specific remote rows have current, native-serial
-# end-to-end trade and battle evidence.  The first profile is the listener
-# (internal-clock master); the second is the connector (external-clock slave).
-# The color suffix is intentional: the vanilla profiles use a different ROM
-# menu contract and are not silently promoted by the version-level matrix.
-REMOTE_STRICT_PROFILE_PAIRS = (
-    ("red_color", "blue_color"),
-    ("blue_color", "red_color"),
+# The strict subprocess driver uses the canonical color Red, color Blue, and
+# Yellow profiles. The first profile is the listener (internal-clock master)
+# and the second is the connector (external-clock slave), so every ordered
+# version pair is a distinct acceptance row. Stock Red/Blue remain outside
+# this matrix because their vanilla fixture provenance is still partial.
+_CANONICAL_PROFILE = {
+    "red": "red_color",
+    "blue": "blue_color",
+    "yellow": "yellow",
+}
+REMOTE_STRICT_PROFILE_PAIRS = tuple(
+    (_CANONICAL_PROFILE[listener], _CANONICAL_PROFILE[connector])
+    for listener, connector in SUPPORTED_VERSION_PAIRS
 )
 
 
@@ -70,6 +75,16 @@ def _nodeid(test: tuple[str, str], parameter_id: str | None = None) -> str:
     return f"{module}::{name}{suffix}"
 
 STRICT_TRADE_NODEIDS = frozenset(
+    _nodeid(
+        (
+            "tests/test_pyboy_link_session_roms.py",
+            "test_pair_completes_trade_end_to_end",
+        ),
+        f"{left}-{right}",
+    )
+    for left, right in SUPPORTED_VERSION_PAIRS
+)
+STRICT_TRADE_NODEIDS |= frozenset(
     {
         _nodeid(
             (
@@ -90,6 +105,16 @@ STRICT_TRADE_NODEIDS = frozenset(
     )
 )
 STRICT_BATTLE_NODEIDS = frozenset(
+    _nodeid(
+        (
+            "tests/test_pyboy_link_session_roms.py",
+            "test_pair_completes_battle_turn",
+        ),
+        f"{left}-{right}",
+    )
+    for left, right in SUPPORTED_VERSION_PAIRS
+)
+STRICT_BATTLE_NODEIDS |= frozenset(
     {
         _nodeid(
             (
@@ -142,51 +167,41 @@ STRICT_ACCEPTANCE_NODEIDS = {
     "battle": STRICT_BATTLE_NODEIDS,
 }
 
-# The strict set contains only current end-to-end evidence.  Every other
-# logical Red/Blue/Yellow pair remains explicitly unverified below; diagnostic
-# LinkMenu rows are never promoted to strict trade/battle acceptance.
+# The strict set contains a dedicated end-to-end entry point for every
+# canonical Red/Blue/Yellow version ordering on both transports. Runtime
+# execution still has to prove each row; collection alone is never a pass.
 STRICT_ACCEPTANCE_CASES = {
     "trade": frozenset(
-        {
-            ("local", "red", "yellow"),
-            ("remote", "red", "blue"),
-            ("remote", "blue", "red"),
-        }
+        ("local", left, right)
+        for left, right in SUPPORTED_VERSION_PAIRS
+    )
+    | frozenset(
+        ("remote", left, right)
+        for left, right in SUPPORTED_VERSION_PAIRS
     ),
     "battle": frozenset(
-        {
-            ("local", "red", "yellow"),
-            ("remote", "red", "blue"),
-            ("remote", "blue", "red"),
-        }
+        ("local", left, right)
+        for left, right in SUPPORTED_VERSION_PAIRS
+    )
+    | frozenset(
+        ("remote", left, right)
+        for left, right in SUPPORTED_VERSION_PAIRS
     ),
 }
 
-# The remote version-level tests cover the complete ordered 3x3 handshake
-# matrix.  These are the current LinkMenu/strict results at the exact
-# candidate boundary.  The strict color Red/Blue rows prove the two Red/Blue
-# directions through trade and battle.  The other Red-involving rows are not
-# exercised by the broad diagnostic because that test explicitly excludes its
-# Red walk path; Yellow->Blue has a reproducible pre-LinkMenu failure; the
-# remaining Blue/Yellow rows reach LinkMenu.  This is a classification, not a
-# runtime claim made by collection alone.
+# These labels describe the required current-candidate runtime work, not a
+# collection-time pass. The gate must execute and retain evidence for every
+# ordered row before any label can be promoted to certified.
 REMOTE_LINK_MENU_CASE_CLASSIFICATIONS = {
-    ("red", "red"): "diagnostic-driver-excluded-red-walk",
-    ("red", "blue"): "strict-trade-battle-certified-color-profiles",
-    ("blue", "red"): "strict-trade-battle-certified-color-profiles",
-    ("red", "yellow"): "diagnostic-driver-excluded-red-walk",
-    ("yellow", "red"): "diagnostic-driver-excluded-red-walk",
-    ("blue", "blue"): "link-menu-certified",
-    ("blue", "yellow"): "link-menu-certified",
-    ("yellow", "blue"): "runtime-failed-before-link-menu",
-    ("yellow", "yellow"): "link-menu-certified",
+    pair: "strict-trade-battle-runtime-pending"
+    for pair in SUPPORTED_VERSION_PAIRS
 }
 
 
 def acceptance_matrix_classifications() -> dict[
     str, dict[tuple[str, str, str], str]
 ]:
-    """Classify every strict candidate row without treating gaps as green."""
+    """Classify declaration coverage without treating it as runtime evidence."""
     all_cases = {
         (transport, left, right)
         for transport in ("local", "remote")
@@ -195,7 +210,7 @@ def acceptance_matrix_classifications() -> dict[
     return {
         operation: {
             case: (
-                "certified"
+                "declared"
                 if case in cases
                 else "unverified-no-strict-entrypoint"
             )
@@ -229,8 +244,8 @@ def _json_strict_profile_pairs() -> list[dict[str, str]]:
         {
             "listener": listener,
             "connector": connector,
-            "trade": "certified",
-            "battle": "certified",
+            "trade": "declared",
+            "battle": "declared",
         }
         for listener, connector in REMOTE_STRICT_PROFILE_PAIRS
     ]
@@ -515,7 +530,7 @@ def render_text(audit: dict[str, object], command: Iterable[str]) -> str:
         audit["remote_link_menu_classifications"].items()
     ):
         lines.append(f"  {status}: {case}")
-    lines.append("strict remote profile/role evidence rows:")
+    lines.append("strict remote profile/role declarations (runtime pending):")
     for pair in audit["remote_strict_profile_pairs"]:
         lines.append(
             f"  trade={pair['trade']} battle={pair['battle']}: "

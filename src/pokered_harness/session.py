@@ -10,8 +10,10 @@ between "emulator control" (this module) and "policy" (external).
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,7 +21,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Self
 
-from pokered_harness.events.hooks import EventBus, GameEvent
+from pokered_harness.events.hooks import EventBus, GameEvent, HookRegistration
 from pokered_harness.input import Button, validate_button
 from pokered_harness.pyboy_protocol import PyBoyLike
 from pokered_harness.state import GameState, parse_game_state
@@ -36,6 +38,24 @@ class SessionClosedError(SessionError):
     """Raised when an operation is attempted after session shutdown."""
 
     code = "session_closed"
+
+
+class SessionCloseTimeout(SessionError):
+    """Raised when shutdown cannot complete before its deadline."""
+
+    code = "session_close_timeout"
+
+
+class SessionCloseError(SessionError):
+    """Raised when the emulator rejects a shutdown attempt."""
+
+    code = "session_close_failed"
+
+
+class SessionLockTimeout(SessionError):
+    """Raised when a bounded compound-operation lock cannot be acquired."""
+
+    code = "session_lock_timeout"
 
 
 class SessionConfigurationError(ValueError):
@@ -78,6 +98,9 @@ class SymbolHashMismatch(VersionMismatch):
     """Raised when the symbol bytes do not match the configured SHA-1 pin."""
 
     code = "symbol_hash_mismatch"
+
+
+_DEFAULT_CLOSE_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +149,9 @@ class Session:
         self._close_done = threading.Event()
         self._close_done.set()
         self._close_owner: int | None = None
+        self._stop_thread: threading.Thread | None = None
+        self._stop_error: BaseException | None = None
+        self._stopped = False
         self._closed = False
         self._serial_hooks: list[tuple[_HookState, int, int, str]] = []
         # ``view`` is stashed for introspection; the actual wiring into the
@@ -259,58 +285,172 @@ class Session:
 
     # --- lifecycle -----------------------------------------------------
 
-    def close(self, save: bool = False) -> None:
-        """Stop the emulator exactly once, serialized with all operations.
+    def close(
+        self, save: bool = False, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
+    ) -> None:
+        """Stop the emulator exactly once with a retryable bounded contract.
 
-        The closed flag is published before waiting for ``_lock`` so a raw
-        serial callback that has not entered yet becomes a no-op.  An already
-        running callback or emulator operation is allowed to finish before
-        ``PyBoy.stop`` runs; otherwise stop could race a tick or memory access.
-        Remote link owners close their transport before closing the Session,
-        which wakes a callback blocked in a serial exchange.
+        The closed flag is published before waiting for ``_lock`` so new
+        operations and raw callbacks fail closed. A caller that already owns
+        the emulator lock is allowed to finish before shutdown begins. Once
+        the lock is observed idle, ``PyBoy.stop`` runs in a daemon worker so a
+        broken emulator implementation cannot block the MCP/request thread
+        forever. A later :meth:`close` waits for that same worker and reports
+        completion, failure, or another bounded timeout; it never starts a
+        second concurrent stop.
         """
+        timeout_s = _validate_timeout(timeout_s, "timeout_s")
+        stop_deadline = time.monotonic() + timeout_s
         current_thread_id = threading.get_ident()
         with self._lifecycle_lock:
-            if self._closed:
+            if self._stopped:
+                return
+            if self._stop_thread is not None or self._close_owner is not None:
                 close_done = self._close_done
                 owned_by_current_thread = self._close_owner == current_thread_id
             else:
                 self._closed = True
                 self._close_owner = current_thread_id
                 self._close_done.clear()
+                self._stop_error = None
                 for state, _bank, _addr, _symbol_name in self._serial_hooks:
                     state.active = False
                 close_done = None
                 owned_by_current_thread = True
 
         if close_done is not None:
-            if not owned_by_current_thread:
-                close_done.wait()
-            return
-
-        try:
-            with self._lock:
-                self._pyboy.stop(save=save)
-        finally:
+            if not owned_by_current_thread and not close_done.wait(
+                timeout=max(0.0, stop_deadline - time.monotonic())
+            ):
+                raise SessionCloseTimeout(
+                    "another session close is still in progress before the "
+                    f"{timeout_s:g}s shutdown deadline"
+                )
             with self._lifecycle_lock:
+                if self._stopped:
+                    return
+                if self._stop_error is not None:
+                    raise SessionCloseError(
+                        f"PyBoy.stop failed: {self._stop_error}"
+                    ) from self._stop_error
+                if self._stop_thread is not None or self._close_owner is not None:
+                    if self._close_done.is_set():
+                        return
+                    raise SessionCloseTimeout(
+                        "emulator shutdown is still in progress after the "
+                        f"{timeout_s:g}s shutdown deadline"
+                    )
+                # The previous close caller timed out before it could launch
+                # the stop worker. Claim the retry slot instead of treating
+                # the session as successfully closed.
+                self._close_owner = current_thread_id
+                self._close_done.clear()
+                close_done = None
+                owned_by_current_thread = True
+
+        lock_acquired = False
+        try:
+            if not self._lock.acquire(
+                timeout=max(0.0, stop_deadline - time.monotonic())
+            ):
+                raise SessionCloseTimeout(
+                    "an emulator operation is still active after "
+                    f"the {timeout_s:g}s shutdown deadline"
+                )
+            lock_acquired = True
+            # Prove that no operation which started before close is active.
+            # Public operations reject ``_closed`` before attempting the lock.
+            self._lock.release()
+            lock_acquired = False
+
+            def _stop_worker() -> None:
+                error: BaseException | None = None
+                acquired = self._lock.acquire(timeout=0.1)
+                if not acquired:
+                    error = SessionCloseTimeout(
+                        "emulator lock became busy during shutdown"
+                    )
+                else:
+                    try:
+                        self._pyboy.stop(save=save)
+                    except BaseException as exc:  # noqa: BLE001 - publish exact failure
+                        error = exc
+                    finally:
+                        self._lock.release()
+                with self._lifecycle_lock:
+                    self._stop_error = error
+                    if error is None:
+                        self._stopped = True
+                    self._close_owner = None
+                    self._close_done.set()
+
+            worker = threading.Thread(
+                target=_stop_worker,
+                name="pokered-session-stop",
+                daemon=True,
+            )
+            with self._lifecycle_lock:
+                self._stop_thread = worker
                 self._close_owner = None
-                self._close_done.set()
+            worker.start()
+            if not self._close_done.wait(
+                timeout=max(0.0, stop_deadline - time.monotonic())
+            ):
+                raise SessionCloseTimeout(
+                    "PyBoy.stop did not return before the "
+                    f"{timeout_s:g}s shutdown deadline"
+                )
+            with self._lifecycle_lock:
+                if self._stopped:
+                    return
+                if self._stop_error is not None:
+                    raise SessionCloseError(
+                        f"PyBoy.stop failed: {self._stop_error}"
+                    ) from self._stop_error
+                raise SessionCloseTimeout(
+                    "emulator shutdown did not complete before the "
+                    f"{timeout_s:g}s shutdown deadline"
+                )
+        finally:
+            if lock_acquired:
+                self._lock.release()
+            with self._lifecycle_lock:
+                if self._close_owner == current_thread_id:
+                    self._close_owner = None
+                    # No stop worker was launched, so another close may retry
+                    # the lock phase. Do not mark the session stopped.
+                    if self._stop_thread is None:
+                        self._close_done.set()
 
     @property
     def closed(self) -> bool:
         return self._closed
 
     @contextmanager
-    def locked(self) -> Iterator[Session]:
+    def locked(
+        self, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
+    ) -> Iterator[Session]:
         """Serialize a compound operation that touches this emulator.
 
         Individual session methods already take this same re-entrant lock.
         This context manager is for callers that need a consistent snapshot
         across more than one method without exposing the lock object itself.
+        Lock acquisition is bounded by ``timeout_s`` (five seconds by
+        default); callers that need a shorter request deadline should pass it
+        explicitly.
         """
-        with self._lock:
+        timeout = _validate_timeout(timeout_s, "timeout_s")
+        acquired = self._lock.acquire(timeout=timeout)
+        if not acquired:
+            raise SessionLockTimeout(
+                "could not acquire the emulator lock before the "
+                f"{timeout:g}s deadline"
+            )
+        try:
             self._ensure_open()
             yield self
+        finally:
+            self._lock.release()
 
     def __enter__(self) -> Self:
         return self
@@ -332,18 +472,67 @@ class Session:
     def symbols(self) -> SymbolTable:
         return self._symbols
 
-    def register_hook(self, symbol_name: str, event_name: str) -> None:
+    def register_hook(self, symbol_name: str, event_name: str) -> HookRegistration:
         """Register an execution hook at a symbol label, tagging fired
         events with the current tick. Encapsulates the ``EventBus``
         interaction so callers don't reach into ``_pyboy``."""
         with self._lock:
             self._ensure_open()
-            self._events.register(
+            return self._events.register(
                 pyboy=self._pyboy,
                 symbols=self._symbols,
                 symbol_name=symbol_name,
                 event_name=event_name,
                 tick_source=self.current_tick,
+            )
+
+    def register_hook_at(
+        self,
+        symbol_name: str,
+        callback: Callable[[object], None],
+        *,
+        context: object | None = None,
+        replace_existing: bool = False,
+    ) -> HookRegistration:
+        """Register a session-serialized callback at a symbol address.
+
+        Link orchestration uses this for callbacks that mutate serial WRAM or
+        CPU state rather than emitting a :class:`GameEvent`.  The EventBus
+        dispatcher still gives each callback an owned, independently closable
+        registration and avoids duplicate physical PyBoy breakpoints.
+        """
+        with self._lock:
+            self._ensure_open()
+            bank, addr = self._symbols.bank_addr(symbol_name)
+            return self._events.register_at(
+                self._pyboy,
+                bank,
+                addr,
+                callback,
+                context,
+                symbol_name=symbol_name,
+                replace_existing=replace_existing,
+            )
+
+    def register_hook_at_address(
+        self,
+        bank: int,
+        addr: int,
+        callback: Callable[[object], None],
+        *,
+        context: object | None = None,
+        replace_existing: bool = False,
+    ) -> HookRegistration:
+        """Register a session-serialized callback at a raw address."""
+        with self._lock:
+            self._ensure_open()
+            return self._events.register_at(
+                self._pyboy,
+                bank,
+                addr,
+                callback,
+                context,
+                replace_existing=replace_existing,
             )
 
     def serial_hook(
@@ -376,29 +565,55 @@ class Session:
             self._pyboy.hook_register(bank, addr, _guarded_callback, context)
             self._serial_hooks.append((state, bank, addr, symbol_name))
 
-    def deactivate_serial_hooks(self) -> int:
+    def deactivate_serial_hooks(
+        self, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
+    ) -> int:
         """Disable all raw serial callbacks previously registered here.
 
         PyBoy 2.7 does not expose a stable per-callback removal API. The
         guarded callbacks therefore become no-ops, which makes reconnect and
-        shutdown safe even when the underlying emulator retains a hook.
-        Returns the number of callbacks deactivated.
+        shutdown safe even when the underlying emulator retains a hook. The
+        state transition is serialized with emulator operations and waits no
+        longer than ``timeout_s``. Returns the number of callbacks
+        deactivated.
         """
-        count = 0
-        for state, _bank, _addr, _symbol_name in self._serial_hooks:
-            if state.active:
-                state.active = False
-                count += 1
-        return count
+        timeout = _validate_timeout(timeout_s, "timeout_s")
+        if not self._lock.acquire(timeout=timeout):
+            raise SessionLockTimeout(
+                "could not acquire the emulator lock before the "
+                f"{timeout:g}s deactivation deadline"
+            )
+        try:
+            count = 0
+            for state, _bank, _addr, _symbol_name in self._serial_hooks:
+                if state.active:
+                    state.active = False
+                    count += 1
+            return count
+        finally:
+            self._lock.release()
 
-    def deactivate_hooks_at(self, symbol_name: str) -> None:
+    def deactivate_hooks_at(
+        self,
+        symbol_name: str,
+        *,
+        timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S,
+    ) -> None:
         """Best-effort removal of every PyBoy hook at ``symbol_name``.
 
         This is used for legacy link callbacks installed directly by the
         link endpoint. The guarded callbacks registered through
-        :meth:`serial_hook` are also disabled at the same address.
+        :meth:`serial_hook` are also disabled at the same address. Cleanup
+        waits at most ``timeout_s`` for the emulator lock, including when the
+        session is already closed and only hook teardown remains.
         """
-        with self._lock:
+        timeout = _validate_timeout(timeout_s, "timeout_s")
+        if not self._lock.acquire(timeout=timeout):
+            raise SessionLockTimeout(
+                "could not acquire the emulator lock before the "
+                f"{timeout:g}s deactivation deadline"
+            )
+        try:
             symbol = self._symbols.get(symbol_name)
             if symbol is None:
                 return
@@ -406,14 +621,9 @@ class Session:
             for state, hook_bank, hook_addr, _hook_symbol in self._serial_hooks:
                 if hook_bank == bank and hook_addr == addr:
                     state.active = False
-            deregister = getattr(self._pyboy, "hook_deregister", None)
-            if deregister is not None:
-                try:
-                    deregister(bank, addr)
-                except ValueError:
-                    # PyBoy reports an absent breakpoint as ValueError. A
-                    # best-effort cleanup is already complete in that case.
-                    pass
+            self._events.deactivate_at(self._pyboy, bank, addr)
+        finally:
+            self._lock.release()
 
     # --- actions -------------------------------------------------------
 
@@ -567,6 +777,18 @@ def sha1_of_file(path: str | Path, *, chunk_size: int = 1 << 20) -> str:
 
 
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _validate_timeout(value: float, name: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be finite and non-negative")
+    try:
+        candidate = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be finite and non-negative") from exc
+    if not math.isfinite(candidate) or candidate < 0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return candidate
 
 
 def _normalise_sha1(value: str, *, label: str = "ROM SHA-1") -> str:

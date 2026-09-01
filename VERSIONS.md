@@ -5,30 +5,35 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate; the current source boundary is
-`d8198ef` (2026-08-31). Its asset-free production gate collected 604 tests,
-passed unit 477/477, and passed timing 35/35 across five repetitions. The
-gate's scoped result is `PASS`; it does not run ROM-backed tiers. Its matrix
-audit collected all nine ordered pairs, six reversed-role rows, nine local
-variant rows, and three strict trade plus three strict battle entry points,
-but the strict acceptance declaration is incomplete with 15 uncovered cases
-per operation; collection-only matrix runtime was not run.
+Status: `PARTIAL` current audit candidate (2026-08-31). The latest ROM-backed
+candidate gate ran from the tree rooted at `ae8d63d` with
+`DEFAULT_MATRIX_WORKERS=1`; the scheduling change is included with this status
+update. Its strict trade tier passed 19/19, while strict battle passed 17/19
+with two bounded remote failures and no skips, xfails, or errors. The earlier
+clean asset-free gate at `dfee2ec` passed unit 507/507 and timing 35/35 in each
+of five repetitions, with 648 tests collected. The collection-only matrix audit
+also passed structurally: all nine ordered local pairs, all nine ordered remote
+role pairs, all six reversed-role rows, all nine local variant rows, and 19
+strict trade plus 19 strict battle entrypoints are present.
 
-The previously recorded selected-tier run at `db72be6` passed local 46/46,
-remote 13/13, strict trade 3/3, and strict battle 3/3 with the pinned BYO
-assets. The remote strict rows cover both color Red/Blue listener/connector
-directions. These results predate the current transport hardening and must be
-rerun for current-candidate sign-off; they do not constitute a full-gate result
-because the strict matrix declaration remains incomplete. The historical complete
-real-ROM snapshot at
-`1046a541e0003923aec6000b6b383c6eaafeaa48` is also separate evidence.
+The pinned fork's Cython build and runtime contract passed in a seeded disposable
+Python 3.12 environment. The compiled mode exposed the Python-side `mb.serial`
+object, passed the serial contract, and passed a real-ROM attach/detach/close
+smoke. Full trade/battle acceptance was not run in Cython mode, so the Cython
+probe does not certify gameplay. Source mode remains the documented release
+default. Current candidate local/dedicated trade and battle rows passed 10/10,
+and all nine remote trade rows passed. Remote battle passed 7/9; the failing
+rows are `red_color-listen-blue_color-connect` (battle LinkMenu cursor did not
+advance) and `red_color-listen-yellow-connect` (LinkMenu rendezvous did not
+converge before the bounded child deadline). The historical complete real-ROM
+snapshot at `1046a541e0003923aec6000b6b383c6eaafeaa48` is separate evidence.
 
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
-The remaining release decision is `PARTIAL` because strict matrix declaration
-and full runtime coverage, vanilla source provenance, broad-suite coverage,
+The remaining release decision is `PARTIAL` because two remote battle rows,
+Cython gameplay coverage, vanilla source provenance, broad-suite coverage,
 native-platform coverage, retained complete evidence, and independent review
-are incomplete. `ruff check .` is clean for the configured product boundary.
+remain incomplete. `ruff check .` is clean for the configured product boundary.
 
 ## Runtime
 
@@ -40,9 +45,12 @@ are incomplete. `ruff check .` is clean for the configured product boundary.
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
-coordinator and remote TCP transport. A pre-existing standalone PyBoy wheel
-must not be allowed to shadow this package; verify the runtime identity before
-release. See the [production runbook](docs/PRODUCTION_RUNBOOK.md).
+coordinator and remote TCP transport. The pinned Cython build tested in this
+audit also exposed that object, but only a build/serial/attach smoke was
+verified there; full gameplay acceptance remains unverified in Cython mode. A
+pre-existing standalone PyBoy wheel must not be allowed to shadow this package;
+verify the runtime identity before release. See the
+[production runbook](docs/PRODUCTION_RUNBOOK.md).
 
 ## ROM pins
 
@@ -73,7 +81,7 @@ for release evidence.
 | Path | `rom/red/pokemon-red-color.gb` |
 | Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
 | Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
-| Role | Color-Red input for the passing local Red/Yellow role and canonical remote listener role; overall release support remains partial |
+| Role | Canonical color-Red input included in the declared matrix; current full local and remote runtime support remains unverified |
 
 ### Pokémon Blue (UE)
 
@@ -95,7 +103,7 @@ for release evidence.
 | Path | `rom/blue/pokemon-blue-color.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
 | Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
-| Role | Color-Blue input for the canonical remote connector role; isolated trade evidence only |
+| Role | Canonical color-Blue input included in the declared matrix; current full local and remote runtime support remains unverified |
 
 ### Pokémon Yellow (UE)
 
@@ -106,7 +114,7 @@ for release evidence.
 | Path | `rom/yellow/pokemon-yellow.gbc` |
 | Symbols | `rom/yellow/pokemon-yellow.sym` |
 | Symbol SHA-1 | `7c4205723943e7722230dcf014e5e8a2012474aa` |
-| Role | Yellow session input and passing local Red/Yellow acceptance peer |
+| Role | Canonical Yellow input included in the declared matrix; current full local and remote runtime support remains unverified |
 
 Other localisations, hacks, and variants are out of scope unless they receive
 their own ROM hash, matching symbols, fixture provenance, and acceptance
@@ -177,14 +185,15 @@ output only establishes a fixture at the expected map/tile; it does not prove
 that a trade or battle works.
 
 The strict local acceptance fixtures and remote acceptance/diagnostic fixtures are
-distinct from the default Cable Club fixtures:
+distinct from the default Cable Club fixtures. The current canonical runtime
+matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 
-| Path | ROMs | Required fixture files |
-|---|---|---|
-| Local strict trade | color Red + Yellow | `red/cable_club.state`, `yellow/cable_club.state` |
-| Local strict battle | color Red + Yellow | `red/cable_club-battle.state`, `yellow/cable_club-battle.state` |
-| Remote isolated trade diagnostic | color Red listener + color Blue connector | `red/cable_club.state`, `blue/cable_club.state` |
-| Remote no-hook battle smoke | color Red listener + color Blue connector | `red/cable_club-battle.state`, `blue/cable_club-battle.state` |
+| Path | ROMs | Required fixture files | Current evidence |
+|---|---|---|---|
+| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | 9/9 ordered rows passed |
+| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | 9/9 ordered rows passed |
+| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | 9/9 ordered rows passed |
+| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | 7/9 passed; 2 `red_color` listener rows failed |
 
 The tracked
 [`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)
@@ -221,10 +230,10 @@ vanilla ROM; vanilla rows therefore remain `PARTIAL` and are not supported
 release rows. Manifest byte validation still requires every listed entry when
 the manifest is checked with `--fixture-root`.
 
-The repository has strict local Red/Yellow trade and battle entry points and
-strict remote color-Red/color-Blue trade and battle entry points in both
-listener/connector directions, plus broader diagnostic matrices. Their
-passing results do not certify the uncovered ordered pairs. Consult the
+The repository has strict local and remote entry points for every canonical
+Red/Blue/Yellow ordered pair, and the current candidate has executed all 19
+trade and 19 battle rows. Trade is green across the matrix; battle remains
+partial because of the two remote Red-listener rows named above. Consult the
 test-surface table in
 the [README](README.md) and run the required tiers in the
 [production runbook](docs/PRODUCTION_RUNBOOK.md) before using any row as

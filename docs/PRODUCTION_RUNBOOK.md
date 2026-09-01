@@ -2,29 +2,23 @@
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
-historical, the current candidate facts refer to functional source candidate
-`d8198ef` on 2026-08-31.
-Uncommitted worktree changes and external BYO assets are excluded from the
-tracked source tree.
+historical, the current candidate facts refer to the tree rooted at `ae8d63d`
+with the conservative one-worker matrix setting included in this status update.
+External BYO assets are excluded from the tracked source tree.
 
-The asset-free gate at `d8198ef` passed unit 477/477 and timing 35/35 across
-five repetitions; its collection preflight collected 604 tests and its scoped
-result was `PASS`. This proves only the ROM-free and timing scope. The matrix
-audit collected nine ordered pairs, six reversed-role rows, nine local variant
-rows, and three strict trade plus three strict battle entry points, but the
-strict acceptance declaration remains incomplete with 15 uncovered cases per
-operation. The collection-only matrix runtime is `NOT RUN`.
-
-The previously recorded selected-tier real-ROM run at `db72be6` recorded local
-46/46, remote 13/13, strict trade 3/3, and strict battle 3/3 using the pinned
-BYO assets. The strict remote rows cover both color Red/Blue listener/connector
-directions. Those results predate the current transport hardening and must be
-rerun for current-candidate sign-off; they are not a full-gate result because
-the strict matrix declaration remains incomplete.
-Symbol hashes and fixture byte/provenance records are in
-[`VERSIONS.md`](../VERSIONS.md) and the tracked
-[`fixture-manifest.json`](../release-evidence/fixture-manifest.json). Overall
-status is `PARTIAL`; the exact open items are listed in [the release
+The latest clean asset-free gate at `dfee2ec` passed unit 507/507 and timing
+35/35 in each of five repetitions; its collection preflight collected 648
+tests and its scoped result was `PASS`. This proves only the ROM-free and
+timing scope. The matrix audit collected nine ordered local pairs, nine ordered
+remote role pairs, six reversed-role rows, nine local variant rows, and 19
+strict trade plus 19 strict battle entrypoints. Structural and declaration
+checks pass. The candidate-bound ROM-backed gate then passed strict trade 19/19
+and strict battle 17/19, with 0 skips, xfails, or errors; the two battle failures
+were `red_color` listener rows connecting to color Blue and Yellow that failed
+at the bounded LinkMenu phase. Symbol hashes and fixture byte/provenance records
+are in [`VERSIONS.md`](../VERSIONS.md) and the tracked
+[`fixture-manifest.json`](../release-evidence/fixture-manifest.json).
+Overall status is `PARTIAL`; the exact open items are listed in [the release
 checklist](RELEASE_CHECKLIST.md).
 
 Status semantics:
@@ -55,6 +49,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 python -m pip check
 python -c 'import pokered_harness, pyboy; print(pokered_harness.__file__); print(pyboy.__version__, pyboy.__pokered_harness_revision__)'
+python scripts/bootstrap_pyboy.py --mode source --check
 ```
 
 The standard-library `venv` module must include `ensurepip`. On Debian or
@@ -76,6 +71,34 @@ The required Python version is 3.12 or newer. On Windows PowerShell, create
 the same environment with `py -3 -m venv .venv`, activate with
 `.venv\Scripts\Activate.ps1`, and use `python -m pip` for the remaining
 commands. Run the tests and the MCP server with the same interpreter.
+
+If `uv` is the environment manager, the lockfile-resolved equivalent is:
+
+```bash
+uv venv --seed .venv
+uv sync --locked --extra dev
+uv pip check
+uv run python scripts/bootstrap_pyboy.py --mode source --check
+```
+
+The standard-library path is the portable baseline. The `uv` path additionally
+uses `uv.lock` for transitive dependency resolution. Neither path installs ROMs,
+symbols, or save states; those remain operator-supplied BYO inputs.
+
+The default installed runtime is PyBoy source mode, verified with:
+
+```bash
+python scripts/bootstrap_pyboy.py --mode source --check
+```
+
+The pinned fork also supports a compiled Cython diagnostic mode. In this audit,
+`python scripts/bootstrap_pyboy.py --mode cython --check` passed in a seeded
+Python 3.12 environment; it reported `cython_compiled=True`, exposed
+`mb.serial`, and passed a real-ROM attach/detach/close smoke. Full trade/battle
+acceptance was not run in Cython mode, so the Cython result is not full gameplay
+sign-off. Do not substitute an arbitrary standalone PyBoy wheel: record the
+version, harness revision, and runtime mode, and require the serial contract
+before running link tests.
 
 The repository is source-only. Obtain ROMs and symbols legally and keep them
 outside version control. The `.gitignore` intentionally excludes ROMs, symbol
@@ -209,9 +232,10 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `d8198ef`, this command collected 604 tests, passed unit 477/477, passed
-timing 35/35 in each of five repetitions, and returned scoped `PASS`. It also
-performed schema-only validation of the ten-entry fixture manifest. Because
+At `dfee2ec`, a clean committed worktree collected 648 tests, passed unit
+507/507, passed timing 35/35 in each of five repetitions, and returned scoped
+`PASS`. It also performed schema-only validation of the ten-entry fixture
+manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
 load save states, exercise MCP with a real ROM, or run link gameplay; it is not
 a production sign-off.
@@ -229,16 +253,17 @@ acceptance matrix declaration is incomplete.
 
 The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
 explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. At `d8198ef`, `ruff check .` is clean. The
-vendored runtime is covered by revision pinning, compile/import checks, and
-the serial contract.
+default `ruff check .` audit. The current configured boundary is clean. The
+vendored runtime is covered by revision pinning, compile/import checks, and the
+serial contract.
 
 The release tree includes `tests/__init__.py`; otherwise environments that do
 not treat `tests/` as a namespace package can fail collection. Run both
 invocation forms for every release candidate.
 
-The standalone matrix command is collection-only and intentionally returns
-nonzero while the acceptance declaration is incomplete:
+The standalone matrix command is collection-only. It returns zero only when
+the required node IDs and strict declaration are present; a zero result still
+does not execute ROM gameplay:
 
 ```bash
 python scripts/tcp_link_matrix.py \
@@ -315,11 +340,11 @@ python -m pytest -q -ra \
 ```
 
 Repeat with the appropriate path, symbol file, and hash for each release input
-that will be advertised. On 2026-08-31, a clean wheel installed outside the
-checkout passed this module 3/3 for the explicit color-Red input. The wider
-five-row stock/color Red, stock/color Blue, and Yellow smoke evidence remains
-an earlier snapshot, not current all-row sign-off. These tests prove only the
-tested boot/state/MCP surface; they do not prove link gameplay.
+that will be advertised. The wheel-install probe in this audit verified clean
+installation, `pip check`, and bundled runtime identity; it did not run this
+real-ROM stdio tier. Any real-ROM result must identify the current candidate,
+ROM/SYM hashes, and complete test output. These tests prove only the tested
+boot/state/MCP surface; they do not prove link gameplay.
 
 ### Tier C: real symbol and local-link smoke
 
@@ -347,19 +372,14 @@ python -m pytest -q -ra \
 ```
 
 The diagnostic matrix in this module is broader than the release acceptance
-scope. A historical audit reached LinkMenu and completed the diagnostic trade
-route for all nine R/B/Y version orderings. Seven of nine diagnostic battle
-rows reached a complete turn at that historical boundary; `blue↔blue` and the
-`blue→red` attach ordering did not reach both move-exchange hooks. A targeted
-re-audit reached LinkMenu for Blue↔Blue and Blue→Red, but that is not a strict
-gameplay result. A prior controlled run passed the strict Red↔Yellow trade and
-battle cases at the library's default scheduler slice; the remaining matrix is
-not certified. The strict local cases are:
+assertions. Historical LinkMenu, trade, and battle observations are not current
+candidate evidence. The current strict local acceptance is parametrized over
+all nine canonical Red/Blue/Yellow ordered pairs:
 
 ```bash
 python -m pytest -q \
-  tests/test_pyboy_link_session_roms.py::test_red_yellow_trade_swaps_real_party_records \
-  tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved
+  tests/test_pyboy_link_session_roms.py::test_pair_completes_trade_end_to_end \
+  tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn
 ```
 
 They require the pinned source-compatible PyBoy runtime, ROM-specific Cable
@@ -369,8 +389,9 @@ uses a legal derived three-mon fixture and requires both sides to reach move
 exchange and turn execution. It does not require the optional damage
 calculation hook. Neither case writes party or battle state during acceptance.
 A skipped or partially parameterized matrix is not full Red/Blue/Yellow
-coverage, and the current strict declaration remains incomplete with 15
-unverified trade and 15 unverified battle cases.
+coverage. The dedicated Red/Yellow assertions remain useful focused checks,
+but the production gate also requires every parametrized local row and every
+remote row below to execute without skips.
 
 ### Tier E: remote transport and subprocess acceptance/diagnostics
 
@@ -385,31 +406,52 @@ This module exercises remote TCP plumbing and selected real-ROM milestones.
 Some cases stop at LinkMenu or use controlled menu/fixture setup; that is not
 the same as a user-driven full trade or battle.
 
-The separate-process acceptance uses the same bundled runtime as the normal
-package and explicit color Red/Blue fixtures:
+The separate-process acceptance uses the same bundled source runtime as the
+normal package and the canonical color Red, color Blue, and Yellow fixtures:
 
 ```bash
 python -m pytest -q -ra \
   tests/test_pyboy_link_session_subprocess.py
 ```
 
-The LinkMenu test is a transport smoke test. The current strict subprocess
-trade and battle runs use cooperative phase rendezvous, compare complete
-party-mon records or execute a battle turn, and cover both color Red/Blue
-listener/connector directions. Both payloads travel through native bit-level
-serial traffic, and the tests reject the out-of-band exchange counter.
-Concurrent-load stability and the other ordered pairs remain open. Record both
-child traces and the exact deadline when investigating a regression.
+The LinkMenu test is a transport smoke test. The strict subprocess trade and
+battle tests use cooperative phase rendezvous, compare complete party-mon
+records or execute a battle turn, and are parametrized over all nine ordered
+canonical listener/connector pairs. Both payloads travel through native
+bit-level serial traffic, and the tests reject the out-of-band exchange
+counter. Current-candidate runtime results and concurrent-load stability must
+still be recorded before release. Record both child traces and the exact
+deadline when investigating a regression.
 
 The native MCP link path only installs the pinned PyBoy serial backend and
 transport callbacks. It must not seed `hSerialConnectionStatus` (the ROM-owned
-HRAM status populated by its serial ISR) or install semantic exchange hooks;
-the listener/connector role must emerge from native serial traffic. The
-semantic endpoint remains a compatibility path for non-native test doubles and
-is not production acceptance evidence. A real PyBoy with an incomplete native
-serial contract fails closed. Native socket writes, public listener waits, and
-worker teardown are bounded; `peer_rom_version` can be supplied to reject an
-unexpected HELLO label.
+HRAM status populated by its serial ISR) or install semantic exchange hooks.
+The listener and connector provide default native clock roles, then the
+versioned HELLO may select the non-Yellow endpoint as the initial internal
+clock source for a Yellow/Red or Yellow/Blue pair. The ROM still owns its
+connection-status byte and any later role changes. The semantic endpoint
+remains a compatibility path for non-native test doubles and is not production
+acceptance evidence. A real PyBoy with an incomplete native serial contract
+fails closed. Native socket writes, public listener waits, and worker teardown
+are bounded; `peer_rom_version` can be supplied to reject an unexpected HELLO
+label.
+
+### Strict-matrix accounting
+
+The collection audit verifies declaration shape only. The current strict runtime
+scope is:
+
+| Operation | Local ordered rows | Remote ordered listener/connector rows | Dedicated assertion | Current status |
+|---|---:|---:|---|---|
+| Trade | 9 | 9 | Red/Yellow party-record swap | 9 local + dedicated and 9 remote rows passed |
+| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | 9 local + dedicated passed; 7/9 remote passed |
+
+That is 19 strict entrypoints per operation. The remote rows use canonical color
+Red, color Blue, and Yellow profiles; listener/connector order is significant.
+The current candidate trade run passed all 19 rows. The battle run passed 17/19;
+the two failures are `red_color` listener rows connecting to color Blue and
+Yellow at the bounded LinkMenu phase. Stock-ROM rows and LinkMenu-only
+milestones are outside this strict release claim.
 
 ## 5. Generate link fixtures safely
 
@@ -495,18 +537,24 @@ paired explicitly with `link_pair`; it is not proof of a working game flow.
 For a normal MCP lifecycle, initialize the server, list tools, and then use
 `step`, `press`, state resources, and save/load as needed. For a local pair,
 call `link_pair`, use `link_step`, and finish with `link_unpair`. For TCP,
-call `link_listen` on the internal-clock side or `link_connect` on the
-external-clock side, poll `link_status` until `remote_mode=connected`, and
-call `link_disconnect` before closing either server. A teardown is complete
+call `link_listen` and `link_connect` using their default roles, poll
+`link_status` until `remote_mode=connected`, and call `link_disconnect` before
+closing either server. For native Yellow/Red or Yellow/Blue pairs, the
+versioned HELLO selects the non-Yellow endpoint as the initial internal-clock
+side. A teardown is complete
 only when status is idle and no child peer, worker thread, socket, or callback
 remains.
 
-The checked-in `.mcp.json` uses the canonical `rom/red/` layout, an explicit
-color-ROM hash, and no machine-local `PYTHONPATH`. It is suitable for a
-workspace whose MCP client expands `${PWD}` and whose installed interpreter
-is the package environment. A wheel launched outside a checkout can omit
-`VERSIONS.md` when it supplies explicit primary and peer SHA-1 values; the
-bundled PyBoy runtime identity is still checked.
+The checked-in `.mcp.json` is a portable configuration template, not a
+self-installing launcher. The MCP client must expand `${PWD}` to the checkout
+root (or substitute its documented workspace variable), and `python` must be
+the same environment used by the clean-install command. The config does not
+search for or create a virtual environment. If a client does not expand
+`${PWD}`, use the explicit launch command above from the repository root or
+configure an equivalent client-specific working directory and substitution.
+No machine-local `PYTHONPATH` is required. A wheel launched outside a checkout
+can omit `VERSIONS.md` when it supplies explicit primary and peer SHA-1 values;
+the bundled PyBoy runtime identity is still checked.
 
 The MCP remote TCP tools enforce localhost-only hosts (`127.0.0.1`,
 `localhost`, or `::1`). They provide no authentication or encryption; do not
@@ -536,23 +584,24 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The current `d8198ef` asset-free gate passed unit 477/477 and timing 35/35
-   across five repetitions. Selected current real-ROM tiers also passed local
-   46/46, remote 13/13, strict trade 3/3, and strict battle 3/3, but the full
-   gate still fails closed on the incomplete strict declaration.
-2. The strict matrix declaration is incomplete: the collection audit has
-   nine ordered pairs, six reversed-role rows, and nine local variant rows,
-   but 15 supported trade cases and 15 supported battle cases lack strict
-   entry points. Collection-only matrix runtime is `NOT RUN`; selected strict
-   runtime covers three trade and three battle rows.
+1. The clean `dfee2ec` asset-free gate passes 507/507 unit tests and 35/35
+   timing cases in each of five repetitions, but it does not run ROM-backed
+   gameplay. The current candidate strict trade matrix passed 19/19; strict
+   battle passed 17/19, with two remote Red-listener failures at LinkMenu.
+2. The strict declaration is complete: the collection audit has nine ordered
+   local pairs, nine ordered remote role pairs, six reversed-role rows, nine
+   local variant rows, and 19 strict entrypoints for each operation. The
+   candidate runtime executed every declared row; the two failed battle rows
+   remain release blockers.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
-   reproduction evidence, while the vanilla ordinary source provenance is
-   `PARTIAL`. The manifest is external and untracked; its complete byte
-   validation and a retained sanitized evidence bundle still need to be
-   associated with the release candidate.
-4. `ruff check .` is clean at `d8198ef`; the broad suite, all advertised
-   single-session rows, native-platform coverage, load-stable full-matrix
-   behavior, and independent review remain open.
+   reproduction evidence, while vanilla ordinary source provenance is
+   `PARTIAL`. The manifest and save states are external/operator-managed; a
+   retained release bundle must include complete byte validation and sanitized
+   evidence.
+4. The wheel and both source/Cython runtime identity paths are validated, but
+   full Cython trade/battle acceptance is not. The broad suite, all advertised
+   real-ROM single-session rows, native-platform coverage, concurrent-load
+   stability, and independent review remain open.
 5. Remote TCP has no authentication or encryption. Loopback-only operation is
    enforced and is the only supported network boundary; cross-host operation
    is blocked until secure transport is added.

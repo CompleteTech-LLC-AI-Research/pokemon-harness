@@ -291,6 +291,43 @@ def test_network_attach_arms_native_role_handshake(
         peer.stop()
 
 
+@pytest.mark.parametrize(
+    ("local_version", "peer_version", "default_internal", "expected_internal"),
+    [
+        ("yellow", "red", True, False),
+        ("red", "yellow", False, True),
+        ("yellow", "blue", True, False),
+        ("blue", "yellow", False, True),
+        ("yellow", "yellow", True, True),
+        ("red", "blue", False, False),
+    ],
+)
+def test_network_clock_negotiation_selects_compatible_native_role(
+    local_version, peer_version, default_internal, expected_internal
+):
+    """Cross-family startup role selection only changes native registers."""
+    backend, peer = NetworkBackend.pair()
+    serial = SerialCore()
+    pyboy = _FakePyBoy(serial=serial)
+    pyboy.memory = {0xFFAA: 0xFF}
+    link = PyBoyLinkSession(
+        network_backend=backend,
+        network_is_internal_clock=default_internal,
+        local_rom_version=local_version,
+    )
+
+    try:
+        link.attach(pyboy)
+        selected = link.negotiate_network_clock_role(peer_version)
+        assert selected is expected_internal
+        assert serial.internal_clock == int(expected_internal)
+        assert serial.SB == (0x01 if expected_internal else 0x02)
+        assert pyboy.memory[0xFFAA] == 0xFF
+    finally:
+        link.detach_all()
+        peer.stop()
+
+
 def test_detach_all_stops_network_backend_when_detach_raises(monkeypatch):
     """Transport shutdown must be unconditional when detaching fails."""
     backend, peer = NetworkBackend.pair()

@@ -25,10 +25,17 @@ and this directory does not claim upstream acceptance.
   See the
   [production runbook](../PRODUCTION_RUNBOOK.md) and
   [release checklist](../RELEASE_CHECKLIST.md).
-- The candidate `.mcp.json` is portable when the MCP client expands `${PWD}`;
-  that harness configuration and its link/runtime contract must still be
-  reviewed independently before any PyBoy contribution can be treated as an
-  upstream dependency.
+- The candidate `.mcp.json` is a portable template only when the MCP client
+  expands `${PWD}` (or an equivalent workspace variable) and launches the
+  environment where the project was installed. It is not a self-installing
+  launcher; clients without that contract must use the explicit launch command
+  in the production runbook. That harness configuration and its link/runtime
+  contract must still be reviewed independently before any PyBoy contribution
+  can be treated as an upstream dependency.
+- The pinned fork's Cython build exposes the Python-side `mb.serial` object and
+  passed a real-ROM attach/detach smoke in the current documentation audit.
+  Full Cython trade/battle acceptance and upstream-wheel compatibility remain
+  unverified.
 
 ## Proposed file mapping
 

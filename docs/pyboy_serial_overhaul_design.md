@@ -393,16 +393,17 @@ per bit. Mitigated by keeping the core in the same module as the rest
 of the hot-path devices; callbacks to the Python-side backend fire only
 on edge boundaries (up to 8 per byte), not per CPU cycle.
 
-**Python-side attach against a standalone wheel remains a compatibility risk.**
-In the original audited environment the wheel-installed PyBoy was
-Cython-compiled — `Motherboard` and `Serial` were extension-level attributes —
-so the harness's pure-Python `PyBoyLinkSession` could not assume that
-`pyboy.mb.serial` was accessible or swappable. The current harness works around
-that boundary by bundling and pinning a source-compatible snapshot; this is not
-evidence that the default upstream wheel or any upstream branch accepts the
-integration. Any upstream implementation must expose and support the required
-API, land the serial integration inside PyBoy, or provide a separately
-documented source-build mode and test it on the claimed platforms.
+**Python-side attach against an arbitrary standalone wheel remains a
+compatibility risk.** In the original audited environment the wheel-installed
+PyBoy did not expose the motherboard attributes needed by the pure-Python
+`PyBoyLinkSession`. The current pinned fork is different: its source build and
+the Cython build both exposed `pyboy.mb.serial`, and the Cython build passed a
+real-ROM attach/detach smoke. That is evidence for this pinned fork only; it is
+not evidence that the default upstream wheel or any other PyBoy build accepts
+the integration. Any upstream implementation must expose and support the
+required API, land the serial integration inside PyBoy, or provide a separately
+documented source/build mode and test it on the claimed platforms. Full
+trade/battle acceptance remains a separate requirement for either build mode.
 
 **Non-blocking network edge.** WAN jitter could bubble up as
 frame-rate stutter. Mitigated by a small jitter buffer (documented

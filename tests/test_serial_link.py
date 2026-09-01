@@ -398,6 +398,11 @@ def test_tcp_serial_link_rejects_non_loopback_hosts():
         TcpSerialLink.listen(_free_port(), "blue", host="0.0.0.0")
 
 
+def test_tcp_serial_link_rejects_unbounded_accept():
+    with pytest.raises(ValueError, match="finite and positive"):
+        TcpSerialLink.listen(_free_port(), "blue", accept_timeout_s=None)
+
+
 def test_tcp_truncated_frame_is_protocol_error_and_closes():
     server, client = _make_tcp_pair()
     try:

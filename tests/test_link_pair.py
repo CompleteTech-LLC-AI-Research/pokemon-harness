@@ -35,6 +35,37 @@ class FakeBridge:
         return self.install_calls > 0
 
 
+class RawBridge(FakeBridge):
+    """Bridge double that installs the same raw hook as ``SerialBridge``."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._resolved_a = {"exchange_bytes": (0x00, 0x216F)}
+        self._resolved_b = {"exchange_bytes": (0x00, 0x216F)}
+        self.callback_calls = [0, 0]
+
+    def install(self) -> None:
+        super().install()
+        for index, session in enumerate(self.args[:2]):
+            def _callback(_ctx: object, *, _index=index) -> None:
+                self.callback_calls[_index] += 1
+
+            session.serial_hook("Serial_ExchangeBytes", _callback)
+
+
+class PartiallyFailingRawBridge(RawBridge):
+    """Install one bridge callback and then fail to exercise rollback."""
+
+    def install(self) -> None:
+        FakeBridge.install(self)
+
+        def _callback(_ctx: object) -> None:
+            return None
+
+        self.args[0].serial_hook("Serial_ExchangeBytes", _callback)
+        raise RuntimeError("injected bridge installation failure")
+
+
 class FakeFactory:
     """Callable that records its calls and returns a fresh :class:`FakeBridge`."""
 
@@ -47,6 +78,46 @@ class FakeFactory:
         b = FakeBridge(*args, **kwargs)
         self.bridges.append(b)
         return b
+
+
+class RawFactory(FakeFactory):
+    """Factory that returns a bridge with raw Session.serial_hook callbacks."""
+
+    def __call__(self, *args, **kwargs) -> RawBridge:
+        self.calls.append((args, kwargs))
+        bridge = RawBridge(*args, **kwargs)
+        self.bridges.append(bridge)
+        return bridge
+
+
+class PartiallyFailingRawFactory(FakeFactory):
+    def __call__(self, *args, **kwargs) -> PartiallyFailingRawBridge:
+        self.calls.append((args, kwargs))
+        bridge = PartiallyFailingRawBridge(*args, **kwargs)
+        self.bridges.append(bridge)
+        return bridge
+
+
+class StrictFakePyBoy(FakePyBoy):
+    """Fake PyBoy with the real address-level duplicate-hook contract."""
+
+    def hook_register(self, bank: int, addr: int, callback, context) -> None:
+        if (bank, addr) in self._hooks:
+            raise ValueError("Hook already registered for this bank and address")
+        super().hook_register(bank, addr, callback, context)
+
+
+class FailingHookPyBoy(FakePyBoy):
+    """Inject a registration failure after earlier hooks have succeeded."""
+
+    def __init__(self, memory) -> None:
+        super().__init__(memory)
+        self.fail_register = False
+
+    def hook_register(self, bank: int, addr: int, callback, context) -> None:
+        if self.fail_register:
+            raise RuntimeError("injected hook registration failure")
+        super().hook_register(bank, addr, callback, context)
 
 
 # ---------------------------------------------------------------------------
@@ -72,20 +143,29 @@ _SYM = """\
 00:D31E wBagItems
 00:6AB1 Trade_ShowPlayerMon
 00:216F Serial_ExchangeBytes
+00:2200 Serial_ExchangeNybble
+00:2210 wSerialExchangeNybbleSendData
+00:2211 wSerialExchangeNybbleReceiveData
+00:2220 Serial_ExchangeLinkMenuSelection
+00:2230 wLinkMenuSelectionSendBuffer
+00:2232 wLinkMenuSelectionReceiveBuffer
+00:2300 LinkMenu.exchangeMenuSelectionLoop
 """
 
 
-def _make_session() -> tuple[Session, FakePyBoy]:
-    pb = FakePyBoy(DictMemory())
+def _make_session(pyboy_type=FakePyBoy) -> tuple[Session, FakePyBoy]:
+    pb = pyboy_type(DictMemory())
     sym = load_sym_text(_SYM)
     return Session(pyboy=pb, symbols=sym, event_bus=EventBus()), pb
 
 
 def _make_pair(
     factory: FakeFactory | None = None,
+    *,
+    pyboy_type=FakePyBoy,
 ) -> tuple[LinkPair, Session, Session, FakePyBoy, FakePyBoy, FakeFactory]:
-    s_a, pb_a = _make_session()
-    s_b, pb_b = _make_session()
+    s_a, pb_a = _make_session(pyboy_type)
+    s_b, pb_b = _make_session(pyboy_type)
     f = factory if factory is not None else FakeFactory()
     pair = LinkPair(
         s_a,
@@ -188,17 +268,146 @@ def test_unpair_clears_paired_flag_and_pre_existing_hooks_survive():
 
     pair.pair()
     assert pair.paired is True
-    # Both the pre-existing hook and the pair()-installed one are present.
-    assert len(pb_a._hooks[(0x00, 0x6AB1)]) >= 2
+    # The EventBus owns one physical dispatcher and keeps both callbacks as
+    # independent logical registrations at this address.
+    assert len(pb_a._hooks[(0x00, 0x6AB1)]) == 1
 
     pair.unpair()
     assert pair.paired is False
-    # Hooks remain installed on the FakePyBoy (no hook_deregister) — the
-    # pre-existing session hook must still fire.
+    # The unrelated logical callback keeps the shared dispatcher alive and
+    # must still fire after the pair-owned callback is removed.
+    assert len(pb_a._hooks[(0x00, 0x6AB1)]) == 1
     before = s_a.events.count("unrelated_event")
     pb_a.fire(0x00, 0x6AB1)
     after = s_a.events.count("unrelated_event")
     assert after == before + 1
+
+
+def test_pair_unpair_pair_removes_owned_hooks_and_stale_callbacks():
+    pair, s_a, _, pb_a, pb_b, _ = _make_pair(pyboy_type=StrictFakePyBoy)
+
+    pair.pair()
+    first_hook_keys_a = set(pb_a._hooks)
+    first_hook_keys_b = set(pb_b._hooks)
+    assert first_hook_keys_a
+    assert first_hook_keys_a == first_hook_keys_b
+    assert s_a.events.count("link.trade.show_player_mon") == 0
+
+    # The first generation fires exactly once.
+    assert pb_a.fire(0x00, 0x6AB1) == 1
+    assert s_a.events.count("link.trade.show_player_mon") == 1
+
+    pair.unpair()
+    assert pair.paired is False
+    assert pb_a._hooks == {}
+    assert pb_b._hooks == {}
+
+    # No callback from the first generation can fire after teardown.
+    assert pb_a.fire(0x00, 0x6AB1) == 0
+    assert s_a.events.count("link.trade.show_player_mon") == 1
+
+    # StrictFakePyBoy rejects duplicate physical registrations. A second pair
+    # therefore proves that every pair-owned address was released.
+    pair.pair()
+    assert set(pb_a._hooks) == first_hook_keys_a
+    assert set(pb_b._hooks) == first_hook_keys_b
+    assert pb_a.fire(0x00, 0x6AB1) == 1
+    assert s_a.events.count("link.trade.show_player_mon") == 2
+
+
+def test_pair_unpair_pair_releases_raw_bridge_hooks():
+    factory = RawFactory()
+    pair, s_a, s_b, pb_a, pb_b, _ = _make_pair(
+        factory=factory,
+        pyboy_type=StrictFakePyBoy,
+    )
+
+    pair.pair()
+    assert pair.paired is True
+    assert len(pb_a._hooks[(0x00, 0x216F)]) == 1
+    assert len(pb_b._hooks[(0x00, 0x216F)]) == 1
+
+    pair.unpair()
+    assert pair.paired is False
+    assert pb_a._hooks == {}
+    assert pb_b._hooks == {}
+    assert s_a._serial_hooks == []
+    assert s_b._serial_hooks == []
+
+    # StrictFakePyBoy raises on an occupied address, so a second successful
+    # pair proves that the raw SerialBridge callback and its replacement were
+    # both removed rather than merely made unreachable.
+    pair.pair()
+    assert pair.paired is True
+    assert len(factory.bridges) == 2
+    assert len(pb_a._hooks[(0x00, 0x216F)]) == 1
+    assert len(pb_b._hooks[(0x00, 0x216F)]) == 1
+
+
+def test_pair_replacement_preserves_unrelated_raw_callback():
+    factory = RawFactory()
+    pair, _, _, pb_a, pb_b, _ = _make_pair(factory=factory)
+    unrelated_calls: list[str] = []
+
+    def unrelated_a(_ctx: object) -> None:
+        unrelated_calls.append("a")
+
+    def unrelated_b(_ctx: object) -> None:
+        unrelated_calls.append("b")
+
+    pb_a.hook_register(0x00, 0x216F, unrelated_a, None)
+    pb_b.hook_register(0x00, 0x216F, unrelated_b, None)
+
+    pair.pair()
+    # The fake permits multiple callbacks at an address; the bridge callback
+    # is replaced exactly and the unrelated callback remains beside the
+    # EventBus dispatcher.
+    assert len(pb_a._hooks[(0x00, 0x216F)]) == 2
+    assert len(pb_b._hooks[(0x00, 0x216F)]) == 2
+
+    pair.unpair()
+    assert len(pb_a._hooks[(0x00, 0x216F)]) == 1
+    assert len(pb_b._hooks[(0x00, 0x216F)]) == 1
+    assert pb_a.fire(0x00, 0x216F) == 1
+    assert pb_b.fire(0x00, 0x216F) == 1
+    assert unrelated_calls == ["a", "b"]
+
+
+def test_pair_rolls_back_partial_raw_bridge_installation():
+    pair, s_a, s_b, pb_a, pb_b, _ = _make_pair(
+        factory=PartiallyFailingRawFactory(),
+        pyboy_type=StrictFakePyBoy,
+    )
+
+    with pytest.raises(RuntimeError, match="injected bridge installation failure"):
+        pair.pair()
+
+    assert pair.paired is False
+    assert pb_a._hooks == {}
+    assert pb_b._hooks == {}
+    assert s_a._serial_hooks == []
+    assert s_b._serial_hooks == []
+    assert pair.transport.pending_a_to_b == 0
+    assert pair.transport.pending_b_to_a == 0
+
+
+def test_pair_rolls_back_owned_hooks_when_installation_fails():
+    pair, _, _, pb_a, pb_b, _ = _make_pair(pyboy_type=FailingHookPyBoy)
+    pb_b.fail_register = True
+
+    with pytest.raises(RuntimeError, match="injected hook registration failure"):
+        pair.pair()
+
+    assert pair.paired is False
+    assert pb_a._hooks == {}
+    assert pb_b._hooks == {}
+    assert pair.transport.pending_a_to_b == 0
+    assert pair.transport.pending_b_to_a == 0
+
+    # A failed transaction must not poison the pair for a later retry.
+    pb_b.fail_register = False
+    pair.pair()
+    assert pair.paired is True
 
 
 def test_pair_after_unpair_installs_fresh_bridge():
