@@ -181,3 +181,54 @@ def test_cancelled_mcp_request_has_a_bounded_cleanup_and_worker_wait(
     assert cleanup_entered.is_set()
     assert cleanup_done.is_set()
     assert worker_done.is_set()
+
+
+def test_cancelled_mcp_resource_has_a_bounded_cleanup_and_worker_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resource EOF/cancellation must not orphan its executor thread."""
+    worker_entered = threading.Event()
+    worker_release = threading.Event()
+    worker_done = threading.Event()
+    cleanup_called = threading.Event()
+
+    def blocked_resource(*_args, **_kwargs):
+        worker_entered.set()
+        assert worker_release.wait(timeout=2.0)
+        worker_done.set()
+        return "{}"
+
+    def cancel_remote(*_args, **_kwargs):
+        cleanup_called.set()
+        worker_release.set()
+
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server.read_resource", blocked_resource
+    )
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._disconnect_remote", cancel_remote
+    )
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05
+    )
+
+    server = build_server(object())  # type: ignore[arg-type]
+    handler = server.request_handlers[mcp_types.ReadResourceRequest]
+    request = mcp_types.ReadResourceRequest(
+        params=mcp_types.ReadResourceRequestParams(uri="pokered://game-state")
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(handler(request))
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while not worker_entered.is_set():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert cleanup_called.is_set()
+    assert worker_done.is_set()

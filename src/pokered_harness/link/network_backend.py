@@ -19,17 +19,18 @@ Byte-oriented, request/response, framed::
 
 Either side can be master at any moment. The master's ``on_edge`` sends
 an ``EDGE_REQ`` and waits for the peer's ``EDGE_RESP``; meanwhile a
-background reader thread on both sides demuxes incoming frames. When a
-reader sees ``EDGE_REQ`` (peer is master, we are slave) it advances our
-local :class:`SerialCore` via ``apply_external_edge`` and responds with
-our outgoing bit. When it sees ``EDGE_RESP`` (peer is slave responding
+background reader thread on both sides demuxes incoming frames. In owner
+dispatch mode, when a reader sees ``EDGE_REQ`` (peer is master, we are
+slave) it queues the request for the emulator owner to advance our local
+:class:`SerialCore` via ``apply_external_edge`` and respond with our
+outgoing bit. When it sees ``EDGE_RESP`` (peer is slave responding
 to our master request) it hands the bit to the blocking ``on_edge``
 waiter via a response queue.
 
 Slave IRQ
 ---------
 
-When the reader-thread path completes the 8th edge on the local slave
+When the owner-side dispatch path completes the 8th edge on the local slave
 core, it fires the optional ``irq_callback`` so halted code wakes up
 (Pokemon's ``halt; wait for serial IRQ`` idiom). Wire this to
 ``pyboy.mb.cpu.set_interruptflag(INTR_SERIAL)`` on attach.
@@ -39,11 +40,13 @@ Threading model
 
 ``on_edge`` blocks for one socket round-trip. The caller is expected
 to be PyBoy's main tick thread. The reader thread runs in the
-background and uses a response queue to hand back RESP payloads;
-REQ frames are handed to an ordered edge worker so slow slave re-arm
-waits cannot starve control frames. A single write-lock ensures the
-reader/worker RESP-sends don't collide with ``on_edge``'s REQ-sends on the
-same socket.
+background and uses a response queue to hand back RESP payloads. In
+production owner-dispatch mode, REQ frames are handed to the emulator
+owner and a response-only worker sends the completed response; no network
+thread touches emulator state. A single write-lock ensures response sends
+do not collide with ``on_edge``'s REQ-sends on the same socket. The legacy
+direct-worker mode remains available for low-level callers that explicitly
+do not attach a PyBoy instance.
 """
 
 from __future__ import annotations
@@ -58,7 +61,10 @@ import struct
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
+
+from pokered_harness.link.serial_coordinator import SerialOperationGate
 
 # Opcodes:
 #   EDGE_REQ  = master → slave: "here's my outgoing bit"
@@ -99,6 +105,17 @@ _ACTIVE_EXCHANGE_REARM_WAIT_SECONDS = 5.0
 
 class NetworkBackendError(RuntimeError):
     """Wraps socket errors + protocol errors from :class:`NetworkBackend`."""
+
+
+@dataclass
+class _InboundEdge:
+    """An EDGE_REQ awaiting execution by the emulator owner."""
+
+    peer_bit: int
+    response_bit: int | None = None
+    completed: bool = False
+    deferred: bool = False
+    error: BaseException | None = None
 
 
 def _validate_id(value: int, name: str) -> int:
@@ -301,8 +318,14 @@ class NetworkBackend:
         # Keep edge application ordered, but do not let a slow slave
         # re-arm wait block the reader from consuming control frames such
         # as SYNC or HELLO. The master sends one EDGE_REQ at a time, so a
-        # bounded queue is sufficient and makes overload fail closed.
-        self._edge_queue: queue.Queue[int | None] = queue.Queue(maxsize=256)
+        # bounded queue is sufficient and makes overload fail closed. In
+        # owner-dispatch mode this queue contains requests which only the
+        # emulator owner may execute; the network threads never touch the
+        # native serial object.
+        self._edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(maxsize=256)
+        self._completed_edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(
+            maxsize=256
+        )
         # Counts EDGE_REQ frames from enqueue until their response has been
         # written.  A phase barrier can therefore wait for the wire work
         # already admitted by the reader without mistaking an armed-but-idle
@@ -329,6 +352,8 @@ class NetworkBackend:
         # Slave-mode config — set by start_receiver.
         self._local_core: object | None = None
         self._irq_callback: Callable[[], None] | None = None
+        self._serial_gate = SerialOperationGate()
+        self._dispatch_to_owner = False
         self._reader: threading.Thread | None = None
         self._edge_worker: threading.Thread | None = None
         # Keep-alive "fake slave" bit index. When our local core is
@@ -369,6 +394,9 @@ class NetworkBackend:
             "last_keepalive_state": None,
             "last_slave_byte_complete_at": None,
             "last_slave_rearm_at": None,
+            "owner_edge_deferred": 0,
+            "owner_edge_applied": 0,
+            "owner_edge_errors": 0,
         }
         self._active_exchange_until: float = 0.0
         self._consecutive_armed_edges: int = 0
@@ -540,15 +568,27 @@ class NetworkBackend:
         self,
         local_core: object,
         irq_callback: Callable[[], None] | None = None,
+        *,
+        serial_gate: SerialOperationGate | None = None,
+        dispatch_to_owner: bool = False,
     ) -> None:
         """Start the reader thread.
 
         When an incoming ``EDGE_REQ`` arrives (the peer is acting as
-        master), apply the bit to ``local_core`` via
-        ``apply_external_edge`` and respond with our
-        ``peek_out_bit()``. If ``apply_external_edge`` returns True
-        (8th-edge completion) and ``irq_callback`` is provided, the
-        callback fires so halted slave code wakes.
+        master), the request is either handled by the compatibility
+        worker or, when ``dispatch_to_owner`` is true, queued for
+        :meth:`service_pending_edges`. The latter is the production
+        PyBoy path: the caller that owns the emulator tick applies the
+        bit to ``local_core`` via ``apply_external_edge``, reads
+        ``peek_out_bit()``, and invokes ``irq_callback`` while holding
+        ``serial_gate``. No network thread touches emulator state.
+
+        ``dispatch_to_owner=True`` requires a shared ``serial_gate``. The
+        PyBoy tick wrapper and this owner-side dispatch must use the same
+        gate so a native ``Serial.tick`` cannot overlap an external edge.
+        If ``apply_external_edge`` returns True (8th-edge completion) and
+        ``irq_callback`` is provided, the callback fires on the owner
+        thread.
 
         ``EDGE_RESP`` frames (responses to our own master-side
         ``on_edge`` requests) are put on the response queue for the
@@ -556,11 +596,27 @@ class NetworkBackend:
         """
         if self._reader is not None:
             raise RuntimeError("receiver already started")
+        if dispatch_to_owner and serial_gate is None:
+            raise ValueError(
+                "dispatch_to_owner=True requires a shared serial_gate"
+            )
         self._local_core = local_core
         self._irq_callback = irq_callback
+        if serial_gate is not None:
+            self._serial_gate = serial_gate
+        self._dispatch_to_owner = dispatch_to_owner
+        worker_target = (
+            self._owner_response_worker_loop
+            if dispatch_to_owner
+            else self._edge_worker_loop
+        )
         self._edge_worker = threading.Thread(
-            target=self._edge_worker_loop,
-            name="NetworkBackend.edge-worker",
+            target=worker_target,
+            name=(
+                "NetworkBackend.owner-response-worker"
+                if dispatch_to_owner
+                else "NetworkBackend.edge-worker"
+            ),
             daemon=True,
         )
         self._reader = threading.Thread(
@@ -893,13 +949,10 @@ class NetworkBackend:
         self._hello_received.set()
         with self._edge_pending_condition:
             self._edge_pending_condition.notify_all()
-        try:
-            self._edge_queue.put_nowait(None)
-        except queue.Full:
-            # The closed flag is authoritative; the worker will observe it
-            # on its next bounded queue wait even if the sentinel cannot be
-            # inserted during an overload condition.
-            pass
+        # Wake the mode-specific edge worker. In owner-dispatch mode this is
+        # the response-only worker; the owner request queue is intentionally
+        # not drained after closure because it contains emulator work.
+        self._signal_edge_worker_stop()
         try:
             self._sock.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -959,8 +1012,9 @@ class NetworkBackend:
                         )
                     with self._edge_pending_condition:
                         self._edge_pending += 1
+                    request = _InboundEdge(payload & 1)
                     try:
-                        self._edge_queue.put_nowait(payload & 1)
+                        self._edge_queue.put_nowait(request)
                     except queue.Full as exc:
                         with self._edge_pending_condition:
                             self._edge_pending -= 1
@@ -1031,18 +1085,24 @@ class NetworkBackend:
             self._mark_closed(exc)
 
     def _edge_worker_loop(self) -> None:
-        """Apply incoming edges in wire order without blocking the reader."""
+        """Compatibility worker for direct low-level backend callers.
+
+        PyBoy sessions use :meth:`service_pending_edges` instead. Keeping
+        this worker preserves the historical ``start_receiver`` behavior for
+        callers that provide a standalone serial-core double; all operations
+        in this path are still serialized by ``_serial_gate``.
+        """
         while not self._closed:
             try:
-                peer_bit = self._edge_queue.get(timeout=0.25)
+                request = self._edge_queue.get(timeout=0.25)
             except queue.Empty:
                 continue
-            if peer_bit is None:
+            if request is None:
                 return
             try:
                 if self._closed:
                     return
-                self._handle_edge_req(peer_bit)
+                self._handle_edge_req(request.peer_bit)
             except Exception as exc:  # noqa: BLE001
                 self._mark_closed(exc)
                 return
@@ -1051,9 +1111,198 @@ class NetworkBackend:
                     self._edge_pending -= 1
                     self._edge_pending_condition.notify_all()
 
+    def _owner_response_worker_loop(self) -> None:
+        """Send responses produced by the emulator-owner dispatch path.
+
+        This thread is deliberately transport-only. It never reads or
+        writes the local serial core, CPU, or emulator memory; the owner
+        thread has already completed those operations before a request is
+        placed on ``_completed_edge_queue``.
+        """
+        while not self._closed:
+            try:
+                request = self._completed_edge_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if request is None:
+                return
+            try:
+                if not self._closed:
+                    self._send_edge_response(request)
+            except Exception as exc:  # noqa: BLE001
+                self._mark_closed(exc)
+                return
+            finally:
+                with self._edge_pending_condition:
+                    self._edge_pending -= 1
+                    self._edge_pending_condition.notify_all()
+
+    def service_pending_edges(self, *, max_edges: int | None = None) -> int:
+        """Apply queued peer edges on the caller's emulator-owner thread.
+
+        The method is only valid after ``start_receiver(...,
+        dispatch_to_owner=True)``. It is intentionally non-blocking: an
+        unarmed slave request is put back on the FIFO and the caller returns
+        to its PyBoy tick so the ROM can execute its normal SB/SC re-arm
+        sequence. A later owner boundary retries the same request. If the
+        owner never services it, the master's existing bounded EDGE_RESP
+        deadline fails closed; no synthetic bit is emitted.
+
+        ``max_edges`` bounds work per owner boundary. ``None`` drains all
+        requests that are currently ready. The return value is the number of
+        requests applied, not the number merely observed or deferred.
+        """
+        if not self._dispatch_to_owner:
+            raise NetworkBackendError(
+                "service_pending_edges requires dispatch_to_owner=True"
+            )
+        if max_edges is not None:
+            if isinstance(max_edges, bool) or not isinstance(max_edges, int):
+                raise TypeError("max_edges must be a positive integer or None")
+            if max_edges <= 0:
+                raise ValueError("max_edges must be a positive integer or None")
+
+        applied = 0
+        while max_edges is None or applied < max_edges:
+            try:
+                request = self._edge_queue.get_nowait()
+            except queue.Empty:
+                break
+            if request is None:
+                # The stop sentinel belongs to the response worker in owner
+                # mode. Treating it as terminal here makes a late owner poll
+                # harmless without altering the pending count.
+                break
+            if self._closed:
+                break
+            try:
+                ready = self._apply_owner_edge_if_ready(request)
+            except Exception as exc:  # noqa: BLE001 - fail the link closed
+                request.error = exc
+                self._stats["owner_edge_errors"] = (
+                    int(self._stats["owner_edge_errors"]) + 1
+                )
+                self._mark_closed(
+                    NetworkBackendError(
+                        f"owner failed to apply incoming EDGE_REQ: {exc}"
+                    )
+                )
+                break
+            if not ready:
+                # There is at most one in-flight master edge per peer, but
+                # preserving FIFO here also makes malformed/busy callers
+                # deterministic. The queue has a free slot immediately after
+                # this get, so this put cannot block.
+                request.deferred = True
+                self._stats["owner_edge_deferred"] = (
+                    int(self._stats["owner_edge_deferred"]) + 1
+                )
+                self._edge_queue.put_nowait(request)
+                break
+            self._stats["owner_edge_applied"] = (
+                int(self._stats["owner_edge_applied"]) + 1
+            )
+            try:
+                self._completed_edge_queue.put_nowait(request)
+            except queue.Full as exc:
+                self._mark_closed(
+                    NetworkBackendError(
+                        "completed EDGE_REQ response queue is full"
+                    )
+                )
+                raise NetworkBackendError(
+                    "completed EDGE_REQ response queue is full"
+                ) from exc
+            applied += 1
+        return applied
+
+    def _apply_owner_edge_if_ready(self, request: _InboundEdge) -> bool:
+        """Apply one edge atomically if the owner core is armed.
+
+        The readiness check and the native calls share one critical section;
+        a concurrent lifecycle or emulator operation therefore cannot change
+        the serial role between the check and ``apply_external_edge``.
+        """
+        core = self._local_core
+        if core is None:
+            raise NetworkBackendError(
+                "owner dispatch requires a local serial core"
+            )
+        with self._serial_gate:
+            transfer_enabled = bool(getattr(core, "transfer_enabled", 0))
+            internal_clock = bool(getattr(core, "internal_clock", 0))
+            if internal_clock:
+                raise NetworkBackendError(
+                    "received EDGE_REQ while local serial core is internal-clock"
+                )
+            if not transfer_enabled:
+                return False
+            self._apply_owner_edge(request)
+            return True
+
+    def _apply_owner_edge(self, request: _InboundEdge) -> None:
+        """Perform one authentic external edge under the shared gate."""
+        core = self._local_core
+        if core is None:
+            raise NetworkBackendError(
+                "owner dispatch requires a local serial core"
+            )
+        if not bool(getattr(core, "transfer_enabled", 0)):
+            raise NetworkBackendError(
+                "serial core became unarmed before EDGE_REQ dispatch"
+            )
+        if bool(getattr(core, "internal_clock", 0)):
+            raise NetworkBackendError(
+                "serial core became internal-clock before EDGE_REQ dispatch"
+            )
+        our_bit = int(core.peek_out_bit()) & 1
+        completed = bool(core.apply_external_edge(request.peer_bit & 1))
+        request.response_bit = our_bit
+        request.completed = completed
+        self._stats["edge_req_received"] = (
+            int(self._stats["edge_req_received"]) + 1
+        )
+        self._stats["slave_armed_edges"] = (
+            int(self._stats["slave_armed_edges"]) + 1
+        )
+        if completed:
+            self._stats["last_slave_byte_complete_at"] = time.monotonic()
+            if self._irq_callback is not None:
+                self._stats["irq_callbacks"] = (
+                    int(self._stats["irq_callbacks"]) + 1
+                )
+                self._irq_callback()
+
+    def _send_edge_response(self, request: _InboundEdge) -> None:
+        """Send an owner-produced response without touching emulator state."""
+        if request.error is not None:
+            raise NetworkBackendError(
+                f"incoming EDGE_REQ failed: {request.error}"
+            ) from request.error
+        if request.response_bit not in (0, 1):
+            raise NetworkBackendError(
+                "owner produced an invalid EDGE_RESP bit"
+            )
+        with self._write_lock:
+            if self._closed:
+                return
+            self._send_frame(
+                _FRAME.pack(_OP_EDGE_RESP, request.response_bit),
+                timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                operation="EDGE_RESP",
+            )
+            self._stats["edge_resp_sent"] = (
+                int(self._stats["edge_resp_sent"]) + 1
+            )
+
     def _signal_edge_worker_stop(self) -> None:
+        target_queue = (
+            self._completed_edge_queue
+            if self._dispatch_to_owner
+            else self._edge_queue
+        )
         try:
-            self._edge_queue.put_nowait(None)
+            target_queue.put_nowait(None)
         except queue.Full:
             pass
 
@@ -1143,50 +1392,51 @@ class NetworkBackend:
                     break
                 time.sleep(0.0005)
 
-        if armed():
-            slave_armed_edges = int(self._stats["slave_armed_edges"]) + 1
-            self._stats["slave_armed_edges"] = slave_armed_edges
-            self._consecutive_armed_edges += 1
-            if slave_armed_edges >= _ACTIVE_EXCHANGE_EDGE_THRESHOLD:
-                self._active_exchange_until = (
-                    time.monotonic() + _ACTIVE_EXCHANGE_GRACE_SECONDS
+        with self._serial_gate:
+            if armed():
+                slave_armed_edges = int(self._stats["slave_armed_edges"]) + 1
+                self._stats["slave_armed_edges"] = slave_armed_edges
+                self._consecutive_armed_edges += 1
+                if slave_armed_edges >= _ACTIVE_EXCHANGE_EDGE_THRESHOLD:
+                    self._active_exchange_until = (
+                        time.monotonic() + _ACTIVE_EXCHANGE_GRACE_SECONDS
+                    )
+                our_bit = core.peek_out_bit()
+                completed = core.apply_external_edge(peer_bit)
+                if completed:
+                    self._stats["last_slave_byte_complete_at"] = time.monotonic()
+                    self._post_byte_rearm_until = (
+                        time.monotonic() + _POST_BYTE_REARM_GRACE_SECONDS
+                    )
+                # Reset keep-alive counter so the next idle stretch starts
+                # fresh at the top of a 0xFE byte boundary rather than
+                # mid-byte.
+                self._keepalive_bit_idx = 0
+            else:
+                if active_exchange:
+                    raise NetworkBackendError(
+                        "slave did not re-arm during active serial exchange"
+                    )
+                self._consecutive_armed_edges = 0
+                if post_byte_rearm:
+                    self._stats["keepalive_after_post_byte_waits"] = (
+                        int(self._stats["keepalive_after_post_byte_waits"]) + 1
+                    )
+                # Still not armed after the re-arm wait — stream the bits
+                # of SERIAL_NO_DATA_BYTE (0xFE) MSB-first. Wraps every 8
+                # edges so successive idle bytes all come out as 0xFE.
+                # First 7 bits are 1, last is 0.
+                if self._keepalive_bit_idx == 0:
+                    self._stats["keepalive_bytes_started"] = (
+                        int(self._stats["keepalive_bytes_started"]) + 1
+                    )
+                self._stats["keepalive_bits_sent"] = (
+                    int(self._stats["keepalive_bits_sent"]) + 1
                 )
-            our_bit = core.peek_out_bit()
-            completed = core.apply_external_edge(peer_bit)
-            if completed:
-                self._stats["last_slave_byte_complete_at"] = time.monotonic()
-                self._post_byte_rearm_until = (
-                    time.monotonic() + _POST_BYTE_REARM_GRACE_SECONDS
-                )
-            # Reset keep-alive counter so the next idle stretch starts
-            # fresh at the top of a 0xFE byte boundary rather than
-            # mid-byte.
-            self._keepalive_bit_idx = 0
-        else:
-            if active_exchange:
-                raise NetworkBackendError(
-                    "slave did not re-arm during active serial exchange"
-                )
-            self._consecutive_armed_edges = 0
-            if post_byte_rearm:
-                self._stats["keepalive_after_post_byte_waits"] = (
-                    int(self._stats["keepalive_after_post_byte_waits"]) + 1
-                )
-            # Still not armed after the re-arm wait — stream the bits
-            # of SERIAL_NO_DATA_BYTE (0xFE) MSB-first. Wraps every 8
-            # edges so successive idle bytes all come out as 0xFE.
-            # First 7 bits are 1, last is 0.
-            if self._keepalive_bit_idx == 0:
-                self._stats["keepalive_bytes_started"] = (
-                    int(self._stats["keepalive_bytes_started"]) + 1
-                )
-            self._stats["keepalive_bits_sent"] = (
-                int(self._stats["keepalive_bits_sent"]) + 1
-            )
-            self._stats["last_keepalive_state"] = self._core_state_snapshot(core)
-            our_bit = 0 if self._keepalive_bit_idx == 7 else 1
-            self._keepalive_bit_idx = (self._keepalive_bit_idx + 1) & 7
-            completed = False
+                self._stats["last_keepalive_state"] = self._core_state_snapshot(core)
+                our_bit = 0 if self._keepalive_bit_idx == 7 else 1
+                self._keepalive_bit_idx = (self._keepalive_bit_idx + 1) & 7
+                completed = False
         try:
             with self._write_lock:
                 if not self._closed:

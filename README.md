@@ -9,21 +9,20 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-This repository is an audited production-readiness candidate, not a production
-release. The baseline at `e219fb5` was not production-certified. The latest
-ROM-backed evidence below was collected from feature head `291202a`, now merged
-to `CompleteDotTech/pokemon` as merge commit `e137a7f` (PR
-[#3](https://github.com/CompleteDotTech/pokemon/pull/3)), with the conservative
-one-worker matrix setting committed alongside this README. The earlier
-source-only baseline at `dfee2ec` is called out where it is used. Any
-uncommitted follow-up in a working tree is outside the evidence and must be
-committed and rerun before it can be used for release sign-off.
+This repository remains an audited production-readiness candidate, not a
+production release. The live target is
+[`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon), whose
+remote `master` was `1e885df` when this candidate was verified. The candidate
+adds a packaged entry point, explicit source-PyBoy runtime checks, MCP worker
+draining, and emulator-owner serial dispatch. It must be treated as release
+evidence only after the candidate is committed and the full gate is rerun.
 
-The preceding repository tip was `cec560e`, merged through PR
-[#4](https://github.com/CompleteDotTech/pokemon/pull/4). That follow-up is
-documentation-only: it records isolated reruns of the two failing battle rows
-without changing the acceptance result or promoting the release status. This
-README clarification is also documentation-only.
+The verification below was collected on 2026-09-01 with Python 3.12.3, PyBoy
+2.7.0, harness revision
+`c565df66c3731fad2856169a90f6bbec99925915`, the pinned ROM/symbol hashes, and
+the external canonical fixtures. The default production runtime is the
+vendored source PyBoy build; Cython is an optional diagnostic mode and does
+not yet have full gameplay acceptance evidence.
 
 Status semantics are deliberately scoped:
 
@@ -37,57 +36,41 @@ Status semantics are deliberately scoped:
   assets, complete strict acceptance coverage, retained evidence, and no open
   release blockers.
 
-The latest clean source-only gate for `dfee2ec` used
-`scripts/production_gate.py --unit-only --repeat-timing 5`: collection was 648,
-unit was 507/507, and timing was 35/35 in each of five repetitions. The scoped
-gate result was `PASS`. The collection-only matrix audit also passed structurally:
-all nine ordered local pairs, all nine ordered remote listener/connector pairs,
-all six reversed-role rows, all nine local ROM-variant rows, and 19 strict trade
-plus 19 strict battle entrypoints were present. The matrix audit does not execute
-ROM gameplay; its runtime is `NOT RUN`.
+The current candidate’s completed tier evidence is:
 
-The latest candidate-bound ROM-backed runs used the same pinned source runtime,
-explicit Red/Blue/Yellow ROM and symbol hashes, external canonical fixtures, and
-`DEFAULT_MATRIX_WORKERS=1`:
+- ROM-free gate: `PASS`, collection 656, unit 514/514, and timing 40/40 across
+  five repetitions, with no skips, xfails, or errors;
+- real-ROM local tier: `PASS`, 47/47, with all five ROM hashes, three symbol
+  hashes, and ten fixture entries validated;
+- remote transport/MCP tier: `PASS`, 13/13;
+- remote Red-listener/Blue-connector battle: 5/5 independent full-turn runs;
+- remote Red-listener/Yellow-connector battle: 5/5 independent full-turn runs;
+- remote Red-listener/Blue-connector trade: 5/5 independent full-trade runs.
 
-- strict trade: `PASS`, 19/19 passed, 0 failed, 0 skipped, 0 xfailed, and 0
-  xpassed/errors (nine local rows, the dedicated Red/Yellow assertion, and nine
-  remote TCP rows);
-- strict battle: `PARTIAL`, 17/19 passed, 2 failed, 0 skipped, 0 xfailed, and
-  0 xpassed/errors (ten local/dedicated rows and seven remote TCP rows passed).
-
-The two battle failures were remote rows with `red_color` as listener:
-`red_color-listen-blue_color-connect` failed to advance the battle LinkMenu
-cursor, and `red_color-listen-yellow-connect` failed to converge at the LinkMenu
-rendezvous before its bounded child deadline. The other 17 battle rows completed
-with native serial traffic. These results are current release evidence, but the
-two failures keep the overall release decision at `PARTIAL`; earlier strict-trade
-timeouts and cross-family warp/phase divergences remain historical diagnostics.
-
-Post-merge isolated reruns of both previously failing rows passed, including
-`red_color-listen-blue_color-connect` in 233.35 seconds and
-`red_color-listen-yellow-connect` in a separate captured run. This is useful
-reproducibility evidence but does not replace the full strict matrix result:
-both rows must pass together in a clean full run before the battle tier can be
-promoted.
+The completed remote gameplay samples used native bit-level serial traffic,
+ordinary ROM input, exact party-record assertions where applicable, bounded
+deadlines, and clean EOF teardown. The full 19-row strict trade and 19-row
+strict battle gate is being rerun on this candidate; until that run completes,
+the README does not claim complete matrix coverage.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
-| ROM-free unit and timing regressions | `PASS` (scoped) | At `dfee2ec` from a clean worktree: collection 648, unit 507/507, and timing 35/35 across five repetitions. |
-| Runtime/package identity | `PASS` (scoped) | The gate resolves bundled source PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, and the bit-accurate serial contract. |
+| ROM-free unit and timing regressions | `PASS` (scoped) | Current candidate: collection 656, unit 514/514, and timing 40/40 across five repetitions. |
+| Runtime/package identity | `PASS` (scoped) | The gate resolves vendored source PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, the packaged entry point, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
-| Single-session/MCP | `PASS` (ROM-free scope) | The clean asset-free gate covers the ROM-free MCP/lifecycle contract. Real-ROM stdio and per-ROM boot/state checks were not run by that command. |
-| In-process link acceptance | `PASS` for the tested canonical rows | Current candidate: all 10 local/dedicated trade rows and all 10 local/dedicated battle rows passed with no skips or xfails. This does not certify stock-ROM or unlisted variants. |
-| Remote TCP and MCP lifecycle | `PARTIAL` | Current candidate: all 9 remote trade rows and 7/9 remote battle rows passed; the two `red_color` listener battle rows failed at the bounded LinkMenu phase described above. TCP remains loopback-only. |
+| Single-session/MCP | `PASS` (tested scope) | The asset-backed stdio smoke passed for Red color, Blue color, and Yellow; resource/tool/state round-trips and connector EOF cleanup are covered. |
+| In-process link acceptance | `PASS` for completed local tier; strict matrix pending | The non-acceptance local tier is 47/47. The strict 19-row trade and battle matrices are being rerun separately. Stock-ROM link support remains unclaimed. |
+| Remote TCP and MCP lifecycle | `PASS` for completed transport/sample scope; release remains `PARTIAL` | Remote transport is 13/13, and the repeated Red/Blue and Red/Yellow battle samples plus Red/Blue trade samples are 5/5. The complete strict matrix and broader platform review remain open. TCP remains loopback-only. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
 The historical complete real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` is retained as historical evidence
-only. The current product Ruff check is clean for the configured source, test,
-and script boundary. The broad suite, battle completion for the two failed remote
-rows, Cython gameplay coverage, vanilla fixture provenance, native-platform
-coverage, retained full-gate evidence, and independent review remain open. TCP is
-deliberately localhost-only because it has no authentication or encryption.
+only. The current product Ruff check is clean for the explicitly configured CI
+files; legacy files outside that boundary are not silently reformatted. The
+strict full-gate report, full Cython gameplay coverage, vanilla fixture
+provenance, native-platform coverage, concurrent-load evidence, and independent
+review remain open. TCP is deliberately localhost-only because it has no
+authentication or encryption.
 
 The required setup, test tiers, evidence format, and sign-off rules are in
 [`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md) and
@@ -101,17 +84,17 @@ The intended release inputs are the exact ROM variants listed in
 | Game | Input | Status |
 |---|---|---|
 | Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Hash-pinned BYO input; current stateful link support is not claimed |
-| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Local trade/battle and remote trade pass; two remote battle rows with Red as listener remain failing |
+| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Local tier and repeated remote Red-listener battle/trade samples pass; complete strict matrix is pending |
 | Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Hash-pinned BYO input; current stateful link support is not claimed |
-| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Canonical local and remote trade/battle rows passed except where paired with a failing Red-listener battle row |
-| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Canonical local and remote trade/battle rows passed except where paired with a failing Red-listener battle row |
+| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Local tier and the repeated remote Blue-connector samples pass; complete strict matrix is pending |
+| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Local tier and the repeated remote Yellow-connector battle samples pass; complete strict matrix is pending |
 | Other localisations and ROM hacks | — | Out of scope |
 
-The current controlled stateful evidence covers every canonical local trade and
-battle row, every remote trade row, and seven of nine remote battle rows. The two
-failed remote battle rows are listed above; no full remote battle capability is
-claimed until they pass. Stock-ROM link pairs remain outside the strict canonical
-matrix because their fixture provenance is partial.
+The current controlled stateful evidence covers the completed local/remote
+tiers and repeated end-to-end remote samples listed above. The strict matrix
+runtime is still being executed, so no complete remote trade or battle claim is
+made yet. Stock-ROM link pairs remain outside the strict canonical matrix
+because their fixture provenance is partial.
 
 ## Requirements and clean install
 
@@ -356,7 +339,7 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Parameterized two-process LinkMenu smoke plus canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints | The two current failing Red-listener battle rows, concurrent-load stability, and any skipped or unpinned row |
+| `tests/test_pyboy_link_session_subprocess.py` | Parameterized two-process LinkMenu smoke plus canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints | Concurrent-load stability, and any skipped or unpinned row; the strict battle matrix is still running |
 | `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus parameterized canonical Red/Blue/Yellow local trade and battle acceptance entrypoints | Stock-variant coverage, or a release result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
@@ -366,10 +349,9 @@ an explicit statement about any test-driver menu control. The current strict
 declaration contains 19 trade and 19 battle entrypoints: nine local ordered
 rows, one dedicated Red/Yellow assertion, and nine remote ordered listener /
 connector rows for each operation. The current runtime result is strict trade
-19/19 and strict battle 17/19, with the two failed remote Red-listener battle
-rows identified above. Earlier diagnostics include a strict-trade timeout and a
-cross-family remote-battle pre-battle warp/phase divergence; no full remote
-battle capability is claimed while those two rows fail.
+19/19; the strict battle matrix is still running, so its final result is not
+claimed here. Earlier targeted remote battle samples pass, but they do not
+replace the complete strict matrix.
 
 ## Walkthrough scripts
 
@@ -443,11 +425,11 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `dfee2ec`, a clean committed worktree passed 507/507 unit tests and 35/35
-timing cases in each of five repetitions, with 648 tests collected. It is a
-`PASS` for the selected scope, not a production sign-off: the full gate
-additionally requires the BYO assets, fixture-byte/provenance checks, real-ROM
-tiers, and complete strict matrix runtime execution.
+The current candidate’s clean-scope gate passed 514/514 unit tests and 40/40
+timing cases across five repetitions, with 656 tests collected. It is a `PASS`
+for the selected scope, not a production sign-off: the full gate additionally
+requires the complete strict matrix runtime, BYO asset provenance, and the
+remaining platform/runtime review.
 
 Use the tiered commands in [`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md)
 when ROMs, symbols, fixtures, or the bundled link runtime are present. The

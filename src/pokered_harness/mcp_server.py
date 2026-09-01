@@ -27,7 +27,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -2190,6 +2190,40 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
     task.exception()
 
 
+class _McpTaskRegistry:
+    """Track thread-backed request work until it has actually finished.
+
+    Cancelling an asyncio task does not stop the executor thread created by
+    :func:`asyncio.to_thread`.  Keeping those tasks in a server-owned registry
+    gives the stdio shutdown path a final opportunity to wake remote work and
+    wait for the emulator operation before the owning session is closed.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task[Any]] = set()
+
+    def start(self, operation: Callable[[], Any]) -> asyncio.Task[Any]:
+        task = asyncio.create_task(asyncio.to_thread(operation))
+        self._tasks.add(task)
+        task.add_done_callback(self._finished)
+        return task
+
+    def _finished(self, task: asyncio.Task[Any]) -> None:
+        self._tasks.discard(task)
+        _consume_task_exception(task)
+
+    async def wait_until(self, deadline: float) -> bool:
+        """Wait for all tracked work without cancelling executor tasks."""
+        while True:
+            pending = tuple(task for task in self._tasks if not task.done())
+            if not pending:
+                return True
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            if remaining <= 0.0:
+                return False
+            await asyncio.wait(pending, timeout=remaining)
+
+
 async def _wait_task_until(
     task: asyncio.Task[Any],
     deadline: float,
@@ -2211,6 +2245,26 @@ async def _wait_task_until(
     except BaseException:  # noqa: BLE001 - cancellation cleanup is best effort
         return True
     return True
+
+
+async def _await_blocking_task(
+    task: asyncio.Task[Any],
+    *,
+    task_registry: _McpTaskRegistry,
+    cancel_cleanup: Callable[[], Any] | None,
+) -> Any:
+    """Await a thread-backed request while retaining cancellation ownership."""
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        cleanup_deadline = (
+            asyncio.get_running_loop().time() + _DEFAULT_CLEANUP_TIMEOUT_S
+        )
+        if cancel_cleanup is not None:
+            cleanup = task_registry.start(cancel_cleanup)
+            await _wait_task_until(cleanup, cleanup_deadline)
+        await _wait_task_until(task, cleanup_deadline)
+        raise
 
 
 def _close_sessions_independently(
@@ -2259,6 +2313,11 @@ def build_server(
         )
 
     server: Server = Server("pokered-harness")
+    request_tasks = _McpTaskRegistry()
+    # ``serve_stdio`` uses this private handle during transport EOF cleanup.
+    # Keeping it on the server also makes the ownership explicit for callers
+    # that construct a server first and select their transport later.
+    server._pokered_request_tasks = request_tasks  # type: ignore[attr-defined]
 
     @server.list_tools()
     async def _list_tools() -> list[mcp_types.Tool]:
@@ -2275,27 +2334,23 @@ def build_server(
         # work, close the remote transport from a second thread to wake a
         # serial hook or an in-progress connect before waiting for the worker
         # to settle.
-        worker = asyncio.create_task(
-            asyncio.to_thread(dispatch_tool, session, name, args, link)
+        worker = request_tasks.start(
+            lambda: dispatch_tool(session, name, args, link)
         )
         try:
             # The emulator is not asyncio-aware. Run the blocking operation
             # off the event loop while the Session/LinkState locks preserve
             # single-emulator ordering. This also leaves the loop responsive
             # to status/resource requests while a bounded TCP call waits.
-            result = await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            cleanup_deadline = (
-                asyncio.get_running_loop().time()
-                + _DEFAULT_CLEANUP_TIMEOUT_S
+            result = await _await_blocking_task(
+                worker,
+                task_registry=request_tasks,
+                cancel_cleanup=(
+                    None
+                    if name == "link_status"
+                    else lambda: _disconnect_remote(link, session)
+                ),
             )
-            if name != "link_status":
-                cleanup = asyncio.create_task(
-                    asyncio.to_thread(_disconnect_remote, link, session)
-                )
-                await _wait_task_until(cleanup, cleanup_deadline)
-            await _wait_task_until(worker, cleanup_deadline)
-            raise
         except Exception as exc:  # noqa: BLE001
             return _error_reply(exc)
         return _text_reply(result)
@@ -2306,7 +2361,18 @@ def build_server(
 
     @server.read_resource()
     async def _read_resource(uri: Any) -> str:
-        return await asyncio.to_thread(read_resource, session, str(uri), link)
+        resource_uri = str(uri)
+        worker = request_tasks.start(
+            lambda: read_resource(session, resource_uri, link)
+        )
+        return await _await_blocking_task(
+            worker,
+            task_registry=request_tasks,
+            # A resource read may be waiting on a remote endpoint or a
+            # session lock.  The same cancellation wake-up used by tools is
+            # required so EOF cannot strand a thread outside server cleanup.
+            cancel_cleanup=lambda: _disconnect_remote(link, session),
+        )
 
     return server
 
@@ -2346,6 +2412,7 @@ async def serve_stdio(
         peer_version=peer_version,
         link=owned_link,
     )
+    request_tasks = getattr(server, "_pokered_request_tasks", None)
     try:
         async with stdio_server() as (read_stream, write_stream):
             # stdio_server captures the real stdout file descriptor before
@@ -2374,6 +2441,22 @@ async def serve_stdio(
                 dispatch_tool(session, "link_unpair", {}, link=owned_link)
             except Exception as exc:  # noqa: BLE001
                 cleanup_errors.append(exc)
+            if request_tasks is not None:
+                try:
+                    drained = await request_tasks.wait_until(
+                        asyncio.get_running_loop().time()
+                        + _DEFAULT_CLEANUP_TIMEOUT_S
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    cleanup_errors.append(exc)
+                else:
+                    if not drained:
+                        cleanup_errors.append(
+                            TimeoutError(
+                                "MCP request worker did not stop before the "
+                                f"{_DEFAULT_CLEANUP_TIMEOUT_S:g}s shutdown deadline"
+                            )
+                        )
         if cleanup_errors:
             details = "; ".join(
                 f"{type(exc).__name__}: {exc}" for exc in cleanup_errors

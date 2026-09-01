@@ -97,8 +97,15 @@ jobs:
           clean_python="$clean_venv/bin/python"
           "$clean_python" -m pip install --no-cache-dir "$RUNNER_TEMP"/pokered-wheels/*.whl
           "$clean_python" -m pip check
+          "$clean_python" scripts/bootstrap_pyboy.py --mode source --check
           "$clean_python" - <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
           import pyboy
+          from pyboy import utils
           from pyboy.core.serial import Serial
           import pokered_harness
 
@@ -106,11 +113,41 @@ jobs:
           assert pyboy.__pokered_harness_revision__ == (
               "c565df66c3731fad2856169a90f6bbec99925915"
           )
+          assert utils.cython_compiled is False
           serial = Serial(False)
           assert all(
               hasattr(serial, name)
               for name in ("backend", "apply_external_edge", "peek_out_bit")
           )
+
+          clean_env = os.environ.copy()
+          for name in (
+              "POKERED_ROM_PATH",
+              "POKERED_SYM_PATH",
+              "POKERED_ROM_SHA1",
+              "POKERED_SYM_SHA1",
+              "POKERED_VERSIONS_PATH",
+              "POKERED_SKIP_SHA1",
+          ):
+              clean_env.pop(name, None)
+          entrypoints = [
+              [sys.executable, "-m", "pokered_harness"],
+              [str(Path(sys.executable).with_name("pokered-harness"))],
+          ]
+          for command in entrypoints:
+              result = subprocess.run(
+                  command,
+                  cwd=Path.cwd(),
+                  env=clean_env,
+                  capture_output=True,
+                  text=True,
+                  check=False,
+              )
+              assert result.returncode != 0, (command, result.stdout, result.stderr)
+              assert "set POKERED_ROM_PATH and POKERED_SYM_PATH" in (
+                  result.stdout + result.stderr
+              )
+
           print(pokered_harness.__file__)
           print(pyboy.__file__)
           PY
