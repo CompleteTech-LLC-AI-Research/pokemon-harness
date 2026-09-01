@@ -5,13 +5,15 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate (2026-09-01), merged as `f5c766e`
-(PR #7) from head `fdd24d2`. The candidate asset-free gate collected 656 tests,
-passed unit 514/514, and passed timing 40/40 in each of five repetitions with
+Status: `PARTIAL` current audit candidate (2026-09-01), based on live `master`
+tip `321cc08` (PR #8; runtime hardening from PR #7). The candidate asset-free
+gate collected 657 tests,
+passed unit 515/515, and passed timing 40/40 in each of five repetitions with
 `DEFAULT_MATRIX_WORKERS=1`. The asset-backed local tier passed 47/47, the
 remote transport/MCP tier passed 13/13, and strict trade passed 19/19 with no
-skips, xfails, or errors. The strict battle matrix is being executed
-separately; no complete 19/19 battle claim is made until that run exits. The
+skips, xfails, or errors. The last completed strict battle run passed 18/19;
+the `red_color-listen-blue_color-connect` remote row failed before its battle
+menu opened. No complete 19/19 battle claim is made. The
 collection audit passed structurally: all nine ordered local pairs, all nine
 ordered remote role pairs, all six reversed-role rows, all nine local variant
 rows, and 19 strict trade plus 19 strict battle entrypoints are present.
@@ -23,14 +25,17 @@ smoke. Full trade/battle acceptance was not run in Cython mode, so the Cython
 probe does not certify gameplay. Source mode remains the documented release
 default. Current candidate local/dedicated trade and battle rows passed 10/10,
 all nine remote trade rows passed, and independent remote Red/Blue and
-Red/Yellow battle samples passed 5/5 each. The strict remote battle matrix
-remains in progress. The historical complete real-ROM snapshot at
+Red/Yellow battle samples passed 5/5 each, but those samples do not replace the
+failed strict row. A focused rerun of the failed Red/Blue row with the
+owner-progress idle-wait change passed once; this is not a replacement for the
+full 19-row result. The historical complete real-ROM snapshot at
 `1046a541e0003923aec6000b6b383c6eaafeaa48` is separate evidence.
 
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
-The remaining release decision is `PARTIAL` because the strict battle matrix,
-Cython gameplay coverage, vanilla source provenance, broad-suite coverage,
+The remaining release decision is `PARTIAL` because one strict remote battle
+row remains failed; the owner-progress follow-up in this update requires a
+fresh full matrix. Cython gameplay coverage, vanilla source provenance, broad-suite coverage,
 native-platform coverage, retained complete evidence, and independent review
 remain incomplete. `ruff check .` is clean only for the configured product
 boundary; the broad legacy tree is not silently reformatted.
@@ -193,7 +198,7 @@ matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 | Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | 9/9 ordered rows passed |
 | Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | 9/9 ordered rows passed |
 | Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | 9/9 ordered rows passed |
-| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Strict 19-row runtime in progress; targeted Red/Blue and Red/Yellow samples are 5/5 each |
+| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | 18/19 passed in the last completed run; `red_color-listen-blue_color-connect` failed before the battle menu |
 
 The tracked
 [`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)
@@ -232,7 +237,8 @@ the manifest is checked with `--fixture-root`.
 
 The repository has strict local and remote entry points for every canonical
 Red/Blue/Yellow ordered pair. The current candidate has executed all 19 trade
-rows; the strict battle runtime is still in progress. Consult the test-surface table in
+rows and 19 battle entrypoints, with one remote battle failure retained as a
+blocker. Consult the test-surface table in
 the [README](README.md) and run the required tiers in the
 [production runbook](docs/PRODUCTION_RUNBOOK.md) before using any row as
 release evidence.

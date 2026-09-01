@@ -383,7 +383,9 @@ def main() -> int:
                 result[f"serial.{name}"] = getattr(serial, name)
         return result
 
-    def cooperative_sync(sync_id: int, *, timeout: float = 60.0) -> None:
+    def cooperative_sync(
+        sync_id: int, *, timeout: float = 60.0, step_frames: int = 4
+    ) -> None:
         """Rendezvous without freezing the local emulator thread.
 
         A blocking barrier is safe only when neither ROM can be servicing
@@ -392,12 +394,16 @@ def main() -> int:
         marker. This keeps the slave able to re-arm and makes the boundary
         an orchestration point rather than a scheduler stop.
         """
+        if isinstance(step_frames, bool) or not isinstance(step_frames, int):
+            raise TypeError("step_frames must be a positive integer")
+        if step_frames <= 0:
+            raise ValueError("step_frames must be a positive integer")
         link._network_backend.announce_sync(sync_id=sync_id)
         deadline_at = time.monotonic() + timeout
         while time.monotonic() < deadline_at:
             if link._network_backend.poll_peer_sync(sync_id=sync_id):
                 return
-            session.step(4)
+            session.step(step_frames)
         raise RuntimeError(
             f"cooperative sync {sync_id} did not converge: "
             f"local={state_snapshot()} backend={backend_snapshot()}"
@@ -623,7 +629,10 @@ def main() -> int:
                     )
                 if peer_link_menu_ready:
                     if not link_menu_quiet_announced:
-                        link._network_backend.wait_for_wire_idle(timeout=10.0)
+                        link._network_backend.wait_for_wire_idle(
+                            timeout=10.0,
+                            progress_callback=lambda: session.step(1),
+                        )
                         link._network_backend.announce_sync(sync_id=122)
                         link_menu_quiet_announced = True
                         log("phase 1 wire-idle acknowledgement sent")
@@ -633,7 +642,9 @@ def main() -> int:
                         )
                 if peer_link_menu_quiet_ready:
                     link._network_backend.wait_for_wire_idle(
-                        timeout=10.0, allow_peer_close=True
+                        timeout=10.0,
+                        allow_peer_close=True,
+                        progress_callback=lambda: session.step(1),
                     )
                     log("phase 1 done: LinkMenu fired on both peers")
                     break
@@ -1080,6 +1091,23 @@ def main() -> int:
                 f"counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} } "
                 f"state={state_snapshot()} backend={backend_snapshot()}"
             )
+            if (
+                counters[
+                    "CableClub_DoBattleOrTradeAgain.finishedEnemyMonsPatchListPart"
+                ][0]
+                < 2
+            ):
+                raise RuntimeError(
+                    "battle prebattle serial milestone did not complete: "
+                    f"counters={counters} state={state_snapshot()} "
+                    f"backend={backend_snapshot()}"
+                )
+            # Both ROMs must finish the party-data exchange before either
+            # process is allowed to run the timed VS/battle transition. The
+            # barrier continues ticking the local owner, so queued native
+            # serial edges are still serviced while the peer catches up.
+            cooperative_sync(sync_id=113, timeout=120.0, step_frames=1)
+            log("battle prebattle barrier complete; entering intro")
 
             # The VS splash and transition are timed ROM work. Do not mash A
             # through them: an input consumed in the transition can leave the
@@ -1092,7 +1120,7 @@ def main() -> int:
                     and counters["DisplayBattleMenu"][0] > 0
                 ):
                     break
-                session.step(20)
+                session.step(1)
             if not (
                 counters["MainInBattleLoop"][0] > 0
                 and counters["DisplayBattleMenu"][0] > 0

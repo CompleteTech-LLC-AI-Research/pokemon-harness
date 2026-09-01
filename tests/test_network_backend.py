@@ -25,6 +25,7 @@ from pokered_harness.link.network_backend import (
     NetworkBackendError,
     validate_loopback_host,
 )
+from pokered_harness.link.serial_coordinator import SerialOperationGate
 
 _OP_EDGE_REQ = 0x10
 _OP_EDGE_RESP = 0x11
@@ -555,6 +556,51 @@ def test_wait_for_wire_idle_is_bounded_while_edge_worker_is_busy():
         assert b.debug_snapshot()["pending_edge_requests"] == 0
     finally:
         core.release_edge.set()
+        a.stop()
+        b.stop()
+
+
+def test_wait_for_wire_idle_can_progress_owner_queued_edge():
+    """An owner callback drains inbound work without a transport deadlock."""
+    a, b = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    core.transfer_enabled = 0
+    core.SC = 0
+    a.start_receiver(local_core=None)
+    b.start_receiver(
+        local_core=core,
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    result: list[int] = []
+    sender = threading.Thread(
+        target=lambda: result.append(a.on_edge(our_bit=1, our_role=1)),
+        daemon=True,
+    )
+    callback_calls = 0
+
+    def progress() -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+        core.transfer_enabled = 1
+        core.SC = 0x80
+        b.service_pending_edges(max_edges=1)
+
+    try:
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while (
+            time.monotonic() < deadline
+            and b.debug_snapshot()["pending_edge_requests"] == 0
+        ):
+            time.sleep(0.005)
+        b.wait_for_wire_idle(timeout=1.0, progress_callback=progress)
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert result == [0]
+        assert callback_calls > 0
+        assert b.debug_snapshot()["pending_edge_requests"] == 0
+    finally:
         a.stop()
         b.stop()
 

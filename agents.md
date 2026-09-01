@@ -27,14 +27,18 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current merged candidate is `f5c766e` (PR #7), rooted at the live target
-`master` tip `1e885df` and using the conservative
-`DEFAULT_MATRIX_WORKERS=1` setting. Its asset-free gate collected 656 tests,
-passed 514/514 unit tests, and passed 40/40 timing cases in each of five
+The current merged candidate is rooted at live target `master` tip `321cc08`
+(PR #8, with runtime hardening from PR #7) and uses the conservative
+`DEFAULT_MATRIX_WORKERS=1` setting. Its asset-free gate collected 657 tests,
+passed 515/515 unit tests, and passed 40/40 timing cases in each of five
 repetitions. The asset-backed local tier passed 47/47, the remote transport/MCP
-tier passed 13/13, and the strict trade tier passed 19/19. The strict battle
-matrix is still being executed separately; no complete 19/19 battle claim is
-made until that run exits. The release runtime is the bundled PyBoy source
+tier passed 13/13, and the strict trade tier passed 19/19. The last completed
+strict battle run passed 18/19: the
+`red_color-listen-blue_color-connect` remote row failed before its battle menu
+opened. No complete 19/19 battle claim is made. This update adds a bounded
+owner-progress callback for transport-idle waits and a focused regression test;
+that change requires a fresh full matrix before it can alter the status. The
+release runtime is the bundled PyBoy source
 snapshot pinned in `VERSIONS.md` (`2.7.0`, harness revision
 `c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode is
 the documented release default. The pinned Cython build also passed its runtime
@@ -50,18 +54,20 @@ release evidence.
   fixture bytes have recorded reproduction evidence; the external states are
   never committed and their hashes do not prove gameplay compatibility.
 - The current candidate passed the completed 10 local/dedicated trade rows, all
-  10 local/dedicated battle rows, and all 9 remote trade rows. Independent
-  remote Red/Blue and Red/Yellow battle samples passed 5/5 each; the strict
-  remote battle matrix remains in progress.
+  10 local/dedicated battle rows, and all 9 remote trade rows. Earlier
+  independent remote Red/Blue and Red/Yellow battle samples passed 5/5 each;
+  those samples do not replace the failed strict battle row.
 - The current tree declares all canonical Red/Blue/Yellow listener and
   connector orderings over localhost TCP. The current runtime result is green
-  for trade and partial for battle until the strict matrix completes;
+  for trade and partial for battle: strict trade is 19/19 and the last strict
+  battle run was 18/19;
   concurrent-load stability remains open.
 - The strict acceptance declaration has a dedicated entry point for every
   canonical ordered local and remote pair (19 trade and 19 battle nodes).
   Collection is declaration evidence only; a LinkMenu milestone is not a
-  gameplay acceptance. Current execution recorded strict trade 19/19; strict
-  battle remains an in-progress runtime requirement.
+  gameplay acceptance. Current execution recorded strict trade 19/19 and
+  strict battle 18/19, with the failed Red-listener/Blue-connector row retained
+  as a blocker.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or
