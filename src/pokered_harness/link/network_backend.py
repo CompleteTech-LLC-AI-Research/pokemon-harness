@@ -798,7 +798,11 @@ class NetworkBackend:
         return snap
 
     def wait_for_wire_idle(
-        self, timeout: float = 10.0, *, allow_peer_close: bool = False
+        self,
+        timeout: float = 10.0,
+        *,
+        allow_peer_close: bool = False,
+        progress_callback: Callable[[], None] | None = None,
     ) -> None:
         """Wait until all already-received edge work has drained.
 
@@ -810,13 +814,18 @@ class NetworkBackend:
         response, to finish within a bounded deadline.  ``allow_peer_close``
         is intended only for a caller that has already completed an
         application-level close marker and therefore expects the peer to
-        tear down immediately.
+        tear down immediately.  When ``progress_callback`` is supplied, it
+        is called outside the transport condition lock between bounded
+        checks.  An emulator owner can use this to service queued inbound
+        edges while the caller is waiting for wire idle; without it, a caller
+        that owns the emulator thread can wait on work that only that same
+        thread is allowed to apply.
         """
         timeout = _validate_optional_timeout(timeout, "timeout")
         assert timeout is not None
         deadline = time.monotonic() + timeout
-        with self._edge_pending_condition:
-            while True:
+        while True:
+            with self._edge_pending_condition:
                 with self._edge_response_lock:
                     edge_inflight = self._edge_inflight
                     response_pending = not self._resp_queue.empty()
@@ -846,7 +855,15 @@ class NetworkBackend:
                         f"edge_inflight={edge_inflight}, "
                         f"response_pending={response_pending})"
                     )
-                self._edge_pending_condition.wait(timeout=min(0.05, remaining))
+                wait_time = min(0.05, remaining)
+                if progress_callback is None:
+                    self._edge_pending_condition.wait(timeout=wait_time)
+                    continue
+            # Never invoke arbitrary emulator-owner code while holding the
+            # transport condition lock. The callback is deliberately outside
+            # the lock so its owner-side serial dispatch can notify the
+            # reader/response worker and let the next loop observe progress.
+            progress_callback()
 
     def _sync_queue(self, sync_id: int) -> queue.Queue[int]:
         if not 0 <= sync_id <= 255:

@@ -2,20 +2,23 @@
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
-historical, the current candidate facts refer to the change set rooted at the
-live target `master` tip `1e885df`, with the conservative one-worker matrix
-setting used for the strict acceptance run. External BYO assets are excluded
-from the tracked source tree.
+historical, the current candidate facts refer to the live target `master` tip
+`321cc08`, with the conservative one-worker matrix setting used for the strict
+acceptance run. External BYO assets are excluded from the tracked source tree.
 
-The current candidate asset-free gate passed collection 656, unit 514/514, and
+The current candidate asset-free gate passed collection 657, unit 515/515, and
 timing 40/40 in each of five repetitions; its scoped result was `PASS`. The
 asset-backed local tier passed 47/47 and the remote transport/MCP tier passed
 13/13, with all five ROM hashes, three symbol hashes, and ten fixture entries
-validated. The strict trade matrix subsequently passed 19/19. The strict
-battle matrix is still running at the time of this update; earlier independent
-remote Red/Blue and Red/Yellow battle samples passed 5/5 each. Symbol hashes and
+validated. The strict trade matrix passed 19/19. The last completed strict
+battle matrix passed 18/19; the
+`red_color-listen-blue_color-connect` remote row failed before its battle menu
+opened. Earlier independent remote Red/Blue and Red/Yellow battle samples
+passed 5/5 each, but do not replace the failed strict row. Symbol hashes and
 fixture byte/provenance records are in [`VERSIONS.md`](../VERSIONS.md) and the
 tracked [`fixture-manifest.json`](../release-evidence/fixture-manifest.json).
+A focused rerun of the failed Red/Blue row with both idle waits
+owner-progress-aware passed once; it is not a replacement for the full matrix.
 Overall status is `PARTIAL`; the exact open items are listed in [the release
 checklist](RELEASE_CHECKLIST.md).
 
@@ -230,8 +233,8 @@ python scripts/production_gate.py \
   --format text
 ```
 
-The current candidate’s clean asset-free run collected 656 tests, passed unit
-514/514, passed timing 40/40 in each of five repetitions, and returned scoped
+The current candidate’s clean asset-free run collected 657 tests, passed unit
+515/515, passed timing 40/40 in each of five repetitions, and returned scoped
 `PASS`. It also performed schema-only validation of the ten-entry fixture
 manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
@@ -443,13 +446,13 @@ scope is:
 | Operation | Local ordered rows | Remote ordered listener/connector rows | Dedicated assertion | Current status |
 |---|---:|---:|---|---|
 | Trade | 9 | 9 | Red/Yellow party-record swap | 9 local + dedicated and 9 remote rows passed (19/19) |
-| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | Strict 19-row runtime is in progress; targeted Red/Blue and Red/Yellow remote samples are 5/5 each |
+| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | 18/19 in the last completed run; `red_color-listen-blue_color-connect` failed before the battle menu |
 
 That is 19 strict entrypoints per operation. The remote rows use canonical color
 Red, color Blue, and Yellow profiles; listener/connector order is significant.
-The current candidate trade run passed all 19 rows. The strict battle run is
-still in progress; its targeted Red/Blue and Red/Yellow remote samples passed
-5/5 each, but those samples do not replace the complete 19-row result.
+The current candidate trade run passed all 19 rows. The last completed strict
+battle run passed 18/19; its targeted Red/Blue and Red/Yellow remote samples
+passed 5/5 each, but those samples do not replace the failed strict row.
 Stock-ROM rows and LinkMenu-only milestones are outside this strict release
 claim.
 
@@ -596,15 +599,15 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The asset-free gate passes 514/514 unit tests and 40/40 timing cases in each
+1. The asset-free gate passes 515/515 unit tests and 40/40 timing cases in each
    of five repetitions, but it does not run ROM-backed gameplay. The strict
-   trade matrix passed 19/19; the strict battle matrix is still running and
-   must finish with no failures, errors, skips, xfails, or timeouts.
+   trade matrix passed 19/19; the last strict battle matrix passed 18/19 and
+   must be rerun with no failures, errors, skips, xfails, or timeouts.
 2. The strict declaration is complete: the collection audit has nine ordered
    local pairs, nine ordered remote role pairs, six reversed-role rows, nine
    local variant rows, and 19 strict entrypoints for each operation. The
    completed local tier is 47/47 and remote tier is 13/13; declaration and
-   completed-tier results do not substitute for the in-progress battle matrix.
+   completed-tier results do not substitute for the failed battle row.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
    reproduction evidence, while vanilla ordinary source provenance is
    `PARTIAL`. The manifest and save states are external/operator-managed; a
