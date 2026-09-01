@@ -978,11 +978,7 @@ def _load_gate_report(
         ) + (derived.errors - len(collection_errors)):
             raise ValueError("pytest report test outcomes do not add up to total")
 
-        if (
-            not collection_only
-            and not allow_partial
-            and seen_nodeids != set(nodeids)
-        ):
+        if not collection_only and not allow_partial and seen_nodeids != set(nodeids):
             raise ValueError("pytest report nodeids do not match test records")
         if allow_partial and not seen_nodeids.issubset(set(nodeids)):
             raise ValueError("partial pytest report contains an unselected test outcome")
@@ -1295,9 +1291,7 @@ def fixture_manifest_provenance_problems(
     try:
         document = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return [
-            f"fixture manifest provenance could not be read: {type(exc).__name__}: {exc}"
-        ]
+        return [f"fixture manifest provenance could not be read: {type(exc).__name__}: {exc}"]
     fixtures = document.get("fixtures") if isinstance(document, dict) else None
     if not isinstance(fixtures, list):
         return ["fixture manifest provenance has no fixture list"]
@@ -1521,8 +1515,7 @@ def run_pytest_once(
             GateReport(
                 Counts(errors=1),
                 error=(
-                    "could not prepare pytest progress report path: "
-                    f"{type(exc).__name__}: {exc}"
+                    f"could not prepare pytest progress report path: {type(exc).__name__}: {exc}"
                 ),
             ),
             "",
@@ -1754,9 +1747,7 @@ def run_matrix_tier(
         )
 
     selected_keys = {
-        key
-        for nodeid in nodeids
-        if (key := _test_key_from_nodeid(nodeid)) is not None
+        key for nodeid in nodeids if (key := _test_key_from_nodeid(nodeid)) is not None
     }
     failures = [
         f"required acceptance test is absent from matrix selectors: {module}::{test_name}"
@@ -1875,16 +1866,12 @@ def run_matrix_tier(
             return final_report, "final"
         if not final_report.error:
             return final_report, "final"
-        progress_report = _load_gate_report(
-            state["progress_path"], allow_partial=True
-        )
+        progress_report = _load_gate_report(state["progress_path"], allow_partial=True)
         if not progress_report.error:
             return progress_report, "partial"
         return GateReport(
             Counts(errors=1),
-            error=(
-                f"{final_report.error}; progress report: {progress_report.error}"
-            ),
+            error=(f"{final_report.error}; progress report: {progress_report.error}"),
         ), "missing"
 
     def start_case(nodeid: str) -> None:
@@ -2008,10 +1995,7 @@ def run_matrix_tier(
                 finish_case(
                     nodeid,
                     timed_out=True,
-                    reason=(
-                        "matrix aggregate deadline exceeded after "
-                        f"{aggregate_timeout:.1f}s"
-                    ),
+                    reason=(f"matrix aggregate deadline exceeded after {aggregate_timeout:.1f}s"),
                 )
             while pending:
                 record_not_started(
@@ -2030,8 +2014,7 @@ def run_matrix_tier(
         remaining = aggregate_deadline - time.monotonic()
         if remaining > 0:
             next_deadline = min(
-                [state["deadline_at"] for state in active.values()]
-                + [aggregate_deadline]
+                [state["deadline_at"] for state in active.values()] + [aggregate_deadline]
             )
             time.sleep(min(0.05, max(0.0, next_deadline - time.monotonic())))
 
@@ -2054,9 +2037,7 @@ def run_matrix_tier(
         required=required,
         status=status,
         counts=aggregate,
-        returncodes=[
-            case.returncode for case in case_results if case.returncode is not None
-        ],
+        returncodes=[case.returncode for case in case_results if case.returncode is not None],
         duration_seconds=time.monotonic() - started,
         skip_reasons=dict(sorted(aggregate_reasons.items())),
         command=[
@@ -2556,17 +2537,14 @@ def _safe_matrix_audit(result: dict[str, Any]) -> dict[str, Any]:
                 "expected": raw_group.get("expected"),
                 "present": raw_group.get("present"),
                 "missing": [
-                    _safe_diagnostic(item, (), limit=1000)
-                    for item in raw_group.get("missing", ())
+                    _safe_diagnostic(item, (), limit=1000) for item in raw_group.get("missing", ())
                 ],
             }
         safe["groups"] = groups
     raw_gaps = result.get("acceptance_gaps", {})
     if isinstance(raw_gaps, dict):
         safe["acceptance_gaps"] = {
-            str(name): [
-                _safe_diagnostic(item, (), limit=1000) for item in entries
-            ]
+            str(name): [_safe_diagnostic(item, (), limit=1000) for item in entries]
             for name, entries in raw_gaps.items()
             if isinstance(entries, (tuple, list))
         }
@@ -2583,10 +2561,7 @@ def _safe_matrix_audit(result: dict[str, Any]) -> dict[str, Any]:
     raw_profile_pairs = result.get("remote_strict_profile_pairs")
     if isinstance(raw_profile_pairs, list):
         safe["remote_strict_profile_pairs"] = [
-            {
-                str(name): _safe_diagnostic(value, (), limit=500)
-                for name, value in pair.items()
-            }
+            {str(name): _safe_diagnostic(value, (), limit=500) for name, value in pair.items()}
             for pair in raw_profile_pairs
             if isinstance(pair, dict)
         ]
@@ -3060,9 +3035,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     elif real_rom_scope:
         gate_problems.extend(
-            fixture_manifest_provenance_problems(
-                project_root / FIXTURE_MANIFEST_RELATIVE_PATH
-            )
+            fixture_manifest_provenance_problems(project_root / FIXTURE_MANIFEST_RELATIVE_PATH)
         )
 
     matrix_audit = run_matrix_collection_audit(

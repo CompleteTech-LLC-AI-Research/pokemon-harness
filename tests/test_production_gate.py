@@ -84,9 +84,7 @@ class _FakeMatrixPopen:
         if self.mode != "hang":
             outcome = "passed" if self.mode == "pass" else self.mode
             payload = _matrix_report(nodeid, outcome=outcome)
-            Path(env["POKERED_GATE_REPORT"]).write_text(
-                json.dumps(payload), encoding="utf-8"
-            )
+            Path(env["POKERED_GATE_REPORT"]).write_text(json.dumps(payload), encoding="utf-8")
 
     def poll(self):
         return self.returncode
@@ -346,9 +344,7 @@ def test_run_tier_repeats_timing_cases_at_least_five_times(tmp_path, monkeypatch
     assert len(calls) == 5
 
 
-def test_strict_matrix_tier_runs_each_required_node_in_isolated_selector(
-    tmp_path, monkeypatch
-):
+def test_strict_matrix_tier_runs_each_required_node_in_isolated_selector(tmp_path, monkeypatch):
     _FakeMatrixPopen.mode = "pass"
     _FakeMatrixPopen.commands = []
     monkeypatch.setattr(gate.subprocess, "Popen", _FakeMatrixPopen)
@@ -375,8 +371,7 @@ def test_strict_matrix_tier_runs_each_required_node_in_isolated_selector(
     assert [case.status for case in result.case_results] == ["PASS", "PASS"]
     assert {command[3] for command, _env in _FakeMatrixPopen.commands} == set(required)
     assert all(
-        command[5] == "real_rom and trade_acceptance"
-        for command, _env in _FakeMatrixPopen.commands
+        command[5] == "real_rom and trade_acceptance" for command, _env in _FakeMatrixPopen.commands
     )
 
 
@@ -399,7 +394,10 @@ def test_strict_matrix_tier_rejects_a_skipped_required_row(tmp_path, monkeypatch
 
     assert result.status == "FAIL"
     assert result.counts.skipped == 1
-    assert any("required matrix case produced a test skip" in failure for failure in result.iteration_failures)
+    assert any(
+        "required matrix case produced a test skip" in failure
+        for failure in result.iteration_failures
+    )
 
 
 def test_strict_matrix_supervisor_marks_timeout_and_queued_rows(tmp_path, monkeypatch):
