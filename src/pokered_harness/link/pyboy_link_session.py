@@ -62,10 +62,14 @@ of a second local core.
 from __future__ import annotations
 
 import threading
+from functools import wraps
 from typing import Protocol, runtime_checkable
 
 from pokered_harness.link.network_backend import NetworkBackend
-from pokered_harness.link.serial_coordinator import LockstepCoordinator
+from pokered_harness.link.serial_coordinator import (
+    LockstepCoordinator,
+    SerialOperationGate,
+)
 from pokered_harness.link.serial_core import (
     SC_CLOCK_SOURCE,
     SC_TRANSFER_ENABLE,
@@ -129,6 +133,11 @@ class PyBoyLinkSession:
         self._prev_serials: list[object | None] = []
         self._coord: LockstepCoordinator | None = None
         self._network_backend: NetworkBackend | None = network_backend
+        # One gate covers the complete PyBoy tick and owner-side native
+        # serial dispatch. Network threads only enqueue work; they never
+        # enter the emulator through this gate.
+        self._serial_gate = SerialOperationGate()
+        self._original_ticks: dict[int, object] = {}
         self._network_is_internal_clock = network_is_internal_clock
         self._local_rom_version = local_rom_version
         # When True, per-frame stepping keeps the LCD renderer on and calls
@@ -274,11 +283,29 @@ class PyBoyLinkSession:
             # changes. Do not write that HRAM cell here; doing so would bypass
             # the ROM protocol.
             core.backend = self._network_backend
-            self._initialize_network_clock_role(core)
-            self._network_backend.start_receiver(
-                local_core=core,
-                irq_callback=self._make_serial_irq_raiser(pyboy),
-            )
+            try:
+                with self._serial_gate:
+                    self._initialize_network_clock_role(core)
+                self._install_network_tick_owner(pyboy)
+                self._network_backend.start_receiver(
+                    local_core=core,
+                    irq_callback=self._make_serial_irq_raiser(pyboy),
+                    serial_gate=self._serial_gate,
+                    dispatch_to_owner=True,
+                )
+            except BaseException:
+                self._restore_network_tick_owner(pyboy)
+                try:
+                    core.backend = (
+                        prev_backend if prev_backend is not None else NullBackend()
+                    )
+                except AttributeError:
+                    pass
+                self._pyboys.pop()
+                self._cores.pop()
+                self._prev_backends.pop()
+                self._prev_serials.pop()
+                raise
         elif len(self._cores) == 2:
             # Local-mode pair: wire the in-process coordinator with
             # IRQ callbacks pointing at each motherboard's CPU. The
@@ -341,6 +368,52 @@ class PyBoyLinkSession:
                 cpu.set_interruptflag(INTR_SERIAL)
 
         return _raise
+
+    def _install_network_tick_owner(self, pyboy: _PyBoyLike) -> None:
+        """Make every normal PyBoy tick an owner-side serial boundary.
+
+        ``Session.step`` and direct PyBoy callers both resolve ``tick`` on
+        the instance, so a small instance wrapper lets the network backend
+        service queued peer edges before and after the real motherboard tick
+        without changing PyBoy or the public session API. The shared gate is
+        held across the complete tick, including ROM writes to FF01/FF02 and
+        PyBoy's internal ``Serial.tick`` call.
+        """
+        backend = self._network_backend
+        if backend is None:
+            raise RuntimeError("network tick ownership requires a backend")
+        key = id(pyboy)
+        if key in self._original_ticks:
+            raise RuntimeError("PyBoy tick owner is already installed")
+        original_tick = getattr(pyboy, "tick", None)
+        if not callable(original_tick):
+            raise TypeError("network link requires a callable PyBoy.tick")
+
+        @wraps(original_tick)
+        def owned_tick(*args, **kwargs):
+            with self._serial_gate:
+                backend.service_pending_edges()
+                try:
+                    return original_tick(*args, **kwargs)
+                finally:
+                    backend.service_pending_edges()
+
+        try:
+            pyboy.tick = owned_tick
+        except (AttributeError, TypeError) as exc:
+            raise TypeError(
+                "network link requires an instance-writable PyBoy.tick "
+                "for serialized serial ownership"
+            ) from exc
+        self._original_ticks[key] = original_tick
+
+    def _restore_network_tick_owner(self, pyboy: _PyBoyLike) -> None:
+        """Restore a PyBoy tick method installed by :meth:`attach`."""
+        original_tick = self._original_ticks.pop(id(pyboy), None)
+        if original_tick is None:
+            return
+        with self._serial_gate:
+            pyboy.tick = original_tick
 
     @staticmethod
     def _make_peer_progressor(pyboy):
@@ -418,23 +491,24 @@ class PyBoyLinkSession:
                 "and Serial.set_SC"
             )
 
-        set_sb(
-            self._ESTABLISH_CONNECTION_WITH_INTERNAL_CLOCK
-            if is_internal_clock
-            else self._ESTABLISH_CONNECTION_WITH_EXTERNAL_CLOCK
-        )
-        # Preserve the CGB fast-serial selection bit if a caller restored a
-        # state with it set, while deterministically selecting the requested
-        # clock source and re-arming the native transfer.
-        try:
-            current_sc = int(getattr(core, "SC", 0))
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise RuntimeError("native Serial.SC is not an integer") from exc
-        next_sc = current_sc & 0x02
-        next_sc |= SC_TRANSFER_ENABLE
-        if is_internal_clock:
-            next_sc |= SC_CLOCK_SOURCE
-        set_sc(next_sc)
+        with self._serial_gate:
+            set_sb(
+                self._ESTABLISH_CONNECTION_WITH_INTERNAL_CLOCK
+                if is_internal_clock
+                else self._ESTABLISH_CONNECTION_WITH_EXTERNAL_CLOCK
+            )
+            # Preserve the CGB fast-serial selection bit if a caller restored
+            # a state with it set, while deterministically selecting the
+            # requested clock source and re-arming the native transfer.
+            try:
+                current_sc = int(getattr(core, "SC", 0))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RuntimeError("native Serial.SC is not an integer") from exc
+            next_sc = current_sc & 0x02
+            next_sc |= SC_TRANSFER_ENABLE
+            if is_internal_clock:
+                next_sc |= SC_CLOCK_SOURCE
+            set_sc(next_sc)
 
     def negotiate_network_clock_role(self, peer_rom_version: str) -> bool | None:
         """Choose the native startup clock role after the HELLO exchange.
@@ -498,6 +572,11 @@ class PyBoyLinkSession:
         prev_backend = self._prev_backends[idx]
         prev_serial = self._prev_serials[idx]
         core = self._cores[idx]
+        if self._network_backend is not None:
+            # Wait for an in-progress owner tick before restoring the serial
+            # backend. The response worker never touches the core, so after
+            # this point no background thread retains an emulator reference.
+            self._restore_network_tick_owner(pyboy)
         if prev_serial is not None:
             pyboy.mb.serial = prev_serial
         else:

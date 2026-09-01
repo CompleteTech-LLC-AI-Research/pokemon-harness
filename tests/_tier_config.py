@@ -72,6 +72,7 @@ UNIT_MODULES = frozenset(
         "test_serial_coordinator.py",
         "test_serial_core.py",
         "test_serial_link.py",
+        "test_serial_ownership.py",
         "test_session.py",
         "test_state_bag.py",
         "test_state_battle.py",
