@@ -58,10 +58,12 @@ with native serial traffic. These results are current release evidence, but the
 two failures keep the overall release decision at `PARTIAL`; earlier strict-trade
 timeouts and cross-family warp/phase divergences remain historical diagnostics.
 
-A post-merge isolated rerun of `red_color-listen-blue_color-connect` passed in
-233.35 seconds. This is useful reproducibility evidence but does not replace the
-full strict matrix result: both previously failing rows must pass together in a
-clean full run before the battle tier can be promoted.
+Post-merge isolated reruns of both previously failing rows passed, including
+`red_color-listen-blue_color-connect` in 233.35 seconds and
+`red_color-listen-yellow-connect` in a separate captured run. This is useful
+reproducibility evidence but does not replace the full strict matrix result:
+both rows must pass together in a clean full run before the battle tier can be
+promoted.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
