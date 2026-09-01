@@ -52,13 +52,57 @@ scheduling on top.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager
+from types import TracebackType
+from typing import Any, Self, TypeVar
 
 from pokered_harness.link.serial_core import (
     NullBackend,
     SerialBackend,
     SerialCore,
 )
+
+_T = TypeVar("_T")
+
+
+class SerialOperationGate(AbstractContextManager[Self]):
+    """Serialize every operation which can touch one emulator's serial core.
+
+    PyBoy calls ``Serial.tick`` from its motherboard thread, while a remote
+    link may receive an externally clocked edge on a network thread.  A
+    ``SerialOperationGate`` is the small, runtime-independent part of the
+    ownership contract: the caller that drives PyBoy holds it across the
+    complete emulator tick, and the owner-side network dispatcher holds it
+    while applying one queued edge and raising its IRQ.
+
+    The lock is deliberately re-entrant.  PyBoy callbacks and compatibility
+    adapters can make a nested call into the link layer without creating a
+    self-deadlock, while distinct threads still cannot overlap native serial
+    operations.  This class does not move work to a hidden thread and does
+    not alter Python's scheduler.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+
+    def __enter__(self) -> Self:
+        self._lock.acquire()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._lock.release()
+
+    def run(self, callback: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+        """Run one callback while holding the gate."""
+        with self:
+            return callback(*args, **kwargs)
 
 
 class CoordinatedBackend:
@@ -277,4 +321,5 @@ class LockstepCoordinator:
 __all__ = [
     "CoordinatedBackend",
     "LockstepCoordinator",
+    "SerialOperationGate",
 ]

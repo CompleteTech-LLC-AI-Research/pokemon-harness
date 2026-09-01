@@ -7,7 +7,7 @@ import json
 import subprocess
 import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from pyboy.core.serial import Serial
 
@@ -73,6 +73,17 @@ def test_project_direct_dependencies_are_exactly_pinned() -> None:
     assert dev_dependencies == EXPECTED_DEV_DEPENDENCIES
 
 
+def test_project_exposes_stable_mcp_entrypoints() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert project["project"]["scripts"] == {
+        "pokered-harness": "pokered_harness.mcp_server:main",
+    }
+    module = ROOT / "src" / "pokered_harness" / "__main__.py"
+    assert module.is_file()
+    assert "pokered_harness.mcp_server" in module.read_text(encoding="utf-8")
+
+
 def test_lockfile_records_the_same_exact_project_requirements() -> None:
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
     project = next(package for package in lock["package"] if package["name"] == "pokered-harness")
@@ -96,6 +107,7 @@ def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
     assert 'choices=("source", "cython")' in bootstrap
     assert '"--check"' in bootstrap
     assert 'env["PYBOY_NO_CYTHON"] = "1"' in bootstrap
+    assert 'env.pop("PYBOY_NO_CYTHON", None)' in bootstrap
     assert '"-m", "ensurepip", "--upgrade"' in bootstrap
     assert '"--no-deps"' in bootstrap
     assert "apply_external_edge" in bootstrap
@@ -206,8 +218,12 @@ def test_mcp_config_uses_the_installed_runtime_without_absolute_paths() -> None:
     server = config["mcpServers"]["pokered"]
 
     assert server["command"] == "python"
+    assert server["args"] == ["-m", "pokered_harness.mcp_server"]
     assert "PYTHONPATH" not in server["env"]
-    assert all(not Path(value).is_absolute() for value in server["env"].values())
+    assert all(
+        not (Path(value).is_absolute() or PureWindowsPath(value).is_absolute())
+        for value in server["env"].values()
+    )
     assert server["env"]["POKERED_ROM_PATH"] == "${PWD}/rom/red/pokemon-red-color.gb"
     assert server["env"]["POKERED_SYM_PATH"] == "${PWD}/rom/red/pokemon-red.sym"
     assert server["env"]["POKERED_SYM_SHA1"] == "03783c86a42588bd77f73bd7814cf8d70e590118"
@@ -215,9 +231,11 @@ def test_mcp_config_uses_the_installed_runtime_without_absolute_paths() -> None:
 
 def test_pyboy_runtime_exposes_the_harness_serial_contract() -> None:
     import pyboy
+    from pyboy import utils
 
     assert pyboy.__version__ == "2.7.0"
     assert pyboy.__pokered_harness_revision__ == EXPECTED_PYBOY_REVISION
+    assert utils.cython_compiled is False
 
     serial = Serial(False)
     for name in ("backend", "apply_external_edge", "peek_out_bit"):

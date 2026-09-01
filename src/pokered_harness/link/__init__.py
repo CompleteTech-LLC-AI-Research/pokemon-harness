@@ -17,6 +17,7 @@ from pokered_harness.link.serial_bridge import BridgeEndpoint, SerialBridge
 from pokered_harness.link.serial_coordinator import (
     CoordinatedBackend,
     LockstepCoordinator,
+    SerialOperationGate,
 )
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
@@ -65,6 +66,7 @@ __all__ = [
     "SerialLinkError",
     "SerialLinkProtocolError",
     "SerialLinkTimeout",
+    "SerialOperationGate",
     "TcpSerialLink",
     "validate_loopback_host",
 ]

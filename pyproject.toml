@@ -21,6 +21,9 @@ dependencies = [
     "pysdl2-dll==2.32.10",
 ]
 
+[project.scripts]
+pokered-harness = "pokered_harness.mcp_server:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",

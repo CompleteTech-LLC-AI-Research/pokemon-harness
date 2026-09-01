@@ -2,22 +2,20 @@
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
-historical, the current candidate facts refer to the tree rooted at `ae8d63d`
-with the conservative one-worker matrix setting included in this status update.
-External BYO assets are excluded from the tracked source tree.
+historical, the current candidate facts refer to the change set rooted at the
+live target `master` tip `1e885df`, with the conservative one-worker matrix
+setting used for the strict acceptance run. External BYO assets are excluded
+from the tracked source tree.
 
-The latest clean asset-free gate at `dfee2ec` passed unit 507/507 and timing
-35/35 in each of five repetitions; its collection preflight collected 648
-tests and its scoped result was `PASS`. This proves only the ROM-free and
-timing scope. The matrix audit collected nine ordered local pairs, nine ordered
-remote role pairs, six reversed-role rows, nine local variant rows, and 19
-strict trade plus 19 strict battle entrypoints. Structural and declaration
-checks pass. The candidate-bound ROM-backed gate then passed strict trade 19/19
-and strict battle 17/19, with 0 skips, xfails, or errors; the two battle failures
-were `red_color` listener rows connecting to color Blue and Yellow that failed
-at the bounded LinkMenu phase. Symbol hashes and fixture byte/provenance records
-are in [`VERSIONS.md`](../VERSIONS.md) and the tracked
-[`fixture-manifest.json`](../release-evidence/fixture-manifest.json).
+The current candidate asset-free gate passed collection 656, unit 514/514, and
+timing 40/40 in each of five repetitions; its scoped result was `PASS`. The
+asset-backed local tier passed 47/47 and the remote transport/MCP tier passed
+13/13, with all five ROM hashes, three symbol hashes, and ten fixture entries
+validated. The strict trade matrix subsequently passed 19/19. The strict
+battle matrix is still running at the time of this update; earlier independent
+remote Red/Blue and Red/Yellow battle samples passed 5/5 each. Symbol hashes and
+fixture byte/provenance records are in [`VERSIONS.md`](../VERSIONS.md) and the
+tracked [`fixture-manifest.json`](../release-evidence/fixture-manifest.json).
 Overall status is `PARTIAL`; the exact open items are listed in [the release
 checklist](RELEASE_CHECKLIST.md).
 
@@ -232,8 +230,8 @@ python scripts/production_gate.py \
   --format text
 ```
 
-At `dfee2ec`, a clean committed worktree collected 648 tests, passed unit
-507/507, passed timing 35/35 in each of five repetitions, and returned scoped
+The current candidate’s clean asset-free run collected 656 tests, passed unit
+514/514, passed timing 40/40 in each of five repetitions, and returned scoped
 `PASS`. It also performed schema-only validation of the ten-entry fixture
 manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
@@ -251,11 +249,12 @@ gate checks five pinned ROM paths, three symbol paths, the ten manifest state
 entries, and all required real-ROM tiers. It also fails closed when the strict
 acceptance matrix declaration is incomplete.
 
-The product Ruff boundary is `src/`, `tests/`, and `scripts/`; `pyproject.toml`
-explicitly excludes the pinned third-party `vendor/pyboy-src` tree from the
-default `ruff check .` audit. The current configured boundary is clean. The
-vendored runtime is covered by revision pinning, compile/import checks, and the
-serial contract.
+The release workflow uses an explicit Ruff boundary for the production files it
+owns and explicitly excludes the pinned third-party `vendor/pyboy-src` tree.
+That configured CI boundary is clean; the repository still contains legacy
+files outside it, so a broad `ruff check src tests scripts` result is not used
+as release evidence. The vendored runtime is covered by revision pinning,
+compile/import checks, and the serial contract.
 
 The release tree includes `tests/__init__.py`; otherwise environments that do
 not treat `tests/` as a namespace package can fail collection. Run both
@@ -443,15 +442,16 @@ scope is:
 
 | Operation | Local ordered rows | Remote ordered listener/connector rows | Dedicated assertion | Current status |
 |---|---:|---:|---|---|
-| Trade | 9 | 9 | Red/Yellow party-record swap | 9 local + dedicated and 9 remote rows passed |
-| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | 9 local + dedicated passed; 7/9 remote passed |
+| Trade | 9 | 9 | Red/Yellow party-record swap | 9 local + dedicated and 9 remote rows passed (19/19) |
+| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | Strict 19-row runtime is in progress; targeted Red/Blue and Red/Yellow remote samples are 5/5 each |
 
 That is 19 strict entrypoints per operation. The remote rows use canonical color
 Red, color Blue, and Yellow profiles; listener/connector order is significant.
-The current candidate trade run passed all 19 rows. The battle run passed 17/19;
-the two failures are `red_color` listener rows connecting to color Blue and
-Yellow at the bounded LinkMenu phase. Stock-ROM rows and LinkMenu-only
-milestones are outside this strict release claim.
+The current candidate trade run passed all 19 rows. The strict battle run is
+still in progress; its targeted Red/Blue and Red/Yellow remote samples passed
+5/5 each, but those samples do not replace the complete 19-row result.
+Stock-ROM rows and LinkMenu-only milestones are outside this strict release
+claim.
 
 ## 5. Generate link fixtures safely
 
@@ -545,6 +545,18 @@ side. A teardown is complete
 only when status is idle and no child peer, worker thread, socket, or callback
 remains.
 
+The stdio server treats input EOF and request cancellation as lifecycle events.
+Thread-backed tool and resource work remains owned until it finishes; a
+cancellation first signals remote teardown and then waits within the bounded
+cleanup deadline. When the transport itself closes, the server repeats that
+remote teardown, unpairs any local pair, and drains tracked request workers
+before the owning sessions are closed. A stubborn native call cannot be
+force-killed by Python, so a worker that misses the deadline is reported as a
+cleanup failure rather than being presented as a clean idle transition. The
+real-asset `tests/test_mcp_stdio_integration.py` coverage exercises startup,
+tool/resource discovery, input, state round-trip, remote listen/connect/status,
+and connector EOF cleanup; it does not certify link gameplay.
+
 The checked-in `.mcp.json` is a portable configuration template, not a
 self-installing launcher. The MCP client must expand `${PWD}` to the checkout
 root (or substitute its documented workspace variable), and `python` must be
@@ -584,15 +596,15 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The clean `dfee2ec` asset-free gate passes 507/507 unit tests and 35/35
-   timing cases in each of five repetitions, but it does not run ROM-backed
-   gameplay. The current candidate strict trade matrix passed 19/19; strict
-   battle passed 17/19, with two remote Red-listener failures at LinkMenu.
+1. The asset-free gate passes 514/514 unit tests and 40/40 timing cases in each
+   of five repetitions, but it does not run ROM-backed gameplay. The strict
+   trade matrix passed 19/19; the strict battle matrix is still running and
+   must finish with no failures, errors, skips, xfails, or timeouts.
 2. The strict declaration is complete: the collection audit has nine ordered
    local pairs, nine ordered remote role pairs, six reversed-role rows, nine
    local variant rows, and 19 strict entrypoints for each operation. The
-   candidate runtime executed every declared row; the two failed battle rows
-   remain release blockers.
+   completed local tier is 47/47 and remote tier is 13/13; declaration and
+   completed-tier results do not substitute for the in-progress battle matrix.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
    reproduction evidence, while vanilla ordinary source provenance is
    `PARTIAL`. The manifest and save states are external/operator-managed; a
