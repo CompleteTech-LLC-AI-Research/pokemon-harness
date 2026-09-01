@@ -6,7 +6,8 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: `PARTIAL` current audit candidate (2026-09-01), based on live `master`
-tip `321cc08` (PR #8; runtime hardening from PR #7). The candidate asset-free
+tip `d2cfb98` (PR #9; runtime hardening and documentation from PRs #7-#8).
+The candidate asset-free
 gate collected 657 tests,
 passed unit 515/515, and passed timing 40/40 in each of five repetitions with
 `DEFAULT_MATRIX_WORKERS=1`. The asset-backed local tier passed 47/47, the

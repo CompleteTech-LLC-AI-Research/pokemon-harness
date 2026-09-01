@@ -12,7 +12,8 @@ symbol files, save states, or other ROM-derived artifacts.
 This repository remains an audited production-readiness candidate, not a
 production release. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon), whose
-remote `master` was `321cc08` when this update was prepared. The candidate adds
+remote `master` was `d2cfb98` when this update was prepared; this includes the
+merged owner-progress update from PR #9. The candidate adds
 a packaged entry point, explicit source-PyBoy runtime checks, MCP worker
 draining, emulator-owner serial dispatch, and a bounded owner-progress hook
 for transport-idle waits. It must be treated as release evidence only after
