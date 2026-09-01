@@ -545,6 +545,18 @@ side. A teardown is complete
 only when status is idle and no child peer, worker thread, socket, or callback
 remains.
 
+The stdio server treats input EOF and request cancellation as lifecycle events.
+Thread-backed tool and resource work remains owned until it finishes; a
+cancellation first signals remote teardown and then waits within the bounded
+cleanup deadline. When the transport itself closes, the server repeats that
+remote teardown, unpairs any local pair, and drains tracked request workers
+before the owning sessions are closed. A stubborn native call cannot be
+force-killed by Python, so a worker that misses the deadline is reported as a
+cleanup failure rather than being presented as a clean idle transition. The
+real-asset `tests/test_mcp_stdio_integration.py` coverage exercises startup,
+tool/resource discovery, input, state round-trip, remote listen/connect/status,
+and connector EOF cleanup; it does not certify link gameplay.
+
 The checked-in `.mcp.json` is a portable configuration template, not a
 self-installing launcher. The MCP client must expand `${PWD}` to the checkout
 root (or substitute its documented workspace variable), and `python` must be
