@@ -27,8 +27,8 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current merged candidate is rooted at live target `master` tip `321cc08`
-(PR #8, with runtime hardening from PR #7) and uses the conservative
+The current merged candidate is rooted at live target `master` tip `d2cfb98`
+(PR #9, with runtime hardening and documentation from PRs #7-#8) and uses the conservative
 `DEFAULT_MATRIX_WORKERS=1` setting. Its asset-free gate collected 657 tests,
 passed 515/515 unit tests, and passed 40/40 timing cases in each of five
 repetitions. The asset-backed local tier passed 47/47, the remote transport/MCP

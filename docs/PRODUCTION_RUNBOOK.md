@@ -3,8 +3,9 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
 historical, the current candidate facts refer to the live target `master` tip
-`321cc08`, with the conservative one-worker matrix setting used for the strict
-acceptance run. External BYO assets are excluded from the tracked source tree.
+`d2cfb98` (PR #9), with the conservative one-worker matrix setting used for
+the strict acceptance run. External BYO assets are excluded from the tracked
+source tree.
 
 The current candidate asset-free gate passed collection 657, unit 515/515, and
 timing 40/40 in each of five repetitions; its scoped result was `PASS`. The

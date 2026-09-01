@@ -16,9 +16,9 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The latest candidate is based on live `master` tip `321cc08` (PR #8, with
-runtime hardening from PR #7) and used `DEFAULT_MATRIX_WORKERS=1`. The current
-clean asset-free command:
+The latest candidate is merged as `d2cfb98` (PR #9, head `231fce9`), with
+runtime hardening and documentation from PRs #7-#8, and used
+`DEFAULT_MATRIX_WORKERS=1`. The current clean asset-free command:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -62,8 +62,9 @@ retained complete evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The candidate evidence boundary is identified as live `master` tip
-  `321cc08` plus the committed runtime hardening and documentation changes;
+- [x] The candidate evidence boundary is identified as merged `master` tip
+  `d2cfb98` (PR #9, head `231fce9`) plus the committed runtime hardening and
+  documentation changes;
   this documentation is reviewed against that boundary.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
