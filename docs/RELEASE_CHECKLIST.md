@@ -16,8 +16,8 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current committed candidate boundary is `dfee2ec` (2026-08-31). The
-asset-free command:
+The latest candidate gate ran from the tree rooted at `ae8d63d` (2026-08-31)
+with `DEFAULT_MATRIX_WORKERS=1`. The earlier clean asset-free command:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -42,30 +42,31 @@ rows, and 19 strict trade plus 19 strict battle entrypoints. Structural and
 declaration checks passed; matrix runtime was `NOT RUN` because the standalone
 audit is collection-only.
 
-No complete current-candidate real-ROM trade or battle matrix result is
-recorded. Earlier selected runs are historical diagnostics and must be rerun
-for current-candidate sign-off. A strict-trade attempt timed out before a final
-pytest report, and repeated cross-family battle probes included a pre-battle
-warp/phase divergence; neither is a passing current row.
+The current candidate strict trade matrix passed 19/19 with no skips, xfails,
+or errors. The strict battle matrix passed 17/19 with no skips, xfails, or
+errors; the two failures were remote `red_color` listener rows connecting to
+color Blue and Yellow at the bounded LinkMenu phase. Earlier selected runs are
+historical diagnostics and do not replace this result.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
 producer plus tracked battle-fixture generator are present. Full sign-off is
-pending strict matrix runtime coverage, vanilla source provenance, broad-suite
-coverage, native-platform evidence, retained complete evidence, and independent
-review.
+pending the two failed remote battle rows, Cython gameplay coverage, vanilla
+source provenance, broad-suite coverage, native-platform evidence, retained
+complete evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The committed source candidate boundary is identified as `dfee2ec`; this
-  documentation is reviewed against that source boundary.
+- [x] The candidate evidence boundary is identified as the tree rooted at
+  `ae8d63d` plus the committed conservative matrix scheduling change; this
+  documentation is reviewed against that boundary.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
 - [x] Documentation keeps BYO assets and external evidence outside the source
   tree and uses relative paths or placeholders rather than machine paths.
-- [x] The source candidate `dfee2ec` was clean in the isolated worktree before
-  this documentation edit; its exact commit is retained with the release
-  handoff.
+- [x] The candidate evidence run used an isolated worktree and its exact
+  runtime, asset hashes, deadlines, and outcome are recorded in the README and
+  runbook; external evidence remains outside the source tree.
 
 ## Runtime and dependency identity
 
@@ -110,21 +111,21 @@ review.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every advertised
   ROM variant. The current asset-free gate does not exercise this tier.
 - [ ] The current candidate rerun of the real-ROM local and remote tiers passes
-  with no fixture or runtime skips. No complete current-candidate strict trade
-  or battle result is recorded; a prior strict-trade attempt timed out before
-  its final report and repeated cross-family battle probes included a
-  pre-battle warp/phase divergence.
-- [ ] Current-candidate controlled local evidence covers the complete canonical
-  matrix; historical Red/Yellow observations are diagnostic only.
+  with no fixture or runtime skips; strict trade is green, but two remote
+  Red-listener battle rows still fail at LinkMenu.
+- [x] Current-candidate controlled local evidence covers the complete canonical
+  matrix: 9/9 ordered trade rows, 9/9 ordered battle rows, and both dedicated
+  Red/Yellow assertions passed.
 - [ ] Current-candidate controlled remote evidence covers every ordered
-  listener/connector pair. Historical selected rows and the known
-  cross-family pre-battle warp/phase divergence are not release sign-off.
+  listener/connector pair: trade is 9/9, while battle is 7/9 because the two
+  Red-listener rows remain failing.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
   ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
-  IDs); runtime execution of every row is still required.
+  IDs); every declared row was executed in the current candidate gate.
 - [ ] Current-candidate local and remote strict runtime rows pass in both
-  listener/connector directions; the prior color Red/Blue evidence is
-  historical, and concurrent-load stability remains open.
+  listener/connector directions; local and trade rows are green, but the two
+  remote Red-listener battle rows remain open and concurrent-load stability is
+  not certified.
 - [ ] Native-platform/build coverage and an independent release review are
   complete.
 

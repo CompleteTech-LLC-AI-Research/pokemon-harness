@@ -5,32 +5,35 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate; the committed source boundary is
-`dfee2ec` (2026-08-31). Its clean asset-free production gate passed unit
-507/507 and timing 35/35 in each of five repetitions, with 648 tests collected.
-The scoped result is `PASS`; it does not run ROM-backed tiers. The
-collection-only matrix audit also passed structurally: all nine ordered local
-pairs, all nine ordered remote role pairs, all six reversed-role rows, all nine
-local variant rows, and 19 strict trade plus 19 strict battle entrypoints are
-present. Collection-only matrix runtime was not run.
+Status: `PARTIAL` current audit candidate (2026-08-31). The latest ROM-backed
+candidate gate ran from the tree rooted at `ae8d63d` with
+`DEFAULT_MATRIX_WORKERS=1`; the scheduling change is included with this status
+update. Its strict trade tier passed 19/19, while strict battle passed 17/19
+with two bounded remote failures and no skips, xfails, or errors. The earlier
+clean asset-free gate at `dfee2ec` passed unit 507/507 and timing 35/35 in each
+of five repetitions, with 648 tests collected. The collection-only matrix audit
+also passed structurally: all nine ordered local pairs, all nine ordered remote
+role pairs, all six reversed-role rows, all nine local variant rows, and 19
+strict trade plus 19 strict battle entrypoints are present.
 
 The pinned fork's Cython build and runtime contract passed in a seeded disposable
 Python 3.12 environment. The compiled mode exposed the Python-side `mb.serial`
 object, passed the serial contract, and passed a real-ROM attach/detach/close
 smoke. Full trade/battle acceptance was not run in Cython mode, so the Cython
 probe does not certify gameplay. Source mode remains the documented release
-default. No complete current-candidate real-ROM trade or battle matrix result is
-recorded: historical selected runs, a strict-trade timeout, and a cross-family
-pre-battle warp/phase divergence are diagnostic boundaries only. The historical
-complete real-ROM snapshot at `1046a541e0003923aec6000b6b383c6eaafeaa48` is
-separate evidence.
+default. Current candidate local/dedicated trade and battle rows passed 10/10,
+and all nine remote trade rows passed. Remote battle passed 7/9; the failing
+rows are `red_color-listen-blue_color-connect` (battle LinkMenu cursor did not
+advance) and `red_color-listen-yellow-connect` (LinkMenu rendezvous did not
+converge before the bounded child deadline). The historical complete real-ROM
+snapshot at `1046a541e0003923aec6000b6b383c6eaafeaa48` is separate evidence.
 
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
-The remaining release decision is `PARTIAL` because strict matrix runtime
-coverage, vanilla source provenance, broad-suite coverage, native-platform
-coverage, retained complete evidence, and independent review are incomplete.
-`ruff check .` is clean for the configured product boundary.
+The remaining release decision is `PARTIAL` because two remote battle rows,
+Cython gameplay coverage, vanilla source provenance, broad-suite coverage,
+native-platform coverage, retained complete evidence, and independent review
+remain incomplete. `ruff check .` is clean for the configured product boundary.
 
 ## Runtime
 
@@ -187,10 +190,10 @@ matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 
 | Path | ROMs | Required fixture files | Current evidence |
 |---|---|---|---|
-| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Declared; current runtime not run |
-| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Declared; current runtime not run |
-| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Declared; current runtime not run |
-| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Declared; current runtime not run |
+| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | 9/9 ordered rows passed |
+| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | 9/9 ordered rows passed |
+| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | 9/9 ordered rows passed |
+| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | 7/9 passed; 2 `red_color` listener rows failed |
 
 The tracked
 [`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)
@@ -228,10 +231,10 @@ release rows. Manifest byte validation still requires every listed entry when
 the manifest is checked with `--fixture-root`.
 
 The repository has strict local and remote entry points for every canonical
-Red/Blue/Yellow ordered pair. Their collection proves declaration coverage,
-not gameplay success; current runtime execution is still required for every
-row. No full trade or battle capability is claimed from these declarations.
-Consult the test-surface table in
+Red/Blue/Yellow ordered pair, and the current candidate has executed all 19
+trade and 19 battle rows. Trade is green across the matrix; battle remains
+partial because of the two remote Red-listener rows named above. Consult the
+test-surface table in
 the [README](README.md) and run the required tiers in the
 [production runbook](docs/PRODUCTION_RUNBOOK.md) before using any row as
 release evidence.

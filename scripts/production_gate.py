@@ -85,10 +85,13 @@ DEFAULT_TIMEOUT_SECONDS: dict[str, float] = {
     "battle": 3600.0,
     "timing": 900.0,
 }
-# Strict acceptance rows are independent subprocess pairs.  Keep their
-# individual deadlines aligned with the deadlines enforced by the tests while
-# allowing the gate to make progress on several isolated rows at once.
-DEFAULT_MATRIX_WORKERS = 4
+# Strict acceptance rows each run an emulator pair (two PyBoy instances for a
+# local row or two child processes for a TCP row).  A conservative default is
+# important because oversubscribing the host changes emulator scheduling and
+# can turn a valid cross-version run into a timing failure.  Dedicated CI can
+# opt into more parallelism with ``--matrix-workers`` after measuring its
+# available CPU budget.
+DEFAULT_MATRIX_WORKERS = 1
 MATRIX_CASE_TIMEOUT_SECONDS: dict[str, float] = {
     "trade": 900.0,
     "battle": 1200.0,

@@ -2,9 +2,9 @@
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. Unless labelled
-historical, the current candidate facts refer to committed source boundary
-`dfee2ec` on 2026-08-31. Uncommitted worktree changes and external BYO assets
-are excluded from the tracked source tree.
+historical, the current candidate facts refer to the tree rooted at `ae8d63d`
+with the conservative one-worker matrix setting included in this status update.
+External BYO assets are excluded from the tracked source tree.
 
 The latest clean asset-free gate at `dfee2ec` passed unit 507/507 and timing
 35/35 in each of five repetitions; its collection preflight collected 648
@@ -12,16 +12,12 @@ tests and its scoped result was `PASS`. This proves only the ROM-free and
 timing scope. The matrix audit collected nine ordered local pairs, nine ordered
 remote role pairs, six reversed-role rows, nine local variant rows, and 19
 strict trade plus 19 strict battle entrypoints. Structural and declaration
-checks pass; the collection-only matrix runtime is `NOT RUN`.
-
-No complete current-candidate real-ROM trade or battle matrix result is
-recorded. Earlier diagnostic runs are historical only: a strict-trade attempt
-timed out before a final pytest report, and repeated cross-family remote-battle
-probes included a pre-battle warp/phase divergence. Those observations remain
-open risks, not release results. Every declared strict row still needs a
-bounded, candidate-bound runtime result before sign-off. Symbol hashes and
-fixture byte/provenance records are in [`VERSIONS.md`](../VERSIONS.md) and the
-tracked [`fixture-manifest.json`](../release-evidence/fixture-manifest.json).
+checks pass. The candidate-bound ROM-backed gate then passed strict trade 19/19
+and strict battle 17/19, with 0 skips, xfails, or errors; the two battle failures
+were `red_color` listener rows connecting to color Blue and Yellow that failed
+at the bounded LinkMenu phase. Symbol hashes and fixture byte/provenance records
+are in [`VERSIONS.md`](../VERSIONS.md) and the tracked
+[`fixture-manifest.json`](../release-evidence/fixture-manifest.json).
 Overall status is `PARTIAL`; the exact open items are listed in [the release
 checklist](RELEASE_CHECKLIST.md).
 
@@ -447,16 +443,15 @@ scope is:
 
 | Operation | Local ordered rows | Remote ordered listener/connector rows | Dedicated assertion | Current status |
 |---|---:|---:|---|---|
-| Trade | 9 | 9 | Red/Yellow party-record swap | Declared; runtime not run |
-| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | Declared; runtime not run |
+| Trade | 9 | 9 | Red/Yellow party-record swap | 9 local + dedicated and 9 remote rows passed |
+| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | 9 local + dedicated passed; 7/9 remote passed |
 
 That is 19 strict entrypoints per operation. The remote rows use canonical color
 Red, color Blue, and Yellow profiles; listener/connector order is significant.
-The collection-only result is not a gameplay result. A previous strict-trade
-attempt timed out before a final report, and repeated cross-family battle probes
-included a pre-battle warp/phase divergence; neither observation is a current
-pass. Stock-ROM rows and LinkMenu-only milestones are outside this strict
-release claim.
+The current candidate trade run passed all 19 rows. The battle run passed 17/19;
+the two failures are `red_color` listener rows connecting to color Blue and
+Yellow at the bounded LinkMenu phase. Stock-ROM rows and LinkMenu-only
+milestones are outside this strict release claim.
 
 ## 5. Generate link fixtures safely
 
@@ -591,15 +586,13 @@ are:
 
 1. The clean `dfee2ec` asset-free gate passes 507/507 unit tests and 35/35
    timing cases in each of five repetitions, but it does not run ROM-backed
-   gameplay. No complete current-candidate strict trade or battle matrix result
-   is recorded. A previous strict-trade attempt timed out before a final
-   report, and repeated cross-family battle probes included a pre-battle
-   warp/phase divergence; both are diagnostic boundaries only.
+   gameplay. The current candidate strict trade matrix passed 19/19; strict
+   battle passed 17/19, with two remote Red-listener failures at LinkMenu.
 2. The strict declaration is complete: the collection audit has nine ordered
    local pairs, nine ordered remote role pairs, six reversed-role rows, nine
-   local variant rows, and 19 strict entrypoints for each operation. Collection
-   runtime is `NOT RUN`; every declared local and remote row still requires a
-   bounded current-candidate gameplay result.
+   local variant rows, and 19 strict entrypoints for each operation. The
+   candidate runtime executed every declared row; the two failed battle rows
+   remain release blockers.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
    reproduction evidence, while vanilla ordinary source provenance is
    `PARTIAL`. The manifest and save states are external/operator-managed; a
