@@ -459,13 +459,13 @@ def test_pyboy_runtime_exposes_the_harness_serial_contract() -> None:
 
     assert pyboy.__version__ == "2.7.0"
     assert pyboy.__pokered_harness_revision__ == EXPECTED_PYBOY_REVISION
-    assert utils.cython_compiled is False
 
     owners = {
         name.lower().replace("_", "-")
         for name in importlib.metadata.packages_distributions().get("pyboy", ())
     }
-    assert owners <= {"pokered-harness"}
+    expected_owners = {"pokered-harness", "pyboy"} if utils.cython_compiled else {"pokered-harness"}
+    assert owners <= expected_owners
     assert "pokered-harness" in owners
 
     serial = Serial(False)

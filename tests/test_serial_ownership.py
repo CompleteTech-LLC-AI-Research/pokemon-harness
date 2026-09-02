@@ -6,8 +6,6 @@ import threading
 import time
 from types import SimpleNamespace
 
-import pytest
-
 from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
@@ -300,17 +298,12 @@ def test_network_attach_wraps_source_pyboy_tick_and_services_owner_queue():
     assert pyboy._tick == original_tick
 
 
-def test_source_mode_pyboy_tick_accepts_instance_assignment():
-    pytest.importorskip("pyboy")
+def test_pyboy_tick_accepts_instance_assignment():
     from pyboy import PyBoy
-    from pyboy.utils import cython_compiled
-
-    if cython_compiled:
-        pytest.skip("instance assignment probe is for source-mode PyBoy")
 
     instance = PyBoy.__new__(PyBoy)
-    # Keep the source class destructor from treating this method-only probe
-    # as a partially initialized emulator.
+    # Keep the class destructor from treating this method-only probe as a
+    # partially initialized emulator.
     instance.initialized = False
     instance.stopped = True
     original_tick = instance.tick

@@ -74,6 +74,11 @@ _IF_ADDR: int = 0xFF0F
 _SC_START: int = 0x80
 _IF_SERIAL: int = 0x08
 _HOOK_LOCK_TIMEOUT_S: float = 5.0
+# A real-ROM serial hook can spend several seconds in emulator scheduling
+# before the peer reaches the matching exchange, especially on a loaded or
+# slower host. Keep the transport's default short for general callers, but
+# give game-driven remote exchanges a bounded window that covers that pacing.
+_REMOTE_EXCHANGE_TIMEOUT_MS: int = 30_000
 
 
 # --- endpoint --------------------------------------------------------------
@@ -274,7 +279,9 @@ class RemoteLinkEndpoint:
             my_byte = bytes([mem[send_addr] & 0xFF])
             try:
                 peer_bytes = link.exchange(
-                    "exchange_nybble/wSerialExchangeNybbleSendData", my_byte
+                    "exchange_nybble/wSerialExchangeNybbleSendData",
+                    my_byte,
+                    timeout_ms=_REMOTE_EXCHANGE_TIMEOUT_MS,
                 )
             except SerialLinkTimeout:
                 return  # leave recv cell untouched; game will retry/fail
@@ -300,7 +307,9 @@ class RemoteLinkEndpoint:
             my_bytes = bytes([mem[send_addr] & 0xFF, mem[send_addr + 1] & 0xFF])
             try:
                 peer_bytes = link.exchange(
-                    "menu_selection/wLinkMenuSelectionSendBuffer", my_bytes
+                    "menu_selection/wLinkMenuSelectionSendBuffer",
+                    my_bytes,
+                    timeout_ms=_REMOTE_EXCHANGE_TIMEOUT_MS,
                 )
             except SerialLinkTimeout:
                 return
@@ -365,7 +374,9 @@ class RemoteLinkEndpoint:
             my_bytes = bytes(mem[hl + i] & 0xFF for i in range(bc))
             try:
                 peer_bytes = link.exchange(
-                    f"exchange_bytes/{symbol}", my_bytes
+                    f"exchange_bytes/{symbol}",
+                    my_bytes,
+                    timeout_ms=_REMOTE_EXCHANGE_TIMEOUT_MS,
                 )
             except SerialLinkTimeout:
                 return  # leave buffer untouched; peer cable unplugged

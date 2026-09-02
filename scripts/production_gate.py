@@ -98,6 +98,15 @@ MATRIX_CASE_TIMEOUT_SECONDS: dict[str, float] = {
 }
 MATRIX_AGGREGATE_GRACE_SECONDS = 10.0
 COLLECTION_TIMEOUT_SECONDS = 300.0
+RUNTIME_MODES = ("source", "cython")
+PYBOY_RUNTIME_MODULES = (
+    "pyboy",
+    "pyboy.pyboy",
+    "pyboy.utils",
+    "pyboy.core.mb",
+    "pyboy.core.serial",
+)
+CYTHON_RUNTIME_MODULES = tuple(name for name in PYBOY_RUNTIME_MODULES if name != "pyboy")
 EVIDENCE_SCHEMA_VERSION = 1
 EVIDENCE_REPORT_FILENAME = "gate-report.json"
 EVIDENCE_TEXT_FILENAME = "gate-report.txt"
@@ -496,8 +505,13 @@ def build_test_environment(
     rom_root: Path,
     fixture_root: Path,
     expected_sha1: dict[Path, str],
+    *,
+    runtime_mode: str = "source",
 ) -> dict[str, str]:
     """Return the exact environment inherited by every pytest subprocess."""
+
+    if runtime_mode not in RUNTIME_MODES:
+        raise ValueError(f"unsupported runtime mode: {runtime_mode!r}")
 
     environment = {key: value for key, value in os.environ.items()}
     environment["POKERED_ROM_ROOT"] = str(rom_root)
@@ -525,19 +539,29 @@ def build_test_environment(
         environment.pop("POKERED_VERSIONS_PATH", None)
 
     # Ensure the subprocess tests import this checkout, not an editable
-    # install from a different worktree.  Preserve user-provided entries.
-    # The vendored PyBoy source is the production runtime.  Put it first so
-    # a gate run from a clean checkout cannot silently import a globally
-    # installed stock PyBoy with an incompatible Serial implementation.
-    source_entries = [
-        str(project_root / "vendor" / "pyboy-src"),
-        str(project_root / "src"),
-        str(project_root),
-    ]
+    # install from a different worktree.  Source mode intentionally places
+    # the vendored PyBoy first. Cython mode places only the harness source on
+    # PYTHONPATH so the interpreter's installed extension modules are used.
+    vendored_pyboy = (project_root / "vendor" / "pyboy-src").resolve(strict=False)
+    source_entries = [str(project_root / "src"), str(project_root)]
+    if runtime_mode == "source":
+        source_entries.insert(0, str(vendored_pyboy))
     old_pythonpath = environment.get("PYTHONPATH")
     if old_pythonpath:
-        source_entries.append(old_pythonpath)
+        for entry in old_pythonpath.split(os.pathsep):
+            if not entry:
+                continue
+            entry_path = Path(entry).expanduser()
+            if not entry_path.is_absolute():
+                entry_path = project_root / entry_path
+            if runtime_mode == "cython" and entry_path.resolve(strict=False) == vendored_pyboy:
+                continue
+            source_entries.append(entry)
     environment["PYTHONPATH"] = os.pathsep.join(source_entries)
+    if runtime_mode == "source":
+        environment["PYBOY_NO_CYTHON"] = "1"
+    else:
+        environment.pop("PYBOY_NO_CYTHON", None)
 
     # The stdio and golden-path tests are environment-driven.  Default them
     # to the pinned Red stock ROM when it is available, without overwriting a
@@ -603,6 +627,17 @@ import platform
 import sys
 from pathlib import Path
 
+PYBOY_RUNTIME_MODULES = (
+    "pyboy",
+    "pyboy.pyboy",
+    "pyboy.utils",
+    "pyboy.core.mb",
+    "pyboy.core.serial",
+)
+CYTHON_RUNTIME_MODULES = tuple(
+    name for name in PYBOY_RUNTIME_MODULES if name != "pyboy"
+)
+
 def spec_path(name):
     spec = importlib.util.find_spec(name)
     return str(spec.origin) if spec and spec.origin else None
@@ -627,10 +662,23 @@ result = {
     "pyboy_module": spec_path("pyboy"),
     "pyboy_kind": module_kind(spec_path("pyboy")),
     "serial_module": spec_path("pyboy.core.serial"),
+    "pyboy_modules": {
+        name: spec_path(name) for name in PYBOY_RUNTIME_MODULES
+    },
+    "pyboy_module_kinds": {},
+    "pyboy_mode": "unknown",
     "harness_module": spec_path("pokered_harness"),
     "serial_core": None,
     "serial_contract": "unavailable",
 }
+result["pyboy_module_kinds"] = {
+    name: module_kind(path) for name, path in result["pyboy_modules"].items()
+}
+module_kinds = result["pyboy_module_kinds"]
+if all(module_kinds.get(name) == "cython/native-extension" for name in CYTHON_RUNTIME_MODULES):
+    result["pyboy_mode"] = "cython"
+elif all(module_kinds.get(name) == "python-source" for name in PYBOY_RUNTIME_MODULES):
+    result["pyboy_mode"] = "source"
 for package, key in (("pytest", "pytest_version"), ("pyboy", "pyboy_version")):
     try:
         result[key] = importlib.metadata.version(package)
@@ -683,13 +731,26 @@ print(json.dumps(result, sort_keys=True))
         return {"probe_error": f"invalid runtime probe JSON: {exc}: {lines[-1]!r}"}
 
 
-def runtime_problems(project_root: Path, runtime: dict[str, Any]) -> list[str]:
+def runtime_problems(
+    project_root: Path,
+    runtime: dict[str, Any],
+    *,
+    expected_mode: str | None = None,
+) -> list[str]:
     """Return runtime identity failures that must prevent a green gate."""
 
     problems: list[str] = []
+    if expected_mode is not None and expected_mode not in RUNTIME_MODES:
+        raise ValueError(f"unsupported runtime mode: {expected_mode!r}")
     if runtime.get("probe_error"):
         problems.append(f"runtime probe failed: {runtime['probe_error']}")
         return problems
+
+    if expected_mode is not None and runtime.get("pyboy_mode") != expected_mode:
+        problems.append(
+            "selected interpreter runtime mode mismatch: "
+            f"expected {expected_mode!r}, got {runtime.get('pyboy_mode')!r}"
+        )
 
     versions_file = project_root / "VERSIONS.md"
     expected_version = parse_expected_pyboy_version(versions_file)
@@ -2977,6 +3038,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--runtime-mode",
+        choices=RUNTIME_MODES,
+        default="source",
+        help=(
+            "PyBoy runtime to require for every selected tier: source uses the "
+            "vendored Python modules; cython uses installed extension modules "
+            "(default: source)"
+        ),
+    )
+    parser.add_argument(
         "--matrix-timeout-seconds",
         type=float,
         help=(
@@ -3029,13 +3100,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     fixture_root = find_fixture_root(project_root, args.fixture_root)
     expected_sha1 = parse_expected_sha1(project_root / "VERSIONS.md")
     assets = inspect_assets(rom_root, fixture_root, expected_sha1)
-    environment = build_test_environment(project_root, rom_root, fixture_root, expected_sha1)
+    environment = build_test_environment(
+        project_root,
+        rom_root,
+        fixture_root,
+        expected_sha1,
+        runtime_mode=args.runtime_mode,
+    )
     # Subprocess acceptance tests must use the exact interpreter whose runtime
     # contract was probed above, not a stale auxiliary virtualenv discovered
     # from the worktree.
     environment["POKERED_PYTHON"] = str(python_executable)
     runtime = probe_runtime(python_executable, project_root, environment)
-    gate_problems = runtime_problems(project_root, runtime)
+    gate_problems = runtime_problems(
+        project_root,
+        runtime,
+        expected_mode=args.runtime_mode,
+    )
     gate_problems.extend(
         environment_policy_problems(
             project_root=project_root,
