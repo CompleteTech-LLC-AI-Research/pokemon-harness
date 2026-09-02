@@ -39,6 +39,11 @@ cdef class PyBoyMemoryView:
     cdef int __setitem(self, int, int, int, object, int, bint, bint) except -1
 
 cdef class PyBoy:
+    # Keep the public PyBoy surface compatible with the source runtime. The
+    # link harness wraps ``tick`` on each instance to serialize native serial
+    # ownership at frame boundaries; extension instances need a Python
+    # instance dictionary for that supported integration seam.
+    cdef dict __dict__
     cdef public Motherboard mb
     cdef readonly PluginManager _plugin_manager
     cdef public uint64_t frame_count

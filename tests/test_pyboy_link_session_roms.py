@@ -22,16 +22,16 @@ ROMs by:
 
 Gated with ``skipif`` on ROM availability, fixture availability, AND a
 runtime check that ``pyboy.mb`` is Python-accessible. The harness package
-bundles the pinned source PyBoy runtime so the link layer can attach its
+bundles the pinned PyBoy runtime so the link layer can attach its
 bit-accurate backend to the motherboard serial object.
 
 The normal checkout installs the pinned, bundled source runtime with
 ``python -m pip install -e ".[dev]"``. It must expose ``pyboy.mb.serial`` so
-the Python link session can attach the native serial backend. Optional native
+the Python link session can attach the native serial backend. Native
 validation is available through ``scripts/bootstrap_pyboy.py --mode cython``;
-that accelerator build is not used for the Python-visible attachment tests
-when Cython hides the motherboard attributes. Run the strict local acceptance
-cases with::
+both source and Cython builds are eligible for these attachment tests when
+they expose the same motherboard serial contract. Run the strict local
+acceptance cases with::
 
     python -m pytest -q \\
         tests/test_pyboy_link_session_roms.py::test_red_yellow_trade_swaps_real_party_records \\
@@ -151,15 +151,11 @@ _fixtures_ready = (
 
 
 def _pyboy_mb_swappable() -> bool:
-    """Detect whether ``pyboy.mb.serial`` is reassignable from Python.
+    """Detect whether the runtime exposes the motherboard for attachment.
 
-    Wheel-installed PyBoy is Cython-compiled (``cdef Motherboard mb``,
-    ``cdef Serial serial``); ``mb`` is not exposed to Python at all,
-    so :class:`PyBoyLinkSession.attach` cannot swap the serial device.
-    The default harness install uses the bundled source-compatible runtime,
-    which keeps those attributes visible. The optional Cython bootstrap is
-    useful for native-runtime validation but is not expected to satisfy this
-    Python-side attachment probe when the extension hides them.
+    :class:`PyBoyLinkSession.attach` reuses ``pyboy.mb.serial`` and installs
+    the bit-accurate backend on that native serial object. Source and Cython
+    runtimes are both supported when they expose this contract.
     """
     try:
         import warnings
@@ -167,9 +163,9 @@ def _pyboy_mb_swappable() -> bool:
         warnings.filterwarnings("ignore")
         from pyboy import PyBoy
 
-        # Probe a temporary instance for the ``mb`` attribute. We can't
-        # rely on ``hasattr(PyBoy, "mb")`` at the class level because
-        # cdef attributes aren't visible there either.
+        # Probe a temporary instance because runtime attributes are exposed
+        # on the instance; a class-level check is insufficient for an
+        # extension-backed PyBoy type.
         p = PyBoy(
             str(_YELLOW_ROM),
             window="null",
@@ -191,11 +187,9 @@ _pyboy_swappable = _fixtures_ready and _pyboy_mb_swappable()
 pytestmark = pytest.mark.skipif(
     not _pyboy_swappable,
     reason=(
-        "PyBoy is Cython-compiled (mb / mb.serial are cdef attributes "
-        "not exposed to Python) so PyBoyLinkSession.attach can't swap "
-        "in SerialCore from outside the C extension. Install the bundled "
-        "source-compatible runtime, or use a fork that bakes SerialCore "
-        "into the motherboard, then this test will run."
+        "PyBoy.mb is not Python-accessible; PyBoyLinkSession.attach requires "
+        "the runtime to expose mb.serial. Install the bundled runtime or a "
+        "compatible PyBoy build, then this test will run."
         if _fixtures_ready
         else (
             "Yellow ROM or Cable Club state fixture missing — regenerate "

@@ -74,10 +74,12 @@ def test_cython_build_pins_the_compiler_and_preserves_serial_widths() -> None:
     serial_pxd = (ROOT / "vendor" / "pyboy-src" / "pyboy" / "core" / "serial.pxd").read_text(
         encoding="utf-8"
     )
+    pyboy_pxd = (ROOT / "vendor" / "pyboy-src" / "pyboy" / "pyboy.pxd").read_text(encoding="utf-8")
     assert "cpdef bint tick(self, unsigned long long) noexcept nogil" in serial_pxd
     assert "cdef public uint64_t last_cycles, clock, clock_target" in serial_pxd
     assert "cdef public uint8_t _shift_register" in serial_pxd
     assert "cdef public uint8_t _bits_remaining" in serial_pxd
+    assert "cdef dict __dict__" in pyboy_pxd
 
 
 def test_source_and_native_runtime_expose_lockstep_timing_attributes() -> None:
@@ -98,6 +100,20 @@ def test_source_and_native_runtime_expose_lockstep_timing_attributes() -> None:
     assert lcd.speed_shift == 0
     assert lcd._cycles_to_frame == 70224
     assert lcd._cycles_to_interrupt == 0
+
+
+def test_source_and_native_runtime_allow_instance_tick_ownership() -> None:
+    """The network serial owner must be able to wrap ``PyBoy.tick`` per instance."""
+    from pyboy import PyBoy
+
+    pyboy = PyBoy.__new__(PyBoy)
+    original_tick = pyboy.tick
+
+    def owned_frame(*args, **kwargs):
+        return original_tick(*args, **kwargs)
+
+    pyboy.tick = owned_frame
+    assert pyboy.tick is owned_frame
 
 
 def test_cython_serial_translation_unit_compiles_with_the_checked_in_pxd() -> None:
