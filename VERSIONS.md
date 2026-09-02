@@ -5,32 +5,35 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate (2026-09-02), based on implementation
-candidate `b0b63c8` (merged PR #17; this documentation update is prepared on
-top of that source tree).
-The complete production gate collected 698 tests and passed unit 554/554,
-local real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19, strict
-battle 19/19, and timing 40/40 in each of five repetitions with
-`DEFAULT_MATRIX_WORKERS=1`. Collection and the ten-entry external fixture
-manifest passed, with no skips, xfails, failures, errors, or timeouts. The
-sanitized evidence bundle is retained outside version control because the
-ROMs, symbols, and save states are BYO assets.
+Status: `PARTIAL` current audit candidate (2026-09-02), based on merged
+implementation candidate `dfc0b2a` (PR #19, following PR #17 and PR #18).
+The complete all-tier source-runtime gate collected 698 tests and passed unit
+554/554, local real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19,
+strict battle 19/19, and timing 40/40 in each of five repetitions with
+`DEFAULT_MATRIX_WORKERS=1`; that is the PR #17 baseline. The PR #19 follow-up
+collected 699 tests and passed the ROM-free 555/555 unit and 40/40 × 5 timing
+slice, focused transport/MCP 167/167, bounded concurrency probe 8/8 × 5, and
+real-ROM remote transport 15/15. The ten-entry external fixture manifest
+schema passed. Sanitized evidence is retained outside version control because
+the ROMs, symbols, and save states are BYO assets.
 
 The vendored source PyBoy runtime remains the documented release default. The
-pinned Cython/native serial build and semantic serial-contract probe now pass,
-but no Cython real-ROM attach/detach smoke or Cython trade/battle acceptance is
-claimed. Vanilla fixture provenance, broad-suite coverage, native-platform
-coverage, concurrent-load evidence, independent review, and authenticated /
-encrypted cross-host TCP remain open, so the release decision remains
-`PARTIAL`. Historical 18/19 trade and 17/19 battle snapshots are superseded by
-the current complete source-runtime gate.
+pinned Cython/native serial build, semantic serial-contract probe, and
+three-ROM attach/step/close smoke pass, but strict Cython gameplay is not
+release-qualified: the targeted Red↔Yellow trade passed, Yellow↔Yellow failed
+party-record integrity, Red↔Red did not complete within the bounded diagnostic,
+and no Cython battle matrix is claimed. The synthetic concurrency probe passes,
+while real-ROM concurrent-load evidence, vanilla fixture provenance,
+broad-suite coverage, native-platform coverage, independent review, and
+authenticated/encrypted cross-host TCP remain open, so the release decision
+remains `PARTIAL`.
 
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
-The remaining release decision is `PARTIAL` because Cython real-ROM gameplay,
-vanilla source provenance, broad-suite coverage, native-platform coverage,
-concurrent-load evidence, independent review, and authenticated / encrypted
-cross-host TCP remain incomplete. `ruff check .` is clean only for the
+The remaining release decision is `PARTIAL` because strict Cython real-ROM
+gameplay, vanilla source provenance, broad-suite coverage, native-platform
+coverage, real-ROM load evidence, independent review, and authenticated /
+encrypted cross-host TCP remain incomplete. `ruff check .` is clean only for the
 configured product boundary; the broad legacy tree is not silently
 reformatted.
 
@@ -45,10 +48,11 @@ reformatted.
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
 coordinator and remote TCP transport. The pinned Cython/native serial build
-also passes its compiled serial-contract probe, but it is not the documented
-release runtime and has no Cython gameplay acceptance evidence. A pre-existing
-standalone PyBoy wheel must not be allowed to shadow this package; verify the
-runtime identity before release. See the
+also passes its compiled serial-contract probe and three canonical real-ROM
+lifecycle smokes, but it is not the documented release runtime and its strict
+gameplay remains unverified for release. A pre-existing standalone PyBoy wheel
+must not be allowed to shadow this package; verify the runtime identity before
+release. See the
 [production runbook](docs/PRODUCTION_RUNBOOK.md).
 
 ## ROM pins
@@ -230,12 +234,12 @@ release rows. Manifest byte validation still requires every listed entry when
 the manifest is checked with `--fixture-root`.
 
 The repository has strict local and remote entry points for every canonical
-Red/Blue/Yellow ordered pair. The current candidate completed the 19-row trade
-run with one bounded remote timeout; the 19-row battle run is still in
-progress. Consult the test-surface table in
-the [README](README.md) and run the required tiers in the
-[production runbook](docs/PRODUCTION_RUNBOOK.md) before using any row as
-release evidence.
+Red/Blue/Yellow ordered pair. The PR #17 source-runtime baseline completed the
+19-row trade and 19-row battle runs; the PR #19 follow-up reran the remote
+transport tier and its focused lifecycle coverage, not the full strict
+trade/battle matrix. Consult the test-surface table in the [README](README.md)
+and run the required tiers in the [production runbook](docs/PRODUCTION_RUNBOOK.md)
+before using any row as release evidence.
 
 ## Performance
 

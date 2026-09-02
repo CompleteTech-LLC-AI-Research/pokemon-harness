@@ -1,15 +1,15 @@
 # Fixture provenance and portability audit
 
 Audit scope: the published `master` at
-`da5c26ba3606b1152d95362789bb42ac5d6ef8ed` and only the tracked manifest,
+`dfc0b2a9a2273f61ed82a737bb644f7d82216189` and only the tracked manifest,
 producer/generator sources, packaging metadata, and platform-facing
 configuration. ROMs, symbol files, save states, and machine-local evidence
 were not copied into the audit checkout.
 
 ## Decision
 
-The repository is not production-ready for the remaining provenance and
-native-platform requirements.
+The repository is not production-ready for the remaining gameplay, provenance,
+load, and native-platform requirements.
 
 The tracked record is internally consistent, but it does not establish the
 missing vanilla source history or native-platform execution. The clean-install
@@ -54,10 +54,11 @@ evidence below is Linux/Python 3.12 source-runtime evidence only.
 The following bounded checks passed:
 
 ```text
-git ls-remote <repository> refs/heads/master                  -> exact published head da5c26ba...
+git ls-remote <repository> refs/heads/master                  -> exact published head dfc0b2a...
 python3 scripts/validate_fixture_manifest.py --schema-only  -> PASS, 10 entries
 uv lock --check                                             -> PASS
 python3 -m compileall <scoped-files>                        -> PASS
+scripts/network_concurrency_probe.py                        -> PASS, 8 probes × 5 repetitions
 wheel archive inspection                                    -> PASS, 100 entries; no ROM/state/symbol/native or absolute entries
 fresh wheel installation                                    -> PASS, dependency check and bundled PyBoy serial contract
 module and console entrypoint without assets                 -> fail closed as expected, missing ROM configuration
@@ -67,7 +68,8 @@ The wheel is `py3-none-any` for the documented source runtime. The GitHub
 workflow runs on `ubuntu-latest` with Python 3.12; no Windows or macOS runner
 executes the install, MCP startup, Cython build, or link tests. `uv.lock`
 contains platform resolution markers, but lock metadata is not native-platform
-execution evidence.
+execution evidence. The Cython build/contract and three-ROM lifecycle smoke
+are recorded separately; they do not establish strict Cython gameplay.
 
 `.mcp.json` uses `python` and `${PWD}`-relative asset paths. This is portable
 only when the MCP client expands `${PWD}` to the checkout root and selects the
