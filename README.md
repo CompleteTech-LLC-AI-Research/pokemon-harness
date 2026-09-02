@@ -66,8 +66,12 @@ lockstep scheduler: the post-fix Yellow↔Yellow and Red↔Red diagnostics passe
 with identical party records in 920 and 880 frames, respectively, and the
 earlier targeted Red↔Yellow trade passed. The pre-PR #23 Yellow↔Yellow
 integrity failure and Red↔Red timeout are historical failures, not current
-results. Full Cython strict trade/battle acceptance is still unverified; no
-Cython battle matrix is claimed.
+results. The post-PR #23 native strict gate collected 19 trade and 19 battle
+rows: 10/19 passed for each operation, while all nine remote rows failed at
+the Cython `PyBoy.tick` instance-writability seam required by serialized
+network ownership. No skips or errors occurred. Full Cython strict
+trade/battle acceptance therefore remains unverified.
+
 The synthetic concurrency probe now passes, but real-ROM concurrent-load
 coverage, vanilla fixture provenance, broad-suite coverage, full native
 platform qualification, independent review, and authenticated/encrypted
@@ -96,6 +100,10 @@ The current candidate’s evidence is:
   no skips, xfails, failures, errors, or timeouts;
 - post-PR #23 ROM-free gate: `PASS`, collection 701, unit 557/557, and timing
   40/40 in each of five repetitions;
+- post-PR #23 native strict gate: `FAIL`, trade 10/19 and battle 10/19;
+  all nine remote rows in each operation fail when the Cython runtime rejects
+  the instance-writable `PyBoy.tick` seam used for serialized network
+  ownership; no skips or errors occurred;
 - post-PR #19 focused transport/MCP slice: `PASS`, 167/167;
 - post-PR #19 bounded concurrency probe: `PASS`, 8/8 in each of five
   repetitions;
@@ -112,13 +120,16 @@ The current candidate’s evidence is:
   Cython lifecycle smokes;
 - Cython/native runtime: `PASS` for the pinned build, semantic serial
   contract, corrected lockstep timing ABI, and three-ROM lifecycle smoke;
-  full strict Cython gameplay remains `UNVERIFIED` for release.
+  local/dedicated native diagnostics pass; the full strict Cython matrix is
+  `FAIL` because all nine remote trade rows and all nine remote battle rows
+  reject the read-only native `PyBoy.tick` seam.
 
 The full gate used native bit-level serial traffic, ordinary ROM input, exact
 party-record and battle-hook assertions, bounded deadlines, and clean teardown
 for every declared local and remote row. This establishes the advertised
 source-runtime scope; it does not establish the open full Cython strict matrix,
-provenance, platform, real-ROM load, review, or network-security claims.
+its native remote tick seam, provenance, platform, real-ROM load, review, or
+network-security claims.
 
 | Capability | Status | Evidence boundary |
 |---|---|---|
@@ -129,7 +140,7 @@ provenance, platform, real-ROM load, review, or network-security claims.
 | In-process link acceptance | `PASS` (baseline scope) | The PR #17 source-runtime baseline passed 47/47 local rows and the declared strict local rows; PR #19 adds focused lifecycle coverage. Stock-ROM link support remains unclaimed. |
 | Remote TCP and MCP lifecycle | `PASS` (post-change tested scope) | The PR #19 real-ROM remote transport slice passed 15/15 and the focused transport/MCP suite passed 167/167. PR #22 adds bounded stdio unpair cleanup and fresh remote lifecycle generations; its release-hygiene workflow passed. The baseline strict remote trade and battle rows passed 9/9 each; PR #19 did not silently relabel that baseline as a full rerun. TCP remains loopback-only and unauthenticated/unencrypted. |
 | Synthetic concurrency/lifecycle boundary | `PASS` (localhost probe scope) | Eight bounded probes passed in each of five repetitions, including concurrent exchange load, shutdown overlap, receiver races, terminal timeouts, resolver rechecks, BYE ordering, and raw-socket boundaries. Real-ROM load remains unverified. |
-| Cython/native serial runtime | `PASS` (build/contract/lifecycle scope) | PR #23 exposes CPU/LCD lockstep timing fields. Fixed native Yellow↔Yellow and Red↔Red diagnostics pass with identical records; Windows and Linux Cython build/lifecycle checks pass. Full strict Cython trade/battle acceptance is not release-qualified. |
+| Cython/native serial runtime | `PARTIAL` (build/local/lifecycle scope) | PR #23 exposes CPU/LCD lockstep timing fields. Fixed native Yellow↔Yellow and Red↔Red diagnostics pass with identical records; Windows and Linux Cython build/lifecycle checks pass. The native strict gate passed 10/19 trade and 10/19 battle rows; all nine remote rows per operation fail because `PyBoy.tick` is read-only when network ownership is installed. |
 | Windows native runtime | `PASS` (scoped) | A fresh Windows environment passed install, dependency, source/Cython bootstrap, selected runtime/fixture, MCP stdio, and three-ROM lifecycle checks. Full native gameplay, concurrent-load, remote trade/battle, and macOS coverage remain open. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 

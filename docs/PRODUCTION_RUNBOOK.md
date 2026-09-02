@@ -117,8 +117,10 @@ semantic serial-contract probe, and three canonical real-ROM attach/step/close
 smokes pass. PR #23 exposes the CPU and LCD timing fields required by native
 lockstep scheduling. Native Red↔Yellow, Yellow↔Yellow, and Red↔Red trade
 diagnostics pass; the two same-family runs produce identical party records in
-880 and 920 frames. Full strict Cython trade/battle acceptance is not
-release-qualified, and no Cython battle matrix is claimed. A fresh Windows
+880 and 920 frames. The post-PR #23 native strict gate passed 10/19 trade and
+10/19 battle rows; all nine remote rows per operation fail because Cython
+`PyBoy.tick` is read-only when network ownership is installed. Full strict
+Cython trade/battle acceptance is not release-qualified. A fresh Windows
 Python 3.12.10 environment also passed the post-PR #23 Cython build/check and
 three-ROM attach/tick/close smokes. This is scoped Windows evidence, not full
 native gameplay, concurrent-load, remote trade/battle, or macOS qualification.
@@ -646,8 +648,9 @@ are:
 1. The documented release runtime is source mode. The pinned Cython build,
    semantic serial probe, and three-ROM lifecycle smoke pass. PR #23 fixes the
    native lockstep timing ABI; targeted Red↔Yellow, Yellow↔Yellow, and Red↔Red
-   trade diagnostics now pass, but the full strict Cython trade/battle matrix
-   remains unverified and no Cython battle matrix is claimed.
+   trade diagnostics now pass. The native strict gate passed 10/19 trade and
+   10/19 battle rows, but all nine remote rows per operation fail because
+   Cython `PyBoy.tick` is read-only when network ownership is installed.
 2. The strict declaration is complete: nine ordered local pairs, nine ordered
    remote role pairs, six reversed-role rows, nine local variant rows, and 19
    strict entrypoints for each operation all collect. The PR #17 baseline
@@ -666,6 +669,8 @@ are:
    enforced and is the only supported network boundary; cross-host operation
    is blocked until secure transport is added.
 
-The smallest next actions are to rerun the full strict matrices against the
-merged runtime, establish native-platform and real-ROM load evidence, verify vanilla
-fixture provenance, run the broad suite, and obtain independent release review.
+The smallest next actions are to expose an instance-writable native tick seam
+for serialized network ownership, rerun the full strict matrices against the
+merged runtime, establish native-platform and real-ROM load evidence, verify
+vanilla fixture provenance, run the broad suite, and obtain independent release
+review.
