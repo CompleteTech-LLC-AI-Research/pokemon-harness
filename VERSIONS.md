@@ -6,8 +6,9 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: `PARTIAL` current audit candidate (2026-09-02), based on merged
-implementation `7f3c2f4` (PR #22), with implementation candidate `dfc0b2a` (PR
-#19, following PR #17 and PR #18).
+implementation `87a9f3a` (PR #23), with MCP lifecycle hardening `7f3c2f4` (PR
+#22) and implementation candidate `dfc0b2a` (PR #19, following PR #17 and PR
+#18).
 The complete all-tier source-runtime gate collected 698 tests and passed unit
 554/554, local real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19,
 strict battle 19/19, and timing 40/40 in each of five repetitions with
@@ -18,13 +19,19 @@ real-ROM remote transport 15/15. The ten-entry external fixture manifest
 schema passed. Sanitized evidence is retained outside version control because
 the ROMs, symbols, and save states are BYO assets.
 
-The vendored source PyBoy runtime remains the documented release default. The
-pinned Cython/native serial build, semantic serial-contract probe, and
-three-ROM attach/step/close smoke pass in the fresh Windows environment as
-well, but strict Cython gameplay is not
-release-qualified: the targeted Red↔Yellow trade passed, Yellow↔Yellow failed
-party-record integrity, Red↔Red did not complete within the bounded diagnostic,
-and no Cython battle matrix is claimed. The synthetic concurrency probe passes,
+The post-PR #23 asset-free source-runtime gate used managed Linux Python
+3.12.13 and Pytest 9.1.1: collection 701, unit 557/557, and timing 40/40 in
+each of five repetitions, with no skips, xfails, failures, errors, or timeouts.
+
+The vendored source PyBoy runtime remains the documented release default. PR
+#23 exposes the CPU and LCD timing fields required by the native lockstep
+scheduler. The pinned Cython/native serial build, semantic serial-contract
+probe, and three-ROM attach/step/close smokes pass in fresh Linux and Windows
+environments. Native Red↔Yellow, Yellow↔Yellow, and Red↔Red trade diagnostics
+pass, with identical party records for the two same-family runs (880 and 920
+frames); full strict Cython trade/battle acceptance is not yet claimed. The
+pre-PR #23 Yellow↔Yellow integrity failure and Red↔Red timeout are historical.
+The synthetic concurrency probe passes,
 while real-ROM concurrent-load evidence, vanilla fixture provenance,
 broad-suite coverage, full native-platform qualification, independent review,
 and authenticated/encrypted cross-host TCP remain open, so the release decision
@@ -36,9 +43,9 @@ post-change gameplay matrices remain open.
 
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
-The remaining release decision is `PARTIAL` because strict Cython real-ROM
-gameplay, vanilla source provenance, broad-suite coverage, full native-platform
-qualification, real-ROM load evidence, independent review, and authenticated /
+The remaining release decision is `PARTIAL` because the full strict Cython
+trade/battle matrix, vanilla source provenance, broad-suite coverage, full
+native-platform qualification, real-ROM load evidence, independent review, and authenticated /
 encrypted cross-host TCP remain incomplete. `ruff check .` is clean only for the
 configured product boundary; the broad legacy tree is not silently
 reformatted.
