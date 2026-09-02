@@ -367,6 +367,42 @@ def test_hold_at_sync_boundary_does_not_tick_past_ready_marker():
     assert service_calls == 0
 
 
+def test_hold_at_sync_boundary_ticks_timed_rom_phase():
+    """Timed ROM work keeps the owner emulator advancing during rendezvous."""
+
+    class FakeBackend:
+        def __init__(self):
+            self.announced: list[int] = []
+            self.polls: dict[int, int] = {}
+
+        def announce_sync(self, *, sync_id: int) -> None:
+            self.announced.append(sync_id)
+
+        def poll_peer_sync(self, *, sync_id: int) -> bool:
+            polls = self.polls.get(sync_id, 0)
+            self.polls[sync_id] = polls + 1
+            return polls >= 1
+
+    progress_calls = 0
+
+    def progress() -> None:
+        nonlocal progress_calls
+        progress_calls += 1
+
+    backend = FakeBackend()
+    _hold_at_sync_boundary(
+        backend,
+        ready_sync_id=115,
+        release_sync_id=116,
+        timeout=1.0,
+        service_pending_edges=lambda: 0,
+        progress_callback=progress,
+    )
+
+    assert backend.announced == [115, 116]
+    assert progress_calls == 2
+
+
 def _kill_without_waiting(procs) -> None:
     """Kill and reap only when the OS reports immediate completion."""
     for proc in procs:

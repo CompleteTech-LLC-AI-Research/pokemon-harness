@@ -76,14 +76,15 @@ def _hold_at_sync_boundary(
     release_sync_id: int,
     timeout: float,
     service_pending_edges: Callable[[], int],
+    progress_callback: Callable[[], None] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Hold a safe ROM boundary until both peers have observed release.
+    """Rendezvous at a ROM boundary until both peers have observed release.
 
-    This helper is reserved for milestones where the ROM has already stopped
-    doing serial work. It intentionally does not tick the emulator while
-    waiting; callers drain only already-admitted owner-dispatch edges.
+    Stable UI milestones can drain already-admitted owner-dispatch edges
+    without ticking. Timed ROM phases must provide ``progress_callback`` so
+    the owner continues authentic emulation while the peer catches up.
     """
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise TypeError("timeout must be a positive number")
@@ -101,7 +102,10 @@ def _hold_at_sync_boundary(
                 raise RuntimeError(
                     f"sync boundary {phase} did not converge: marker={marker}"
                 )
-            service_pending_edges()
+            if progress_callback is None:
+                service_pending_edges()
+            else:
+                progress_callback()
             remaining = deadline - monotonic()
             if remaining > 0:
                 sleep(min(0.001, remaining))
@@ -809,15 +813,18 @@ def main() -> int:
                 input_duration=12,
                 settle_frames=40,
             )
-            # Both peers have now reached the ROM-owned Trade cursor. Keep
-            # ticking while rendezvousing after the real A event: the ROM's
-            # selection exchange may begin immediately, so a non-ticking
-            # host barrier can hold the internal-clock peer before the
-            # external-clock peer has reached its native SC wait. A one-frame
-            # cooperative barrier preserves the authentic input and serial
-            # paths while keeping both owner threads live at the handoff.
-            session.press("a", duration=4)
+            # Both peers have now reached the ROM-owned Trade cursor. First
+            # rendezvous before the real A event so the two independent
+            # processes enter the ROM's selection exchange from the same
+            # input boundary. A one-frame cooperative barrier keeps each
+            # owner thread live for any final serial edge without allowing
+            # one side to consume the choice several host frames ahead.
             cooperative_sync(sync_id=19, timeout=120.0, step_frames=1)
+            session.press("a", duration=4)
+            # The selection exchange may begin immediately after A. Keep a
+            # second cooperative boundary so both sides have admitted the
+            # authentic input before the warp phase starts.
+            cooperative_sync(sync_id=20, timeout=120.0, step_frames=1)
             log("sync: trade menu A events queued on both peers")
             session.step(20)
             # Trade Center warp — A-mash until map becomes 0xEF. Once one
@@ -1092,15 +1099,16 @@ def main() -> int:
                     f"state={state_snapshot()}"
                 )
             # Both peers have now observed the ROM-owned BATTLE cursor. Keep
-            # ticking while rendezvousing at this boundary: a visible menu
-            # does not prove that the final LinkMenu serial edge has drained,
-            # so a no-tick hold here could strand an EDGE_RESP. Once both
+            # each owner live while rendezvousing at this boundary: a visible
+            # menu does not prove that the final LinkMenu serial edge has
+            # drained, and a no-tick hold could strand an EDGE_RESP. Once both
             # processes announce readiness, they commit A from the same menu
             # phase without starving the owner pump.
             cooperative_sync(sync_id=117, timeout=120.0, step_frames=1)
-            session.step(4)
             session.press("a", duration=4)
-            session.step(20)
+            # Let both owners admit the authentic selection before either
+            # side starts the warp-driving loop.
+            cooperative_sync(sync_id=118, timeout=120.0, step_frames=1)
             shot("02_battle_menu")
 
             COLOSSEUM = 0xF0
@@ -1226,6 +1234,7 @@ def main() -> int:
                 service_pending_edges=lambda: link._network_backend.service_pending_edges(
                     max_edges=1
                 ),
+                progress_callback=lambda: session.step(1),
             )
             log("battle VS-text hold barrier complete; entering transition")
 
@@ -1252,6 +1261,7 @@ def main() -> int:
                 service_pending_edges=lambda: link._network_backend.service_pending_edges(
                     max_edges=1
                 ),
+                progress_callback=lambda: session.step(1),
             )
             log("battle transition hold barrier complete; entering menu")
             menu_deadline = min(deadline, time.monotonic() + 180.0)
