@@ -12,10 +12,11 @@ symbol files, save states, or other ROM-derived artifacts.
 This repository remains an audited production-readiness candidate, not a
 production release. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
-current implementation candidate is merged commit `dfc0b2a` (PR #19), which
-includes the MCP lifecycle, runtime packaging, in-process serial/lifecycle,
-remote TCP follow-ups from PRs #12-#17, and the concurrency/lifecycle hardening
-from PR #19.
+latest merged implementation is `7f3c2f4` (PR #22), built on implementation
+candidate `dfc0b2a` (PR #19). It includes the MCP lifecycle, runtime packaging,
+in-process serial/lifecycle, remote TCP follow-ups from PRs #12-#17,
+concurrency/lifecycle hardening from PR #19, and the bounded MCP shutdown and
+remote-generation hardening from PR #22.
 
 The latest complete all-tier source-runtime gate was collected on 2026-09-02
 from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`, whose
@@ -38,6 +39,17 @@ real-ROM remote transport slice passed 15/15. The ten-entry fixture manifest
 schema passed. Its sanitized evidence remains outside version control because
 ROMs, symbols, and save states are operator-supplied assets.
 
+Fresh Windows validation on 2026-09-02 used Windows Python 3.12.10 and a new
+virtual environment in an isolated checkout. The editable install and
+`pip check` passed; source bootstrap and the optional pinned Cython build/check
+passed; scoped runtime/fixture checks passed 23 tests with one unrelated skip;
+MCP stdio integration passed 4/4; and Cython attach/step/close smokes passed
+for canonical color Red, color Blue, and Yellow (3/3). The skipped check was
+the WSL-worktree metadata inspection, which Windows Python cannot interpret.
+This is scoped Windows execution evidence, not full native qualification:
+strict Cython gameplay, real-ROM concurrent load, the remote trade/battle
+matrix, and macOS coverage remain open.
+
 The release status remains `PARTIAL`, despite the complete source-runtime
 gate passing. The vendored source PyBoy build remains the documented release
 runtime. PR #19 also verified a Cython real-ROM lifecycle smoke for the three
@@ -46,9 +58,10 @@ is not release-qualified: the targeted Red↔Yellow trade diagnostic passed,
 the Yellow↔Yellow diagnostic failed party-record integrity, and a bounded
 Red↔Red diagnostic did not complete. No Cython battle matrix is claimed.
 The synthetic concurrency probe now passes, but real-ROM concurrent-load
-coverage, vanilla fixture provenance, broad-suite coverage, native-platform
-coverage, independent review, and authenticated/encrypted cross-host TCP
-remain open. Earlier 18/19 trade and 17/19 battle snapshots are historical;
+coverage, vanilla fixture provenance, broad-suite coverage, full native
+platform qualification, independent review, and authenticated/encrypted
+cross-host TCP remain open. Earlier 18/19 trade and 17/19 battle snapshots are
+historical;
 the complete 19/19 source-runtime baseline belongs to PR #17, while PR #19's
 post-change remote slice is reported separately above.
 
@@ -79,6 +92,13 @@ The current candidate’s evidence is:
 - fixture manifest schema: `PASS`, all 10 entries validated;
 - source runtime/package checks: `PASS`, `pip check`, source bootstrap, and
   the selected production Ruff boundary;
+- MCP lifecycle hardening: `PASS` in the focused local rerun (85 passed, four
+  expected real-ROM skips without supplied assets); CI release-hygiene run
+  #47 passed on PR #22;
+- Windows native runtime checks: `PASS` for a fresh Windows install,
+  `pip check`, source and Cython bootstrap contracts, selected runtime/fixture
+  checks (23 passed, one unrelated skip), MCP stdio (4/4), and three-ROM
+  Cython lifecycle smokes;
 - Cython/native runtime: `PASS` for the pinned build, semantic serial
   contract, and three-ROM lifecycle smoke; strict Cython gameplay remains
   `UNVERIFIED` for release.
@@ -96,9 +116,10 @@ provenance, platform, real-ROM load, review, or network-security claims.
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PASS` (baseline scope) | The PR #17 source-runtime baseline asset-backed local/session tier passed 47/47; PR #19 did not rerun the full local matrix. |
 | In-process link acceptance | `PASS` (baseline scope) | The PR #17 source-runtime baseline passed 47/47 local rows and the declared strict local rows; PR #19 adds focused lifecycle coverage. Stock-ROM link support remains unclaimed. |
-| Remote TCP and MCP lifecycle | `PASS` (post-change tested scope) | The PR #19 real-ROM remote transport slice passed 15/15 and the focused transport/MCP suite passed 167/167. The baseline strict remote trade and battle rows passed 9/9 each; PR #19 did not silently relabel that baseline as a full rerun. TCP remains loopback-only and unauthenticated/unencrypted. |
+| Remote TCP and MCP lifecycle | `PASS` (post-change tested scope) | The PR #19 real-ROM remote transport slice passed 15/15 and the focused transport/MCP suite passed 167/167. PR #22 adds bounded stdio unpair cleanup and fresh remote lifecycle generations; its release-hygiene workflow passed. The baseline strict remote trade and battle rows passed 9/9 each; PR #19 did not silently relabel that baseline as a full rerun. TCP remains loopback-only and unauthenticated/unencrypted. |
 | Synthetic concurrency/lifecycle boundary | `PASS` (localhost probe scope) | Eight bounded probes passed in each of five repetitions, including concurrent exchange load, shutdown overlap, receiver races, terminal timeouts, resolver rechecks, BYE ordering, and raw-socket boundaries. Real-ROM load remains unverified. |
-| Cython/native serial runtime | `PASS` (build/contract/lifecycle scope) | The pinned Cython build, semantic serial probe, and three canonical real-ROM lifecycle smokes pass; strict Cython gameplay is not release-qualified. |
+| Cython/native serial runtime | `PASS` (build/contract/lifecycle scope) | The pinned Cython build, semantic serial probe, and three canonical real-ROM lifecycle smokes pass, including the fresh Windows run; strict Cython gameplay is not release-qualified. |
+| Windows native runtime | `PASS` (scoped) | A fresh Windows environment passed install, dependency, source/Cython bootstrap, selected runtime/fixture, MCP stdio, and three-ROM lifecycle checks. Full native gameplay, concurrent-load, remote trade/battle, and macOS coverage remain open. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
 The historical complete real-ROM snapshot at
@@ -107,7 +128,7 @@ only. The current product Ruff check is clean for the explicitly configured CI
 files; the broad legacy tree still reports pre-existing style violations and is
 not silently reformatted. The complete source-runtime gate is the PR #17
 baseline; PR #19's focused source-runtime and remote slices are green, while
-full Cython gameplay, vanilla fixture provenance, broad-suite and
+full Cython gameplay, vanilla fixture provenance, broad-suite and full
 native-platform coverage, real-ROM load evidence, independent review, and
 secure cross-host networking remain open. TCP is deliberately localhost-only
 because it has no authentication or encryption.
@@ -479,7 +500,7 @@ complete PR #17 asset-backed baseline additionally passed local 47/47, remote
 15/15, strict trade 19/19, and strict battle 19/19; PR #19's post-change
 real-ROM remote transport slice passed 15/15. The result is still not a
 production sign-off because strict Cython gameplay, fixture provenance,
-broad-suite and native-platform coverage, real-ROM load evidence, security,
+broad-suite and full native-platform coverage, real-ROM load evidence, security,
 and independent-review conditions remain open.
 
 Use the tiered commands in [`docs/PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md)
