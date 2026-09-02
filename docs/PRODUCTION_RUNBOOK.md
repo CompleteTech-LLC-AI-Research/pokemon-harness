@@ -3,9 +3,10 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon); the
-latest merged implementation is `7f3c2f4` (PR #22), with implementation
-candidate `dfc0b2a` (PR #19, following PR #17 and PR #18). External BYO assets
-are excluded from the tracked source tree.
+latest merged implementation is `87a9f3a` (PR #23), with MCP lifecycle
+hardening `7f3c2f4` (PR #22) and implementation candidate `dfc0b2a` (PR #19,
+following PR #17 and PR #18). External BYO assets are excluded from the
+tracked source tree.
 
 The complete all-tier source-runtime production gate passed collection 698,
 unit 554/554, local real-ROM 47/47, remote transport/MCP 15/15, strict trade
@@ -25,6 +26,11 @@ macOS coverage.
 PR #22 adds bounded MCP stdio unpair cleanup and fresh remote lifecycle
 generation tracking. Its release-hygiene workflow passed; the full strict
 post-change gameplay matrices remain open.
+
+The post-PR #23 asset-free source-runtime gate used managed Linux Python
+3.12.13 and Pytest 9.1.1: collection 701, unit 557/557, and timing 40/40 in
+each of five repetitions, with no skips, xfails, failures, errors, or timeouts.
+ROM-backed tiers were not run by this asset-free command.
 
 The baseline gate ran from isolated source head
 `df0e7424c87c812a57f257286b0dc00e87c498f4`, whose implementation tree is the
@@ -108,16 +114,17 @@ python scripts/bootstrap_pyboy.py --mode source --check
 
 The pinned fork has an optional Cython diagnostic mode. Its pinned build,
 semantic serial-contract probe, and three canonical real-ROM attach/step/close
-smokes pass. Strict Cython gameplay is not release-qualified: targeted
-Red↔Yellow trade passed, Yellow↔Yellow failed party-record integrity, Red↔Red
-did not complete within the bounded diagnostic, and no Cython battle matrix is
-claimed. A fresh Windows Python 3.12.10 environment also passed editable
-installation, `pip check`, source/Cython bootstrap checks, scoped MCP stdio
-integration (4/4), and the three-ROM Cython lifecycle smokes. This is scoped
-Windows evidence, not full native gameplay, concurrent-load, remote
-trade/battle, or macOS qualification. Do not substitute an arbitrary
-standalone PyBoy wheel: record the version, harness revision, and runtime mode,
-and require the serial contract before running link tests.
+smokes pass. PR #23 exposes the CPU and LCD timing fields required by native
+lockstep scheduling. Native Red↔Yellow, Yellow↔Yellow, and Red↔Red trade
+diagnostics pass; the two same-family runs produce identical party records in
+880 and 920 frames. Full strict Cython trade/battle acceptance is not
+release-qualified, and no Cython battle matrix is claimed. A fresh Windows
+Python 3.12.10 environment also passed the post-PR #23 Cython build/check and
+three-ROM attach/tick/close smokes. This is scoped Windows evidence, not full
+native gameplay, concurrent-load, remote trade/battle, or macOS qualification.
+Do not substitute an arbitrary standalone PyBoy wheel: record the version,
+harness revision, and runtime mode, and require the serial contract before
+running link tests.
 
 The repository is source-only. Obtain ROMs and symbols legally and keep them
 outside version control. The `.gitignore` intentionally excludes ROMs, symbol
@@ -251,9 +258,9 @@ python scripts/production_gate.py \
   --format text
 ```
 
-The current candidate's clean asset-free follow-up collected 699 tests, passed
-unit 555/555, passed timing 40/40 in each of five repetitions, and returned
-scoped `PASS`. It also performed schema-only validation of the ten-entry
+The current candidate's post-PR #23 clean asset-free gate collected 701 tests,
+passed unit 557/557, passed timing 40/40 in each of five repetitions, and
+returned scoped `PASS`. It also performed schema-only validation of the ten-entry
 fixture manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
 load save states, exercise MCP with a real ROM, or run link gameplay; it is not
@@ -637,11 +644,10 @@ The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
 1. The documented release runtime is source mode. The pinned Cython build,
-   semantic serial probe, and three-ROM lifecycle smoke pass, but strict
-   Cython gameplay is not release-qualified: Red↔Yellow passed a targeted trade
-   diagnostic, Yellow↔Yellow failed party-record integrity, Red↔Red did not
-   complete within the bounded diagnostic, and no Cython battle matrix is
-   claimed.
+   semantic serial probe, and three-ROM lifecycle smoke pass. PR #23 fixes the
+   native lockstep timing ABI; targeted Red↔Yellow, Yellow↔Yellow, and Red↔Red
+   trade diagnostics now pass, but the full strict Cython trade/battle matrix
+   remains unverified and no Cython battle matrix is claimed.
 2. The strict declaration is complete: nine ordered local pairs, nine ordered
    remote role pairs, six reversed-role rows, nine local variant rows, and 19
    strict entrypoints for each operation all collect. The PR #17 baseline
@@ -660,7 +666,6 @@ are:
    enforced and is the only supported network boundary; cross-host operation
    is blocked until secure transport is added.
 
-The smallest next actions are to fix or explicitly retire the failing Cython
-same-family gameplay path, rerun the full strict matrices against the merged
-runtime, establish native-platform and real-ROM load evidence, verify vanilla
+The smallest next actions are to rerun the full strict matrices against the
+merged runtime, establish native-platform and real-ROM load evidence, verify vanilla
 fixture provenance, run the broad suite, and obtain independent release review.

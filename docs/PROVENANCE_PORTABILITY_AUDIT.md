@@ -1,6 +1,6 @@
 # Fixture provenance and portability audit
 
-Audit scope: the merged implementation `7f3c2f48e229f75610631955904c46032a58c7d5`
+Audit scope: the merged implementation `87a9f3a433958a4cef565fb41de540449254e4b7`
 and only the tracked manifest,
 producer/generator sources, packaging metadata, and platform-facing
 configuration. ROMs, symbol files, save states, and machine-local evidence
@@ -14,7 +14,7 @@ load, and full native-platform requirements.
 The tracked record is internally consistent, but it does not establish the
 missing vanilla source history or full native-platform qualification. The
 clean-install evidence below includes Linux/Python 3.12 source-runtime
-evidence and a scoped Windows/Python 3.12.10 validation; neither establishes
+evidence and scoped Windows/Python 3.12.10 validation; neither establishes
 the complete native gameplay and matrix contract.
 
 ## Evidence classification
@@ -50,20 +50,21 @@ the complete native gameplay and matrix contract.
   tracked ordinary and battle producer files. This establishes repository
   lineage, not that an external source state was captured with the claimed
   ROM.
-- A fresh Windows Python 3.12.10 environment in an isolated checkout passed
-  editable installation, `pip check`, source bootstrap, the pinned Cython
-  build/check, scoped runtime/fixture checks (23 passed, one unrelated skip),
-  MCP stdio integration (4/4), and three canonical color-Red, color-Blue, and
-  Yellow Cython attach/step/close smokes (3/3). This is scoped platform
-  evidence; it does not prove strict Cython gameplay, concurrent real-ROM
-  load, remote trade/battle acceptance, or macOS support.
+- Fresh Windows Python 3.12.10 environments in isolated checkouts passed
+  editable installation, `pip check`, source bootstrap, the post-PR #23 pinned
+  Cython build/check, `PyBoy.mb.serial` exposure, and three canonical
+  color-Red, color-Blue, and Yellow Cython attach/tick/close smokes (3/3).
+  Earlier scoped source/fixture checks passed 23 tests with one unrelated
+  WSL-worktree skip, and MCP stdio integration passed 4/4. This is scoped
+  platform evidence; it does not prove the full strict Cython gameplay matrix,
+  concurrent real-ROM load, remote trade/battle acceptance, or macOS support.
 
 ## Portability and clean-install findings
 
 The following bounded checks passed:
 
 ```text
-git ls-remote <repository> refs/heads/master                  -> exact published implementation head 7f3c2f4...
+git ls-remote <repository> refs/heads/master                  -> exact published implementation head 87a9f3a...
 python3 scripts/validate_fixture_manifest.py --schema-only  -> PASS, 10 entries
 uv lock --check                                             -> PASS
 python3 -m compileall <scoped-files>                        -> PASS
@@ -77,8 +78,10 @@ The wheel is `py3-none-any` for the documented source runtime. The GitHub
 workflow still runs on `ubuntu-latest` with Python 3.12 and has no Windows or
 macOS job. The fresh Windows run independently executes install, MCP startup,
 Cython build, and three-ROM lifecycle checks, but not the complete strict
-gameplay or load matrix. `uv.lock` contains platform resolution markers, but
-lock metadata is not native-platform execution evidence.
+gameplay or load matrix. The post-PR #23 Linux gate also passes the source ABI
+timing regression and full asset-free unit/timing scope. `uv.lock` contains
+platform resolution markers, but lock metadata is not native-platform
+execution evidence.
 
 `.mcp.json` uses `python` and `${PWD}`-relative asset paths. This is portable
 only when the MCP client expands `${PWD}` to the checkout root and selects the
@@ -98,11 +101,11 @@ establish native real-ROM gameplay.
    the sanitized reproduction record. Regenerate the two vanilla battle states
    only from those verified ordinary inputs.
 2. Choose the supported native platform set. Windows now has scoped
-   clean-install, bootstrap, MCP, and Cython lifecycle evidence, but the full
-   gameplay/load matrix is still required before retaining a production
-   Windows claim. Either narrow the advertised contract to the platforms
-   actually tested, or add complete checks for every retained target, including
-   any Unix/macOS target intended for release.
+   clean-install, bootstrap, MCP, Cython build, and three-ROM lifecycle
+   evidence, but the full gameplay/load matrix is still required before
+   retaining a production Windows claim. Either narrow the advertised contract
+   to the platforms actually tested, or add complete checks for every retained
+   target, including any Unix/macOS target intended for release.
 3. Keep external asset validation and native-platform results as separate
    evidence bundles; neither a manifest hash nor a Linux wheel install proves
    gameplay or portability on another platform.
