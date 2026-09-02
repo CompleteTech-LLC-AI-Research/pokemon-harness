@@ -11,6 +11,13 @@ coverage, and known non-gates. The 2026-08-30 file is retained as a
 superseded historical snapshot. These are sanitized evidence summaries, not
 copies of emulator traces or ROM-derived artifacts.
 
+The PR #19 follow-up is recorded in the repository README and runbook rather
+than retroactively changing that baseline report. Its post-change evidence
+includes the ROM-free 555/555 and timing 40/40 × 5 gate, focused transport/MCP
+167/167, the 8/8 × 5 bounded localhost concurrency probe, and a 15/15
+real-ROM remote transport slice. The full 19-row trade and battle results
+remain the PR #17 source-runtime baseline until rerun against a later runtime.
+
 The `.state` files are ROM-derived, ignored by Git, and intentionally not
 distributed by this repository. The manifest is an evidence index, not a
 license or a claim that the files are safely reproducible. The canonical color

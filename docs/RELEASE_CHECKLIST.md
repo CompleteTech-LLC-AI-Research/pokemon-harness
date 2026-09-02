@@ -16,11 +16,10 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current implementation candidate is merged commit `b0b63c8` (PR #17,
-including PRs #12-#17), with the documentation update prepared in an isolated
-worktree using `DEFAULT_MATRIX_WORKERS=1`. The complete source-runtime gate
+The current implementation candidate is merged commit `dfc0b2a` (PR #19,
+following PR #17 and PR #18). The complete all-tier source-runtime baseline
 ran from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`,
-whose implementation tree is the merged candidate. The complete gate
+whose implementation tree is the PR #17 parent. The complete baseline gate
 command was:
 
 ```bash
@@ -56,8 +55,8 @@ python scripts/production_gate.py \
   --format text
 ```
 
-returns scoped `PASS`: collection 698, unit 554/554, and timing 40/40 in each
-of five repetitions. It uses bundled source
+returns scoped `PASS` on the PR #19 candidate: collection 699, unit 555/555,
+and timing 40/40 in each of five repetitions. It uses bundled source
 PyBoy 2.7.0, fork
 `c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
 ten-entry fixture manifest. No ROM-backed tier ran in this command.
@@ -68,22 +67,27 @@ rows, and 19 strict trade plus 19 strict battle entrypoints. Structural and
 declaration checks passed; matrix runtime was `NOT RUN` because the standalone
 audit is collection-only.
 
-The focused post-change integration slice passed 294/294. The complete
-source-runtime real-ROM local tier passed 47/47, the remote transport/MCP tier
-passed 15/15, and strict trade and battle each passed all 19/19 rows. Historical
-18/19 trade and 17/19 battle snapshots are retained only as historical context.
+The PR #19 focused transport/MCP slice passed 167/167, the bounded concurrency
+probe passed 8/8 in each of five repetitions, and the post-change real-ROM
+remote transport slice passed 15/15. The PR #17 complete source-runtime
+baseline passed local 47/47, strict trade 19/19, and strict battle 19/19;
+those full strict rows were not silently relabeled as a PR #19 rerun.
+Historical 18/19 trade and 17/19 battle snapshots are retained only as
+historical context.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
 producer plus tracked battle-fixture generator are present. The source-runtime
-gate is complete, but full sign-off still requires Cython real-ROM gameplay,
-vanilla source provenance, broad-suite coverage, native-platform evidence,
-concurrent-load evidence, independent review, and secure cross-host networking.
+baseline is complete and PR #19 adds focused lifecycle/concurrency evidence,
+but full sign-off still requires strict Cython gameplay, a full strict rerun
+after the runtime change, vanilla source provenance, broad-suite coverage,
+native-platform evidence, real-ROM load evidence, independent review, and
+secure cross-host networking.
 
 ## Source and artifact hygiene
 
-- [x] The implementation candidate is identified as merged commit `b0b63c8`
-  (PR #17, including PRs #12-#17), and the documentation worktree is isolated from the protected
+- [x] The implementation candidate is identified as merged commit `dfc0b2a`
+  (PR #19, following PRs #12-#18), and the documentation worktree is isolated from the protected
   dirty development checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
@@ -104,9 +108,10 @@ concurrent-load evidence, independent review, and secure cross-host networking.
 - [x] The audited environment runs `python -m pip check` and records the
   interpreter/runtime identity from the same environment used by MCP.
 - [x] Cython/native-accelerator mode builds and passes its explicit semantic
-  serial contract; the real-ROM Cython path remains a separate unchecked item.
-- [ ] The pinned Cython build exposes `mb.serial` and passes a real-ROM
-  attach/detach/close smoke.
+  serial contract and canonical three-ROM attach/step/close smoke.
+- [ ] The pinned Cython build passes the full real-ROM strict gameplay matrix;
+  targeted Red↔Yellow passed, Yellow↔Yellow failed party-record integrity,
+  and Red↔Red did not complete within the bounded diagnostic.
 - [ ] Full Cython trade/battle acceptance is complete; source mode remains the
   documented release default, while Cython mode has no strict-matrix sign-off.
 
@@ -127,28 +132,32 @@ concurrent-load evidence, independent review, and secure cross-host networking.
 
 ## Test gates
 
-- [x] Both module and console-script collection paths complete in the current
-  candidate gate; 698 tests were collected with no collection errors.
-- [x] ROM-free unit tests pass 554/554 in the scoped gate.
-- [x] Timing tests pass 40/40 in each of five repetitions in the scoped gate.
+- [x] Both module and console-script collection paths complete in the baseline
+  gate; the PR #19 follow-up collected 699 tests with no collection errors.
+- [x] ROM-free unit tests pass 555/555 in the PR #19 follow-up gate (the
+  complete PR #17 baseline passed 554/554).
+- [x] Timing tests pass 40/40 in each of five repetitions in the PR #19
+  follow-up gate.
 - [x] The explicit production-file Ruff boundary is clean; broad legacy files
   outside that boundary are not used as release evidence.
 - [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
-  xfail, or timeout.
-- [x] The current asset-backed local/session tier passes 47/47 for the pinned
-  advertised ROM inputs, with no fixture or runtime skips.
-- [x] Current-candidate controlled local evidence covers the complete canonical
-  strict trade and battle matrix: 9/9 local ordered rows plus the dedicated
-  Red/Yellow assertions passed for each operation.
-- [x] Current-candidate controlled remote evidence covers every ordered
-  listener/connector pair: transport/MCP passed 15/15, strict trade passed
-  9/9, and strict battle passed 9/9.
+  xfail, or timeout on the PR #19 candidate.
+- [x] The PR #17 baseline asset-backed local/session tier passes 47/47 for the
+  pinned advertised ROM inputs, with no fixture or runtime skips.
+- [x] The PR #17 baseline controlled local evidence covers the complete
+  canonical strict trade and battle matrix: 9/9 local ordered rows plus the
+  dedicated Red/Yellow assertions passed for each operation.
+- [x] The PR #19 post-change remote transport/MCP slice passes 15/15; the PR
+  #17 baseline strict trade and battle remote rows passed 9/9 each.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
   ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
   IDs).
-- [x] Current-candidate local and remote strict runtime rows pass in both
+- [x] The PR #17 baseline local and remote strict runtime rows pass in both
   listener/connector directions; strict trade and strict battle each passed
-  19/19 with bounded teardown.
+  19/19 with bounded teardown. A full strict rerun after PR #19 remains open.
+- [x] The PR #19 bounded localhost concurrency/lifecycle probe passes 8/8 in
+  each of five repetitions.
+- [ ] Real-ROM concurrent-load stability is complete on the PR #19 runtime.
 - [ ] Native-platform/build coverage and an independent release review are
   complete.
 
