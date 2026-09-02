@@ -144,11 +144,20 @@ def _hash_file(path: Path) -> tuple[str, str]:
 
 
 def _validate_assets(fixtures: list[dict[str, Any]], fixture_root: Path) -> None:
-    if not fixture_root.is_dir():
+    try:
+        resolved_root = fixture_root.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise _error(f"fixture root could not be resolved: {fixture_root}: {exc}") from exc
+    if not resolved_root.is_dir():
         raise _error(f"fixture root not found: {fixture_root}")
 
     for fixture in fixtures:
-        path = fixture_root / fixture["path"]
+        relative_path = Path(fixture["path"])
+        try:
+            path = (resolved_root / relative_path).resolve(strict=False)
+            path.relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise _error(f"fixture path escapes fixture root: {fixture['path']!r}") from exc
         if not path.is_file():
             raise _error(f"fixture missing: {path}")
         actual_size = path.stat().st_size

@@ -32,6 +32,10 @@ jobs:
             scripts/bootstrap_pyboy.py \
             scripts/network_concurrency_probe.py \
             scripts/production_gate.py \
+            scripts/tcp_link_matrix.py \
+            scripts/validate_fixture_manifest.py \
+            tests/_gate_report.py \
+            tests/_tier_config.py \
             tests/test_fixture_provenance.py \
             tests/test_production_gate.py \
             tests/test_runtime_packaging.py
@@ -64,12 +68,15 @@ jobs:
       - name: Validate fixture-manifest schema
         run: python scripts/validate_fixture_manifest.py --schema-only
 
+      - name: Audit collected matrix and tier declarations
+        run: python scripts/tcp_link_matrix.py --format text
+
       - name: Run bounded network concurrency probe
         run: python scripts/network_concurrency_probe.py
 
       - name: Run ROM-free production gate
         run: >-
-          python scripts/production_gate.py --unit-only --repeat-timing 5
+          python scripts/production_gate.py --runtime-mode source --unit-only --repeat-timing 5
           --evidence-dir "$RUNNER_TEMP/pokered-unit-evidence"
 
       - name: Build wheel without ROM-derived artifacts

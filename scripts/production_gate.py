@@ -35,7 +35,7 @@ from collections import Counter, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 KNOWN_ROM_FILES: tuple[tuple[str, Path], ...] = (
@@ -126,6 +126,19 @@ GATE_CONTROLLED_ENVIRONMENT = (
     "PYTEST_ADDOPTS",
     "PYTEST_PLUGINS",
     "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    "POKERED_GATE_REPORT",
+    "POKERED_GATE_PROGRESS_REPORT",
+)
+# The gate must not inherit arbitrary pytest plugins or configuration.  The
+# async integration tests still need their pinned plugin, so load that plugin
+# explicitly alongside the gate report plugin in every child process.
+PYTEST_GATE_ARGUMENTS = (
+    "--strict-config",
+    "--strict-markers",
+    "-p",
+    "pytest_asyncio.plugin",
+    "-p",
+    "tests._gate_report",
 )
 
 _SHA1_RE = re.compile(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|")
@@ -524,6 +537,14 @@ def build_test_environment(
     # collection or xfail behavior.  The gate owns these settings.
     for key in GATE_CONTROLLED_ENVIRONMENT:
         environment.pop(key, None)
+    # Remove the rest of pytest's parent-process state as well (for example
+    # PYTEST_CURRENT_TEST and xdist variables), then opt into the controlled
+    # plugin set above.  Leaving autoload enabled would let an installed
+    # third-party plugin change collection, skips, or xfail semantics.
+    for key in tuple(environment):
+        if key.startswith("PYTEST_"):
+            environment.pop(key, None)
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     for key in tuple(environment):
         if key.startswith("POKERED_PEER_") or key == "POKERED_ROM_VERSION":
             environment.pop(key, None)
@@ -1241,8 +1262,7 @@ def run_collection_preflight(
                 "tests",
                 "--collect-only",
                 "-q",
-                "-p",
-                "tests._gate_report",
+                *PYTEST_GATE_ARGUMENTS,
             ],
         )
     ]
@@ -1257,8 +1277,7 @@ def run_collection_preflight(
                     "tests",
                     "--collect-only",
                     "-q",
-                    "-p",
-                    "tests._gate_report",
+                    *PYTEST_GATE_ARGUMENTS,
                 ],
             )
         )
@@ -1271,8 +1290,7 @@ def run_collection_preflight(
                     "tests",
                     "--collect-only",
                     "-q",
-                    "-p",
-                    "tests._gate_report",
+                    *PYTEST_GATE_ARGUMENTS,
                 ],
             )
         )
@@ -1413,6 +1431,96 @@ def fixture_manifest_provenance_problems(
             problems.append(
                 f"certified fixture provenance is not verified: {fixture_id} ({status!r})"
             )
+    return problems
+
+
+def fixture_manifest_input_problems(
+    manifest_path: Path,
+    *,
+    rom_root: Path,
+    assets: Iterable[AssetRecord],
+    expected_sha1: dict[Path, str],
+) -> list[str]:
+    """Check fixture input pins against the inspected ROM/SYM inventory.
+
+    Byte validation proves that a state matches the hashes written in the
+    manifest.  This second check proves that those manifest pins still agree
+    with ``VERSIONS.md`` and with the files the gate actually inspected.  A
+    manifest that is internally self-consistent but points at a different
+    ROM/SYM set must not be accepted as release evidence.
+    """
+
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"fixture manifest input pins could not be read: {type(exc).__name__}: {exc}"]
+    fixtures = document.get("fixtures") if isinstance(document, dict) else None
+    if not isinstance(fixtures, list):
+        return ["fixture manifest input pins have no fixture list"]
+
+    try:
+        resolved_rom_root = rom_root.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        resolved_rom_root = rom_root
+    records_by_key: dict[Path, AssetRecord] = {}
+    for record in assets:
+        if record.kind not in {"rom", "symbol"}:
+            continue
+        try:
+            relative = Path(record.path).resolve(strict=False).relative_to(resolved_rom_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        records_by_key[_asset_key(relative)] = record
+
+    problems: list[str] = []
+    seen: set[str] = set()
+
+    def add(problem: str) -> None:
+        if problem not in seen:
+            seen.add(problem)
+            problems.append(problem)
+
+    for index, fixture in enumerate(fixtures):
+        if not isinstance(fixture, dict):
+            add(f"fixture manifest entry {index} is not an object")
+            continue
+        fixture_id = fixture.get("id", f"index {index}")
+        for field_name, kind in (("expected_rom", "rom"), ("expected_symbols", "symbol")):
+            pin = fixture.get(field_name)
+            if not isinstance(pin, dict):
+                add(f"fixture {fixture_id} has no valid {field_name} pin")
+                continue
+            raw_path = pin.get("path")
+            pin_sha1 = pin.get("sha1")
+            if not isinstance(raw_path, str) or not isinstance(pin_sha1, str):
+                add(f"fixture {fixture_id} has an invalid {field_name} pin")
+                continue
+            key = _asset_key(raw_path)
+            expected = expected_sha1.get(key)
+            if expected is None:
+                add(f"fixture {fixture_id} {field_name} is not pinned in VERSIONS.md: {raw_path}")
+            elif expected != pin_sha1.lower():
+                add(
+                    f"fixture {fixture_id} {field_name} pin disagrees with VERSIONS.md: "
+                    f"expected {expected}, got {pin_sha1.lower()}"
+                )
+            record = records_by_key.get(key)
+            if record is None or record.kind != kind:
+                add(
+                    f"fixture {fixture_id} {field_name} is outside the inspected {kind} set: "
+                    f"{raw_path}"
+                )
+                continue
+            if record.status != "ok":
+                add(
+                    f"fixture {fixture_id} {field_name} uses an unverified asset: "
+                    f"{record.label} {record.status}"
+                )
+            elif record.actual_sha1 != pin_sha1.lower():
+                add(
+                    f"fixture {fixture_id} {field_name} does not match inspected bytes: "
+                    f"expected {record.actual_sha1}, got {pin_sha1.lower()}"
+                )
     return problems
 
 
@@ -1581,8 +1689,7 @@ def run_pytest_once(
         (
             "-m",
             expression,
-            "-p",
-            "tests._gate_report",
+            *PYTEST_GATE_ARGUMENTS,
             "-rA",
             "--maxfail=0",
         )
@@ -2004,8 +2111,7 @@ def run_matrix_tier(
             (
                 "-m",
                 TIER_EXPRESSIONS[name],
-                "-p",
-                "tests._gate_report",
+                *PYTEST_GATE_ARGUMENTS,
                 "-rA",
                 "--maxfail=0",
             )
@@ -2062,6 +2168,11 @@ def run_matrix_tier(
             returncode = process.poll()
             if returncode is None:
                 returncode = 125
+        # ``poll()`` only means the process has exited; the reader can still
+        # be draining its pipe.  Join it before retaining diagnostics so a
+        # fast case does not lose the very failure text needed to audit it.
+        reader = state["reader"]
+        reader.join(timeout=1.0)
         report, report_kind = load_case_report(
             state,
             returncode=int(returncode),
@@ -2903,6 +3014,26 @@ def verify_evidence_bundle(evidence_dir: Path) -> None:
     """Verify the metadata and content hashes of a retained evidence bundle."""
 
     evidence_dir = evidence_dir.expanduser().resolve(strict=False)
+    expected_bundle_names = {
+        EVIDENCE_REPORT_FILENAME,
+        EVIDENCE_TEXT_FILENAME,
+        EVIDENCE_MANIFEST_FILENAME,
+    }
+    try:
+        actual_bundle_names = {path.name for path in evidence_dir.iterdir()}
+    except OSError as exc:
+        raise ValueError(
+            f"could not enumerate evidence bundle: {type(exc).__name__}: {exc}"
+        ) from exc
+    unexpected_files = sorted(actual_bundle_names - expected_bundle_names)
+    if unexpected_files:
+        raise ValueError(
+            "evidence bundle contains unexpected files: " + ", ".join(unexpected_files)
+        )
+    for name in expected_bundle_names:
+        path = evidence_dir / name
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"evidence bundle entry is not a regular file: {name!r}")
     manifest_path = evidence_dir / EVIDENCE_MANIFEST_FILENAME
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -2928,7 +3059,12 @@ def verify_evidence_bundle(evidence_dir: Path) -> None:
             raise ValueError(f"evidence manifest repeats file {relative_name!r}")
         actual_names.add(relative_name)
         relative_path = Path(relative_name)
-        if relative_path.is_absolute() or ".." in relative_path.parts:
+        if (
+            relative_path.is_absolute()
+            or PureWindowsPath(relative_name).is_absolute()
+            or "\\" in relative_name
+            or ".." in relative_path.parts
+        ):
             raise ValueError(f"evidence manifest file escapes its directory: {relative_name!r}")
         path = (evidence_dir / relative_path).resolve(strict=False)
         try:
@@ -3161,6 +3297,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{fixture_manifest.get('reason') or 'unknown error'}"
         )
     elif real_rom_scope:
+        gate_problems.extend(
+            fixture_manifest_input_problems(
+                project_root / FIXTURE_MANIFEST_RELATIVE_PATH,
+                rom_root=rom_root,
+                assets=assets,
+                expected_sha1=expected_sha1,
+            )
+        )
         gate_problems.extend(
             fixture_manifest_provenance_problems(project_root / FIXTURE_MANIFEST_RELATIVE_PATH)
         )
