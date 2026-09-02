@@ -3,9 +3,9 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon); the
-current implementation candidate is merged commit `dfc0b2a` (PR #19,
-following PR #17 and PR #18). External BYO assets are excluded from the
-tracked source tree.
+current published `master` is `73c0b8c`, with implementation candidate merged
+commit `dfc0b2a` (PR #19, following PR #17 and PR #18). External BYO assets are
+excluded from the tracked source tree.
 
 The complete all-tier source-runtime production gate passed collection 698,
 unit 554/554, local real-ROM 47/47, remote transport/MCP 15/15, strict trade
@@ -16,6 +16,11 @@ transport/MCP 167/167, a bounded concurrency probe 8/8 in each of five
 repetitions, and a 15/15 real-ROM remote transport slice. The ten-entry
 fixture-manifest schema passed. Sanitized evidence is retained outside version
 control because ROMs, symbols, and save states are operator-supplied assets.
+
+Fresh Windows scoped evidence also covers install, source/Cython bootstrap, MCP
+stdio, and three-ROM Cython lifecycle checks; it does not complete strict
+Cython gameplay, real-ROM concurrent load, the remote trade/battle matrix, or
+macOS coverage.
 
 The baseline gate ran from isolated source head
 `df0e7424c87c812a57f257286b0dc00e87c498f4`, whose implementation tree is the
@@ -102,9 +107,13 @@ semantic serial-contract probe, and three canonical real-ROM attach/step/close
 smokes pass. Strict Cython gameplay is not release-qualified: targeted
 Red↔Yellow trade passed, Yellow↔Yellow failed party-record integrity, Red↔Red
 did not complete within the bounded diagnostic, and no Cython battle matrix is
-claimed. Do not substitute an arbitrary standalone PyBoy wheel: record the
-version, harness revision, and runtime mode, and require the serial contract
-before running link tests.
+claimed. A fresh Windows Python 3.12.10 environment also passed editable
+installation, `pip check`, source/Cython bootstrap checks, scoped MCP stdio
+integration (4/4), and the three-ROM Cython lifecycle smokes. This is scoped
+Windows evidence, not full native gameplay, concurrent-load, remote
+trade/battle, or macOS qualification. Do not substitute an arbitrary
+standalone PyBoy wheel: record the version, harness revision, and runtime mode,
+and require the serial contract before running link tests.
 
 The repository is source-only. Obtain ROMs and symbols legally and keep them
 outside version control. The `.gitignore` intentionally excludes ROMs, symbol
@@ -349,7 +358,9 @@ python -m pytest -q -ra \
 Repeat with the appropriate path, symbol file, and hash for each release input
 that will be advertised. The wheel-install probe in this audit verified clean
 installation, `pip check`, and bundled runtime identity; it did not run this
-real-ROM stdio tier. Any real-ROM result must identify the current candidate,
+real-ROM stdio tier on Linux. The fresh Windows validation separately passed
+the selected MCP stdio integration (4/4), but did not replace the full
+real-ROM tier. Any real-ROM result must identify the current candidate,
 ROM/SYM hashes, and complete test output. These tests prove only the tested
 boot/state/MCP surface; they do not prove link gameplay.
 
@@ -632,8 +643,10 @@ are:
    strict entrypoints for each operation all collect. The PR #17 baseline
    passed the strict trade and battle runs 19/19 each. PR #19 adds synthetic
    concurrency/lifecycle evidence and a 15/15 remote transport rerun, but
-   broad-suite (`pytest -q -ra`) evidence, real-ROM load stability,
-   native-platform coverage, and independent review remain open.
+   broad-suite (`pytest -q -ra`) evidence, real-ROM load stability, full
+   native-platform qualification, and independent review remain open. Scoped
+   Windows install/bootstrap/MCP/Cython lifecycle evidence is recorded above;
+   full Windows gameplay/load coverage and macOS coverage remain open.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
    reproduction evidence, while vanilla ordinary source provenance is
    `PARTIAL`. The manifest and save states are external/operator-managed; a

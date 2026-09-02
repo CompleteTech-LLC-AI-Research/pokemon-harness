@@ -16,8 +16,9 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current implementation candidate is merged commit `dfc0b2a` (PR #19,
-following PR #17 and PR #18). The complete all-tier source-runtime baseline
+The current published `master` is commit `73c0b8c`; its implementation
+candidate is merged commit `dfc0b2a` (PR #19, following PR #17 and PR #18).
+The complete all-tier source-runtime baseline
 ran from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`,
 whose implementation tree is the PR #17 parent. The complete baseline gate
 command was:
@@ -75,12 +76,19 @@ those full strict rows were not silently relabeled as a PR #19 rerun.
 Historical 18/19 trade and 17/19 battle snapshots are retained only as
 historical context.
 
+A fresh Windows Python 3.12.10 environment passed editable installation,
+`pip check`, source bootstrap, the pinned Cython build/check, scoped
+runtime/fixture checks (23 passed, one unrelated skip), MCP stdio integration
+(4/4), and three-ROM Cython attach/step/close smokes (3/3). This narrows the
+native-platform gap but does not complete strict Cython gameplay, real-ROM
+concurrent load, the remote trade/battle matrix, or macOS coverage.
+
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
 producer plus tracked battle-fixture generator are present. The source-runtime
 baseline is complete and PR #19 adds focused lifecycle/concurrency evidence,
 but full sign-off still requires strict Cython gameplay, a full strict rerun
-after the runtime change, vanilla source provenance, broad-suite coverage,
+after the runtime change, vanilla source provenance, broad-suite coverage, full
 native-platform evidence, real-ROM load evidence, independent review, and
 secure cross-host networking.
 
@@ -109,6 +117,8 @@ secure cross-host networking.
   interpreter/runtime identity from the same environment used by MCP.
 - [x] Cython/native-accelerator mode builds and passes its explicit semantic
   serial contract and canonical three-ROM attach/step/close smoke.
+- [x] A fresh Windows environment passes install, dependency, source/Cython
+  bootstrap, scoped MCP stdio, and canonical three-ROM lifecycle checks.
 - [ ] The pinned Cython build passes the full real-ROM strict gameplay matrix;
   targeted Red↔Yellow passed, Yellow↔Yellow failed party-record integrity,
   and Red↔Red did not complete within the bounded diagnostic.
@@ -158,8 +168,9 @@ secure cross-host networking.
 - [x] The PR #19 bounded localhost concurrency/lifecycle probe passes 8/8 in
   each of five repetitions.
 - [ ] Real-ROM concurrent-load stability is complete on the PR #19 runtime.
-- [ ] Native-platform/build coverage and an independent release review are
-  complete.
+- [ ] Full native-platform/build coverage and an independent release review
+  are complete; the current Windows evidence is scoped and macOS remains
+  untested.
 
 ## Fixture provenance and generation
 

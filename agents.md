@@ -77,8 +77,10 @@ items include strict Cython same-family gameplay (the Yellow↔Yellow trade
 diagnostic failed record-integrity and the bounded Red↔Red diagnostic did not
 complete), a Cython battle matrix, a completed post-PR #19 strict trade and
 battle rerun, a completed broad-suite run, vanilla fixture provenance,
-native-platform validation, independent review, and authenticated/encrypted
-cross-host transport.
+full native-platform gameplay/load coverage, independent review, and
+authenticated/encrypted cross-host transport. Fresh Windows install,
+bootstrap, MCP stdio, and three-ROM lifecycle checks are now scoped evidence,
+not full native qualification.
 
 ## Verification and handoff
 
