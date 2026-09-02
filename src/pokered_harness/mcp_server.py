@@ -1931,6 +1931,24 @@ def _close_serial_link(
     return close_ok and not any(worker.is_alive() for worker in workers)
 
 
+def _uninstall_remote_endpoint(endpoint: Any) -> list[Exception]:
+    """Release an endpoint's owned callbacks during transport teardown.
+
+    The MCP lifecycle retains a legacy symbol-based cleanup fallback for
+    endpoint implementations that predate ``RemoteLinkEndpoint.uninstall``.
+    Calling the owned teardown first lets current endpoints clear both their
+    physical hooks and their endpoint/session ownership records.
+    """
+    uninstall = getattr(endpoint, "uninstall", None)
+    if not callable(uninstall):
+        return []
+    try:
+        uninstall()
+    except Exception as exc:  # noqa: BLE001 - cleanup must continue
+        return [exc]
+    return []
+
+
 def _cleanup_unpublished_remote(
     session: Session,
     network_session: PyBoyLinkSession | None,
@@ -1977,6 +1995,11 @@ def _cleanup_unpublished_remote(
                     "the cleanup deadline"
                 )
             )
+    if endpoint is not None:
+        endpoint_errors = _uninstall_remote_endpoint(endpoint)
+        if endpoint_errors:
+            hook_cleanup_failed = True
+            cleanup_errors.extend(endpoint_errors)
     try:
         hook_errors = _deactivate_link_hooks(session)
     except Exception as exc:  # noqa: BLE001 - cleanup must not mask the original error
@@ -2225,6 +2248,11 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
         # accepted a peer does not. This conditional also preserves an active
         # in-process pair when link_disconnect is called in its idle state.
         if remote_endpoint is not None or network_session is not None:
+            if remote_endpoint is not None:
+                endpoint_errors = _uninstall_remote_endpoint(remote_endpoint)
+                if endpoint_errors:
+                    hook_cleanup_failed = True
+                    cleanup_errors.extend(endpoint_errors)
             hook_errors = _deactivate_link_hooks(session)
             if hook_errors:
                 hook_cleanup_failed = True

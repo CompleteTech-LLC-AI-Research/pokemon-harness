@@ -587,7 +587,7 @@ class Session:
         for registration in reversed(self._event_hooks):
             try:
                 registration.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - teardown must continue
                 # EventBus marks a logical registration inactive before
                 # attempting physical deregistration. Continue stopping the
                 # emulator even if a custom PyBoy hook API rejects removal.
@@ -681,6 +681,11 @@ class Session:
                 if hook_bank == bank and hook_addr == addr:
                     state.active = False
             self._events.deactivate_at(self._pyboy, bank, addr)
+            self._serial_hooks[:] = [
+                record
+                for record in self._serial_hooks
+                if record[1] != bank or record[2] != addr
+            ]
         finally:
             self._lock.release()
 
