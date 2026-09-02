@@ -3,10 +3,11 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon); the
-latest merged implementation is `87a9f3a` (PR #23), with MCP lifecycle
-hardening `7f3c2f4` (PR #22) and implementation candidate `dfc0b2a` (PR #19,
-following PR #17 and PR #18). External BYO assets are excluded from the
-tracked source tree.
+latest merged implementation commit is `b2a4016` (PR #27, merge `b96ee77`),
+with the native Cython ABI fix in `94f103e` (PR #26), MCP lifecycle hardening
+`7f3c2f4` (PR #22), and implementation candidate `dfc0b2a` (PR #19, following
+PR #17 and PR #18). External BYO assets are excluded from the tracked source
+tree.
 
 The complete all-tier source-runtime production gate passed collection 698,
 unit 554/554, local real-ROM 47/47, remote transport/MCP 15/15, strict trade
@@ -27,10 +28,12 @@ PR #22 adds bounded MCP stdio unpair cleanup and fresh remote lifecycle
 generation tracking. Its release-hygiene workflow passed; the full strict
 post-change gameplay matrices remain open.
 
-The post-PR #23 asset-free source-runtime gate used managed Linux Python
-3.12.13 and Pytest 9.1.1: collection 701, unit 557/557, and timing 40/40 in
-each of five repetitions, with no skips, xfails, failures, errors, or timeouts.
-ROM-backed tiers were not run by this asset-free command.
+The merged-head source-runtime gate used managed Linux Python 3.12.13 and
+Pytest 9.1.1: collection 706, unit 562/562, and timing 40/40 in each of five
+repetitions, with no skips, xfails, failures, errors, or timeouts. The same
+unit/timing scope passes under the explicitly selected Cython runtime, whose
+probe resolves all five required PyBoy modules as native extensions. ROM-backed
+tiers were not run by either asset-free command.
 
 The baseline gate ran from isolated source head
 `df0e7424c87c812a57f257286b0dc00e87c498f4`, whose implementation tree is the
@@ -39,8 +42,14 @@ local 1,078.8 seconds, remote 96.2 seconds, trade 5,037.4 seconds, battle
 6,909.8 seconds, and timing 18.7 seconds. The post-PR #19 ROM-free follow-up
 ran from the merged candidate with collection 699; its release-hygiene check
 also runs the bounded concurrency probe.
-Overall status is `PARTIAL`; the exact open items are listed in [the release
-checklist](RELEASE_CHECKLIST.md).
+The merged-head representative `blue-blue` remote LinkMenu flow passes in
+both source and Cython modes after PR #27 changes game-driven exchange pacing
+to a bounded 30-second timeout. The post-PR #27 native strict trade
+qualification returned `FAIL`: 16/19 rows passed and three color-variant
+subprocess rows failed in the trade-center/rendezvous path. The native strict
+battle rerun has not been run, and the full post-fix source matrix and broad
+runtime evidence remain open. Overall status is `PARTIAL`; the exact open
+items are listed in [the release checklist](RELEASE_CHECKLIST.md).
 
 Status semantics:
 
@@ -112,21 +121,22 @@ The default installed runtime is PyBoy source mode, verified with:
 python scripts/bootstrap_pyboy.py --mode source --check
 ```
 
-The pinned fork has an optional Cython diagnostic mode. Its pinned build,
-semantic serial-contract probe, and three canonical real-ROM attach/step/close
-smokes pass. PR #23 exposes the CPU and LCD timing fields required by native
-lockstep scheduling. Native Red↔Yellow, Yellow↔Yellow, and Red↔Red trade
-diagnostics pass; the two same-family runs produce identical party records in
-880 and 920 frames. The post-PR #23 native strict gate passed 10/19 trade and
-10/19 battle rows; all nine remote rows per operation fail because Cython
-`PyBoy.tick` is read-only when network ownership is installed. Full strict
-Cython trade/battle acceptance is not release-qualified. A fresh Windows
-Python 3.12.10 environment also passed the post-PR #23 Cython build/check and
-three-ROM attach/tick/close smokes. This is scoped Windows evidence, not full
-native gameplay, concurrent-load, remote trade/battle, or macOS qualification.
-Do not substitute an arbitrary standalone PyBoy wheel: record the version,
-harness revision, and runtime mode, and require the serial contract before
-running link tests.
+The pinned fork has an optional Cython mode. Its pinned build, semantic
+serial-contract probe, and three canonical real-ROM attach/step/close smokes
+pass. PR #23 exposes the CPU and LCD timing fields required by native lockstep
+scheduling, and PR #26 makes native `PyBoy.tick` instance ownership writable.
+PR #27's gate selects the requested runtime explicitly and fails closed if the
+interpreter resolves the wrong PyBoy module kind. The merged-head Cython
+unit/timing gate and `blue-blue` remote LinkMenu smoke pass. The post-PR #27
+native strict trade qualification is `FAIL` at 16/19, with three
+color-variant subprocess failures in the trade-center/rendezvous path; native
+strict battle has not been run. A
+fresh Windows Python 3.12.10 environment also passed the
+earlier Cython build/check and three-ROM attach/tick/close smokes. This is
+scoped Windows evidence, not full native gameplay, concurrent-load,
+remote trade/battle, or macOS qualification. Do not substitute an arbitrary
+standalone PyBoy wheel: record the version, harness revision, and runtime mode,
+and require the serial contract before running link tests.
 
 The repository is source-only. Obtain ROMs and symbols legally and keep them
 outside version control. The `.gitignore` intentionally excludes ROMs, symbol
@@ -241,6 +251,7 @@ python scripts/production_gate.py \
   --rom-root "$PWD/rom" \
   --fixture-root "$PWD/tests/fixtures/link" \
   --python "$(command -v python)" \
+  --runtime-mode source \
   --repeat-timing 5 \
   --evidence-dir "$EVIDENCE_DIR" \
   --format text
@@ -254,19 +265,43 @@ EVIDENCE_DIR="$(mktemp -d)"
 python scripts/production_gate.py \
   --repo-root "$PWD" \
   --python "$(command -v python)" \
+  --runtime-mode source \
   --unit-only \
   --repeat-timing 5 \
   --evidence-dir "$EVIDENCE_DIR" \
   --format text
 ```
 
-The current candidate's post-PR #23 clean asset-free gate collected 701 tests,
-passed unit 557/557, passed timing 40/40 in each of five repetitions, and
-returned scoped `PASS`. It also performed schema-only validation of the ten-entry
-fixture manifest. Because
+The merged-head clean asset-free source gate collected 706 tests, passed unit
+562/562, passed timing 40/40 in each of five repetitions, and returned scoped
+`PASS`. The native Cython gate passes the same unit/timing scope after its
+runtime probe resolves all five required PyBoy modules as native extensions. It
+also performs schema-only validation of the ten-entry fixture manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
 load save states, exercise MCP with a real ROM, or run link gameplay; it is not
 a production sign-off.
+
+For the optional native qualification, first build the pinned fork and then
+select Cython explicitly. The gate verifies that all required PyBoy modules are
+installed extensions before running any selected tier:
+
+```bash
+python scripts/bootstrap_pyboy.py --mode cython
+python scripts/bootstrap_pyboy.py --mode cython --check
+EVIDENCE_DIR="$(mktemp -d)"
+python scripts/production_gate.py \
+  --repo-root "$PWD" \
+  --python "$(command -v python)" \
+  --runtime-mode cython \
+  --unit-only \
+  --repeat-timing 5 \
+  --evidence-dir "$EVIDENCE_DIR" \
+  --format text
+```
+
+The source default and native command are separate evidence scopes. Do not
+describe a source result as native parity, or a native unit/timing result as
+real-ROM gameplay coverage.
 
 `--evidence-dir` writes `gate-report.json`, `gate-report.txt`, and
 `evidence-manifest.json`. The bundle contains metadata, asset hashes and
@@ -489,8 +524,8 @@ runtime scope is:
 
 | Operation | Local ordered rows | Remote ordered listener/connector rows | Dedicated assertion | Current status |
 |---|---:|---:|---|---|
-| Trade | 9 | 9 | Red/Yellow party-record swap | 19/19 passed in the PR #17 baseline |
-| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | 19/19 passed in the PR #17 baseline |
+| Trade | 9 | 9 | Red/Yellow party-record swap | Historical PR #17 source baseline: 19/19; post-PR #27 native qualification: `FAIL`, 16/19 with three color-variant subprocess failures in the trade-center/rendezvous path; post-fix source rerun not run |
+| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | Historical PR #17 source baseline: 19/19; post-PR #27 native qualification not run; post-fix source rerun not run |
 
 That is 19 strict entrypoints per operation. The remote rows use canonical color
 Red, color Blue, and Yellow profiles; listener/connector order is significant.
@@ -646,31 +681,37 @@ The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
 1. The documented release runtime is source mode. The pinned Cython build,
-   semantic serial probe, and three-ROM lifecycle smoke pass. PR #23 fixes the
-   native lockstep timing ABI; targeted Red↔Yellow, Yellow↔Yellow, and Red↔Red
-   trade diagnostics now pass. The native strict gate passed 10/19 trade and
-   10/19 battle rows, but all nine remote rows per operation fail because
-   Cython `PyBoy.tick` is read-only when network ownership is installed.
+   semantic serial probe, three-ROM lifecycle smoke, native unit/timing gate,
+   and representative `blue-blue` remote LinkMenu smoke pass. PR #26 fixes
+   native `PyBoy.tick` ownership, and PR #27 makes runtime selection explicit.
+   The post-PR #27 native strict trade qualification is `FAIL` at 16/19, with
+   three color-variant subprocess failures in the trade-center/rendezvous path;
+   native strict battle has not been run.
 2. The strict declaration is complete: nine ordered local pairs, nine ordered
    remote role pairs, six reversed-role rows, nine local variant rows, and 19
    strict entrypoints for each operation all collect. The PR #17 baseline
    passed the strict trade and battle runs 19/19 each. PR #19 adds synthetic
    concurrency/lifecycle evidence and a 15/15 remote transport rerun, but
-   broad-suite (`pytest -q -ra`) evidence, real-ROM load stability, full
-   native-platform qualification, and independent review remain open. Scoped
-   Windows install/bootstrap/MCP/Cython lifecycle evidence is recorded above;
-   full Windows gameplay/load coverage and macOS coverage remain open.
+   broad-suite (`pytest -q -ra`) evidence is currently pre-PR #27 bounded
+   diagnostic evidence: 418/703 tests completed before the 5,400-second bound
+   (386 passed, 20 skipped, 12 failed, and 285 not started). The failed rows
+   were remote TCP cases that reached the old 5-second exchange deadline;
+   representative source and native flows pass with the PR #27 pacing fix; a
+   complete post-fix broad rerun remains open.
+   Real-ROM load stability, full native-platform qualification, and independent
+   review remain open. Scoped Windows install/bootstrap/MCP/Cython lifecycle
+   evidence is recorded above; full Windows gameplay/load coverage and macOS
+   coverage remain open.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
-   reproduction evidence, while vanilla ordinary source provenance is
-   `PARTIAL`. The manifest and save states are external/operator-managed; a
-   retained release bundle must include complete byte validation and sanitized
-   evidence.
+   reproduction evidence, and the Red color fixture is now enabled for the
+   remote diagnostic matrices. Vanilla ordinary source provenance is `PARTIAL`.
+   The manifest and save states are external/operator-managed; a retained
+   release bundle must include complete byte validation and sanitized evidence.
 4. Remote TCP has no authentication or encryption. Loopback-only operation is
    enforced and is the only supported network boundary; cross-host operation
    is blocked until secure transport is added.
 
-The smallest next actions are to expose an instance-writable native tick seam
-for serialized network ownership, rerun the full strict matrices against the
+The smallest next actions are to complete the full strict matrices against the
 merged runtime, establish native-platform and real-ROM load evidence, verify
-vanilla fixture provenance, run the broad suite, and obtain independent release
-review.
+vanilla fixture provenance, rerun the broad suite to completion, and obtain
+independent release review.
