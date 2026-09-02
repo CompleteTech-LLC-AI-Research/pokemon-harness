@@ -7,8 +7,8 @@ end-to-end byte exchange without loading a real ROM.
 
 from __future__ import annotations
 
-import threading
 import socket as _socket
+import threading
 from types import SimpleNamespace
 
 import pytest

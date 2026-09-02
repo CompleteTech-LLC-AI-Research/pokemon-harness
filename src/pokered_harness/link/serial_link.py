@@ -903,6 +903,7 @@ __all__ = [
     "OP_BYE",
     "OP_EXCHANGE",
     "OP_HELLO",
+    "SUPPORTED_ROM_VERSIONS",
     "InProcessSerialLink",
     "SerialLink",
     "SerialLinkClosed",
@@ -910,6 +911,5 @@ __all__ = [
     "SerialLinkProtocolError",
     "SerialLinkTimeout",
     "TcpSerialLink",
-    "SUPPORTED_ROM_VERSIONS",
     "validate_rom_version",
 ]

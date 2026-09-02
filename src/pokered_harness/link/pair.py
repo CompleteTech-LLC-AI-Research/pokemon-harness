@@ -346,7 +346,10 @@ class LinkPair:
         for session, records in grouped.values():
             lock = getattr(session, "_lock", None)
 
-            def _deactivate() -> None:
+            def _deactivate(
+                records: list[tuple[object, int, int, str]] = records,
+                session: object = session,
+            ) -> None:
                 states = {id(record[0]) for record in records}
                 for record in records:
                     state = record[0]

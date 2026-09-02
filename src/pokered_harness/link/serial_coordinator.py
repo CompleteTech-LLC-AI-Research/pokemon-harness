@@ -322,12 +322,12 @@ class LockstepCoordinator:
                 try:
                     if self._a.backend is backend_a:
                         self._a.backend = prev_backend_a
-                except BaseException as rollback_error:
+                except BaseException as rollback_error:  # noqa: BLE001 - preserve original attach failure during rollback
                     rollback_errors.append(rollback_error)
                 try:
                     if self._b.backend is backend_b:
                         self._b.backend = prev_backend_b
-                except BaseException as rollback_error:
+                except BaseException as rollback_error:  # noqa: BLE001 - preserve original attach failure during rollback
                     rollback_errors.append(rollback_error)
                 for rollback_error in rollback_errors:
                     exc.add_note(

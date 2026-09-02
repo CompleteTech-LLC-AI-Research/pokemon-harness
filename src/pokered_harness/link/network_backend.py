@@ -60,8 +60,8 @@ import socket
 import struct
 import threading
 import time
-from contextlib import contextmanager
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
