@@ -67,6 +67,14 @@ from pokered_harness.link.serial_core import (
 _T = TypeVar("_T")
 
 
+def _validate_positive_cycles(cycles: int) -> int:
+    if isinstance(cycles, bool) or not isinstance(cycles, int):
+        raise TypeError("cycles must be a positive integer")
+    if cycles <= 0:
+        raise ValueError("cycles must be a positive integer")
+    return cycles
+
+
 class SerialOperationGate(AbstractContextManager[Self]):
     """Serialize every operation which can touch one emulator's serial core.
 
@@ -125,10 +133,14 @@ class CoordinatedBackend:
         peer: SerialCore,
         on_peer_transfer_complete: Callable[[], None] | None = None,
         on_peer_unarmed: Callable[[], bool] | None = None,
+        *,
+        active: bool = True,
     ) -> None:
         self._peer = peer
         self._on_peer_transfer_complete = on_peer_transfer_complete
         self._on_peer_unarmed = on_peer_unarmed
+        self._lifecycle_lock = threading.RLock()
+        self._active = active
         # Lightweight counters make real-ROM diagnostics able to
         # distinguish a clean cable exchange from pull-up fallback. They
         # are intentionally plain integers: local coordination is driven
@@ -144,15 +156,13 @@ class CoordinatedBackend:
         return self._peer
 
     def prepare_peer_for_edge(self) -> bool:
-        """Give a same-process peer a chance to arm before an edge.
+        """Give a same-process peer a bounded chance to arm before an edge."""
+        with self._lifecycle_lock:
+            return self._prepare_peer_for_edge_locked()
 
-        A network peer continues executing independently while the local
-        serial core is between edges.  A local pair is driven by one Python
-        thread, so the scheduler must make that short hand-off explicit
-        before the master's edge callback runs.  Returning ``True`` means
-        the peer is now an armed external-clock receiver; it does not drive
-        an edge itself.
-        """
+    def _prepare_peer_for_edge_locked(self) -> bool:
+        if not self._active:
+            return False
         peer = self._peer
         if peer.transfer_enabled:
             return not peer.internal_clock
@@ -170,6 +180,13 @@ class CoordinatedBackend:
         return False
 
     def on_edge(self, our_bit: int, our_role: int) -> int:
+        """Exchange one bit, or return the pulled-up line when inactive."""
+        with self._lifecycle_lock:
+            return self._on_edge_locked(our_bit, our_role)
+
+    def _on_edge_locked(self, our_bit: int, our_role: int) -> int:
+        if not self._active:
+            return 1
         peer = self._peer
         self.edge_count += 1
         # Peer must be armed and in slave mode to accept a driven edge.
@@ -181,7 +198,7 @@ class CoordinatedBackend:
             # master callback is active. Give it a bounded cooperative
             # chance to reach the ROM's SB/SC re-arm point before treating
             # the line as disconnected.
-            self.prepare_peer_for_edge()
+            self._prepare_peer_for_edge_locked()
         if not peer.transfer_enabled:
             self.peer_unarmed_edges += 1
             return 1
@@ -196,6 +213,20 @@ class CoordinatedBackend:
         if completed and self._on_peer_transfer_complete is not None:
             self._on_peer_transfer_complete()
         return peer_bit
+
+    @property
+    def active(self) -> bool:
+        with self._lifecycle_lock:
+            return self._active
+
+    def activate(self) -> None:
+        with self._lifecycle_lock:
+            self._active = True
+
+    def deactivate(self) -> None:
+        """Stop future edge callbacks after any in-flight callback completes."""
+        with self._lifecycle_lock:
+            self._active = False
 
 
 class LockstepCoordinator:
@@ -247,38 +278,96 @@ class LockstepCoordinator:
         self._on_a_peer_unarmed = on_a_peer_unarmed
         self._on_b_peer_unarmed = on_b_peer_unarmed
         self._attached = False
+        self._lifecycle_lock = threading.RLock()
+        self._backend_a: CoordinatedBackend | None = None
+        self._backend_b: CoordinatedBackend | None = None
         self.attach()
 
     # --- attach / detach -----------------------------------------------
 
     def attach(self) -> None:
         """Install :class:`CoordinatedBackend` on both cores. Idempotent."""
-        if self._attached:
-            return
-        self._prev_backend_a = self._a.backend
-        self._prev_backend_b = self._b.backend
-        # A's backend drives edges into B; completion on B means B's
-        # slave IRQ callback should fire (wakes B's halted CPU).
-        self._a.backend = CoordinatedBackend(
-            self._b,
-            on_peer_transfer_complete=self._on_b_done,
-            on_peer_unarmed=self._on_a_peer_unarmed,
-        )
-        self._b.backend = CoordinatedBackend(
-            self._a,
-            on_peer_transfer_complete=self._on_a_done,
-            on_peer_unarmed=self._on_b_peer_unarmed,
-        )
-        self._attached = True
+        with self._lifecycle_lock:
+            if self._attached:
+                return
+            prev_backend_a = self._a.backend
+            prev_backend_b = self._b.backend
+            # A's backend drives edges into B; completion on B means B's
+            # slave IRQ callback should fire (wakes B's halted CPU).
+            backend_a = CoordinatedBackend(
+                self._b,
+                on_peer_transfer_complete=self._on_b_done,
+                on_peer_unarmed=self._on_a_peer_unarmed,
+                active=False,
+            )
+            backend_b = CoordinatedBackend(
+                self._a,
+                on_peer_transfer_complete=self._on_a_done,
+                on_peer_unarmed=self._on_b_peer_unarmed,
+                active=False,
+            )
+            try:
+                self._a.backend = backend_a
+                self._b.backend = backend_b
+                # Do not let a concurrently ticking core use a half-attached
+                # pair while the second backend assignment is still pending.
+                backend_a.activate()
+                backend_b.activate()
+            except BaseException as exc:
+                # A partially attached coordinator must never leave one core
+                # pointing at a backend whose peer side was not installed.
+                backend_a.deactivate()
+                backend_b.deactivate()
+                rollback_errors: list[BaseException] = []
+                try:
+                    if self._a.backend is backend_a:
+                        self._a.backend = prev_backend_a
+                except BaseException as rollback_error:
+                    rollback_errors.append(rollback_error)
+                try:
+                    if self._b.backend is backend_b:
+                        self._b.backend = prev_backend_b
+                except BaseException as rollback_error:
+                    rollback_errors.append(rollback_error)
+                for rollback_error in rollback_errors:
+                    exc.add_note(
+                        f"coordinator attach rollback failed: {rollback_error!r}"
+                    )
+                raise
+            self._prev_backend_a = prev_backend_a
+            self._prev_backend_b = prev_backend_b
+            self._backend_a = backend_a
+            self._backend_b = backend_b
+            self._attached = True
 
     def detach(self) -> None:
         """Restore the backends the cores had before :meth:`attach`.
         Idempotent."""
-        if not self._attached:
-            return
-        self._a.backend = self._prev_backend_a or NullBackend()
-        self._b.backend = self._prev_backend_b or NullBackend()
-        self._attached = False
+        with self._lifecycle_lock:
+            if not self._attached:
+                return
+            errors: list[Exception] = []
+            for core, backend, previous in (
+                (self._a, self._backend_a, self._prev_backend_a),
+                (self._b, self._backend_b, self._prev_backend_b),
+            ):
+                if backend is not None:
+                    backend.deactivate()
+                # Do not overwrite a backend installed by another owner
+                # after attach; only restore the coordinator's own object.
+                if core.backend is not backend:
+                    continue
+                try:
+                    core.backend = previous if previous is not None else NullBackend()
+                except Exception as exc:  # noqa: BLE001 - detach both sides
+                    errors.append(exc)
+            self._backend_a = None
+            self._backend_b = None
+            self._attached = False
+            if errors:
+                raise RuntimeError(
+                    "one or more coordinated serial backends could not be detached"
+                ) from errors[0]
 
     @property
     def attached(self) -> bool:
@@ -310,12 +399,17 @@ class LockstepCoordinator:
         their job transparently; this helper exists for simple tests
         and examples.
         """
-        masters = [c for c in (self._a, self._b) if c.internal_clock and c.transfer_enabled]
-        if len(masters) != 1:
-            return False
-        master = masters[0]
-        target = master.last_cycles + cycles
-        return master.tick(target)
+        cycles = _validate_positive_cycles(cycles)
+        with self._lifecycle_lock:
+            masters = [
+                c for c in (self._a, self._b)
+                if c.internal_clock and c.transfer_enabled
+            ]
+            if len(masters) != 1:
+                return False
+            master = masters[0]
+            target = master.last_cycles + cycles
+            return master.tick(target)
 
 
 __all__ = [
