@@ -153,6 +153,15 @@ def _require_timeout(value: float | None, name: str) -> float:
     return normalized
 
 
+def _coerce_payload(value: bytes | bytearray | memoryview, name: str) -> bytes:
+    """Validate and copy a wire payload before framing it."""
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError(
+            f"{name} must be bytes-like, got {type(value).__name__}"
+        )
+    return bytes(value)
+
+
 def validate_loopback_host(host: str) -> str:
     """Return a normalized loopback host or reject unsafe destinations.
 
@@ -401,9 +410,18 @@ class NetworkBackend:
         # lets multiple pending syncs coexist (unusual but defensively
         # modeled).
         self._sync_queues: dict[int, queue.Queue[int]] = {}
+        # At most one unconsumed marker is allowed for a sync id. The wire
+        # format has no request id, so accepting two pending markers would let
+        # a duplicate satisfy a later barrier. Once a marker is consumed, the
+        # id may be reused for the next phase.
+        self._sync_pending: set[int] = set()
         self._exchange_queues: dict[int, queue.Queue[bytes]] = {}
-        self._sync_lock = threading.Lock()
+        # poll_peer_sync and the reader both update the per-id pending marker;
+        # a re-entrant lock keeps the small queue helper safe when called from
+        # either path while preserving one ordering point for duplicate checks.
+        self._sync_lock = threading.RLock()
         self._exchange_lock = threading.Lock()
+        self._close_lock = threading.Lock()
         self._closed = False
         self._closed_event = threading.Event()
         self._reader_exc: Exception | None = None
@@ -809,6 +827,7 @@ class NetworkBackend:
         transport after the marker is sent so a stale barrier cannot be
         mistaken for a later one.
         """
+        sync_id = _validate_id(sync_id, "sync_id")
         timeout = _require_timeout(timeout, "timeout")
         q = self._sync_queue(sync_id)
         deadline = time.monotonic() + timeout
@@ -824,6 +843,8 @@ class NetworkBackend:
                 timeout_message=f"no peer OP_SYNC({sync_id}) within {timeout}s",
                 cancel_event=cancel_event,
             )
+            with self._sync_lock:
+                self._sync_pending.discard(sync_id)
         except NetworkBackendError:
             # A cancelled or timed-out SYNC has already put a control marker
             # on the wire. Without request ids, retaining the connection
@@ -853,11 +874,14 @@ class NetworkBackend:
         Consumes one queued peer SYNC if present; otherwise returns
         False immediately.
         """
-        q = self._sync_queue(sync_id)
-        try:
-            q.get_nowait()
-        except queue.Empty:
-            return False
+        sync_id = _validate_id(sync_id, "sync_id")
+        with self._sync_lock:
+            q = self._sync_queue(sync_id)
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                return False
+            self._sync_pending.discard(sync_id)
         self._stats["sync_poll_hits"] = int(self._stats["sync_poll_hits"]) + 1
         return True
 
@@ -878,8 +902,8 @@ class NetworkBackend:
         total deadline; cancellation closes the transport after a frame may
         have been admitted.
         """
-        if not 0 <= kind_id <= 255:
-            raise ValueError(f"kind_id must fit in uint8, got {kind_id}")
+        kind_id = _validate_id(kind_id, "kind_id")
+        payload = _coerce_payload(payload, "payload")
         if len(payload) > 0xFFFF:
             raise ValueError(f"payload too large: {len(payload)} bytes")
         timeout = _require_timeout(timeout, "timeout")
@@ -1035,8 +1059,7 @@ class NetworkBackend:
                         )
 
     def _sync_queue(self, sync_id: int) -> queue.Queue[int]:
-        if not 0 <= sync_id <= 255:
-            raise ValueError(f"sync_id must fit in uint8, got {sync_id}")
+        sync_id = _validate_id(sync_id, "sync_id")
         # Make sure we have a queue ready before we send, so the
         # reader thread can deposit an incoming SYNC even if we
         # haven't started waiting yet.
@@ -1046,6 +1069,7 @@ class NetworkBackend:
             )
 
     def _exchange_queue(self, kind_id: int) -> queue.Queue[bytes]:
+        kind_id = _validate_id(kind_id, "kind_id")
         with self._exchange_lock:
             return self._exchange_queues.setdefault(
                 kind_id, queue.Queue(maxsize=_CONTROL_QUEUE_MAXSIZE)
@@ -1070,6 +1094,7 @@ class NetworkBackend:
         timeout: float,
         cancel_event: threading.Event | None = None,
     ) -> None:
+        sync_id = _validate_id(sync_id, "sync_id")
         self._stats["sync_sent"] = int(self._stats["sync_sent"]) + 1
         try:
             with self._write_guard(
@@ -1125,22 +1150,30 @@ class NetworkBackend:
         makes that state terminal and lets both the reader and edge worker
         unwind; a later call to :meth:`stop` remains idempotent.
         """
-        if error is not None and self._reader_exc is None:
-            self._reader_exc = error
-        self._closed = True
-        self._closed_event.set()
-        self._hello_received.set()
-        with self._edge_pending_condition:
-            self._edge_pending_condition.notify_all()
-        self._signal_edge_worker_stop()
-        try:
-            self._sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        with self._close_lock:
+            if self._closed:
+                return
+            if error is not None:
+                self._reader_exc = error
+            self._closed = True
+            self._closed_event.set()
+            self._hello_received.set()
+            # Requests which have not produced a response cannot complete
+            # after the transport is terminal. Clear the admitted-work
+            # accounting now; worker finally blocks use the saturating helper
+            # below so a racing worker cannot make it negative.
+            with self._edge_pending_condition:
+                self._edge_pending = 0
+                self._edge_pending_condition.notify_all()
+            self._signal_edge_worker_stop()
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self._sock.close()
+            except OSError:
+                pass
 
     def close(self, *, timeout_s: float = 2.0) -> bool:
         return self.stop(timeout_s=timeout_s)
@@ -1152,24 +1185,11 @@ class NetworkBackend:
         # observe a half-published worker pair and return before the newly
         # started threads are signalled and joined.
         with self._receiver_start_lock:
-            self._closed = True
-            self._closed_event.set()
-            self._hello_received.set()
-            with self._edge_pending_condition:
-                self._edge_pending_condition.notify_all()
-            # Wake the mode-specific edge worker. In owner-dispatch mode this
-            # is the response-only worker; the owner request queue is
-            # intentionally not drained after closure because it contains
-            # emulator work.
-            self._signal_edge_worker_stop()
-            try:
-                self._sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                self._sock.close()
-            except OSError:
-                pass
+            # Wake the mode-specific edge worker and close the socket before
+            # joining either thread. In owner-dispatch mode queued requests
+            # are terminal emulator work and must not be applied after close;
+            # _mark_closed clears their pending accounting.
+            self._mark_closed()
             edge_worker = self._edge_worker
             reader = self._reader
         if (
@@ -1249,17 +1269,22 @@ class NetworkBackend:
                                 "duplicate or unsolicited EDGE_RESP"
                             ) from exc
                 elif opcode == _OP_SYNC:
-                    self._stats["sync_received"] = int(self._stats["sync_received"]) + 1
                     with self._sync_lock:
+                        if payload in self._sync_pending:
+                            raise NetworkBackendError(
+                                f"duplicate pending OP_SYNC({payload})"
+                            )
                         q = self._sync_queues.setdefault(
                             payload, queue.Queue(maxsize=_CONTROL_QUEUE_MAXSIZE)
                         )
-                    try:
-                        q.put_nowait(payload)
-                    except queue.Full as exc:
-                        raise NetworkBackendError(
-                            f"OP_SYNC({payload}) queue is full"
-                        ) from exc
+                        try:
+                            q.put_nowait(payload)
+                        except queue.Full as exc:
+                            raise NetworkBackendError(
+                                f"OP_SYNC({payload}) queue is full"
+                            ) from exc
+                        self._sync_pending.add(payload)
+                    self._stats["sync_received"] = int(self._stats["sync_received"]) + 1
                 elif opcode == _OP_EXCHANGE:
                     raw_len = self._recv_exactly(2)
                     (length,) = _LEN.unpack(raw_len)
@@ -1321,9 +1346,7 @@ class NetworkBackend:
                 self._mark_closed(exc)
                 return
             finally:
-                with self._edge_pending_condition:
-                    self._edge_pending -= 1
-                    self._edge_pending_condition.notify_all()
+                self._decrement_edge_pending()
 
     def _owner_response_worker_loop(self) -> None:
         """Send responses produced by the emulator-owner dispatch path.
@@ -1347,9 +1370,7 @@ class NetworkBackend:
                 self._mark_closed(exc)
                 return
             finally:
-                with self._edge_pending_condition:
-                    self._edge_pending -= 1
-                    self._edge_pending_condition.notify_all()
+                self._decrement_edge_pending()
 
     def service_pending_edges(self, *, max_edges: int | None = None) -> int:
         """Apply queued peer edges on the caller's emulator-owner thread.
@@ -1388,6 +1409,7 @@ class NetworkBackend:
                 # harmless without altering the pending count.
                 break
             if self._closed:
+                self._decrement_edge_pending()
                 break
             try:
                 ready = self._apply_owner_edge_if_ready(request)
@@ -1401,6 +1423,7 @@ class NetworkBackend:
                         f"owner failed to apply incoming EDGE_REQ: {exc}"
                     )
                 )
+                self._decrement_edge_pending()
                 break
             if not ready:
                 # There is at most one in-flight master edge per peer, but
@@ -1424,6 +1447,7 @@ class NetworkBackend:
                         "completed EDGE_REQ response queue is full"
                     )
                 )
+                self._decrement_edge_pending()
                 raise NetworkBackendError(
                     "completed EDGE_REQ response queue is full"
                 ) from exc
@@ -1551,6 +1575,15 @@ class NetworkBackend:
         except queue.Full:
             pass
 
+    def _decrement_edge_pending(self) -> None:
+        """Release one admitted edge without allowing close races to underflow."""
+        with self._edge_pending_condition:
+            if self._edge_pending > 0:
+                self._edge_pending -= 1
+            else:
+                self._edge_pending = 0
+            self._edge_pending_condition.notify_all()
+
     def _handle_edge_req(self, peer_bit: int) -> None:
         """Peer is master, we are slave. Apply edge to local_core,
         respond with our bit.
@@ -1623,7 +1656,7 @@ class NetworkBackend:
                     deadline,
                     time.monotonic() + _ACTIVE_EXCHANGE_REARM_WAIT_SECONDS,
                 )
-            while time.monotonic() < deadline and not self._closed:
+            while time.monotonic() < deadline and not self._closed_event.is_set():
                 if armed():
                     self._stats["slave_rearm_successes"] = (
                         int(self._stats["slave_rearm_successes"]) + 1
@@ -1635,7 +1668,11 @@ class NetworkBackend:
                         self._post_byte_rearm_until = 0.0
                     self._stats["last_slave_rearm_at"] = time.monotonic()
                     break
-                time.sleep(0.0005)
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    # Event.wait is both a short polling interval and an
+                    # immediate cancellation point for stop()/peer EOF.
+                    self._closed_event.wait(timeout=min(0.0005, remaining))
 
         with self._serial_gate:
             if armed():

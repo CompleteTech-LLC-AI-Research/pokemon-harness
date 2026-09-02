@@ -29,6 +29,8 @@ from pokered_harness.link.serial_coordinator import SerialOperationGate
 
 _OP_EDGE_REQ = 0x10
 _OP_EDGE_RESP = 0x11
+_OP_SYNC = 0x20
+_OP_EXCHANGE = 0x30
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +342,81 @@ def test_unsolicited_edge_responses_fail_closed_without_wedging_shutdown():
         b.stop()
 
 
+def test_duplicate_pending_sync_fails_closed():
+    """The id-only SYNC frame cannot safely carry two outstanding markers."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        a.announce_sync(sync_id=42)
+        a.announce_sync(sync_id=42)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and b._reader_exc is None:
+            time.sleep(0.005)
+        assert isinstance(b._reader_exc, NetworkBackendError)
+        assert "duplicate pending OP_SYNC" in str(b._reader_exc)
+        assert not b.connected
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_sync_id_can_be_reused_after_marker_is_consumed():
+    """Duplicate protection must not make a connection single-use per id."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    try:
+        for _ in range(2):
+            a.announce_sync(sync_id=42)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if b.poll_peer_sync(sync_id=42):
+                    break
+                time.sleep(0.005)
+            else:
+                pytest.fail("peer SYNC marker was not delivered")
+        assert b.connected
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_partial_frame_eof_fails_closed():
+    """EOF after a partial control frame is protocol damage, not clean close."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b._sock.sendall(struct.pack(">B", _OP_SYNC))
+    b.stop()
+    try:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and a._reader_exc is None:
+            time.sleep(0.005)
+        assert isinstance(a._reader_exc, NetworkBackendError)
+        assert "mid-frame" in str(a._reader_exc)
+        assert not a.connected
+    finally:
+        a.stop()
+
+
+def test_exchange_queue_backpressure_fails_closed():
+    """A peer flooding one exchange kind cannot grow an unbounded queue."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    frame = struct.pack(">BBH", _OP_EXCHANGE, 7, 0)
+    b._sock.sendall(frame * 257)
+    try:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and a._reader_exc is None:
+            time.sleep(0.005)
+        assert isinstance(a._reader_exc, NetworkBackendError)
+        assert "queue is full" in str(a._reader_exc)
+        assert not a.connected
+    finally:
+        a.stop()
+        b.stop()
+
+
 def test_cancelled_network_connect_returns_promptly():
     cancel = threading.Event()
     cancel.set()
@@ -607,6 +684,47 @@ class _BlockingSlaveCore:
         if not self.release_edge.wait(timeout=2.0):
             raise RuntimeError("test edge release timed out")
         return False
+
+
+def test_stop_releases_owner_queued_edge_accounting():
+    """Closing a queued owner-dispatch backend cannot strand pending work."""
+    a, b = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    core.transfer_enabled = 0
+    a.start_receiver(local_core=None)
+    b.start_receiver(
+        local_core=core,
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    sender_errors: list[Exception] = []
+
+    def send_edge() -> None:
+        try:
+            a.on_edge(our_bit=1, our_role=1)
+        except Exception as exc:  # noqa: BLE001 - shutdown is expected here
+            sender_errors.append(exc)
+
+    sender = threading.Thread(target=send_edge, daemon=True)
+    sender.start()
+    try:
+        deadline = time.monotonic() + 1.0
+        while (
+            time.monotonic() < deadline
+            and b.debug_snapshot()["pending_edge_requests"] == 0
+        ):
+            time.sleep(0.005)
+        assert b.debug_snapshot()["pending_edge_requests"] == 1
+
+        assert b.stop(timeout_s=0.2) is True
+        assert b.debug_snapshot()["pending_edge_requests"] == 0
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert sender_errors and isinstance(sender_errors[0], NetworkBackendError)
+        assert core.SB == 0
+    finally:
+        a.stop()
+        b.stop()
 
 
 def test_wait_for_wire_idle_is_bounded_while_edge_worker_is_busy():
