@@ -406,15 +406,24 @@ def test_default_pyboy_factory_passes_window_and_cgb(monkeypatch):
 
     # Default: headless + CGB on.
     _default_pyboy_factory("rom.gb")
-    assert captured[-1] == (("rom.gb",), {"window": "null", "cgb": True})
+    assert captured[-1] == (
+        ("rom.gb",),
+        {"window": "null", "cgb": True, "sound_emulated": False},
+    )
 
     # Explicit SDL2 view + CGB still on.
     _default_pyboy_factory("rom.gb", window="SDL2")
-    assert captured[-1] == (("rom.gb",), {"window": "SDL2", "cgb": True})
+    assert captured[-1] == (
+        ("rom.gb",),
+        {"window": "SDL2", "cgb": True, "sound_emulated": True},
+    )
 
     # cgb can be overridden.
     _default_pyboy_factory("rom.gb", window="null", cgb=False)
-    assert captured[-1] == (("rom.gb",), {"window": "null", "cgb": False})
+    assert captured[-1] == (
+        ("rom.gb",),
+        {"window": "null", "cgb": False, "sound_emulated": False},
+    )
 
 
 # -- serial_hook ---------------------------------------------------------
