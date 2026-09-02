@@ -60,7 +60,8 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Callable
+from contextlib import contextmanager
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -141,6 +142,14 @@ def _validate_optional_timeout(value: float | None, name: str) -> float | None:
         ) from exc
     if not math.isfinite(normalized) or normalized < 0:
         raise ValueError(f"{name} must be a finite, non-negative number")
+    return normalized
+
+
+def _require_timeout(value: float | None, name: str) -> float:
+    """Validate a required finite timeout without relying on ``assert``."""
+    normalized = _validate_optional_timeout(value, name)
+    if normalized is None:
+        raise ValueError(f"{name} must be finite and non-negative")
     return normalized
 
 
@@ -501,6 +510,11 @@ class NetworkBackend:
         return not self._closed
 
     @property
+    def local_rom_version(self) -> str | None:
+        """Return the local HELLO ROM label, if versioned transport is on."""
+        return self._local_rom_version
+
+    @property
     def peer_rom_version(self) -> str:
         """Return the peer's versioned protocol ROM label.
 
@@ -517,6 +531,7 @@ class NetworkBackend:
         timeout: float = 10.0,
         *,
         expected_peer_rom_version: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str | None:
         """Wait for the optional versioned handshake.
 
@@ -525,23 +540,38 @@ class NetworkBackend:
         callers pass ``local_rom_version`` and therefore fail closed if the
         peer does not present a compatible protocol/ROM identity. Callers that
         know the expected peer label can pass it explicitly to reject a
-        mismatched announcement.
+        mismatched announcement. ``cancel_event`` is polled while waiting;
+        cancellation closes this transport because the handshake has no
+        request id and cannot safely be resumed.
         """
+        timeout = _require_timeout(timeout, "timeout")
         expected = (
             _validate_rom_version(expected_peer_rom_version)
             if expected_peer_rom_version is not None
             else None
         )
         if self._local_rom_version is None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise NetworkBackendError("HELLO wait cancelled")
             if expected is not None:
                 raise NetworkBackendError(
                     "cannot validate peer ROM without a local versioned HELLO"
                 )
             return None
-        if not self._hello_received.wait(timeout=max(0.0, timeout)):
-            raise NetworkBackendError(
-                f"peer HELLO not received within {timeout:g}s"
-            )
+        deadline = time.monotonic() + timeout
+        while not self._hello_received.is_set():
+            if cancel_event is not None and cancel_event.is_set():
+                error = NetworkBackendError("HELLO wait cancelled")
+                self._mark_closed(error)
+                raise error
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                error = NetworkBackendError(
+                    f"peer HELLO not received within {timeout:g}s"
+                )
+                self._mark_closed(error)
+                raise error
+            self._hello_received.wait(timeout=min(_SEND_POLL_SECONDS, remaining))
         if self._closed and self._peer_rom_version is None:
             if self._reader_exc is not None:
                 raise NetworkBackendError(
@@ -650,18 +680,25 @@ class NetworkBackend:
 
             frame_out = _FRAME.pack(_OP_EDGE_REQ, our_bit & 1)
             self._stats["edge_req_sent"] = int(self._stats["edge_req_sent"]) + 1
+            # EDGE_RESP has no request id, so a late response cannot be
+            # retried or matched to a later transfer. Bound the complete
+            # request/response operation with one deadline; separately
+            # granting the send and receive phases the full timeout could
+            # retain the emulator owner for twice the advertised limit.
+            deadline = time.monotonic() + _EDGE_RESPONSE_TIMEOUT_SECONDS
             try:
-                with self._write_lock:
-                    if self._closed:
-                        raise NetworkBackendError("backend closed")
+                with self._write_guard(
+                    deadline=deadline,
+                    operation="EDGE_REQ",
+                ) as write_deadline:
                     self._send_frame(
                         frame_out,
-                        timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                        timeout=max(0.0, write_deadline - time.monotonic()),
                         operation="EDGE_REQ",
                     )
                 bit = self._queue_get(
                     self._resp_queue,
-                    timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                    timeout=max(0.0, deadline - time.monotonic()),
                     timeout_message=(
                         "no EDGE_RESP from peer within "
                         f"{_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
@@ -691,7 +728,13 @@ class NetworkBackend:
 
     # --- out-of-band rendezvous ---------------------------------------
 
-    def sync_with_peer(self, sync_id: int = 0, *, timeout: float = 120.0) -> None:
+    def sync_with_peer(
+        self,
+        sync_id: int = 0,
+        *,
+        timeout: float = 120.0,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         """Cross-peer rendezvous barrier.
 
         Send an ``OP_SYNC`` frame with ``sync_id`` (0-255), then block
@@ -701,19 +744,40 @@ class NetworkBackend:
         to converge both sides at phase boundaries.
 
         Raises :class:`NetworkBackendError` if the peer's SYNC doesn't
-        arrive within ``timeout`` seconds.
+        arrive within ``timeout`` seconds. The timeout covers both the send
+        and receive phases as one total deadline. Cancellation closes the
+        transport after the marker is sent so a stale barrier cannot be
+        mistaken for a later one.
         """
-        timeout = _validate_optional_timeout(timeout, "timeout")
-        assert timeout is not None
+        timeout = _require_timeout(timeout, "timeout")
         q = self._sync_queue(sync_id)
-        self._send_sync_with_timeout(sync_id, timeout=timeout)
-        self._queue_get(
-            q,
-            timeout=timeout,
-            timeout_message=f"no peer OP_SYNC({sync_id}) within {timeout}s",
-        )
+        deadline = time.monotonic() + timeout
+        try:
+            self._send_sync_with_timeout(
+                sync_id,
+                timeout=max(0.0, deadline - time.monotonic()),
+                cancel_event=cancel_event,
+            )
+            self._queue_get(
+                q,
+                timeout=max(0.0, deadline - time.monotonic()),
+                timeout_message=f"no peer OP_SYNC({sync_id}) within {timeout}s",
+                cancel_event=cancel_event,
+            )
+        except NetworkBackendError:
+            # A cancelled or timed-out SYNC has already put a control marker
+            # on the wire. Without request ids, retaining the connection
+            # would let that stale marker satisfy a later barrier.
+            if not self._closed:
+                self._mark_closed()
+            raise
 
-    def announce_sync(self, sync_id: int = 0) -> None:
+    def announce_sync(
+        self,
+        sync_id: int = 0,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         """Send an ``OP_SYNC`` marker without waiting for the peer.
 
         Higher-level drivers can use this to advertise that the local
@@ -721,7 +785,7 @@ class NetworkBackend:
         CPU until the peer catches up.
         """
         self._sync_queue(sync_id)
-        self._send_sync(sync_id)
+        self._send_sync(sync_id, cancel_event=cancel_event)
 
     def poll_peer_sync(self, sync_id: int = 0) -> bool:
         """Return True if a peer ``OP_SYNC`` for ``sync_id`` is pending.
@@ -738,32 +802,42 @@ class NetworkBackend:
         return True
 
     def exchange_block(
-        self, kind_id: int, payload: bytes, *, timeout: float = 120.0
+        self,
+        kind_id: int,
+        payload: bytes,
+        *,
+        timeout: float = 120.0,
+        cancel_event: threading.Event | None = None,
     ) -> bytes:
         """Exchange an arbitrary serial data block with the peer.
 
         This is an out-of-band helper for high-level ROM routines such as
         ``Serial_ExchangeBytes`` where bit-level transfer is prohibitively
         slow or can desynchronize after thousands of serial edges. FIFO is
-        preserved per ``kind_id``.
+        preserved per ``kind_id``. The timeout covers both directions as one
+        total deadline; cancellation closes the transport after a frame may
+        have been admitted.
         """
         if not 0 <= kind_id <= 255:
             raise ValueError(f"kind_id must fit in uint8, got {kind_id}")
         if len(payload) > 0xFFFF:
             raise ValueError(f"payload too large: {len(payload)} bytes")
-        timeout = _validate_optional_timeout(timeout, "timeout")
-        assert timeout is not None
+        timeout = _require_timeout(timeout, "timeout")
         q = self._exchange_queue(kind_id)
         frame = _FRAME.pack(_OP_EXCHANGE, kind_id) + _LEN.pack(len(payload)) + payload
         self._stats["exchange_sent"] = int(self._stats["exchange_sent"]) + 1
+        deadline = time.monotonic() + timeout
         try:
-            with self._write_lock:
-                if self._closed:
-                    raise NetworkBackendError("backend closed")
+            with self._write_guard(
+                deadline=deadline,
+                operation=f"OP_EXCHANGE({kind_id})",
+                cancel_event=cancel_event,
+            ) as write_deadline:
                 self._send_frame(
                     frame,
-                    timeout=timeout,
+                    timeout=max(0.0, write_deadline - time.monotonic()),
                     operation=f"OP_EXCHANGE({kind_id})",
+                    cancel_event=cancel_event,
                 )
         except (OSError, NetworkBackendError) as exc:
             error = (
@@ -777,8 +851,9 @@ class NetworkBackend:
             raise error from exc
         return self._queue_get(
             q,
-            timeout=timeout,
+            timeout=max(0.0, deadline - time.monotonic()),
             timeout_message=f"no peer OP_EXCHANGE({kind_id}) within {timeout}s",
+            cancel_event=cancel_event,
         )
 
     def debug_snapshot(self) -> dict[str, object]:
@@ -804,6 +879,7 @@ class NetworkBackend:
         allow_peer_close: bool = False,
         progress_callback: Callable[[], None] | None = None,
         stable_checks: int = 1,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         """Wait until all already-received edge work has drained.
 
@@ -821,12 +897,13 @@ class NetworkBackend:
         edges while the caller is waiting for wire idle; without it, a caller
         that owns the emulator thread can wait on work that only that same
         thread is allowed to apply. ``stable_checks`` requires that many
-        consecutive idle observations, allowing a caller to establish a
-        quiet window around a ROM phase boundary rather than trusting a
-        single gap between serial edges.
+        consecutive idle observations separated by a bounded poll interval,
+        allowing a caller to establish a quiet window around a ROM phase
+        boundary rather than trusting a single gap between serial edges.
+        Cancellation leaves this transport open because no wire marker was
+        sent and the wait can be safely retried.
         """
-        timeout = _validate_optional_timeout(timeout, "timeout")
-        assert timeout is not None
+        timeout = _require_timeout(timeout, "timeout")
         if isinstance(stable_checks, bool) or not isinstance(stable_checks, int):
             raise TypeError("stable_checks must be a positive integer")
         if stable_checks <= 0:
@@ -834,6 +911,9 @@ class NetworkBackend:
         deadline = time.monotonic() + timeout
         idle_checks = 0
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise NetworkBackendError("wire-idle wait cancelled")
+            idle_observed = False
             with self._edge_pending_condition:
                 with self._edge_response_lock:
                     edge_inflight = self._edge_inflight
@@ -848,6 +928,7 @@ class NetworkBackend:
                                 f"{self._reader_exc}"
                             ) from self._reader_exc
                         raise NetworkBackendError("backend closed while waiting for wire idle")
+                    idle_observed = True
                     idle_checks += 1
                     if idle_checks >= stable_checks:
                         return
@@ -860,6 +941,8 @@ class NetworkBackend:
                             f"{self._reader_exc}"
                         ) from self._reader_exc
                     raise NetworkBackendError("backend closed while waiting for wire idle")
+                if cancel_event is not None and cancel_event.is_set():
+                    raise NetworkBackendError("wire-idle wait cancelled")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise NetworkBackendError(
@@ -877,6 +960,19 @@ class NetworkBackend:
             # the lock so its owner-side serial dispatch can notify the
             # reader/response worker and let the next loop observe progress.
             progress_callback()
+            if idle_observed and stable_checks > 1:
+                # A sequence of immediate checks is not a quiet window: a
+                # peer can enqueue its next EDGE_REQ between two Python
+                # observations. Keep the owner callback outside the lock,
+                # then wait for one bounded poll interval before counting the
+                # next observation. Reader/worker notifications wake this
+                # wait as soon as edge work appears or drains.
+                with self._edge_pending_condition:
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        self._edge_pending_condition.wait(
+                            timeout=min(_SEND_POLL_SECONDS, remaining)
+                        )
 
     def _sync_queue(self, sync_id: int) -> queue.Queue[int]:
         if not 0 <= sync_id <= 255:
@@ -895,19 +991,37 @@ class NetworkBackend:
                 kind_id, queue.Queue(maxsize=_CONTROL_QUEUE_MAXSIZE)
             )
 
-    def _send_sync(self, sync_id: int) -> None:
-        self._send_sync_with_timeout(sync_id, timeout=_DEFAULT_SEND_TIMEOUT_SECONDS)
+    def _send_sync(
+        self,
+        sync_id: int,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        self._send_sync_with_timeout(
+            sync_id,
+            timeout=_DEFAULT_SEND_TIMEOUT_SECONDS,
+            cancel_event=cancel_event,
+        )
 
-    def _send_sync_with_timeout(self, sync_id: int, *, timeout: float) -> None:
+    def _send_sync_with_timeout(
+        self,
+        sync_id: int,
+        *,
+        timeout: float,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         self._stats["sync_sent"] = int(self._stats["sync_sent"]) + 1
         try:
-            with self._write_lock:
-                if self._closed:
-                    raise NetworkBackendError("backend closed")
+            with self._write_guard(
+                timeout=timeout,
+                operation=f"OP_SYNC({sync_id})",
+                cancel_event=cancel_event,
+            ) as write_deadline:
                 self._send_frame(
                     _FRAME.pack(_OP_SYNC, sync_id),
-                    timeout=timeout,
+                    timeout=max(0.0, write_deadline - time.monotonic()),
                     operation=f"OP_SYNC({sync_id})",
+                    cancel_event=cancel_event,
                 )
         except (OSError, NetworkBackendError) as exc:
             error = (
@@ -923,12 +1037,13 @@ class NetworkBackend:
     def _send_hello(self, rom_version: str) -> None:
         payload = (_PROTOCOL_VERSION << 4) | _ROM_VERSION_CODES[rom_version]
         try:
-            with self._write_lock:
-                if self._closed:
-                    raise NetworkBackendError("backend closed")
+            with self._write_guard(
+                timeout=_DEFAULT_SEND_TIMEOUT_SECONDS,
+                operation="HELLO",
+            ) as write_deadline:
                 self._send_frame(
                     _FRAME.pack(_OP_HELLO, payload),
-                    timeout=_DEFAULT_SEND_TIMEOUT_SECONDS,
+                    timeout=max(0.0, write_deadline - time.monotonic()),
                     operation="HELLO",
                 )
         except (OSError, NetworkBackendError) as exc:
@@ -971,8 +1086,7 @@ class NetworkBackend:
         return self.stop(timeout_s=timeout_s)
 
     def stop(self, *, timeout_s: float = 2.0) -> bool:
-        timeout_s = _validate_optional_timeout(timeout_s, "timeout_s")
-        assert timeout_s is not None
+        timeout_s = _require_timeout(timeout_s, "timeout_s")
         deadline = time.monotonic() + timeout_s
         self._closed = True
         self._closed_event.set()
@@ -1042,6 +1156,7 @@ class NetworkBackend:
                         )
                     with self._edge_pending_condition:
                         self._edge_pending += 1
+                        self._edge_pending_condition.notify_all()
                     request = _InboundEdge(payload & 1)
                     try:
                         self._edge_queue.put_nowait(request)
@@ -1058,6 +1173,10 @@ class NetworkBackend:
                             f"invalid EDGE_RESP bit payload {payload}"
                         )
                     with self._edge_response_lock:
+                        if not self._edge_inflight:
+                            raise NetworkBackendError(
+                                "unsolicited EDGE_RESP"
+                            )
                         try:
                             self._resp_queue.put_nowait(payload & 1)
                         except queue.Full as exc:
@@ -1341,12 +1460,15 @@ class NetworkBackend:
             raise NetworkBackendError(
                 "owner produced an invalid EDGE_RESP bit"
             )
-        with self._write_lock:
+        with self._write_guard(
+            timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+            operation="EDGE_RESP",
+        ) as write_deadline:
             if self._closed:
                 return
             self._send_frame(
                 _FRAME.pack(_OP_EDGE_RESP, request.response_bit),
-                timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                timeout=max(0.0, write_deadline - time.monotonic()),
                 operation="EDGE_RESP",
             )
             self._stats["edge_resp_sent"] = (
@@ -1496,11 +1618,14 @@ class NetworkBackend:
                 self._keepalive_bit_idx = (self._keepalive_bit_idx + 1) & 7
                 completed = False
         try:
-            with self._write_lock:
+            with self._write_guard(
+                timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                operation="EDGE_RESP",
+            ) as write_deadline:
                 if not self._closed:
                     self._send_frame(
                         _FRAME.pack(_OP_EDGE_RESP, our_bit & 1),
-                        timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                        timeout=max(0.0, write_deadline - time.monotonic()),
                         operation="EDGE_RESP",
                     )
                     self._stats["edge_resp_sent"] = (
@@ -1571,7 +1696,52 @@ class NetworkBackend:
             buf.extend(chunk)
         return bytes(buf)
 
-    def _send_frame(self, frame: bytes, *, timeout: float, operation: str) -> None:
+    @contextmanager
+    def _write_guard(
+        self,
+        *,
+        timeout: float | None = None,
+        deadline: float | None = None,
+        operation: str,
+        cancel_event: threading.Event | None = None,
+    ) -> Iterator[float]:
+        """Acquire the shared writer lock without extending a deadline."""
+        if (timeout is None) == (deadline is None):
+            raise ValueError("provide exactly one of timeout or deadline")
+        if timeout is not None:
+            timeout = _require_timeout(timeout, "timeout")
+            deadline = time.monotonic() + timeout
+        else:
+            if deadline is None:
+                raise ValueError("deadline must be finite")
+            if not math.isfinite(deadline):
+                raise ValueError("deadline must be finite")
+            timeout = max(0.0, deadline - time.monotonic())
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise NetworkBackendError(f"{operation}: cancelled")
+            if self._closed or self._closed_event.is_set():
+                raise NetworkBackendError(f"{operation}: backend closed")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise NetworkBackendError(
+                    f"{operation} write lock timed out after {timeout:g}s"
+                )
+            if self._write_lock.acquire(timeout=min(_SEND_POLL_SECONDS, remaining)):
+                break
+        try:
+            yield deadline
+        finally:
+            self._write_lock.release()
+
+    def _send_frame(
+        self,
+        frame: bytes,
+        *,
+        timeout: float,
+        operation: str,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         """Send one framed message with a cancellation-aware deadline.
 
         ``socket.sendall`` is deliberately avoided: it can block in the
@@ -1579,12 +1749,13 @@ class NetworkBackend:
         is non-blocking, so each partial write is followed by a short
         writability poll and a closed-event check.
         """
-        timeout = _validate_optional_timeout(timeout, "timeout")
-        assert timeout is not None
+        timeout = _require_timeout(timeout, "timeout")
         view = memoryview(frame)
         offset = 0
         deadline = time.monotonic() + timeout
         while offset < len(view):
+            if cancel_event is not None and cancel_event.is_set():
+                raise NetworkBackendError(f"{operation}: cancelled")
             if self._closed or self._closed_event.is_set():
                 raise NetworkBackendError(f"{operation}: backend closed")
             remaining = deadline - time.monotonic()
@@ -1629,10 +1800,15 @@ class NetworkBackend:
         *,
         timeout: float,
         timeout_message: str,
+        cancel_event: threading.Event | None = None,
     ) -> Any:
         """Get a response while allowing :meth:`stop` to wake the waiter."""
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                error = NetworkBackendError("operation cancelled")
+                self._mark_closed(error)
+                raise error
             if self._closed_event.is_set():
                 if self._reader_exc is not None:
                     raise NetworkBackendError(
