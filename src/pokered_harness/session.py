@@ -153,6 +153,7 @@ class Session:
         self._stop_error: BaseException | None = None
         self._stopped = False
         self._closed = False
+        self._event_hooks: list[HookRegistration] = []
         self._serial_hooks: list[tuple[_HookState, int, int, str]] = []
         # ``view`` is stashed for introspection; the actual wiring into the
         # PyBoy factory happens in ``from_files`` where the ROM is loaded.
@@ -358,6 +359,11 @@ class Session:
                     f"the {timeout_s:g}s shutdown deadline"
                 )
             lock_acquired = True
+            # EventBus hooks are physical PyBoy callbacks too. Deactivate and
+            # deregister them while the session lock proves that no callback
+            # is currently running. Raw serial hooks are guarded separately
+            # above because their physical removal API is not stable.
+            self._close_event_hooks_locked()
             # Prove that no operation which started before close is active.
             # Public operations reject ``_closed`` before attempting the lock.
             self._lock.release()
@@ -478,12 +484,21 @@ class Session:
         interaction so callers don't reach into ``_pyboy``."""
         with self._lock:
             self._ensure_open()
-            return self._events.register(
-                pyboy=self._pyboy,
-                symbols=self._symbols,
+            bank, addr = self._symbols.bank_addr(symbol_name)
+
+            def _emit(_ctx: object) -> None:
+                self._events.emit(
+                    tick=self.current_tick(),
+                    name=event_name,
+                    bank=bank,
+                    addr=addr,
+                )
+
+            return self._register_event_hook_at_locked(
+                bank,
+                addr,
+                _emit,
                 symbol_name=symbol_name,
-                event_name=event_name,
-                tick_source=self.current_tick,
             )
 
     def register_hook_at(
@@ -504,8 +519,7 @@ class Session:
         with self._lock:
             self._ensure_open()
             bank, addr = self._symbols.bank_addr(symbol_name)
-            return self._events.register_at(
-                self._pyboy,
+            return self._register_event_hook_at_locked(
                 bank,
                 addr,
                 callback,
@@ -526,14 +540,59 @@ class Session:
         """Register a session-serialized callback at a raw address."""
         with self._lock:
             self._ensure_open()
-            return self._events.register_at(
-                self._pyboy,
+            return self._register_event_hook_at_locked(
                 bank,
                 addr,
                 callback,
                 context,
                 replace_existing=replace_existing,
             )
+
+    def _register_event_hook_at_locked(
+        self,
+        bank: int,
+        addr: int,
+        callback: Callable[[object], None],
+        context: object | None = None,
+        *,
+        symbol_name: str | None = None,
+        replace_existing: bool = False,
+    ) -> HookRegistration:
+        """Register a guarded EventBus callback; caller owns ``_lock``."""
+
+        def _guarded_callback(ctx: object) -> None:
+            # Close publishes ``_closed`` before waiting for the session lock,
+            # so callbacks arriving concurrently with teardown fail closed.
+            if self._closed:
+                return
+            with self._lock:
+                if self._closed:
+                    return
+                callback(ctx)
+
+        registration = self._events.register_at(
+            self._pyboy,
+            bank,
+            addr,
+            _guarded_callback,
+            context,
+            symbol_name=symbol_name,
+            replace_existing=replace_existing,
+        )
+        self._event_hooks.append(registration)
+        return registration
+
+    def _close_event_hooks_locked(self) -> None:
+        """Make all session-owned EventBus callbacks inert and release them."""
+        for registration in reversed(self._event_hooks):
+            try:
+                registration.close()
+            except Exception:
+                # EventBus marks a logical registration inactive before
+                # attempting physical deregistration. Continue stopping the
+                # emulator even if a custom PyBoy hook API rejects removal.
+                pass
+        self._event_hooks.clear()
 
     def serial_hook(
         self,

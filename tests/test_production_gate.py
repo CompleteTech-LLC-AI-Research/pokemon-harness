@@ -427,8 +427,17 @@ def test_strict_matrix_supervisor_marks_timeout_and_queued_rows(tmp_path, monkey
     )
 
     assert result.status == "FAIL"
-    assert {case.status for case in result.case_results} == {"TIMEOUT", "NOT_STARTED"}
-    assert sum(case.status == "NOT_STARTED" for case in result.case_results) == 1
+    # The selector startup and thread scheduling overhead is intentionally
+    # host-dependent. Assert the accounting invariant (a timeout plus queued
+    # work is recorded) without promising how many rows fit before the hard
+    # aggregate deadline.
+    assert len(result.case_results) == 3
+    assert {case.status for case in result.case_results} <= {
+        "TIMEOUT",
+        "NOT_STARTED",
+    }
+    assert any(case.status == "TIMEOUT" for case in result.case_results)
+    assert any(case.status == "NOT_STARTED" for case in result.case_results)
     assert any("aggregate deadline expired" in failure for failure in result.iteration_failures)
 
 
@@ -483,6 +492,30 @@ def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_p
         str(tmp_path / "src"),
         str(tmp_path),
     ]
+
+
+def test_environment_pins_selected_symbol_file_when_available(tmp_path, monkeypatch):
+    rom_root = tmp_path / "rom"
+    red = rom_root / "red"
+    red.mkdir(parents=True)
+    rom_path = red / "pokemon-red.gb"
+    sym_path = red / "pokemon-red.sym"
+    rom_path.write_bytes(b"rom")
+    sym_path.write_text("sym", encoding="utf-8")
+    monkeypatch.setenv("POKERED_SYM_PATH", str(sym_path))
+
+    symbol_sha = hashlib.sha1(b"sym").hexdigest()
+    environment = gate.build_test_environment(
+        tmp_path,
+        rom_root,
+        tmp_path / "fixtures",
+        {
+            Path("red/pokemon-red.gb"): hashlib.sha1(b"rom").hexdigest(),
+            Path("red/pokemon-red.sym"): symbol_sha,
+        },
+    )
+
+    assert environment["POKERED_SYM_SHA1"] == symbol_sha
 
 
 def test_gate_report_loader_counts_xfail_and_skip_reasons(tmp_path):
@@ -792,7 +825,10 @@ def test_evidence_bundle_is_portable_sanitized_and_diagnostic(tmp_path):
         "python_executable": str(project_root / ".venv" / "bin" / "python"),
         "python_version": "3.12.13",
         "pyboy_module": str(project_root / "vendor" / "pyboy-src" / "pyboy"),
-        "pyboy_import_error": "Authorization: Bearer topsecret b'ROM_BYTES'",
+        "pyboy_import_error": (
+            "Authorization: Bearer topsecret b'ROM_BYTES' "
+            r"path=C:\agent work\private\secret.gb"
+        ),
     }
     collections = [
         gate.CollectionResult(
@@ -844,6 +880,7 @@ def test_evidence_bundle_is_portable_sanitized_and_diagnostic(tmp_path):
     serialized = json.dumps(payload, sort_keys=True)
     assert "topsecret" not in serialized
     assert "ROM_BYTES" not in serialized
+    assert "secret.gb" not in serialized
     assert str(tmp_path) not in serialized
     assert "/sensitive/path" not in serialized
     assert payload["assets"][0]["path"] == "<rom-root>/red/pokemon-red.gb"

@@ -174,6 +174,33 @@ def test_dispatch_run_until_event_reports_structured_result():
     assert result["event"]["name"] == "dialog_open"
 
 
+def test_session_close_deactivates_all_event_hooks():
+    s, pb, bus = _session()
+    callback_calls: list[object] = []
+
+    event_handle = s.register_hook("DisplayTextID", "dialog_open")
+    symbol_handle = s.register_hook_at(
+        "DisplayTextID", callback_calls.append, context="symbol"
+    )
+    address_handle = s.register_hook_at_address(
+        0x00, 0x2920, callback_calls.append, context="address"
+    )
+
+    assert pb.fire(0x00, 0x2920) == 1
+    assert bus.count("dialog_open") == 1
+    assert callback_calls == ["symbol", "address"]
+
+    s.close()
+
+    assert event_handle.active is False
+    assert symbol_handle.active is False
+    assert address_handle.active is False
+    assert pb._hooks == {}
+    assert pb.fire(0x00, 0x2920) == 0
+    assert bus.count("dialog_open") == 1
+    assert callback_calls == ["symbol", "address"]
+
+
 def test_dispatch_run_until_event_timeout_path():
     s, _, _ = _session()
     s.register_hook("DisplayTextID", "dialog_open")
@@ -878,9 +905,17 @@ def test_link_connect_cleans_unpublished_resources_on_unexpected_failure(monkeyp
     detached = threading.Event()
 
     class FakeNetworkSession:
+        def __init__(self):
+            self.calls = 0
+            self.fail = True
+
         def detach_all(self):
+            self.calls += 1
             detached.set()
-            raise RuntimeError("detach failed")
+            if self.fail:
+                raise RuntimeError("detach failed")
+
+    network_session = FakeNetworkSession()
 
     monkeypatch.setattr(
         "pokered_harness.mcp_server._supports_bit_accurate_network",
@@ -892,7 +927,7 @@ def test_link_connect_cleans_unpublished_resources_on_unexpected_failure(monkeyp
     )
     monkeypatch.setattr(
         "pokered_harness.mcp_server._attach_network_backend",
-        lambda *_args, **_kwargs: FakeNetworkSession(),
+        lambda *_args, **_kwargs: network_session,
     )
 
     def fail_handshake(*_args, **_kwargs):
@@ -913,9 +948,19 @@ def test_link_connect_cleans_unpublished_resources_on_unexpected_failure(monkeyp
 
     assert detached.is_set()
     assert transport.closed is True
-    assert link.remote_mode == "idle"
+    assert link.remote_mode == "disconnecting"
     assert link.remote_link is None
     assert link.network_session is None
+    assert link._pending_network_session is network_session
+
+    # The failed detach remains owned by LinkState rather than being reported
+    # as a clean idle transition. A later disconnect retries the exact handle.
+    network_session.fail = False
+    assert dispatch_tool(s, "link_disconnect", {}, link=link) == {
+        "remote_mode": "idle"
+    }
+    assert network_session.calls == 2
+    assert link._pending_network_session is None
 
 
 def test_link_listen_rejects_live_previous_listener_worker():

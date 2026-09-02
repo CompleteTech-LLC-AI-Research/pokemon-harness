@@ -1164,11 +1164,17 @@ def _dispatch_link_tool(
                     local_rom_version=rom_version,
                     cancel_event=connect_cancel,
                 )
+                _track_unpublished_remote_resource(
+                    link, generation, transport=transport
+                )
                 network_session = _attach_network_backend(
                     session,
                     transport,
                     is_internal_clock=False,
                     local_rom_version=rom_version,
+                )
+                _track_unpublished_remote_resource(
+                    link, generation, network_session=network_session
                 )
                 peer_version = _wait_for_network_hello(
                     transport,
@@ -1193,6 +1199,9 @@ def _dispatch_link_tool(
                     timeout_s=timeout_s,
                     cancel_event=connect_cancel,
                 )
+                _track_unpublished_remote_resource(
+                    link, generation, transport=transport
+                )
                 _wait_for_remote_hello(
                     transport, connect_cancel, _remaining(deadline)
                 )
@@ -1205,8 +1214,11 @@ def _dispatch_link_tool(
                         "link_handshake_failed",
                         f"peer ROM version {peer_version!r} does not match "
                         f"expected {expected_peer_version!r}",
-                    )
+                )
                 endpoint = RemoteLinkEndpoint.as_connector(session, transport)
+                _track_unpublished_remote_resource(
+                    link, generation, endpoint=endpoint
+                )
                 endpoint.install()
             with link.state():
                 if (
@@ -1220,20 +1232,47 @@ def _dispatch_link_tool(
                 link.remote_link = transport
                 link.remote_endpoint = endpoint
                 link.network_session = network_session
+                if link._pending_remote_link is transport:
+                    link._pending_remote_link = None
+                if link._pending_remote_endpoint is endpoint:
+                    link._pending_remote_endpoint = None
+                if link._pending_network_session is network_session:
+                    link._pending_network_session = None
                 link.remote_mode = "connected"
                 link.remote_role = "connector"
                 link.remote_bind_port = None
                 link._remote_error = None
         except McpHarnessError:
-            _cleanup_unpublished_remote(session, network_session, transport)
+            _cleanup_unpublished_remote(
+                session,
+                network_session,
+                transport,
+                link=link,
+                endpoint=endpoint,
+                generation=generation,
+            )
             raise
         except _ListenerCancelled as exc:
-            _cleanup_unpublished_remote(session, network_session, transport)
+            _cleanup_unpublished_remote(
+                session,
+                network_session,
+                transport,
+                link=link,
+                endpoint=endpoint,
+                generation=generation,
+            )
             raise McpHarnessError(
                 "link_cancelled", "remote connection cancelled"
             ) from exc
         except (SerialLinkError, NetworkBackendError, OSError, TimeoutError) as exc:
-            _cleanup_unpublished_remote(session, network_session, transport)
+            _cleanup_unpublished_remote(
+                session,
+                network_session,
+                transport,
+                link=link,
+                endpoint=endpoint,
+                generation=generation,
+            )
             if connect_cancel.is_set():
                 raise McpHarnessError(
                     "link_cancelled", "remote connection cancelled"
@@ -1244,15 +1283,28 @@ def _dispatch_link_tool(
             # transport/backend it has created.  Always release unpublished
             # resources even when an unexpected runtime or hook failure
             # escapes the protocol-specific handlers above.
-            _cleanup_unpublished_remote(session, network_session, transport)
+            _cleanup_unpublished_remote(
+                session,
+                network_session,
+                transport,
+                link=link,
+                endpoint=endpoint,
+                generation=generation,
+            )
             raise
         finally:
             with link.state():
                 if link._generation == generation and link.remote_link is None:
-                    link.remote_mode = "idle"
+                    pending = (
+                        link._pending_remote_link is not None
+                        or link._pending_remote_endpoint is not None
+                        or link._pending_network_session is not None
+                    )
+                    link.remote_mode = "disconnecting" if pending else "idle"
                     link.remote_role = None
                     link.remote_bind_port = None
-                    link._connect_cancel = threading.Event()
+                    if not pending:
+                        link._connect_cancel = threading.Event()
                 link._connect_in_progress = False
                 link._connect_done.set()
         return {
@@ -1608,6 +1660,35 @@ def _wait_for_network_hello(
     return peer_version
 
 
+def _track_unpublished_remote_resource(
+    link: LinkState,
+    generation: int,
+    *,
+    transport: Any | None = None,
+    endpoint: RemoteLinkEndpoint | None = None,
+    network_session: PyBoyLinkSession | None = None,
+) -> None:
+    """Publish setup ownership before a remote handshake completes.
+
+    A listener/connect worker can block in HELLO while ``link_disconnect`` is
+    already trying to cancel it. Keeping these handles on ``LinkState`` gives
+    teardown a way to close the transport and detach the backend immediately;
+    the worker still owns the local variables and performs idempotent cleanup
+    when it unwinds.
+    """
+    with link.state():
+        if link._generation != generation and not link._disconnecting:
+            raise McpHarnessError(
+                "link_cancelled", "remote connection cancelled"
+            )
+        if transport is not None:
+            link._pending_remote_link = transport
+        if endpoint is not None:
+            link._pending_remote_endpoint = endpoint
+        if network_session is not None:
+            link._pending_network_session = network_session
+
+
 def _accept_remote(
     link: LinkState,
     session: Session,
@@ -1641,11 +1722,17 @@ def _accept_remote(
                         accepted_conn, local_rom_version=rom_version
                     )
                     accepted_conn = None
+                    _track_unpublished_remote_resource(
+                        link, generation, transport=transport
+                    )
                     network_session = _attach_network_backend(
                         session,
                         transport,
                         is_internal_clock=True,
                         local_rom_version=rom_version,
+                    )
+                    _track_unpublished_remote_resource(
+                        link, generation, network_session=network_session
                     )
                     _wait_for_network_hello(
                         transport,
@@ -1664,6 +1751,9 @@ def _accept_remote(
                     )
                     transport = TcpSerialLink(accepted_conn, rom_version)
                     accepted_conn = None
+                    _track_unpublished_remote_resource(
+                        link, generation, transport=transport
+                    )
                     _wait_for_remote_hello(transport, cancel, timeout_s)
                     peer_version = transport.peer_rom_version
                     if (
@@ -1673,8 +1763,11 @@ def _accept_remote(
                         raise NetworkBackendError(
                             f"peer ROM version {peer_version!r} does not match "
                             f"expected {expected_peer_rom_version!r}"
-                        )
+                    )
                     endpoint = RemoteLinkEndpoint.as_listener(session, transport)
+                    _track_unpublished_remote_resource(
+                        link, generation, endpoint=endpoint
+                    )
                     endpoint.install()
                 with link.state():
                     if (
@@ -1686,6 +1779,12 @@ def _accept_remote(
                     link.remote_link = transport
                     link.remote_endpoint = endpoint
                     link.network_session = network_session
+                    if link._pending_remote_link is transport:
+                        link._pending_remote_link = None
+                    if link._pending_remote_endpoint is endpoint:
+                        link._pending_remote_endpoint = None
+                    if link._pending_network_session is network_session:
+                        link._pending_network_session = None
                     link.remote_mode = "connected"
                     link.remote_role = "listener"
                     link.remote_bind_port = None
@@ -1716,28 +1815,21 @@ def _accept_remote(
                 # as the only owners.  Always release them here, including
                 # the cancellation path, or the transport reader can outlive
                 # the MCP link and retain the peer socket indefinitely.
-                cleanup_deadline = (
-                    time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
-                )
-                if transport is not None:
-                    _close_serial_link(
+                if (
+                    transport is not None
+                    or endpoint is not None
+                    or network_session is not None
+                ):
+                    cleanup_errors = _cleanup_unpublished_remote(
+                        session,
+                        network_session,
                         transport,
-                        timeout_s=_remaining(cleanup_deadline),
+                        link=link,
+                        endpoint=endpoint,
+                        generation=generation,
                     )
-                if endpoint is not None:
-                    # A semantic endpoint installs raw PyBoy callbacks before
-                    # publication. If installation or publication fails,
-                    # those callbacks are still owned by this worker and
-                    # must be disabled before the next peer is accepted.
-                    _deactivate_link_hooks(session)
-                if network_session is not None:
-                    try:
-                        with session.locked(
-                            timeout_s=_remaining(cleanup_deadline)
-                        ):
-                            network_session.detach_all()
-                    except Exception:  # noqa: BLE001, S110
-                        pass
+                    if cleanup_errors:
+                        cancel.set()
                 if accepted_conn is not None:
                     try:
                         accepted_conn.shutdown(socket.SHUT_RDWR)
@@ -1801,7 +1893,11 @@ def _cleanup_unpublished_remote(
     session: Session,
     network_session: PyBoyLinkSession | None,
     transport: Any | None,
-) -> None:
+    *,
+    link: LinkState | None = None,
+    endpoint: RemoteLinkEndpoint | None = None,
+    generation: int | None = None,
+) -> list[Exception]:
     """Release resources created before a remote connection was published.
 
     Connection setup has several failure points after the socket and native
@@ -1811,24 +1907,83 @@ def _cleanup_unpublished_remote(
     exception remains the client-visible failure.
     """
     cleanup_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+    cleanup_errors: list[Exception] = []
+    transport_close_failed = False
+    network_detach_failed = False
+    hook_cleanup_failed = False
     if network_session is not None:
         try:
             with session.locked(timeout_s=_remaining(cleanup_deadline)):
                 network_session.detach_all()
-        except BaseException:  # noqa: BLE001, S110 - cleanup must not mask the original error
-            pass
+        except Exception as exc:  # noqa: BLE001, S110 - cleanup must not mask the original error
+            network_detach_failed = True
+            cleanup_errors.append(exc)
     if transport is not None:
         try:
-            _close_serial_link(
+            transport_closed = _close_serial_link(
                 transport,
                 timeout_s=_remaining(cleanup_deadline),
             )
-        except BaseException:  # noqa: BLE001, S110 - cleanup must not mask the original error
-            pass
+        except Exception as exc:  # noqa: BLE001, S110 - cleanup must not mask the original error
+            transport_closed = False
+            cleanup_errors.append(exc)
+        if not transport_closed:
+            transport_close_failed = True
+            cleanup_errors.append(
+                TimeoutError(
+                    "unpublished remote transport did not close before "
+                    "the cleanup deadline"
+                )
+            )
     try:
-        _deactivate_link_hooks(session)
-    except BaseException:  # noqa: BLE001, S110 - cleanup must not mask the original error
-        pass
+        hook_errors = _deactivate_link_hooks(session)
+    except Exception as exc:  # noqa: BLE001, S110 - cleanup must not mask the original error
+        hook_errors = [exc]
+    if hook_errors:
+        hook_cleanup_failed = True
+        cleanup_errors.extend(hook_errors)
+
+    if link is not None:
+        with link.state():
+            # A disconnect may have advanced the generation while this worker
+            # was unwinding. Its teardown finalizer still preserves pending
+            # handles published during that disconnect, but never attach an
+            # old worker to a newly started lifecycle.
+            same_lifecycle = link._generation == generation
+            if link.remote_link is None and (same_lifecycle or link._disconnecting):
+                if (
+                    link._pending_remote_link is transport
+                    and not transport_close_failed
+                ):
+                    link._pending_remote_link = None
+                if (
+                    link._pending_remote_endpoint is endpoint
+                    and not hook_cleanup_failed
+                ):
+                    link._pending_remote_endpoint = None
+                if (
+                    link._pending_network_session is network_session
+                    and not network_detach_failed
+                    and not hook_cleanup_failed
+                ):
+                    link._pending_network_session = None
+            if cleanup_errors and link.remote_link is None and (
+                same_lifecycle or link._disconnecting
+            ):
+                if transport_close_failed and transport is not None:
+                    link._pending_remote_link = transport
+                if hook_cleanup_failed and endpoint is not None:
+                    link._pending_remote_endpoint = endpoint
+                if (
+                    (network_detach_failed or hook_cleanup_failed)
+                    and network_session is not None
+                ):
+                    link._pending_network_session = network_session
+                link.remote_mode = "disconnecting"
+                link.remote_role = None
+                link.remote_bind_port = None
+                link._remote_error = cleanup_errors[0]
+    return cleanup_errors
 
 
 def _detach_local_link_session(
@@ -2040,6 +2195,28 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
                         "listener worker did not stop before cleanup deadline"
                     )
                 )
+            pending_listener = link._pending_listener_socket
+            pending_remote = link._pending_remote_link
+            pending_endpoint = link._pending_remote_endpoint
+            pending_network = link._pending_network_session
+            if not cleanup_errors and any(
+                resource is not None
+                for resource in (
+                    pending_listener,
+                    pending_remote,
+                    pending_endpoint,
+                    pending_network,
+                )
+            ):
+                # A connect/accept worker may have finished its own cleanup
+                # after this teardown captured its first snapshot. Pending
+                # handles are still live ownership, not a successful idle
+                # transition; force the caller to retry link_disconnect.
+                cleanup_errors.append(
+                    TimeoutError(
+                        "remote setup cleanup remained pending after teardown"
+                    )
+                )
             if cleanup_errors:
                 link._listener_error = cleanup_errors[0]
                 link._remote_error = cleanup_errors[0]
@@ -2048,20 +2225,22 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
                 # disconnecting, so no emulator operation can use a resource
                 # during teardown.
                 link._pending_listener_socket = (
-                    listener if listener_close_failed else None
+                    listener
+                    if listener_close_failed
+                    else pending_listener
                 )
                 link._pending_remote_link = (
-                    remote if remote_close_failed else None
+                    remote if remote_close_failed else pending_remote
                 )
                 link._pending_remote_endpoint = (
                     remote_endpoint
                     if hook_cleanup_failed
-                    else None
+                    else pending_endpoint
                 )
                 link._pending_network_session = (
                     network_session
                     if network_detach_failed or hook_cleanup_failed
-                    else None
+                    else pending_network
                 )
             else:
                 link._listener_error = None
