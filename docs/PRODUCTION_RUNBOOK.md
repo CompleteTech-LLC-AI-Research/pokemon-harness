@@ -3,8 +3,8 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon); its
-current `master` is `01edb6e` (merged PRs #12-#13). External BYO assets are
-excluded from the tracked source tree.
+current `master` is `ae48938` (merged PR #14, including PRs #12-#14).
+External BYO assets are excluded from the tracked source tree.
 
 The current source-only gate passed collection 692, unit 549/549, and timing
 40/40 in each of five repetitions. The focused post-change integration slice
@@ -12,7 +12,10 @@ passed 294 tests, all 10 external fixture-manifest entries validated, and the
 source environment passed `pip check` and the source runtime identity check.
 The post-change real-ROM local tier passed 47/47 and the remote transport/MCP
 tier passed 14/14. Strict trade completed 18/19 with one bounded remote
-timeout at the Trade Center warp rendezvous; strict battle is still running.
+timeout at the Trade Center warp rendezvous. The strict battle candidate gate
+completed 17/19, with remote `red_color-listen-yellow-connect` and
+`yellow-listen-yellow-connect` failing during the LinkMenu-to-Colosseum
+transition.
 Overall status is `PARTIAL`; the exact open items are listed in [the release
 checklist](RELEASE_CHECKLIST.md).
 
@@ -438,14 +441,14 @@ scope is:
 | Operation | Local ordered rows | Remote ordered listener/connector rows | Dedicated assertion | Current status |
 |---|---:|---:|---|---|
 | Trade | 9 | 9 | Red/Yellow party-record swap | 18/19 passed: local/dedicated rows passed and `yellow-listen-red_color-connect` timed out at the Trade Center warp rendezvous |
-| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | Post-change 19-row run is still in progress |
+| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | 17/19 passed: two remote rows failed during the LinkMenu-to-Colosseum transition (`red_color-listen-yellow-connect`, `yellow-listen-yellow-connect`) |
 
 That is 19 strict entrypoints per operation. The remote rows use canonical color
 Red, color Blue, and Yellow profiles; listener/connector order is significant.
-The follow-up candidate has completed the strict trade matrix with one failed
-remote row and must finish the strict battle matrix. Historical targeted
-Red/Blue and Red/Yellow remote samples passed 5/5 each, but those samples do
-not replace the current matrix result.
+The merged candidate completed the strict trade matrix with one failed remote
+row and the strict battle matrix with two failed remote rows. Historical
+targeted Red/Blue and Red/Yellow remote samples passed 5/5 each, but those
+samples do not replace the current matrix result.
 Stock-ROM rows and LinkMenu-only milestones are outside this strict release
 claim.
 
@@ -595,12 +598,13 @@ are:
 1. The asset-free gate passes 549/549 unit tests and 40/40 timing cases in each
    of five repetitions, but it does not run ROM-backed gameplay. The post-change
    strict trade matrix completed 18/19 with one remote timeout, and the strict
-   battle matrix is still running; neither supports full sign-off yet.
+   battle matrix completed 17/19 with two remote LinkMenu-to-Colosseum
+   failures; neither supports full sign-off yet.
 2. The strict declaration is complete: the collection audit has nine ordered
    local pairs, nine ordered remote role pairs, six reversed-role rows, nine
    local variant rows, and 19 strict entrypoints for each operation. The
    post-change local and remote transport/MCP tiers passed, but one strict
-   remote trade row failed and the strict battle tier remains in progress;
+   remote trade row failed and two strict remote battle rows failed;
    historical completed tier results do not substitute for current runtime
    evidence.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded

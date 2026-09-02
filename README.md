@@ -12,10 +12,9 @@ symbol files, save states, or other ROM-derived artifacts.
 This repository remains an audited production-readiness candidate, not a
 production release. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). Its
-current `master` includes the merged MCP lifecycle hardening (PR #12) and
-reproducible runtime packaging (PR #13), ending at `01edb6e` when this audit
-started. The in-process serial/lifecycle and remote TCP follow-ups are being
-validated on an isolated candidate branch before publication.
+current `master` is merged commit `ae48938` (PR #14), including the MCP
+lifecycle hardening (PR #12), reproducible runtime packaging (PR #13), and
+the in-process serial/lifecycle plus remote TCP follow-ups.
 
 The latest source-only verification was collected on 2026-09-02 with Python
 3.12.3 and the vendored PyBoy 2.7.0 runtime at fork revision
@@ -30,8 +29,10 @@ The post-change real-ROM local tier passed 47/47 and the remote
 transport/MCP tier passed 14/14. The strict trade gate completed 18/19: all
 nine local ordered rows and the dedicated Red/Yellow assertion passed, while
 the remote `yellow-listen-red_color-connect` row timed out at the Trade Center
-warp rendezvous after its 720-second peer deadline. The strict battle gate is
-still running in this snapshot, so no final battle-matrix result is claimed.
+warp rendezvous after its 720-second peer deadline. The strict battle gate
+completed 17/19: the remote `red_color-listen-yellow-connect` and
+`yellow-listen-yellow-connect` rows failed during the LinkMenu-to-Colosseum
+transition. No complete battle-matrix pass is claimed.
 The release status remains `PARTIAL`. Earlier full evidence recorded 13/13
 remote transport/MCP tests and incomplete 18/19 strict trade and battle
 matrices; those historical results are not being relabeled as current
@@ -65,8 +66,9 @@ The current candidate’s evidence is:
 - strict trade matrix: `FAIL`, 18/19; all local/dedicated rows passed and
   remote `yellow-listen-red_color-connect` timed out at the Trade Center warp
   rendezvous after the bounded peer deadline;
-- strict battle matrix: `RUNNING`; the post-change 19-row result is not yet
-  available;
+- strict battle matrix: `FAIL`, 17/19; remote
+  `red_color-listen-yellow-connect` and `yellow-listen-yellow-connect` failed
+  during the LinkMenu-to-Colosseum transition;
 - Cython/native gameplay: `UNVERIFIED`; the current native serial extension
   compile does not pass, so source mode remains the only documented release
   runtime.
@@ -84,7 +86,7 @@ can change the release decision.
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PASS` (tested scope) | Asset-backed local/MCP lifecycle tier passed 47/47; strict remote gameplay acceptance remains separate. |
 | In-process link acceptance | `PASS` (scoped) | The post-change local production tier passed 47/47 with the pinned external assets. Stock-ROM link support remains unclaimed. |
-| Remote TCP and MCP lifecycle | `PASS` (transport scope) | The post-change remote transport/MCP tier passed 14/14; strict remote trade is 8/9 with one bounded timeout and strict battle is still running. TCP remains loopback-only. |
+| Remote TCP and MCP lifecycle | `PASS` (transport scope) | The post-change remote transport/MCP tier passed 14/14; strict remote trade is 8/9 with one bounded timeout and strict remote battle is 7/9 with two LinkMenu-to-Colosseum failures. TCP remains loopback-only. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
 The historical complete real-ROM snapshot at
@@ -108,16 +110,17 @@ The intended release inputs are the exact ROM variants listed in
 | Game | Input | Status |
 |---|---|---|
 | Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Hash-pinned BYO input; current stateful link support is not claimed |
-| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Pinned BYO input; local production evidence passed, while strict trade is partial and strict battle is pending |
+| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Pinned BYO input; local production evidence passed, while strict trade and battle remain partial |
 | Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Hash-pinned BYO input; current stateful link support is not claimed |
-| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Pinned BYO input; local production evidence passed, while strict trade is partial and strict battle is pending |
-| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Pinned BYO input; local production evidence passed, while strict trade is partial and strict battle is pending |
+| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Pinned BYO input; local production evidence passed, while strict trade and battle remain partial |
+| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Pinned BYO input; local production evidence passed, while strict trade and battle remain partial |
 | Other localisations and ROM hacks | — | Out of scope |
 
-The current controlled stateful evidence is being refreshed on the follow-up
-candidate. The strict trade run is incomplete at 18/19 because one remote row
-timed out; the strict battle run is still in progress. No complete post-change
-remote trade or battle claim is made until both strict matrices finish.
+The current controlled stateful evidence is recorded on the merged candidate.
+The strict trade run is incomplete at 18/19 because one remote row timed out;
+the strict battle run is incomplete at 17/19 because two remote rows failed at
+the LinkMenu-to-Colosseum transition. No complete post-change remote trade or
+battle claim is made while either strict matrix has failures.
 Stock-ROM link pairs remain outside the strict canonical matrix because their
 fixture provenance is partial.
 
@@ -362,7 +365,7 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Parameterized two-process LinkMenu smoke plus canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints | Concurrent-load stability; current strict remote trade is 8/9 with one timeout and strict battle is running |
+| `tests/test_pyboy_link_session_subprocess.py` | Parameterized two-process LinkMenu smoke plus canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints | Concurrent-load stability; current strict remote trade is 8/9 with one timeout and strict remote battle is 7/9 with two LinkMenu-to-Colosseum failures |
 | `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus parameterized canonical Red/Blue/Yellow local trade and battle acceptance entrypoints | Stock-variant coverage, or a release result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
@@ -371,12 +374,14 @@ ROMs, matching save-state fixtures, bounded deadlines, a clean teardown, and
 an explicit statement about any test-driver menu control. The current strict
 declaration contains 19 trade and 19 battle entrypoints: nine local ordered
 rows, one dedicated Red/Yellow assertion, and nine remote ordered listener /
-connector rows for each operation. The follow-up candidate has a current
-strict trade result of 18/19, with `yellow-listen-red_color-connect` failing at
-the Trade Center warp rendezvous after its bounded peer deadline. The strict
-battle matrix is still running; its final result must be recorded before
-release sign-off. Historical battle failure details are retained only as
-historical context and are not current candidate evidence.
+connector rows for each operation. The merged candidate has a current strict
+trade result of 18/19, with `yellow-listen-red_color-connect` failing at the
+Trade Center warp rendezvous after its bounded peer deadline. Its strict
+battle result is 17/19, with `red_color-listen-yellow-connect` and
+`yellow-listen-yellow-connect` failing during the LinkMenu-to-Colosseum
+transition. These failures must be resolved or explicitly scoped before
+release sign-off. Historical results are retained only as historical context
+and are not substituted for current candidate evidence.
 
 ## Walkthrough scripts
 
