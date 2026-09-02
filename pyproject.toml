@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,6 +9,7 @@ description = "Memory-first automation harness for Pokémon Red via PyBoy, expos
 requires-python = ">=3.12"
 readme = "README.md"
 license = "LGPL-3.0-only"
+license-files = ["vendor/pyboy-src/LICENSE.md"]
 dependencies = [
     # These are the versions used by the certified gate. Bump them as a
     # tested set; open-ended requirements can silently change the emulator
@@ -33,7 +34,9 @@ dev = [
 ]
 
 [tool.setuptools]
-include-package-data = true
+# Package data is an explicit allowlist.  Manifest-driven package data would
+# let stale ignored egg-info/SOURCES.txt entries leak files into the wheel.
+include-package-data = false
 
 # Package the pinned PyBoy fork into the same distribution as the harness.
 # This keeps editable installs and wheels on the identical runtime without a
@@ -57,7 +60,7 @@ packages = [
 pyboy = "vendor/pyboy-src/pyboy"
 
 [tool.setuptools.package-data]
-"pyboy.core" = ["*.bin"]
+"pyboy.core" = ["bootrom_cgb.bin", "bootrom_dmg.bin"]
 "pyboy.plugins" = ["font.txt"]
 
 [tool.pytest.ini_options]
