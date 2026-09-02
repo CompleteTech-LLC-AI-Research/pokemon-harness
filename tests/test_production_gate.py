@@ -479,6 +479,8 @@ def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_p
     sym_path_value.write_text("sym", encoding="utf-8")
     explicit = "/caller/selected.gb"
     monkeypatch.setenv("POKERED_ROM_PATH", explicit)
+    ambient_sha = "f" * 40
+    monkeypatch.setenv("POKERED_ROM_SHA1", ambient_sha)
     environment = gate.build_test_environment(
         tmp_path,
         rom_root,
@@ -487,6 +489,9 @@ def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_p
     )
     assert environment["POKERED_ROM_ROOT"] == str(rom_root)
     assert environment["POKERED_ROM_PATH"] == explicit
+    # Explicit path/digest pairs are preserved for the later policy check;
+    # the gate must not silently replace a caller-selected ROM identity.
+    assert environment["POKERED_ROM_SHA1"] == ambient_sha
     assert environment["PYTHONPATH"].split(os.pathsep)[:3] == [
         str(tmp_path / "vendor" / "pyboy-src"),
         str(tmp_path / "src"),
@@ -503,6 +508,13 @@ def test_environment_pins_selected_symbol_file_when_available(tmp_path, monkeypa
     rom_path.write_bytes(b"rom")
     sym_path.write_text("sym", encoding="utf-8")
     monkeypatch.setenv("POKERED_SYM_PATH", str(sym_path))
+    # The production gate intentionally forwards an explicitly configured
+    # symbol digest to every child process.  This unit test exercises the
+    # auto-pin path, so make the absence of both selected-input digests part
+    # of its fixture instead of depending on the caller's environment.  The
+    # ROM digest is asserted below as a guard against the analogous leak.
+    for name in ("POKERED_ROM_PATH", "POKERED_ROM_SHA1", "POKERED_SYM_SHA1"):
+        monkeypatch.delenv(name, raising=False)
 
     symbol_sha = hashlib.sha1(b"sym").hexdigest()
     environment = gate.build_test_environment(
@@ -515,6 +527,7 @@ def test_environment_pins_selected_symbol_file_when_available(tmp_path, monkeypa
         },
     )
 
+    assert environment["POKERED_ROM_SHA1"] == hashlib.sha1(b"rom").hexdigest()
     assert environment["POKERED_SYM_SHA1"] == symbol_sha
 
 

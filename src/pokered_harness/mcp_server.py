@@ -1172,6 +1172,7 @@ def _dispatch_link_tool(
                     transport,
                     is_internal_clock=False,
                     local_rom_version=rom_version,
+                    network_hello_timeout_s=max(0.0, _remaining(deadline)),
                 )
                 _track_unpublished_remote_resource(
                     link, generation, network_session=network_session
@@ -1277,6 +1278,8 @@ def _dispatch_link_tool(
                 raise McpHarnessError(
                     "link_cancelled", "remote connection cancelled"
                 ) from exc
+            if _error_code(exc) == "timeout":
+                raise McpHarnessError("timeout", str(exc)) from exc
             raise McpHarnessError("link_connect_failed", str(exc)) from exc
         except BaseException:
             # Until state publication succeeds, this call owns every
@@ -1542,13 +1545,21 @@ def _attach_network_backend(
     *,
     is_internal_clock: bool,
     local_rom_version: str,
+    network_hello_timeout_s: float | None = None,
 ) -> PyBoyLinkSession:
-    """Attach a TCP bit-level backend to the session's existing PyBoy."""
+    """Attach a TCP backend while honoring the MCP handshake deadline.
+
+    ``PyBoyLinkSession`` owns the native attach sequence, including its HELLO
+    wait. MCP supplies the request deadline here until that lower-level API
+    exposes a per-attach timeout.
+    """
     network_session = PyBoyLinkSession(
         network_backend=backend,
         network_is_internal_clock=is_internal_clock,
         local_rom_version=local_rom_version,
     )
+    if network_hello_timeout_s is not None:
+        network_session._NETWORK_HELLO_TIMEOUT_SECONDS = network_hello_timeout_s
     with session.locked(timeout_s=_DEFAULT_CLEANUP_TIMEOUT_S):
         network_session.attach(session._pyboy)
     return network_session
@@ -1730,6 +1741,7 @@ def _accept_remote(
                         transport,
                         is_internal_clock=True,
                         local_rom_version=rom_version,
+                        network_hello_timeout_s=timeout_s,
                     )
                     _track_unpublished_remote_resource(
                         link, generation, network_session=network_session
