@@ -13,10 +13,12 @@ copies of emulator traces or ROM-derived artifacts.
 
 The `.state` files are ROM-derived, ignored by Git, and intentionally not
 distributed by this repository. The manifest is an evidence index, not a
-license or a claim that the files are safely reproducible. The battle and
-vanilla entries retain hashes but have `unknown` or `partial` provenance
-because their source-state hashes, runtime identity, and capture commands were
-not retained.
+license or a claim that the files are safely reproducible. The canonical color
+Red, color Blue, and Yellow rows retain source-state hashes, runtime identity,
+and reproduction commands. The four vanilla rows remain `partial`: the
+ordinary source states are not proven to have been captured against the
+vanilla ROMs, while the vanilla battle rows inherit that open provenance
+boundary from their ordinary inputs.
 
 ## Production gate evidence bundles
 
@@ -49,7 +51,7 @@ Validate the actual external bytes for a release or acceptance run:
 
 ```bash
 python scripts/validate_fixture_manifest.py \
-  --fixture-root /path/to/tests/fixtures/link
+  --fixture-root <fixture-root>
 ```
 
 The byte-validation command fails closed on a missing file, size mismatch,
