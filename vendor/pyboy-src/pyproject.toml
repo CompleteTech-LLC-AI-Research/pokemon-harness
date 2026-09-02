@@ -45,7 +45,9 @@ pyboy = "pyboy.__main__:main"
 requires = [
     "setuptools>=61.0.0",
     "wheel",
-    "cython>=3.0.6,<3.1,!=3.0.10; platform_python_implementation == 'CPython'",
+    # Keep the optional Cython build on the same compiler version as the
+    # harness bootstrap and its tested serial ABI.
+    "cython==3.0.12; platform_python_implementation == 'CPython'",
     "numpy",
 ]
 build-backend = "setuptools.build_meta"

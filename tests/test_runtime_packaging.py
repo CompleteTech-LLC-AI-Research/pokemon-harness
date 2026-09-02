@@ -5,8 +5,13 @@ from __future__ import annotations
 import importlib.metadata
 import importlib.util
 import json
+import os
+import shlex
+import shutil
 import subprocess
 import sys
+import sysconfig
+import tempfile
 import tomllib
 from pathlib import Path, PureWindowsPath
 
@@ -55,6 +60,134 @@ def test_project_bundles_the_pinned_pyboy_source() -> None:
         .strip()
     )
     assert marker == EXPECTED_PYBOY_REVISION
+
+
+def test_cython_build_pins_the_compiler_and_preserves_serial_widths() -> None:
+    vendor_project = tomllib.loads(
+        (ROOT / "vendor" / "pyboy-src" / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert (
+        "cython==3.0.12; platform_python_implementation == 'CPython'"
+        in vendor_project["build-system"]["requires"]
+    )
+
+    serial_pxd = (ROOT / "vendor" / "pyboy-src" / "pyboy" / "core" / "serial.pxd").read_text(
+        encoding="utf-8"
+    )
+    assert "cpdef bint tick(self, unsigned long long) noexcept nogil" in serial_pxd
+    assert "cdef public uint64_t last_cycles, clock, clock_target" in serial_pxd
+    assert "cdef public uint8_t _shift_register" in serial_pxd
+    assert "cdef public uint8_t _bits_remaining" in serial_pxd
+
+
+def test_cython_serial_translation_unit_compiles_with_the_checked_in_pxd() -> None:
+    """Compile the serial C translation unit without writing build output to the repo."""
+    compiler_spec = os.environ.get("CC") or sysconfig.get_config_var("CC")
+    compiler = shlex.split(compiler_spec or "")
+    if not compiler or shutil.which(compiler[0]) is None:
+        pytest.skip("a C compiler is required for the Cython ABI smoke check")
+
+    python_include_candidates = {
+        Path(candidate)
+        for candidate in (
+            sysconfig.get_config_var("INCLUDEPY"),
+            sysconfig.get_path("include"),
+            sysconfig.get_path("platinclude"),
+            str(
+                Path(sys.prefix)
+                / "include"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            ),
+            str(
+                Path(sys.base_prefix)
+                / "include"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            ),
+        )
+        if candidate
+    }
+    python_include_path = next(
+        (
+            candidate
+            for candidate in python_include_candidates
+            if (candidate / "Python.h").is_file()
+        ),
+        None,
+    )
+    if python_include_path is None:
+        pytest.skip("the active Python does not expose an include directory")
+    python_include = str(python_include_path)
+
+    import numpy
+
+    vendor_root = ROOT / "vendor" / "pyboy-src"
+    with tempfile.TemporaryDirectory(prefix="pokered-cython-serial-") as temporary:
+        c_file = Path(temporary) / "serial.c"
+        cython_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "cython",
+                "--3str",
+                "--directive",
+                "language_level=3",
+                "--output-file",
+                str(c_file),
+                "pyboy/core/serial.py",
+            ],
+            cwd=vendor_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert cython_result.returncode == 0, cython_result.stdout + cython_result.stderr
+
+        compiler_name = Path(compiler[0]).name.lower()
+        if compiler_name in {"cl", "cl.exe", "clang-cl", "clang-cl.exe"}:
+            compile_command = [
+                *compiler,
+                "/nologo",
+                "/c",
+                f"/I{numpy.get_include()}",
+                f"/I{python_include}",
+                f"/Fo{Path(temporary) / 'serial.obj'}",
+                str(c_file),
+            ]
+        else:
+            compile_command = [
+                *compiler,
+                "-pthread",
+                "-fPIC",
+                "-Werror=incompatible-pointer-types",
+                "-fsyntax-only",
+                f"-I{numpy.get_include()}",
+                f"-I{python_include}",
+                str(c_file),
+            ]
+        compile_result = subprocess.run(
+            compile_command,
+            cwd=vendor_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert compile_result.returncode == 0, compile_result.stdout + compile_result.stderr
+
+
+def test_runtime_build_files_have_no_machine_specific_absolute_paths() -> None:
+    files = (
+        ROOT / "pyproject.toml",
+        ROOT / ".mcp.json",
+        ROOT / "scripts" / "bootstrap_pyboy.py",
+        ROOT / "vendor" / "pyboy-src" / "pyproject.toml",
+        ROOT / "vendor" / "pyboy-src" / "setup.py",
+        ROOT / "vendor" / "pyboy-src" / "pyboy" / "core" / "serial.py",
+        ROOT / "vendor" / "pyboy-src" / "pyboy" / "core" / "serial.pxd",
+    )
+    forbidden_fragments = ("/mnt/", "/home/", "/Users/", "C:\\Users\\", "C:/Users/")
+    for path in files:
+        contents = path.read_text(encoding="utf-8")
+        assert not any(fragment in contents for fragment in forbidden_fragments), path
 
 
 def test_product_lint_boundary_excludes_pinned_vendored_runtime() -> None:
