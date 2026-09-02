@@ -23,6 +23,24 @@ from pokered_harness.link.serial_core import (
     SerialCore,
 )
 
+
+class _FailingBackendAssignmentCore:
+    """Minimal core double for attach rollback without emulator state."""
+
+    def __init__(self, backend, *, fail_assignment: bool = False) -> None:
+        self._backend = backend
+        self.fail_assignment = fail_assignment
+
+    @property
+    def backend(self):
+        return self._backend
+
+    @backend.setter
+    def backend(self, value) -> None:
+        if self.fail_assignment:
+            raise RuntimeError("injected backend assignment failure")
+        self._backend = value
+
 # ---------------------------------------------------------------------------
 # Basic pairing
 # ---------------------------------------------------------------------------
@@ -60,6 +78,21 @@ def test_detach_restores_previous_backends():
     assert b.backend is original_b
 
 
+def test_detach_does_not_overwrite_a_backend_replaced_by_another_owner():
+    original_b = NullBackend()
+    a = SerialCore()
+    b = SerialCore(backend=original_b)
+    coord = LockstepCoordinator(a, b)
+    replacement = NullBackend()
+    a.backend = replacement
+
+    coord.detach()
+
+    assert a.backend is replacement
+    assert b.backend is original_b
+    assert not coord.attached
+
+
 def test_attach_detach_is_idempotent():
     a = SerialCore()
     b = SerialCore()
@@ -70,6 +103,60 @@ def test_attach_detach_is_idempotent():
     coord.detach()
     coord.detach()  # second detach is a no-op
     assert not coord.attached
+
+
+def test_attach_rolls_back_if_the_second_core_rejects_assignment():
+    original_a = NullBackend()
+    original_b = NullBackend()
+    a = _FailingBackendAssignmentCore(original_a)
+    b = _FailingBackendAssignmentCore(original_b, fail_assignment=True)
+
+    with pytest.raises(RuntimeError, match="injected backend assignment failure"):
+        LockstepCoordinator(a, b)
+
+    assert a.backend is original_a
+    assert b.backend is original_b
+
+
+def test_attach_keeps_backends_inactive_until_both_assignments_succeed():
+    observed: list[bool] = []
+    original_a = NullBackend()
+    original_b = NullBackend()
+
+    class ObservingCore(_FailingBackendAssignmentCore):
+        @property
+        def backend(self):
+            return self._backend
+
+        @backend.setter
+        def backend(self, value) -> None:
+            observed.append(getattr(value, "active", True))
+            _FailingBackendAssignmentCore.backend.fset(self, value)
+
+    a = ObservingCore(original_a)
+    b = _FailingBackendAssignmentCore(original_b, fail_assignment=True)
+
+    with pytest.raises(RuntimeError, match="injected backend assignment failure"):
+        LockstepCoordinator(a, b)
+
+    assert observed[0] is False
+    assert a.backend is original_a
+
+
+def test_detach_deactivates_stale_coordinated_backends():
+    a = SerialCore()
+    b = SerialCore()
+    coord = LockstepCoordinator(a, b)
+    stale_backend = a.backend
+
+    b.set_SB(0x00)
+    b.set_SC(0x80)
+    coord.detach()
+
+    assert isinstance(stale_backend, CoordinatedBackend)
+    assert stale_backend.active is False
+    assert stale_backend.on_edge(1, 1) == 1
+    assert b._bits_remaining == 8
 
 
 # ---------------------------------------------------------------------------
@@ -211,14 +298,18 @@ def test_role_swap_between_bytes():
     LockstepCoordinator(a, b)
 
     # Byte 1: A master, B slave.
-    a.set_SB(0x11); b.set_SB(0x22)
-    a.set_SC(0x81); b.set_SC(0x80)
+    a.set_SB(0x11)
+    b.set_SB(0x22)
+    a.set_SC(0x81)
+    b.set_SC(0x80)
     a.tick(CYCLES_PER_BYTE_DMG)
     assert a.SB == 0x22 and b.SB == 0x11
 
     # Byte 2: swap roles.
-    a.set_SB(0x33); b.set_SB(0x44)
-    a.set_SC(0x80); b.set_SC(0x81)
+    a.set_SB(0x33)
+    b.set_SB(0x44)
+    a.set_SC(0x80)
+    b.set_SC(0x81)
     b.tick(b.last_cycles + CYCLES_PER_BYTE_DMG)
     assert a.SB == 0x44 and b.SB == 0x33
 
@@ -233,8 +324,10 @@ def test_advance_master_runs_the_current_master():
     b = SerialCore()
     coord = LockstepCoordinator(a, b)
 
-    a.set_SB(0xAB); b.set_SB(0xCD)
-    a.set_SC(0x81); b.set_SC(0x80)
+    a.set_SB(0xAB)
+    b.set_SB(0xCD)
+    a.set_SC(0x81)
+    b.set_SC(0x80)
 
     completed = coord.advance_master(CYCLES_PER_BYTE_DMG)
     assert completed is True
@@ -253,10 +346,31 @@ def test_advance_master_no_op_when_both_master():
     a = SerialCore()
     b = SerialCore()
     coord = LockstepCoordinator(a, b)
-    a.set_SB(0x00); b.set_SB(0x00)
-    a.set_SC(0x81); b.set_SC(0x81)
+    a.set_SB(0x00)
+    b.set_SB(0x00)
+    a.set_SC(0x81)
+    b.set_SC(0x81)
     # Both master — protocol error; helper declines to advance.
     assert coord.advance_master(CYCLES_PER_BYTE_DMG) is False
+
+
+@pytest.mark.parametrize("cycles", [0, -1])
+def test_advance_master_rejects_non_positive_cycles(cycles: int):
+    a = SerialCore()
+    b = SerialCore()
+    coord = LockstepCoordinator(a, b)
+
+    with pytest.raises(ValueError, match="positive integer"):
+        coord.advance_master(cycles)
+
+
+def test_advance_master_rejects_boolean_cycles():
+    a = SerialCore()
+    b = SerialCore()
+    coord = LockstepCoordinator(a, b)
+
+    with pytest.raises(TypeError, match="positive integer"):
+        coord.advance_master(True)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

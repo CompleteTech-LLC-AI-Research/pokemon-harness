@@ -7,6 +7,7 @@ end-to-end byte exchange without loading a real ROM.
 
 from __future__ import annotations
 
+import socket as _socket
 import threading
 from types import SimpleNamespace
 
@@ -66,6 +67,17 @@ class _LegacySerialStub:
 
     def set_SC(self, value):
         self.SC = value & 0xFF
+
+
+def _versioned_backend_pair(
+    local_version: str = "red", peer_version: str = "blue"
+):
+    """Create a socket pair whose HELLO frames are available to attach()."""
+    local_sock, peer_sock = _socket.socketpair()
+    return (
+        NetworkBackend(local_sock, local_rom_version=local_version),
+        NetworkBackend(peer_sock, local_rom_version=peer_version),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +249,7 @@ def test_network_attach_does_not_seed_game_role_status(is_internal_clock):
     serial registers for the requested wire role, but it must never prefill
     this ROM-owned HRAM byte for either network role.
     """
-    backend, peer = NetworkBackend.pair()
+    backend, peer = _versioned_backend_pair("red", "blue")
     serial = SerialCore()
     pyboy = _FakePyBoy(serial=serial)
     pyboy.memory = {0xFFAA: 0xFF}
@@ -266,7 +278,7 @@ def test_network_attach_arms_native_role_handshake(
     is_internal_clock, expected_sb, expected_sc_source
 ):
     """Configure FF01/FF02 without touching the ROM's role-status HRAM."""
-    backend, peer = NetworkBackend.pair()
+    backend, peer = _versioned_backend_pair("red", "blue")
     serial = SerialCore()
     serial.set_SB(0x02)
     serial.set_SC(0x80)
@@ -306,7 +318,7 @@ def test_network_clock_negotiation_selects_compatible_native_role(
     local_version, peer_version, default_internal, expected_internal
 ):
     """Cross-family startup role selection only changes native registers."""
-    backend, peer = NetworkBackend.pair()
+    backend, peer = _versioned_backend_pair(local_version, peer_version)
     serial = SerialCore()
     pyboy = _FakePyBoy(serial=serial)
     pyboy.memory = {0xFFAA: 0xFF}
@@ -323,6 +335,28 @@ def test_network_clock_negotiation_selects_compatible_native_role(
         assert serial.internal_clock == int(expected_internal)
         assert serial.SB == (0x01 if expected_internal else 0x02)
         assert pyboy.memory[0xFFAA] == 0xFF
+    finally:
+        link.detach_all()
+        peer.stop()
+
+
+def test_network_attach_selects_cross_family_role_before_owner_ticks():
+    """HELLO must select Yellow external before a native tick can begin."""
+    backend, peer = _versioned_backend_pair("yellow", "red")
+    serial = SerialCore()
+    pyboy = _FakePyBoy(serial=serial)
+    link = PyBoyLinkSession(
+        network_backend=backend,
+        network_is_internal_clock=True,
+        local_rom_version="yellow",
+    )
+
+    try:
+        link.attach(pyboy)
+        assert pyboy._cycles == 0
+        assert serial.SB == 0x02
+        assert serial.internal_clock == 0
+        assert serial.transfer_enabled == 1
     finally:
         link.detach_all()
         peer.stop()

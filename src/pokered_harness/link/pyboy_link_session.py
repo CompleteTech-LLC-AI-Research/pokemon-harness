@@ -105,6 +105,10 @@ class PyBoyLinkSession:
     # Keep an individual singlestepped chunk bounded even if a caller
     # supplies an unusually large ``chunk_cycles`` value.
     _MAX_SINGLE_STEP_TICKS: int = 4096
+    # A versioned network peer must be identified before native serial
+    # startup.  This is deliberately finite so attach cannot retain an
+    # emulator or reader thread forever when the remote endpoint disappears.
+    _NETWORK_HELLO_TIMEOUT_SECONDS: float = 10.0
     # These are the wire markers from pret/pokered's serial_constants.asm.
     # They are written to the native FF01/FF02 serial registers through
     # Serial.set_SB/set_SC, never to the ROM-owned hSerialConnectionStatus.
@@ -242,7 +246,10 @@ class PyBoyLinkSession:
         Network mode: only one instance attaches per session. The
         serial's ``backend`` is set to the :class:`NetworkBackend`;
         the reader thread starts so peer-driven (slave-mode) edges
-        advance the local serial and fire the CPU's serial IRQ.
+        advance the local serial and fire the CPU's serial IRQ. When both
+        the session and backend carry ROM labels, attach waits for the
+        bounded HELLO handshake and selects the deterministic native clock
+        role before returning to the caller.
 
         Raises ``RuntimeError`` if ``pyboy`` is already attached, the
         session is at :attr:`MAX_ATTACHED`, or a network-mode session
@@ -281,24 +288,45 @@ class PyBoyLinkSession:
             # native clock role is negotiated after versioned HELLO; the ROM
             # still owns its connection-status byte and all later role
             # changes. Do not write that HRAM cell here; doing so would bypass
-            # the ROM protocol.
+            # the ROM protocol. The provisional listener/connector role is
+            # only a register-level bootstrap; no emulator tick is allowed
+            # until a versioned peer has selected the deterministic role.
             core.backend = self._network_backend
             try:
                 with self._serial_gate:
                     self._initialize_network_clock_role(core)
-                self._install_network_tick_owner(pyboy)
                 self._network_backend.start_receiver(
                     local_core=core,
                     irq_callback=self._make_serial_irq_raiser(pyboy),
                     serial_gate=self._serial_gate,
                     dispatch_to_owner=True,
                 )
+                if (
+                    self._local_rom_version is not None
+                    and self._network_backend.local_rom_version is not None
+                ):
+                    # HELLO is emitted by NetworkBackend construction, so
+                    # both connected endpoints can identify their ROMs while
+                    # the native serial registers remain at the provisional
+                    # role. This prevents a Yellow listener/Red connector
+                    # pair from starting the connection probe in opposite
+                    # roles before negotiate_network_clock_role() runs.
+                    peer_version = self._network_backend.wait_for_hello(
+                        timeout=self._NETWORK_HELLO_TIMEOUT_SECONDS
+                    )
+                    if peer_version is None:
+                        raise RuntimeError(
+                            "versioned network backend did not report peer ROM"
+                        )
+                    self.negotiate_network_clock_role(peer_version)
+                self._install_network_tick_owner(pyboy)
                 with self._serial_gate:
                     self._enable_network_owner_pump(core, self._network_backend)
             except BaseException:
                 with self._serial_gate:
                     self._disable_network_owner_pump(core)
                 self._restore_network_tick_owner(pyboy)
+                self._network_backend.stop()
                 try:
                     core.backend = (
                         prev_backend if prev_backend is not None else NullBackend()

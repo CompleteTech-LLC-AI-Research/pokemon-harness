@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from threading import RLock
 from typing import TYPE_CHECKING
 
 from pokered_harness.events.hooks import (
@@ -18,6 +19,7 @@ from pokered_harness.events.hooks import (
     hooks_added_since,
     snapshot_hooks,
 )
+from pokered_harness.link.serial_link import validate_rom_version
 from pokered_harness.link.symbols import LinkRole, symbols_for_role
 from pokered_harness.link.transport import LinkTransport
 from pokered_harness.session import RunUntilResult
@@ -29,6 +31,14 @@ _HookSnapshot = dict[
     tuple[tuple[Callable[[object], None], object], ...],
 ] | None
 _SerialHookRecord = tuple[object, int, int, str]
+
+
+def _validate_positive_int(value: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
 
 if TYPE_CHECKING:
     from pokered_harness.session import Session
@@ -69,14 +79,15 @@ class LinkPair:
     ) -> None:
         self._primary = primary
         self._peer = peer
-        self._version_primary = version_primary
-        self._version_peer = version_peer
+        self._version_primary = validate_rom_version(version_primary)
+        self._version_peer = validate_rom_version(version_peer)
         self._transport = LinkTransport()
         self._bridge_factory = bridge_factory or _default_bridge_factory
         self._bridge: object | None = None
         self._owned_hooks: list[HookRegistration] = []
         self._owned_raw_hooks: list[RawHookRegistration] = []
         self._owned_serial_hooks: list[tuple[object, tuple[object, int, int, str]]] = []
+        self._lifecycle_lock = RLock()
 
     # --- properties ----------------------------------------------------
 
@@ -99,14 +110,11 @@ class LinkPair:
     # --- pair / unpair -------------------------------------------------
 
     def pair(self) -> None:
-        """Build and install the bridge and register PROGRESS-role hooks.
+        """Build and install the bridge and progress hooks atomically."""
+        with self._lifecycle_lock:
+            self._pair_locked()
 
-        Raises :class:`RuntimeError` if already paired. PROGRESS hooks
-        missing from a given ROM are silently skipped — they are
-        non-required diagnostics. Every hook installed by this method is
-        committed as one transaction; a later installation failure removes
-        the hooks installed earlier and leaves the pair unpaired.
-        """
+    def _pair_locked(self) -> None:
         if self._bridge is not None:
             raise RuntimeError("LinkPair is already paired; call unpair() first")
 
@@ -331,18 +339,38 @@ class LinkPair:
         owned: Iterable[tuple[object, tuple[object, int, int, str]]],
     ) -> None:
         """Disable and forget only the bridge's guarded serial records."""
+        grouped: dict[int, tuple[object, list[tuple[object, int, int, str]]]] = {}
         for session, record in owned:
-            state = record[0]
-            if hasattr(state, "active"):
-                state.active = False
-            serial_hooks = getattr(session, "_serial_hooks", None)
-            if isinstance(serial_hooks, list):
-                state_id = id(state)
-                serial_hooks[:] = [
-                    candidate
-                    for candidate in serial_hooks
-                    if not candidate or id(candidate[0]) != state_id
-                ]
+            grouped.setdefault(id(session), (session, []))[1].append(record)
+
+        for session, records in grouped.values():
+            lock = getattr(session, "_lock", None)
+
+            def _deactivate(
+                records: list[tuple[object, int, int, str]] = records,
+                session: object = session,
+            ) -> None:
+                states = {id(record[0]) for record in records}
+                for record in records:
+                    state = record[0]
+                    if hasattr(state, "active"):
+                        state.active = False
+                serial_hooks = getattr(session, "_serial_hooks", None)
+                if isinstance(serial_hooks, list):
+                    serial_hooks[:] = [
+                        candidate
+                        for candidate in serial_hooks
+                        if not candidate or id(candidate[0]) not in states
+                    ]
+
+            if lock is None:
+                _deactivate()
+            else:
+                # Session.serial_hook guards callback execution with this
+                # same lock. Waiting here prevents an in-flight callback
+                # from touching memory or transport after teardown returns.
+                with lock:
+                    _deactivate()
 
     @staticmethod
     def _close_owned_raw_hooks_at(
@@ -450,29 +478,40 @@ class LinkPair:
         pa, pb = self._primary, self._peer
         mem_a, mem_b = pa._pyboy.memory, pb._pyboy.memory
 
+        def _buffer_addresses(
+            session: Session, key: str
+        ) -> tuple[int, int] | None:
+            send_tags = (
+                f"wSerial{key}SendData",
+                f"wLink{key}SendBuffer",
+            )
+            receive_tags = (
+                f"wSerial{key}ReceiveData",
+                f"wLink{key}ReceiveBuffer",
+            )
+            for send_tag, receive_tag in zip(send_tags, receive_tags):
+                if send_tag in session.symbols and receive_tag in session.symbols:
+                    return (
+                        session.symbols.addr_of(send_tag),
+                        session.symbols.addr_of(receive_tag),
+                    )
+            return None
+
         def _install_pair(label: str, widths: dict[str, int]) -> None:
             """Install a 1:1 send→receive copy for a pret serial routine."""
             for key, width in widths.items():
-                send_tag = f"wSerial{key}SendData"
-                recv_tag = f"wSerial{key}ReceiveData"
-                alt_send = f"wLink{key}SendBuffer"
-                alt_recv = f"wLink{key}ReceiveBuffer"
-                send = None
-                recv = None
-                for s_tag, r_tag in ((send_tag, recv_tag), (alt_send, alt_recv)):
-                    if s_tag in pa.symbols and r_tag in pa.symbols:
-                        send = pa.symbols.addr_of(s_tag)
-                        recv = pa.symbols.addr_of(r_tag)
-                        break
-                if send is None or recv is None:
+                addresses_a = _buffer_addresses(pa, key)
+                addresses_b = _buffer_addresses(pb, key)
+                if addresses_a is None or addresses_b is None:
                     continue
-                send_b, recv_b = send, recv  # same addr on both versions
+                send_a, recv_a = addresses_a
+                send_b, recv_b = addresses_b
 
-                def _copy_to_a(_ctx, _w=width, _s=send_b, _r=recv_b):
+                def _copy_to_a(_ctx, _w=width, _s=send_b, _r=recv_a):
                     for i in range(_w):
                         mem_a[_r + i] = mem_b[_s + i]
 
-                def _copy_to_b(_ctx, _w=width, _s=send_b, _r=recv_b):
+                def _copy_to_b(_ctx, _w=width, _s=send_a, _r=recv_b):
                     for i in range(_w):
                         mem_b[_r + i] = mem_a[_s + i]
 
@@ -505,10 +544,10 @@ class LinkPair:
         """Short-circuit ``Serial_ExchangeBytes`` to copy peer's send buffer
         into this side's receive buffer and RET immediately.
 
-        The function's parameters are ``hl`` = send-buffer addr,
-        ``de`` = receive-buffer addr, ``bc`` = byte count. Both peers
-        have identical WRAM layouts so ``peer_memory[hl..hl+bc]`` is
-        the peer's send bytes for the same logical buffer.
+        The function's parameters are ``hl`` = local send-buffer addr,
+        ``de`` = local receive-buffer addr, ``bc`` = byte count. The
+        peer's send pointer is translated by the shared buffer symbol name
+        when the ROM families use different WRAM layouts.
 
         Without this skip ``Serial_ExchangeBytes`` spin-waits in its
         byte-by-byte serial loop, which PyBoy's silent rSB-write
@@ -520,15 +559,50 @@ class LinkPair:
         mem_a, mem_b = pa._pyboy.memory, pb._pyboy.memory
         pba, pbb = pa._pyboy, pb._pyboy
 
-        def skip(this_pb, this_mem, peer_mem):
+        candidate_names = (
+            "wSerialPlayerDataBlock",
+            "wSerialRandomNumberListBlock",
+            "wSerialPartyMonsPatchList",
+            "wSerialEnemyDataBlock",
+            "wSerialOtherGameboyRandomNumberListBlock",
+            "wSerialEnemyMonsPatchList",
+        )
+
+        def _buffer_name(session: Session, address: int) -> str | None:
+            for name in candidate_names:
+                if name in session.symbols and session.symbols.addr_of(name) == address:
+                    return name
+            try:
+                names = session.symbols.names_at(0, address)
+            except (AttributeError, KeyError):
+                return None
+            return next((name for name in names if name in candidate_names), None)
+
+        def _peer_send_address(
+            local_session: Session, peer_session: Session, address: int
+        ) -> int:
+            """Translate a local serial buffer pointer to the peer's address."""
+            name = _buffer_name(local_session, address)
+            if name is None or name not in peer_session.symbols:
+                # Custom/test symbol tables and same-layout ROMs may not carry
+                # the curated buffer labels. Preserve the legacy same-address
+                # behavior for those inputs; known cross-version buffers use
+                # the symbol-specific address below.
+                return address
+            return peer_session.symbols.addr_of(name)
+
+        def skip(this_pb, this_mem, peer_mem, local_session, peer_session):
             rf = this_pb.register_file
             hl = rf.HL
             de = (rf.D << 8) | rf.E
             bc = (rf.B << 8) | rf.C
+            peer_hl = _peer_send_address(local_session, peer_session, hl)
             for i in range(bc):
-                this_mem[de + i] = peer_mem[hl + i]
+                this_mem[(de + i) & 0xFFFF] = peer_mem[(peer_hl + i) & 0xFFFF]
             sp = rf.SP
-            rf.PC = (this_mem[sp + 1] << 8) | this_mem[sp]
+            rf.PC = (
+                this_mem[(sp + 1) & 0xFFFF] << 8
+            ) | this_mem[sp & 0xFFFF]
             rf.SP = (sp + 2) & 0xFFFF
             rf.HL = (hl + bc) & 0xFFFF
             new_de = (de + bc) & 0xFFFF
@@ -536,10 +610,15 @@ class LinkPair:
             rf.E = new_de & 0xFF
             rf.B = 0
             rf.C = 0
+            # Serial_ExchangeBytes ends with `xor a; ret` in pokered. Keep
+            # the flags observable by the caller identical to a successful
+            # hardware exchange instead of leaking the prior hook state.
+            rf.A = 0
+            rf.F = 0x80
 
-        for session, this_pb, this_mem, peer_mem in (
-            (pa, pba, mem_a, mem_b),
-            (pb, pbb, mem_b, mem_a),
+        for session, peer_session, this_pb, this_mem, peer_mem in (
+            (pa, pb, pba, mem_a, mem_b),
+            (pb, pa, pbb, mem_b, mem_a),
         ):
             if "Serial_ExchangeBytes" not in session.symbols:
                 continue
@@ -550,8 +629,16 @@ class LinkPair:
                 _this_pb=this_pb,
                 _this_mem=this_mem,
                 _peer_mem=peer_mem,
+                _session=session,
+                _peer_session=peer_session,
             ) -> None:
-                skip(_this_pb, _this_mem, _peer_mem)
+                skip(
+                    _this_pb,
+                    _this_mem,
+                    _peer_mem,
+                    _session,
+                    _peer_session,
+                )
 
             bank, addr = session.symbols.bank_addr("Serial_ExchangeBytes")
             cleanup_errors = self._close_owned_raw_hooks_at(
@@ -648,13 +735,11 @@ class LinkPair:
             pass
 
     def unpair(self) -> None:
-        """Remove pair-owned hooks, bridge breakpoints, and transport state.
+        """Remove pair-owned hooks and transport state atomically."""
+        with self._lifecycle_lock:
+            self._unpair_locked()
 
-        EventBus handles remove only this pair's logical callbacks when a
-        shared dispatcher also carries an unrelated event hook. Raw bridge
-        callbacks are removed by identity because SerialBridge predates the
-        ownership API.
-        """
+    def _unpair_locked(self) -> None:
         owned_hooks = self._owned_hooks
         owned_raw_hooks = self._owned_raw_hooks
         owned_serial_hooks = self._owned_serial_hooks
@@ -663,13 +748,13 @@ class LinkPair:
         self._owned_raw_hooks = []
         self._owned_serial_hooks = []
         self._bridge = None
-        self._transport.reset()
 
         self._deactivate_serial_hooks(owned_serial_hooks)
         cleanup_errors = self._close_owned_hooks(owned_hooks)
         cleanup_errors.extend(self._close_owned_raw_hooks(owned_raw_hooks))
         if bridge is not None:
             self._uninstall_bridge(bridge)
+        self._transport.reset()
         if cleanup_errors:
             raise RuntimeError("one or more pair hooks could not be removed") from cleanup_errors[0]
 
@@ -720,18 +805,12 @@ class LinkPair:
         mem_b[self._IF_ADDR] = mem_b[self._IF_ADDR] | self._IF_SERIAL
 
     def step(self, count: int = 1, *, render: bool = False) -> None:
-        """Advance BOTH sessions by ``count`` ticks each, interleaved.
+        """Advance both sessions by ``count`` ticks under the pair lifecycle lock."""
+        count = _validate_positive_int(count, "count")
+        with self._lifecycle_lock:
+            self._step_locked(count, render=render)
 
-        Semantics: ``step(N)`` leaves primary.current_tick() and
-        peer.current_tick() each advanced by N, with the two sides
-        interleaved in :data:`CHUNK_SIZE`-sized slices so hooks can fire
-        near-simultaneously. (It is NOT 2N ticks combined.)
-
-        When paired, each tick runs the hardware serial exchange so the
-        two peers' serial ports behave like a physical link cable.
-        """
-        if count <= 0:
-            raise ValueError(f"count must be positive, got {count}")
+    def _step_locked(self, count: int, *, render: bool) -> None:
         remaining = count
         paired = self._bridge is not None
         while remaining > 0:
@@ -758,10 +837,8 @@ class LinkPair:
         chunk: int = 16,
     ) -> RunUntilResult:
         """Step both sides until ``event_names`` fires on ``side``."""
-        if max_ticks <= 0:
-            raise ValueError(f"max_ticks must be positive, got {max_ticks}")
-        if chunk <= 0:
-            raise ValueError(f"chunk must be positive, got {chunk}")
+        max_ticks = _validate_positive_int(max_ticks, "max_ticks")
+        chunk = _validate_positive_int(chunk, "chunk")
         if side == "primary":
             watched = self._primary
         elif side == "peer":
