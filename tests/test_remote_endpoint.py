@@ -146,6 +146,45 @@ def test_exchange_nybble_exchanges_bytes_between_peers():
     assert mb[recv_addr] == 0x61
 
 
+def test_game_driven_exchanges_use_a_long_bounded_timeout():
+    session, pyboy, memory = _make_session(_BLUE_SYM)
+
+    class RecordingLink:
+        def __init__(self):
+            self.timeouts: list[int] = []
+
+        def exchange(self, _kind, payload, *, timeout_ms):
+            self.timeouts.append(timeout_ms)
+            return bytes([0x42] * len(payload))
+
+    link = RecordingLink()
+    endpoint = RemoteLinkEndpoint.as_listener(session, link)
+    endpoint.install()
+
+    nybble_send = session.symbols.addr_of("wSerialExchangeNybbleSendData")
+    memory[nybble_send] = 0x61
+    pyboy.fire(0x00, 0x22C3)
+
+    menu_send = session.symbols.addr_of("wLinkMenuSelectionSendBuffer")
+    memory[menu_send] = 0xD0
+    memory[menu_send + 1] = 0xD0
+    pyboy.fire(0x00, 0x2247)
+
+    player_data = session.symbols.addr_of("wSerialPlayerDataBlock")
+    memory[player_data] = 0xAA
+    pyboy.register_file.HL = player_data
+    pyboy.register_file.D = 0xD1
+    pyboy.register_file.E = 0x41
+    pyboy.register_file.B = 0
+    pyboy.register_file.C = 1
+    pyboy.register_file.SP = 0x1000
+    memory[0x1000] = 0x34
+    memory[0x1001] = 0x12
+    pyboy.fire(0x00, 0x216F)
+
+    assert link.timeouts == [30_000, 30_000, 30_000]
+
+
 # --- exchange menu selection ---------------------------------------------
 
 

@@ -489,9 +489,9 @@ def _drive_remote_to_link_menu(
 #   is the old EnterMap-hookwarp version, the nybble test's
 #   _ensure_fixture_is_walkable precondition below skips the run
 #   rather than hanging until timeout.
-# - Red fixture: not produced — Mt. Moon → Cerulean progression is not
-#   yet scripted in the Red harness.
-_FIXTURES_WITH_WALKABLE_PLAYER = {"blue", "yellow"}
+# - Red fixture: reproduced by scripts/produce_cable_club_fixture.py from the
+#   retained external cerulean_pc.state input and pinned to the color Red ROM.
+_FIXTURES_WITH_WALKABLE_PLAYER = {"blue", "red", "yellow"}
 
 
 # Expected load-time player position per version. Used by the
@@ -501,6 +501,7 @@ _FIXTURE_EXPECTED_POS = {
     # All versions share the same Cerulean Pokecenter interior map
     # (0x40). The receptionist-adjacent tile is (11, 3).
     "blue": (0x40, 11, 3),
+    "red": (0x40, 11, 3),
     "yellow": (0x40, 11, 3),
 }
 

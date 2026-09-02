@@ -69,3 +69,5 @@ vendor/pyboy-src/**/*.gb
 vendor/pyboy-src/**/*.gbc
 vendor/pyboy-src/**/__pycache__/
 vendor/pyboy-src/**/.benchmarks/
+vendor/pyboy-src/build/
+vendor/pyboy-src/pyboy.egg-info/

@@ -499,6 +499,43 @@ def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_p
     ]
 
 
+def test_environment_cython_mode_does_not_shadow_installed_pyboy(tmp_path, monkeypatch):
+    vendored = tmp_path / "vendor" / "pyboy-src"
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join((str(vendored), str(tmp_path / "ambient"))),
+    )
+    monkeypatch.setenv("PYBOY_NO_CYTHON", "1")
+
+    environment = gate.build_test_environment(
+        tmp_path,
+        tmp_path / "rom",
+        tmp_path / "fixtures",
+        {},
+        runtime_mode="cython",
+    )
+
+    entries = environment["PYTHONPATH"].split(os.pathsep)
+    assert entries[:2] == [str(tmp_path / "src"), str(tmp_path)]
+    assert str(vendored) not in entries
+    assert "PYBOY_NO_CYTHON" not in environment
+
+
+def test_runtime_problems_reject_an_unexpected_runtime_mode(tmp_path):
+    runtime = {
+        "pyboy_mode": "source",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "revision",
+        "serial_contract": "bit-accurate-backend",
+        "pyboy_module": "pyboy",
+        "harness_module": "pokered_harness",
+    }
+
+    problems = gate.runtime_problems(tmp_path, runtime, expected_mode="cython")
+
+    assert any("runtime mode mismatch" in problem for problem in problems)
+
+
 def test_environment_pins_selected_symbol_file_when_available(tmp_path, monkeypatch):
     rom_root = tmp_path / "rom"
     red = rom_root / "red"
