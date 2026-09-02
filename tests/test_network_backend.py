@@ -594,12 +594,58 @@ def test_wait_for_wire_idle_can_progress_owner_queued_edge():
             and b.debug_snapshot()["pending_edge_requests"] == 0
         ):
             time.sleep(0.005)
-        b.wait_for_wire_idle(timeout=1.0, progress_callback=progress)
+        b.wait_for_wire_idle(
+            timeout=1.0,
+            progress_callback=progress,
+            stable_checks=2,
+        )
         sender.join(timeout=1.0)
         assert not sender.is_alive()
         assert result == [0]
         assert callback_calls > 0
         assert b.debug_snapshot()["pending_edge_requests"] == 0
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_owner_dispatch_uses_no_data_during_clock_role_transition():
+    """A transient internal-clock edge gets a connected/no-data response."""
+    a, b = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    core.transfer_enabled = 1
+    core.internal_clock = 1
+    core.SC = 0x81
+    a.start_receiver(local_core=None)
+    b.start_receiver(
+        local_core=core,
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    result: list[int] = []
+    sender = threading.Thread(
+        target=lambda: result.append(a.on_edge(our_bit=1, our_role=1)),
+        daemon=True,
+    )
+    try:
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while (
+            time.monotonic() < deadline
+            and b.debug_snapshot()["pending_edge_requests"] == 0
+        ):
+            time.sleep(0.005)
+        assert b.service_pending_edges(max_edges=1) == 1
+        assert b.debug_snapshot()["pending_edge_requests"] == 1
+        assert b.connected
+
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert result == [1]
+        assert core.SB == 0
+        snapshot = b.debug_snapshot()
+        assert snapshot["keepalive_bits_sent"] == 1
+        assert snapshot["owner_edge_applied"] == 1
     finally:
         a.stop()
         b.stop()

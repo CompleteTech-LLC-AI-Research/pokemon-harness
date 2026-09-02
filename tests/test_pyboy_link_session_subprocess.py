@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from tests._rom_assets import fixture_path, rom_path, sym_path
+from tests._tcp_trade_peer import _hold_at_sync_boundary
 
 _REPO = Path(__file__).resolve().parents[1]
 
@@ -327,6 +328,43 @@ def _assert_peer_success(result: dict, *, label: str) -> None:
             f"deadline_exceeded={deadline_exceeded!r} "
             f"returncode={returncode!r}; result={result}"
         )
+
+
+def test_hold_at_sync_boundary_does_not_tick_past_ready_marker():
+    """The release rendezvous uses owner dispatch, never blind ROM ticks."""
+
+    class FakeBackend:
+        def __init__(self):
+            self.announced: list[int] = []
+
+        def announce_sync(self, *, sync_id: int) -> None:
+            self.announced.append(sync_id)
+
+        def poll_peer_sync(self, *, sync_id: int) -> bool:
+            # A peer that has already reached each matching phase.
+            return sync_id in (113, 114)
+
+    service_calls = 0
+
+    def service_pending_edges() -> int:
+        nonlocal service_calls
+        service_calls += 1
+        return 0
+
+    backend = FakeBackend()
+    _hold_at_sync_boundary(
+        backend,
+        ready_sync_id=113,
+        release_sync_id=114,
+        timeout=1.0,
+        service_pending_edges=service_pending_edges,
+    )
+
+    assert backend.announced == [113, 114]
+    # Both peer markers were already available, so no ROM tick is possible
+    # in this helper; the callback exists solely for any already-admitted
+    # owner edge that may arrive at a real boundary.
+    assert service_calls == 0
 
 
 def _kill_without_waiting(procs) -> None:

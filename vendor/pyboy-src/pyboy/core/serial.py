@@ -181,6 +181,12 @@ class Serial:
         self._bits_remaining = 0
 
         self.backend = backend if backend is not None else NullBackend()
+        # Network owner-dispatch is opt-in. The callback is invoked from
+        # ``tick`` on the emulator owner thread, never from the reader
+        # thread; keeping it disabled by default preserves the disconnected
+        # and low-level serial paths.
+        self.owner_dispatch_callback = None
+        self.owner_dispatch_enabled = False
 
     # --- register writes ------------------------------------------------
 
@@ -270,6 +276,11 @@ class Serial:
 
     # --- tick (master / idle) -------------------------------------------
 
+    @cython.locals(
+        _cycles=cython.ulonglong,
+        delta=cython.ulonglong,
+        interrupt=cython.bint,
+    )
     def tick(self, _cycles):
         """Advance by ``_cycles - last_cycles`` CPU cycles.
 
@@ -283,6 +294,22 @@ class Serial:
             return False
         self.last_cycles = _cycles
         self.clock += delta
+
+        # A remote slave edge is delivered by the network reader into an
+        # owner queue. Pump it from this native serial boundary, while the
+        # slave is armed, so a long motherboard frame cannot strand the
+        # master's EDGE_REQ behind a frame-level callback. The Python callback
+        # is entered only under the GIL; ``noexcept`` is preserved because
+        # the installed harness callback catches and records its own errors.
+        if (
+            self.owner_dispatch_enabled
+            and self.transfer_enabled
+            and not self.internal_clock
+        ):
+            with cython.gil:
+                callback = self.owner_dispatch_callback
+                if callback is not None:
+                    callback()
 
         interrupt = False
         if self.transfer_enabled and self.internal_clock:

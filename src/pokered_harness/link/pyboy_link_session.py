@@ -293,7 +293,11 @@ class PyBoyLinkSession:
                     serial_gate=self._serial_gate,
                     dispatch_to_owner=True,
                 )
+                with self._serial_gate:
+                    self._enable_network_owner_pump(core, self._network_backend)
             except BaseException:
+                with self._serial_gate:
+                    self._disable_network_owner_pump(core)
                 self._restore_network_tick_owner(pyboy)
                 try:
                     core.backend = (
@@ -417,6 +421,48 @@ class PyBoyLinkSession:
                 "for serialized serial ownership"
             ) from exc
         self._original_ticks[key] = (owner_attribute, original_tick)
+
+    @staticmethod
+    def _make_network_owner_pump(backend: NetworkBackend):
+        """Return a noexcept-safe owner-thread serial queue pump.
+
+        ``Serial.tick`` is declared ``noexcept`` for PyBoy's Cython
+        motherboard path. Any backend failure therefore must be converted
+        into the backend's normal fail-closed state instead of escaping from
+        the callback as an unraisable Cython exception.
+        """
+
+        def _pump() -> None:
+            try:
+                backend.service_pending_edges()
+            except BaseException as exc:  # noqa: BLE001 - fail the link closed
+                backend._mark_closed(exc)
+
+        return _pump
+
+    @staticmethod
+    def _enable_network_owner_pump(core: object, backend: NetworkBackend) -> None:
+        """Install the serial-tick owner pump when the native core supports it."""
+        if not hasattr(core, "owner_dispatch_callback") or not hasattr(
+            core, "owner_dispatch_enabled"
+        ):
+            # Lightweight legacy doubles do not expose the optional native
+            # pump. The per-frame owner wrapper remains the safe fallback for
+            # those integrations; the bundled patched PyBoy core always has
+            # the fields and therefore gets the higher-throughput path.
+            return
+        core.owner_dispatch_callback = PyBoyLinkSession._make_network_owner_pump(
+            backend
+        )
+        core.owner_dispatch_enabled = True
+
+    @staticmethod
+    def _disable_network_owner_pump(core: object) -> None:
+        """Disable owner pumping before a network core is restored or detached."""
+        if hasattr(core, "owner_dispatch_enabled"):
+            core.owner_dispatch_enabled = False
+        if hasattr(core, "owner_dispatch_callback"):
+            core.owner_dispatch_callback = None
 
     def _restore_network_tick_owner(self, pyboy: _PyBoyLike) -> None:
         """Restore a PyBoy tick method installed by :meth:`attach`."""
@@ -588,6 +634,8 @@ class PyBoyLinkSession:
             # Wait for an in-progress owner tick before restoring the serial
             # backend. The response worker never touches the core, so after
             # this point no background thread retains an emulator reference.
+            with self._serial_gate:
+                self._disable_network_owner_pump(core)
             self._restore_network_tick_owner(pyboy)
         if prev_serial is not None:
             pyboy.mb.serial = prev_serial
