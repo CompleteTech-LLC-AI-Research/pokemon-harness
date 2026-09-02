@@ -27,24 +27,19 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current merged candidate is rooted at live target `master` tip `d2cfb98`
-(PR #9, with runtime hardening and documentation from PRs #7-#8) and uses the conservative
-`DEFAULT_MATRIX_WORKERS=1` setting. Its asset-free gate collected 657 tests,
-passed 515/515 unit tests, and passed 40/40 timing cases in each of five
-repetitions. The asset-backed local tier passed 47/47, the remote transport/MCP
-tier passed 13/13, and the strict trade tier passed 19/19. The last completed
-strict battle run passed 18/19: the
-`red_color-listen-blue_color-connect` remote row failed before its battle menu
-opened. No complete 19/19 battle claim is made. This update adds a bounded
-owner-progress callback for transport-idle waits and a focused regression test;
-that change requires a fresh full matrix before it can alter the status. The
-release runtime is the bundled PyBoy source
+The current merged base is live target `master` tip `01edb6e` (PRs #12-#13),
+and the production follow-up is tested with the conservative
+`DEFAULT_MATRIX_WORKERS=1` setting. Its asset-free gate collected 692 tests,
+passed 549/549 unit tests, and passed 40/40 timing cases in each of five
+repetitions. The post-change asset-backed local tier passed 47/47 and the
+remote transport/MCP tier passed 14/14. The strict trade matrix completed
+18/19, with one bounded remote timeout at the Trade Center warp rendezvous;
+the strict battle matrix is still running. The release runtime is the bundled PyBoy source
 snapshot pinned in `VERSIONS.md` (`2.7.0`, harness revision
 `c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode is
-the documented release default. The pinned Cython build also passed its runtime
-identity and serial-contract checks, exposed `mb.serial`, and passed a
-real-ROM attach/detach/close smoke; full trade/battle acceptance has not been
-run in Cython mode. Use
+the documented release default. The current Cython/native serial extension
+does not compile at its `uint64_t`/function-pointer boundary, so it has no
+gameplay acceptance evidence. Use
 explicit ROM, symbol, and SHA-1 values; never use `POKERED_SKIP_SHA1=1` for
 release evidence.
 
@@ -53,21 +48,20 @@ release evidence.
 - Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
   fixture bytes have recorded reproduction evidence; the external states are
   never committed and their hashes do not prove gameplay compatibility.
-- The current candidate passed the completed 10 local/dedicated trade rows, all
-  10 local/dedicated battle rows, and all 9 remote trade rows. Earlier
-  independent remote Red/Blue and Red/Yellow battle samples passed 5/5 each;
-  those samples do not replace the failed strict battle row.
+- The post-change local production tier passed 47/47 and the remote
+  transport/MCP tier passed 14/14. The current strict trade run passed all
+  local/dedicated rows and 8/9 remote rows; the strict battle run remains in
+  progress. Earlier gameplay samples remain historical diagnostics until the
+  strict post-change matrices complete.
 - The current tree declares all canonical Red/Blue/Yellow listener and
-  connector orderings over localhost TCP. The current runtime result is green
-  for trade and partial for battle: strict trade is 19/19 and the last strict
-  battle run was 18/19;
-  concurrent-load stability remains open.
+  connector orderings over localhost TCP. Post-change strict trade has one
+  failed remote row and strict battle remains in progress; concurrent-load
+  stability remains open.
 - The strict acceptance declaration has a dedicated entry point for every
   canonical ordered local and remote pair (19 trade and 19 battle nodes).
   Collection is declaration evidence only; a LinkMenu milestone is not a
-  gameplay acceptance. Current execution recorded strict trade 19/19 and
-  strict battle 18/19, with the failed Red-listener/Blue-connector row retained
-  as a blocker.
+  gameplay acceptance. Current execution has recorded an incomplete strict
+  trade result; the strict battle result is still pending.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or

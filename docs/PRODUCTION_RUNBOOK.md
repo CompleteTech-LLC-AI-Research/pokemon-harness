@@ -1,25 +1,18 @@
 # Production runbook
 
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
-checkout. The baseline at `e219fb5` was not certified. Unless labelled
-historical, the current candidate facts refer to the live target `master` tip
-`d2cfb98` (PR #9), with the conservative one-worker matrix setting used for
-the strict acceptance run. External BYO assets are excluded from the tracked
-source tree.
+checkout. The baseline at `e219fb5` was not certified. The live target is
+[`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon); its
+current `master` is `01edb6e` (merged PRs #12-#13). External BYO assets are
+excluded from the tracked source tree.
 
-The current candidate asset-free gate passed collection 657, unit 515/515, and
-timing 40/40 in each of five repetitions; its scoped result was `PASS`. The
-asset-backed local tier passed 47/47 and the remote transport/MCP tier passed
-13/13, with all five ROM hashes, three symbol hashes, and ten fixture entries
-validated. The strict trade matrix passed 19/19. The last completed strict
-battle matrix passed 18/19; the
-`red_color-listen-blue_color-connect` remote row failed before its battle menu
-opened. Earlier independent remote Red/Blue and Red/Yellow battle samples
-passed 5/5 each, but do not replace the failed strict row. Symbol hashes and
-fixture byte/provenance records are in [`VERSIONS.md`](../VERSIONS.md) and the
-tracked [`fixture-manifest.json`](../release-evidence/fixture-manifest.json).
-A focused rerun of the failed Red/Blue row with both idle waits
-owner-progress-aware passed once; it is not a replacement for the full matrix.
+The current source-only gate passed collection 692, unit 549/549, and timing
+40/40 in each of five repetitions. The focused post-change integration slice
+passed 294 tests, all 10 external fixture-manifest entries validated, and the
+source environment passed `pip check` and the source runtime identity check.
+The post-change real-ROM local tier passed 47/47 and the remote transport/MCP
+tier passed 14/14. Strict trade completed 18/19 with one bounded remote
+timeout at the Trade Center warp rendezvous; strict battle is still running.
 Overall status is `PARTIAL`; the exact open items are listed in [the release
 checklist](RELEASE_CHECKLIST.md).
 
@@ -93,14 +86,12 @@ The default installed runtime is PyBoy source mode, verified with:
 python scripts/bootstrap_pyboy.py --mode source --check
 ```
 
-The pinned fork also supports a compiled Cython diagnostic mode. In this audit,
-`python scripts/bootstrap_pyboy.py --mode cython --check` passed in a seeded
-Python 3.12 environment; it reported `cython_compiled=True`, exposed
-`mb.serial`, and passed a real-ROM attach/detach/close smoke. Full trade/battle
-acceptance was not run in Cython mode, so the Cython result is not full gameplay
-sign-off. Do not substitute an arbitrary standalone PyBoy wheel: record the
-version, harness revision, and runtime mode, and require the serial contract
-before running link tests.
+The pinned fork has an optional Cython diagnostic mode, but the current native
+serial-extension build fails closed at the `pyboy/core/serial.c` compile
+boundary (`uint64_t`/function-pointer incompatibility). No Cython gameplay
+acceptance is claimed. Do not substitute an arbitrary standalone PyBoy wheel:
+record the version, harness revision, and runtime mode, and require the serial
+contract before running link tests.
 
 The repository is source-only. Obtain ROMs and symbols legally and keep them
 outside version control. The `.gitignore` intentionally excludes ROMs, symbol
@@ -234,8 +225,8 @@ python scripts/production_gate.py \
   --format text
 ```
 
-The current candidate’s clean asset-free run collected 657 tests, passed unit
-515/515, passed timing 40/40 in each of five repetitions, and returned scoped
+The current candidate’s clean asset-free run collected 692 tests, passed unit
+549/549, passed timing 40/40 in each of five repetitions, and returned scoped
 `PASS`. It also performed schema-only validation of the ten-entry fixture
 manifest. Because
 `--unit-only` selects only `unit` and `timing`, it does not validate ROM bytes,
@@ -446,14 +437,15 @@ scope is:
 
 | Operation | Local ordered rows | Remote ordered listener/connector rows | Dedicated assertion | Current status |
 |---|---:|---:|---|---|
-| Trade | 9 | 9 | Red/Yellow party-record swap | 9 local + dedicated and 9 remote rows passed (19/19) |
-| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | 18/19 in the last completed run; `red_color-listen-blue_color-connect` failed before the battle menu |
+| Trade | 9 | 9 | Red/Yellow party-record swap | 18/19 passed: local/dedicated rows passed and `yellow-listen-red_color-connect` timed out at the Trade Center warp rendezvous |
+| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | Post-change 19-row run is still in progress |
 
 That is 19 strict entrypoints per operation. The remote rows use canonical color
 Red, color Blue, and Yellow profiles; listener/connector order is significant.
-The current candidate trade run passed all 19 rows. The last completed strict
-battle run passed 18/19; its targeted Red/Blue and Red/Yellow remote samples
-passed 5/5 each, but those samples do not replace the failed strict row.
+The follow-up candidate has completed the strict trade matrix with one failed
+remote row and must finish the strict battle matrix. Historical targeted
+Red/Blue and Red/Yellow remote samples passed 5/5 each, but those samples do
+not replace the current matrix result.
 Stock-ROM rows and LinkMenu-only milestones are outside this strict release
 claim.
 
@@ -600,24 +592,26 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The asset-free gate passes 515/515 unit tests and 40/40 timing cases in each
-   of five repetitions, but it does not run ROM-backed gameplay. The strict
-   trade matrix passed 19/19; the last strict battle matrix passed 18/19 and
-   must be rerun with no failures, errors, skips, xfails, or timeouts.
+1. The asset-free gate passes 549/549 unit tests and 40/40 timing cases in each
+   of five repetitions, but it does not run ROM-backed gameplay. The post-change
+   strict trade matrix completed 18/19 with one remote timeout, and the strict
+   battle matrix is still running; neither supports full sign-off yet.
 2. The strict declaration is complete: the collection audit has nine ordered
    local pairs, nine ordered remote role pairs, six reversed-role rows, nine
    local variant rows, and 19 strict entrypoints for each operation. The
-   completed local tier is 47/47 and remote tier is 13/13; declaration and
-   completed-tier results do not substitute for the failed battle row.
+   post-change local and remote transport/MCP tiers passed, but one strict
+   remote trade row failed and the strict battle tier remains in progress;
+   historical completed tier results do not substitute for current runtime
+   evidence.
 3. The canonical color Red, color Blue, and Yellow fixture bytes have recorded
    reproduction evidence, while vanilla ordinary source provenance is
    `PARTIAL`. The manifest and save states are external/operator-managed; a
    retained release bundle must include complete byte validation and sanitized
    evidence.
-4. The wheel and both source/Cython runtime identity paths are validated, but
-   full Cython trade/battle acceptance is not. The broad suite, all advertised
-   real-ROM single-session rows, native-platform coverage, concurrent-load
-   stability, and independent review remain open.
+4. The wheel and source runtime identity paths are validated, but the current
+   Cython native extension does not compile and has no gameplay evidence. The
+   broad suite, all advertised real-ROM single-session rows, native-platform
+   coverage, concurrent-load stability, and independent review remain open.
 5. Remote TCP has no authentication or encryption. Loopback-only operation is
    enforced and is the only supported network boundary; cross-host operation
    is blocked until secure transport is added.

@@ -16,9 +16,10 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The latest candidate is merged as `d2cfb98` (PR #9, head `231fce9`), with
-runtime hardening and documentation from PRs #7-#8, and used
-`DEFAULT_MATRIX_WORKERS=1`. The current clean asset-free command:
+The current release base is merged `master` tip `01edb6e` (PRs #12-#13), with
+the in-process serial/lifecycle and remote TCP follow-ups under validation on an
+isolated branch using `DEFAULT_MATRIX_WORKERS=1`. The current clean asset-free
+command:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -31,9 +32,9 @@ python scripts/production_gate.py \
   --format text
 ```
 
-returned scoped `PASS` from the isolated candidate: collection 657, unit
-515/515, and timing 40/40 in each of five repetitions. It used bundled source PyBoy
-2.7.0, fork
+returned scoped `PASS` from the isolated candidate: collection 692, unit
+549/549, and timing 40/40 in each of five repetitions. It used bundled source
+PyBoy 2.7.0, fork
 `c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
 ten-entry fixture manifest. No ROM-backed tier ran in this command.
 
@@ -43,29 +44,28 @@ rows, and 19 strict trade plus 19 strict battle entrypoints. Structural and
 declaration checks passed; matrix runtime was `NOT RUN` because the standalone
 audit is collection-only.
 
-The current candidate asset-backed local tier passed 47/47, the remote
-transport/MCP tier passed 13/13, and the strict trade matrix passed 19/19 with
-no skips, xfails, or errors. The last completed strict battle matrix passed
-18/19; `red_color-listen-blue_color-connect` failed before its battle menu
-opened. Independent targeted Red/Blue and Red/Yellow remote battle samples
-passed 5/5 each, but do not replace the failed strict row.
-A focused rerun of the failed Red/Blue row with both idle waits
-owner-progress-aware passed once; it is not a replacement for the full matrix.
+The focused post-change integration slice passed 294/294, and all 10 external
+fixture-manifest entries validated. The post-change real-ROM local tier passed
+47/47 and the remote transport/MCP tier passed 14/14. Strict trade completed
+18/19, with one remote timeout at the Trade Center warp rendezvous; strict
+battle is still running. Historical full evidence is not reused as current
+candidate evidence.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
 producer plus tracked battle-fixture generator are present. Full sign-off is
-pending repair and a fresh green run of the failed strict battle row, plus
-Cython gameplay coverage,
+pending the strict trade failure disposition, the post-change battle matrix,
+and the remaining release blockers. The
+current Cython native serial extension does not compile, so Cython gameplay
+coverage,
 vanilla source provenance, broad-suite coverage, native-platform evidence,
 retained complete evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The candidate evidence boundary is identified as merged `master` tip
-  `d2cfb98` (PR #9, head `231fce9`) plus the committed runtime hardening and
-  documentation changes;
-  this documentation is reviewed against that boundary.
+- [x] The release base is identified as merged `master` tip `01edb6e`
+  (PRs #12-#13), and the follow-up candidate is isolated from the protected
+  dirty development checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
 - [x] Documentation keeps BYO assets and external evidence outside the source
@@ -82,11 +82,11 @@ retained complete evidence, and independent review.
 - [x] `mcp==1.29.1` is pinned in `pyproject.toml`.
 - [x] The asset-free gate resolved the bundled source runtime and the
   bit-accurate serial contract.
-- [ ] Any release environment runs `python -m pip check` and records the
+- [x] The audited environment runs `python -m pip check` and records the
   interpreter/runtime identity from the same environment used by MCP.
-- [x] Cython/native-accelerator mode builds and passes its explicit runtime
-  serial contract in a seeded disposable Python 3.12 environment.
-- [x] The pinned Cython build exposes `mb.serial` and passes a real-ROM
+- [ ] Cython/native-accelerator mode builds and passes its explicit runtime
+  serial contract; the current native serial extension fails at compile time.
+- [ ] The pinned Cython build exposes `mb.serial` and passes a real-ROM
   attach/detach/close smoke.
 - [ ] Full Cython trade/battle acceptance is complete; source mode remains the
   documented release default and neither mode has full strict-matrix sign-off.
@@ -108,8 +108,8 @@ retained complete evidence, and independent review.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete in the current
-  candidate gate; 657 tests were collected with no collection errors.
-- [x] ROM-free unit tests pass 515/515 in the scoped gate.
+  candidate gate; 692 tests were collected with no collection errors.
+- [x] ROM-free unit tests pass 549/549 in the scoped gate.
 - [x] Timing tests pass 40/40 in each of five repetitions in the scoped gate.
 - [x] The explicit production-file Ruff boundary is clean; broad legacy files
   outside that boundary are not used as release evidence.
@@ -117,22 +117,20 @@ retained complete evidence, and independent review.
   xfail, or timeout.
 - [ ] Real-session boot, state, and MCP stdio tests pass for every advertised
   ROM variant. The current asset-free gate does not exercise this tier.
-- [x] The current candidate real-ROM local tier passes 47/47 and the remote
-  transport/MCP tier passes 13/13 with no fixture or runtime skips.
-- [x] Current-candidate controlled local evidence covers the complete canonical
-  matrix: 9/9 ordered trade rows, 9/9 ordered battle rows, and both dedicated
-  Red/Yellow assertions passed.
+- [x] The current candidate real-ROM local tier passed 47/47 with no fixture
+  or runtime skips.
+- [ ] Current-candidate controlled local evidence covers the complete canonical
+  matrix: strict trade local/dedicated rows passed, while the strict battle
+  rows are still running.
 - [ ] Current-candidate controlled remote evidence covers every ordered
-  listener/connector pair: trade is 9/9; the last strict battle run was 18/19
-  because `red_color-listen-blue_color-connect` failed before the battle menu.
-  Independent Red/Blue and Red/Yellow battle samples are 5/5 each but do not
-  close the strict-row failure.
+  listener/connector pair; transport/MCP passed 14/14, strict trade passed 8/9
+  with one bounded timeout, and strict battle is still running.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
   ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
   IDs).
 - [ ] Current-candidate local and remote strict runtime rows pass in both
-  listener/connector directions; local and trade rows are green, but one
-  strict remote battle row remains failed and concurrent-load stability is not
+  listener/connector directions; strict trade has one failed remote row,
+  strict battle is still running, and concurrent-load stability is not
   certified.
 - [ ] Native-platform/build coverage and an independent release review are
   complete.

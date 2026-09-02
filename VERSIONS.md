@@ -5,38 +5,30 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate (2026-09-01), based on live `master`
-tip `d2cfb98` (PR #9; runtime hardening and documentation from PRs #7-#8).
-The candidate asset-free
-gate collected 657 tests,
-passed unit 515/515, and passed timing 40/40 in each of five repetitions with
-`DEFAULT_MATRIX_WORKERS=1`. The asset-backed local tier passed 47/47, the
-remote transport/MCP tier passed 13/13, and strict trade passed 19/19 with no
-skips, xfails, or errors. The last completed strict battle run passed 18/19;
-the `red_color-listen-blue_color-connect` remote row failed before its battle
-menu opened. No complete 19/19 battle claim is made. The
-collection audit passed structurally: all nine ordered local pairs, all nine
-ordered remote role pairs, all six reversed-role rows, all nine local variant
-rows, and 19 strict trade plus 19 strict battle entrypoints are present.
+Status: `PARTIAL` current audit candidate (2026-09-02), based on live `master`
+tip `01edb6e` (merged PRs #12-#13) plus the isolated in-process and remote
+follow-ups.
+The source-only gate collected 692 tests, passed unit 549/549, and passed
+timing 40/40 in each of five repetitions with `DEFAULT_MATRIX_WORKERS=1`.
+The focused post-change integration slice passed 294 tests, the external
+fixture manifest validated all 10 entries, and the source environment passed
+`pip check` and the source runtime identity check. Post-change real-ROM local,
+remote transport/MCP tier passed 14/14. The strict trade gate completed 18/19,
+with all local/dedicated rows passing and one remote row timing out at the
+Trade Center warp rendezvous; the strict battle gate is still running.
 
-The pinned fork's Cython build and runtime contract passed in a seeded disposable
-Python 3.12 environment. The compiled mode exposed the Python-side `mb.serial`
-object, passed the serial contract, and passed a real-ROM attach/detach/close
-smoke. Full trade/battle acceptance was not run in Cython mode, so the Cython
-probe does not certify gameplay. Source mode remains the documented release
-default. Current candidate local/dedicated trade and battle rows passed 10/10,
-all nine remote trade rows passed, and independent remote Red/Blue and
-Red/Yellow battle samples passed 5/5 each, but those samples do not replace the
-failed strict row. A focused rerun of the failed Red/Blue row with the
-owner-progress idle-wait change passed once; this is not a replacement for the
-full 19-row result. The historical complete real-ROM snapshot at
-`1046a541e0003923aec6000b6b383c6eaafeaa48` is separate evidence.
+The vendored source PyBoy runtime remains the documented release default. The
+current Cython/native serial-extension build does not pass its compile
+boundary (`uint64_t`/function-pointer incompatibility), so no Cython gameplay
+acceptance is claimed. Historical real-ROM rows remain separately labeled in
+the README and are not promoted to current-candidate evidence until the full
+post-change gate completes.
 
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
-The remaining release decision is `PARTIAL` because one strict remote battle
-row remains failed; the owner-progress follow-up in this update requires a
-fresh full matrix. Cython gameplay coverage, vanilla source provenance, broad-suite coverage,
+The remaining release decision is `PARTIAL` because one strict remote trade
+row failed and the strict battle matrix is not complete; the owner-progress
+follow-up in this update requires a fresh full matrix. Cython gameplay coverage, vanilla source provenance, broad-suite coverage,
 native-platform coverage, retained complete evidence, and independent review
 remain incomplete. `ruff check .` is clean only for the configured product
 boundary; the broad legacy tree is not silently reformatted.
@@ -51,11 +43,11 @@ boundary; the broad legacy tree is not silently reformatted.
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
-coordinator and remote TCP transport. The pinned Cython build tested in this
-audit also exposed that object, but only a build/serial/attach smoke was
-verified there; full gameplay acceptance remains unverified in Cython mode. A
-pre-existing standalone PyBoy wheel must not be allowed to shadow this package;
-verify the runtime identity before release. See the
+coordinator and remote TCP transport. The current Cython/native serial
+extension build fails at compile time, so it is not a release runtime and has
+no gameplay acceptance evidence. A pre-existing standalone PyBoy wheel must
+not be allowed to shadow this package; verify the runtime identity before
+release. See the
 [production runbook](docs/PRODUCTION_RUNBOOK.md).
 
 ## ROM pins
@@ -196,10 +188,10 @@ matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 
 | Path | ROMs | Required fixture files | Current evidence |
 |---|---|---|---|
-| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | 9/9 ordered rows passed |
-| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | 9/9 ordered rows passed |
-| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | 9/9 ordered rows passed |
-| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | 18/19 passed in the last completed run; `red_color-listen-blue_color-connect` failed before the battle menu |
+| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Current run passed 9/9 ordered rows |
+| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Post-change run still in progress |
+| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Current run passed 8/9; `yellow-listen-red_color-connect` timed out at the Trade Center warp rendezvous |
+| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Post-change run still in progress |
 
 The tracked
 [`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)
@@ -237,9 +229,9 @@ release rows. Manifest byte validation still requires every listed entry when
 the manifest is checked with `--fixture-root`.
 
 The repository has strict local and remote entry points for every canonical
-Red/Blue/Yellow ordered pair. The current candidate has executed all 19 trade
-rows and 19 battle entrypoints, with one remote battle failure retained as a
-blocker. Consult the test-surface table in
+Red/Blue/Yellow ordered pair. The current candidate completed the 19-row trade
+run with one bounded remote timeout; the 19-row battle run is still in
+progress. Consult the test-surface table in
 the [README](README.md) and run the required tiers in the
 [production runbook](docs/PRODUCTION_RUNBOOK.md) before using any row as
 release evidence.

@@ -39,6 +39,22 @@ jobs:
             tests/test_production_gate.py \
             tests/test_runtime_packaging.py
 
+      - name: Check runtime and link lane lint
+        run: |
+          python -m ruff check \
+            src/pokered_harness/link/network_backend.py \
+            src/pokered_harness/link/pyboy_link_session.py \
+            src/pokered_harness/link/pair.py \
+            src/pokered_harness/link/serial_bridge.py \
+            src/pokered_harness/link/serial_coordinator.py \
+            src/pokered_harness/link/serial_link.py \
+            tests/test_network_backend.py \
+            tests/test_pyboy_link_session.py \
+            tests/test_link_pair.py \
+            tests/test_link_serial_bridge.py \
+            tests/test_serial_coordinator.py \
+            tests/test_serial_link.py
+
       - name: Validate fixture-manifest schema
         run: python scripts/validate_fixture_manifest.py --schema-only
 
