@@ -180,7 +180,7 @@ def validate_loopback_host(host: str) -> str:
                 "NetworkBackend is localhost-only; localhost did not resolve"
             ) from exc
         if not addresses or any(
-            not ipaddress.ip_address(address[4][0]).is_loopback
+            not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
             for address in addresses
         ):
             raise ValueError(
@@ -198,6 +198,54 @@ def validate_loopback_host(host: str) -> str:
             "NetworkBackend is localhost-only; use 127.0.0.1, localhost, or ::1"
         )
     return normalized
+
+
+def _is_loopback_sockaddr(sockaddr: object) -> bool:
+    """Return whether a resolver result is an IP loopback address."""
+    if not isinstance(sockaddr, tuple) or not sockaddr:
+        return False
+    host = sockaddr[0]
+    if not isinstance(host, str):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_connected_socket_loopback(sock: socket.socket) -> None:
+    """Reject raw TCP sockets whose peer is not on the local host.
+
+    The factory methods validate their destination or bind address, but the
+    low-level constructors also accept an already-connected socket.  Without
+    this check a caller could bypass the localhost-only boundary by handing a
+    cross-host TCP socket directly to a backend.  AF_UNIX socket pairs remain
+    available for in-process tests; they are not TCP transports.
+    """
+    family = getattr(sock, "family", None)
+    unix_family = getattr(socket, "AF_UNIX", None)
+    if unix_family is not None and family == unix_family:
+        return
+    if family not in (socket.AF_INET, socket.AF_INET6):
+        raise ValueError(
+            "NetworkBackend requires a connected loopback TCP socket"
+        )
+    try:
+        peer = sock.getpeername()
+    except OSError as exc:
+        raise ValueError(
+            "NetworkBackend requires a connected loopback TCP socket"
+        ) from exc
+    if not isinstance(peer, tuple) or not peer or not isinstance(peer[0], str):
+        raise ValueError(
+            "NetworkBackend requires a connected loopback TCP socket"
+        )
+    try:
+        validate_loopback_host(peer[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "NetworkBackend is localhost-only; raw TCP peer is not loopback"
+        ) from exc
 
 
 def _connect_socket(
@@ -221,6 +269,13 @@ def _connect_socket(
         raise NetworkBackendError(
             f"unable to resolve {normalized_host!r}: {exc}"
         ) from exc
+    if not addresses or any(
+        not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
+        for address in addresses
+    ):
+        raise NetworkBackendError(
+            "NetworkBackend is localhost-only; resolver returned an unsafe address"
+        )
     last_error: OSError | None = None
     for family, socktype, proto, _canonname, sockaddr in addresses:
         if cancel_event is not None and cancel_event.is_set():
@@ -302,6 +357,7 @@ class NetworkBackend:
     """
 
     def __init__(self, sock: socket.socket, *, local_rom_version: str | None = None) -> None:
+        _validate_connected_socket_loopback(sock)
         self._sock = sock
         # Keep both directions non-blocking.  The reader uses short
         # select-polling below, while writers use the same bounded polling
@@ -365,6 +421,7 @@ class NetworkBackend:
         self._dispatch_to_owner = False
         self._reader: threading.Thread | None = None
         self._edge_worker: threading.Thread | None = None
+        self._receiver_start_lock = threading.Lock()
         # Keep-alive "fake slave" bit index. When our local core is
         # idle but the peer is still master-clocking (common during
         # trade/battle sequences where one side's CPU finishes a phase
@@ -624,36 +681,39 @@ class NetworkBackend:
         ``on_edge`` requests) are put on the response queue for the
         blocking ``on_edge`` call to pick up.
         """
-        if self._reader is not None:
-            raise RuntimeError("receiver already started")
-        if dispatch_to_owner and serial_gate is None:
-            raise ValueError(
-                "dispatch_to_owner=True requires a shared serial_gate"
-            )
-        self._local_core = local_core
-        self._irq_callback = irq_callback
-        if serial_gate is not None:
-            self._serial_gate = serial_gate
-        self._dispatch_to_owner = dispatch_to_owner
-        worker_target = (
-            self._owner_response_worker_loop
-            if dispatch_to_owner
-            else self._edge_worker_loop
-        )
-        self._edge_worker = threading.Thread(
-            target=worker_target,
-            name=(
-                "NetworkBackend.owner-response-worker"
+        with self._receiver_start_lock:
+            if self._reader is not None:
+                raise RuntimeError("receiver already started")
+            if self._closed:
+                raise NetworkBackendError("backend closed")
+            if dispatch_to_owner and serial_gate is None:
+                raise ValueError(
+                    "dispatch_to_owner=True requires a shared serial_gate"
+                )
+            self._local_core = local_core
+            self._irq_callback = irq_callback
+            if serial_gate is not None:
+                self._serial_gate = serial_gate
+            self._dispatch_to_owner = dispatch_to_owner
+            worker_target = (
+                self._owner_response_worker_loop
                 if dispatch_to_owner
-                else "NetworkBackend.edge-worker"
-            ),
-            daemon=True,
-        )
-        self._reader = threading.Thread(
-            target=self._reader_loop, name="NetworkBackend.reader", daemon=True
-        )
-        self._edge_worker.start()
-        self._reader.start()
+                else self._edge_worker_loop
+            )
+            self._edge_worker = threading.Thread(
+                target=worker_target,
+                name=(
+                    "NetworkBackend.owner-response-worker"
+                    if dispatch_to_owner
+                    else "NetworkBackend.edge-worker"
+                ),
+                daemon=True,
+            )
+            self._reader = threading.Thread(
+                target=self._reader_loop, name="NetworkBackend.reader", daemon=True
+            )
+            self._edge_worker.start()
+            self._reader.start()
 
     # --- SerialBackend.on_edge (master path) --------------------------
 
@@ -1088,31 +1148,36 @@ class NetworkBackend:
     def stop(self, *, timeout_s: float = 2.0) -> bool:
         timeout_s = _require_timeout(timeout_s, "timeout_s")
         deadline = time.monotonic() + timeout_s
-        self._closed = True
-        self._closed_event.set()
-        self._hello_received.set()
-        with self._edge_pending_condition:
-            self._edge_pending_condition.notify_all()
-        # Wake the mode-specific edge worker. In owner-dispatch mode this is
-        # the response-only worker; the owner request queue is intentionally
-        # not drained after closure because it contains emulator work.
-        self._signal_edge_worker_stop()
-        try:
-            self._sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
-        edge_worker = self._edge_worker
+        # Serialize lifecycle teardown with receiver setup so stop cannot
+        # observe a half-published worker pair and return before the newly
+        # started threads are signalled and joined.
+        with self._receiver_start_lock:
+            self._closed = True
+            self._closed_event.set()
+            self._hello_received.set()
+            with self._edge_pending_condition:
+                self._edge_pending_condition.notify_all()
+            # Wake the mode-specific edge worker. In owner-dispatch mode this
+            # is the response-only worker; the owner request queue is
+            # intentionally not drained after closure because it contains
+            # emulator work.
+            self._signal_edge_worker_stop()
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            edge_worker = self._edge_worker
+            reader = self._reader
         if (
             isinstance(edge_worker, threading.Thread)
             and edge_worker is not threading.current_thread()
         ):
             edge_worker.join(timeout=max(0.0, deadline - time.monotonic()))
 
-        reader = self._reader
         if (
             isinstance(reader, threading.Thread)
             and reader is not threading.current_thread()

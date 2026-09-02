@@ -30,12 +30,16 @@ jobs:
         run: |
           python -m ruff check \
             scripts/bootstrap_pyboy.py \
+            scripts/network_concurrency_probe.py \
             scripts/production_gate.py \
+            tests/test_fixture_provenance.py \
             tests/test_production_gate.py \
             tests/test_runtime_packaging.py
           python -m ruff format --check \
             scripts/bootstrap_pyboy.py \
+            scripts/network_concurrency_probe.py \
             scripts/production_gate.py \
+            tests/test_fixture_provenance.py \
             tests/test_production_gate.py \
             tests/test_runtime_packaging.py
 
@@ -48,7 +52,9 @@ jobs:
             src/pokered_harness/link/serial_bridge.py \
             src/pokered_harness/link/serial_coordinator.py \
             src/pokered_harness/link/serial_link.py \
+            scripts/network_concurrency_probe.py \
             tests/test_network_backend.py \
+            tests/test_fixture_provenance.py \
             tests/test_pyboy_link_session.py \
             tests/test_link_pair.py \
             tests/test_link_serial_bridge.py \
@@ -57,6 +63,9 @@ jobs:
 
       - name: Validate fixture-manifest schema
         run: python scripts/validate_fixture_manifest.py --schema-only
+
+      - name: Run bounded network concurrency probe
+        run: python scripts/network_concurrency_probe.py
 
       - name: Run ROM-free production gate
         run: >-
