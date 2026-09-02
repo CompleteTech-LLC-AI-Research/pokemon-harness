@@ -74,9 +74,7 @@ def test_cython_build_pins_the_compiler_and_preserves_serial_widths() -> None:
     serial_pxd = (ROOT / "vendor" / "pyboy-src" / "pyboy" / "core" / "serial.pxd").read_text(
         encoding="utf-8"
     )
-    pyboy_pxd = (ROOT / "vendor" / "pyboy-src" / "pyboy" / "pyboy.pxd").read_text(
-        encoding="utf-8"
-    )
+    pyboy_pxd = (ROOT / "vendor" / "pyboy-src" / "pyboy" / "pyboy.pxd").read_text(encoding="utf-8")
     assert "cpdef bint tick(self, unsigned long long) noexcept nogil" in serial_pxd
     assert "cdef public uint64_t last_cycles, clock, clock_target" in serial_pxd
     assert "cdef public uint8_t _shift_register" in serial_pxd
