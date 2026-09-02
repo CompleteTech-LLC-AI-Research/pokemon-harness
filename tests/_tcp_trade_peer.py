@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 _TRADE_DIAG_SYMBOLS = (
@@ -66,6 +67,49 @@ _TRADE_DIAG_SYMBOLS = (
 PARTY_MON_SIZE = 44
 PARTY_OT_SIZE = 11
 PARTY_NICK_SIZE = 11
+
+
+def _hold_at_sync_boundary(
+    backend: object,
+    *,
+    ready_sync_id: int,
+    release_sync_id: int,
+    timeout: float,
+    service_pending_edges: Callable[[], int],
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Hold a safe ROM boundary until both peers have observed release.
+
+    This helper is reserved for milestones where the ROM has already stopped
+    doing serial work. It intentionally does not tick the emulator while
+    waiting; callers drain only already-admitted owner-dispatch edges.
+    """
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("timeout must be a positive number")
+    if timeout <= 0:
+        raise ValueError("timeout must be a positive number")
+
+    deadline = monotonic() + timeout
+
+    def wait_for_peer(marker: int, *, phase: str) -> None:
+        while True:
+            if backend.poll_peer_sync(sync_id=marker):
+                return
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"sync boundary {phase} did not converge: marker={marker}"
+                )
+            service_pending_edges()
+            remaining = deadline - monotonic()
+            if remaining > 0:
+                sleep(min(0.001, remaining))
+
+    backend.announce_sync(sync_id=ready_sync_id)
+    wait_for_peer(ready_sync_id, phase="ready")
+    backend.announce_sync(sync_id=release_sync_id)
+    wait_for_peer(release_sync_id, phase="release")
 
 
 def _install_hook(session, symbol, bucket):
@@ -489,8 +533,12 @@ def main() -> int:
         max_item: int,
         label: str,
         timeout: float = 30.0,
+        input_duration: int = 2,
+        settle_frames: int = 4,
     ) -> None:
         """Move a ROM-owned cursor with bounded one-shot directions."""
+        if input_duration <= 0 or settle_frames <= 0:
+            raise ValueError("menu input and settle durations must be positive")
         deadline_at = time.monotonic() + timeout
         while time.monotonic() < deadline_at:
             snapshot = wait_for_menu_ready(
@@ -506,8 +554,8 @@ def main() -> int:
                 button = "down"
             else:
                 button = "up"
-            session.press(button, duration=2)
-            session.step(4)
+            session.press(button, duration=input_duration)
+            session.step(settle_frames)
         raise RuntimeError(
             f"{label} cursor did not reach {target}: "
             f"menu={menu_snapshot()} state={state_snapshot()} "
@@ -650,10 +698,16 @@ def main() -> int:
                     break
                 if not link_menu_quiet_announced:
                     session.step(4)
+                elif not peer_link_menu_quiet_ready:
+                    # The local idle marker only means this peer has drained
+                    # its currently admitted edges. The other peer may still
+                    # be completing its final edge and needs this owner
+                    # thread to keep pumping serial work until marker 122 is
+                    # observed on both sides.
+                    session.step(1)
                 else:
-                    # After the transport-idle acknowledgement, do not enter
-                    # another emulator tick: the peer may close as soon as it
-                    # observes marker 122.
+                    # Both quiet markers are visible; avoid another emulator
+                    # tick before the close-tolerant final drain.
                     time.sleep(0.001)
                 continue
             in_serial_phase = (
@@ -733,26 +787,50 @@ def main() -> int:
             log("sync: link_menu barrier")
             cooperative_sync(sync_id=1, timeout=60.0)
             log("sync: past link_menu barrier")
-            # Trade Center warp — A-mash until map becomes 0xEF.
+            # The LinkMenu hook fires before the ROM has finished installing
+            # its final menu fields. Settle those fields and rendezvous at
+            # the actual Trade Center cursor before sending A; otherwise a
+            # peer can consume the selection while the other is still in the
+            # menu's setup loop.
+            wait_for_menu_ready(
+                label="trade LinkMenu",
+                min_item=0,
+                max_item=link_menu_max,
+                expected_max=link_menu_max,
+                required_keys=0x01,
+                timeout=60.0,
+            )
+            session.step(60)
+            move_menu_to_item(
+                target=0,
+                min_item=0,
+                max_item=link_menu_max,
+                label="trade LinkMenu",
+                input_duration=12,
+                settle_frames=40,
+            )
+            # Both peers have now reached the ROM-owned Trade cursor. Keep
+            # ticking while rendezvousing after the real A event: the ROM's
+            # selection exchange may begin immediately, so a non-ticking
+            # host barrier can hold the internal-clock peer before the
+            # external-clock peer has reached its native SC wait. A one-frame
+            # cooperative barrier preserves the authentic input and serial
+            # paths while keeping both owner threads live at the handoff.
+            session.press("a", duration=4)
+            cooperative_sync(sync_id=19, timeout=120.0, step_frames=1)
+            log("sync: trade menu A events queued on both peers")
+            session.step(20)
+            # Trade Center warp — A-mash until map becomes 0xEF. Once one
+            # peer reaches the map it must keep ticking while the other peer
+            # completes its ROM-owned selection exchange; stopping the first
+            # owner here can strand the second peer before it can announce
+            # the same milestone. Keep the established 20-frame input
+            # cadence here: one-frame calls can leave the ROM's joypad pulse
+            # and serial handoff split across too many host-thread scheduling
+            # boundaries on a cross-family pair.
             TRADE_CENTER = 0xEF
-            while time.monotonic() < deadline:
-                if session.read_game_state().overworld.map_id == TRADE_CENTER:
-                    break
-                session.press("a", duration=4)
-                session.step(20)
-            log("trade center warp complete")
-            shot("02_trade_center")
-
-            # Settle after warp, but keep advancing the local ROM while
-            # the peer finishes its own warp. A blocking barrier here can
-            # starve the peer: the listener may reach 0xEF first, stop its
-            # game CPU inside sync_with_peer(), and no longer run the ROM
-            # instructions that service/re-arm serial IRQs for the
-            # connector's final menu exchange.
-            session.step(120)
             warp_announced = False
             peer_warp_ready = False
-            log("sync: warp announce-and-continue")
             while time.monotonic() < deadline:
                 if (
                     session.read_game_state().overworld.map_id == TRADE_CENTER
@@ -761,17 +839,32 @@ def main() -> int:
                     link._network_backend.announce_sync(sync_id=2)
                     warp_announced = True
                     log("local trade-center warp announced")
-                    shot("03_post_warp_local")
+                    shot("02_trade_center")
                 if warp_announced and link._network_backend.poll_peer_sync(sync_id=2):
                     peer_warp_ready = True
                     break
+                if not warp_announced:
+                    session.press("a", duration=4)
                 session.step(20)
             if not (warp_announced and peer_warp_ready):
                 raise RuntimeError(
                     "trade-center warp rendezvous did not converge: "
                     f"local={state_snapshot()} backend={backend_snapshot()}"
                 )
-            log("sync: past warp announce-and-continue")
+            log("trade center warp complete on both peers")
+
+            # Both ROMs have now reached the map, but the peer can still have
+            # one final serial edge in flight. Drain it while both owners
+            # continue ticking, then use a symmetric release rendezvous. A
+            # no-tick hold is unsafe here because an already-armed ROM may
+            # still need its next native serial callback to finish the phase.
+            link._network_backend.wait_for_wire_idle(
+                timeout=120.0,
+                progress_callback=lambda: session.step(1),
+                stable_checks=4,
+            )
+            cooperative_sync(sync_id=18, timeout=120.0, step_frames=1)
+            log("sync: trade-center cooperative barrier complete")
             shot("03_post_warp_sync")
 
             # Walk onto hidden-event trigger tile.
@@ -974,11 +1067,18 @@ def main() -> int:
                 timeout=60.0,
             )
             initial_item = link_menu_before["wCurrentMenuItem"]
+            # LinkMenu's hook and menu-field initialization occur before its
+            # first stable joypad polling window. Give the ROM the same
+            # post-entry settling interval as the in-process acceptance
+            # driver before issuing the directional event.
+            session.step(60)
             move_menu_to_item(
                 target=1,
                 min_item=0,
                 max_item=link_menu_max,
                 label="battle LinkMenu",
+                input_duration=12,
+                settle_frames=40,
             )
             selected_item = current_menu_item()
             log(
@@ -991,8 +1091,16 @@ def main() -> int:
                     f"initial_item={initial_item} selected_item={selected_item} "
                     f"state={state_snapshot()}"
                 )
-            session.press("a")
-            session.step(8)
+            # Both peers have now observed the ROM-owned BATTLE cursor. Keep
+            # ticking while rendezvousing at this boundary: a visible menu
+            # does not prove that the final LinkMenu serial edge has drained,
+            # so a no-tick hold here could strand an EDGE_RESP. Once both
+            # processes announce readiness, they commit A from the same menu
+            # phase without starving the owner pump.
+            cooperative_sync(sync_id=117, timeout=120.0, step_frames=1)
+            session.step(4)
+            session.press("a", duration=4)
+            session.step(20)
             shot("02_battle_menu")
 
             COLOSSEUM = 0xF0
@@ -1064,19 +1172,23 @@ def main() -> int:
             )
             shot("04_battle_launch")
 
-            # The remaining trainer/party block is still a ROM-owned serial
-            # exchange. A side can return from the trigger routine before its
-            # peer has finished this block; keep the ordinary A input alive
-            # only until this local exchange milestone, then stop before the
-            # timed battle intro and menu.
-            prebattle_deadline = min(deadline, time.monotonic() + 240.0)
+            # The party-patch counters can fire before the final ROM-owned
+            # serial work has returned to the battle path. Wait for the later
+            # VS-text hook, which is the first observed boundary shared by
+            # both variants after that exchange. Do not send input after the
+            # hook fires; the following transition is timed ROM work.
+            intro_deadline = min(deadline, time.monotonic() + 300.0)
             last_prebattle_log = time.monotonic()
             while (
-                time.monotonic() < prebattle_deadline
-                and counters["CableClub_DoBattleOrTradeAgain.finishedEnemyMonsPatchListPart"][0]
-                < 2
+                time.monotonic() < intro_deadline
+                and counters["DisplayLinkBattleVersusTextBox"][0] == 0
             ):
                 session.press("a", duration=4)
+                # Keep the real-ROM serial exchange moving at the same
+                # throughput as the established battle driver. The owner
+                # tick wrapper still services queued edges at every frame;
+                # one-frame calls add enough Python scheduling overhead to
+                # exhaust the bounded prebattle window before the VS hook.
                 session.step(20)
                 if time.monotonic() - last_prebattle_log > 15.0:
                     log(
@@ -1087,34 +1199,63 @@ def main() -> int:
                     )
                     last_prebattle_log = time.monotonic()
             log(
-                "battle prebattle milestone reached; waiting for intro menu "
+                "battle VS-text milestone reached; waiting for wire quiet "
                 f"counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} } "
                 f"state={state_snapshot()} backend={backend_snapshot()}"
             )
-            if (
-                counters[
-                    "CableClub_DoBattleOrTradeAgain.finishedEnemyMonsPatchListPart"
-                ][0]
-                < 2
-            ):
+            if counters["DisplayLinkBattleVersusTextBox"][0] == 0:
                 raise RuntimeError(
-                    "battle prebattle serial milestone did not complete: "
+                    "battle VS-text milestone did not complete: "
                     f"counters={counters} state={state_snapshot()} "
                     f"backend={backend_snapshot()}"
                 )
-            # Both ROMs must finish the party-data exchange before either
-            # process is allowed to run the timed VS/battle transition. The
-            # barrier continues ticking the local owner, so queued native
-            # serial edges are still serviced while the peer catches up.
-            cooperative_sync(sync_id=113, timeout=120.0, step_frames=1)
-            log("battle prebattle barrier complete; entering intro")
+            # A later edge can still be admitted immediately after the hook.
+            # Let the owner continue for a bounded stable quiet window before
+            # entering the no-tick ready/release barrier.
+            link._network_backend.wait_for_wire_idle(
+                timeout=120.0,
+                progress_callback=lambda: session.step(1),
+                stable_checks=4,
+            )
+            log("battle VS-text wire quiet; entering hold barrier")
+            _hold_at_sync_boundary(
+                link._network_backend,
+                ready_sync_id=113,
+                release_sync_id=114,
+                timeout=120.0,
+                service_pending_edges=lambda: link._network_backend.service_pending_edges(
+                    max_edges=1
+                ),
+            )
+            log("battle VS-text hold barrier complete; entering transition")
 
             # The VS splash and transition are timed ROM work. Do not mash A
             # through them: an input consumed in the transition can leave the
             # two independent ROMs in different battle menu states. Wait for
             # the ROM's own battle-menu hooks before selecting FIGHT.
-            intro_deadline = min(deadline, time.monotonic() + 180.0)
-            while time.monotonic() < intro_deadline:
+            transition_deadline = min(deadline, time.monotonic() + 180.0)
+            while time.monotonic() < transition_deadline:
+                if counters["BattleTransition"][0] > 0:
+                    break
+                session.step(1)
+            if counters["BattleTransition"][0] == 0:
+                raise RuntimeError(
+                    "battle transition did not start after VS-text barrier: "
+                    f"counters={counters} state={state_snapshot()} "
+                    f"cpu={cpu_snapshot()} backend={backend_snapshot()}"
+                )
+            _hold_at_sync_boundary(
+                link._network_backend,
+                ready_sync_id=115,
+                release_sync_id=116,
+                timeout=120.0,
+                service_pending_edges=lambda: link._network_backend.service_pending_edges(
+                    max_edges=1
+                ),
+            )
+            log("battle transition hold barrier complete; entering menu")
+            menu_deadline = min(deadline, time.monotonic() + 180.0)
+            while time.monotonic() < menu_deadline:
                 if (
                     counters["MainInBattleLoop"][0] > 0
                     and counters["DisplayBattleMenu"][0] > 0
@@ -1176,7 +1317,15 @@ def main() -> int:
             # Both ROMs now own a live battle menu. Rendezvous before either
             # side commits FIGHT so a subprocess cannot consume A while its
             # peer is still finishing DisplayTextBoxID/menu setup.
-            cooperative_sync(sync_id=12, timeout=120.0)
+            _hold_at_sync_boundary(
+                link._network_backend,
+                ready_sync_id=12,
+                release_sync_id=16,
+                timeout=120.0,
+                service_pending_edges=lambda: link._network_backend.service_pending_edges(
+                    max_edges=1
+                ),
+            )
             # Match the in-process acceptance driver: after the rendezvous,
             # give both ROMs a short input-free window to finish entering
             # HandleMenuInput before sending the single ordinary A event.
@@ -1240,7 +1389,15 @@ def main() -> int:
             )
             # The move menu is another ROM-owned input boundary. Match the
             # peers before reading its cursor or sending the legal move.
-            cooperative_sync(sync_id=13, timeout=120.0)
+            _hold_at_sync_boundary(
+                link._network_backend,
+                ready_sync_id=13,
+                release_sync_id=17,
+                timeout=120.0,
+                service_pending_edges=lambda: link._network_backend.service_pending_edges(
+                    max_edges=1
+                ),
+            )
             session.step(4)
             selected_move_id = choose_first_usable_battle_move()
             # Give the ROM a bounded opportunity to consume the ordinary A

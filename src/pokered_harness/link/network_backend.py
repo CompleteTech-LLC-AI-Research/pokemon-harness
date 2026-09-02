@@ -803,6 +803,7 @@ class NetworkBackend:
         *,
         allow_peer_close: bool = False,
         progress_callback: Callable[[], None] | None = None,
+        stable_checks: int = 1,
     ) -> None:
         """Wait until all already-received edge work has drained.
 
@@ -819,11 +820,19 @@ class NetworkBackend:
         checks.  An emulator owner can use this to service queued inbound
         edges while the caller is waiting for wire idle; without it, a caller
         that owns the emulator thread can wait on work that only that same
-        thread is allowed to apply.
+        thread is allowed to apply. ``stable_checks`` requires that many
+        consecutive idle observations, allowing a caller to establish a
+        quiet window around a ROM phase boundary rather than trusting a
+        single gap between serial edges.
         """
         timeout = _validate_optional_timeout(timeout, "timeout")
         assert timeout is not None
+        if isinstance(stable_checks, bool) or not isinstance(stable_checks, int):
+            raise TypeError("stable_checks must be a positive integer")
+        if stable_checks <= 0:
+            raise ValueError("stable_checks must be a positive integer")
         deadline = time.monotonic() + timeout
+        idle_checks = 0
         while True:
             with self._edge_pending_condition:
                 with self._edge_response_lock:
@@ -839,7 +848,11 @@ class NetworkBackend:
                                 f"{self._reader_exc}"
                             ) from self._reader_exc
                         raise NetworkBackendError("backend closed while waiting for wire idle")
-                    return
+                    idle_checks += 1
+                    if idle_checks >= stable_checks:
+                        return
+                else:
+                    idle_checks = 0
                 if self._closed:
                     if self._reader_exc is not None:
                         raise NetworkBackendError(
@@ -1249,13 +1262,41 @@ class NetworkBackend:
             transfer_enabled = bool(getattr(core, "transfer_enabled", 0))
             internal_clock = bool(getattr(core, "internal_clock", 0))
             if internal_clock:
-                raise NetworkBackendError(
-                    "received EDGE_REQ while local serial core is internal-clock"
-                )
+                # The ROM can switch clock source while an EDGE_REQ from the
+                # previous role is already queued. The existing serial
+                # protocol uses the connected/no-data byte for this brief
+                # transition; emit its next bit without touching the native
+                # core rather than closing the link or waiting for a role
+                # that cannot service the request while it is internal-clock.
+                self._apply_owner_keepalive(request, core)
+                return True
             if not transfer_enabled:
                 return False
             self._apply_owner_edge(request)
             return True
+
+    def _apply_owner_keepalive(self, request: _InboundEdge, core: object) -> None:
+        """Prepare one no-data response for a transient internal-clock edge."""
+        self._stats["edge_req_received"] = (
+            int(self._stats["edge_req_received"]) + 1
+        )
+        now = time.monotonic()
+        if now < self._active_exchange_until:
+            raise NetworkBackendError(
+                "received EDGE_REQ while local serial core is internal-clock "
+                "during an active exchange"
+            )
+        if self._keepalive_bit_idx == 0:
+            self._stats["keepalive_bytes_started"] = (
+                int(self._stats["keepalive_bytes_started"]) + 1
+            )
+        self._stats["keepalive_bits_sent"] = (
+            int(self._stats["keepalive_bits_sent"]) + 1
+        )
+        self._stats["last_keepalive_state"] = self._core_state_snapshot(core)
+        request.response_bit = 0 if self._keepalive_bit_idx == 7 else 1
+        request.completed = False
+        self._keepalive_bit_idx = (self._keepalive_bit_idx + 1) & 7
 
     def _apply_owner_edge(self, request: _InboundEdge) -> None:
         """Perform one authentic external edge under the shared gate."""

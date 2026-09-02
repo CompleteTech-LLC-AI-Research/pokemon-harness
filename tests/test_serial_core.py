@@ -223,6 +223,19 @@ def test_slave_mode_never_completes_without_external_edges():
         assert s.SC & 0x80 != 0
 
 
+def test_owner_dispatch_callback_runs_on_armed_slave_tick():
+    """Remote owner dispatch can pump queued work at a native serial boundary."""
+    s = SerialCore()
+    calls: list[int] = []
+    s.owner_dispatch_callback = lambda: calls.append(1)
+    s.owner_dispatch_enabled = True
+    s.set_SC(0x80)
+
+    s.tick(1)
+
+    assert calls == [1]
+
+
 def test_slave_mode_apply_external_edge_progresses():
     """Slave receives 0x55 when the peer clocks 0,1,0,1,0,1,0,1."""
     s = SerialCore(backend=NullBackend())

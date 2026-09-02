@@ -34,6 +34,13 @@ cdef class Serial:
     # the link-cable harness swaps in a NetworkBackend after start.
     cdef public object backend
 
+    # Optional owner-thread pump installed by the link harness. The network
+    # reader only queues work; this callback is invoked from the native
+    # serial tick on the emulator owner thread while an external transfer is
+    # armed, so applying an incoming edge cannot race motherboard execution.
+    cdef public object owner_dispatch_callback
+    cdef public bint owner_dispatch_enabled
+
     cpdef bint tick(self, uint64_t) noexcept nogil
 
     cpdef void set_SB(self, uint8_t) noexcept nogil
