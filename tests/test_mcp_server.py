@@ -12,13 +12,14 @@ from types import SimpleNamespace
 import pytest
 
 from pokered_harness.events import EventBus
-from pokered_harness.link.network_backend import NetworkBackendError
+from pokered_harness.link.network_backend import NetworkBackend, NetworkBackendError
 from pokered_harness.link.pair import LinkPair
 from pokered_harness.link.serial_link import TcpSerialLink
 from pokered_harness.mcp_server import (
     DEFAULT_HOOKS,
     LinkState,
     McpHarnessError,
+    _attach_network_backend,
     _close_serial_link,
     _error_code,
     _wait_for_network_hello,
@@ -835,6 +836,77 @@ def test_link_rejects_rom_version_override_for_primary_session():
 def test_error_code_maps_network_backend_failures():
     assert _error_code(NetworkBackendError("backend closed")) == "link_error"
     assert _error_code(NetworkBackendError("no peer response within 1s")) == "timeout"
+
+
+def test_native_network_attach_honors_mcp_hello_deadline():
+    core = SimpleNamespace(backend=None, SB=0, SC=0)
+    core.set_SB = lambda value: setattr(core, "SB", value)
+    core.set_SC = lambda value: setattr(core, "SC", value)
+    core.apply_external_edge = lambda _peer_bit: False
+    core.peek_out_bit = lambda: 1
+    pyboy = SimpleNamespace(mb=SimpleNamespace(serial=core))
+    pyboy.tick = lambda *_args, **_kwargs: True
+    session = Session(
+        pyboy=pyboy,
+        symbols=load_sym_text("00:0000 Label\n"),
+        event_bus=EventBus(),
+    )
+    local_sock, peer_sock = _socket.socketpair()
+    backend = NetworkBackend(local_sock, local_rom_version="red")
+    started = _time.monotonic()
+    try:
+        with pytest.raises(NetworkBackendError, match="within 0.05s"):
+            _attach_network_backend(
+                session,
+                backend,
+                is_internal_clock=False,
+                local_rom_version="red",
+                network_hello_timeout_s=0.05,
+            )
+        assert _time.monotonic() - started < 1.0
+        assert backend._closed is True
+        assert backend._reader is not None and not backend._reader.is_alive()
+        assert backend._edge_worker is not None and not backend._edge_worker.is_alive()
+    finally:
+        backend.stop(timeout_s=1.0)
+        peer_sock.close()
+
+
+def test_native_network_hello_timeout_has_structured_timeout_code(monkeypatch):
+    session, _ = _endpoint_session()
+    link = LinkState(primary_version="red")
+    transport = SimpleNamespace(closed=False)
+
+    def close_transport():
+        transport.closed = True
+
+    transport.close = close_transport
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._supports_bit_accurate_network",
+        lambda _session: True,
+    )
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server.NetworkBackend.connect",
+        lambda *_args, **_kwargs: transport,
+    )
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._attach_network_backend",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            NetworkBackendError("peer HELLO not received within 0.05s")
+        ),
+    )
+
+    with pytest.raises(McpHarnessError) as exc_info:
+        dispatch_tool(
+            session,
+            "link_connect",
+            {"host": "127.0.0.1", "port": _free_port(), "timeout_s": 0.1},
+            link=link,
+        )
+
+    assert exc_info.value.code == "timeout"
+    assert transport.closed is True
+    assert link.remote_mode == "idle"
 
 
 def test_network_hello_rejects_peer_that_closes_after_hello():
