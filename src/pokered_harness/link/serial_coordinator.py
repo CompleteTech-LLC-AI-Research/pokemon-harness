@@ -361,13 +361,19 @@ class LockstepCoordinator:
                     core.backend = previous if previous is not None else NullBackend()
                 except Exception as exc:  # noqa: BLE001 - detach both sides
                     errors.append(exc)
-            self._backend_a = None
-            self._backend_b = None
-            self._attached = False
             if errors:
+                # Keep the handles and attached state so a caller can retry
+                # restoration after a transient native backend-assignment
+                # failure. The successfully restored side is skipped on the
+                # retry because it no longer points at its coordinator
+                # backend; the failed side remains identifiable and safe to
+                # clean up.
                 raise RuntimeError(
                     "one or more coordinated serial backends could not be detached"
                 ) from errors[0]
+            self._backend_a = None
+            self._backend_b = None
+            self._attached = False
 
     @property
     def attached(self) -> bool:

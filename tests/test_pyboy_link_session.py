@@ -69,6 +69,39 @@ class _LegacySerialStub:
         self.SC = value & 0xFF
 
 
+class _StatefulLegacySerialStub(_LegacySerialStub):
+    """Legacy serial double with an active, partially shifted transfer."""
+
+    def __init__(self):
+        super().__init__()
+        self.transfer_enabled = 1
+        self.internal_clock = 1
+        self.double_speed = 1
+        self.cpu_speed_shift = 1
+        self._shift_register = 0x5A
+        self._bits_remaining = 3
+        self._cycles_to_interrupt = 77
+        self.clock_target = 1234
+
+
+class _BackendSerialStub:
+    """Serial double whose backend setter can fail during pair attach."""
+
+    def __init__(self, *, fail_assignment: bool = False):
+        self._backend = object()
+        self._fail_assignment = fail_assignment
+
+    @property
+    def backend(self):
+        return self._backend
+
+    @backend.setter
+    def backend(self, value):
+        if self._fail_assignment:
+            raise RuntimeError("injected second-core assignment failure")
+        self._backend = value
+
+
 def _versioned_backend_pair(
     local_version: str = "red", peer_version: str = "blue"
 ):
@@ -139,6 +172,36 @@ def test_attach_preserves_register_state_from_legacy_serial():
     assert core.last_cycles == 1000
 
 
+def test_attach_preserves_inflight_legacy_serial_state():
+    """Promotion must preserve an already-active native serial transfer."""
+    legacy = _StatefulLegacySerialStub()
+    legacy.SB = 0xC3
+    legacy.SC = 0x83
+    legacy.last_cycles = 900
+    legacy.clock = 1000
+    a = _FakePyBoy(serial=legacy)
+
+    link = PyBoyLinkSession.local()
+    core = link.attach(a)
+
+    assert core.SB == legacy.SB
+    assert core.SC == legacy.SC
+    for attr in (
+        "transfer_enabled",
+        "internal_clock",
+        "double_speed",
+        "cpu_speed_shift",
+        "_shift_register",
+        "_bits_remaining",
+        "_cycles_to_interrupt",
+        "clock_target",
+    ):
+        assert getattr(core, attr) == getattr(legacy, attr)
+    assert core.last_cycles == legacy.last_cycles
+    assert core.clock == legacy.clock
+    link.detach_all()
+
+
 def test_second_attach_wires_coordinator():
     a = _FakePyBoy()
     b = _FakePyBoy()
@@ -150,6 +213,28 @@ def test_second_attach_wires_coordinator():
     assert link.coordinator is not None
     assert isinstance(a.mb.serial.backend, CoordinatedBackend)
     assert isinstance(b.mb.serial.backend, CoordinatedBackend)
+
+
+def test_second_attach_failure_rolls_back_session_bookkeeping():
+    """A failed coordinator install must leave only the first side attached."""
+    serial_a = _BackendSerialStub()
+    serial_b = _BackendSerialStub(fail_assignment=True)
+    original_backend_a = serial_a.backend
+    original_backend_b = serial_b.backend
+    a = _FakePyBoy(serial=serial_a)
+    b = _FakePyBoy(serial=serial_b)
+    link = PyBoyLinkSession.local()
+    link.attach(a)
+
+    with pytest.raises(RuntimeError, match="injected second-core assignment"):
+        link.attach(b)
+
+    assert link.attached == (a,)
+    assert link.cores == (serial_a,)
+    assert link.paired is False
+    assert serial_a.backend is original_backend_a
+    assert serial_b.backend is original_backend_b
+    link.detach_all()
 
 
 def test_attach_same_pyboy_twice_raises():
@@ -384,6 +469,32 @@ def test_detach_all_stops_network_backend_when_detach_raises(monkeypatch):
         peer.stop()
 
 
+def test_detach_all_attempts_remaining_attachments_after_failure(monkeypatch):
+    """One restoration failure must not strand the other attached core."""
+    a = _FakePyBoy()
+    b = _FakePyBoy()
+    link = PyBoyLinkSession.local()
+    link.attach(a)
+    link.attach(b)
+    calls = []
+    real_detach = link.detach
+
+    def fail_first(pyboy):
+        calls.append(pyboy)
+        if pyboy is b:
+            raise RuntimeError("synthetic first detach failure")
+        real_detach(pyboy)
+
+    monkeypatch.setattr(link, "detach", fail_first)
+    with pytest.raises(RuntimeError, match="synthetic first detach failure"):
+        link.detach_all()
+
+    assert calls == [b, a]
+    assert link.attached == (b,)
+    monkeypatch.setattr(link, "detach", real_detach)
+    link.detach_all()
+
+
 # ---------------------------------------------------------------------------
 # step(): drives both sides and triggers the coordinated exchange
 # ---------------------------------------------------------------------------
@@ -394,6 +505,30 @@ def test_step_requires_both_sides_attached():
     link.attach(_FakePyBoy())
     with pytest.raises(RuntimeError, match="requires 2 attached"):
         link.step()
+
+
+@pytest.mark.parametrize(
+    ("method_name", "frames", "exception"),
+    [
+        ("step", 0, ValueError),
+        ("step", -1, ValueError),
+        ("step", True, TypeError),
+        ("step_interleaved", 0, ValueError),
+        ("step_interleaved", -1, ValueError),
+        ("step_interleaved", True, TypeError),
+    ],
+)
+def test_step_rejects_non_positive_or_boolean_frame_counts(
+    method_name, frames, exception
+):
+    link = PyBoyLinkSession.local()
+    link.attach(_FakePyBoy())
+    link.attach(_FakePyBoy())
+
+    with pytest.raises(exception, match="frames must be a positive integer"):
+        getattr(link, method_name)(frames=frames)
+
+    link.detach_all()
 
 
 def test_step_exchanges_a_full_byte_end_to_end():

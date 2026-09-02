@@ -93,6 +93,28 @@ def test_detach_does_not_overwrite_a_backend_replaced_by_another_owner():
     assert not coord.attached
 
 
+def test_detach_retains_state_for_retry_after_backend_restore_failure():
+    """A transient native setter failure must not make cleanup unretryable."""
+    original_a = NullBackend()
+    original_b = NullBackend()
+    a = _FailingBackendAssignmentCore(original_a)
+    b = _FailingBackendAssignmentCore(original_b)
+    coord = LockstepCoordinator(a, b)
+    b.fail_assignment = True
+
+    with pytest.raises(RuntimeError, match="could not be detached"):
+        coord.detach()
+
+    assert coord.attached is True
+    assert a.backend is original_a
+    assert isinstance(b.backend, CoordinatedBackend)
+
+    b.fail_assignment = False
+    coord.detach()
+    assert coord.attached is False
+    assert b.backend is original_b
+
+
 def test_attach_detach_is_idempotent():
     a = SerialCore()
     b = SerialCore()
