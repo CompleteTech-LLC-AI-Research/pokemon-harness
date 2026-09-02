@@ -97,15 +97,18 @@ The post-PR #23 asset-free source-runtime gate used managed Linux Python
 each of five repetitions, with no skips, xfails, failures, errors, or timeouts.
 PR #23 also fixes native lockstep timing; targeted Red↔Yellow, Yellow↔Yellow,
 and Red↔Red trade diagnostics pass, but the full strict Cython trade/battle
-matrix remains unverified.
+matrix currently fails closed: the native strict gate passed 10/19 trade and
+10/19 battle rows, while all nine remote rows per operation failed because
+Cython `PyBoy.tick` is read-only when network ownership is installed. No skips
+or errors occurred.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
 producer plus tracked battle-fixture generator are present. The source-runtime
 baseline is complete and PR #19 adds focused lifecycle/concurrency evidence,
 but full sign-off still requires the full strict Cython matrix, a full strict
-rerun after the runtime change, vanilla source provenance, broad-suite coverage, full
-native-platform evidence, real-ROM load evidence, independent review, and
+rerun after the runtime change, vanilla source provenance, broad-suite coverage,
+full native-platform evidence, real-ROM load evidence, independent review, and
 secure cross-host networking.
 
 ## Source and artifact hygiene
@@ -140,7 +143,8 @@ secure cross-host networking.
   and MCP stdio 4/4.
 - [ ] The pinned Cython build passes the full real-ROM strict gameplay matrix;
   targeted Red↔Yellow, Yellow↔Yellow, and Red↔Red trade diagnostics pass after
-  the PR #23 timing-ABI fix.
+  the PR #23 timing-ABI fix, but all nine remote rows per operation currently
+  fail because Cython `PyBoy.tick` is read-only for network ownership.
 - [ ] Full Cython trade/battle acceptance is complete; source mode remains the
   documented release default, while Cython mode has no strict-matrix sign-off.
 

@@ -29,7 +29,11 @@ scheduler. The pinned Cython/native serial build, semantic serial-contract
 probe, and three-ROM attach/step/close smokes pass in fresh Linux and Windows
 environments. Native Red↔Yellow, Yellow↔Yellow, and Red↔Red trade diagnostics
 pass, with identical party records for the two same-family runs (880 and 920
-frames); full strict Cython trade/battle acceptance is not yet claimed. The
+frames). The post-PR #23 native strict gate collected 19 trade and 19 battle
+rows: 10/19 passed for each operation, while all nine remote rows failed at
+the Cython `PyBoy.tick` instance-writability seam required by serialized
+network ownership; no skips or errors occurred. Full strict Cython
+trade/battle acceptance is not yet claimed. The
 pre-PR #23 Yellow↔Yellow integrity failure and Red↔Red timeout are historical.
 The synthetic concurrency probe passes,
 while real-ROM concurrent-load evidence, vanilla fixture provenance,
@@ -44,9 +48,10 @@ post-change gameplay matrices remain open.
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
 The remaining release decision is `PARTIAL` because the full strict Cython
-trade/battle matrix, vanilla source provenance, broad-suite coverage, full
-native-platform qualification, real-ROM load evidence, independent review, and authenticated /
-encrypted cross-host TCP remain incomplete. `ruff check .` is clean only for the
+trade/battle matrix (including the native remote `PyBoy.tick` seam), vanilla
+source provenance, broad-suite coverage, full native-platform qualification,
+real-ROM load evidence, independent review, and authenticated / encrypted
+cross-host TCP remain incomplete. `ruff check .` is clean only for the
 configured product boundary; the broad legacy tree is not silently
 reformatted.
 
