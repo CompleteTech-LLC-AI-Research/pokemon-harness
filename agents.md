@@ -27,20 +27,17 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current merged base is live target `master` tip `a15182a` (PRs #12-#15),
-and the production follow-up is tested with the conservative
-`DEFAULT_MATRIX_WORKERS=1` setting. Its asset-free gate collected 692 tests,
-passed 549/549 unit tests, and passed 40/40 timing cases in each of five
-repetitions. The post-change asset-backed local tier passed 47/47 and the
-remote transport/MCP tier passed 14/14. The strict trade matrix completed
-18/19, with one bounded remote timeout at the Trade Center warp rendezvous;
-the strict battle matrix passed 17/19, with two remote failures at the
-LinkMenu-to-Colosseum transition. The release runtime is the bundled PyBoy source
-snapshot pinned in `VERSIONS.md` (`2.7.0`, harness revision
-`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode is
-the documented release default. The current Cython/native serial extension
-does not compile at its `uint64_t`/function-pointer boundary, so it has no
-gameplay acceptance evidence. Use
+The current implementation candidate is merged commit `b0b63c8` (PR #17),
+and the complete production gate was run with the conservative
+`DEFAULT_MATRIX_WORKERS=1` setting. It collected 698 tests and passed unit
+554/554, local real-ROM 47/47, remote transport/MCP 15/15, strict trade
+19/19, strict battle 19/19, and timing 40/40 in each of five repetitions,
+with no skips, xfails, failures, errors, or timeouts. The release runtime is
+the bundled PyBoy source snapshot pinned in `VERSIONS.md` (`2.7.0`, harness
+revision `c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`.
+Source mode is the documented release default. The pinned Cython/native serial
+build and semantic serial-contract probe pass, but Cython gameplay acceptance
+is not claimed. Use
 explicit ROM, symbol, and SHA-1 values; never use `POKERED_SKIP_SHA1=1` for
 release evidence.
 
@@ -49,21 +46,20 @@ release evidence.
 - Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
   fixture bytes have recorded reproduction evidence; the external states are
   never committed and their hashes do not prove gameplay compatibility.
-- The post-change local production tier passed 47/47 and the remote
-  transport/MCP tier passed 14/14. The current strict trade run passed all
-  local/dedicated rows and 8/9 remote rows; the strict battle run passed all
-  local/dedicated rows and 7/9 remote rows. Earlier gameplay samples remain
-  historical diagnostics while the strict post-change matrices have failed
-  rows.
+- The complete source-runtime local production tier passed 47/47 and the
+  remote transport/MCP tier passed 15/15. The strict trade and battle runs
+  passed all local/dedicated rows and all 9/9 remote rows. Earlier gameplay
+  samples and their incomplete 18/19 and 17/19 snapshots remain historical
+  diagnostics.
 - The current tree declares all canonical Red/Blue/Yellow listener and
-  connector orderings over localhost TCP. Post-change strict trade has one
-  failed remote row and strict battle has two failed remote rows; concurrent-
-  load stability remains open.
+  connector orderings over localhost TCP. The complete source-runtime strict
+  trade and battle matrices passed 19/19 each; concurrent-load stability
+  remains open.
 - The strict acceptance declaration has a dedicated entry point for every
   canonical ordered local and remote pair (19 trade and 19 battle nodes).
   Collection is declaration evidence only; a LinkMenu milestone is not a
-  gameplay acceptance. Current execution recorded incomplete strict trade
-  (18/19) and battle (17/19) results.
+  gameplay acceptance. Current execution recorded complete strict trade and
+  battle results (19/19 each) for the source runtime.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or
