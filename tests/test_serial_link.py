@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import select
 import socket
 import struct
@@ -155,9 +156,51 @@ def test_in_process_closed_after_close():
     assert not a.connected
     with pytest.raises(SerialLinkClosed):
         a.exchange("nope", b"\x00", timeout_ms=100)
-    # Peer side is independent and still considered "connected" until
-    # its own close().
-    assert b.connected
+    # Closing one endpoint disconnects the shared in-process cable, matching
+    # the EOF behavior observed by the peer of a TCP link.
+    assert not b.connected
+
+
+def test_in_process_peer_close_wakes_exchange_waiter_promptly():
+    a, b = InProcessSerialLink.pair("blue", "blue")
+    started = threading.Event()
+    result: list[Exception] = []
+
+    def blocked_exchange() -> None:
+        started.set()
+        try:
+            a.exchange("blocked", b"x", timeout_ms=5000)
+        except Exception as exc:  # noqa: BLE001
+            result.append(exc)
+
+    worker = threading.Thread(target=blocked_exchange, daemon=True)
+    worker.start()
+    assert started.wait(timeout=1.0)
+    b.close()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result and isinstance(result[0], SerialLinkClosed)
+
+
+def test_in_process_rejects_unsupported_rom_version():
+    with pytest.raises(ValueError, match="unsupported ROM version"):
+        InProcessSerialLink.pair("pokemon", "blue")
+
+
+@pytest.mark.parametrize("kind", ["", "é"])
+def test_in_process_rejects_non_wire_exchange_kind(kind: str):
+    a, _b = InProcessSerialLink.pair("blue", "blue")
+    with pytest.raises(ValueError, match="exchange kind"):
+        a.exchange(kind, b"x", timeout_ms=50)
+
+
+def test_exchange_rejects_non_positive_or_non_integer_deadline():
+    a, _b = InProcessSerialLink.pair("blue", "blue")
+    with pytest.raises(ValueError, match="timeout_ms"):
+        a.exchange("x", b"x", timeout_ms=0)
+    with pytest.raises(TypeError, match="timeout_ms"):
+        a.exchange("x", b"x", timeout_ms=True)
 
 
 # --- TcpSerialLink ---------------------------------------------------------
@@ -437,6 +480,32 @@ def test_tcp_rejects_malformed_frame():
     finally:
         server.close()
         client.close()
+
+
+def test_tcp_rejects_exchange_before_peer_hello():
+    local, peer = socket.socketpair()
+    link = TcpSerialLink(local, "blue")
+    body = (
+        bytes([serial_link_module.OP_EXCHANGE])
+        + serial_link_module._pack_lp_str("x")
+        + serial_link_module._pack_lp_bytes(b"x")
+    )
+    try:
+        _send_raw(peer, struct.pack(">I", len(body)) + body)
+        deadline = time.monotonic() + 1.0
+        while link._reader_exc is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert isinstance(link._reader_exc, SerialLinkProtocolError)
+        assert "HELLO" in str(link._reader_exc)
+        assert not link.connected
+    finally:
+        link.close()
+        peer.close()
+
+
+def test_tcp_rejects_non_finite_connect_deadline():
+    with pytest.raises(ValueError, match="finite and positive"):
+        TcpSerialLink.connect("127.0.0.1", 1, "blue", timeout_s=math.inf)
 
 
 def test_tcp_close_is_bounded_when_peer_stops_reading(monkeypatch):

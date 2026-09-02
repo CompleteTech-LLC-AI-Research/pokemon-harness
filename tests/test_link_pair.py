@@ -152,6 +152,18 @@ _SYM = """\
 00:2300 LinkMenu.exchangeMenuSelectionLoop
 """
 
+_CROSS_VERSION_SYM_A = """\
+00:216F Serial_ExchangeBytes
+00:D100 wSerialPlayerDataBlock
+00:D200 wSerialRandomNumberListBlock
+"""
+
+_CROSS_VERSION_SYM_B = """\
+00:1FCB Serial_ExchangeBytes
+00:D110 wSerialPlayerDataBlock
+00:D210 wSerialRandomNumberListBlock
+"""
+
 
 def _make_session(pyboy_type=FakePyBoy) -> tuple[Session, FakePyBoy]:
     pb = pyboy_type(DictMemory())
@@ -220,6 +232,23 @@ def test_pair_twice_raises_runtime_error():
         pair.pair()
 
 
+def test_pair_rejects_unknown_rom_version_before_factory_use():
+    s_a, _ = _make_session()
+    s_b, _ = _make_session()
+    factory = FakeFactory()
+
+    with pytest.raises(ValueError, match="unsupported ROM version"):
+        LinkPair(
+            s_a,
+            s_b,
+            version_primary="pokemon",
+            version_peer="red",
+            bridge_factory=factory,
+        )
+
+    assert factory.calls == []
+
+
 def test_pair_registers_progress_hook_for_present_symbol():
     pair, _, _, pb_a, pb_b, _ = _make_pair()
     pair.pair()
@@ -258,6 +287,58 @@ def test_pair_progress_hook_emits_events():
     evt = s_a.events.latest("link.trade.show_player_mon")
     assert evt is not None
     assert evt.name == "link.trade.show_player_mon"
+
+
+def test_pair_translates_cross_version_exchange_buffer_addresses():
+    """Known trade buffers are mapped by symbol, not by raw WRAM address."""
+    pb_a = FakePyBoy(DictMemory())
+    pb_b = FakePyBoy(DictMemory())
+    sa = Session(
+        pyboy=pb_a,
+        symbols=load_sym_text(_CROSS_VERSION_SYM_A),
+        event_bus=EventBus(),
+    )
+    sb = Session(
+        pyboy=pb_b,
+        symbols=load_sym_text(_CROSS_VERSION_SYM_B),
+        event_bus=EventBus(),
+    )
+    pair = LinkPair(
+        sa,
+        sb,
+        version_primary="blue",
+        version_peer="yellow",
+        bridge_factory=FakeFactory(),
+    )
+
+    pair.pair()
+    try:
+        blue_send = 0xD100
+        blue_receive = 0xD200
+        yellow_send = 0xD110
+        expected = b"xyz"
+        for offset, value in enumerate(expected):
+            pb_b.memory[yellow_send + offset] = value
+
+        rf = pb_a.register_file
+        rf.HL = blue_send
+        rf.D = blue_receive >> 8
+        rf.E = blue_receive & 0xFF
+        rf.B = 0
+        rf.C = len(expected)
+        rf.SP = 0x1000
+        pb_a.memory[0x1000] = 0x34
+        pb_a.memory[0x1001] = 0x12
+        rf.A = 0x99
+        rf.F = 0x00
+
+        assert pb_a.fire(0x00, 0x216F) == 1
+        assert bytes(pb_a.memory[blue_receive + i] for i in range(3)) == expected
+        assert rf.PC == 0x1234
+        assert rf.A == 0
+        assert rf.F == 0x80
+    finally:
+        pair.unpair()
 
 
 def test_unpair_clears_paired_flag_and_pre_existing_hooks_survive():
@@ -453,6 +534,13 @@ def test_step_rejects_non_positive():
     pair, _, _, _, _, _ = _make_pair()
     with pytest.raises(ValueError):
         pair.step(0)
+
+
+@pytest.mark.parametrize("count", [True, "1"])
+def test_step_rejects_non_integer_count(count):
+    pair, _, _, _, _, _ = _make_pair()
+    with pytest.raises(TypeError, match="positive integer"):
+        pair.step(count)  # type: ignore[arg-type]
 
 
 def test_step_chunk_size_one_still_advances_correctly():

@@ -40,6 +40,19 @@ HRAM_SEND = 0xFFA2
 HRAM_RECEIVE = 0xFFA3
 
 
+class FailingHookPyBoy(FakePyBoy):
+    """Fail the first hook registration to exercise bridge rollback."""
+
+    def __init__(self, memory) -> None:
+        super().__init__(memory)
+        self.fail_register = False
+
+    def hook_register(self, bank: int, addr: int, callback, context) -> None:
+        if self.fail_register:
+            raise RuntimeError("injected hook registration failure")
+        super().hook_register(bank, addr, callback, context)
+
+
 def _make_session() -> tuple[Session, FakePyBoy, DictMemory]:
     mem = DictMemory()
     pb = FakePyBoy(mem)
@@ -85,6 +98,61 @@ def test_install_twice_raises():
     bridge.install()
     with pytest.raises(RuntimeError):
         bridge.install()
+
+
+def test_uninstall_removes_only_bridge_callbacks_and_is_idempotent():
+    sa, pa, _, sb, pb, _ = _make_pair()
+    unrelated_calls: list[str] = []
+
+    def unrelated(_ctx: object) -> None:
+        unrelated_calls.append("unrelated")
+
+    pa.hook_register(SERIAL_EXCHANGE_BANK, SERIAL_EXCHANGE_ADDR, unrelated, None)
+    bridge = SerialBridge.from_sessions(
+        sa, sb, LinkTransport(), version_a="red", version_b="red"
+    )
+    bridge.install()
+
+    bridge.uninstall()
+    bridge.uninstall()
+
+    assert bridge.installed is False
+    assert pa.fire(SERIAL_EXCHANGE_BANK, SERIAL_EXCHANGE_ADDR) == 1
+    assert (SERIAL_EXCHANGE_BANK, SERIAL_EXCHANGE_ADDR) not in pb._hooks
+    assert unrelated_calls == ["unrelated"]
+    assert sa._serial_hooks == []
+    assert sb._serial_hooks == []
+
+
+def test_install_rolls_back_direct_bridge_on_partial_failure():
+    sa_mem = DictMemory()
+    sb_mem = DictMemory()
+    pa = FakePyBoy(sa_mem)
+    pb = FailingHookPyBoy(sb_mem)
+    sym_a = load_sym_text(_SYM_TEXT)
+    sym_b = load_sym_text(_SYM_TEXT)
+    sa = Session(pyboy=pa, symbols=sym_a, event_bus=EventBus())
+    sb = Session(pyboy=pb, symbols=sym_b, event_bus=EventBus())
+    pb.fail_register = True
+    bridge = SerialBridge.from_sessions(
+        sa, sb, LinkTransport(), version_a="red", version_b="red"
+    )
+
+    with pytest.raises(RuntimeError, match="injected hook registration failure"):
+        bridge.install()
+
+    assert bridge.installed is False
+    assert pa._hooks == {}
+    assert pb._hooks == {}
+    assert sa._serial_hooks == []
+    assert sb._serial_hooks == []
+
+    # The failed transaction does not poison a later retry once the runtime
+    # registration fault is removed.
+    pb.fail_register = False
+    bridge.install()
+    assert bridge.installed is True
+    bridge.uninstall()
 
 
 # ---------------------------------------------------------------------------
