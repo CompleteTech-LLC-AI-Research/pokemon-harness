@@ -41,7 +41,11 @@ cdef class Serial:
     cdef public object owner_dispatch_callback
     cdef public bint owner_dispatch_enabled
 
-    cpdef bint tick(self, uint64_t) noexcept nogil
+    # Cython 3.0.12 emits cpdef vtable slots for ``unsigned long long``.
+    # Using the spelling it uses for the callable ABI avoids a platform
+    # typedef mismatch (uint64_t is unsigned long on LP64) while preserving
+    # the 64-bit cycle value at the Python/C boundary.
+    cpdef bint tick(self, unsigned long long) noexcept nogil
 
     cpdef void set_SB(self, uint8_t) noexcept nogil
     cpdef void set_SC(self, uint8_t) noexcept nogil
