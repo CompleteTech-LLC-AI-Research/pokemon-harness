@@ -16,7 +16,8 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current release base is merged `master` tip `01edb6e` (PRs #12-#13), with
+The current release base is merged `master` tip `ae48938` (PR #14, including
+PRs #12-#14), with
 the in-process serial/lifecycle and remote TCP follow-ups under validation on an
 isolated branch using `DEFAULT_MATRIX_WORKERS=1`. The current clean asset-free
 command:
@@ -47,15 +48,17 @@ audit is collection-only.
 The focused post-change integration slice passed 294/294, and all 10 external
 fixture-manifest entries validated. The post-change real-ROM local tier passed
 47/47 and the remote transport/MCP tier passed 14/14. Strict trade completed
-18/19, with one remote timeout at the Trade Center warp rendezvous; strict
-battle is still running. Historical full evidence is not reused as current
-candidate evidence.
+18/19, with one remote timeout at the Trade Center warp rendezvous. Strict
+battle completed 17/19, with remote `red_color-listen-yellow-connect` and
+`yellow-listen-yellow-connect` failing during the LinkMenu-to-Colosseum
+transition. Historical full evidence is not reused as current candidate
+evidence.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
 producer plus tracked battle-fixture generator are present. Full sign-off is
-pending the strict trade failure disposition, the post-change battle matrix,
-and the remaining release blockers. The
+pending the strict trade and battle failure disposition and the remaining
+release blockers. The
 current Cython native serial extension does not compile, so Cython gameplay
 coverage,
 vanilla source provenance, broad-suite coverage, native-platform evidence,
@@ -63,8 +66,8 @@ retained complete evidence, and independent review.
 
 ## Source and artifact hygiene
 
-- [x] The release base is identified as merged `master` tip `01edb6e`
-  (PRs #12-#13), and the follow-up candidate is isolated from the protected
+- [x] The release base is identified as merged `master` tip `ae48938`
+  (PR #14, including PRs #12-#14), and the follow-up candidate is isolated from the protected
   dirty development checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
@@ -121,17 +124,18 @@ retained complete evidence, and independent review.
   or runtime skips.
 - [ ] Current-candidate controlled local evidence covers the complete canonical
   matrix: strict trade local/dedicated rows passed, while the strict battle
-  rows are still running.
+  matrix has two failed remote rows.
 - [ ] Current-candidate controlled remote evidence covers every ordered
   listener/connector pair; transport/MCP passed 14/14, strict trade passed 8/9
-  with one bounded timeout, and strict battle is still running.
+  with one bounded timeout, and strict battle passed 7/9 with two
+  LinkMenu-to-Colosseum failures.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
   ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
   IDs).
 - [ ] Current-candidate local and remote strict runtime rows pass in both
   listener/connector directions; strict trade has one failed remote row,
-  strict battle is still running, and concurrent-load stability is not
-  certified.
+  strict battle has two failed remote rows, and concurrent-load stability is
+  not certified.
 - [ ] Native-platform/build coverage and an independent release review are
   complete.
 
