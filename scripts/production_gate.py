@@ -136,6 +136,20 @@ _URI_CREDENTIAL_RE = re.compile(r"(?i)(https?://[^/\s:@]+):[^@\s]+@")
 _BYTE_LITERAL_RE = re.compile(r"(?is)\bb(?:'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\")")
 _LONG_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{128,}(?![A-Za-z0-9])")
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9>])(?:[A-Za-z]:[\\/]|/)[^\s,;()]+")
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9>])[A-Za-z]:[\\/]"
+    r"(?:[^\\/\r\n,;()]+[\\/])*"
+    r"[^\s\\/\r\n,;()]+"
+)
+_SPACED_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9>])/(?:[^/\r\n,;()]+/)*"
+    r"[^\s/\r\n,;()]+"
+)
+_QUOTED_ABSOLUTE_PATH_RE = re.compile(
+    r"(?P<quote>[\"'])"
+    r"(?P<path>(?:[A-Za-z]:[\\/]|/)[^\"'\r\n]+)"
+    r"(?P=quote)"
+)
 
 
 def _asset_key(value: str | Path) -> Path:
@@ -553,6 +567,23 @@ def build_test_environment(
         selected_expected = expected_sha1.get(selected_key)
         if selected_expected:
             environment["POKERED_ROM_SHA1"] = selected_expected
+    if "POKERED_SYM_SHA1" not in environment:
+        selected_sym = environment.get("POKERED_SYM_PATH")
+        if selected_sym:
+            selected_path = Path(selected_sym).expanduser()
+            if not selected_path.is_absolute():
+                selected_path = project_root / selected_path
+            try:
+                selected_key = _asset_key(
+                    selected_path.resolve(strict=False).relative_to(
+                        rom_root.expanduser().resolve(strict=False)
+                    )
+                )
+            except ValueError:
+                selected_key = _asset_key(selected_path)
+            selected_expected = expected_sha1.get(selected_key)
+            if selected_expected:
+                environment["POKERED_SYM_SHA1"] = selected_expected
     return environment
 
 
@@ -783,6 +814,15 @@ def environment_policy_problems(
             problems.append(
                 f"primary ROM SHA-1 does not match inspected bytes: "
                 f"expected {rom_record.actual_sha1!r}, got {selected_sha!r}"
+            )
+    if sym_record is not None and sym_record.kind == "symbol":
+        selected_sha = environment.get("POKERED_SYM_SHA1", "").strip().lower()
+        if not selected_sha:
+            problems.append("POKERED_SYM_SHA1 is missing for the primary symbols")
+        elif sym_record.actual_sha1 != selected_sha:
+            problems.append(
+                f"primary symbols SHA-1 does not match inspected bytes: "
+                f"expected {sym_record.actual_sha1!r}, got {selected_sha!r}"
             )
     return problems
 
@@ -2371,6 +2411,13 @@ def _safe_text(value: Any, *, limit: int = 8000) -> str:
     """Bound and redact free-form diagnostics before retaining them."""
 
     text = "" if value is None else str(value)
+    # Redact paths before credential matching. A path component such as
+    # ``secret`` must not cause the credential regex to consume only the
+    # suffix of a spaced path and leave the remainder machine-specific.
+    text = _QUOTED_ABSOLUTE_PATH_RE.sub("<external-path>", text)
+    text = _WINDOWS_ABSOLUTE_PATH_RE.sub("<external-path>", text)
+    text = _SPACED_ABSOLUTE_PATH_RE.sub("<external-path>", text)
+    text = _ABSOLUTE_PATH_RE.sub("<external-path>", text)
     text = _URI_CREDENTIAL_RE.sub(r"\1:[REDACTED]@", text)
     text = _BYTE_LITERAL_RE.sub("[BINARY DATA REDACTED]", text)
     text = _CREDENTIAL_TEXT_RE.sub("[CREDENTIAL REDACTED]", text)
@@ -2429,7 +2476,7 @@ def _safe_diagnostic(
     *,
     limit: int = 8000,
 ) -> str:
-    text = _safe_text(value, limit=limit)
+    text = "" if value is None else str(value)
     replacements: dict[str, str] = {}
     for label, root in roots:
         for raw in (str(root), str(root.expanduser())):
@@ -2441,8 +2488,7 @@ def _safe_diagnostic(
             pass
     for raw, replacement in sorted(replacements.items(), key=lambda item: -len(item[0])):
         text = text.replace(raw, replacement)
-    text = _ABSOLUTE_PATH_RE.sub("<external-path>", text)
-    return text
+    return _safe_text(text, limit=limit)
 
 
 def _safe_command(

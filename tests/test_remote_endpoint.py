@@ -296,6 +296,58 @@ def test_step_services_serial_tick_after_each_frame():
 # --- install() guards ----------------------------------------------------
 
 
+def test_install_failure_rolls_back_hooks_and_can_retry(monkeypatch):
+    session, pyboy, _mem = _make_session(_BLUE_SYM)
+    la, _lb = InProcessSerialLink.pair("blue", "blue")
+    endpoint = RemoteLinkEndpoint.as_connector(session, la)
+    original = session.serial_hook
+    calls = 0
+
+    def fail_second(symbol_name, callback, *, context=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected hook failure")
+        return original(symbol_name, callback, context=context)
+
+    monkeypatch.setattr(session, "serial_hook", fail_second)
+    with pytest.raises(RuntimeError, match="injected hook failure"):
+        endpoint.install()
+    assert endpoint.installed is False
+    assert pyboy._hooks == {}
+
+    monkeypatch.setattr(session, "serial_hook", original)
+    endpoint.install()
+    assert endpoint.installed is True
+    endpoint.uninstall()
+    assert endpoint.installed is False
+    assert pyboy._hooks == {}
+
+
+def test_session_close_guards_remote_exchange_bytes_hook():
+    session, pyboy, memory = _make_session(_BLUE_SYM)
+    la, _lb = InProcessSerialLink.pair("blue", "blue")
+    endpoint = RemoteLinkEndpoint.as_connector(session, la)
+    endpoint.install()
+
+    send = session.symbols.addr_of("wSerialPlayerDataBlock")
+    memory[send] = 0xA5
+    pyboy.register_file.HL = send
+    pyboy.register_file.D = 0xD2
+    pyboy.register_file.E = 0x00
+    pyboy.register_file.B = 0
+    pyboy.register_file.C = 1
+
+    session.close()
+
+    # The raw hook is guarded by Session.close even though the endpoint was
+    # not explicitly uninstalled first. No peer exchange or memory mutation
+    # may occur after the session lifecycle has ended.
+    assert pyboy.fire(0x00, 0x216F) == 1
+    assert memory[0xD200] == 0
+    assert endpoint.installed is True
+
+
 def test_install_twice_raises():
     session, _pb, _mem = _make_session(_BLUE_SYM)
     la, _lb = InProcessSerialLink.pair("blue", "blue")

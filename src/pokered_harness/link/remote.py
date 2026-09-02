@@ -48,6 +48,7 @@ What stays:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from pokered_harness.link.serial_link import SerialLink, SerialLinkTimeout
@@ -72,6 +73,7 @@ _RSC_ADDR: int = 0xFF02
 _IF_ADDR: int = 0xFF0F
 _SC_START: int = 0x80
 _IF_SERIAL: int = 0x08
+_HOOK_LOCK_TIMEOUT_S: float = 5.0
 
 
 # --- endpoint --------------------------------------------------------------
@@ -106,6 +108,7 @@ class RemoteLinkEndpoint:
         self._link = serial_link
         self._is_internal_clock = is_internal_clock
         self._installed = False
+        self._owned_hook_symbols: list[str] = []
 
     # --- construction -------------------------------------------------
 
@@ -144,14 +147,50 @@ class RemoteLinkEndpoint:
         return STATUS_INTERNAL if self._is_internal_clock else STATUS_EXTERNAL
 
     def install(self) -> None:
-        """Register all bridge hooks on the local session."""
-        if self._installed:
-            raise RuntimeError("RemoteLinkEndpoint already installed")
-        self._install_handshake()
-        self._install_exchange_nybble()
-        self._install_exchange_link_menu_selection()
-        self._install_exchange_bytes_skip()
-        self._installed = True
+        """Register all bridge hooks on the local session as one transaction."""
+        with self._session.locked(timeout_s=_HOOK_LOCK_TIMEOUT_S):
+            if self._installed:
+                raise RuntimeError("RemoteLinkEndpoint already installed")
+            try:
+                self._install_handshake()
+                self._install_exchange_nybble()
+                self._install_exchange_link_menu_selection()
+                self._install_exchange_bytes_skip()
+            except BaseException:
+                # A later symbol lookup or PyBoy hook failure must not leave
+                # the earlier serial callbacks active or make a retry collide
+                # with stale physical breakpoints.
+                self._uninstall_owned_hooks()
+                raise
+            self._installed = True
+
+    def uninstall(self) -> None:
+        """Remove this endpoint's installed serial callbacks.
+
+        Session-level cleanup remains available to the MCP owner for legacy
+        endpoints, but exposing an owned rollback path makes direct endpoint
+        users safe on install failure, reconnect, and explicit teardown.
+        """
+        self._uninstall_owned_hooks()
+
+    def _uninstall_owned_hooks(self) -> None:
+        errors: list[Exception] = []
+        for symbol_name in reversed(tuple(dict.fromkeys(self._owned_hook_symbols))):
+            try:
+                # ``deactivate_hooks_at`` is intentionally usable after the
+                # Session itself has been marked closed; teardown still has
+                # to release physical PyBoy breakpoints.
+                self._session.deactivate_hooks_at(
+                    symbol_name, timeout_s=_HOOK_LOCK_TIMEOUT_S
+                )
+            except Exception as exc:  # noqa: BLE001 - continue best-effort cleanup
+                errors.append(exc)
+        if errors:
+            raise RuntimeError(
+                "one or more remote endpoint hooks could not be removed"
+            ) from errors[0]
+        self._owned_hook_symbols.clear()
+        self._installed = False
 
     def serial_tick(self) -> None:
         """Clear SC_START and raise IF-bit 3 on the local session so
@@ -160,6 +199,11 @@ class RemoteLinkEndpoint:
         Called by the MCP server's step loop after each emulator frame
         (analogous to :meth:`LinkPair._hardware_serial_tick`). Purely
         local — no peer interaction."""
+        with self._session.locked(timeout_s=_HOOK_LOCK_TIMEOUT_S):
+            self._serial_tick_locked()
+
+    def _serial_tick_locked(self) -> None:
+        """Apply the hardware tick; caller owns the session lock."""
         mem = self._session._pyboy.memory
         sc = mem[_RSC_ADDR]
         if not (sc & _SC_START):
@@ -179,9 +223,17 @@ class RemoteLinkEndpoint:
         """
         if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
             raise ValueError(f"count must be a positive integer, got {count!r}")
-        for _ in range(count):
-            self._session.step(1, render=render)
-            self.serial_tick()
+        with self._session.locked(timeout_s=_HOOK_LOCK_TIMEOUT_S):
+            for _ in range(count):
+                self._session.step(1, render=render)
+                self.serial_tick()
+
+    def _register_serial_hook(
+        self, symbol_name: str, callback: Callable[[object], None]
+    ) -> None:
+        """Register and retain ownership of a guarded Session hook."""
+        self._session.serial_hook(symbol_name, callback)
+        self._owned_hook_symbols.append(symbol_name)
 
     # --- hook installers ----------------------------------------------
 
@@ -199,7 +251,7 @@ class RemoteLinkEndpoint:
             mem[status_addr] = my_status
 
         try:
-            session.serial_hook(
+            self._register_serial_hook(
                 "Serial_TryEstablishingExternallyClockedConnection", _cb
             )
         except (KeyError, LookupError):
@@ -229,7 +281,7 @@ class RemoteLinkEndpoint:
             if peer_bytes:
                 mem[recv_addr] = peer_bytes[0] & 0xFF
 
-        session.serial_hook("Serial_ExchangeNybble", _cb)
+        self._register_serial_hook("Serial_ExchangeNybble", _cb)
 
     def _install_exchange_link_menu_selection(self) -> None:
         """Intercept ``Serial_ExchangeLinkMenuSelection`` and exchange
@@ -256,7 +308,7 @@ class RemoteLinkEndpoint:
                 mem[recv_addr] = peer_bytes[0] & 0xFF
                 mem[recv_addr + 1] = peer_bytes[1] & 0xFF
 
-        session.serial_hook("Serial_ExchangeLinkMenuSelection", _cb)
+        self._register_serial_hook("Serial_ExchangeLinkMenuSelection", _cb)
 
     def _install_exchange_bytes_skip(self) -> None:
         """Skip ``Serial_ExchangeBytes`` and exchange arbitrary-length
@@ -274,7 +326,6 @@ class RemoteLinkEndpoint:
         session = self._session
         if "Serial_ExchangeBytes" not in session.symbols:
             return
-        bank, addr = session.symbols.bank_addr("Serial_ExchangeBytes")
         mem = session._pyboy.memory
         pb = session._pyboy
         symbols = session.symbols
@@ -341,17 +392,15 @@ class RemoteLinkEndpoint:
             rf.F = 0x80
 
         # Replace any pre-existing Serial_ExchangeBytes hook (e.g. the
-        # SerialBridge BRIDGE-role callback) with our remote variant.
-        deregister = getattr(pb, "hook_deregister", None)
-        if callable(deregister):
-            try:
-                deregister(bank, addr)
-            except ValueError:
-                # PyBoy raises when no callback is registered at the
-                # address.  The replacement hook is still safe to install
-                # when the optional legacy callback is absent.
-                pass
-        pb.hook_register(bank, addr, _cb, None)
+        # SerialBridge BRIDGE-role callback) with our remote variant. Route
+        # the removal through Session so EventBus bookkeeping and raw-hook
+        # guards agree with the physical PyBoy table.
+        session.deactivate_hooks_at("Serial_ExchangeBytes")
+        # Keep this callback inside Session's guarded raw-hook lifecycle too.
+        # The physical replacement above is still needed for the legacy
+        # callback, but a direct PyBoy registration would otherwise remain
+        # callable after Session.close().
+        self._register_serial_hook("Serial_ExchangeBytes", _cb)
 
 
 __all__ = [
