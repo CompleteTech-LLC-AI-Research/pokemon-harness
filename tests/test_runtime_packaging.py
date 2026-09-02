@@ -80,6 +80,26 @@ def test_cython_build_pins_the_compiler_and_preserves_serial_widths() -> None:
     assert "cdef public uint8_t _bits_remaining" in serial_pxd
 
 
+def test_source_and_native_runtime_expose_lockstep_timing_attributes() -> None:
+    """The Cython ABI must expose the scheduler's source-runtime inputs."""
+    from pyboy.core.cpu import CPU
+    from pyboy.core.lcd import LCD
+    from pyboy.pyboy import defaults
+
+    cpu = CPU(None)
+    lcd = LCD(
+        False,
+        False,
+        defaults["color_palette"],
+        defaults["cgb_color_palette"],
+    )
+
+    assert cpu.cycles == 0
+    assert lcd.speed_shift == 0
+    assert lcd._cycles_to_frame == 70224
+    assert lcd._cycles_to_interrupt == 0
+
+
 def test_cython_serial_translation_unit_compiles_with_the_checked_in_pxd() -> None:
     """Compile the serial C translation unit without writing build output to the repo."""
     compiler_spec = os.environ.get("CC") or sysconfig.get_config_var("CC")

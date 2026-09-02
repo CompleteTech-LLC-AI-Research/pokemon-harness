@@ -53,7 +53,10 @@ cdef class LCD:
     cdef Renderer renderer
     cdef uint8_t[144][5] _scanlineparameters
     cdef uint64_t last_cycles
-    cdef int64_t _cycles_to_interrupt, _cycles_to_frame
+    # These timing fields are consumed by the harness scheduler.  Source
+    # PyBoy exposes them as Python attributes; native PyBoy must expose the
+    # same scheduling inputs for equivalent lockstep behavior.
+    cdef public int64_t _cycles_to_interrupt, _cycles_to_frame
 
     @final
     cdef void switch_cgb(self, bint) noexcept with gil
@@ -78,7 +81,7 @@ cdef class LCD:
 
     # CGB
     cdef bint cgb, _downgraded_to_dmg
-    cdef uint8_t speed_shift
+    cdef public uint8_t speed_shift
     cdef uint8_t[8 * 1024] VRAM1
     cdef VBKregister vbk
     cdef PaletteIndexRegister bcps
