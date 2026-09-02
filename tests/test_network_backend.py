@@ -115,6 +115,23 @@ def test_versioned_handshake_rejects_unexpected_peer_rom():
         b.stop()
 
 
+def test_versioned_handshake_can_be_cancelled_and_closes_transport():
+    """A cancelled HELLO wait cannot leave an unauthenticated link alive."""
+    a_sock, b_sock = _socket.socketpair()
+    a = NetworkBackend(a_sock, local_rom_version="red")
+    b = NetworkBackend(b_sock)
+    a.start_receiver(local_core=None)
+    cancel = threading.Event()
+    cancel.set()
+    try:
+        with pytest.raises(NetworkBackendError, match="cancelled"):
+            a.wait_for_hello(timeout=5.0, cancel_event=cancel)
+        assert not a.connected
+    finally:
+        a.stop()
+        b.stop()
+
+
 def test_frame_send_deadline_does_not_block_on_silent_peer():
     a_sock, b_sock = _socket.socketpair()
     a_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_SNDBUF, 4096)
@@ -238,6 +255,36 @@ def test_on_edge_sends_REQ_and_waits_for_RESP():
         b.stop()
 
 
+def test_on_edge_uses_one_total_deadline_for_send_and_response(monkeypatch):
+    """A slow send cannot double the advertised owner-blocking limit."""
+    a, b = NetworkBackend.pair()
+    monkeypatch.setattr(
+        "pokered_harness.link.network_backend._EDGE_RESPONSE_TIMEOUT_SECONDS",
+        0.05,
+    )
+    observed_response_timeouts: list[float] = []
+
+    def slow_send(_frame, *, timeout, operation, cancel_event=None):
+        del timeout, operation, cancel_event
+        time.sleep(0.02)
+
+    def no_response(_queue, *, timeout, timeout_message, cancel_event=None):
+        del timeout_message, cancel_event
+        observed_response_timeouts.append(timeout)
+        raise NetworkBackendError("test response timeout")
+
+    monkeypatch.setattr(a, "_send_frame", slow_send)
+    monkeypatch.setattr(a, "_queue_get", no_response)
+    try:
+        with pytest.raises(NetworkBackendError, match="test response timeout"):
+            a.on_edge(our_bit=1, our_role=1)
+        assert observed_response_timeouts
+        assert observed_response_timeouts[0] < 0.045
+    finally:
+        a.stop()
+        b.stop()
+
+
 def test_on_edge_with_peer_hangup_raises():
     """If the peer closes the socket before responding, ``on_edge``
     times out and raises :class:`NetworkBackendError`."""
@@ -270,8 +317,8 @@ def test_unknown_opcode_fails_closed_and_stops_reader():
         b.stop()
 
 
-def test_duplicate_edge_responses_do_not_block_shutdown():
-    """A full response queue must fail the reader without wedging stop()."""
+def test_unsolicited_edge_responses_fail_closed_without_wedging_shutdown():
+    """A response without an in-flight request is a protocol error."""
     a, b = NetworkBackend.pair()
     a.start_receiver(local_core=None)
     b._sock.sendall(
@@ -284,6 +331,7 @@ def test_duplicate_edge_responses_do_not_block_shutdown():
                 break
             time.sleep(0.01)
         assert isinstance(a._reader_exc, NetworkBackendError)
+        assert "unsolicited EDGE_RESP" in str(a._reader_exc)
         started = time.monotonic()
         a.stop()
         assert time.monotonic() - started < 0.5
@@ -463,6 +511,38 @@ def test_sync_with_peer_times_out_on_silent_peer():
     try:
         with pytest.raises(NetworkBackendError, match="no peer OP_SYNC"):
             a.sync_with_peer(sync_id=1, timeout=1.0)
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_sync_with_peer_can_be_cancelled_and_closes_transport():
+    """A cancelled barrier cannot be reused with a stale SYNC marker."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    cancel = threading.Event()
+    cancel.set()
+    try:
+        with pytest.raises(NetworkBackendError, match="cancelled"):
+            a.sync_with_peer(sync_id=2, timeout=5.0, cancel_event=cancel)
+        assert not a.connected
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_wire_idle_wait_can_be_cancelled_without_touching_emulator():
+    """Cancellation is observable even when no transport work is pending."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=None)
+    cancel = threading.Event()
+    cancel.set()
+    try:
+        with pytest.raises(NetworkBackendError, match="cancelled"):
+            a.wait_for_wire_idle(timeout=5.0, cancel_event=cancel)
+        assert a.connected
     finally:
         a.stop()
         b.stop()
