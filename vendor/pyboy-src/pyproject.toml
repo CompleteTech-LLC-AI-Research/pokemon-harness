@@ -6,7 +6,10 @@ authors = [
 ]
 keywords = ["gameboy", "game boy", "emulator", "cython", "pypy"]
 description = "Game Boy emulator written in Python"
-readme = "README.md"
+# The upstream README is intentionally not vendored.  Keep the standalone
+# PyBoy build metadata valid when this source snapshot is bootstrapped from a
+# clean checkout.
+readme = {text = "Pinned PyBoy source fork bundled by pokered-harness.", content-type = "text/plain"}
 license = "LGPL-3.0-only"
 classifiers = [
     "Operating System :: OS Independent",
