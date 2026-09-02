@@ -81,10 +81,27 @@ class AgentSync:
         prefixed with ``agent_sync/`` so it can never collide with a
         game-serial RPC kind (which uses ``exchange_bytes/``,
         ``exchange_nybble/``, ``menu_selection/``)."""
+        if not isinstance(label, str):
+            raise TypeError(
+                f"label must be a string, got {type(label).__name__}"
+            )
+        if not label:
+            raise ValueError("label must not be empty")
         if "/" in label:
             raise ValueError(
                 f"label must not contain '/', got {label!r} — the "
                 f"namespace prefix is managed by AgentSync."
+            )
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                "payload must be bytes-like, "
+                f"got {type(payload).__name__}"
+            )
+        encoded_label = (_KIND_PREFIX + label).encode("ascii")
+        if len(encoded_label) > 0xFF:
+            raise ValueError(
+                "label is too long for the agent-sync wire kind: "
+                f"{len(encoded_label)} bytes"
             )
         return self._link.exchange(
             _KIND_PREFIX + label, bytes(payload), timeout_ms=timeout_ms

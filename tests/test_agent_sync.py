@@ -60,6 +60,23 @@ def test_rendezvous_rejects_label_with_slash():
         sync.rendezvous("bad/label", b"")
 
 
+@pytest.mark.parametrize("bad_payload", [1, "payload", None])
+def test_rendezvous_rejects_non_bytes_payload(bad_payload):
+    a, _b = InProcessSerialLink.pair("blue", "blue")
+    sync = AgentSync(a)
+    with pytest.raises(TypeError, match="payload must be bytes-like"):
+        sync.rendezvous("payload", bad_payload)
+
+
+def test_rendezvous_rejects_empty_or_non_string_label():
+    a, _b = InProcessSerialLink.pair("blue", "blue")
+    sync = AgentSync(a)
+    with pytest.raises(ValueError, match="must not be empty"):
+        sync.rendezvous("", b"")
+    with pytest.raises(TypeError, match="label must be a string"):
+        sync.rendezvous(7, b"")
+
+
 def test_rendezvous_labels_dont_collide_with_game_kinds():
     """Game RPCs use kinds like ``exchange_bytes/wSerialPlayerDataBlock``
     — agent_sync adds its own prefix so a rendezvous with label
