@@ -201,7 +201,9 @@ class LinkState:
         self._connect_done.set()
         self._connect_in_progress = False
         self._state_lock = threading.RLock()
-        self._operation_lock = threading.Lock()
+        # Re-entrant so shutdown can take a bounded outer acquisition before
+        # calling the normal dispatcher, which takes the same guard again.
+        self._operation_lock = threading.RLock()
         # Pair/native-link mutations and transport snapshots must not race.
         # This is deliberately separate from ``_operation_lock`` so a
         # read-only status request stays responsive while a remote connect is
@@ -211,10 +213,29 @@ class LinkState:
         self._generation = 0
 
     @contextmanager
-    def operation(self) -> Iterator[None]:
-        """Serialize emulator/link mutations without blocking disconnect."""
-        with self._operation_lock:
+    def operation(self, *, timeout_s: float | None = None) -> Iterator[None]:
+        """Serialize emulator/link mutations without blocking disconnect.
+
+        Normal request dispatch keeps its historical wait-until-complete
+        semantics.  Shutdown callers can provide a finite timeout so an
+        in-flight request cannot strand stdio teardown behind this guard.
+        """
+        timeout: float | None = None
+        if timeout_s is None:
+            acquired = self._operation_lock.acquire()
+        else:
+            timeout = _validate_timeout(timeout_s)
+            acquired = self._operation_lock.acquire(timeout=timeout)
+        if not acquired:
+            raise McpHarnessError(
+                "link_operation_timeout",
+                "link operation did not release before the "
+                f"{timeout:g}s shutdown deadline",
+            )
+        try:
             yield
+        finally:
+            self._operation_lock.release()
 
     @contextmanager
     def state(self) -> Iterator[None]:
@@ -1026,7 +1047,13 @@ def _dispatch_link_tool(
                 arguments.get("peer_rom_version")
             )
 
-            generation = link._generation
+            # Every new remote attempt gets its own generation.  A status
+            # request may be finishing cleanup of an older dead transport
+            # while a reconnect starts; without a new token, that status
+            # request could publish the old reader error onto the new idle
+            # lifecycle.
+            generation = link._generation + 1
+            link._generation = generation
             link._listener_cancel = cancel
             link._listener_start_in_progress = True
             link._listener_start_owner = start_owner
@@ -1140,7 +1167,10 @@ def _dispatch_link_tool(
             expected_peer_version = _optional_rom_version(
                 arguments.get("peer_rom_version")
             )
-            generation = link._generation
+            # Reserve a fresh token for this attempt so a racing status
+            # cleanup cannot attach an older reader failure to its result.
+            generation = link._generation + 1
+            link._generation = generation
             link._connect_cancel = threading.Event()
             connect_cancel = link._connect_cancel
             link._connect_in_progress = True
@@ -1927,7 +1957,7 @@ def _cleanup_unpublished_remote(
         try:
             with session.locked(timeout_s=_remaining(cleanup_deadline)):
                 network_session.detach_all()
-        except Exception as exc:  # noqa: BLE001, S110 - cleanup must not mask the original error
+        except Exception as exc:  # noqa: BLE001 - cleanup must not mask the original error
             network_detach_failed = True
             cleanup_errors.append(exc)
     if transport is not None:
@@ -1936,7 +1966,7 @@ def _cleanup_unpublished_remote(
                 transport,
                 timeout_s=_remaining(cleanup_deadline),
             )
-        except Exception as exc:  # noqa: BLE001, S110 - cleanup must not mask the original error
+        except Exception as exc:  # noqa: BLE001 - cleanup must not mask the original error
             transport_closed = False
             cleanup_errors.append(exc)
         if not transport_closed:
@@ -1949,7 +1979,7 @@ def _cleanup_unpublished_remote(
             )
     try:
         hook_errors = _deactivate_link_hooks(session)
-    except Exception as exc:  # noqa: BLE001, S110 - cleanup must not mask the original error
+    except Exception as exc:  # noqa: BLE001 - cleanup must not mask the original error
         hook_errors = [exc]
     if hook_errors:
         hook_cleanup_failed = True
@@ -2629,7 +2659,12 @@ async def serve_stdio(
             # Restore native serial backends before the owning Sessions are
             # closed by main().
             try:
-                dispatch_tool(session, "link_unpair", {}, link=owned_link)
+                # ``dispatch_tool`` normally waits for the operation guard
+                # without a deadline.  During stdio EOF cleanup, a request
+                # that is still inside a link operation must not turn that
+                # wait into an unbounded server shutdown.
+                with owned_link.operation(timeout_s=_DEFAULT_CLEANUP_TIMEOUT_S):
+                    dispatch_tool(session, "link_unpair", {}, link=owned_link)
             except Exception as exc:  # noqa: BLE001
                 cleanup_errors.append(exc)
             if request_tasks is not None:

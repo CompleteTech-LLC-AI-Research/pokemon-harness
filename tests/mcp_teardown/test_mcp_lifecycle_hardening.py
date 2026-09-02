@@ -6,6 +6,7 @@ import ast
 import asyncio
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import mcp.types as mcp_types
@@ -18,6 +19,7 @@ from pokered_harness.mcp_server import (
     _close_sessions_independently,
     build_server,
     dispatch_tool,
+    serve_stdio,
 )
 from pokered_harness.session import Session
 from pokered_harness.symbols.loader import load_sym_text
@@ -232,3 +234,57 @@ def test_cancelled_mcp_resource_has_a_bounded_cleanup_and_worker_wait(
     asyncio.run(scenario())
     assert cleanup_called.is_set()
     assert worker_done.is_set()
+
+
+def test_stdio_shutdown_bounds_unpair_operation_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EOF cleanup must not wait forever for an in-flight link operation."""
+    session = _session()
+    link = LinkState()
+    operation_entered = threading.Event()
+    operation_release = threading.Event()
+
+    def hold_operation() -> None:
+        with link.operation():
+            operation_entered.set()
+            operation_release.wait(timeout=2.0)
+
+    holder = threading.Thread(target=hold_operation, name="test-link-operation")
+    holder.start()
+    assert operation_entered.wait(timeout=1.0)
+
+    class _FinishedServer:
+        def create_initialization_options(self):
+            return None
+
+        async def run(self, *_args, **_kwargs):
+            return None
+
+    @asynccontextmanager
+    async def fake_stdio_server():
+        yield object(), object()
+
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server.build_server",
+        lambda *_args, **_kwargs: _FinishedServer(),
+    )
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server.stdio_server", fake_stdio_server
+    )
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05
+    )
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(McpHarnessError, match="link operation") as exc_info:
+            asyncio.run(serve_stdio(session, link=link))
+        assert exc_info.value.code == "server_cleanup_failed"
+        assert time.monotonic() - started < 0.5
+    finally:
+        operation_release.set()
+        holder.join(timeout=1.0)
+        session.close()
+
+    assert not holder.is_alive()
