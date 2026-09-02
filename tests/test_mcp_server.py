@@ -21,6 +21,7 @@ from pokered_harness.mcp_server import (
     McpHarnessError,
     _attach_network_backend,
     _close_serial_link,
+    _disconnect_remote,
     _error_code,
     _wait_for_network_hello,
     build_server,
@@ -1223,6 +1224,65 @@ def test_link_status_serializes_dead_remote_cleanup_before_reconnect(monkeypatch
     assert not status_worker.is_alive()
     assert status_result and status_result[0]["remote_mode"] == "idle"
     assert link.remote_mode == "idle"
+
+
+def test_link_status_does_not_publish_stale_error_after_reconnect(monkeypatch):
+    s, _ = _endpoint_session()
+    link = LinkState(primary_version="red")
+
+    class DeadRemote:
+        connected = False
+        _reader_exc = RuntimeError("old peer closed")
+
+        def close(self):
+            return None
+
+    link.remote_mode = "connected"
+    link.remote_link = DeadRemote()  # type: ignore[assignment]
+    original_disconnect = _disconnect_remote
+    cleanup_returned = threading.Event()
+    release_status = threading.Event()
+    status_result: list[dict] = []
+
+    def delayed_disconnect(*args, **kwargs):
+        original_disconnect(*args, **kwargs)
+        cleanup_returned.set()
+        assert release_status.wait(timeout=2.0)
+
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._disconnect_remote", delayed_disconnect
+    )
+
+    status_worker = threading.Thread(
+        target=lambda: status_result.append(
+            dispatch_tool(s, "link_status", {}, link=link)
+        )
+    )
+    status_worker.start()
+    assert cleanup_returned.wait(timeout=1.0)
+
+    try:
+        with pytest.raises(McpHarnessError) as connect_error:
+            dispatch_tool(
+                s,
+                "link_connect",
+                {
+                    "host": "127.0.0.1",
+                    "port": _free_port(),
+                    "timeout_s": 0.05,
+                },
+                link=link,
+            )
+        assert connect_error.value.code == "link_connect_failed"
+    finally:
+        release_status.set()
+        status_worker.join(timeout=2.0)
+        s.close()
+
+    assert not status_worker.is_alive()
+    assert status_result
+    assert status_result[0]["remote_mode"] == "idle"
+    assert status_result[0]["remote_error"] is None
 
 
 def test_link_connect_reservation_survives_disconnect_race(monkeypatch):
