@@ -5,9 +5,9 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate (2026-09-02), based on published
-`master` commit `73c0b8c` and merged implementation candidate `dfc0b2a` (PR #19,
-following PR #17 and PR #18).
+Status: `PARTIAL` current audit candidate (2026-09-02), based on merged
+implementation `7f3c2f4` (PR #22), with implementation candidate `dfc0b2a` (PR
+#19, following PR #17 and PR #18).
 The complete all-tier source-runtime gate collected 698 tests and passed unit
 554/554, local real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19,
 strict battle 19/19, and timing 40/40 in each of five repetitions with
@@ -29,6 +29,10 @@ while real-ROM concurrent-load evidence, vanilla fixture provenance,
 broad-suite coverage, full native-platform qualification, independent review,
 and authenticated/encrypted cross-host TCP remain open, so the release decision
 remains `PARTIAL`.
+
+PR #22 adds bounded MCP stdio unpair cleanup and fresh remote lifecycle
+generation tracking. Its release-hygiene workflow passed; the full strict
+post-change gameplay matrices remain open.
 
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).

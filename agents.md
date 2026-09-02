@@ -27,8 +27,8 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current implementation candidate is merged commit `dfc0b2a` (PR #19),
-and the latest documentation is merged commit `73c0b8c` (PR #20). The
+The latest merged implementation is `7f3c2f4` (PR #22), built on implementation
+candidate `dfc0b2a` (PR #19). The
 complete all-tier source-runtime gate was collected before PR #19 at the
 PR #17 parent `b0b63c8` (698 tests: unit 554/554, local real-ROM 47/47,
 remote transport/MCP 15/15, strict trade 19/19, strict battle 19/19, and

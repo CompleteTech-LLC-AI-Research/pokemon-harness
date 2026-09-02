@@ -1,7 +1,7 @@
 # Fixture provenance and portability audit
 
-Audit scope: the published `master` at
-`73c0b8cd98da073d66157c0b7a5b24f302beb5bb` and only the tracked manifest,
+Audit scope: the merged implementation `7f3c2f48e229f75610631955904c46032a58c7d5`
+and only the tracked manifest,
 producer/generator sources, packaging metadata, and platform-facing
 configuration. ROMs, symbol files, save states, and machine-local evidence
 were not copied into the audit checkout.
@@ -63,7 +63,7 @@ the complete native gameplay and matrix contract.
 The following bounded checks passed:
 
 ```text
-git ls-remote <repository> refs/heads/master                  -> exact published head 73c0b8c...
+git ls-remote <repository> refs/heads/master                  -> exact published implementation head 7f3c2f4...
 python3 scripts/validate_fixture_manifest.py --schema-only  -> PASS, 10 entries
 uv lock --check                                             -> PASS
 python3 -m compileall <scoped-files>                        -> PASS

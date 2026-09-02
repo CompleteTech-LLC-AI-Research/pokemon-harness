@@ -3,9 +3,9 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon); the
-current published `master` is `73c0b8c`, with implementation candidate merged
-commit `dfc0b2a` (PR #19, following PR #17 and PR #18). External BYO assets are
-excluded from the tracked source tree.
+latest merged implementation is `7f3c2f4` (PR #22), with implementation
+candidate `dfc0b2a` (PR #19, following PR #17 and PR #18). External BYO assets
+are excluded from the tracked source tree.
 
 The complete all-tier source-runtime production gate passed collection 698,
 unit 554/554, local real-ROM 47/47, remote transport/MCP 15/15, strict trade
@@ -21,6 +21,10 @@ Fresh Windows scoped evidence also covers install, source/Cython bootstrap, MCP
 stdio, and three-ROM Cython lifecycle checks; it does not complete strict
 Cython gameplay, real-ROM concurrent load, the remote trade/battle matrix, or
 macOS coverage.
+
+PR #22 adds bounded MCP stdio unpair cleanup and fresh remote lifecycle
+generation tracking. Its release-hygiene workflow passed; the full strict
+post-change gameplay matrices remain open.
 
 The baseline gate ran from isolated source head
 `df0e7424c87c812a57f257286b0dc00e87c498f4`, whose implementation tree is the

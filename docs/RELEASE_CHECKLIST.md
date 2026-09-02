@@ -16,8 +16,8 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current published `master` is commit `73c0b8c`; its implementation
-candidate is merged commit `dfc0b2a` (PR #19, following PR #17 and PR #18).
+The latest merged implementation is `7f3c2f4` (PR #22); its implementation
+candidate is `dfc0b2a` (PR #19, following PR #17 and PR #18).
 The complete all-tier source-runtime baseline
 ran from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`,
 whose implementation tree is the PR #17 parent. The complete baseline gate
@@ -82,6 +82,10 @@ runtime/fixture checks (23 passed, one unrelated skip), MCP stdio integration
 (4/4), and three-ROM Cython attach/step/close smokes (3/3). This narrows the
 native-platform gap but does not complete strict Cython gameplay, real-ROM
 concurrent load, the remote trade/battle matrix, or macOS coverage.
+
+PR #22 adds bounded MCP stdio unpair cleanup and fresh remote lifecycle
+generation tracking. Its release-hygiene workflow passed; the full strict
+post-change gameplay matrices remain open.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded

@@ -12,11 +12,11 @@ symbol files, save states, or other ROM-derived artifacts.
 This repository remains an audited production-readiness candidate, not a
 production release. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
-current published `master` is commit `73c0b8c`; its implementation candidate is
-merged commit `dfc0b2a` (PR #19). That implementation includes the MCP
-lifecycle, runtime packaging, in-process serial/lifecycle, remote TCP
-follow-ups from PRs #12-#17, and the concurrency/lifecycle hardening from PR
-#19.
+latest merged implementation is `7f3c2f4` (PR #22), built on implementation
+candidate `dfc0b2a` (PR #19). It includes the MCP lifecycle, runtime packaging,
+in-process serial/lifecycle, remote TCP follow-ups from PRs #12-#17,
+concurrency/lifecycle hardening from PR #19, and the bounded MCP shutdown and
+remote-generation hardening from PR #22.
 
 The latest complete all-tier source-runtime gate was collected on 2026-09-02
 from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`, whose
@@ -92,6 +92,9 @@ The current candidate’s evidence is:
 - fixture manifest schema: `PASS`, all 10 entries validated;
 - source runtime/package checks: `PASS`, `pip check`, source bootstrap, and
   the selected production Ruff boundary;
+- MCP lifecycle hardening: `PASS` in the focused local rerun (85 passed, four
+  expected real-ROM skips without supplied assets); CI release-hygiene run
+  #47 passed on PR #22;
 - Windows native runtime checks: `PASS` for a fresh Windows install,
   `pip check`, source and Cython bootstrap contracts, selected runtime/fixture
   checks (23 passed, one unrelated skip), MCP stdio (4/4), and three-ROM
@@ -113,7 +116,7 @@ provenance, platform, real-ROM load, review, or network-security claims.
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PASS` (baseline scope) | The PR #17 source-runtime baseline asset-backed local/session tier passed 47/47; PR #19 did not rerun the full local matrix. |
 | In-process link acceptance | `PASS` (baseline scope) | The PR #17 source-runtime baseline passed 47/47 local rows and the declared strict local rows; PR #19 adds focused lifecycle coverage. Stock-ROM link support remains unclaimed. |
-| Remote TCP and MCP lifecycle | `PASS` (post-change tested scope) | The PR #19 real-ROM remote transport slice passed 15/15 and the focused transport/MCP suite passed 167/167. The baseline strict remote trade and battle rows passed 9/9 each; PR #19 did not silently relabel that baseline as a full rerun. TCP remains loopback-only and unauthenticated/unencrypted. |
+| Remote TCP and MCP lifecycle | `PASS` (post-change tested scope) | The PR #19 real-ROM remote transport slice passed 15/15 and the focused transport/MCP suite passed 167/167. PR #22 adds bounded stdio unpair cleanup and fresh remote lifecycle generations; its release-hygiene workflow passed. The baseline strict remote trade and battle rows passed 9/9 each; PR #19 did not silently relabel that baseline as a full rerun. TCP remains loopback-only and unauthenticated/unencrypted. |
 | Synthetic concurrency/lifecycle boundary | `PASS` (localhost probe scope) | Eight bounded probes passed in each of five repetitions, including concurrent exchange load, shutdown overlap, receiver races, terminal timeouts, resolver rechecks, BYE ordering, and raw-socket boundaries. Real-ROM load remains unverified. |
 | Cython/native serial runtime | `PASS` (build/contract/lifecycle scope) | The pinned Cython build, semantic serial probe, and three canonical real-ROM lifecycle smokes pass, including the fresh Windows run; strict Cython gameplay is not release-qualified. |
 | Windows native runtime | `PASS` (scoped) | A fresh Windows environment passed install, dependency, source/Cython bootstrap, selected runtime/fixture, MCP stdio, and three-ROM lifecycle checks. Full native gameplay, concurrent-load, remote trade/battle, and macOS coverage remain open. |
