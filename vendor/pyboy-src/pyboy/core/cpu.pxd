@@ -29,7 +29,10 @@ cdef class CPU:
 
     cdef uint8_t interrupts_flag, interrupts_enabled, interrupts_flag_register, interrupts_enabled_register
 
-    cdef int64_t cycles
+    # The harness lockstep coordinator reads the emulated CPU clock to keep
+    # two native PyBoy instances on one deterministic cycle horizon.  Keep
+    # this public in the Cython ABI, matching the source-runtime attribute.
+    cdef public int64_t cycles
 
     cdef inline int check_interrupts(self) noexcept nogil
 
