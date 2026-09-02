@@ -486,6 +486,7 @@ def test_gitignore_protects_rom_derived_inputs_and_outputs() -> None:
 def test_ci_runs_gate_clean_install_and_retains_sanitized_evidence() -> None:
     workflow = (ROOT / ".github" / "workflows" / "release-hygiene.yml").read_text(encoding="utf-8")
     assert "scripts/production_gate.py" in workflow
+    assert "scripts/network_concurrency_probe.py" in workflow
     assert "--unit-only" in workflow
     assert "--repeat-timing 5" in workflow
     assert "pip wheel" in workflow

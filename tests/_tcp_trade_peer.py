@@ -698,6 +698,13 @@ def main() -> int:
                         allow_peer_close=True,
                         progress_callback=lambda: session.step(1),
                     )
+                    # Both peers have now observed the quiet acknowledgement.
+                    # Use one final live rendezvous before either process
+                    # closes its socket; otherwise a peer can still be
+                    # advancing its last owner tick when the other teardown
+                    # sends BYE, leaving a legitimate final EDGE_REQ without
+                    # a response.
+                    cooperative_sync(sync_id=123, timeout=10.0, step_frames=1)
                     log("phase 1 done: LinkMenu fired on both peers")
                     break
                 if not link_menu_quiet_announced:

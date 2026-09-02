@@ -79,6 +79,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from pokered_harness.link.network_backend import (
+    _is_loopback_sockaddr,
     _validate_connected_socket_loopback,
     validate_loopback_host,
 )
@@ -336,6 +337,13 @@ def _connect_socket(
         )
     except OSError as exc:
         raise SerialLinkError(f"unable to resolve {normalized_host!r}: {exc}") from exc
+    if not addresses or any(
+        not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
+        for address in addresses
+    ):
+        raise SerialLinkError(
+            "TcpSerialLink is localhost-only; resolver returned an unsafe address"
+        )
     for family, socktype, proto, _canonname, sockaddr in addresses:
         if cancel_event is not None and cancel_event.is_set():
             raise SerialLinkClosed("connection cancelled")
@@ -905,18 +913,25 @@ class InProcessSerialLink:
                 ) from exc
         with self._in_lock:
             q = self._in[kind]
-        while True:
-            if self._state.closed.is_set():
-                raise SerialLinkClosed("link is closed")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise SerialLinkTimeout(
-                    f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
-                )
-            try:
-                return q.get_nowait()
-            except queue.Empty:
-                self._state.closed.wait(timeout=min(_IO_POLL_S, remaining))
+        try:
+            while True:
+                if self._state.closed.is_set():
+                    raise SerialLinkClosed("link is closed")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SerialLinkTimeout(
+                        f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
+                    )
+                try:
+                    return q.get_nowait()
+                except queue.Empty:
+                    self._state.closed.wait(timeout=min(_IO_POLL_S, remaining))
+        except SerialLinkTimeout:
+            # EXCHANGE has no request identifier. A delayed response after a
+            # timeout cannot safely be matched to a later call of this kind,
+            # so the shared in-process stream becomes terminal too.
+            self.close()
+            raise
 
     def close(self) -> None:
         self._closed = True

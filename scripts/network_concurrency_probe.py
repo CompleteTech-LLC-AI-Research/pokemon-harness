@@ -18,11 +18,14 @@ import time
 import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
+from unittest.mock import patch
 
 from pokered_harness.link.network_backend import NetworkBackend, NetworkBackendError
 from pokered_harness.link.serial_link import (
     OP_BYE,
+    InProcessSerialLink,
     SerialLinkClosed,
+    SerialLinkError,
     SerialLinkTimeout,
     TcpSerialLink,
 )
@@ -115,6 +118,51 @@ def read_frame(sock: socket.socket) -> bytes:
         require(bool(chunk), "peer closed while reading frame body")
         body.extend(chunk)
     return bytes(body)
+
+
+def probe_resolver_recheck() -> None:
+    """Ensure a DNS answer cannot change after the host validation pass."""
+    for connect, error_type, safe_calls in (
+        (
+            lambda: NetworkBackend.connect("localhost", 1, timeout_s=0.1),
+            NetworkBackendError,
+            2,
+        ),
+        (
+            lambda: TcpSerialLink.connect("localhost", 1, "blue", timeout_s=0.1),
+            SerialLinkError,
+            1,
+        ),
+    ):
+        safe = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (LOOPBACK, 1))]
+        unsafe = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("192.0.2.1", 1))]
+        calls = 0
+
+        def changing_resolution(
+            *_args,
+            _safe=safe,
+            _unsafe=unsafe,
+            _safe_calls=safe_calls,
+            **_kwargs,
+        ):
+            nonlocal calls
+            calls += 1
+            return _safe if calls <= _safe_calls else _unsafe
+
+        def unexpected_socket(*_args, **_kwargs):
+            raise ProbeFailure("unsafe resolver answer reached socket creation")
+
+        with (
+            patch.object(socket, "getaddrinfo", changing_resolution),
+            patch.object(socket, "socket", unexpected_socket),
+        ):
+            try:
+                connect()
+            except error_type as exc:
+                require("unsafe" in str(exc), f"wrong resolver error: {exc}")
+            else:
+                raise ProbeFailure("unsafe resolver answer was accepted")
+        require(calls == safe_calls + 1, f"resolver call count was {calls}")
 
 
 def probe_concurrent_exchange_load() -> None:
@@ -381,6 +429,26 @@ def probe_timeout_terminality() -> None:
         )
         require(server._inbound_frame_count == 0, "closed peer retained inbound frames")
 
+    local, peer = InProcessSerialLink.pair("blue", "yellow")
+    try:
+        try:
+            local.exchange("probe/timeout", b"first", timeout_ms=50)
+        except SerialLinkTimeout:
+            pass
+        else:
+            raise ProbeFailure("in-process EXCHANGE did not time out")
+        require(not local.connected, "in-process timeout left a reusable link")
+        require(not peer.connected, "in-process timeout left its peer connected")
+        try:
+            local.exchange("probe/timeout", b"second", timeout_ms=100)
+        except SerialLinkClosed:
+            pass
+        else:
+            raise ProbeFailure("in-process retry on timed-out link was not rejected")
+    finally:
+        local.close()
+        peer.close()
+
 
 def probe_bye_ordering() -> None:
     local, peer = socket.socketpair()
@@ -476,6 +544,7 @@ def probe_raw_socket_boundary() -> None:
 
 def main() -> int:
     probes = (
+        ("resolver_recheck", probe_resolver_recheck),
         ("concurrent_exchange_load", probe_concurrent_exchange_load),
         ("shutdown_overlap", probe_shutdown_overlap),
         ("receiver_start_race", probe_receiver_start_race),

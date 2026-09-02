@@ -180,7 +180,7 @@ def validate_loopback_host(host: str) -> str:
                 "NetworkBackend is localhost-only; localhost did not resolve"
             ) from exc
         if not addresses or any(
-            not ipaddress.ip_address(address[4][0]).is_loopback
+            not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
             for address in addresses
         ):
             raise ValueError(
@@ -198,6 +198,19 @@ def validate_loopback_host(host: str) -> str:
             "NetworkBackend is localhost-only; use 127.0.0.1, localhost, or ::1"
         )
     return normalized
+
+
+def _is_loopback_sockaddr(sockaddr: object) -> bool:
+    """Return whether a resolver result is an IP loopback address."""
+    if not isinstance(sockaddr, tuple) or not sockaddr:
+        return False
+    host = sockaddr[0]
+    if not isinstance(host, str):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _validate_connected_socket_loopback(sock: socket.socket) -> None:
@@ -256,6 +269,13 @@ def _connect_socket(
         raise NetworkBackendError(
             f"unable to resolve {normalized_host!r}: {exc}"
         ) from exc
+    if not addresses or any(
+        not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
+        for address in addresses
+    ):
+        raise NetworkBackendError(
+            "NetworkBackend is localhost-only; resolver returned an unsafe address"
+        )
     last_error: OSError | None = None
     for family, socktype, proto, _canonname, sockaddr in addresses:
         if cancel_event is not None and cancel_event.is_set():
