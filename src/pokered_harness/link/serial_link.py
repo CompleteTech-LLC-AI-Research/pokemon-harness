@@ -78,7 +78,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Protocol
 
-from pokered_harness.link.network_backend import validate_loopback_host
+from pokered_harness.link.network_backend import (
+    _validate_connected_socket_loopback,
+    validate_loopback_host,
+)
 
 # --- opcodes ---------------------------------------------------------------
 
@@ -404,6 +407,7 @@ class TcpSerialLink:
     """
 
     def __init__(self, sock: socket.socket, local_rom_version: str) -> None:
+        _validate_connected_socket_loopback(sock)
         self._sock = sock
         self._local_rom_version = validate_rom_version(local_rom_version)
         self._peer_rom_version: str | None = None
@@ -569,9 +573,16 @@ class TcpSerialLink:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._raise_if_reader_failed()
-                raise SerialLinkTimeout(
+                error = SerialLinkTimeout(
                     f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
                 )
+                # EXCHANGE has no request id.  Leaving the channel reusable
+                # after a timeout would let a delayed response satisfy a
+                # later call of the same kind, so timeout is terminal and a
+                # fresh connection is required.
+                self._mark_closed(error)
+                self._join_reader()
+                raise error
             with self._inbound_lock:
                 try:
                     payload = q.get_nowait()
@@ -587,13 +598,16 @@ class TcpSerialLink:
         with self._close_lock:
             if not self._is_closed():
                 # Send BYE while the link is still open. This is best-effort
-                # and ordered behind any concurrent exchange write.
-                try:
-                    self._send_frame(bytes([OP_BYE]))
-                except (OSError, SerialLinkError):
-                    pass
-                finally:
-                    self._mark_closed()
+                # and ordered with the terminal state transition. Holding the
+                # write lock through ``_mark_closed`` prevents a concurrent
+                # exchange from writing after BYE but before closure.
+                with self._write_lock:
+                    try:
+                        self._send_frame_locked(bytes([OP_BYE]))
+                    except (OSError, SerialLinkError):
+                        pass
+                    finally:
+                        self._mark_closed()
         self._join_reader()
 
     # --- reader thread --------------------------------------------------
@@ -714,6 +728,12 @@ class TcpSerialLink:
             pass
 
     def _send_frame(self, payload: bytes, *, deadline: float | None = None) -> None:
+        with self._write_lock:
+            self._send_frame_locked(payload, deadline=deadline)
+
+    def _send_frame_locked(
+        self, payload: bytes, *, deadline: float | None = None
+    ) -> None:
         if len(payload) > _MAX_FRAME_SIZE:
             raise ValueError(f"frame too large: {len(payload)}")
         header = struct.pack(">I", len(payload))
@@ -721,46 +741,50 @@ class TcpSerialLink:
         write_deadline = time.monotonic() + _WRITE_TIMEOUT_S
         if deadline is not None:
             write_deadline = min(write_deadline, deadline)
-        with self._write_lock:
+        if self._is_closed():
+            raise SerialLinkClosed("link is closed")
+        offset = 0
+        while offset < len(frame):
             if self._is_closed():
                 raise SerialLinkClosed("link is closed")
-            offset = 0
-            while offset < len(frame):
-                if self._is_closed():
-                    raise SerialLinkClosed("link is closed")
-                try:
-                    sent = self._sock.send(frame[offset:])
-                except (BlockingIOError, InterruptedError):
-                    remaining = write_deadline - time.monotonic()
-                    if remaining <= 0:
-                        self._mark_closed()
-                        raise SerialLinkTimeout("socket write timed out")
-                    try:
-                        _readable, writable, exceptional = select.select(
-                            [], [self._sock], [self._sock],
-                            min(_IO_POLL_S, remaining),
-                        )
-                    except (OSError, ValueError) as exc:
-                        if self._is_closed():
-                            raise SerialLinkClosed("link is closed") from exc
-                        self._mark_closed()
-                        raise SerialLinkClosed("socket closed while writing") from exc
-                    if not writable and not exceptional:
-                        continue
-                    continue
-                except OSError as exc:
-                    if not self._is_closed():
-                        self._mark_closed()
-                    raise SerialLinkClosed("socket write failed") from exc
-                if sent <= 0:
+            try:
+                sent = self._sock.send(frame[offset:])
+            except (BlockingIOError, InterruptedError):
+                remaining = write_deadline - time.monotonic()
+                if remaining <= 0:
                     self._mark_closed()
-                    raise SerialLinkClosed("socket write returned no progress")
-                offset += sent
+                    raise SerialLinkTimeout("socket write timed out")
+                try:
+                    _readable, writable, exceptional = select.select(
+                        [], [self._sock], [self._sock],
+                        min(_IO_POLL_S, remaining),
+                    )
+                except (OSError, ValueError) as exc:
+                    if self._is_closed():
+                        raise SerialLinkClosed("link is closed") from exc
+                    self._mark_closed()
+                    raise SerialLinkClosed("socket closed while writing") from exc
+                if not writable and not exceptional:
+                    continue
+                continue
+            except OSError as exc:
+                if not self._is_closed():
+                    self._mark_closed()
+                raise SerialLinkClosed("socket write failed") from exc
+            if sent <= 0:
+                self._mark_closed()
+                raise SerialLinkClosed("socket write returned no progress")
+            offset += sent
 
     def _wait_for_hello(self, timeout_s: float) -> str:
         if not self._hello_received.wait(timeout=max(0.0, timeout_s)):
             self._raise_if_reader_failed()
-            raise SerialLinkTimeout("peer did not send HELLO before the deadline")
+            error = SerialLinkTimeout("peer did not send HELLO before the deadline")
+            # HELLO has no request id or retry epoch. A timed-out handshake
+            # cannot safely be resumed on this socket.
+            self._mark_closed(error)
+            self._join_reader()
+            raise error
         self._raise_if_reader_failed()
         if self._is_closed():
             raise SerialLinkClosed("link is closed before HELLO completed")
