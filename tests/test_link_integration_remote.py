@@ -563,8 +563,9 @@ def test_remote_trade_reaches_link_menu_via_tcp(
     :func:`test_link_integration.test_link_trade_roundtrip`. It stops
     at LinkMenu — past that, menu-selection is agent policy.
 
-    Parametrized over the full listener × connector matrix; red and
-    yellow rows skip until their fixtures become walkable.
+    Parametrized over the full listener × connector matrix; a row skips only
+    when its pinned ROM, symbols, or Cable Club state is unavailable or does
+    not load at the expected position.
     """
     if not (_roms_present(version_listen) and _roms_present(version_connect)):
         pytest.skip(
@@ -846,7 +847,8 @@ def test_remote_rpc_flow_past_link_menu_over_tcp(
     test-only common TRADE vote before starting the independent runners so
     sub-frame A-press timing cannot obscure the menu RPC itself.
 
-    Parametrized over the full 3×3 matrix; red and yellow gaps skip.
+    Parametrized over the full 3×3 matrix; a row skips only when its pinned
+    ROM, symbols, or Cable Club state is unavailable.
     """
     if not (_roms_present(version_listen) and _roms_present(version_connect)):
         pytest.skip(f"ROMs not present for {version_listen}/{version_connect}")
@@ -1019,8 +1021,8 @@ def test_remote_menu_vote_converges_and_warps_to_trade_center(
     is covered by in-process tests (test_link_integration.test_link_trade_roundtrip)
     instead.
 
-    Parametrized over the full 3×3 matrix; red and yellow-fixture-gap
-    rows skip.
+    Parametrized over the full 3×3 matrix; a row skips only when its pinned
+    ROM, symbols, or Cable Club state is unavailable.
     """
     if not (_roms_present(version_listen) and _roms_present(version_connect)):
         pytest.skip(f"ROMs not present for {version_listen}/{version_connect}")
