@@ -878,4 +878,14 @@ def _default_pyboy_factory(
     # stay fast and windowless) vs "SDL2" (visible window for local viewing).
     # ``cgb=True`` enables Game Boy Color mode so Pokemon Red renders with
     # its stock CGB auto-palette instead of the DMG grayscale fallback.
-    return PyBoy(rom_path, window=window, cgb=cgb)  # type: ignore[return-value]
+    # Headless harness consumers do not expose audio, and PyBoy's default
+    # sound emulation is a significant per-frame cost in the source runtime.
+    # Keep audio for visible sessions while making the documented headless
+    # path deterministic and suitable for bounded automation.
+    sound_emulated = window not in {"null", "headless", "dummy"}
+    return PyBoy(  # type: ignore[return-value]
+        rom_path,
+        window=window,
+        cgb=cgb,
+        sound_emulated=sound_emulated,
+    )
