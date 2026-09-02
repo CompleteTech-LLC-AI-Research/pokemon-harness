@@ -25,13 +25,13 @@ The payload's first byte is an opcode:
     replies with its own HELLO. Both peers learn the peer's ROM
     version (``"red"`` / ``"blue"`` / ``"yellow"``) which
     :class:`SerialBridge` uses for cross-version symbol address
-    translation.
+    translation. HELLO must be the first frame received on a connection.
 
 ``0x10 EXCHANGE``
-    Body: ``kind`` (length-prefixed ASCII) + ``data`` (length-prefixed
-    bytes). The two peers are expected to both send an EXCHANGE with
-    matching ``kind`` values; each side's :meth:`SerialLink.exchange`
-    call returns the peer's data bytes.
+    Body: ``kind`` (non-empty length-prefixed ASCII) + ``data``
+    (length-prefixed bytes). The two peers are expected to both send an
+    EXCHANGE with matching ``kind`` values; each side's
+    :meth:`SerialLink.exchange` call returns the peer's data bytes.
 
 ``0xFE BYE``
     Peer gracefully disconnects.
@@ -97,6 +97,7 @@ _MAX_INBOUND_FRAMES_PER_KIND = 32
 _MAX_INBOUND_FRAMES = 256
 _MAX_INBOUND_BYTES = 4 * 1024 * 1024
 _DEFAULT_ACCEPT_TIMEOUT_SECONDS = 30.0
+_HELLO_TIMEOUT_SECONDS = 5.0
 
 # Socket I/O is non-blocking so closing a link cannot strand a writer behind a
 # full kernel buffer.  These short polls also let cancellation/close state be
@@ -125,17 +126,76 @@ class SerialLinkProtocolError(SerialLinkError):
     """Received a malformed frame or an unexpected opcode."""
 
 
-_SUPPORTED_ROM_VERSIONS = frozenset(("red", "blue", "yellow"))
+SUPPORTED_ROM_VERSIONS = ("red", "blue", "yellow")
+_SUPPORTED_ROM_VERSIONS = frozenset(SUPPORTED_ROM_VERSIONS)
 
 
-def _validate_rom_version(version: str) -> str:
+def validate_rom_version(version: str) -> str:
+    if not isinstance(version, str):
+        raise TypeError(f"ROM version must be a string, got {type(version).__name__}")
     normalized = version.strip().lower()
     if normalized not in _SUPPORTED_ROM_VERSIONS:
         raise ValueError(
             f"unsupported ROM version {version!r}; expected one of "
-            f"{sorted(_SUPPORTED_ROM_VERSIONS)}"
+            f"{list(SUPPORTED_ROM_VERSIONS)}"
         )
     return normalized
+
+
+def _validate_exchange_kind(kind: str) -> str:
+    if not isinstance(kind, str):
+        raise TypeError(f"exchange kind must be a string, got {type(kind).__name__}")
+    if not kind:
+        raise ValueError("exchange kind must not be empty")
+    try:
+        encoded = kind.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("exchange kind must contain ASCII characters only") from exc
+    if len(encoded) > 0xFF:
+        raise ValueError(
+            f"exchange kind is too long for the wire protocol: {len(encoded)} bytes"
+        )
+    return kind
+
+
+def _coerce_exchange_payload(payload: bytes | bytearray | memoryview) -> bytes:
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise TypeError(
+            "exchange payload must be bytes-like, "
+            f"got {type(payload).__name__}"
+        )
+    return bytes(payload)
+
+
+def _validate_timeout_ms(timeout_ms: int) -> int:
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int):
+        raise TypeError("timeout_ms must be a positive integer")
+    if timeout_ms <= 0:
+        raise ValueError("timeout_ms must be a positive integer")
+    return timeout_ms
+
+
+def _validate_timeout_seconds(timeout_s: float, name: str) -> float:
+    if isinstance(timeout_s, bool):
+        raise TypeError(f"{name} must be finite and positive")
+    try:
+        value = float(timeout_s)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be finite and positive") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be finite and positive")
+    return value
+
+
+def _validate_port(port: int, *, allow_zero: bool = False) -> int:
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise TypeError("port must be an integer")
+    lower = 0 if allow_zero else 1
+    if not lower <= port <= 0xFFFF:
+        if allow_zero:
+            raise ValueError("port must be in the range 0..65535")
+        raise ValueError("port must be in the range 1..65535")
+    return port
 
 
 # --- Protocol --------------------------------------------------------------
@@ -263,8 +323,8 @@ def _connect_socket(
     if cancel_event is not None and cancel_event.is_set():
         raise SerialLinkClosed("connection cancelled")
     normalized_host = validate_loopback_host(host)
-    if timeout_s <= 0:
-        raise ValueError("timeout_s must be positive")
+    timeout_s = _validate_timeout_seconds(timeout_s, "timeout_s")
+    port = _validate_port(port)
     end_time = time.monotonic() + timeout_s
     last_error: OSError | None = None
     try:
@@ -345,7 +405,7 @@ class TcpSerialLink:
 
     def __init__(self, sock: socket.socket, local_rom_version: str) -> None:
         self._sock = sock
-        self._local_rom_version = _validate_rom_version(local_rom_version)
+        self._local_rom_version = validate_rom_version(local_rom_version)
         self._peer_rom_version: str | None = None
         self._closed = False
         self._closed_event = threading.Event()
@@ -402,8 +462,8 @@ class TcpSerialLink:
         """Open an outbound connection to a peer that is
         :meth:`listen`-ing on ``(host, port)``."""
         sock = _connect_socket(host, port, timeout_s, cancel_event)
-        sock.settimeout(None)  # blocking reads in reader thread
         try:
+            sock.settimeout(None)  # blocking reads in reader thread
             return cls(sock, local_rom_version)
         except BaseException:
             try:
@@ -431,16 +491,10 @@ class TcpSerialLink:
         which lets a connector start without a guessed sleep.
         """
         host = validate_loopback_host(host)
-        if isinstance(accept_timeout_s, bool):
-            raise TypeError("accept_timeout_s must be finite and positive")
-        try:
-            accept_timeout_s = float(accept_timeout_s)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "accept_timeout_s must be finite and positive"
-            ) from exc
-        if not math.isfinite(accept_timeout_s) or accept_timeout_s <= 0:
-            raise ValueError("accept_timeout_s must be finite and positive")
+        accept_timeout_s = _validate_timeout_seconds(
+            accept_timeout_s, "accept_timeout_s"
+        )
+        port = _validate_port(port, allow_zero=True)
         listener = socket.socket(
             socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM
         )
@@ -471,8 +525,8 @@ class TcpSerialLink:
             listener.close()
         if conn is None:
             raise SerialLinkClosed("listener closed before accepting a peer")
-        conn.settimeout(None)
         try:
+            conn.settimeout(None)
             return cls(conn, local_rom_version)
         except BaseException:
             try:
@@ -489,31 +543,25 @@ class TcpSerialLink:
 
     @property
     def peer_rom_version(self) -> str:
-        # If HELLO hasn't arrived yet (e.g. first call racing startup),
-        # block briefly for it.
-        if not self._hello_received.wait(timeout=5.0):
-            self._raise_if_reader_failed()
-            raise SerialLinkError("peer never sent HELLO")
-        self._raise_if_reader_failed()
-        with self._state_lock:
-            peer_rom_version = self._peer_rom_version
-        if peer_rom_version is None:
-            raise SerialLinkError("peer HELLO arrived without rom_version")
-        return peer_rom_version
+        return self._wait_for_hello(_HELLO_TIMEOUT_SECONDS)
 
     def exchange(
         self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000
     ) -> bytes:
+        timeout_ms = _validate_timeout_ms(timeout_ms)
+        kind = _validate_exchange_kind(kind)
+        payload = _coerce_exchange_payload(my_bytes)
         if self._is_closed():
             raise SerialLinkClosed("link is closed")
         self._raise_if_reader_failed()
 
-        frame = bytes([OP_EXCHANGE]) + _pack_lp_str(kind) + _pack_lp_bytes(my_bytes)
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        self._wait_for_hello(max(0.0, deadline - time.monotonic()))
+        frame = bytes([OP_EXCHANGE]) + _pack_lp_str(kind) + _pack_lp_bytes(payload)
         with self._inbound_lock:
             q = self._get_inbound_queue_locked(kind)
-        self._send_frame(frame)
+        self._send_frame(frame, deadline=deadline)
 
-        deadline = time.monotonic() + timeout_ms / 1000.0
         while True:
             if self._closed_event.is_set():
                 self._raise_if_reader_failed()
@@ -573,11 +621,18 @@ class TcpSerialLink:
         if not body:
             raise SerialLinkProtocolError("empty frame body")
         opcode = body[0]
+        if opcode != OP_HELLO:
+            with self._state_lock:
+                hello_received = self._peer_rom_version is not None
+            if not hello_received:
+                raise SerialLinkProtocolError(
+                    "HELLO must be the first frame received"
+                )
         if opcode == OP_HELLO:
             rom_version, offset = _read_lp_str(body, 1)
             if offset != len(body):
                 raise SerialLinkProtocolError("HELLO has trailing bytes")
-            rom_version = _validate_rom_version(rom_version)
+            rom_version = validate_rom_version(rom_version)
             with self._state_lock:
                 if self._peer_rom_version is not None:
                     raise SerialLinkProtocolError("duplicate HELLO")
@@ -585,6 +640,12 @@ class TcpSerialLink:
             self._hello_received.set()
         elif opcode == OP_EXCHANGE:
             kind, offset = _read_lp_str(body, 1)
+            try:
+                _validate_exchange_kind(kind)
+            except (TypeError, ValueError) as exc:
+                raise SerialLinkProtocolError(
+                    f"invalid EXCHANGE kind: {exc}"
+                ) from exc
             payload, offset = _read_lp_bytes(body, offset)
             if offset != len(body):
                 raise SerialLinkProtocolError("EXCHANGE has trailing bytes")
@@ -652,12 +713,14 @@ class TcpSerialLink:
         except OSError:
             pass
 
-    def _send_frame(self, payload: bytes) -> None:
+    def _send_frame(self, payload: bytes, *, deadline: float | None = None) -> None:
         if len(payload) > _MAX_FRAME_SIZE:
             raise ValueError(f"frame too large: {len(payload)}")
         header = struct.pack(">I", len(payload))
         frame = header + payload
-        deadline = time.monotonic() + _WRITE_TIMEOUT_S
+        write_deadline = time.monotonic() + _WRITE_TIMEOUT_S
+        if deadline is not None:
+            write_deadline = min(write_deadline, deadline)
         with self._write_lock:
             if self._is_closed():
                 raise SerialLinkClosed("link is closed")
@@ -668,7 +731,7 @@ class TcpSerialLink:
                 try:
                     sent = self._sock.send(frame[offset:])
                 except (BlockingIOError, InterruptedError):
-                    remaining = deadline - time.monotonic()
+                    remaining = write_deadline - time.monotonic()
                     if remaining <= 0:
                         self._mark_closed()
                         raise SerialLinkTimeout("socket write timed out")
@@ -694,6 +757,19 @@ class TcpSerialLink:
                     raise SerialLinkClosed("socket write returned no progress")
                 offset += sent
 
+    def _wait_for_hello(self, timeout_s: float) -> str:
+        if not self._hello_received.wait(timeout=max(0.0, timeout_s)):
+            self._raise_if_reader_failed()
+            raise SerialLinkTimeout("peer did not send HELLO before the deadline")
+        self._raise_if_reader_failed()
+        if self._is_closed():
+            raise SerialLinkClosed("link is closed before HELLO completed")
+        with self._state_lock:
+            peer_rom_version = self._peer_rom_version
+        if peer_rom_version is None:
+            raise SerialLinkProtocolError("peer HELLO arrived without rom_version")
+        return peer_rom_version
+
     def _join_reader(self) -> None:
         if self._reader is threading.current_thread():
             return
@@ -710,6 +786,13 @@ class TcpSerialLink:
 
 
 # --- in-process loopback (for unit tests) ---------------------------------
+
+
+class _InProcessState:
+    """Shared close notification for the two ends of an in-process cable."""
+
+    def __init__(self) -> None:
+        self.closed = threading.Event()
 
 
 class InProcessSerialLink:
@@ -729,29 +812,49 @@ class InProcessSerialLink:
         outgoing: dict[str, queue.Queue[bytes]],
         incoming: dict[str, queue.Queue[bytes]],
         locks: tuple[threading.Lock, threading.Lock],
+        state: _InProcessState | None = None,
     ) -> None:
-        self._local_rom = local_rom_version
-        self._peer_rom = peer_rom_version
+        self._local_rom = validate_rom_version(local_rom_version)
+        self._peer_rom = validate_rom_version(peer_rom_version)
         self._out = outgoing
         self._in = incoming
         self._out_lock, self._in_lock = locks
+        self._state = state if state is not None else _InProcessState()
         self._closed = False
 
     @classmethod
     def pair(
         cls, a_rom_version: str, b_rom_version: str
     ) -> tuple[InProcessSerialLink, InProcessSerialLink]:
-        a_to_b: dict[str, queue.Queue[bytes]] = defaultdict(queue.Queue)
-        b_to_a: dict[str, queue.Queue[bytes]] = defaultdict(queue.Queue)
+        def _new_queue() -> queue.Queue[bytes]:
+            return queue.Queue(maxsize=_MAX_INBOUND_FRAMES_PER_KIND)
+
+        a_to_b: dict[str, queue.Queue[bytes]] = defaultdict(_new_queue)
+        b_to_a: dict[str, queue.Queue[bytes]] = defaultdict(_new_queue)
         a_lock = threading.Lock()
         b_lock = threading.Lock()
-        a = cls(a_rom_version, b_rom_version, a_to_b, b_to_a, (a_lock, b_lock))
-        b = cls(b_rom_version, a_rom_version, b_to_a, a_to_b, (b_lock, a_lock))
+        state = _InProcessState()
+        a = cls(
+            a_rom_version,
+            b_rom_version,
+            a_to_b,
+            b_to_a,
+            (a_lock, b_lock),
+            state,
+        )
+        b = cls(
+            b_rom_version,
+            a_rom_version,
+            b_to_a,
+            a_to_b,
+            (b_lock, a_lock),
+            state,
+        )
         return a, b
 
     @property
     def connected(self) -> bool:
-        return not self._closed
+        return not self._state.closed.is_set()
 
     @property
     def peer_rom_version(self) -> str:
@@ -760,21 +863,40 @@ class InProcessSerialLink:
     def exchange(
         self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000
     ) -> bytes:
-        if self._closed:
+        timeout_ms = _validate_timeout_ms(timeout_ms)
+        kind = _validate_exchange_kind(kind)
+        payload = _coerce_exchange_payload(my_bytes)
+        if self._state.closed.is_set():
             raise SerialLinkClosed("link is closed")
+        deadline = time.monotonic() + timeout_ms / 1000.0
         with self._out_lock:
-            self._out[kind].put(bytes(my_bytes))
+            if self._state.closed.is_set():
+                raise SerialLinkClosed("link is closed")
+            try:
+                self._out[kind].put_nowait(payload)
+            except queue.Full as exc:
+                self._state.closed.set()
+                raise SerialLinkProtocolError(
+                    f"inbound EXCHANGE queue is full for kind={kind!r}"
+                ) from exc
         with self._in_lock:
             q = self._in[kind]
-        try:
-            return q.get(timeout=timeout_ms / 1000.0)
-        except queue.Empty as exc:
-            raise SerialLinkTimeout(
-                f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
-            ) from exc
+        while True:
+            if self._state.closed.is_set():
+                raise SerialLinkClosed("link is closed")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SerialLinkTimeout(
+                    f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
+                )
+            try:
+                return q.get_nowait()
+            except queue.Empty:
+                self._state.closed.wait(timeout=min(_IO_POLL_S, remaining))
 
     def close(self) -> None:
         self._closed = True
+        self._state.closed.set()
 
 
 __all__ = [
@@ -788,4 +910,6 @@ __all__ = [
     "SerialLinkProtocolError",
     "SerialLinkTimeout",
     "TcpSerialLink",
+    "SUPPORTED_ROM_VERSIONS",
+    "validate_rom_version",
 ]
