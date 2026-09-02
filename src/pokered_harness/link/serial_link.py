@@ -78,7 +78,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Protocol
 
-from pokered_harness.link.network_backend import validate_loopback_host
+from pokered_harness.link.network_backend import (
+    _is_loopback_sockaddr,
+    _validate_connected_socket_peer,
+    validate_loopback_host,
+)
 
 # --- opcodes ---------------------------------------------------------------
 
@@ -333,6 +337,13 @@ def _connect_socket(
         )
     except OSError as exc:
         raise SerialLinkError(f"unable to resolve {normalized_host!r}: {exc}") from exc
+    if not addresses or any(
+        not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
+        for address in addresses
+    ):
+        raise SerialLinkError(
+            "TcpSerialLink is localhost-only; resolver returned an unsafe address"
+        )
     for family, socktype, proto, _canonname, sockaddr in addresses:
         if cancel_event is not None and cancel_event.is_set():
             raise SerialLinkClosed("connection cancelled")
@@ -425,8 +436,9 @@ class TcpSerialLink:
         self._hello_received = threading.Event()
 
         try:
+            _validate_connected_socket_peer(self._sock)
             self._sock.setblocking(False)
-        except OSError:
+        except (OSError, ValueError):
             try:
                 self._sock.close()
             except OSError:
@@ -562,26 +574,33 @@ class TcpSerialLink:
             q = self._get_inbound_queue_locked(kind)
         self._send_frame(frame, deadline=deadline)
 
-        while True:
-            if self._closed_event.is_set():
-                self._raise_if_reader_failed()
-                raise SerialLinkClosed("link is closed")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                self._raise_if_reader_failed()
-                raise SerialLinkTimeout(
-                    f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
-                )
-            with self._inbound_lock:
-                try:
-                    payload = q.get_nowait()
-                except queue.Empty:
-                    payload = None
-                else:
-                    self._inbound_frame_count -= 1
-                    self._inbound_byte_count -= len(payload)
-                    return payload
-            self._closed_event.wait(timeout=min(_IO_POLL_S, remaining))
+        try:
+            while True:
+                if self._closed_event.is_set():
+                    self._raise_if_reader_failed()
+                    raise SerialLinkClosed("link is closed")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._raise_if_reader_failed()
+                    raise SerialLinkTimeout(
+                        f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
+                    )
+                with self._inbound_lock:
+                    try:
+                        payload = q.get_nowait()
+                    except queue.Empty:
+                        payload = None
+                    else:
+                        self._inbound_frame_count -= 1
+                        self._inbound_byte_count -= len(payload)
+                        return payload
+                self._closed_event.wait(timeout=min(_IO_POLL_S, remaining))
+        except SerialLinkTimeout:
+            # EXCHANGE has no request identifier. Once a caller has timed out,
+            # a delayed peer frame cannot be distinguished from the response
+            # to a later call, so the stream must not be reused.
+            self._mark_closed()
+            raise
 
     def close(self) -> None:
         with self._close_lock:
@@ -760,6 +779,9 @@ class TcpSerialLink:
     def _wait_for_hello(self, timeout_s: float) -> str:
         if not self._hello_received.wait(timeout=max(0.0, timeout_s)):
             self._raise_if_reader_failed()
+            # HELLO is the first frame and carries no request identifier. A
+            # timed-out handshake cannot be safely resumed on this stream.
+            self._mark_closed()
             raise SerialLinkTimeout("peer did not send HELLO before the deadline")
         self._raise_if_reader_failed()
         if self._is_closed():
@@ -881,18 +903,24 @@ class InProcessSerialLink:
                 ) from exc
         with self._in_lock:
             q = self._in[kind]
-        while True:
-            if self._state.closed.is_set():
-                raise SerialLinkClosed("link is closed")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise SerialLinkTimeout(
-                    f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
-                )
-            try:
-                return q.get_nowait()
-            except queue.Empty:
-                self._state.closed.wait(timeout=min(_IO_POLL_S, remaining))
+        try:
+            while True:
+                if self._state.closed.is_set():
+                    raise SerialLinkClosed("link is closed")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SerialLinkTimeout(
+                        f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
+                    )
+                try:
+                    return q.get_nowait()
+                except queue.Empty:
+                    self._state.closed.wait(timeout=min(_IO_POLL_S, remaining))
+        except SerialLinkTimeout:
+            # The in-process cable models the same request-less FIFO protocol;
+            # a late response is just as ambiguous after a timeout.
+            self.close()
+            raise
 
     def close(self) -> None:
         self._closed = True

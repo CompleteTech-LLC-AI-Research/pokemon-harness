@@ -180,7 +180,7 @@ def validate_loopback_host(host: str) -> str:
                 "NetworkBackend is localhost-only; localhost did not resolve"
             ) from exc
         if not addresses or any(
-            not ipaddress.ip_address(address[4][0]).is_loopback
+            not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
             for address in addresses
         ):
             raise ValueError(
@@ -198,6 +198,43 @@ def validate_loopback_host(host: str) -> str:
             "NetworkBackend is localhost-only; use 127.0.0.1, localhost, or ::1"
         )
     return normalized
+
+
+def _is_loopback_sockaddr(sockaddr: object) -> bool:
+    """Return whether a resolver/socket address is an IP loopback address."""
+    if not isinstance(sockaddr, tuple) or not sockaddr:
+        return False
+    host = sockaddr[0]
+    if not isinstance(host, str):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_connected_socket_peer(sock: socket.socket) -> None:
+    """Reject raw TCP sockets whose peer is not provably loopback.
+
+    ``NetworkBackend`` also has a raw constructor for socket-pair tests and
+    for the already-accepted socket in the MCP listener.  A caller using that
+    constructor must not be able to bypass the factory host guard with an
+    arbitrary connected TCP socket.  Non-IP local socket pairs are retained
+    for ROM-free tests; TCP peers must be addressable and loopback.
+    """
+    family = getattr(sock, "family", None)
+    if family not in (socket.AF_INET, socket.AF_INET6):
+        return
+    try:
+        peer = sock.getpeername()
+    except OSError as exc:
+        raise ValueError(
+            "NetworkBackend is localhost-only; connected TCP peer could not be verified"
+        ) from exc
+    if not _is_loopback_sockaddr(peer):
+        raise ValueError(
+            "NetworkBackend is localhost-only; connected TCP peer is not loopback"
+        )
 
 
 def _connect_socket(
@@ -221,6 +258,13 @@ def _connect_socket(
         raise NetworkBackendError(
             f"unable to resolve {normalized_host!r}: {exc}"
         ) from exc
+    if not addresses or any(
+        not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
+        for address in addresses
+    ):
+        raise NetworkBackendError(
+            "NetworkBackend is localhost-only; resolver returned an unsafe address"
+        )
     last_error: OSError | None = None
     for family, socktype, proto, _canonname, sockaddr in addresses:
         if cancel_event is not None and cancel_event.is_set():
@@ -308,8 +352,9 @@ class NetworkBackend:
         # primitive.  This makes a saturated peer unable to wedge either the
         # emulator thread or lifecycle teardown in ``sendall``/``recv``.
         try:
+            _validate_connected_socket_peer(self._sock)
             self._sock.setblocking(False)
-        except OSError:
+        except (OSError, ValueError):
             try:
                 self._sock.close()
             except OSError:
