@@ -3,7 +3,8 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The baseline at `e219fb5` was not certified. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon); the
-latest merged implementation commit is `b2a4016` (PR #27, merge `b96ee77`),
+current audited repository head is `8727779` (PR #28 documentation merge), and
+the latest merged implementation commit is `b2a4016` (PR #27, merge `b96ee77`),
 with the native Cython ABI fix in `94f103e` (PR #26), MCP lifecycle hardening
 `7f3c2f4` (PR #22), and implementation candidate `dfc0b2a` (PR #19, following
 PR #17 and PR #18). External BYO assets are excluded from the tracked source
@@ -35,6 +36,11 @@ unit/timing scope passes under the explicitly selected Cython runtime, whose
 probe resolves all five required PyBoy modules as native extensions. ROM-backed
 tiers were not run by either asset-free command.
 
+A fresh `python -m pytest -q -ra` run in the same clean asset-free checkout
+completed 566 passed, 140 expected BYO-asset skips, and 2 warnings. It proves
+the test suite can complete without ROMs; it is not a release result because
+the skipped real-ROM tiers still require their assets.
+
 The baseline gate ran from isolated source head
 `df0e7424c87c812a57f257286b0dc00e87c498f4`, whose implementation tree is the
 merged PR #17 candidate. Recorded tier durations were unit 17.8 seconds,
@@ -42,9 +48,9 @@ local 1,078.8 seconds, remote 96.2 seconds, trade 5,037.4 seconds, battle
 6,909.8 seconds, and timing 18.7 seconds. The post-PR #19 ROM-free follow-up
 ran from the merged candidate with collection 699; its release-hygiene check
 also runs the bounded concurrency probe.
-The merged-head representative `blue-blue` remote LinkMenu flow passes in
-both source and Cython modes after PR #27 changes game-driven exchange pacing
-to a bounded 30-second timeout. The post-PR #27 native strict trade
+Recorded post-PR #27 source and Cython `blue-blue` remote LinkMenu smokes pass
+after PR #27 changes game-driven exchange pacing to a bounded 30-second
+timeout. The post-PR #27 native strict trade
 qualification returned `FAIL`: 16/19 rows passed and three color-variant
 subprocess rows failed in the trade-center/rendezvous path. The native strict
 battle rerun has not been run, and the full post-fix source matrix and broad
@@ -127,7 +133,8 @@ pass. PR #23 exposes the CPU and LCD timing fields required by native lockstep
 scheduling, and PR #26 makes native `PyBoy.tick` instance ownership writable.
 PR #27's gate selects the requested runtime explicitly and fails closed if the
 interpreter resolves the wrong PyBoy module kind. The merged-head Cython
-unit/timing gate and `blue-blue` remote LinkMenu smoke pass. The post-PR #27
+unit/timing gate passes; a recorded `blue-blue` remote LinkMenu smoke also
+passes. The post-PR #27
 native strict trade qualification is `FAIL` at 16/19, with three
 color-variant subprocess failures in the trade-center/rendezvous path; native
 strict battle has not been run. A
@@ -384,11 +391,11 @@ python -m pytest -q \
   tests/test_symbol_loader.py
 ```
 
-These tests do not require commercial ROM bytes. The package bundles the
-source PyBoy runtime pinned in `VERSIONS.md`; the gate prepends that runtime
-when running from a checkout so a standalone PyBoy wheel cannot silently
-change the serial contract. A green Tier A result does not establish
-emulator, MCP, trade, or battle compatibility.
+These tests do not require commercial ROM bytes. In source mode, the gate
+prepends the vendored PyBoy runtime pinned in `VERSIONS.md`; in Cython mode it
+deliberately omits that vendored path so the selected interpreter's extension
+modules are tested. A green Tier A result does not establish emulator, MCP,
+trade, or battle compatibility.
 
 ### Tier B: one real session and MCP stdio
 
@@ -682,7 +689,7 @@ are:
 
 1. The documented release runtime is source mode. The pinned Cython build,
    semantic serial probe, three-ROM lifecycle smoke, native unit/timing gate,
-   and representative `blue-blue` remote LinkMenu smoke pass. PR #26 fixes
+   and the recorded representative `blue-blue` remote LinkMenu smoke pass. PR #26 fixes
    native `PyBoy.tick` ownership, and PR #27 makes runtime selection explicit.
    The post-PR #27 native strict trade qualification is `FAIL` at 16/19, with
    three color-variant subprocess failures in the trade-center/rendezvous path;

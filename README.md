@@ -12,7 +12,8 @@ symbol files, save states, or other ROM-derived artifacts.
 This repository remains an audited production-readiness candidate, not a
 production release. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
-latest implementation commit is `b2a4016` (PR #27, merge `b96ee77`), built on
+current audited repository head is `8727779` (PR #28 documentation merge), and
+the latest implementation commit is `b2a4016` (PR #27, merge `b96ee77`), built on
 the native Cython ABI fix in `94f103e` (PR #26), MCP lifecycle hardening in
 `7f3c2f4` (PR #22), and the earlier runtime candidate in `dfc0b2a` (PR #19).
 It includes the MCP lifecycle, runtime packaging, in-process serial/lifecycle,
@@ -49,6 +50,12 @@ timeouts. The runtime probe resolved the vendored PyBoy 2.7.0 source modules
 and the pinned bit-accurate serial contract. ROM-backed tiers were not run in
 this asset-free command.
 
+A fresh `python -m pytest -q -ra` run at the current head completed 566 passed,
+140 expected BYO-asset skips, and 2 warnings. It is a clean-checkout
+diagnostic rather than a release result: the ROM-backed tests were skipped
+because this isolated checkout intentionally contains no ROMs, symbols, or
+save states.
+
 Fresh Windows validation on 2026-09-02 used Windows Python 3.12.10 and new
 virtual environments in isolated checkouts. The editable install, `pip check`,
 source bootstrap, and the post-PR #23 pinned Cython build/check passed. The
@@ -64,8 +71,8 @@ The release status remains `PARTIAL`, despite the source-runtime gate and the
 native runtime contract gate passing. PR #26 makes per-instance native
 `PyBoy.tick` ownership writable; PR #27 makes the gate select the requested
 runtime instead of accidentally shadowing Cython extensions with vendored
-source. The merged-head Cython unit/timing gate and representative native
-`blue-blue` remote LinkMenu flow pass. The post-PR #27 native strict trade
+source. The merged-head Cython unit/timing gate passes. Recorded post-PR #27
+source and Cython `blue-blue` remote LinkMenu smokes pass. The post-PR #27 native strict trade
 qualification run returned `FAIL`: 16/19 rows passed and three color-variant
 subprocess rows failed in the trade-center/rendezvous path. The native strict
 battle rerun has not been run. These results keep the release at `PARTIAL`.
@@ -74,7 +81,7 @@ The pre-PR #27 source-runtime asset-backed broad run is diagnostic and bounded,
 not a release sign-off: at the 5,400-second supervisor cutoff it had completed
 418 of 703 collected tests (386 passed, 20 skipped, 12 failed, 285 not
 started). The 12 failures were remote TCP integration cases ending in
-`SerialLinkClosed` after the old 5-second exchange deadline; the representative
+`SerialLinkClosed` after the old 5-second exchange deadline; the recorded
 `blue-blue` flow passes with PR #27's 30-second game-exchange deadline. The Red
 color fixture now reproduces byte-for-byte and its four previously excluded
 remote diagnostic matrices are enabled, but a complete post-fix broad rerun
@@ -106,8 +113,8 @@ The current candidate’s evidence is:
 - merged-head Cython/native unit-runtime gate: `PASS`, collection 706, unit
   562/562, and timing 40/40 in each of five repetitions; all five probed PyBoy
   modules were native extensions and the serial contract passed;
-- merged-head remote gameplay smoke: `PASS` for the real-ROM `blue-blue`
-  LinkMenu flow in both source and Cython modes;
+- recorded post-PR #27 remote gameplay smoke: `PASS` for the real-ROM
+  `blue-blue` LinkMenu flow in both source and Cython modes;
 - post-PR #27 native strict trade qualification: `FAIL`, 16/19 rows passed and
   three color-variant subprocess rows failed in the trade-center/rendezvous
   path;
@@ -149,7 +156,7 @@ review, or network-security claims.
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` for recorded byte reproduction; release remains `PARTIAL` | The external manifest records verified ordinary and derived battle fixture bytes for color Red, color Blue, and Yellow. The Red color fixture is now enabled for remote diagnostics. States remain BYO and untracked; hashes do not replace gameplay acceptance. |
 | Single-session/MCP | `PASS` (baseline scope) | The PR #17 source-runtime baseline asset-backed local/session tier passed 47/47; PR #19 did not rerun the full local matrix. |
 | In-process link acceptance | `PASS` (baseline scope) | The PR #17 source-runtime baseline passed 47/47 local rows and the declared strict local rows; PR #19 adds focused lifecycle coverage. Stock-ROM link support remains unclaimed. |
-| Remote TCP and MCP lifecycle | `PARTIAL` (representative gameplay scope) | The PR #19 real-ROM remote transport slice passed 15/15 and the focused transport/MCP suite passed 167/167. PR #27's source and Cython `blue-blue` LinkMenu smokes pass with a bounded 30-second game-exchange timeout; full post-fix remote trade/battle coverage is pending. TCP remains loopback-only and unauthenticated/unencrypted. |
+| Remote TCP and MCP lifecycle | `PARTIAL` (representative gameplay scope) | The PR #19 real-ROM remote transport slice passed 15/15 and the focused transport/MCP suite passed 167/167. Recorded PR #27 source and Cython `blue-blue` LinkMenu smokes pass with a bounded 30-second game-exchange timeout; full post-fix remote trade/battle coverage is pending. TCP remains loopback-only and unauthenticated/unencrypted. |
 | Synthetic concurrency/lifecycle boundary | `PASS` (localhost probe scope) | Eight bounded probes passed in each of five repetitions, including concurrent exchange load, shutdown overlap, receiver races, terminal timeouts, resolver rechecks, BYE ordering, and raw-socket boundaries. Real-ROM load remains unverified. |
 | Cython/native serial runtime | `PARTIAL` (contract/representative gameplay scope) | PR #26 fixes native `PyBoy.tick` ownership and PR #27 verifies the installed extension modules, 562/562 unit, 40/40 × 5 timing, and a real-ROM `blue-blue` remote smoke. The post-PR #27 native strict trade run is `FAIL` at 16/19, with three color-variant subprocess failures; native strict battle has not been run. |
 | Windows native runtime | `PASS` (scoped) | A fresh Windows environment passed install, dependency, source/Cython bootstrap, selected runtime/fixture, MCP stdio, and three-ROM lifecycle checks. Full native gameplay, concurrent-load, remote trade/battle, and macOS coverage remain open. |
@@ -273,7 +280,7 @@ bit-accuracy probe, and passed real-ROM attach/step/close smokes for canonical
 color Red, color Blue, and Yellow. PR #26 makes native `PyBoy.tick` instance
 ownership writable; PR #27's explicit `--runtime-mode` gate verifies all five
 native PyBoy modules before running tests. The native unit/timing gate and a
-real-ROM `blue-blue` remote LinkMenu smoke pass. The post-PR #27 native strict
+recorded real-ROM `blue-blue` remote LinkMenu smoke pass. The post-PR #27 native strict
 trade qualification is `FAIL` at 16/19, with three color-variant subprocess
 failures; native strict battle has not been run. Source mode remains the
 documented release default.

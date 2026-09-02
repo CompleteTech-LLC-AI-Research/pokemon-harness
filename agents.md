@@ -27,27 +27,33 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The latest merged implementation is `87a9f3a` (PR #23), with MCP lifecycle
-hardening `7f3c2f4` (PR #22) and implementation candidate `dfc0b2a` (PR #19). The
-complete all-tier source-runtime gate was collected before PR #19 at the
+The current audited repository head is `8727779` (PR #28 documentation merge);
+the latest merged implementation is `b2a4016` (PR #27, merge `b96ee77`), with
+the native ABI fix `94f103e` (PR #26), MCP lifecycle hardening `7f3c2f4` (PR
+#22), and implementation candidate `dfc0b2a` (PR #19). The release runtime is
+the bundled PyBoy source snapshot pinned in `VERSIONS.md` (`2.7.0`, harness
+revision `c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`.
+Source mode is the documented release default.
+
+The merged-head asset-free source and explicitly selected Cython gates each
+collected 706 tests and passed unit 562/562 plus timing 40/40 in each of five
+repetitions. The source gate uses vendored Python modules; the Cython gate
+reports native extensions for all five required PyBoy modules. The current
+post-PR #27 native strict trade qualification is `FAIL` at 16/19, with three
+color-variant subprocess failures in the trade-center/rendezvous path; native
+strict battle and a complete post-fix source real-ROM rerun are unrun. Use
+explicit ROM, symbol, and SHA-1 values; never use `POKERED_SKIP_SHA1=1` for
+release evidence.
+
+The complete all-tier source-runtime gate was collected before PR #19 at the
 PR #17 parent `b0b63c8` (698 tests: unit 554/554, local real-ROM 47/47,
 remote transport/MCP 15/15, strict trade 19/19, strict battle 19/19, and
 timing 40/40 in each of five repetitions, with no skips, xfails, failures,
 errors, or timeouts). Post-PR #19 verification is intentionally reported as
-separate slices: 699 collected, ROM-free unit 555/555, timing 40/40 in each
-of five repetitions, focused transport/MCP 167/167, localhost concurrency
-probe 8/8 in each of five repetitions, and real-ROM remote transport 15/15.
-Post-PR #23 asset-free verification collected 701 tests and passed unit
-557/557 plus timing 40/40 in each of five repetitions under managed Python
-3.12.13. The release runtime is the bundled PyBoy source snapshot pinned in
-`VERSIONS.md` (`2.7.0`, harness revision
-`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode
-is the documented release default. PR #23 exposes the native lockstep timing
-ABI; the pinned Cython/native serial build and three-ROM lifecycle smoke pass,
-and targeted Red↔Yellow, Yellow↔Yellow, and Red↔Red trade diagnostics pass.
-The full strict Cython trade/battle matrix is not claimed. Use explicit ROM,
-symbol, and SHA-1 values; never use
-`POKERED_SKIP_SHA1=1` for release evidence.
+separate historical slices: 699 collected, ROM-free unit 555/555, timing
+40/40 in each of five repetitions, focused transport/MCP 167/167, localhost
+concurrency probe 8/8 in each of five repetitions, and real-ROM remote
+transport 15/15.
 
 ## Supported-scope boundary
 
@@ -68,7 +74,8 @@ symbol, and SHA-1 values; never use
   Collection is declaration evidence only; a LinkMenu milestone is not a
   gameplay acceptance. Complete 19/19 trade and battle results exist for the
   pre-PR #19 source-runtime baseline; the full strict matrix remains open
-  after the PR #23 runtime changes.
+  after the PR #27 runtime changes. Current native trade qualification is
+  `FAIL` at 16/19 and native battle is unrun.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or
@@ -77,10 +84,9 @@ symbol, and SHA-1 values; never use
   never expose it to a LAN, WAN, or public address.
 
 The release decision remains `PARTIAL`, not `PRODUCTION-READY`. Known open
-items include the full strict Cython trade/battle matrix (targeted
-Red↔Yellow, Yellow↔Yellow, and Red↔Red trade diagnostics pass after the PR #23
-timing fix), a completed post-PR #23 strict trade and battle rerun, a completed
-broad-suite run, vanilla fixture provenance,
+items include the post-PR #27 native strict trade result (`FAIL`, 16/19), native
+strict battle (unrun), a completed post-fix source strict rerun, a completed
+broad-suite release run, vanilla fixture provenance,
 full native-platform gameplay/load coverage, independent review, and
 authenticated/encrypted cross-host transport. Fresh Windows install,
 bootstrap, MCP stdio, and three-ROM lifecycle checks are now scoped evidence,

@@ -16,6 +16,7 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
+The current audited repository head is `8727779` (PR #28 documentation merge).
 The latest merged implementation commit is `b2a4016` (PR #27, merge
 `b96ee77`), with the native Cython ABI fix `94f103e` (PR #26), MCP lifecycle
 hardening `7f3c2f4` (PR #22), and implementation candidate `dfc0b2a` (PR #19,
@@ -67,8 +68,8 @@ ten-entry fixture manifest. No ROM-backed tier ran in this command.
 
 The same unit/timing gate passes with `--runtime-mode cython` after the pinned
 fork is built with `scripts/bootstrap_pyboy.py --mode cython`; its runtime
-probe reports all five required PyBoy modules as native extensions. A
-real-ROM `blue-blue` remote LinkMenu smoke passes in both source and Cython
+probe reports all five required PyBoy modules as native extensions. Recorded
+real-ROM `blue-blue` remote LinkMenu smokes pass in both source and Cython
 modes after PR #27's bounded game-exchange timeout fix. The post-PR #27 native
 strict trade qualification is `FAIL` at 16/19, with three color-variant
 subprocess failures in the trade-center/rendezvous path; native strict battle
@@ -113,6 +114,11 @@ before a 5,400-second supervisor bound (386 passed, 20 skipped, 12 failed, and
 285 not started). The failed cases were remote TCP timing cases from before
 PR #27's 30-second game-exchange timeout; this is not a full-suite pass.
 
+A fresh asset-free `python -m pytest -q -ra` run at the current head completed
+566 passed, 140 expected BYO-asset skips, and 2 warnings. This is a completed
+clean-checkout diagnostic, not a release gate; ROM-backed trade, battle, and
+MCP cases were intentionally skipped because their external assets were absent.
+
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, the Red fixture is
 now enabled in the remote diagnostic matrices, and the bounded producer plus
@@ -156,8 +162,8 @@ evidence, independent review, and secure cross-host networking.
   earlier scoped source/MCP checks passed with one unrelated WSL-worktree skip
   and MCP stdio 4/4.
 - [ ] The pinned Cython build passes the full real-ROM strict gameplay matrix;
-  the merged-head native unit/timing gate and representative `blue-blue`
-  remote LinkMenu smoke pass, but native strict trade is `FAIL` at 16/19 with
+  the merged-head native unit/timing gate and recorded representative
+  `blue-blue` remote LinkMenu smoke pass, but native strict trade is `FAIL` at 16/19 with
   three color-variant subprocess failures in the trade-center/rendezvous path,
   and native strict battle has not
   been run.
@@ -176,9 +182,9 @@ evidence, independent review, and secure cross-host networking.
 - [x] The default real-ROM gate expects five ROMs and three symbols; the
   acceptance scope additionally requires the canonical ordinary and battle
   states for color Red, color Blue, and Yellow.
-- [x] The operator ran the full gate with those assets and recorded exact
-  hashes, sizes, deadlines, skips, xfails, failures, errors, and bounded
-  diagnostics in the sanitized external evidence bundle.
+- [x] The historical PR #17 full gate with those assets recorded exact hashes,
+  sizes, deadlines, skips, xfails, failures, errors, and bounded diagnostics in
+  a sanitized external evidence bundle; this does not certify the current head.
 
 ## Test gates
 

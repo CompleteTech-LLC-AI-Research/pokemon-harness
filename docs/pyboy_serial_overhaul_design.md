@@ -161,7 +161,7 @@ Error-handling semantics:
 3. On each peer edge, shift one bit out and one bit in.
 4. If peer never clocks, transfer never completes. Game must use
    software timeout (Pokémon does this — see
-   `pret/pokered/home/serial.asm`'s timeout counters).
+   `home/serial.asm`'s timeout counters).
 
 ### Disconnect
 
@@ -269,7 +269,7 @@ actually running a Pokémon ROM. Assert the transport correctly relays:
 ### Tier 3 — Game-level (real ROMs, gated by BYO-ROM)
 
 Two linked PyBoy instances driven through real Pokémon flows. Reuses
-the [pokered-harness](https://github.com/timothywaynegregg/pokemon)
+the [pokered-harness](https://github.com/CompleteDotTech/pokemon)
 fixture + symbol machinery developed alongside this proposal:
 
 - Red↔Red trade: load `cable_club.state` on both, drive to
@@ -470,11 +470,10 @@ is a goal, not an accident. Tested as invariants.
 
 ### Companion / fixture sources
 
-- [pokered-harness](https://github.com/timothywaynegregg/pokemon)
+- [pokered-harness](https://github.com/CompleteDotTech/pokemon)
   (this repo) — `pokered_harness.link.*`, fixture scripts, symbol
   machinery ready to plug into the game-level test suite
 - [vaguilar/pokemon-red-cable-club-hack](https://github.com/vaguilar/pokemon-red-cable-club-hack)
-- [Nitwhiz — Pokémon trade write-up](https://nitwhiz.github.io/)
 - [tzwenn/PokeDuino](https://github.com/tzwenn/PokeDuino) — optional
   hardware-relay smoke test for real-line behavior
 

@@ -5,41 +5,42 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate (2026-09-02), based on merged
-implementation `87a9f3a` (PR #23), with MCP lifecycle hardening `7f3c2f4` (PR
-#22) and implementation candidate `dfc0b2a` (PR #19, following PR #17 and PR
-#18).
-The complete all-tier source-runtime gate collected 698 tests and passed unit
-554/554, local real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19,
-strict battle 19/19, and timing 40/40 in each of five repetitions with
-`DEFAULT_MATRIX_WORKERS=1`; that is the PR #17 baseline. The PR #19 follow-up
-collected 699 tests and passed the ROM-free 555/555 unit and 40/40 × 5 timing
-slice, focused transport/MCP 167/167, bounded concurrency probe 8/8 × 5, and
-real-ROM remote transport 15/15. The ten-entry external fixture manifest
-schema passed. Sanitized evidence is retained outside version control because
-the ROMs, symbols, and save states are BYO assets.
+Status: `PARTIAL` current audit candidate (2026-09-02) at repository head
+`8727779f1b89f966d9a631af546732a36a97cf51` (PR #28 documentation merge). It
+implements `b2a4016` (PR #27, merge `b96ee77`), with the native Cython ABI fix
+`94f103e` (PR #26), MCP lifecycle hardening `7f3c2f4` (PR #22), and the earlier
+runtime candidate `dfc0b2a` (PR #19).
 
-The post-PR #23 asset-free source-runtime gate used managed Linux Python
-3.12.13 and Pytest 9.1.1: collection 701, unit 557/557, and timing 40/40 in
+The current merged-head asset-free source gate used managed Linux Python
+3.12.13 and Pytest 9.1.1: collection 706, unit 562/562, and timing 40/40 in
 each of five repetitions, with no skips, xfails, failures, errors, or timeouts.
+The explicitly selected Cython gate passes the same unit/timing scope and
+reports native extensions for all five required PyBoy modules. A direct
+`python -m pytest -q -ra` run in this clean asset-free checkout completed
+566 passed, 140 expected BYO-asset skips, and 2 warnings; it is not a release
+acceptance result. The ten-entry manifest schema and the bounded concurrency
+probe also pass in the current checkout.
 
-The vendored source PyBoy runtime remains the documented release default. PR
-#23 exposes the CPU and LCD timing fields required by the native lockstep
-scheduler. The pinned Cython/native serial build, semantic serial-contract
-probe, and three-ROM attach/step/close smokes pass in fresh Linux and Windows
-environments. Native Red↔Yellow, Yellow↔Yellow, and Red↔Red trade diagnostics
-pass, with identical party records for the two same-family runs (880 and 920
-frames). The post-PR #23 native strict gate collected 19 trade and 19 battle
-rows: 10/19 passed for each operation, while all nine remote rows failed at
-the Cython `PyBoy.tick` instance-writability seam required by serialized
-network ownership; no skips or errors occurred. Full strict Cython
-trade/battle acceptance is not yet claimed. The
-pre-PR #23 Yellow↔Yellow integrity failure and Red↔Red timeout are historical.
-The synthetic concurrency probe passes,
-while real-ROM concurrent-load evidence, vanilla fixture provenance,
-broad-suite coverage, full native-platform qualification, independent review,
-and authenticated/encrypted cross-host TCP remain open, so the release decision
-remains `PARTIAL`.
+The vendored source PyBoy runtime remains the documented release default. The
+representative real-ROM `blue-blue` remote LinkMenu flow passes in both source
+and Cython modes in recorded post-PR #27 evidence. The post-PR #27 native strict
+trade qualification is `FAIL` at 16/19, with three color-variant subprocess
+failures in the trade-center/rendezvous path; native strict battle has not been
+run. The complete post-fix source real-ROM matrix, real-ROM load stability,
+vanilla fixture provenance, full native-platform qualification, independent
+review, and authenticated/encrypted cross-host TCP remain open, so the release
+decision remains `PARTIAL`.
+
+Historical PR #17 evidence collected 698 tests and passed unit 554/554, local
+real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19, strict battle
+19/19, and timing 40/40 in each of five repetitions with
+`DEFAULT_MATRIX_WORKERS=1`. The PR #19 follow-up collected 699 tests and
+passed the ROM-free 555/555 unit and 40/40 × 5 timing slice, focused
+transport/MCP 167/167, bounded concurrency probe 8/8 × 5, and real-ROM remote
+transport 15/15. These results are historical slices, not a full rerun of the
+current merged implementation. Earlier post-PR #23 native failures at the
+Cython `PyBoy.tick` ownership seam are superseded by PR #26/#27 and are not
+current acceptance evidence.
 
 PR #22 adds bounded MCP stdio unpair cleanup and fresh remote lifecycle
 generation tracking. Its release-hygiene workflow passed; the full strict
@@ -65,12 +66,12 @@ reformatted.
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
-coordinator and remote TCP transport. The pinned Cython/native serial build
-also passes its compiled serial-contract probe and three canonical real-ROM
-lifecycle smokes, but it is not the documented release runtime and its strict
-gameplay remains unverified for release. A pre-existing standalone PyBoy wheel
-must not be allowed to shadow this package; verify the runtime identity before
-release. See the
+coordinator and remote TCP transport. The optional Cython/native build passes
+its compiled serial-contract probe, native asset-free unit/timing gate, and
+recorded three-ROM lifecycle smokes, but its current strict trade result is
+`FAIL` at 16/19 and strict battle is unrun. A pre-existing standalone PyBoy
+wheel must not be allowed to shadow this package; verify the runtime identity
+and selected mode before release. See the
 [production runbook](docs/PRODUCTION_RUNBOOK.md).
 
 ## ROM pins
@@ -102,7 +103,7 @@ for release evidence.
 | Path | `rom/red/pokemon-red-color.gb` |
 | Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
 | Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
-| Role | Canonical color-Red input; source-runtime local and remote strict trade/battle rows passed |
+| Role | Canonical color-Red input; historical PR #17 source-runtime strict rows passed; current post-change acceptance incomplete |
 
 ### Pokémon Blue (UE)
 
@@ -124,7 +125,7 @@ for release evidence.
 | Path | `rom/blue/pokemon-blue-color.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
 | Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
-| Role | Canonical color-Blue input; source-runtime local and remote strict trade/battle rows passed |
+| Role | Canonical color-Blue input; historical PR #17 source-runtime strict rows passed; current post-change acceptance incomplete |
 
 ### Pokémon Yellow (UE)
 
@@ -135,7 +136,7 @@ for release evidence.
 | Path | `rom/yellow/pokemon-yellow.gbc` |
 | Symbols | `rom/yellow/pokemon-yellow.sym` |
 | Symbol SHA-1 | `7c4205723943e7722230dcf014e5e8a2012474aa` |
-| Role | Canonical Yellow input; source-runtime local and remote strict trade/battle rows passed |
+| Role | Canonical Yellow input; historical PR #17 source-runtime strict rows passed; current post-change acceptance incomplete |
 
 Other localisations, hacks, and variants are out of scope unless they receive
 their own ROM hash, matching symbols, fixture provenance, and acceptance
@@ -209,12 +210,12 @@ The strict local acceptance fixtures and remote acceptance/diagnostic fixtures a
 distinct from the default Cable Club fixtures. The current canonical runtime
 matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 
-| Path | ROMs | Required fixture files | Current evidence |
+| Path | ROMs | Required fixture files | Evidence boundary |
 |---|---|---|---|
-| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Complete source-runtime gate passed 9/9 ordered rows |
-| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Complete source-runtime gate passed 9/9 ordered rows |
-| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Complete source-runtime gate passed 9/9 ordered rows |
-| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Complete source-runtime gate passed 9/9 ordered rows |
+| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Historical PR #17 source-runtime baseline passed 9/9 ordered rows; current post-change rerun incomplete |
+| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Historical PR #17 source-runtime baseline passed 9/9 ordered rows; current post-change rerun incomplete |
+| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Historical PR #17 source-runtime baseline passed 9/9 ordered rows; current post-change rerun incomplete |
+| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Historical PR #17 source-runtime baseline passed 9/9 ordered rows; current post-change rerun incomplete |
 
 The tracked
 [`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)
