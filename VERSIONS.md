@@ -5,35 +5,34 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate (2026-09-02), based on live `master`
-tip `a15182a` (merged PRs #12-#15).
-The source-only gate collected 692 tests, passed unit 549/549, and passed
-timing 40/40 in each of five repetitions with `DEFAULT_MATRIX_WORKERS=1`.
-The focused post-change integration slice passed 294 tests, the external
-fixture manifest validated all 10 entries, and the source environment passed
-`pip check` and the source runtime identity check. Post-change real-ROM local,
-remote transport/MCP tier passed 14/14. The strict trade gate completed 18/19,
-with all local/dedicated rows passing and
-`yellow-listen-red_color-connect` timing out at the Trade Center warp
-rendezvous. The strict battle gate completed 17/19; the remote rows
-`red_color-listen-yellow-connect` and `yellow-listen-yellow-connect` failed at
-the LinkMenu-to-Colosseum transition.
+Status: `PARTIAL` current audit candidate (2026-09-02), based on implementation
+candidate `b0b63c8` (merged PR #17; this documentation update is prepared on
+top of that source tree).
+The complete production gate collected 698 tests and passed unit 554/554,
+local real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19, strict
+battle 19/19, and timing 40/40 in each of five repetitions with
+`DEFAULT_MATRIX_WORKERS=1`. Collection and the ten-entry external fixture
+manifest passed, with no skips, xfails, failures, errors, or timeouts. The
+sanitized evidence bundle is retained outside version control because the
+ROMs, symbols, and save states are BYO assets.
 
 The vendored source PyBoy runtime remains the documented release default. The
-current Cython/native serial-extension build does not pass its compile
-boundary (`uint64_t`/function-pointer incompatibility), so no Cython gameplay
-acceptance is claimed. Historical real-ROM rows remain separately labeled in
-the README and are not promoted to current-candidate evidence while the strict
-post-change matrix has failed rows.
+pinned Cython/native serial build and semantic serial-contract probe now pass,
+but no Cython real-ROM attach/detach smoke or Cython trade/battle acceptance is
+claimed. Vanilla fixture provenance, broad-suite coverage, native-platform
+coverage, concurrent-load evidence, independent review, and authenticated /
+encrypted cross-host TCP remain open, so the release decision remains
+`PARTIAL`. Historical 18/19 trade and 17/19 battle snapshots are superseded by
+the current complete source-runtime gate.
 
 Symbol hashes and fixture byte/provenance records are recorded below and in
 [`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
-The remaining release decision is `PARTIAL` because one strict remote trade
-row and two strict remote battle rows failed. Cython gameplay coverage,
-vanilla source provenance, broad-suite coverage,
-native-platform coverage, retained complete evidence, and independent review
-remain incomplete. `ruff check .` is clean only for the configured product
-boundary; the broad legacy tree is not silently reformatted.
+The remaining release decision is `PARTIAL` because Cython real-ROM gameplay,
+vanilla source provenance, broad-suite coverage, native-platform coverage,
+concurrent-load evidence, independent review, and authenticated / encrypted
+cross-host TCP remain incomplete. `ruff check .` is clean only for the
+configured product boundary; the broad legacy tree is not silently
+reformatted.
 
 ## Runtime
 
@@ -45,11 +44,11 @@ boundary; the broad legacy tree is not silently reformatted.
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
-coordinator and remote TCP transport. The current Cython/native serial
-extension build fails at compile time, so it is not a release runtime and has
-no gameplay acceptance evidence. A pre-existing standalone PyBoy wheel must
-not be allowed to shadow this package; verify the runtime identity before
-release. See the
+coordinator and remote TCP transport. The pinned Cython/native serial build
+also passes its compiled serial-contract probe, but it is not the documented
+release runtime and has no Cython gameplay acceptance evidence. A pre-existing
+standalone PyBoy wheel must not be allowed to shadow this package; verify the
+runtime identity before release. See the
 [production runbook](docs/PRODUCTION_RUNBOOK.md).
 
 ## ROM pins
@@ -81,7 +80,7 @@ for release evidence.
 | Path | `rom/red/pokemon-red-color.gb` |
 | Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
 | Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
-| Role | Canonical color-Red input; local strict trade and battle rows passed, while remote gameplay remains partial |
+| Role | Canonical color-Red input; source-runtime local and remote strict trade/battle rows passed |
 
 ### Pokémon Blue (UE)
 
@@ -103,7 +102,7 @@ for release evidence.
 | Path | `rom/blue/pokemon-blue-color.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
 | Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
-| Role | Canonical color-Blue input; local strict trade and battle rows passed, while remote gameplay remains partial |
+| Role | Canonical color-Blue input; source-runtime local and remote strict trade/battle rows passed |
 
 ### Pokémon Yellow (UE)
 
@@ -114,7 +113,7 @@ for release evidence.
 | Path | `rom/yellow/pokemon-yellow.gbc` |
 | Symbols | `rom/yellow/pokemon-yellow.sym` |
 | Symbol SHA-1 | `7c4205723943e7722230dcf014e5e8a2012474aa` |
-| Role | Canonical Yellow input; local strict trade and battle rows passed, while remote gameplay remains partial |
+| Role | Canonical Yellow input; source-runtime local and remote strict trade/battle rows passed |
 
 Other localisations, hacks, and variants are out of scope unless they receive
 their own ROM hash, matching symbols, fixture provenance, and acceptance
@@ -190,10 +189,10 @@ matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 
 | Path | ROMs | Required fixture files | Current evidence |
 |---|---|---|---|
-| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Current run passed 9/9 ordered rows |
-| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Current run passed 9/9 ordered rows |
-| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Current run passed 8/9; `yellow-listen-red_color-connect` timed out at the Trade Center warp rendezvous |
-| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Current run passed 7/9; `red_color-listen-yellow-connect` and `yellow-listen-yellow-connect` failed at the LinkMenu-to-Colosseum transition |
+| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Complete source-runtime gate passed 9/9 ordered rows |
+| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Complete source-runtime gate passed 9/9 ordered rows |
+| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Complete source-runtime gate passed 9/9 ordered rows |
+| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Complete source-runtime gate passed 9/9 ordered rows |
 
 The tracked
 [`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)

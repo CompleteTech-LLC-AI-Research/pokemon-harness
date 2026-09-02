@@ -16,11 +16,34 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current release base is merged `master` tip `ae48938` (PR #14, including
-PRs #12-#14), with
-the in-process serial/lifecycle and remote TCP follow-ups under validation on an
-isolated branch using `DEFAULT_MATRIX_WORKERS=1`. The current clean asset-free
-command:
+The current implementation candidate is merged commit `b0b63c8` (PR #17,
+including PRs #12-#17), with the documentation update prepared in an isolated
+worktree using `DEFAULT_MATRIX_WORKERS=1`. The complete source-runtime gate
+ran from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`,
+whose implementation tree is the merged candidate. The complete gate
+command was:
+
+```bash
+EVIDENCE_DIR="$(mktemp -d)"
+python scripts/production_gate.py \
+  --repo-root "$PWD" \
+  --rom-root "$PWD/rom" \
+  --fixture-root "$PWD/tests/fixtures/link" \
+  --python "$(command -v python)" \
+  --repeat-timing 5 \
+  --matrix-workers 1 \
+  --evidence-dir "$EVIDENCE_DIR" \
+  --format text
+```
+
+It returned `PASS`: collection 698, unit 554/554, local real-ROM 47/47,
+remote transport/MCP 15/15, strict trade 19/19, strict battle 19/19, and
+timing 40/40 in each of five repetitions. All ten external fixture-manifest
+entries validated; no selected test skipped, xfailed, failed, errored, or
+timed out. The sanitized evidence bundle is retained outside version control
+because ROMs, symbols, and save states are external BYO assets.
+
+The clean asset-free command remains:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -33,8 +56,8 @@ python scripts/production_gate.py \
   --format text
 ```
 
-returned scoped `PASS` from the isolated candidate: collection 692, unit
-549/549, and timing 40/40 in each of five repetitions. It used bundled source
+returns scoped `PASS`: collection 698, unit 554/554, and timing 40/40 in each
+of five repetitions. It uses bundled source
 PyBoy 2.7.0, fork
 `c565df66c3731fad2856169a90f6bbec99925915`, and schema-validated the
 ten-entry fixture manifest. No ROM-backed tier ran in this command.
@@ -45,29 +68,22 @@ rows, and 19 strict trade plus 19 strict battle entrypoints. Structural and
 declaration checks passed; matrix runtime was `NOT RUN` because the standalone
 audit is collection-only.
 
-The focused post-change integration slice passed 294/294, and all 10 external
-fixture-manifest entries validated. The post-change real-ROM local tier passed
-47/47 and the remote transport/MCP tier passed 14/14. Strict trade completed
-18/19, with one remote timeout at the Trade Center warp rendezvous. Strict
-battle completed 17/19, with remote `red_color-listen-yellow-connect` and
-`yellow-listen-yellow-connect` failing during the LinkMenu-to-Colosseum
-transition. Historical full evidence is not reused as current candidate
-evidence.
+The focused post-change integration slice passed 294/294. The complete
+source-runtime real-ROM local tier passed 47/47, the remote transport/MCP tier
+passed 15/15, and strict trade and battle each passed all 19/19 rows. Historical
+18/19 trade and 17/19 battle snapshots are retained only as historical context.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, and the bounded
-producer plus tracked battle-fixture generator are present. Full sign-off is
-pending the strict trade and battle failure disposition and the remaining
-release blockers. The
-current Cython native serial extension does not compile, so Cython gameplay
-coverage,
+producer plus tracked battle-fixture generator are present. The source-runtime
+gate is complete, but full sign-off still requires Cython real-ROM gameplay,
 vanilla source provenance, broad-suite coverage, native-platform evidence,
-retained complete evidence, and independent review.
+concurrent-load evidence, independent review, and secure cross-host networking.
 
 ## Source and artifact hygiene
 
-- [x] The release base is identified as merged `master` tip `ae48938`
-  (PR #14, including PRs #12-#14), and the follow-up candidate is isolated from the protected
+- [x] The implementation candidate is identified as merged commit `b0b63c8`
+  (PR #17, including PRs #12-#17), and the documentation worktree is isolated from the protected
   dirty development checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
@@ -87,12 +103,12 @@ retained complete evidence, and independent review.
   bit-accurate serial contract.
 - [x] The audited environment runs `python -m pip check` and records the
   interpreter/runtime identity from the same environment used by MCP.
-- [ ] Cython/native-accelerator mode builds and passes its explicit runtime
-  serial contract; the current native serial extension fails at compile time.
+- [x] Cython/native-accelerator mode builds and passes its explicit semantic
+  serial contract; the real-ROM Cython path remains a separate unchecked item.
 - [ ] The pinned Cython build exposes `mb.serial` and passes a real-ROM
   attach/detach/close smoke.
 - [ ] Full Cython trade/battle acceptance is complete; source mode remains the
-  documented release default and neither mode has full strict-matrix sign-off.
+  documented release default, while Cython mode has no strict-matrix sign-off.
 
 ## ROM, symbol, and BYO asset identity
 
@@ -105,37 +121,34 @@ retained complete evidence, and independent review.
 - [x] The default real-ROM gate expects five ROMs and three symbols; the
   acceptance scope additionally requires the canonical ordinary and battle
   states for color Red, color Blue, and Yellow.
-- [ ] The operator runs the full gate with those assets and records exact
-  hashes, sizes, deadlines, skips, xfails, failures, and teardown results.
+- [x] The operator ran the full gate with those assets and recorded exact
+  hashes, sizes, deadlines, skips, xfails, failures, errors, and bounded
+  diagnostics in the sanitized external evidence bundle.
 
 ## Test gates
 
 - [x] Both module and console-script collection paths complete in the current
-  candidate gate; 692 tests were collected with no collection errors.
-- [x] ROM-free unit tests pass 549/549 in the scoped gate.
+  candidate gate; 698 tests were collected with no collection errors.
+- [x] ROM-free unit tests pass 554/554 in the scoped gate.
 - [x] Timing tests pass 40/40 in each of five repetitions in the scoped gate.
 - [x] The explicit production-file Ruff boundary is clean; broad legacy files
   outside that boundary are not used as release evidence.
 - [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
   xfail, or timeout.
-- [ ] Real-session boot, state, and MCP stdio tests pass for every advertised
-  ROM variant. The current asset-free gate does not exercise this tier.
-- [x] The current candidate real-ROM local tier passed 47/47 with no fixture
-  or runtime skips.
-- [ ] Current-candidate controlled local evidence covers the complete canonical
-  matrix: strict trade local/dedicated rows passed, while the strict battle
-  matrix has two failed remote rows.
-- [ ] Current-candidate controlled remote evidence covers every ordered
-  listener/connector pair; transport/MCP passed 14/14, strict trade passed 8/9
-  with one bounded timeout, and strict battle passed 7/9 with two
-  LinkMenu-to-Colosseum failures.
+- [x] The current asset-backed local/session tier passes 47/47 for the pinned
+  advertised ROM inputs, with no fixture or runtime skips.
+- [x] Current-candidate controlled local evidence covers the complete canonical
+  strict trade and battle matrix: 9/9 local ordered rows plus the dedicated
+  Red/Yellow assertions passed for each operation.
+- [x] Current-candidate controlled remote evidence covers every ordered
+  listener/connector pair: transport/MCP passed 15/15, strict trade passed
+  9/9, and strict battle passed 9/9.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
   ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
   IDs).
-- [ ] Current-candidate local and remote strict runtime rows pass in both
-  listener/connector directions; strict trade has one failed remote row,
-  strict battle has two failed remote rows, and concurrent-load stability is
-  not certified.
+- [x] Current-candidate local and remote strict runtime rows pass in both
+  listener/connector directions; strict trade and strict battle each passed
+  19/19 with bounded teardown.
 - [ ] Native-platform/build coverage and an independent release review are
   complete.
 
