@@ -5,8 +5,9 @@ The normal harness distribution already bundles this source tree.  This
 bootstrap is for the two explicit runtime modes used by development and
 performance testing:
 
-* ``source`` (default): disable Cython and install the same Python sources;
-* ``cython``: build the same sources with PyBoy's Cython extensions.
+* ``source`` (default): disable Cython and install the harness distribution,
+  including its bundled Python sources;
+* ``cython``: build the checked-in PyBoy fork with its Cython extensions.
 
 Both modes use the checked-in source snapshot.  No network VCS checkout,
 ``PYTHONPATH`` override, or machine-specific path is involved.
@@ -17,7 +18,9 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.machinery
+import importlib.metadata
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,12 +31,59 @@ REVISION_FILE = PYBOY_SOURCE / "POKERED_HARNESS_PYBOY_REVISION"
 EXPECTED_PYBOY_VERSION = "2.7.0"
 EXPECTED_REVISION = "c565df66c3731fad2856169a90f6bbec99925915"
 CYTHON_REQUIREMENT = "cython==3.0.12"
+PROJECT_DISTRIBUTION = "pokered-harness"
 RUNTIME_MODULES = (
     "pyboy",
     "pyboy.pyboy",
+    "pyboy.utils",
     "pyboy.core.mb",
     "pyboy.core.serial",
 )
+CYTHON_MODULES = tuple(name for name in RUNTIME_MODULES if name != "pyboy")
+
+
+def _pip_command() -> list[str]:
+    """Return an install-command prefix bound to the active interpreter.
+
+    Some supported environments deliberately omit pip from a newly created
+    venv. Prefer that interpreter's pip, seed it with ``ensurepip`` when
+    possible, and fall back to uv's explicit ``--python`` target rather than
+    silently installing into another interpreter.
+    """
+    command = [sys.executable, "-m", "pip"]
+    probe = subprocess.run(
+        [*command, "--version"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if probe.returncode == 0:
+        return [*command, "install"]
+
+    bootstrap = subprocess.run(
+        [sys.executable, "-m", "ensurepip", "--upgrade"],
+        check=False,
+    )
+    if bootstrap.returncode != 0:
+        uv = shutil.which("uv")
+        if uv is not None:
+            return [uv, "pip", "install", "--python", sys.executable]
+        raise SystemExit(
+            "pip is unavailable and ensurepip failed; install pip in the "
+            "active environment (or install uv) before running bootstrap_pyboy.py"
+        )
+
+    verify = subprocess.run(
+        [*command, "--version"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise SystemExit(
+            "ensurepip completed but the active interpreter still cannot run python -m pip"
+        )
+    return [*command, "install"]
 
 
 def _validate_source() -> None:
@@ -60,6 +110,23 @@ def _module_kind(module: object) -> str:
     return "unknown"
 
 
+def _normalise_distribution_name(name: str) -> str:
+    return name.lower().replace("_", "-")
+
+
+def _package_distributions(package: str) -> set[str]:
+    """Return normalized distributions that claim ``package``.
+
+    Editable installs can expose the same distribution more than once; the
+    set removes that harmless duplication while preserving a competing owner
+    such as a separately installed stock PyBoy.
+    """
+    return {
+        _normalise_distribution_name(name)
+        for name in importlib.metadata.packages_distributions().get(package, ())
+    }
+
+
 def _verify_runtime(mode: str) -> None:
     """Fail closed unless the installed runtime matches the requested mode."""
     try:
@@ -73,7 +140,11 @@ def _verify_runtime(mode: str) -> None:
             f"harness dependencies first or inspect the build output: {type(exc).__name__}: {exc}"
         ) from exc
 
-    expected_kind = "cython" if mode == "cython" else "source"
+    expected_modules = (
+        {name: "cython" for name in CYTHON_MODULES}
+        if mode == "cython"
+        else {name: "source" for name in RUNTIME_MODULES}
+    )
     problems: list[str] = []
     if getattr(pyboy, "__version__", None) != EXPECTED_PYBOY_VERSION:
         problems.append(
@@ -85,10 +156,27 @@ def _verify_runtime(mode: str) -> None:
             f"{getattr(pyboy, '__pokered_harness_revision__', None)!r}, expected {EXPECTED_REVISION!r}"
         )
 
-    for name, module in modules.items():
-        actual_kind = _module_kind(module)
+    for name, expected_kind in expected_modules.items():
+        actual_kind = _module_kind(modules[name])
         if actual_kind != expected_kind:
             problems.append(f"{name} is {actual_kind}, expected {expected_kind}")
+
+    owners = _package_distributions("pyboy")
+    if mode == "source":
+        unexpected = owners - {PROJECT_DISTRIBUTION}
+        if PROJECT_DISTRIBUTION not in owners:
+            problems.append("pyboy is not provided by the installed pokered-harness distribution")
+        if unexpected:
+            problems.append(
+                "pyboy has competing installed owners: " + ", ".join(sorted(unexpected))
+            )
+    else:
+        # Cython mode intentionally installs the checked-in PyBoy project as
+        # an extension-backed distribution. Its revision marker remains
+        # authoritative, so an unmodified stock package cannot pass below.
+        unexpected = owners - {PROJECT_DISTRIBUTION, "pyboy"}
+        if unexpected:
+            problems.append("pyboy has foreign installed owners: " + ", ".join(sorted(unexpected)))
 
     if bool(getattr(utils, "cython_compiled", False)) != (mode == "cython"):
         problems.append(
@@ -106,11 +194,7 @@ def _verify_runtime(mode: str) -> None:
         problems.append(f"serial contract missing {', '.join(missing)}")
 
     if problems:
-        raise SystemExit(
-            "PyBoy runtime contract failed for "
-            f"--mode {mode}: "
-            + "; ".join(problems)
-        )
+        raise SystemExit(f"PyBoy runtime contract failed for --mode {mode}: " + "; ".join(problems))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -119,7 +203,10 @@ def main(argv: list[str] | None = None) -> int:
         "--mode",
         choices=("source", "cython"),
         default="source",
-        help="runtime build mode (default: source)",
+        help=(
+            "runtime build mode (default: source); source is the supported "
+            "production mode, cython is an optional source-checkout diagnostic"
+        ),
     )
     parser.add_argument(
         "--check",
@@ -136,20 +223,26 @@ def main(argv: list[str] | None = None) -> int:
     env = os.environ.copy()
     if args.mode == "source":
         env["PYBOY_NO_CYTHON"] = "1"
+        install_target = ROOT
     else:
         env.pop("PYBOY_NO_CYTHON", None)
+        install_target = PYBOY_SOURCE
 
     command = [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
+        *_pip_command(),
         "--force-reinstall",
+        "--no-deps",
         CYTHON_REQUIREMENT,
-        str(PYBOY_SOURCE),
+        str(install_target),
     ]
     result = subprocess.run(command, cwd=ROOT, env=env, check=False)
     if result.returncode:
+        if args.mode == "cython":
+            print(
+                "Cython runtime build failed for the pinned PyBoy source; "
+                "the supported production runtime remains --mode source.",
+                file=sys.stderr,
+            )
         return result.returncode
     _verify_runtime(args.mode)
     return 0

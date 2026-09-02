@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import json
+import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+
+import pytest
 
 from pyboy.core.serial import Serial
 
@@ -44,22 +49,55 @@ def test_project_bundles_the_pinned_pyboy_source() -> None:
     assert package_dir["pyboy"] == "vendor/pyboy-src/pyboy"
     assert not any(dep.lower().startswith("pyboy") for dep in project["project"]["dependencies"])
 
-    marker = (ROOT / "vendor" / "pyboy-src" / "POKERED_HARNESS_PYBOY_REVISION").read_text(
-        encoding="ascii"
-    ).strip()
+    marker = (
+        (ROOT / "vendor" / "pyboy-src" / "POKERED_HARNESS_PYBOY_REVISION")
+        .read_text(encoding="ascii")
+        .strip()
+    )
     assert marker == EXPECTED_PYBOY_REVISION
+
+
+def test_project_exposes_the_installed_mcp_entrypoint_and_explicit_package_data() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    setuptools = project["tool"]["setuptools"]
+
+    assert "setuptools>=77" in project["build-system"]["requires"]
+    assert project["project"]["scripts"] == {
+        "pokered-harness": "pokered_harness.mcp_server:main",
+    }
+    assert setuptools["include-package-data"] is False
+    assert setuptools["package-data"] == {
+        "pyboy.core": ["bootrom_cgb.bin", "bootrom_dmg.bin"],
+        "pyboy.plugins": ["font.txt"],
+    }
 
 
 def test_project_direct_dependencies_are_exactly_pinned() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = dict(_split_exact_requirement(req) for req in project["project"]["dependencies"])
     dev_dependencies = dict(
-        _split_exact_requirement(req)
-        for req in project["project"]["optional-dependencies"]["dev"]
+        _split_exact_requirement(req) for req in project["project"]["optional-dependencies"]["dev"]
     )
 
     assert dependencies == EXPECTED_RUNTIME_DEPENDENCIES
     assert dev_dependencies == EXPECTED_DEV_DEPENDENCIES
+
+
+def test_lockfile_records_the_same_exact_project_requirements() -> None:
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    project = next(package for package in lock["package"] if package["name"] == "pokered-harness")
+    locked_requirements = {
+        item["name"].lower(): item["specifier"]
+        for item in project["metadata"]["requires-dist"]
+        if "marker" not in item
+    }
+    locked_dev_requirements = {
+        item["name"].lower(): item["specifier"]
+        for item in project["metadata"]["requires-dist"]
+        if item.get("marker") == "extra == 'dev'"
+    }
+    assert locked_requirements == EXPECTED_RUNTIME_DEPENDENCIES
+    assert locked_dev_requirements == EXPECTED_DEV_DEPENDENCIES
 
 
 def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
@@ -68,8 +106,146 @@ def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
     assert 'choices=("source", "cython")' in bootstrap
     assert '"--check"' in bootstrap
     assert 'env["PYBOY_NO_CYTHON"] = "1"' in bootstrap
+    assert 'env.pop("PYBOY_NO_CYTHON", None)' in bootstrap
+    assert '"-m", "ensurepip", "--upgrade"' in bootstrap
+    assert '"--python", sys.executable' in bootstrap
+    assert '"--no-deps"' in bootstrap
+    assert "install_target = ROOT" in bootstrap
+    assert "install_target = PYBOY_SOURCE" in bootstrap
     assert "apply_external_edge" in bootstrap
     assert "cython_compiled" in bootstrap
+
+
+def _load_bootstrap():
+    spec = importlib.util.spec_from_file_location(
+        "pokered_bootstrap_runtime_test", ROOT / "scripts" / "bootstrap_pyboy.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_bootstrap_rehydrates_missing_pip(monkeypatch) -> None:
+    module = _load_bootstrap()
+    calls: list[list[str]] = []
+    pip_probes = 0
+
+    class Result:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    def fake_run(command, **_kwargs):
+        nonlocal pip_probes
+        command = list(command)
+        calls.append(command)
+        if command == [sys.executable, "-m", "pip", "--version"]:
+            pip_probes += 1
+            return Result(1 if pip_probes == 1 else 0)
+        if command == [sys.executable, "-m", "ensurepip", "--upgrade"]:
+            return Result(0)
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module._pip_command() == [sys.executable, "-m", "pip", "install"]
+    assert calls == [
+        [sys.executable, "-m", "pip", "--version"],
+        [sys.executable, "-m", "ensurepip", "--upgrade"],
+        [sys.executable, "-m", "pip", "--version"],
+    ]
+
+
+def test_bootstrap_uses_uv_when_pip_and_ensurepip_are_unavailable(monkeypatch) -> None:
+    module = _load_bootstrap()
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 1
+
+    def fake_run(command, **_kwargs):
+        calls.append(list(command))
+        return Result()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/opt/uv" if name == "uv" else None)
+
+    assert module._pip_command() == ["/opt/uv", "pip", "install", "--python", sys.executable]
+    assert calls == [
+        [sys.executable, "-m", "pip", "--version"],
+        [sys.executable, "-m", "ensurepip", "--upgrade"],
+    ]
+
+
+def test_bootstrap_source_mode_installs_the_harness_distribution(monkeypatch) -> None:
+    module = _load_bootstrap()
+    calls: list[tuple[list[str], dict]] = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), kwargs))
+        return Result()
+
+    monkeypatch.setattr(module, "_validate_source", lambda: None)
+    monkeypatch.setattr(module, "_verify_runtime", lambda _mode: None)
+    monkeypatch.setattr(module, "_pip_command", lambda: ["pip", "install"])
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module.main(["--mode", "source"]) == 0
+    command, kwargs = calls[0]
+    assert command == [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        module.CYTHON_REQUIREMENT,
+        str(module.ROOT),
+    ]
+    assert kwargs["cwd"] == module.ROOT
+    assert kwargs["env"]["PYBOY_NO_CYTHON"] == "1"
+
+
+def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(monkeypatch) -> None:
+    module = _load_bootstrap()
+    calls: list[tuple[list[str], dict]] = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), kwargs))
+        return Result()
+
+    monkeypatch.setattr(module, "_validate_source", lambda: None)
+    monkeypatch.setattr(module, "_verify_runtime", lambda _mode: None)
+    monkeypatch.setattr(module, "_pip_command", lambda: ["pip", "install"])
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module.main(["--mode", "cython"]) == 0
+    command, kwargs = calls[0]
+    assert command[:4] == ["pip", "install", "--force-reinstall", "--no-deps"]
+    assert command[-2:] == [module.CYTHON_REQUIREMENT, str(module.PYBOY_SOURCE)]
+    assert "PYBOY_NO_CYTHON" not in kwargs["env"]
+    assert module.CYTHON_MODULES == (
+        "pyboy.pyboy",
+        "pyboy.utils",
+        "pyboy.core.mb",
+        "pyboy.core.serial",
+    )
+
+
+def test_bootstrap_source_mode_rejects_a_competing_pyboy_distribution(monkeypatch) -> None:
+    module = _load_bootstrap()
+    monkeypatch.setattr(
+        module,
+        "_package_distributions",
+        lambda package: {"pokered-harness", "pyboy"} if package == "pyboy" else set(),
+    )
+
+    with pytest.raises(SystemExit, match="competing installed owners"):
+        module._verify_runtime("source")
 
 
 def test_mcp_config_uses_the_installed_runtime_without_absolute_paths() -> None:
@@ -77,10 +253,16 @@ def test_mcp_config_uses_the_installed_runtime_without_absolute_paths() -> None:
     server = config["mcpServers"]["pokered"]
 
     assert server["command"] == "python"
+    assert server["args"] == ["-m", "pokered_harness.mcp_server"]
     assert "PYTHONPATH" not in server["env"]
-    assert all(not Path(value).is_absolute() for value in server["env"].values())
+    assert all(
+        not (Path(value).is_absolute() or PureWindowsPath(value).is_absolute())
+        for value in server["env"].values()
+    )
     assert server["env"]["POKERED_ROM_PATH"] == "${PWD}/rom/red/pokemon-red-color.gb"
     assert server["env"]["POKERED_SYM_PATH"] == "${PWD}/rom/red/pokemon-red.sym"
+    assert server["env"]["POKERED_SYM_SHA1"] == "03783c86a42588bd77f73bd7814cf8d70e590118"
+    assert server["env"]["POKERED_VERSIONS_PATH"] == "${PWD}/VERSIONS.md"
 
 
 def test_pyboy_runtime_exposes_the_harness_serial_contract() -> None:
@@ -88,6 +270,13 @@ def test_pyboy_runtime_exposes_the_harness_serial_contract() -> None:
 
     assert pyboy.__version__ == "2.7.0"
     assert pyboy.__pokered_harness_revision__ == EXPECTED_PYBOY_REVISION
+
+    owners = {
+        name.lower().replace("_", "-")
+        for name in importlib.metadata.packages_distributions().get("pyboy", ())
+    }
+    assert owners <= {"pokered-harness"}
+    assert "pokered-harness" in owners
 
     serial = Serial(False)
     for name in ("backend", "apply_external_edge", "peek_out_bit"):
