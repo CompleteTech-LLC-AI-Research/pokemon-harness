@@ -14,7 +14,7 @@ production release. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
 current published implementation head is
 `ec28a78286325db4dad243c6185846b77ba5bbed` (PR #30, merged 2026-09-03).
-The latest README status refreshes are merged in PRs #31 and #32, following
+The README status is maintained through merged documentation updates following
 the release-gate and runtime-hardening merge in PR #29. The historical
 publication base for this candidate is
 `8727779` (PR #28 documentation merge); the candidate also contains the
