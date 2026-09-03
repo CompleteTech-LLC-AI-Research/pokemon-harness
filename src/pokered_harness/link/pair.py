@@ -26,10 +26,13 @@ from pokered_harness.session import RunUntilResult
 
 _LOGGER = logging.getLogger(__name__)
 
-_HookSnapshot = dict[
-    tuple[int, int],
-    tuple[tuple[Callable[[object], None], object], ...],
-] | None
+_HookSnapshot = (
+    dict[
+        tuple[int, int],
+        tuple[tuple[Callable[[object], None], object], ...],
+    ]
+    | None
+)
 _SerialHookRecord = tuple[object, int, int, str]
 
 
@@ -39,6 +42,7 @@ def _validate_positive_int(value: int, name: str) -> int:
     if value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
 
 if TYPE_CHECKING:
     from pokered_harness.session import Session
@@ -390,9 +394,7 @@ class LinkPair:
                 errors.append(exc)
         return errors
 
-    def _bridge_hook_addresses_for(
-        self, bridge: object
-    ) -> list[tuple[object, int, int]]:
+    def _bridge_hook_addresses_for(self, bridge: object) -> list[tuple[object, int, int]]:
         """Return addresses occupied by the bridge's Session.serial_hook calls.
 
         ``SerialBridge`` keeps its resolved map privately, so use it when
@@ -478,9 +480,7 @@ class LinkPair:
         pa, pb = self._primary, self._peer
         mem_a, mem_b = pa._pyboy.memory, pb._pyboy.memory
 
-        def _buffer_addresses(
-            session: Session, key: str
-        ) -> tuple[int, int] | None:
+        def _buffer_addresses(session: Session, key: str) -> tuple[int, int] | None:
             send_tags = (
                 f"wSerial{key}SendData",
                 f"wLink{key}SendBuffer",
@@ -520,9 +520,7 @@ class LinkPair:
                     (pb, _copy_to_b),
                 ):
                     try:
-                        handle = self._register_owned_symbol_hook(
-                            session, label, callback
-                        )
+                        handle = self._register_owned_symbol_hook(session, label, callback)
                     except (KeyError, LookupError, ValueError):
                         # These semantic bridges are optional for a ROM whose
                         # symbol set differs. Do not disturb another hook at
@@ -578,9 +576,7 @@ class LinkPair:
                 return None
             return next((name for name in names if name in candidate_names), None)
 
-        def _peer_send_address(
-            local_session: Session, peer_session: Session, address: int
-        ) -> int:
+        def _peer_send_address(local_session: Session, peer_session: Session, address: int) -> int:
             """Translate a local serial buffer pointer to the peer's address."""
             name = _buffer_name(local_session, address)
             if name is None or name not in peer_session.symbols:
@@ -600,9 +596,7 @@ class LinkPair:
             for i in range(bc):
                 this_mem[(de + i) & 0xFFFF] = peer_mem[(peer_hl + i) & 0xFFFF]
             sp = rf.SP
-            rf.PC = (
-                this_mem[(sp + 1) & 0xFFFF] << 8
-            ) | this_mem[sp & 0xFFFF]
+            rf.PC = (this_mem[(sp + 1) & 0xFFFF] << 8) | this_mem[sp & 0xFFFF]
             rf.SP = (sp + 2) & 0xFFFF
             rf.HL = (hl + bc) & 0xFFFF
             new_de = (de + bc) & 0xFFFF
@@ -663,9 +657,7 @@ class LinkPair:
                 continue
             owned_hooks.append(handle)
 
-    def _install_linkmenu_autoselect_trade(
-        self, owned_hooks: list[HookRegistration]
-    ) -> None:
+    def _install_linkmenu_autoselect_trade(self, owned_hooks: list[HookRegistration]) -> None:
         """Auto-select TRADE in the Cable Club LinkMenu.
 
         LinkMenu's ``.exchangeMenuSelectionLoop`` calls
@@ -714,23 +706,19 @@ class LinkPair:
         addr_b += 3
 
         def force_trade_a(_ctx: object) -> None:
-            mem_a[recv_addr_a] = 0xd4
-            mem_a[recv_addr_a + 1] = 0xd4
+            mem_a[recv_addr_a] = 0xD4
+            mem_a[recv_addr_a + 1] = 0xD4
 
         def force_trade_b(_ctx: object) -> None:
-            mem_b[recv_addr_b] = 0xd4
-            mem_b[recv_addr_b + 1] = 0xd4
+            mem_b[recv_addr_b] = 0xD4
+            mem_b[recv_addr_b + 1] = 0xD4
 
         try:
-            owned_hooks.append(
-                self._register_owned_address_hook(pa, bank_a, addr_a, force_trade_a)
-            )
+            owned_hooks.append(self._register_owned_address_hook(pa, bank_a, addr_a, force_trade_a))
         except (KeyError, LookupError, ValueError):
             pass
         try:
-            owned_hooks.append(
-                self._register_owned_address_hook(pb, bank_b, addr_b, force_trade_b)
-            )
+            owned_hooks.append(self._register_owned_address_hook(pb, bank_b, addr_b, force_trade_b))
         except (KeyError, LookupError, ValueError):
             pass
 
@@ -761,9 +749,9 @@ class LinkPair:
     # --- stepping ------------------------------------------------------
 
     #: Hardware-level serial IO register addresses (Game Boy common).
-    _RSB_ADDR = 0xFF01      # serial data
-    _RSC_ADDR = 0xFF02      # serial control (bit 7 = START, bit 0 = INTERNAL)
-    _IF_ADDR = 0xFF0F       # interrupt flag; bit 3 = serial
+    _RSB_ADDR = 0xFF01  # serial data
+    _RSC_ADDR = 0xFF02  # serial control (bit 7 = START, bit 0 = INTERNAL)
+    _IF_ADDR = 0xFF0F  # interrupt flag; bit 3 = serial
     _HRAM_STATUS_ADDR = 0xFFAA  # hSerialConnectionStatus
     _SC_START = 0x80
     _IF_SERIAL = 0x08
@@ -846,9 +834,7 @@ class LinkPair:
         else:
             raise ValueError(f"side must be 'primary' or 'peer', got {side!r}")
 
-        wanted = (
-            {event_names} if isinstance(event_names, str) else set(event_names)
-        )
+        wanted = {event_names} if isinstance(event_names, str) else set(event_names)
         if not wanted:
             raise ValueError("event_names must be non-empty")
 
@@ -873,9 +859,7 @@ class LinkPair:
                     event=evt,
                     ticks_spent=watched.current_tick() - start_tick,
                 )
-        return RunUntilResult(
-            event=None, ticks_spent=watched.current_tick() - start_tick
-        )
+        return RunUntilResult(event=None, ticks_spent=watched.current_tick() - start_tick)
 
 
 __all__ = ["LinkPair"]

@@ -315,6 +315,18 @@ def _load_bootstrap():
     return module
 
 
+def test_bootstrap_removes_transient_pyboy_metadata(tmp_path, monkeypatch) -> None:
+    module = _load_bootstrap()
+    metadata_dir = tmp_path / "pyboy.egg-info"
+    metadata_dir.mkdir()
+    (metadata_dir / "PKG-INFO").write_text("generated", encoding="utf-8")
+    monkeypatch.setattr(module, "PYBOY_SOURCE", tmp_path)
+
+    module._remove_generated_pyboy_metadata()
+
+    assert not metadata_dir.exists()
+
+
 def test_bootstrap_rehydrates_missing_pip(monkeypatch) -> None:
     module = _load_bootstrap()
     calls: list[list[str]] = []

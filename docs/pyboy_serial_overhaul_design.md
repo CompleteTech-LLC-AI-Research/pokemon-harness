@@ -18,7 +18,7 @@ dispatch implementation is
 `54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35). The harness bundles a pinned PyBoy
 `2.7.0` source runtime and documents source mode as its release runtime. The
 optional Cython build passes the focused transport/serial/PyBoy-link suite
-107/107, but its current strict trade gate is 18/19 because
+110/110, but its current strict trade gate is 18/19 because
 `yellow-listen-blue_color-connect` stalls before party exchange. The full
 native battle matrix is unqualified. These are harness results, not upstream
 PyBoy results, and the API and integration points below remain a proposal for

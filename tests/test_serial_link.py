@@ -50,9 +50,7 @@ def _send_raw(sock: socket.socket, data: bytes) -> None:
         view = view[sent:]
 
 
-def _make_tcp_pair(
-    a_rom: str = "blue", b_rom: str = "blue"
-) -> tuple[TcpSerialLink, TcpSerialLink]:
+def _make_tcp_pair(a_rom: str = "blue", b_rom: str = "blue") -> tuple[TcpSerialLink, TcpSerialLink]:
     """Spin up a listener + connector on localhost and return both ends."""
     port = _free_port()
     holder: dict[str, TcpSerialLink] = {}
@@ -81,13 +79,11 @@ def test_in_process_exchange_round_trip():
 
     def peer_work():
         reply = b.exchange("exchange_bytes/wSerialPlayerDataBlock", b"\x11\x22\x33")
-        assert reply == b"\xAA\xBB\xCC"
+        assert reply == b"\xaa\xbb\xcc"
 
     t = threading.Thread(target=peer_work, daemon=True)
     t.start()
-    got = a.exchange(
-        "exchange_bytes/wSerialPlayerDataBlock", b"\xAA\xBB\xCC", timeout_ms=2000
-    )
+    got = a.exchange("exchange_bytes/wSerialPlayerDataBlock", b"\xaa\xbb\xcc", timeout_ms=2000)
     assert got == b"\x11\x22\x33"
     t.join(timeout=2.0)
 
@@ -131,8 +127,8 @@ def test_in_process_different_kinds_dont_cross():
     a, b = InProcessSerialLink.pair("blue", "blue")
 
     def peer_work():
-        assert b.exchange("foo", b"\xAA") == b"\x01"
-        assert b.exchange("bar", b"\xBB") == b"\x02"
+        assert b.exchange("foo", b"\xaa") == b"\x01"
+        assert b.exchange("bar", b"\xbb") == b"\x02"
 
     t = threading.Thread(target=peer_work, daemon=True)
     t.start()
@@ -140,8 +136,8 @@ def test_in_process_different_kinds_dont_cross():
     got_foo = a.exchange("foo", b"\x01", timeout_ms=2000)
     got_bar = a.exchange("bar", b"\x02", timeout_ms=2000)
     t.join(timeout=2.0)
-    assert got_foo == b"\xAA"
-    assert got_bar == b"\xBB"
+    assert got_foo == b"\xaa"
+    assert got_bar == b"\xbb"
 
 
 def test_in_process_timeout_when_peer_silent():
@@ -272,12 +268,10 @@ def test_tcp_exchange_round_trip():
 
         t = threading.Thread(target=server_work, daemon=True)
         t.start()
-        got = client.exchange(
-            "exchange_bytes/wSerialPlayerDataBlock", b"\xAA" * 5, timeout_ms=2000
-        )
+        got = client.exchange("exchange_bytes/wSerialPlayerDataBlock", b"\xaa" * 5, timeout_ms=2000)
         t.join(timeout=2.0)
         assert got == b"\x11" * 5
-        assert results_server == [b"\xAA" * 5]
+        assert results_server == [b"\xaa" * 5]
     finally:
         server.close()
         client.close()
@@ -352,9 +346,11 @@ def test_tcp_peer_close_wakes_exchange_waiter_promptly():
 def test_tcp_inbound_exchange_queue_overflow_fails_closed():
     server, client = _make_tcp_pair()
     kind = "flood"
-    body = bytes([serial_link_module.OP_EXCHANGE]) + serial_link_module._pack_lp_str(
-        kind
-    ) + serial_link_module._pack_lp_bytes(b"x")
+    body = (
+        bytes([serial_link_module.OP_EXCHANGE])
+        + serial_link_module._pack_lp_str(kind)
+        + serial_link_module._pack_lp_bytes(b"x")
+    )
     try:
         for _ in range(serial_link_module._MAX_INBOUND_FRAMES_PER_KIND):
             client._send_frame(body)
@@ -390,9 +386,11 @@ def test_tcp_inbound_exchange_frame_budget_fails_closed_across_kinds():
     try:
         for index in range(serial_link_module._MAX_INBOUND_FRAMES + 1):
             kind = f"flood-{index}"
-            body = bytes([serial_link_module.OP_EXCHANGE]) + serial_link_module._pack_lp_str(
-                kind
-            ) + serial_link_module._pack_lp_bytes(b"x")
+            body = (
+                bytes([serial_link_module.OP_EXCHANGE])
+                + serial_link_module._pack_lp_str(kind)
+                + serial_link_module._pack_lp_bytes(b"x")
+            )
             client._send_frame(body)
 
         deadline = time.monotonic() + 1.0
@@ -428,9 +426,7 @@ def test_cancelled_tcp_connect_returns_promptly():
     cancel.set()
     started = time.monotonic()
     with pytest.raises(SerialLinkClosed, match="cancelled"):
-        TcpSerialLink.connect(
-            "127.0.0.1", 1, "blue", timeout_s=30.0, cancel_event=cancel
-        )
+        TcpSerialLink.connect("127.0.0.1", 1, "blue", timeout_s=30.0, cancel_event=cancel)
     assert time.monotonic() - started < 1.0
 
 

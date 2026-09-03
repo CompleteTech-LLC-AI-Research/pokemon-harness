@@ -3,18 +3,24 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
-current published repository head is
+published base for this candidate is
 `84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36, 2026-09-03); the
-implementation change immediately below it is
+underlying implementation change is
 `54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35). External ROMs, symbols,
 save states, and sanitized evidence remain operator-managed and are not
 distributed by this repository.
+
+The current integration candidate also includes serial save-state restoration,
+native bootstrap ownership and build-metadata cleanup, bounded MCP teardown,
+fail-closed gate accounting, and safe cleanup for partially initialized PyBoy
+objects. The
+underlying remote-dispatch implementation remains the PR #35 change above.
 
 The release decision at this head is `PARTIAL`, not `PRODUCTION-READY`.
 Current controlled evidence is:
 
 - the focused source and Cython transport/serial/PyBoy-link suite passes
-  107/107 in each runtime;
+  110/110 in each runtime;
 - an asset-backed source trade gate recorded 19/19 ordered local and remote
   party-swap rows. Its supervisor started before PR #35 was published, so this
   is recorded trade-tier evidence, not a clean post-merge all-tier sign-off;
@@ -25,15 +31,21 @@ Current controlled evidence is:
 - a timing-altered diagnostic reached the native trade hooks but produced
   incorrect party records, so it is not acceptance evidence; and
 - the full native battle matrix is not qualified.
+- the current source and Cython packaging/runtime contract is 27/27 in each
+  runtime, including native bootstrap ownership and transient metadata cleanup.
 
 A fresh isolated source and Cython `--unit-only --repeat-timing 5` gate on
-2026-09-03 collected 730 tests in each runtime. Both passed unit 586/586 and
+2026-09-03 collected 745 tests in each runtime. Both passed unit 600/600 and
 timing 40/40 in all five repetitions; source reported `python-source` and
 Cython reported `cython/native-extension`. The clone had no ROM, symbol, or
 save-state assets, so fixture schema and matrix declaration were checked but
-ROM gameplay was not run. An earlier environment-specific 585/586 ownership
-result is superseded for these isolated environments. Source mode is the
-documented release runtime; Cython is an optional diagnostic build.
+ROM gameplay was not run. Fresh uv-managed source and native environments
+installed the candidate, passed `pip check`, and the native bootstrap verified
+both `pyboy` and `pokered-harness` owners. An earlier environment-specific
+585/586 ownership result is superseded for these isolated environments. Source
+mode is the documented release runtime; Cython is an optional diagnostic build.
+The host's bare `python3` still lacks `ensurepip`, so that alternate
+standard-library venv path remains open.
 
 The complete all-tier source-runtime gate is historical PR #17 baseline
 evidence: collection 698, unit 554/554, local real-ROM 47/47, remote
@@ -43,10 +55,10 @@ transport 15/15, local/session 47/47, focused transport/MCP 167/167, and a
 bounded localhost concurrency probe 8/8 in each of five repetitions. These
 results must not be relabeled as a current full native gate.
 
-An asset-free `python -m pytest -q -ra` diagnostic completed 566 passed, 140
-expected BYO-asset skips, and 2 warnings. It proves clean-checkout test
-collection can complete without assets; skipped real-ROM tiers remain
-unverified. Fresh Windows evidence covers install, source/Cython bootstrap,
+An asset-free `python -m pytest -q -ra` diagnostic completed 604 passed, 141
+expected BYO-asset skips, and one SDL warning after the partial-initialization
+destructor guard was added. It proves clean-checkout test collection can
+complete without assets; skipped real-ROM tiers remain unverified. Fresh Windows evidence covers install, source/Cython bootstrap,
 MCP stdio, and three-ROM Cython lifecycle checks, but not full native
 gameplay, real-ROM concurrent load, the remote trade/battle matrix, or macOS.
 
@@ -65,7 +77,7 @@ Status semantics:
 | Capability | Current status | Evidence boundary |
 |---|---|---|
 | Single session and MCP | Scoped `PASS`; release remains `PARTIAL` | Historical asset-backed local/session 47/47 and Windows MCP stdio 4/4 cover the tested inputs. They do not establish link gameplay or every platform. |
-| In-process paired link | Scoped `PASS`; release remains `PARTIAL` | Prior source/Cython local/session evidence and current focused 107/107 cover controlled attach/serial/lifecycle behavior. Current full native battle coverage is not recorded. |
+| In-process paired link | Scoped `PASS`; release remains `PARTIAL` | Prior source/Cython local/session evidence and current focused 110/110 cover controlled attach/serial/lifecycle behavior. Current full native battle coverage is not recorded. |
 | Remote TCP transport | Scoped `PASS` | Prior source/Cython remote transport/MCP slice passed 15/15 with bounded lifecycle. TCP is loopback-only and has no authentication or encryption. |
 | Remote trade | Source `19/19` recorded; native `18/19` | The native failure is `yellow-listen-blue_color-connect` before party exchange. Representative rows do not close the matrix. |
 | Remote battle | Historical source baseline only; native unqualified | The historical source baseline passed its 19/19 strict battle matrix. No complete current native battle matrix is claimed. |
@@ -135,7 +147,7 @@ python scripts/bootstrap_pyboy.py --mode source --check
 The pinned fork has an optional Cython mode. Its semantic serial-contract probe
 and three canonical real-ROM attach/step/close smokes pass, but it is not the
 documented release default. The current focused source and Cython
-transport/serial/PyBoy-link suite passes 107/107 in each runtime. The current
+transport/serial/PyBoy-link suite passes 110/110 in each runtime. The current
 native strict trade gate is `PARTIAL` at 18/19 because
 `yellow-listen-blue_color-connect` stalls before party exchange; an isolated
 retry reproduced the same failure. The full native battle matrix is not
@@ -286,15 +298,18 @@ python scripts/production_gate.py \
   --format text
 ```
 
-The fresh isolated `--unit-only --repeat-timing 5` check collected 730 tests in
-each runtime, passed unit 586/586, and passed timing 40/40 in all five
+The fresh isolated `--unit-only --repeat-timing 5` check collected 745 tests in
+each runtime, passed unit 600/600, and passed timing 40/40 in all five
 repetitions. Source reported `python-source`; Cython reported
 `cython/native-extension`. The gate also performs schema-only validation of the
 ten-entry fixture manifest. Because the isolated clone had no ROM, symbol, or
 save-state assets, this check did not validate ROM bytes, load save states,
 exercise MCP with a real ROM, or run link gameplay; it is never a production
-sign-off by itself. An earlier environment-specific 585/586 ownership result
-is superseded for these isolated environments.
+sign-off by itself. Both uv-managed environments passed `pip check`, and the
+native bootstrap verified the `pyboy` and `pokered-harness` owners. An earlier
+environment-specific 585/586 ownership result is superseded for these isolated
+environments. The host's bare `python3` still lacks `ensurepip`, so that
+alternate standard-library venv path remains open.
 Because `--unit-only` selects only `unit` and `timing`, it does not validate ROM
 bytes, load save states, exercise MCP with a real ROM, or run link gameplay; it
 is never a production sign-off by itself.
@@ -701,8 +716,8 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The fresh isolated source and Cython unit/timing gates each collected 730
-   tests, passed unit 586/586, and passed timing 40/40 in five repetitions.
+1. The fresh isolated source and Cython unit/timing gates each collected 745
+   tests, passed unit 600/600, and passed timing 40/40 in five repetitions.
    They were asset-free and therefore do not close ROM-backed gameplay,
    platform, or release-sign-off requirements. A new standard-library virtual
    environment was not created on this host because its `python3` lacked

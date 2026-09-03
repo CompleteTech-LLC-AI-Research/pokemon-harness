@@ -5,15 +5,19 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate (2026-09-03). The published repository
-head is `84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36). The current
-implementation commit is `54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35),
-which moves remote serial-edge dispatch to an explicit native instruction-batch
-boundary. This is a `PARTIAL` publication candidate, not a
+Status: `PARTIAL` current audit candidate (2026-09-03). The published base for
+this candidate is `84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36). The
+underlying implementation commit is
+`54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35), which moves remote
+serial-edge dispatch to an explicit native instruction-batch boundary. The
+current candidate also contains serial save-state, bootstrap ownership and
+build-metadata cleanup, MCP teardown, gate-accounting, and
+partial-initialization cleanup changes. This is a
+`PARTIAL` publication candidate, not a
 `PRODUCTION-READY` release.
 
 Current controlled evidence is scoped as follows. The focused source and Cython
-transport/serial/PyBoy-link suite passes 107/107 in each runtime. An
+transport/serial/PyBoy-link suite passes 110/110 in each runtime. An
 asset-backed source trade gate recorded 19/19 ordered local and remote party
 swaps. The corresponding native Cython trade gate completed 18/19: the sole
 failure is the remote `yellow-listen-blue_color-connect` row, which stalls
@@ -26,14 +30,17 @@ published; its child runs loaded the current implementation, but it is not a
 clean post-merge all-tier sign-off.
 
 A fresh isolated source and Cython `--unit-only --repeat-timing 5` gate on
-2026-09-03 collected 730 tests in each runtime. Both passed unit 586/586 and
+2026-09-03 collected 745 tests in each runtime. Both passed unit 600/600 and
 timing 40/40 in all five repetitions; source reported `python-source` and
 Cython reported `cython/native-extension`. The clone had no ROM, symbol, or
 save-state assets, so fixture schema and matrix declaration were checked but
 ROM gameplay was not run. An earlier environment-specific 585/586 ownership
-result is superseded for these isolated environments. The vendored source
-PyBoy runtime remains the documented release
-default; Cython is an optional diagnostic build.
+result is superseded for these isolated environments. Fresh uv-managed source
+and native environments installed the candidate, passed `pip check`, and the
+native bootstrap verified both `pyboy` and `pokered-harness` package owners. The
+vendored source PyBoy runtime remains the documented release default; Cython is
+an optional diagnostic build. The host's bare `python3` still lacks `ensurepip`,
+so that alternate standard-library venv path remains open.
 
 Prior integrated source and Cython transport slices passed remote 15/15 and
 the Cython local/session slice passed 47/47. Those are scoped follow-up
@@ -79,7 +86,7 @@ reformatted.
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
 coordinator and remote TCP transport. The optional Cython/native build passes
-its compiled serial-contract probe and the focused 107/107 serial-link suite,
+its compiled serial-contract probe and the focused 110/110 serial-link suite,
 but the current native strict trade gate is 18/19 and the full native battle
 matrix is unqualified. A pre-existing standalone PyBoy wheel must not be
 allowed to shadow this package; verify the runtime identity and selected mode
@@ -224,9 +231,9 @@ matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 
 | Path | ROMs | Required fixture files | Evidence boundary |
 |---|---|---|---|
-| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Current source gate recorded 9/9 local rows; current native trade also completed 9/9 local rows, with its remaining failure in the remote half |
+| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Recorded source gate: 9/9 local rows; recorded native trade: 9/9 local rows, with its remaining failure in the remote half |
 | Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Historical source baseline passed 9/9 local rows; current full source rerun is not recorded, and native full battle coverage remains unqualified |
-| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Current source gate recorded 9/9 remote rows; current native trade recorded 8/9, with `yellow-listen-blue_color-connect` stalled before party exchange |
+| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Recorded source gate: 9/9 remote rows; current native rerun reproduces the 8/9 result, with `yellow-listen-blue_color-connect` stalled before party exchange |
 | Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Historical source baseline passed 9/9 remote rows; current native battle matrix is not qualified |
 
 The tracked

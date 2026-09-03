@@ -142,6 +142,13 @@ def _new_serial_instance() -> object:
     return Serial(False)
 
 
+def _remove_generated_pyboy_metadata() -> None:
+    """Keep a native build's transient distribution metadata out of the source path."""
+    metadata_dir = PYBOY_SOURCE / "pyboy.egg-info"
+    if metadata_dir.is_dir():
+        shutil.rmtree(metadata_dir)
+
+
 def _verify_runtime(mode: str) -> None:
     """Fail closed unless the installed runtime matches the requested mode."""
     try:
@@ -204,10 +211,7 @@ def _verify_runtime(mode: str) -> None:
         # A separately installed stock PyBoy may import successfully while
         # exposing an incompatible constructor or ABI. Report it alongside
         # the ownership/module-kind violations instead of leaking a traceback.
-        problems.append(
-            "serial contract could not be constructed: "
-            f"{type(exc).__name__}: {exc}"
-        )
+        problems.append(f"serial contract could not be constructed: {type(exc).__name__}: {exc}")
     else:
         missing = [
             name
@@ -275,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         str(install_target),
     ]
     result = subprocess.run(command, cwd=ROOT, env=env, check=False)
+    _remove_generated_pyboy_metadata()
     if result.returncode:
         if args.mode == "cython":
             print(

@@ -47,6 +47,7 @@ class RawBridge(FakeBridge):
     def install(self) -> None:
         super().install()
         for index, session in enumerate(self.args[:2]):
+
             def _callback(_ctx: object, *, _index=index) -> None:
                 self.callback_calls[_index] += 1
 
@@ -561,7 +562,9 @@ def test_run_until_event_pair_returns_when_event_present_on_primary():
     # Pre-seed the primary's bus with an event at tick=100 (> start_tick=0).
     s_a.events.emit(tick=100, name="link.trade.show_player_mon", bank=0, addr=0)
     result = pair.run_until_event_pair(
-        "link.trade.show_player_mon", max_ticks=16, chunk=4,
+        "link.trade.show_player_mon",
+        max_ticks=16,
+        chunk=4,
     )
     assert result.reached is True
     assert result.event is not None
@@ -572,7 +575,10 @@ def test_run_until_event_pair_returns_when_event_present_on_peer():
     pair, _, s_b, _, _, _ = _make_pair()
     s_b.events.emit(tick=50, name="link.trade.load_data", bank=0, addr=0)
     result = pair.run_until_event_pair(
-        "link.trade.load_data", side="peer", max_ticks=16, chunk=4,
+        "link.trade.load_data",
+        side="peer",
+        max_ticks=16,
+        chunk=4,
     )
     assert result.reached is True
     assert result.event is not None
@@ -581,7 +587,9 @@ def test_run_until_event_pair_returns_when_event_present_on_peer():
 def test_run_until_event_pair_times_out():
     pair, _, _, _, _, _ = _make_pair()
     result = pair.run_until_event_pair(
-        "link.trade.show_player_mon", max_ticks=12, chunk=4,
+        "link.trade.show_player_mon",
+        max_ticks=12,
+        chunk=4,
     )
     assert result.reached is False
     assert result.event is None

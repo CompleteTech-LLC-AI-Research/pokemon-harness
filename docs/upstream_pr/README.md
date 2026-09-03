@@ -22,7 +22,7 @@ PyBoy contribution and this directory does not claim upstream acceptance.
   upstream review result.
 - No upstream PR number, branch tip, test output, or merge status is asserted
   by these files.
-- Fresh isolated source and Cython unit/timing gates each pass 586/586 unit
+- Fresh isolated source and Cython unit/timing gates each pass 600/600 unit
   tests and 40/40 timing cases across five repetitions. The clone had no ROM,
   symbol, or save-state assets, so real-ROM/link tests remain fixture- and
   runtime-gated; the release decision remains `PARTIAL`. An earlier
@@ -40,7 +40,7 @@ PyBoy contribution and this directory does not claim upstream acceptance.
   can be treated as an upstream dependency.
 - The pinned fork's Cython build exposes the Python-side `mb.serial` object.
   Recorded scoped evidence includes a three-ROM attach/tick/close smoke and a
-  current focused 107/107 serial-link suite. The native trade gate is still
+  current focused 110/110 serial-link suite. The native trade gate is still
   18/19 because `yellow-listen-blue_color-connect` stalls before party
   exchange, and native battle is not fully qualified. This proposal does not
   reproduce those ROM-backed results or certify the strict matrix. Upstream-

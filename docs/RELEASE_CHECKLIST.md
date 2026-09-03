@@ -16,12 +16,16 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The published repository head is `84dc79d8098fe5fa298db6700b5ba0b81610ed53`
-(PR #36, 2026-09-03). The implementation commit immediately below it is
+The published repository base for the current integration candidate is
+`84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36, 2026-09-03). The
+implementation commit below it is
 `54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35), which moves remote
-serial-edge dispatch to an explicit native instruction-batch boundary. This
-remains a `PARTIAL` publication candidate until the remaining verification and
-review conditions are complete.
+serial-edge dispatch to an explicit native instruction-batch boundary. The
+candidate also includes serial save-state restoration, native bootstrap
+ownership and build-metadata cleanup, bounded MCP teardown, fail-closed gate
+accounting, and partial-initialization cleanup. This remains a `PARTIAL`
+publication candidate
+until the remaining verification and review conditions are complete.
 The complete all-tier source-runtime baseline
 ran from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`,
 whose implementation tree is the PR #17 parent. The complete baseline gate
@@ -62,16 +66,19 @@ python scripts/production_gate.py \
   --format text
 ```
 
-passed in the fresh isolated current-head check: collection 730 in each
-runtime, unit 586/586, and timing 40/40 in each of five repetitions. Source
+passed in the fresh isolated current-head check: collection 745 in each
+runtime, unit 600/600, and timing 40/40 in each of five repetitions. Source
 reported `python-source`; Cython reported `cython/native-extension`. The clone
 contained no ROM, symbol, or save-state assets, so no ROM-backed tier ran and
-the check is not a production sign-off. An earlier environment-specific
-585/586 ownership result is superseded for these isolated environments.
+the check is not a production sign-off. Both uv-managed environments passed
+`pip check`, and native bootstrap verified the `pyboy` and `pokered-harness`
+owners. An earlier environment-specific 585/586 ownership result is superseded
+for these isolated environments. The host's bare `python3` still lacks
+`ensurepip`, so that alternate standard-library venv path remains open.
 
 After the pinned fork is built with `scripts/bootstrap_pyboy.py --mode cython`,
 the optional native path can be checked explicitly. The current focused source
-and Cython transport/serial/PyBoy-link suite passes 107/107 in each runtime.
+and Cython transport/serial/PyBoy-link suite passes 110/110 in each runtime.
 An asset-backed source trade gate recorded 19/19 ordered rows; the current
 native trade gate recorded 18/19, with
 `yellow-listen-blue_color-connect` stalled before party exchange and reproduced
@@ -114,9 +121,9 @@ update. Current native trade remains 18/19 and native battle remains
 unqualified.
 
 The fresh isolated asset-free source and Cython checks use managed Linux Python
-3.12.13 and Pytest 9.1.1: collection 730 in each mode, unit 586/586, and
+3.12.13 and Pytest 9.1.1: collection 745 in each mode, unit 600/600, and
 timing 40/40 in each of five repetitions. The native probe/build and current
-focused 107/107 serial-link suite are separate scoped checks. These gates do
+focused 110/110 serial-link suite are separate scoped checks. These gates do
 not establish ROM-backed gameplay coverage.
 
 The pre-PR #27 source broad diagnostic remains incomplete: 418/703 tests
@@ -126,7 +133,7 @@ from before PR #27's 30-second game-exchange timeout; this is not a full-suite
 pass.
 
 A fresh asset-free `python -m pytest -q -ra` run at the current head completed
-566 passed, 140 expected BYO-asset skips, and 2 warnings. This is a completed
+604 passed, 141 expected BYO-asset skips, and one SDL warning. This is a completed
 clean-checkout diagnostic, not a release gate; ROM-backed trade, battle, and
 MCP cases were intentionally skipped because their external assets were absent.
 
@@ -144,9 +151,11 @@ cross-host networking.
 
 ## Source and artifact hygiene
 
-- [x] The current published head is identified as `84dc79d` (PR #36), with
-  implementation commit `54a739b` (PR #35), and the documentation worktree is
-  isolated from the protected dirty development checkout.
+- [x] The published base for the current candidate is identified as `84dc79d`
+  (PR #36), with implementation commit `54a739b` (PR #35); the candidate also
+  records the serial, bootstrap, lifecycle, gate-accounting, and cleanup
+  changes, and the documentation worktree is isolated from the protected dirty
+  development checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
 - [x] Documentation keeps BYO assets and external evidence outside the source
@@ -173,7 +182,7 @@ cross-host networking.
   earlier scoped source/MCP checks passed with one unrelated WSL-worktree skip
   and MCP stdio 4/4.
 - [ ] The integrated Cython build passes the full real-ROM strict gameplay
-  matrix. Its focused serial-link suite passes 107/107 and its native trade
+  matrix. Its focused serial-link suite passes 110/110 and its native trade
   gate passes 18/19, but `yellow-listen-blue_color-connect` remains blocked
   before party exchange and the full native battle matrix is open.
 - [ ] Full Cython trade/battle acceptance is complete; source mode remains the
@@ -197,10 +206,11 @@ cross-host networking.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete in the
-  integrated gate; it collected 730 tests with no collection errors.
+  integrated gate; the current candidate collected 745 tests with no collection
+  errors.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
-- [x] The fresh isolated current-head unit gate passes 586/586 in both source
+- [x] The fresh isolated current-head unit gate passes 600/600 in both source
   and Cython modes, and timing passes 40/40 in each of five repetitions; the
   asset-free run did not exercise ROM-backed gameplay.
 - [ ] A fresh standard-library virtual environment and editable install have
