@@ -62,7 +62,8 @@ tiers each pass 15/15, and source and Cython local/session tiers each pass
 remote Yellow↔Yellow failed at the trade-center warp; its exact selector passed
 when rerun in isolation. A source strict battle gate completed 18/19 under two
 workers for the same remote Yellow↔Yellow scheduling boundary; its exact
-selector also passed in isolation. Native strict matrices are still running.
+selector also passed in isolation. Native strict matrices were started but
+stopped before terminal results, so full native qualification remains open.
 
 A fresh `python -m pytest -q -ra` run at the current head completed 566 passed,
 140 expected BYO-asset skips, and 2 warnings. It is a clean-checkout
