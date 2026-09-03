@@ -9,6 +9,14 @@ Use this page only after recreating a candidate PyBoy branch and attaching
 fresh evidence. The [APPLY.md](APPLY.md) recipe is illustrative and requires
 review against the exact PyBoy base commit.
 
+At the current harness head
+(`84dc79d8098fe5fa298db6700b5ba0b81610ed53`, implementation
+`54a739be4a5f2d95a924c6f35c2aa695246ddd2f`), no PyBoy upstream branch or pull
+request has been created. The harness's focused
+source/native serial-link suite is 107/107 in each runtime, but native trade is
+18/19 and native battle is unqualified. Those results do not satisfy this
+template's upstream requirements.
+
 ## Required branch record
 
 - [ ] PyBoy upstream repository and exact base commit are recorded.
