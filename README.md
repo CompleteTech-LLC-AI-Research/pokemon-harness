@@ -12,12 +12,14 @@ symbol files, save states, or other ROM-derived artifacts.
 This repository remains an audited production-readiness candidate, not a
 production release. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
-published base for the current candidate is `8727779` (PR #28 documentation
-merge). The isolated candidate also contains the reviewed runtime, lifecycle,
-TCP, gate, and headless-performance commits `94f4429`, `9ce7c9f`, `3d04293`,
-`f046c34`, `8b4847b`, `9453d7a`, and `abf3d27`. This candidate is a `PARTIAL`
-publication candidate, not a `PRODUCTION-READY` release, until the remaining
-gates and review conditions are closed.
+current published head is `ec28a78286325db4dad243c6185846b77ba5bbed`
+(PR #30, merged 2026-09-03), following the release-gate and runtime-hardening
+merge in PR #29. The historical publication base for this candidate is
+`8727779` (PR #28 documentation merge); the candidate also contains the
+reviewed runtime, lifecycle, TCP, gate, and headless-performance commits
+`94f4429`, `9ce7c9f`, `3d04293`, `f046c34`, `8b4847b`, `9453d7a`, and `abf3d27`.
+This candidate is a `PARTIAL` publication candidate, not a `PRODUCTION-READY`
+release, until the remaining gates and review conditions are closed.
 
 The candidate includes the MCP lifecycle, runtime packaging, in-process
 serial/lifecycle, remote TCP follow-ups from PRs #12-#17, concurrency/lifecycle
@@ -63,7 +65,10 @@ remote Yellow↔Yellow failed at the trade-center warp; its exact selector passe
 when rerun in isolation. A source strict battle gate completed 18/19 under two
 workers for the same remote Yellow↔Yellow scheduling boundary; its exact
 selector also passed in isolation. Native strict matrices were started but
-stopped before terminal results, so full native qualification remains open.
+stopped before terminal results. A subsequent bounded native Blue Color↔Yellow
+trade diagnostic also failed to reach `TradeCenter_SelectMon` before its
+720-second deadline; no native cross-version trade completion is claimed. Full
+native qualification remains open.
 
 A fresh `python -m pytest -q -ra` run at the current head completed 566 passed,
 140 expected BYO-asset skips, and 2 warnings. It is a clean-checkout
