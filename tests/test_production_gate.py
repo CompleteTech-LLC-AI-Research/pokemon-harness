@@ -18,6 +18,8 @@ from scripts.tcp_link_matrix import (
     LOCAL_VERSION_PAIR_NODEIDS,
     REMOTE_REVERSED_ROLE_NODEIDS,
     REMOTE_VERSION_PAIR_NODEIDS,
+    _collection_environment,
+    _collection_report_details,
     acceptance_matrix_gaps,
     audit_collection,
     required_matrix_nodeids,
@@ -225,6 +227,76 @@ def test_fixture_manifest_provenance_requires_certified_entries(tmp_path):
     ]
 
 
+def test_fixture_manifest_input_pins_match_versions_and_inspected_bytes(tmp_path):
+    rom_root = tmp_path / "rom"
+    fixture_root = tmp_path / "fixtures"
+    red_root = rom_root / "red"
+    red_root.mkdir(parents=True)
+    rom = red_root / "pokemon-red.gb"
+    symbols = red_root / "pokemon-red.sym"
+    rom.write_bytes(b"rom")
+    symbols.write_bytes(b"symbols")
+    rom_sha1 = hashlib.sha1(b"rom").hexdigest()
+    symbol_sha1 = hashlib.sha1(b"symbols").hexdigest()
+    manifest = tmp_path / "fixture-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "fixtures": [
+                    {
+                        "id": "red-color-ordinary",
+                        "expected_rom": {
+                            "path": "rom/red/pokemon-red.gb",
+                            "sha1": rom_sha1,
+                        },
+                        "expected_symbols": {
+                            "path": "rom/red/pokemon-red.sym",
+                            "sha1": symbol_sha1,
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assets = gate.inspect_assets(
+        rom_root,
+        fixture_root,
+        {
+            Path("red/pokemon-red.gb"): rom_sha1,
+            Path("red/pokemon-red.sym"): symbol_sha1,
+        },
+    )
+
+    assert (
+        gate.fixture_manifest_input_problems(
+            manifest,
+            rom_root=rom_root,
+            assets=assets,
+            expected_sha1={
+                Path("red/pokemon-red.gb"): rom_sha1,
+                Path("red/pokemon-red.sym"): symbol_sha1,
+            },
+        )
+        == []
+    )
+
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["fixtures"][0]["expected_rom"]["sha1"] = "0" * 40
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    problems = gate.fixture_manifest_input_problems(
+        manifest,
+        rom_root=rom_root,
+        assets=assets,
+        expected_sha1={
+            Path("red/pokemon-red.gb"): rom_sha1,
+            Path("red/pokemon-red.sym"): symbol_sha1,
+        },
+    )
+    assert any("disagrees with VERSIONS.md" in problem for problem in problems)
+    assert any("does not match inspected bytes" in problem for problem in problems)
+
+
 def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert len(TIER_REQUIRED_NODEIDS["remote"]) == 11
     assert len(TIER_REQUIRED_NODEIDS["local"]) == 18
@@ -261,6 +333,55 @@ def test_matrix_audit_surfaces_collection_skips_even_when_they_are_described():
 
     assert audit["structural_pass"] is False
     assert audit["collection_skips"] == ("optional dependency unavailable",)
+
+
+def test_standalone_matrix_collection_report_rejects_inconsistent_accounting():
+    nodeids, errors, skips, problems = _collection_report_details(
+        {
+            "collection_only": True,
+            "counts": {
+                "total": 1,
+                "passed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "errors": 0,
+            },
+            "tests": [],
+            "collection_errors": [],
+            "collection_skips": [],
+            "collected": 1,
+            "nodeids": ["tests/test_one.py::test_one"],
+            "exitstatus": 0,
+        },
+        returncode=0,
+    )
+
+    assert nodeids == ["tests/test_one.py::test_one"]
+    assert errors == []
+    assert skips == []
+    assert "collection-only report contains test outcomes" in problems
+
+
+def test_standalone_matrix_collection_environment_is_controlled(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-k hidden")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "leaked")
+    monkeypatch.setenv("POKERED_SKIP_SHA1", "1")
+    monkeypatch.setenv("PYTHONPATH", "/ambient")
+
+    environment = _collection_environment(tmp_path)
+
+    assert environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert environment["PYBOY_NO_CYTHON"] == "1"
+    assert "PYTEST_ADDOPTS" not in environment
+    assert "PYTEST_CURRENT_TEST" not in environment
+    assert "POKERED_SKIP_SHA1" not in environment
+    assert environment["PYTHONPATH"].split(os.pathsep)[:3] == [
+        str(tmp_path / "vendor" / "pyboy-src"),
+        str(tmp_path / "src"),
+        str(tmp_path),
+    ]
 
 
 def test_strict_acceptance_gap_report_has_an_entrypoint_for_each_ordered_case():
@@ -481,6 +602,8 @@ def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_p
     monkeypatch.setenv("POKERED_ROM_PATH", explicit)
     ambient_sha = "f" * 40
     monkeypatch.setenv("POKERED_ROM_SHA1", ambient_sha)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_gate.py::test_parent")
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "0")
     environment = gate.build_test_environment(
         tmp_path,
         rom_root,
@@ -492,6 +615,8 @@ def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_p
     # Explicit path/digest pairs are preserved for the later policy check;
     # the gate must not silently replace a caller-selected ROM identity.
     assert environment["POKERED_ROM_SHA1"] == ambient_sha
+    assert environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert "PYTEST_CURRENT_TEST" not in environment
     assert environment["PYTHONPATH"].split(os.pathsep)[:3] == [
         str(tmp_path / "vendor" / "pyboy-src"),
         str(tmp_path / "src"),
@@ -714,6 +839,10 @@ def test_collection_preflight_runs_module_and_console_commands(tmp_path, monkeyp
             "tests",
             "--collect-only",
             "-q",
+            "--strict-config",
+            "--strict-markers",
+            "-p",
+            "pytest_asyncio.plugin",
             "-p",
             "tests._gate_report",
         ],
@@ -722,6 +851,10 @@ def test_collection_preflight_runs_module_and_console_commands(tmp_path, monkeyp
             "tests",
             "--collect-only",
             "-q",
+            "--strict-config",
+            "--strict-markers",
+            "-p",
+            "pytest_asyncio.plugin",
             "-p",
             "tests._gate_report",
         ],
@@ -973,6 +1106,26 @@ def test_evidence_bundle_is_portable_sanitized_and_diagnostic(tmp_path):
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="(?:size|sha256) mismatch"):
+        gate.verify_evidence_bundle(evidence_dir)
+
+
+def test_evidence_bundle_rejects_unlisted_files(tmp_path):
+    payload = gate.build_evidence_payload(
+        project_root=tmp_path / "checkout",
+        rom_root=tmp_path / "rom",
+        fixture_root=tmp_path / "fixtures",
+        runtime={},
+        assets=[],
+        collections=[],
+        tiers=[],
+        gate_problems=[],
+        overall="PASS",
+    )
+    evidence_dir = tmp_path / "evidence"
+    gate.write_evidence_bundle(evidence_dir, payload)
+    (evidence_dir / "raw-debug.log").write_text("unredacted", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unexpected files"):
         gate.verify_evidence_bundle(evidence_dir)
 
 

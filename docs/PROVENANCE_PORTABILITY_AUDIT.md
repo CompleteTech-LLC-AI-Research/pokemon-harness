@@ -1,7 +1,10 @@
 # Fixture provenance and portability audit
 
-Audit scope: the merged implementation `87a9f3a433958a4cef565fb41de540449254e4b7`
-and only the tracked manifest,
+Audit scope: the current isolated candidate based on published head
+`8727779f1b89f966d9a631af546732a36a97cf51` (PR #28), with the reviewed
+runtime, lifecycle, TCP, gate, and headless-performance commits `94f4429`,
+`9ce7c9f`, `3d04293`, `f046c34`, `8b4847b`, `9453d7a`, and `abf3d27`, and only the tracked
+manifest,
 producer/generator sources, packaging metadata, and platform-facing
 configuration. ROMs, symbol files, save states, and machine-local evidence
 were not copied into the audit checkout.
@@ -34,6 +37,22 @@ the complete native gameplay and matrix contract.
 - The manifest and provenance strings contain no machine-specific absolute
   paths. The clean checkout contains no tracked ROM, symbol, save-state, or
   generated native payload.
+- A fresh Linux Python 3.12.13 environment passed editable installation,
+  `pip check`, the source runtime probe, and the explicit Cython build/check.
+  Both integrated asset-free production gates collected 730 tests and passed
+  unit 586/586 plus timing 40/40 in each of five repetitions; the Cython probe
+  reported native extensions for all five required PyBoy modules.
+- With the external hashed assets supplied, source and Cython remote tiers
+  passed 15/15, and the Cython local/session tier passed 47/47. Source strict
+  trade and battle gates each reached 18/19 under bounded parallel execution;
+  the isolated exact retry for each failed remote Yellow-to-Yellow selector
+  passed. Exact native Red-to-Red trade/battle and Blue Color-to-Red Color
+  trade rows pass, but the full native strict matrices remain open.
+- A fresh asset-free `python -m pytest -q -ra` run completed 566 passed, 140
+  expected BYO-asset skips, and 2 warnings. The current remote, trade, and
+  battle gates fail closed before execution when their required ROM, symbol,
+  and fixture roots are absent; this checkout contains no real-ROM gameplay
+  result.
 
 ### Source-derived, not independently reproducible here
 
@@ -61,14 +80,14 @@ the complete native gameplay and matrix contract.
 
 ## Portability and clean-install findings
 
-The following bounded checks passed:
+The following bounded checks passed in this current documentation audit:
 
 ```text
-git ls-remote <repository> refs/heads/master                  -> exact published implementation head 87a9f3a...
+git ls-remote <repository> refs/heads/master                  -> published base 8727779f...
 python3 scripts/validate_fixture_manifest.py --schema-only  -> PASS, 10 entries
 uv lock --check                                             -> PASS
 python3 -m compileall <scoped-files>                        -> PASS
-scripts/network_concurrency_probe.py                        -> PASS, 8 probes × 5 repetitions
+scripts/network_concurrency_probe.py                        -> PASS, 8 probes
 wheel archive inspection                                    -> PASS, 100 entries; no ROM/state/symbol/native or absolute entries
 fresh wheel installation                                    -> PASS, dependency check and bundled PyBoy serial contract
 module and console entrypoint without assets                 -> fail closed as expected, missing ROM configuration
@@ -78,8 +97,8 @@ The wheel is `py3-none-any` for the documented source runtime. The GitHub
 workflow still runs on `ubuntu-latest` with Python 3.12 and has no Windows or
 macOS job. The fresh Windows run independently executes install, MCP startup,
 Cython build, and three-ROM lifecycle checks, but not the complete strict
-gameplay or load matrix. The post-PR #23 Linux gate also passes the source ABI
-timing regression and full asset-free unit/timing scope. `uv.lock` contains
+gameplay or load matrix. The current merged-head source and explicitly selected
+Cython gates also pass the full asset-free unit/timing scope. `uv.lock` contains
 platform resolution markers, but lock metadata is not native-platform
 execution evidence.
 

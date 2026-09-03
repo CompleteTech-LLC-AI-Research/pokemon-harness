@@ -643,6 +643,9 @@ def test_subprocess_pair_completes_trade_over_tcp(
         assert backend_stats.get("exchange_received", 0) == 0, (
             f"remote trade used an out-of-band exchange; {result}"
         )
+        assert backend_stats.get("pending_edge_requests", 0) == 0, (
+            f"remote trade left admitted EDGE_REQ work pending at shutdown; {result}"
+        )
     before_a = result_a.get("party_before", {})
     before_b = result_b.get("party_before", {})
     after_a = result_a.get("party_after", {})

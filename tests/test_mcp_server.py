@@ -725,11 +725,17 @@ def test_link_listen_then_connect_updates_status():
     assert status_l["remote_peer_rom_version"] == "yellow"
     assert status_c["remote_mode"] == "connected"
     assert status_c["remote_peer_rom_version"] == "blue"
+    endpoint_l = link_l.remote_endpoint
+    endpoint_c = link_c.remote_endpoint
+    assert endpoint_l is not None
+    assert endpoint_c is not None
 
     # Cleanup in the proper order — connector first drops the cable,
     # then listener notices.
     dispatch_tool(s_connector, "link_disconnect", {}, link=link_c)
     assert link_c.remote_mode == "idle"
+    assert endpoint_c.installed is False
+    assert s_connector._serial_hooks == []
     # Listener sees its link drop on the next status poll.
     for _ in range(100):
         status_l = dispatch_tool(s_listener, "link_status", {}, link=link_l)
@@ -737,6 +743,8 @@ def test_link_listen_then_connect_updates_status():
             break
         _time.sleep(0.01)
     assert status_l["remote_mode"] == "idle"
+    assert endpoint_l.installed is False
+    assert s_listener._serial_hooks == []
     dispatch_tool(s_listener, "link_disconnect", {}, link=link_l)
 
 

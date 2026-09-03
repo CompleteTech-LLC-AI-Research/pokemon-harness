@@ -587,7 +587,7 @@ class Session:
         for registration in reversed(self._event_hooks):
             try:
                 registration.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - teardown must continue
                 # EventBus marks a logical registration inactive before
                 # attempting physical deregistration. Continue stopping the
                 # emulator even if a custom PyBoy hook API rejects removal.
@@ -681,6 +681,11 @@ class Session:
                 if hook_bank == bank and hook_addr == addr:
                     state.active = False
             self._events.deactivate_at(self._pyboy, bank, addr)
+            self._serial_hooks[:] = [
+                record
+                for record in self._serial_hooks
+                if record[1] != bank or record[2] != addr
+            ]
         finally:
             self._lock.release()
 
@@ -873,4 +878,14 @@ def _default_pyboy_factory(
     # stay fast and windowless) vs "SDL2" (visible window for local viewing).
     # ``cgb=True`` enables Game Boy Color mode so Pokemon Red renders with
     # its stock CGB auto-palette instead of the DMG grayscale fallback.
-    return PyBoy(rom_path, window=window, cgb=cgb)  # type: ignore[return-value]
+    # Headless harness consumers do not expose audio, and PyBoy's default
+    # sound emulation is a significant per-frame cost in the source runtime.
+    # Keep audio for visible sessions while making the documented headless
+    # path deterministic and suitable for bounded automation.
+    sound_emulated = window not in {"null", "headless", "dummy"}
+    return PyBoy(  # type: ignore[return-value]
+        rom_path,
+        window=window,
+        cgb=cgb,
+        sound_emulated=sound_emulated,
+    )

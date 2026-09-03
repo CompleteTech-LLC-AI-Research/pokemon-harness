@@ -32,10 +32,11 @@ and this directory does not claim upstream acceptance.
   in the production runbook. That harness configuration and its link/runtime
   contract must still be reviewed independently before any PyBoy contribution
   can be treated as an upstream dependency.
-- The pinned fork's Cython build exposes the Python-side `mb.serial` object and
-  passed a real-ROM attach/detach smoke in the current documentation audit.
-  Full Cython trade/battle acceptance and upstream-wheel compatibility remain
-  unverified.
+- The pinned fork's Cython build exposes the Python-side `mb.serial` object.
+  Recorded scoped evidence includes a three-ROM attach/tick/close smoke, but
+  this proposal does not reproduce ROM-backed results or certify the current
+  strict matrix. Full Cython trade/battle acceptance and upstream-wheel
+  compatibility remain unverified.
 
 ## Proposed file mapping
 

@@ -93,6 +93,15 @@ class _PyBoyLike(Protocol):
         ...
 
 
+def _validate_positive_int(value: int, name: str) -> int:
+    """Validate a public count argument before doing any work."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
 class PyBoyLinkSession:
     """Pairs up to two PyBoy instances under a bit-accurate serial link."""
 
@@ -141,6 +150,10 @@ class PyBoyLinkSession:
         # serial dispatch. The per-frame boundary is installed below so a
         # multi-frame public tick cannot starve a queued peer edge.
         self._serial_gate = SerialOperationGate()
+        # Attach/detach and local stepping mutate the same core/backend graph.
+        # Serialize those lifecycle transitions so a concurrent caller cannot
+        # observe or drive a half-paired session.
+        self._lifecycle_lock = threading.RLock()
         self._original_ticks: dict[int, tuple[str, object]] = {}
         self._network_is_internal_clock = network_is_internal_clock
         self._local_rom_version = local_rom_version
@@ -235,6 +248,9 @@ class PyBoyLinkSession:
     def attach(self, pyboy: _PyBoyLike) -> object:
         """Wire a backend onto ``pyboy.mb.serial``.
 
+        The operation is serialized with other attach, detach, and stepping
+        calls so callers cannot observe a half-paired session.
+
         Returns the PyBoy ``Serial`` instance so callers can inspect
         its register state directly.
 
@@ -255,6 +271,11 @@ class PyBoyLinkSession:
         session is at :attr:`MAX_ATTACHED`, or a network-mode session
         already has its one attachment.
         """
+        with self._lifecycle_lock:
+            return self._attach_locked(pyboy)
+
+    def _attach_locked(self, pyboy: _PyBoyLike) -> object:
+        # Caller holds the lifecycle lock.
         if pyboy in self._pyboys:
             raise RuntimeError(f"already attached: {pyboy!r}")
         max_attached = 1 if self._network_backend is not None else self.MAX_ATTACHED
@@ -343,18 +364,42 @@ class PyBoyLinkSession:
             # IRQ callbacks pointing at each motherboard's CPU. The
             # coordinator installs CoordinatedBackend on each core's
             # ``backend`` attribute.
-            self._coord = LockstepCoordinator(
-                self._cores[0],
-                self._cores[1],
-                on_a_transfer_complete=self._make_serial_irq_raiser(
-                    self._pyboys[0]
-                ),
-                on_b_transfer_complete=self._make_serial_irq_raiser(
-                    self._pyboys[1]
-                ),
-                on_a_peer_unarmed=self._make_peer_progressor(self._pyboys[1]),
-                on_b_peer_unarmed=self._make_peer_progressor(self._pyboys[0]),
-            )
+            try:
+                self._coord = LockstepCoordinator(
+                    self._cores[0],
+                    self._cores[1],
+                    on_a_transfer_complete=self._make_serial_irq_raiser(
+                        self._pyboys[0]
+                    ),
+                    on_b_transfer_complete=self._make_serial_irq_raiser(
+                        self._pyboys[1]
+                    ),
+                    on_a_peer_unarmed=self._make_peer_progressor(self._pyboys[1]),
+                    on_b_peer_unarmed=self._make_peer_progressor(self._pyboys[0]),
+                )
+            except BaseException as exc:
+                # Coordinator.attach() can fail after the new bookkeeping
+                # entries have been appended (for example, a native Serial
+                # rejects its backend assignment). Restore the second
+                # motherboard and remove all four entries transactionally.
+                try:
+                    if prev_serial is not None:
+                        mb.serial = prev_serial
+                    else:
+                        core.backend = (
+                            prev_backend if prev_backend is not None else NullBackend()
+                        )
+                except BaseException as rollback_error:  # noqa: BLE001
+                    exc.add_note(
+                        "local attach rollback also failed: "
+                        f"{rollback_error!r}"
+                    )
+                finally:
+                    self._pyboys.pop()
+                    self._cores.pop()
+                    self._prev_backends.pop()
+                    self._prev_serials.pop()
+                raise
 
         return core
 
@@ -370,13 +415,33 @@ class PyBoyLinkSession:
         if SerialCore is None:
             raise RuntimeError("SerialCore is unavailable; can't promote legacy serial")
         core = SerialCore(getattr(serial, "cgb_mode", False))
+        # Set the absolute counters before arming SC. Older PyBoy serial
+        # objects may already be in the middle of a transfer; arming against
+        # a fresh core clock would otherwise schedule the next edge in the
+        # past and lose the transfer's timing state.
+        for attr in ("last_cycles", "clock"):
+            if hasattr(serial, attr):
+                setattr(core, attr, getattr(serial, attr))
         if hasattr(serial, "SB"):
             core.set_SB(serial.SB)
         if hasattr(serial, "SC"):
             raw_sc = serial.SC
             core.set_SC(raw_sc)
             core.SC = raw_sc
-        for attr in ("last_cycles", "clock"):
+        # Preserve the serial state fields exposed by the native PyBoy
+        # implementation when promoting a legacy object. The register-only
+        # fallback above remains compatible with older integrations which do
+        # not expose these in-flight fields.
+        for attr in (
+            "transfer_enabled",
+            "internal_clock",
+            "double_speed",
+            "cpu_speed_shift",
+            "_shift_register",
+            "_bits_remaining",
+            "_cycles_to_interrupt",
+            "clock_target",
+        ):
             if hasattr(serial, attr):
                 setattr(core, attr, getattr(serial, attr))
         return core
@@ -646,6 +711,11 @@ class PyBoyLinkSession:
     def detach(self, pyboy: _PyBoyLike) -> None:
         """Restore ``pyboy.mb.serial.backend`` and (if paired) tear
         down the coordinator. No-op if ``pyboy`` isn't attached."""
+        with self._lifecycle_lock:
+            self._detach_locked(pyboy)
+
+    def _detach_locked(self, pyboy: _PyBoyLike) -> None:
+        # Caller holds the lifecycle lock.
         if pyboy not in self._pyboys:
             return
         # Tearing down the coordinator first ensures neither remaining
@@ -691,20 +761,41 @@ class PyBoyLinkSession:
         session cleanup path) so ``detach`` retains its existing behavior of
         only restoring one PyBoy's serial backend.
         """
-        detach_error: BaseException | None = None
-        try:
+        with self._lifecycle_lock:
+            errors: list[BaseException] = []
             for pyboy in list(reversed(self._pyboys)):
-                self.detach(pyboy)
-        except BaseException as exc:
-            detach_error = exc
-            raise
-        finally:
+                try:
+                    # Call the public method so integrations which wrap
+                    # detach() still observe every cleanup attempt. The
+                    # RLock makes this re-entrant for the normal path.
+                    self.detach(pyboy)
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+
             if self._network_backend is not None:
-                stopped = self._network_backend.stop()
-                if not stopped and detach_error is None:
-                    raise RuntimeError(
-                        "network backend workers did not stop before cleanup deadline"
-                    )
+                stop_error: BaseException | None = None
+                try:
+                    stopped = self._network_backend.stop()
+                    if not stopped:
+                        stop_error = RuntimeError(
+                            "network backend workers did not stop before cleanup deadline"
+                        )
+                except BaseException as exc:  # noqa: BLE001
+                    stop_error = exc
+                if stop_error is not None:
+                    if errors:
+                        errors[0].add_note(
+                            "network backend cleanup also failed: "
+                            f"{stop_error!r}"
+                        )
+                    else:
+                        errors.append(stop_error)
+
+            if errors:
+                first = errors[0]
+                for extra in errors[1:]:
+                    first.add_note(f"additional detach cleanup failure: {extra!r}")
+                raise first
 
     # --- accessors -----------------------------------------------------
 
@@ -748,15 +839,17 @@ class PyBoyLinkSession:
 
         Raises ``RuntimeError`` if fewer than 2 instances are attached.
         """
-        if len(self._pyboys) != self.MAX_ATTACHED:
-            raise RuntimeError(
-                f"step() requires {self.MAX_ATTACHED} attached instances, "
-                f"have {len(self._pyboys)}"
-            )
-        effective_render = render or self._view
-        for _ in range(frames):
-            for pyboy in self._serial_step_order(*self._pyboys):
-                pyboy.tick(1, effective_render)
+        frames = _validate_positive_int(frames, "frames")
+        with self._lifecycle_lock:
+            if len(self._pyboys) != self.MAX_ATTACHED:
+                raise RuntimeError(
+                    f"step() requires {self.MAX_ATTACHED} attached instances, "
+                    f"have {len(self._pyboys)}"
+                )
+            effective_render = render or self._view
+            for _ in range(frames):
+                for pyboy in self._serial_step_order(*self._pyboys):
+                    pyboy.tick(1, effective_render)
 
     def step_interleaved(
         self,
@@ -783,23 +876,25 @@ class PyBoyLinkSession:
         then batches instructions into chunks. This mode is only
         available on the non-Cython PyBoy build.
         """
-        if len(self._pyboys) != self.MAX_ATTACHED:
-            raise RuntimeError(
-                f"step_interleaved() requires {self.MAX_ATTACHED} "
-                f"attached instances, have {len(self._pyboys)}"
-            )
-        if not isinstance(chunk_cycles, int) or isinstance(chunk_cycles, bool):
-            raise TypeError("chunk_cycles must be a positive integer")
-        if chunk_cycles <= 0:
-            raise ValueError("chunk_cycles must be a positive integer")
-        # ``mb.tick`` returns after one CPU instruction in singlestep mode,
-        # but instruction lengths vary. Pass a normal-speed hardware-time
-        # budget to the frame driver; it scales that budget for each side's
-        # current CGB CPU speed rather than comparing raw CPU counters.
-        effective_view = self._view if render is None else bool(render) or self._view
-        a, b = self._pyboys[0], self._pyboys[1]
-        for _ in range(frames):
-            self._interleave_one_frame(a, b, chunk_cycles, view=effective_view)
+        frames = _validate_positive_int(frames, "frames")
+        with self._lifecycle_lock:
+            if len(self._pyboys) != self.MAX_ATTACHED:
+                raise RuntimeError(
+                    f"step_interleaved() requires {self.MAX_ATTACHED} "
+                    f"attached instances, have {len(self._pyboys)}"
+                )
+            if not isinstance(chunk_cycles, int) or isinstance(chunk_cycles, bool):
+                raise TypeError("chunk_cycles must be a positive integer")
+            if chunk_cycles <= 0:
+                raise ValueError("chunk_cycles must be a positive integer")
+            # ``mb.tick`` returns after one CPU instruction in singlestep mode,
+            # but instruction lengths vary. Pass a normal-speed hardware-time
+            # budget to the frame driver; it scales that budget for each side's
+            # current CGB CPU speed rather than comparing raw CPU counters.
+            effective_view = self._view if render is None else bool(render) or self._view
+            a, b = self._pyboys[0], self._pyboys[1]
+            for _ in range(frames):
+                self._interleave_one_frame(a, b, chunk_cycles, view=effective_view)
 
     @staticmethod
     def _interleave_one_frame(a, b, chunk_cycles: int, *, view: bool = False) -> None:

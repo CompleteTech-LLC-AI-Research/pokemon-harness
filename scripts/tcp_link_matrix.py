@@ -197,6 +197,24 @@ REMOTE_LINK_MENU_CASE_CLASSIFICATIONS = {
     for pair in SUPPORTED_VERSION_PAIRS
 }
 
+PYTEST_COLLECTION_ARGUMENTS = (
+    "--strict-config",
+    "--strict-markers",
+    "-p",
+    "pytest_asyncio.plugin",
+    "-p",
+    "tests._gate_report",
+)
+_COLLECTION_REPORT_FIELDS = (
+    "total",
+    "passed",
+    "failed",
+    "skipped",
+    "xfailed",
+    "xpassed",
+    "errors",
+)
+
 
 def acceptance_matrix_classifications() -> dict[
     str, dict[tuple[str, str, str], str]
@@ -390,6 +408,137 @@ def _resolve_python(value: Path, project_root: Path) -> Path:
     return project_root / value
 
 
+def _collection_environment(project_root: Path) -> dict[str, str]:
+    """Make standalone collection auditing independent of ambient pytest state."""
+
+    environment = dict(os.environ)
+    for key in tuple(environment):
+        if key.startswith("PYTEST_") or key in {
+            "POKERED_GATE_REPORT",
+            "POKERED_GATE_PROGRESS_REPORT",
+            "POKERED_SKIP_SHA1",
+        }:
+            environment.pop(key, None)
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    environment["PYBOY_NO_CYTHON"] = "1"
+
+    entries = [
+        str((project_root / "vendor" / "pyboy-src").resolve(strict=False)),
+        str((project_root / "src").resolve(strict=False)),
+        str(project_root),
+    ]
+    old_pythonpath = os.environ.get("PYTHONPATH")
+    if old_pythonpath:
+        entries.extend(item for item in old_pythonpath.split(os.pathsep) if item)
+    environment["PYTHONPATH"] = os.pathsep.join(entries)
+    return environment
+
+
+def _collection_report_details(
+    payload: object,
+    *,
+    returncode: int,
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Validate the gate-plugin collection report before auditing its nodes.
+
+    Returning errors and skips separately lets :func:`audit_collection` keep
+    its structural diagnostics, while malformed accounting is still a hard
+    failure instead of being reduced to a plausible node list.
+    """
+
+    errors: list[str] = []
+    skips: list[str] = []
+    problems: list[str] = []
+    if not isinstance(payload, dict):
+        return [], [], [], ["collection report root is not an object"]
+
+    exitstatus = payload.get("exitstatus")
+    if isinstance(exitstatus, bool) or not isinstance(exitstatus, int):
+        problems.append("collection report has an invalid exitstatus")
+    elif exitstatus != returncode:
+        problems.append(
+            "collection report exitstatus does not match pytest return code: "
+            f"{exitstatus} != {returncode}"
+        )
+
+    if payload.get("collection_only") is not True:
+        problems.append("collection report is not marked collection_only")
+
+    raw_counts = payload.get("counts")
+    if not isinstance(raw_counts, dict):
+        problems.append("collection report has no counts object")
+    else:
+        counts: dict[str, int] = {}
+        for field in _COLLECTION_REPORT_FIELDS:
+            value = raw_counts.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                problems.append(f"collection report count {field!r} is invalid")
+            else:
+                counts[field] = value
+        if counts.get("total") not in (None, 0):
+            problems.append("collection-only report contains test outcomes")
+        for field in ("passed", "failed", "skipped", "xfailed", "xpassed"):
+            if counts.get(field, 0) != 0:
+                problems.append(
+                    f"collection-only report has nonzero {field} outcome count"
+                )
+
+    records = payload.get("tests")
+    if records != []:
+        problems.append("collection-only report unexpectedly contains test records")
+
+    raw_nodeids = payload.get("nodeids")
+    if not isinstance(raw_nodeids, list) or any(
+        not isinstance(nodeid, str) or not nodeid for nodeid in raw_nodeids
+    ):
+        problems.append("collection report nodeids is invalid")
+        nodeids: list[str] = []
+    else:
+        nodeids = list(raw_nodeids)
+        if len(set(nodeids)) != len(nodeids):
+            problems.append("collection report contains duplicate nodeids")
+
+    collected = payload.get("collected")
+    if isinstance(collected, bool) or not isinstance(collected, int) or collected < 0:
+        problems.append("collection report collected count is invalid")
+    elif collected != len(nodeids):
+        problems.append(
+            "collection report count does not match nodeids: "
+            f"collected={collected} nodeids={len(nodeids)}"
+        )
+
+    def read_collection_entries(name: str) -> list[str]:
+        raw_entries = payload.get(name)
+        if not isinstance(raw_entries, list):
+            problems.append(f"collection report {name} is not a list")
+            return []
+        result: list[str] = []
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                problems.append(f"collection report {name} contains a non-object entry")
+                continue
+            nodeid = entry.get("nodeid")
+            reason = entry.get("reason")
+            if not isinstance(nodeid, str) or not isinstance(reason, str):
+                problems.append(f"collection report {name} contains an invalid entry")
+                continue
+            result.append(f"{nodeid}: {reason}")
+        return result
+
+    errors = read_collection_entries("collection_errors")
+    skips = read_collection_entries("collection_skips")
+    if isinstance(raw_counts, dict):
+        declared_errors = raw_counts.get("errors")
+        if isinstance(declared_errors, int) and declared_errors != len(errors):
+            problems.append(
+                "collection report error count does not match collection_errors: "
+                f"errors={declared_errors} entries={len(errors)}"
+            )
+    if returncode != 0:
+        problems.append(f"pytest return code: {returncode}")
+    return nodeids, errors, skips, problems
+
+
 def collect_nodeids(
     project_root: Path,
     python_executable: Path,
@@ -405,12 +554,11 @@ def collect_nodeids(
         "tests",
         "--collect-only",
         "-q",
-        "-p",
-        "tests._gate_report",
+        *PYTEST_COLLECTION_ARGUMENTS,
     ]
     with tempfile.TemporaryDirectory(prefix="pokered-matrix-") as directory:
         report_path = Path(directory) / "collection.json"
-        environment = dict(os.environ)
+        environment = _collection_environment(project_root)
         environment["POKERED_GATE_REPORT"] = str(report_path)
         try:
             completed = subprocess.run(
@@ -440,45 +588,11 @@ def collect_nodeids(
             )
             return audit, command
 
-        if not isinstance(payload, dict):
-            audit = audit_collection(
-                (), collection_errors=("collection report root is not an object",)
-            )
-            return audit, command
-
-        raw_nodeids = payload.get("nodeids", [])
-        nodeids = raw_nodeids if isinstance(raw_nodeids, list) else []
-        raw_collected = payload.get("collected")
-        errors = payload.get("collection_errors", [])
-        skips = payload.get("collection_skips", [])
-        error_text = [
-            str(entry.get("reason", entry))
-            if isinstance(entry, dict)
-            else str(entry)
-            for entry in (errors if isinstance(errors, list) else [errors])
-        ]
-        skip_text = [
-            str(entry.get("reason", entry))
-            if isinstance(entry, dict)
-            else str(entry)
-            for entry in (skips if isinstance(skips, list) else [skips])
-        ]
-        if completed.returncode != 0:
-            error_text.append(f"pytest return code: {completed.returncode}")
-        if payload.get("collection_only") is not True:
-            error_text.append("collection report is not marked collection_only")
-        if isinstance(raw_collected, bool) or not isinstance(raw_collected, int):
-            error_text.append("collection report has an invalid collected count")
-        elif raw_collected != len(nodeids):
-            error_text.append(
-                "collection report count does not match nodeids: "
-                f"collected={raw_collected} nodeids={len(nodeids)}"
-            )
-        records = payload.get("tests")
-        if payload.get("collection_only") is True and records != []:
-            error_text.append(
-                "collection-only report unexpectedly contains test outcomes"
-            )
+        nodeids, error_text, skip_text, report_problems = _collection_report_details(
+            payload,
+            returncode=completed.returncode,
+        )
+        error_text.extend(report_problems)
         return audit_collection(
             (str(nodeid) for nodeid in nodeids),
             collection_errors=error_text,

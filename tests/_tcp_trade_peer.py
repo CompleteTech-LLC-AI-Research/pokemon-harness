@@ -321,6 +321,7 @@ def main() -> int:
         _install_hook(session, s, counters[s])
 
     log(f"establishing TCP {args.role}")
+    link = None
     if args.role == "listen":
         link = PyBoyLinkSession.listen(
             args.port, host=args.host, local_rom_version=fixture_version
@@ -456,6 +457,76 @@ def main() -> int:
             f"cooperative sync {sync_id} did not converge: "
             f"local={state_snapshot()} backend={backend_snapshot()}"
         )
+
+    def peer_shutdown_sync(
+        *, ready_sync_id: int, release_sync_id: int, timeout: float = 120.0
+    ) -> None:
+        """Close a successful pair only after both peers have gone quiet.
+
+        Reaching the same game milestone is not sufficient for teardown:
+        either ROM may still have an armed native serial transfer.  The first
+        marker lets both owners finish their local post-milestone drain; the
+        second marker is an acknowledgement that the resulting wire-idle
+        window was observed by both peers.  The ready barrier continues
+        stepping the owner emulator; the final acknowledgements service only
+        already-admitted edges so a faster peer cannot reopen a transfer while
+        the other side is finishing its drain.
+        """
+
+        def wait_for_peer_marker(sync_id: int) -> None:
+            deadline_at = time.monotonic() + timeout
+            while time.monotonic() < deadline_at:
+                if link._network_backend.poll_peer_sync(sync_id=sync_id):
+                    return
+                # After a local wire-idle observation no new master edge can
+                # be created without ticking the emulator.  Service only
+                # already-admitted slave work while waiting for the peer's
+                # marker; this keeps the final handshake symmetric without
+                # reopening a native transfer on the faster side.
+                link._network_backend.service_pending_edges(max_edges=1)
+                time.sleep(0.001)
+            raise RuntimeError(
+                f"peer shutdown sync {sync_id} did not converge: "
+                f"backend={backend_snapshot()}"
+            )
+
+        cooperative_sync(sync_id=ready_sync_id, timeout=timeout, step_frames=1)
+        link._network_backend.wait_for_wire_idle(
+            timeout=timeout,
+            progress_callback=lambda: session.step(1),
+            stable_checks=4,
+        )
+        link._network_backend.announce_sync(sync_id=release_sync_id)
+        wait_for_peer_marker(release_sync_id)
+        link._network_backend.wait_for_wire_idle(
+            timeout=timeout,
+            progress_callback=lambda: link._network_backend.service_pending_edges(
+                max_edges=1
+            ),
+            stable_checks=4,
+        )
+        # The release marker can be consumed while the peer is still
+        # finishing its own idle wait.  A final passive acknowledgement makes
+        # both sides observe that second drain before either detaches.
+        final_sync_id = release_sync_id + 1
+        link._network_backend.announce_sync(sync_id=final_sync_id)
+        wait_for_peer_marker(final_sync_id)
+        link._network_backend.wait_for_wire_idle(
+            timeout=timeout,
+            progress_callback=lambda: link._network_backend.service_pending_edges(
+                max_edges=1
+            ),
+            stable_checks=4,
+        )
+        # Do not detach as soon as the peer sees the final marker: the peer
+        # may still be returning from its own final idle drain.  Advertise a
+        # completion marker only after that drain and wait passively for the
+        # matching completion marker.  No emulator tick occurs in this last
+        # exchange, so it cannot create a new master transfer between the
+        # marker and teardown.
+        done_sync_id = final_sync_id + 1
+        link._network_backend.announce_sync(sync_id=done_sync_id)
+        wait_for_peer_marker(done_sync_id)
 
     def current_menu_item() -> int | None:
         try:
@@ -1025,15 +1096,15 @@ def main() -> int:
                     session.press("a", duration=4)
                 prev = now
 
-            # Post-trade sync + keep-tick. Whichever side's
+            # Post-trade sync. Whichever side's
             # _AddEnemyMonToPlayerParty fired first has finished the
             # trade locally but the peer may still be mid-exchange
             # waiting for a few final bytes. Exiting the drive loop
             # immediately would tear down our SerialCore and leave
-            # the peer's on_edge calls timing out. Instead, rendezvous
-            # over OP_SYNC and then keep ticking the local core (and
-            # honoring peer EDGE_REQs via the NetworkBackend reader)
-            # long enough for the peer to complete its own trade.
+            # the peer's on_edge calls timing out. The shutdown
+            # handshake announces this milestone while both owners
+            # continue servicing authentic serial work, then closes
+            # only after both peers acknowledge a quiet transport.
             if counters["_AddEnemyMonToPlayerParty"][0] > 0:
                 # The hook is at function entry. Advance through the
                 # copy routine before the rendezvous so the result records
@@ -1050,13 +1121,9 @@ def main() -> int:
                     drive_status = "error"
                     drive_error = f"{type(exc).__name__}: {exc}"
                     log(f"post-trade sync raised {type(exc).__name__}: {exc}")
-                # After rendezvous both sides have fired
-                # _AddEnemyMonToPlayerParty. Keep ticking briefly so
-                # the peer's post-trade animation / UI code can still
-                # drive any residual serial traffic through us.
-                post_deadline = min(deadline, time.monotonic() + 30.0)
-                while time.monotonic() < post_deadline:
-                    session.step(40)
+                log("sync: post-trade shutdown drain")
+                peer_shutdown_sync(ready_sync_id=5, release_sync_id=6)
+                log("sync: post-trade shutdown barrier complete")
         elif args.goal == "battle":
             log("sync: link_menu battle barrier")
             cooperative_sync(sync_id=11, timeout=120.0)
@@ -1475,6 +1542,9 @@ def main() -> int:
                 while time.monotonic() < post_deadline:
                     session.press("a", duration=4)
                     session.step(20)
+                log("sync: post-battle shutdown drain")
+                peer_shutdown_sync(ready_sync_id=21, release_sync_id=22)
+                log("sync: post-battle shutdown barrier complete")
             if not peer_battle_turn_ready:
                 log(
                     "peer battle turn completion not observed before deadline "
@@ -1489,6 +1559,20 @@ def main() -> int:
         log(f"EXCEPTION in drive loop: {type(exc).__name__}: {exc}")
 
     finally:
+        # Detach the link while the emulator is still alive.  Stopping the
+        # Session first leaves the native serial callback installed against a
+        # closed NetworkBackend; a peer that is finishing its last transfer
+        # can then spin on backend-closed errors during teardown.  The public
+        # PyBoyLinkSession lifecycle restores the serial backend, disables
+        # owner dispatch, and stops its transport in the required order.
+        try:
+            if link is not None:
+                link.detach_all()
+        except Exception as exc:  # noqa: BLE001
+            if drive_status == "ok":
+                drive_status = "error"
+                drive_error = f"link cleanup {type(exc).__name__}: {exc}"
+            log(f"link cleanup raised {type(exc).__name__}: {exc}")
         try:
             final_state = state_snapshot()
             final_cpu = cpu_snapshot()

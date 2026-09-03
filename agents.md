@@ -27,39 +27,47 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The latest merged implementation is `87a9f3a` (PR #23), with MCP lifecycle
-hardening `7f3c2f4` (PR #22) and implementation candidate `dfc0b2a` (PR #19). The
-complete all-tier source-runtime gate was collected before PR #19 at the
+The published base is `8727779` (PR #28 documentation merge). The current
+isolated candidate additionally contains runtime, lifecycle, TCP, gate,
+headless-performance, and TCP-peer-teardown commits `94f4429`, `9ce7c9f`,
+`3d04293`, `f046c34`, `8b4847b`, `9453d7a`, and `abf3d27`; this is a `PARTIAL`
+publication candidate until the final gate and merge are verified. The release runtime is the bundled PyBoy source
+snapshot pinned in `VERSIONS.md` (`2.7.0`, harness revision
+`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode
+is the documented release default.
+
+The integrated source and explicitly selected Cython gates each collect 730
+tests and pass unit 586/586 plus timing 40/40 in each of five repetitions. The
+source gate uses vendored Python modules; the Cython gate reports native
+extensions for all five required PyBoy modules. With hashed assets supplied,
+source and Cython remote tiers pass 15/15, and the Cython local/session tier
+passes 47/47. Source strict trade and battle gates each reached 18/19 under
+bounded parallel execution; the isolated retry of each failed remote
+Yellow-to-Yellow selector passed. Exact native Red-to-Red trade/battle and
+Blue Color-to-Red Color trade rows pass, but full native strict qualification
+remains open after the historical post-PR #27 native trade result of 16/19. Use explicit ROM, symbol,
+and SHA-1 values; never use `POKERED_SKIP_SHA1=1` for release evidence.
+
+The complete all-tier source-runtime gate was collected before PR #19 at the
 PR #17 parent `b0b63c8` (698 tests: unit 554/554, local real-ROM 47/47,
 remote transport/MCP 15/15, strict trade 19/19, strict battle 19/19, and
 timing 40/40 in each of five repetitions, with no skips, xfails, failures,
 errors, or timeouts). Post-PR #19 verification is intentionally reported as
-separate slices: 699 collected, ROM-free unit 555/555, timing 40/40 in each
-of five repetitions, focused transport/MCP 167/167, localhost concurrency
-probe 8/8 in each of five repetitions, and real-ROM remote transport 15/15.
-Post-PR #23 asset-free verification collected 701 tests and passed unit
-557/557 plus timing 40/40 in each of five repetitions under managed Python
-3.12.13. The release runtime is the bundled PyBoy source snapshot pinned in
-`VERSIONS.md` (`2.7.0`, harness revision
-`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode
-is the documented release default. PR #23 exposes the native lockstep timing
-ABI; the pinned Cython/native serial build and three-ROM lifecycle smoke pass,
-and targeted Red↔Yellow, Yellow↔Yellow, and Red↔Red trade diagnostics pass.
-The full strict Cython trade/battle matrix is not claimed. Use explicit ROM,
-symbol, and SHA-1 values; never use
-`POKERED_SKIP_SHA1=1` for release evidence.
+separate historical slices: 699 collected, ROM-free unit 555/555, timing
+40/40 in each of five repetitions, focused transport/MCP 167/167, localhost
+concurrency probe 8/8 in each of five repetitions, and real-ROM remote
+transport 15/15.
 
 ## Supported-scope boundary
 
 - Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
   fixture bytes have recorded reproduction evidence; the external states are
   never committed and their hashes do not prove gameplay compatibility.
-- The complete source-runtime local production tier passed 47/47, the remote
-  transport/MCP tier passed 15/15, and the strict trade and battle runs
-  passed all local/dedicated rows and all 9/9 remote rows at the PR #17
-  baseline. These strict 19/19 results are historical baseline evidence, not
-  a full rerun after PR #19. Post-change real-ROM remote evidence is limited
-  to the separately reported 15-row transport tier.
+- The integrated source and Cython remote transport/MCP tiers pass 15/15, and
+  the integrated Cython local/session tier passes 47/47. Current source strict
+  trade and battle gates each reached 18/19 under parallel execution, with the
+  failed remote Yellow-to-Yellow selectors passing isolated retries. Full
+  native strict acceptance remains open.
 - The current tree declares all canonical Red/Blue/Yellow listener and
   connector orderings over localhost TCP. The PR #19 synthetic concurrency
   probe passes, while real-ROM concurrent-load stability remains open.
@@ -67,8 +75,10 @@ symbol, and SHA-1 values; never use
   canonical ordered local and remote pair (19 trade and 19 battle nodes).
   Collection is declaration evidence only; a LinkMenu milestone is not a
   gameplay acceptance. Complete 19/19 trade and battle results exist for the
-  pre-PR #19 source-runtime baseline; the full strict matrix remains open
-  after the PR #23 runtime changes.
+  pre-PR #19 source-runtime baseline; the current source gate rows are
+  18/19 in each parallel strict matrix, with isolated retries passing. The
+  historical native trade qualification is `FAIL` at 16/19; the full native
+  matrix remains open.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or
@@ -77,10 +87,9 @@ symbol, and SHA-1 values; never use
   never expose it to a LAN, WAN, or public address.
 
 The release decision remains `PARTIAL`, not `PRODUCTION-READY`. Known open
-items include the full strict Cython trade/battle matrix (targeted
-Red↔Yellow, Yellow↔Yellow, and Red↔Red trade diagnostics pass after the PR #23
-timing fix), a completed post-PR #23 strict trade and battle rerun, a completed
-broad-suite run, vanilla fixture provenance,
+items include a clean full strict gate at the documented conservative worker
+count, native serial handling under the full matrix, a completed broad-suite
+release run, vanilla fixture provenance,
 full native-platform gameplay/load coverage, independent review, and
 authenticated/encrypted cross-host transport. Fresh Windows install,
 bootstrap, MCP stdio, and three-ROM lifecycle checks are now scoped evidence,

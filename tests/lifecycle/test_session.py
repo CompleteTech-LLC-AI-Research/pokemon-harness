@@ -138,6 +138,7 @@ def test_deactivate_hooks_at_removes_registered_hooks_and_disables_raw_hooks() -
     assert pyboy.fire(0x00, 0x216F) == 0
     assert session.events.count("serial_event") == 1
     assert len(raw_calls) == 1
+    assert session._serial_hooks == []
 
     # Address cleanup must also invalidate the EventBus slot. A subsequent
     # logical registration needs to install a fresh physical dispatcher.
