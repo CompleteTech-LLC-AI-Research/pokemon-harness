@@ -735,7 +735,12 @@ class PyBoy:
         self._plugin_manager._set_title()
 
     def __del__(self):
-        self.stop(save=False)
+        # Construction can fail before ``initialized`` is assigned (and
+        # callers may use ``__new__`` for instance-level API probes).  A
+        # best-effort destructor must not turn that partial object into an
+        # unraisable exception during interpreter or test cleanup.
+        if getattr(self, "initialized", False) and not getattr(self, "stopped", True):
+            self.stop(save=False)
 
     def __enter__(self):
         return self
