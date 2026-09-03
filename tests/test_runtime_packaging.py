@@ -414,7 +414,20 @@ def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(monkeypatch) -> 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
     assert module.main(["--mode", "cython"]) == 0
-    command, kwargs = calls[0]
+    assert len(calls) == 2
+    project_command, project_kwargs = calls[0]
+    assert project_command == [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        "-e",
+        str(module.ROOT),
+    ]
+    assert project_kwargs["cwd"] == module.ROOT
+    assert "PYBOY_NO_CYTHON" not in project_kwargs["env"]
+
+    command, kwargs = calls[1]
     assert command[:4] == ["pip", "install", "--force-reinstall", "--no-deps"]
     assert command[-2:] == [module.CYTHON_REQUIREMENT, str(module.PYBOY_SOURCE)]
     assert "PYBOY_NO_CYTHON" not in kwargs["env"]
@@ -435,6 +448,36 @@ def test_bootstrap_source_mode_rejects_a_competing_pyboy_distribution(monkeypatc
     )
 
     with pytest.raises(SystemExit, match="competing installed owners"):
+        module._verify_runtime("source")
+
+
+def test_bootstrap_cython_mode_rejects_a_missing_harness_owner(monkeypatch) -> None:
+    module = _load_bootstrap()
+    monkeypatch.setattr(
+        module,
+        "_package_distributions",
+        lambda package: {"pyboy"} if package == "pyboy" else set(),
+    )
+
+    with pytest.raises(SystemExit, match="not provided by the installed pokered-harness"):
+        module._verify_runtime("cython")
+
+
+def test_bootstrap_reports_an_incompatible_serial_constructor(monkeypatch) -> None:
+    module = _load_bootstrap()
+
+    class BrokenSerial:
+        def __init__(self, *_args) -> None:
+            raise TypeError("stock PyBoy ABI")
+
+    monkeypatch.setattr(module, "_new_serial_instance", lambda: BrokenSerial(False))
+    monkeypatch.setattr(
+        module,
+        "_package_distributions",
+        lambda package: {"pokered-harness", "pyboy"} if package == "pyboy" else set(),
+    )
+
+    with pytest.raises(SystemExit, match="serial contract could not be constructed"):
         module._verify_runtime("source")
 
 
