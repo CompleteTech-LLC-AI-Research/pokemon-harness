@@ -237,7 +237,10 @@ class Serial:
 
         self.transfer_enabled = 1 if (self.SC & 0x80) else 0
         self.internal_clock = 1 if (self.SC & 0x01) else 0
-        self.double_speed = 1 if (self.SC & 0x02) else 0
+        # The fast-clock bit is meaningful only on CGB serial hardware. On
+        # DMG, bit 1 reads as an unused bit set to one and must not expose a
+        # CGB-only mode to the motherboard.
+        self.double_speed = 1 if self.cgb_mode and (self.SC & 0x02) else 0
 
         fresh_transfer = (
             not was_transfer_enabled
@@ -422,6 +425,9 @@ class Serial:
         f.write(self._bits_remaining)
 
     def load_state(self, f, state_version):
+        # ``state_version`` is the enclosing PyBoy save version. The serial
+        # shift-register extension was added without a global version bump,
+        # so extension parsing must remain EOF-tolerant for older saves.
         self.SB = f.read()
         self.SC = f.read()
         self.transfer_enabled = f.read()
@@ -430,6 +436,7 @@ class Serial:
         self._cycles_to_interrupt = f.read_64bit()
         self.clock = f.read_64bit()
         self.clock_target = f.read_64bit()
+        self.double_speed = 1 if self.cgb_mode and (self.SC & 0x02) else 0
         # Attempt to restore extended fields. Older states (and
         # upstream PyBoy saves) don't have them, so recover
         # conservatively: assume no in-flight transfer.
@@ -439,6 +446,10 @@ class Serial:
         except Exception:
             self._shift_register = self.SB
             self._bits_remaining = 0
+            self.transfer_enabled = 0
+            self.SC = self.SC & ~0x80 & 0xFF
+            self.clock_target = (1 << 31)
+            self._cycles_to_interrupt = (1 << 31)
 
 
 __all__ = [
