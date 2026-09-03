@@ -14,7 +14,7 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 _HASH_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -47,9 +47,17 @@ def _load_manifest(path: Path) -> dict[str, Any]:
 def _validate_relative_path(value: Any, field: str) -> None:
     _require(isinstance(value, str) and value, f"{field} must be a non-empty string")
     path = Path(value)
-    _require(not path.is_absolute(), f"{field} must be relative: {value!r}")
+    windows_path = PureWindowsPath(value)
+    _require(
+        not path.is_absolute() and not windows_path.is_absolute() and not windows_path.drive,
+        f"{field} must be relative: {value!r}",
+    )
     _require("\\" not in value, f"{field} must use POSIX separators: {value!r}")
     _require(".." not in path.parts, f"{field} must not escape its root: {value!r}")
+
+
+def _validate_text(value: Any, field: str) -> None:
+    _require(isinstance(value, str) and value.strip(), f"{field} must be a non-empty string")
 
 
 def _validate_input_pin(value: Any, field: str) -> None:
@@ -95,8 +103,8 @@ def _validate_schema(document: dict[str, Any]) -> list[dict[str, Any]]:
         seen_paths.add(relative_path)
 
         _require(fixture.get("kind") in {"ordinary", "battle"}, f"{prefix}.kind is invalid")
-        _require(isinstance(fixture.get("version"), str), f"{prefix}.version is required")
-        _require(isinstance(fixture.get("variant"), str), f"{prefix}.variant is required")
+        _validate_text(fixture.get("version"), f"{prefix}.version")
+        _validate_text(fixture.get("variant"), f"{prefix}.variant")
         size = fixture.get("size_bytes")
         _require(
             isinstance(size, int) and not isinstance(size, bool) and size >= 0,
@@ -122,13 +130,19 @@ def _validate_schema(document: dict[str, Any]) -> list[dict[str, Any]]:
             provenance.get("status") in _PROVENANCE_STATUSES,
             f"{prefix}.provenance.status is invalid",
         )
-        for field in (
-            "source_state",
-            "capture_command_template",
-            "runtime_identity",
-            "captured_at_utc",
-        ):
+        for field in ("source_state", "capture_command_template"):
             _require(field in provenance, f"{prefix}.provenance.{field} is required")
+            _validate_text(provenance[field], f"{prefix}.provenance.{field}")
+        for field in ("runtime_identity", "captured_at_utc", "verification_method"):
+            _require(field in provenance, f"{prefix}.provenance.{field} is required")
+            value = provenance[field]
+            _require(
+                value is None or (isinstance(value, str) and value.strip()),
+                f"{prefix}.provenance.{field} must be null or a non-empty string",
+            )
+        if provenance["status"] == "verified":
+            for field in ("runtime_identity", "captured_at_utc", "verification_method"):
+                _validate_text(provenance[field], f"{prefix}.provenance.{field}")
 
     return fixtures
 
@@ -153,11 +167,14 @@ def _validate_assets(fixtures: list[dict[str, Any]], fixture_root: Path) -> None
 
     for fixture in fixtures:
         relative_path = Path(fixture["path"])
+        candidate = resolved_root / relative_path
         try:
-            path = (resolved_root / relative_path).resolve(strict=False)
+            path = candidate.resolve(strict=False)
             path.relative_to(resolved_root)
         except (OSError, RuntimeError, ValueError) as exc:
             raise _error(f"fixture path escapes fixture root: {fixture['path']!r}") from exc
+        if candidate.is_symlink():
+            raise _error(f"fixture must be a regular file, not a symlink: {fixture['path']}")
         if not path.is_file():
             raise _error(f"fixture missing: {path}")
         actual_size = path.stat().st_size

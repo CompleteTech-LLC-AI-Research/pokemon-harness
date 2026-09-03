@@ -27,26 +27,41 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The published base is `8727779` (PR #28 documentation merge). The current
-isolated candidate additionally contains runtime, lifecycle, TCP, gate,
-headless-performance, and TCP-peer-teardown commits `94f4429`, `9ce7c9f`,
-`3d04293`, `f046c34`, `8b4847b`, `9453d7a`, and `abf3d27`; this is a `PARTIAL`
-publication candidate until the final gate and merge are verified. The release runtime is the bundled PyBoy source
+The published repository base for the current integration candidate is
+`84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36, 2026-09-03). The
+underlying implementation commit is
+`54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35), which moves remote
+serial-edge dispatch to an explicit native instruction-batch boundary. The
+candidate also includes serial save-state restoration, native bootstrap
+ownership and build-metadata cleanup, bounded MCP teardown, fail-closed gate
+accounting, and partial-initialization cleanup. This remains a `PARTIAL`
+publication candidate,
+not a production release. The release runtime is the bundled PyBoy source
 snapshot pinned in `VERSIONS.md` (`2.7.0`, harness revision
-`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode
-is the documented release default.
+`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode is
+the documented release default; Cython is an optional diagnostic build.
 
-The integrated source and explicitly selected Cython gates each collect 730
-tests and pass unit 586/586 plus timing 40/40 in each of five repetitions. The
-source gate uses vendored Python modules; the Cython gate reports native
-extensions for all five required PyBoy modules. With hashed assets supplied,
-source and Cython remote tiers pass 15/15, and the Cython local/session tier
-passes 47/47. Source strict trade and battle gates each reached 18/19 under
-bounded parallel execution; the isolated retry of each failed remote
-Yellow-to-Yellow selector passed. Exact native Red-to-Red trade/battle and
-Blue Color-to-Red Color trade rows pass, but full native strict qualification
-remains open after the historical post-PR #27 native trade result of 16/19. Use explicit ROM, symbol,
-and SHA-1 values; never use `POKERED_SKIP_SHA1=1` for release evidence.
+Current controlled evidence: the focused source and Cython
+transport/serial/PyBoy-link suite passes 110/110 in each runtime; an
+asset-backed source trade gate recorded 19/19 ordered rows; and the native
+Cython trade gate recorded 18/19. Its only failed row is
+`yellow-listen-blue_color-connect`, which stalls before party exchange at the
+configured 720-second bound and reproduced on isolated retry. A timing-altered
+diagnostic produced incorrect party records and is not acceptance evidence;
+the full native battle matrix is unqualified. Fresh isolated uv-managed source
+and Cython unit/timing gates collected 745 tests in each mode, passed unit
+600/600, and passed timing 40/40 in five repetitions; both installs passed
+`pip check`, and native bootstrap verified the `pyboy` and `pokered-harness`
+owners. The asset-free run did not exercise ROM-backed gameplay. An earlier
+environment-specific 585/586 ownership result is superseded for these isolated
+environments. The host's bare `python3` still lacks `ensurepip`, so that
+alternate standard-library venv path remains open. Use explicit ROM, symbol,
+and SHA-1 values; never use
+`POKERED_SKIP_SHA1=1` for release evidence.
+
+The source trade run was a trade-tier run whose supervisor started before PR
+#35 was published. Its child runs loaded the current implementation, but the
+result is not a clean post-merge all-tier sign-off.
 
 The complete all-tier source-runtime gate was collected before PR #19 at the
 PR #17 parent `b0b63c8` (698 tests: unit 554/554, local real-ROM 47/47,
@@ -63,11 +78,12 @@ transport 15/15.
 - Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
   fixture bytes have recorded reproduction evidence; the external states are
   never committed and their hashes do not prove gameplay compatibility.
-- The integrated source and Cython remote transport/MCP tiers pass 15/15, and
-  the integrated Cython local/session tier passes 47/47. Current source strict
-  trade and battle gates each reached 18/19 under parallel execution, with the
-  failed remote Yellow-to-Yellow selectors passing isolated retries. Full
-  native strict acceptance remains open.
+- Prior integrated source and Cython remote transport/MCP tiers pass 15/15,
+  and the prior integrated Cython local/session tier passes 47/47. These are
+  scoped follow-ups, not current full native trade/battle acceptance. The
+  current source trade gate recorded 19/19; current native trade recorded
+  18/19, with the exact remote failure named above. The current native battle
+  matrix is unqualified.
 - The current tree declares all canonical Red/Blue/Yellow listener and
   connector orderings over localhost TCP. The PR #19 synthetic concurrency
   probe passes, while real-ROM concurrent-load stability remains open.
@@ -75,10 +91,11 @@ transport 15/15.
   canonical ordered local and remote pair (19 trade and 19 battle nodes).
   Collection is declaration evidence only; a LinkMenu milestone is not a
   gameplay acceptance. Complete 19/19 trade and battle results exist for the
-  pre-PR #19 source-runtime baseline; the current source gate rows are
-  18/19 in each parallel strict matrix, with isolated retries passing. The
-  historical native trade qualification is `FAIL` at 16/19; the full native
-  matrix remains open.
+  pre-PR #19 source-runtime baseline. The current source trade gate recorded
+  19/19, while the current native trade gate recorded 18/19; the current full
+  source battle rerun and native battle matrix remain unqualified. The
+  historical native trade qualification of `FAIL` at 16/19 is not current
+  evidence.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
   source-state provenance is not proven against the vanilla ROM. Stock link
   pairs, other version pairs, and unlisted variants are unsupported or
@@ -87,9 +104,9 @@ transport 15/15.
   never expose it to a LAN, WAN, or public address.
 
 The release decision remains `PARTIAL`, not `PRODUCTION-READY`. Known open
-items include a clean full strict gate at the documented conservative worker
-count, native serial handling under the full matrix, a completed broad-suite
-release run, vanilla fixture provenance,
+items include reproducible clean-install verification, a clean full strict gate
+at the documented conservative worker count, native serial handling under the
+full matrix, a completed broad-suite release run, vanilla fixture provenance,
 full native-platform gameplay/load coverage, independent review, and
 authenticated/encrypted cross-host transport. Fresh Windows install,
 bootstrap, MCP stdio, and three-ROM lifecycle checks are now scoped evidence,

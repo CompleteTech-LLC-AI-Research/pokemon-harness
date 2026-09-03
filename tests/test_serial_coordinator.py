@@ -41,6 +41,7 @@ class _FailingBackendAssignmentCore:
             raise RuntimeError("injected backend assignment failure")
         self._backend = value
 
+
 # ---------------------------------------------------------------------------
 # Basic pairing
 # ---------------------------------------------------------------------------

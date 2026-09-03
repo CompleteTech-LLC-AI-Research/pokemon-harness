@@ -140,8 +140,7 @@ def validate_rom_version(version: str) -> str:
     normalized = version.strip().lower()
     if normalized not in _SUPPORTED_ROM_VERSIONS:
         raise ValueError(
-            f"unsupported ROM version {version!r}; expected one of "
-            f"{list(SUPPORTED_ROM_VERSIONS)}"
+            f"unsupported ROM version {version!r}; expected one of {list(SUPPORTED_ROM_VERSIONS)}"
         )
     return normalized
 
@@ -156,18 +155,13 @@ def _validate_exchange_kind(kind: str) -> str:
     except UnicodeEncodeError as exc:
         raise ValueError("exchange kind must contain ASCII characters only") from exc
     if len(encoded) > 0xFF:
-        raise ValueError(
-            f"exchange kind is too long for the wire protocol: {len(encoded)} bytes"
-        )
+        raise ValueError(f"exchange kind is too long for the wire protocol: {len(encoded)} bytes")
     return kind
 
 
 def _coerce_exchange_payload(payload: bytes | bytearray | memoryview) -> bytes:
     if not isinstance(payload, (bytes, bytearray, memoryview)):
-        raise TypeError(
-            "exchange payload must be bytes-like, "
-            f"got {type(payload).__name__}"
-        )
+        raise TypeError(f"exchange payload must be bytes-like, got {type(payload).__name__}")
     return bytes(payload)
 
 
@@ -224,9 +218,7 @@ class SerialLink(Protocol):
         complete."""
         ...
 
-    def exchange(
-        self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000
-    ) -> bytes:
+    def exchange(self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000) -> bytes:
         """Send ``my_bytes`` tagged with ``kind`` and block until peer
         sends a matching EXCHANGE for the same ``kind``. Returns peer's
         bytes.
@@ -257,9 +249,7 @@ def _pack_lp_bytes(b: bytes) -> bytes:
     return struct.pack(">H", len(b)) + bytes(b)
 
 
-def _read_exactly(
-    sock: socket.socket, n: int, *, allow_clean_eof: bool = False
-) -> bytes:
+def _read_exactly(sock: socket.socket, n: int, *, allow_clean_eof: bool = False) -> bytes:
     """Read exactly ``n`` bytes from a non-blocking socket.
 
     A clean EOF is only valid when no bytes of the next frame have arrived
@@ -272,9 +262,7 @@ def _read_exactly(
             chunk = sock.recv(n - len(buf))
         except (BlockingIOError, InterruptedError):
             try:
-                readable, _writable, exceptional = select.select(
-                    [sock], [], [sock], _IO_POLL_S
-                )
+                readable, _writable, exceptional = select.select([sock], [], [sock], _IO_POLL_S)
             except (OSError, ValueError) as exc:
                 raise SerialLinkClosed("socket closed while reading") from exc
             if not readable and not exceptional:
@@ -332,14 +320,11 @@ def _connect_socket(
     end_time = time.monotonic() + timeout_s
     last_error: OSError | None = None
     try:
-        addresses = socket.getaddrinfo(
-            normalized_host, port, type=socket.SOCK_STREAM
-        )
+        addresses = socket.getaddrinfo(normalized_host, port, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise SerialLinkError(f"unable to resolve {normalized_host!r}: {exc}") from exc
     if not addresses or any(
-        not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
-        for address in addresses
+        not _is_loopback_sockaddr(address[4] if len(address) > 4 else None) for address in addresses
     ):
         raise SerialLinkError(
             "TcpSerialLink is localhost-only; resolver returned an unsafe address"
@@ -364,9 +349,7 @@ def _connect_socket(
                     raise SerialLinkClosed("connection cancelled")
                 remaining = end_time - time.monotonic()
                 if remaining <= 0:
-                    last_error = TimeoutError(
-                        f"connection to {normalized_host}:{port} timed out"
-                    )
+                    last_error = TimeoutError(f"connection to {normalized_host}:{port} timed out")
                     break
                 _readable, writable, exceptional = select.select(
                     [], [sock], [sock], min(0.05, remaining)
@@ -378,9 +361,7 @@ def _connect_socket(
                     sock.setblocking(True)
                     connected = True
                     return sock
-                last_error = OSError(
-                    error, errno.errorcode.get(error, "connect failed")
-                )
+                last_error = OSError(error, errno.errorcode.get(error, "connect failed"))
                 break
         except (SerialLinkClosed, KeyboardInterrupt):
             raise
@@ -503,9 +484,7 @@ class TcpSerialLink:
         which lets a connector start without a guessed sleep.
         """
         host = validate_loopback_host(host)
-        accept_timeout_s = _validate_timeout_seconds(
-            accept_timeout_s, "accept_timeout_s"
-        )
+        accept_timeout_s = _validate_timeout_seconds(accept_timeout_s, "accept_timeout_s")
         port = _validate_port(port, allow_zero=True)
         listener = socket.socket(
             socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM
@@ -557,9 +536,7 @@ class TcpSerialLink:
     def peer_rom_version(self) -> str:
         return self._wait_for_hello(_HELLO_TIMEOUT_SECONDS)
 
-    def exchange(
-        self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000
-    ) -> bytes:
+    def exchange(self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000) -> bytes:
         timeout_ms = _validate_timeout_ms(timeout_ms)
         kind = _validate_exchange_kind(kind)
         payload = _coerce_exchange_payload(my_bytes)
@@ -647,9 +624,7 @@ class TcpSerialLink:
             with self._state_lock:
                 hello_received = self._peer_rom_version is not None
             if not hello_received:
-                raise SerialLinkProtocolError(
-                    "HELLO must be the first frame received"
-                )
+                raise SerialLinkProtocolError("HELLO must be the first frame received")
         if opcode == OP_HELLO:
             rom_version, offset = _read_lp_str(body, 1)
             if offset != len(body):
@@ -665,9 +640,7 @@ class TcpSerialLink:
             try:
                 _validate_exchange_kind(kind)
             except (TypeError, ValueError) as exc:
-                raise SerialLinkProtocolError(
-                    f"invalid EXCHANGE kind: {exc}"
-                ) from exc
+                raise SerialLinkProtocolError(f"invalid EXCHANGE kind: {exc}") from exc
             payload, offset = _read_lp_bytes(body, offset)
             if offset != len(body):
                 raise SerialLinkProtocolError("EXCHANGE has trailing bytes")
@@ -739,9 +712,7 @@ class TcpSerialLink:
         with self._write_lock:
             self._send_frame_locked(payload, deadline=deadline)
 
-    def _send_frame_locked(
-        self, payload: bytes, *, deadline: float | None = None
-    ) -> None:
+    def _send_frame_locked(self, payload: bytes, *, deadline: float | None = None) -> None:
         if len(payload) > _MAX_FRAME_SIZE:
             raise ValueError(f"frame too large: {len(payload)}")
         header = struct.pack(">I", len(payload))
@@ -764,7 +735,9 @@ class TcpSerialLink:
                     raise SerialLinkTimeout("socket write timed out")
                 try:
                     _readable, writable, exceptional = select.select(
-                        [], [self._sock], [self._sock],
+                        [],
+                        [self._sock],
+                        [self._sock],
                         min(_IO_POLL_S, remaining),
                     )
                 except (OSError, ValueError) as exc:
@@ -812,8 +785,7 @@ class TcpSerialLink:
             reader_exc = self._reader_exc
         if reader_exc is not None:
             raise SerialLinkError(
-                f"reader thread failed: {type(reader_exc).__name__}: "
-                f"{reader_exc}"
+                f"reader thread failed: {type(reader_exc).__name__}: {reader_exc}"
             ) from reader_exc
 
 
@@ -892,9 +864,7 @@ class InProcessSerialLink:
     def peer_rom_version(self) -> str:
         return self._peer_rom
 
-    def exchange(
-        self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000
-    ) -> bytes:
+    def exchange(self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000) -> bytes:
         timeout_ms = _validate_timeout_ms(timeout_ms)
         kind = _validate_exchange_kind(kind)
         payload = _coerce_exchange_payload(my_bytes)

@@ -25,9 +25,7 @@ from pathlib import Path
 
 SUPPORTED_VERSIONS = ("red", "blue", "yellow")
 SUPPORTED_VERSION_PAIRS = tuple(
-    (left, right)
-    for left in SUPPORTED_VERSIONS
-    for right in SUPPORTED_VERSIONS
+    (left, right) for left in SUPPORTED_VERSIONS for right in SUPPORTED_VERSIONS
 )
 
 ROM_VARIANTS = (
@@ -73,6 +71,7 @@ def _nodeid(test: tuple[str, str], parameter_id: str | None = None) -> str:
     module, name = test
     suffix = f"[{parameter_id}]" if parameter_id is not None else ""
     return f"{module}::{name}{suffix}"
+
 
 STRICT_TRADE_NODEIDS = frozenset(
     _nodeid(
@@ -137,8 +136,7 @@ STRICT_BATTLE_NODEIDS |= frozenset(
 
 
 LOCAL_VERSION_PAIR_NODEIDS = frozenset(
-    _nodeid(LOCAL_VERSION_PAIR_TEST, f"{left}-{right}")
-    for left, right in SUPPORTED_VERSION_PAIRS
+    _nodeid(LOCAL_VERSION_PAIR_TEST, f"{left}-{right}") for left, right in SUPPORTED_VERSION_PAIRS
 )
 
 REMOTE_VERSION_PAIR_NODEIDS = frozenset(
@@ -171,30 +169,17 @@ STRICT_ACCEPTANCE_NODEIDS = {
 # canonical Red/Blue/Yellow version ordering on both transports. Runtime
 # execution still has to prove each row; collection alone is never a pass.
 STRICT_ACCEPTANCE_CASES = {
-    "trade": frozenset(
-        ("local", left, right)
-        for left, right in SUPPORTED_VERSION_PAIRS
-    )
-    | frozenset(
-        ("remote", left, right)
-        for left, right in SUPPORTED_VERSION_PAIRS
-    ),
-    "battle": frozenset(
-        ("local", left, right)
-        for left, right in SUPPORTED_VERSION_PAIRS
-    )
-    | frozenset(
-        ("remote", left, right)
-        for left, right in SUPPORTED_VERSION_PAIRS
-    ),
+    "trade": frozenset(("local", left, right) for left, right in SUPPORTED_VERSION_PAIRS)
+    | frozenset(("remote", left, right) for left, right in SUPPORTED_VERSION_PAIRS),
+    "battle": frozenset(("local", left, right) for left, right in SUPPORTED_VERSION_PAIRS)
+    | frozenset(("remote", left, right) for left, right in SUPPORTED_VERSION_PAIRS),
 }
 
 # These labels describe the required current-candidate runtime work, not a
 # collection-time pass. The gate must execute and retain evidence for every
 # ordered row before any label can be promoted to certified.
 REMOTE_LINK_MENU_CASE_CLASSIFICATIONS = {
-    pair: "strict-trade-battle-runtime-pending"
-    for pair in SUPPORTED_VERSION_PAIRS
+    pair: "strict-trade-battle-runtime-pending" for pair in SUPPORTED_VERSION_PAIRS
 }
 
 PYTEST_COLLECTION_ARGUMENTS = (
@@ -216,9 +201,7 @@ _COLLECTION_REPORT_FIELDS = (
 )
 
 
-def acceptance_matrix_classifications() -> dict[
-    str, dict[tuple[str, str, str], str]
-]:
+def acceptance_matrix_classifications() -> dict[str, dict[tuple[str, str, str], str]]:
     """Classify declaration coverage without treating it as runtime evidence."""
     all_cases = {
         (transport, left, right)
@@ -227,11 +210,7 @@ def acceptance_matrix_classifications() -> dict[
     }
     return {
         operation: {
-            case: (
-                "declared"
-                if case in cases
-                else "unverified-no-strict-entrypoint"
-            )
+            case: ("declared" if case in cases else "unverified-no-strict-entrypoint")
             for case in sorted(all_cases)
         }
         for operation, cases in STRICT_ACCEPTANCE_CASES.items()
@@ -241,9 +220,7 @@ def acceptance_matrix_classifications() -> dict[
 def _json_case_classifications() -> dict[str, dict[str, str]]:
     """Return acceptance classifications with JSON-safe case keys."""
     return {
-        operation: {
-            _case_label(case): status for case, status in classifications.items()
-        }
+        operation: {_case_label(case): status for case, status in classifications.items()}
         for operation, classifications in acceptance_matrix_classifications().items()
     }
 
@@ -306,11 +283,7 @@ def _normalize_nodeid(nodeid: str) -> str:
     normalized_path = path.replace("\\", "/")
     while normalized_path.startswith("./"):
         normalized_path = normalized_path[2:]
-    return (
-        f"{normalized_path}::{test_name}"
-        if separator
-        else normalized_path
-    )
+    return f"{normalized_path}::{test_name}" if separator else normalized_path
 
 
 def _missing(expected: Iterable[str], actual: set[str]) -> tuple[str, ...]:
@@ -326,8 +299,7 @@ def _acceptance_gaps_for(
         for left, right in SUPPORTED_VERSION_PAIRS
     )
     return {
-        operation: tuple(sorted(expected - cases))
-        for operation, cases in declared_cases.items()
+        operation: tuple(sorted(expected - cases)) for operation, cases in declared_cases.items()
     }
 
 
@@ -341,9 +313,7 @@ def acceptance_matrix_gaps() -> dict[str, tuple[tuple[str, str, str], ...]]:
     return _acceptance_gaps_for(STRICT_ACCEPTANCE_CASES)
 
 
-def acceptance_declaration_gaps() -> dict[
-    str, tuple[tuple[str, str, str], ...]
-]:
+def acceptance_declaration_gaps() -> dict[str, tuple[tuple[str, str, str], ...]]:
     """Return current strict rows without a dedicated acceptance entry point."""
     return acceptance_matrix_gaps()
 
@@ -379,16 +349,11 @@ def audit_collection(
     errors = tuple(str(error) for error in collection_errors)
     skips = tuple(str(skip) for skip in collection_skips)
     structural_pass = not (
-        errors
-        or skips
-        or duplicate_nodeids
-        or any(group["missing"] for group in groups.values())
+        errors or skips or duplicate_nodeids or any(group["missing"] for group in groups.values())
     )
     return {
         "structural_pass": structural_pass,
-        "acceptance_matrix_complete": not any(
-            acceptance_declaration_gaps().values()
-        ),
+        "acceptance_matrix_complete": not any(acceptance_declaration_gaps().values()),
         "collected": len(normalized),
         "duplicate_nodeids": duplicate_nodeids,
         "collection_errors": errors,
@@ -479,9 +444,7 @@ def _collection_report_details(
             problems.append("collection-only report contains test outcomes")
         for field in ("passed", "failed", "skipped", "xfailed", "xpassed"):
             if counts.get(field, 0) != 0:
-                problems.append(
-                    f"collection-only report has nonzero {field} outcome count"
-                )
+                problems.append(f"collection-only report has nonzero {field} outcome count")
 
     records = payload.get("tests")
     if records != []:
@@ -618,10 +581,7 @@ def render_text(audit: dict[str, object], command: Iterable[str]) -> str:
         lines.append(f"command: {' '.join(command)}")
     for name, group in audit["groups"].items():
         status = "PASS" if not group["missing"] else "FAIL"
-        lines.append(
-            f"  {status:4} {name}: "
-            f"{group['present']}/{group['expected']} collected"
-        )
+        lines.append(f"  {status:4} {name}: {group['present']}/{group['expected']} collected")
         for nodeid in group["missing"]:
             lines.append(f"    missing: {nodeid}")
     for name, entries in (
@@ -635,14 +595,10 @@ def render_text(audit: dict[str, object], command: Iterable[str]) -> str:
 
     lines.append("strict acceptance declaration gaps (not runtime results):")
     for operation, cases in audit["acceptance_gaps"].items():
-        lines.append(
-            f"  {operation}: {len(cases)} unverified cases lack a strict entry point"
-        )
+        lines.append(f"  {operation}: {len(cases)} unverified cases lack a strict entry point")
         lines.extend(f"    - {_case_label(case)}" for case in cases)
     lines.append("remote ordered role classifications (runtime evidence recorded separately):")
-    for case, status in sorted(
-        audit["remote_link_menu_classifications"].items()
-    ):
+    for case, status in sorted(audit["remote_link_menu_classifications"].items()):
         lines.append(f"  {status}: {case}")
     lines.append("strict remote profile/role declarations (runtime pending):")
     for pair in audit["remote_strict_profile_pairs"]:

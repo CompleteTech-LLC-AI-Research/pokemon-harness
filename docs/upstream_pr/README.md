@@ -8,10 +8,12 @@
 The proposal describes how the candidate link modules in
 `src/pokered_harness/link/` could be adapted for
 [Baekalfen/PyBoy](https://github.com/Baekalfen/PyBoy). It is intentionally
-separate from the harness release gate. The current candidate bundles a pinned
-PyBoy `2.7.0` source runtime whose motherboard and serial objects are
-accessible from Python, but that bundle is not an upstream PyBoy contribution
-and this directory does not claim upstream acceptance.
+separate from the harness release gate. The published harness head is
+`84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36), and its implementation
+commit is `54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35). The candidate
+bundles a pinned PyBoy `2.7.0` source runtime whose motherboard and
+serial objects are accessible from Python, but that bundle is not an upstream
+PyBoy contribution and this directory does not claim upstream acceptance.
 
 ## Current boundary
 
@@ -20,8 +22,12 @@ and this directory does not claim upstream acceptance.
   upstream review result.
 - No upstream PR number, branch tip, test output, or merge status is asserted
   by these files.
-- The current candidate's collection gate passes, but real-ROM/link tests are
-  still fixture- and runtime-gated; the release decision remains `PARTIAL`.
+- Fresh isolated source and Cython unit/timing gates each pass 600/600 unit
+  tests and 40/40 timing cases across five repetitions. The clone had no ROM,
+  symbol, or save-state assets, so real-ROM/link tests remain fixture- and
+  runtime-gated; the release decision remains `PARTIAL`. An earlier
+  environment-specific 585/586 ownership result is superseded for these
+  isolated environments.
   See the
   [production runbook](../PRODUCTION_RUNBOOK.md) and
   [release checklist](../RELEASE_CHECKLIST.md).
@@ -33,10 +39,12 @@ and this directory does not claim upstream acceptance.
   contract must still be reviewed independently before any PyBoy contribution
   can be treated as an upstream dependency.
 - The pinned fork's Cython build exposes the Python-side `mb.serial` object.
-  Recorded scoped evidence includes a three-ROM attach/tick/close smoke, but
-  this proposal does not reproduce ROM-backed results or certify the current
-  strict matrix. Full Cython trade/battle acceptance and upstream-wheel
-  compatibility remain unverified.
+  Recorded scoped evidence includes a three-ROM attach/tick/close smoke and a
+  current focused 110/110 serial-link suite. The native trade gate is still
+  18/19 because `yellow-listen-blue_color-connect` stalls before party
+  exchange, and native battle is not fully qualified. This proposal does not
+  reproduce those ROM-backed results or certify the strict matrix. Upstream-
+  wheel compatibility remains unverified.
 
 ## Proposed file mapping
 

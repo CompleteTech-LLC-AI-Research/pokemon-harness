@@ -73,9 +73,7 @@ def _make_pair() -> tuple[Session, FakePyBoy, DictMemory, Session, FakePyBoy, Di
 
 def test_install_registers_hooks_on_both_sessions():
     sa, pa, _, sb, pb, _ = _make_pair()
-    bridge = SerialBridge.from_sessions(
-        sa, sb, LinkTransport(), version_a="red", version_b="red"
-    )
+    bridge = SerialBridge.from_sessions(sa, sb, LinkTransport(), version_a="red", version_b="red")
     assert bridge.installed is False
 
     bridge.install()
@@ -92,9 +90,7 @@ def test_install_registers_hooks_on_both_sessions():
 
 def test_install_twice_raises():
     sa, _, _, sb, _, _ = _make_pair()
-    bridge = SerialBridge.from_sessions(
-        sa, sb, LinkTransport(), version_a="red", version_b="red"
-    )
+    bridge = SerialBridge.from_sessions(sa, sb, LinkTransport(), version_a="red", version_b="red")
     bridge.install()
     with pytest.raises(RuntimeError):
         bridge.install()
@@ -108,9 +104,7 @@ def test_uninstall_removes_only_bridge_callbacks_and_is_idempotent():
         unrelated_calls.append("unrelated")
 
     pa.hook_register(SERIAL_EXCHANGE_BANK, SERIAL_EXCHANGE_ADDR, unrelated, None)
-    bridge = SerialBridge.from_sessions(
-        sa, sb, LinkTransport(), version_a="red", version_b="red"
-    )
+    bridge = SerialBridge.from_sessions(sa, sb, LinkTransport(), version_a="red", version_b="red")
     bridge.install()
 
     bridge.uninstall()
@@ -134,9 +128,7 @@ def test_install_rolls_back_direct_bridge_on_partial_failure():
     sa = Session(pyboy=pa, symbols=sym_a, event_bus=EventBus())
     sb = Session(pyboy=pb, symbols=sym_b, event_bus=EventBus())
     pb.fail_register = True
-    bridge = SerialBridge.from_sessions(
-        sa, sb, LinkTransport(), version_a="red", version_b="red"
-    )
+    bridge = SerialBridge.from_sessions(sa, sb, LinkTransport(), version_a="red", version_b="red")
 
     with pytest.raises(RuntimeError, match="injected hook registration failure"):
         bridge.install()
@@ -162,9 +154,7 @@ def test_install_rolls_back_direct_bridge_on_partial_failure():
 
 def test_exchange_from_side_a_swaps_bytes_and_sets_status():
     sa, pa, ma, sb, _, mb = _make_pair()
-    bridge = SerialBridge.from_sessions(
-        sa, sb, LinkTransport(), version_a="red", version_b="red"
-    )
+    bridge = SerialBridge.from_sessions(sa, sb, LinkTransport(), version_a="red", version_b="red")
     bridge.install()
 
     ma[HRAM_SEND] = 0xAA
@@ -187,9 +177,7 @@ def test_exchange_from_side_a_swaps_bytes_and_sets_status():
 
 def test_exchange_from_side_b_uses_same_mapping():
     sa, _, ma, sb, pb, mb = _make_pair()
-    bridge = SerialBridge.from_sessions(
-        sa, sb, LinkTransport(), version_a="red", version_b="red"
-    )
+    bridge = SerialBridge.from_sessions(sa, sb, LinkTransport(), version_a="red", version_b="red")
     bridge.install()
 
     ma[HRAM_SEND] = 0x11
@@ -208,9 +196,7 @@ def test_exchange_from_side_b_uses_same_mapping():
 def test_exchange_drives_the_transport():
     sa, pa, ma, sb, _, mb = _make_pair()
     transport = LinkTransport()
-    bridge = SerialBridge.from_sessions(
-        sa, sb, transport, version_a="red", version_b="red"
-    )
+    bridge = SerialBridge.from_sessions(sa, sb, transport, version_a="red", version_b="red")
     bridge.install()
 
     ma[HRAM_SEND] = 0x42
@@ -229,9 +215,7 @@ def test_exchange_drives_the_transport():
 
 def test_handshake_writes_connected_marker_on_both_sides():
     sa, pa, ma, sb, _, mb = _make_pair()
-    bridge = SerialBridge.from_sessions(
-        sa, sb, LinkTransport(), version_a="red", version_b="red"
-    )
+    bridge = SerialBridge.from_sessions(sa, sb, LinkTransport(), version_a="red", version_b="red")
     bridge.install()
 
     ma[HRAM_STATUS] = 0x00
@@ -266,17 +250,11 @@ def test_from_sessions_missing_hram_label_raises_lookup_error():
 """
     sa_mem = DictMemory()
     sb_mem = DictMemory()
-    sa = Session(
-        pyboy=FakePyBoy(sa_mem), symbols=load_sym_text(sym_missing)
-    )
-    sb = Session(
-        pyboy=FakePyBoy(sb_mem), symbols=load_sym_text(_SYM_TEXT)
-    )
+    sa = Session(pyboy=FakePyBoy(sa_mem), symbols=load_sym_text(sym_missing))
+    sb = Session(pyboy=FakePyBoy(sb_mem), symbols=load_sym_text(_SYM_TEXT))
 
     with pytest.raises(LookupError) as exc:
-        SerialBridge.from_sessions(
-            sa, sb, LinkTransport(), version_a="red", version_b="red"
-        )
+        SerialBridge.from_sessions(sa, sb, LinkTransport(), version_a="red", version_b="red")
     assert HRAM_SERIAL_RECEIVE in str(exc.value)
 
 
@@ -288,16 +266,10 @@ def test_from_sessions_missing_required_link_symbol_propagates():
 00:FFA2 hSerialSendData
 00:FFA3 hSerialReceiveData
 """
-    sa = Session(
-        pyboy=FakePyBoy(DictMemory()), symbols=load_sym_text(sym_no_exchange)
-    )
-    sb = Session(
-        pyboy=FakePyBoy(DictMemory()), symbols=load_sym_text(_SYM_TEXT)
-    )
+    sa = Session(pyboy=FakePyBoy(DictMemory()), symbols=load_sym_text(sym_no_exchange))
+    sb = Session(pyboy=FakePyBoy(DictMemory()), symbols=load_sym_text(_SYM_TEXT))
     with pytest.raises(LookupError) as exc:
-        SerialBridge.from_sessions(
-            sa, sb, LinkTransport(), version_a="red", version_b="red"
-        )
+        SerialBridge.from_sessions(sa, sb, LinkTransport(), version_a="red", version_b="red")
     assert "exchange_bytes" in str(exc.value)
 
 

@@ -81,9 +81,7 @@ def _require_hram(session: Session, label: str) -> int:
     return sym.addr
 
 
-def _label_on(
-    session: Session, link_sym: LinkSymbol, version: str | None = None
-) -> str | None:
+def _label_on(session: Session, link_sym: LinkSymbol, version: str | None = None) -> str | None:
     """Return whichever per_version label for ``link_sym`` exists in this
     session's SymbolTable, or None if none of them do.
 
@@ -126,17 +124,11 @@ class SerialBridge:
         self._transport = transport
         self._resolved_a = dict(resolved_a)
         self._resolved_b = dict(resolved_b)
-        self._version_a = (
-            validate_rom_version(version_a) if version_a is not None else None
-        )
-        self._version_b = (
-            validate_rom_version(version_b) if version_b is not None else None
-        )
+        self._version_a = validate_rom_version(version_a) if version_a is not None else None
+        self._version_b = validate_rom_version(version_b) if version_b is not None else None
         self._installed = False
         self._lifecycle_lock = RLock()
-        self._owned_serial_hooks: list[
-            tuple[Session, tuple[object, int, int, str]]
-        ] = []
+        self._owned_serial_hooks: list[tuple[Session, tuple[object, int, int, str]]] = []
         self._owned_raw_hooks: list[RawHookRegistration] = []
 
     @classmethod
@@ -205,9 +197,7 @@ class SerialBridge:
                 self._capture_owned_hooks(baselines, hook_baselines)
                 cleanup_errors = self._uninstall_locked()
                 for cleanup_error in cleanup_errors:
-                    exc.add_note(
-                        f"bridge install rollback cleanup failed: {cleanup_error!r}"
-                    )
+                    exc.add_note(f"bridge install rollback cleanup failed: {cleanup_error!r}")
                 raise
             self._installed = True
 

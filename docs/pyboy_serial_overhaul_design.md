@@ -10,6 +10,20 @@
 > in the [production runbook](PRODUCTION_RUNBOOK.md) and
 > [release checklist](RELEASE_CHECKLIST.md).
 
+## Current harness boundary
+
+The published harness head is
+`84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36); the current serial
+dispatch implementation is
+`54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35). The harness bundles a pinned PyBoy
+`2.7.0` source runtime and documents source mode as its release runtime. The
+optional Cython build passes the focused transport/serial/PyBoy-link suite
+110/110, but its current strict trade gate is 18/19 because
+`yellow-listen-blue_color-connect` stalls before party exchange. The full
+native battle matrix is unqualified. These are harness results, not upstream
+PyBoy results, and the API and integration points below remain a proposal for
+maintainer review.
+
 ## Why this document exists
 
 At the time of this proposal, mainline PyBoy did not implement the Game Boy
@@ -103,7 +117,12 @@ new coordinator strategy (e.g. "schedule both cores on the same thread
 and advance together") can experiment without redesigning the wire
 protocol.
 
-## Public Python API
+## Proposed public Python API
+
+The following is an illustrative upstream API, not the current harness MCP
+surface or a guarantee that these names exist in PyBoy. Validate constructor,
+tick, state, and teardown semantics against the exact upstream revision before
+implementing or advertising it.
 
 The smallest surface that covers Gen I Pokémon needs:
 
@@ -232,7 +251,9 @@ This sidesteps save-state compatibility concerns during the transition
 
 ## Test plan
 
-Three tiers, matching the research-report recommendation:
+Four evidence tiers are useful for this proposal. They must remain separate;
+ROM-free or synthetic results cannot substitute for real-ROM trade or battle
+acceptance.
 
 ### Tier 1 — Register-level (ROM-free)
 
@@ -266,7 +287,15 @@ actually running a Pokémon ROM. Assert the transport correctly relays:
   slots (encoded as `wWhichPokemon + 4`), `0xD` no-action, `0xE`
   struggle, `0xF` run.
 
-### Tier 3 — Game-level (real ROMs, gated by BYO-ROM)
+### Tier 3 — Harness integration (BYO assets)
+
+Use the harness's pinned ROM, symbol, and fixture machinery to test attach,
+session lifecycle, local pairs, and loopback TCP separately. A LinkMenu or
+transport milestone is not a completed trade or battle. The current harness
+records source trade 19/19, native trade 18/19 with one reproducible remote
+pre-party-exchange stall, and no complete current native battle matrix.
+
+### Tier 4 — Game-level (real ROMs, gated by BYO-ROM)
 
 Two linked PyBoy instances driven through real Pokémon flows. Reuses
 the [pokered-harness](https://github.com/CompleteDotTech/pokemon)
@@ -427,7 +456,8 @@ is a goal, not an accident. Tested as invariants.
 
 ## Proposed acceptance criteria for a future v1
 
-- All three tiers of tests green on CI.
+- All four evidence tiers green on CI, with real-ROM assets and source/native
+  runtime results reported separately.
 - Two PyBoy instances trade a Pokémon end-to-end on Red/Blue/Yellow
   cross-version pairings.
 - Two PyBoy instances complete a link battle turn with correct move

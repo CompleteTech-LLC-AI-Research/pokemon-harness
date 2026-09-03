@@ -7,10 +7,11 @@ performance testing:
 
 * ``source`` (default): disable Cython and install the harness distribution,
   including its bundled Python sources;
-* ``cython``: build the checked-in PyBoy fork with its Cython extensions. This
-  is an optional source-checkout diagnostic; source mode is the supported
-  production runtime and a Cython compile failure is reported without
-  weakening the source-runtime contract.
+* ``cython``: install the current checkout as an editable harness distribution
+  and build the checked-in PyBoy fork with its Cython extensions. This is an
+  optional source-checkout diagnostic; source mode is the supported production
+  runtime and a Cython compile failure is reported without weakening the
+  source-runtime contract.
 
 Both modes use the checked-in source snapshot.  No network VCS checkout,
 ``PYTHONPATH`` override, or machine-specific path is involved.
@@ -134,13 +135,26 @@ def _package_distributions(package: str) -> set[str]:
     }
 
 
+def _new_serial_instance() -> object:
+    """Construct the serial object after the module import contract passes."""
+    from pyboy.core.serial import Serial
+
+    return Serial(False)
+
+
+def _remove_generated_pyboy_metadata() -> None:
+    """Keep a native build's transient distribution metadata out of the source path."""
+    metadata_dir = PYBOY_SOURCE / "pyboy.egg-info"
+    if metadata_dir.is_dir():
+        shutil.rmtree(metadata_dir)
+
+
 def _verify_runtime(mode: str) -> None:
     """Fail closed unless the installed runtime matches the requested mode."""
     try:
         modules = {name: importlib.import_module(name) for name in RUNTIME_MODULES}
         import pyboy
         from pyboy import utils
-        from pyboy.core.serial import Serial
     except Exception as exc:
         raise SystemExit(
             "PyBoy runtime cannot be imported after bootstrap; install the "
@@ -169,10 +183,10 @@ def _verify_runtime(mode: str) -> None:
             problems.append(f"{name} is {actual_kind}, expected {expected_kind}")
 
     owners = _package_distributions("pyboy")
+    if PROJECT_DISTRIBUTION not in owners:
+        problems.append("pyboy is not provided by the installed pokered-harness distribution")
     if mode == "source":
         unexpected = owners - {PROJECT_DISTRIBUTION}
-        if PROJECT_DISTRIBUTION not in owners:
-            problems.append("pyboy is not provided by the installed pokered-harness distribution")
         if unexpected:
             problems.append(
                 "pyboy has competing installed owners: " + ", ".join(sorted(unexpected))
@@ -191,14 +205,21 @@ def _verify_runtime(mode: str) -> None:
             f"expected {mode == 'cython'!r}"
         )
 
-    serial = Serial(False)
-    missing = [
-        name
-        for name in ("backend", "apply_external_edge", "peek_out_bit")
-        if not hasattr(serial, name)
-    ]
-    if missing:
-        problems.append(f"serial contract missing {', '.join(missing)}")
+    try:
+        serial = _new_serial_instance()
+    except Exception as exc:  # noqa: BLE001 - an incompatible ABI must fail closed
+        # A separately installed stock PyBoy may import successfully while
+        # exposing an incompatible constructor or ABI. Report it alongside
+        # the ownership/module-kind violations instead of leaking a traceback.
+        problems.append(f"serial contract could not be constructed: {type(exc).__name__}: {exc}")
+    else:
+        missing = [
+            name
+            for name in ("backend", "apply_external_edge", "peek_out_bit")
+            if not hasattr(serial, name)
+        ]
+        if missing:
+            problems.append(f"serial contract missing {', '.join(missing)}")
 
     if problems:
         raise SystemExit(f"PyBoy runtime contract failed for --mode {mode}: " + "; ".join(problems))
@@ -232,14 +253,33 @@ def main(argv: list[str] | None = None) -> int:
         env.pop("PYBOY_NO_CYTHON", None)
         install_target = PYBOY_SOURCE
 
+    pip_install = _pip_command()
+    if args.mode == "cython":
+        # Keep the harness distribution installed in native environments too.
+        # The vendored fork has its own ``pyboy`` distribution metadata, but
+        # that package alone cannot provide the MCP entry point or harness
+        # modules. Install the checkout first so the native fork can overlay
+        # its extension-backed PyBoy modules without losing project ownership.
+        project_command = [
+            *pip_install,
+            "--force-reinstall",
+            "--no-deps",
+            "-e",
+            str(ROOT),
+        ]
+        project_result = subprocess.run(project_command, cwd=ROOT, env=env, check=False)
+        if project_result.returncode:
+            return project_result.returncode
+
     command = [
-        *_pip_command(),
+        *pip_install,
         "--force-reinstall",
         "--no-deps",
         CYTHON_REQUIREMENT,
         str(install_target),
     ]
     result = subprocess.run(command, cwd=ROOT, env=env, check=False)
+    _remove_generated_pyboy_metadata()
     if result.returncode:
         if args.mode == "cython":
             print(

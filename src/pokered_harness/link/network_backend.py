@@ -86,9 +86,7 @@ _OP_HELLO: int = 0x01
 
 _PROTOCOL_VERSION: int = 1
 _ROM_VERSION_CODES: dict[str, int] = {"red": 1, "blue": 2, "yellow": 3}
-_ROM_VERSION_NAMES: dict[int, str] = {
-    value: key for key, value in _ROM_VERSION_CODES.items()
-}
+_ROM_VERSION_NAMES: dict[int, str] = {value: key for key, value in _ROM_VERSION_CODES.items()}
 
 _FRAME = struct.Struct(">BB")  # opcode, payload (1-byte id for SYNC)
 _LEN = struct.Struct(">H")
@@ -137,9 +135,7 @@ def _validate_optional_timeout(value: float | None, name: str) -> float | None:
     try:
         normalized = float(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{name} must be a finite, non-negative number"
-        ) from exc
+        raise ValueError(f"{name} must be a finite, non-negative number") from exc
     if not math.isfinite(normalized) or normalized < 0:
         raise ValueError(f"{name} must be a finite, non-negative number")
     return normalized
@@ -156,9 +152,7 @@ def _require_timeout(value: float | None, name: str) -> float:
 def _coerce_payload(value: bytes | bytearray | memoryview, name: str) -> bytes:
     """Validate and copy a wire payload before framing it."""
     if not isinstance(value, (bytes, bytearray, memoryview)):
-        raise TypeError(
-            f"{name} must be bytes-like, got {type(value).__name__}"
-        )
+        raise TypeError(f"{name} must be bytes-like, got {type(value).__name__}")
     return bytes(value)
 
 
@@ -181,20 +175,14 @@ def validate_loopback_host(host: str) -> str:
         # unauthenticated transport. Every address returned for localhost
         # must still be loopback before it is accepted.
         try:
-            addresses = socket.getaddrinfo(
-                normalized, None, type=socket.SOCK_STREAM
-            )
+            addresses = socket.getaddrinfo(normalized, None, type=socket.SOCK_STREAM)
         except OSError as exc:
-            raise ValueError(
-                "NetworkBackend is localhost-only; localhost did not resolve"
-            ) from exc
+            raise ValueError("NetworkBackend is localhost-only; localhost did not resolve") from exc
         if not addresses or any(
             not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
             for address in addresses
         ):
-            raise ValueError(
-                "NetworkBackend is localhost-only; localhost resolved unsafely"
-            )
+            raise ValueError("NetworkBackend is localhost-only; localhost resolved unsafely")
         return "localhost"
     try:
         address = ipaddress.ip_address(normalized)
@@ -203,9 +191,7 @@ def validate_loopback_host(host: str) -> str:
             "NetworkBackend is localhost-only; use 127.0.0.1, localhost, or ::1"
         ) from exc
     if not address.is_loopback:
-        raise ValueError(
-            "NetworkBackend is localhost-only; use 127.0.0.1, localhost, or ::1"
-        )
+        raise ValueError("NetworkBackend is localhost-only; use 127.0.0.1, localhost, or ::1")
     return normalized
 
 
@@ -236,25 +222,17 @@ def _validate_connected_socket_loopback(sock: socket.socket) -> None:
     if unix_family is not None and family == unix_family:
         return
     if family not in (socket.AF_INET, socket.AF_INET6):
-        raise ValueError(
-            "NetworkBackend requires a connected loopback TCP socket"
-        )
+        raise ValueError("NetworkBackend requires a connected loopback TCP socket")
     try:
         peer = sock.getpeername()
     except OSError as exc:
-        raise ValueError(
-            "NetworkBackend requires a connected loopback TCP socket"
-        ) from exc
+        raise ValueError("NetworkBackend requires a connected loopback TCP socket") from exc
     if not isinstance(peer, tuple) or not peer or not isinstance(peer[0], str):
-        raise ValueError(
-            "NetworkBackend requires a connected loopback TCP socket"
-        )
+        raise ValueError("NetworkBackend requires a connected loopback TCP socket")
     try:
         validate_loopback_host(peer[0])
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "NetworkBackend is localhost-only; raw TCP peer is not loopback"
-        ) from exc
+        raise ValueError("NetworkBackend is localhost-only; raw TCP peer is not loopback") from exc
 
 
 def _connect_socket(
@@ -271,16 +249,11 @@ def _connect_socket(
         raise ValueError("timeout_s must be finite and positive")
     deadline = time.monotonic() + timeout_s
     try:
-        addresses = socket.getaddrinfo(
-            normalized_host, port, type=socket.SOCK_STREAM
-        )
+        addresses = socket.getaddrinfo(normalized_host, port, type=socket.SOCK_STREAM)
     except OSError as exc:
-        raise NetworkBackendError(
-            f"unable to resolve {normalized_host!r}: {exc}"
-        ) from exc
+        raise NetworkBackendError(f"unable to resolve {normalized_host!r}: {exc}") from exc
     if not addresses or any(
-        not _is_loopback_sockaddr(address[4] if len(address) > 4 else None)
-        for address in addresses
+        not _is_loopback_sockaddr(address[4] if len(address) > 4 else None) for address in addresses
     ):
         raise NetworkBackendError(
             "NetworkBackend is localhost-only; resolver returned an unsafe address"
@@ -299,18 +272,14 @@ def _connect_socket(
                 sock.setblocking(True)
                 return sock
             if result not in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
-                last_error = OSError(
-                    result, errno.errorcode.get(result, "connect failed")
-                )
+                last_error = OSError(result, errno.errorcode.get(result, "connect failed"))
                 continue
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise NetworkBackendError("connection cancelled")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    last_error = TimeoutError(
-                        f"connection to {normalized_host}:{port} timed out"
-                    )
+                    last_error = TimeoutError(f"connection to {normalized_host}:{port} timed out")
                     break
                 _readable, writable, exceptional = select.select(
                     [], [sock], [sock], min(0.05, remaining)
@@ -322,9 +291,7 @@ def _connect_socket(
                     connected = True
                     sock.setblocking(True)
                     return sock
-                last_error = OSError(
-                    error, errno.errorcode.get(error, "connect failed")
-                )
+                last_error = OSError(error, errno.errorcode.get(error, "connect failed"))
                 break
         except NetworkBackendError:
             raise
@@ -349,8 +316,7 @@ def _validate_rom_version(version: str) -> str:
     normalized = version.strip().lower()
     if normalized not in _ROM_VERSION_CODES:
         raise ValueError(
-            f"unsupported ROM version {version!r}; expected one of "
-            f"{sorted(_ROM_VERSION_CODES)}"
+            f"unsupported ROM version {version!r}; expected one of {sorted(_ROM_VERSION_CODES)}"
         )
     return normalized
 
@@ -397,9 +363,7 @@ class NetworkBackend:
         # emulator owner may execute; the network threads never touch the
         # native serial object.
         self._edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(maxsize=256)
-        self._completed_edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(
-            maxsize=256
-        )
+        self._completed_edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(maxsize=256)
         # Counts EDGE_REQ frames from enqueue until their response has been
         # written.  A phase barrier can therefore wait for the wire work
         # already admitted by the reader without mistaking an armed-but-idle
@@ -426,9 +390,7 @@ class NetworkBackend:
         self._closed_event = threading.Event()
         self._reader_exc: Exception | None = None
         self._local_rom_version = (
-            _validate_rom_version(local_rom_version)
-            if local_rom_version is not None
-            else None
+            _validate_rom_version(local_rom_version) if local_rom_version is not None else None
         )
         self._peer_rom_version: str | None = None
         self._hello_received = threading.Event()
@@ -509,18 +471,14 @@ class NetworkBackend:
         The accept deadline is always finite; cancellation may end it sooner.
         """
         normalized_host = validate_loopback_host(host)
-        accept_timeout_s = _validate_optional_timeout(
-            accept_timeout_s, "accept_timeout_s"
-        )
+        accept_timeout_s = _validate_optional_timeout(accept_timeout_s, "accept_timeout_s")
         if accept_timeout_s is None:
             raise ValueError("accept_timeout_s must be finite and positive")
         family = _socket_family(normalized_host)
         listener = socket.socket(family, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         bind_address = (
-            (normalized_host, port, 0, 0)
-            if family == socket.AF_INET6
-            else (normalized_host, port)
+            (normalized_host, port, 0, 0) if family == socket.AF_INET6 else (normalized_host, port)
         )
         conn: socket.socket | None = None
         try:
@@ -641,9 +599,7 @@ class NetworkBackend:
                 raise error
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                error = NetworkBackendError(
-                    f"peer HELLO not received within {timeout:g}s"
-                )
+                error = NetworkBackendError(f"peer HELLO not received within {timeout:g}s")
                 self._mark_closed(error)
                 raise error
             self._hello_received.wait(timeout=min(_SEND_POLL_SECONDS, remaining))
@@ -660,8 +616,7 @@ class NetworkBackend:
         peer_version = self.peer_rom_version
         if expected is not None and peer_version != expected:
             error = NetworkBackendError(
-                f"peer ROM version {peer_version!r} does not match "
-                f"expected {expected!r}"
+                f"peer ROM version {peer_version!r} does not match expected {expected!r}"
             )
             self._mark_closed(error)
             raise error
@@ -705,18 +660,14 @@ class NetworkBackend:
             if self._closed:
                 raise NetworkBackendError("backend closed")
             if dispatch_to_owner and serial_gate is None:
-                raise ValueError(
-                    "dispatch_to_owner=True requires a shared serial_gate"
-                )
+                raise ValueError("dispatch_to_owner=True requires a shared serial_gate")
             self._local_core = local_core
             self._irq_callback = irq_callback
             if serial_gate is not None:
                 self._serial_gate = serial_gate
             self._dispatch_to_owner = dispatch_to_owner
             worker_target = (
-                self._owner_response_worker_loop
-                if dispatch_to_owner
-                else self._edge_worker_loop
+                self._owner_response_worker_loop if dispatch_to_owner else self._edge_worker_loop
             )
             self._edge_worker = threading.Thread(
                 target=worker_target,
@@ -778,13 +729,10 @@ class NetworkBackend:
                     self._resp_queue,
                     timeout=max(0.0, deadline - time.monotonic()),
                     timeout_message=(
-                        "no EDGE_RESP from peer within "
-                        f"{_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
+                        f"no EDGE_RESP from peer within {_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
                     ),
                 )
-                self._stats["edge_resp_received"] = (
-                    int(self._stats["edge_resp_received"]) + 1
-                )
+                self._stats["edge_resp_received"] = int(self._stats["edge_resp_received"]) + 1
                 return bit
             except OSError as exc:
                 error = NetworkBackendError(f"failed to send EDGE_REQ: {exc}")
@@ -927,9 +875,7 @@ class NetworkBackend:
             error = (
                 exc
                 if isinstance(exc, NetworkBackendError)
-                else NetworkBackendError(
-                    f"failed to send OP_EXCHANGE({kind_id}): {exc}"
-                )
+                else NetworkBackendError(f"failed to send OP_EXCHANGE({kind_id}): {exc}")
             )
             self._mark_closed(error)
             raise error from exc
@@ -1008,8 +954,7 @@ class NetworkBackend:
                             return
                         if self._reader_exc is not None:
                             raise NetworkBackendError(
-                                f"backend closed while waiting for wire idle: "
-                                f"{self._reader_exc}"
+                                f"backend closed while waiting for wire idle: {self._reader_exc}"
                             ) from self._reader_exc
                         raise NetworkBackendError("backend closed while waiting for wire idle")
                     idle_observed = True
@@ -1021,8 +966,7 @@ class NetworkBackend:
                 if self._closed:
                     if self._reader_exc is not None:
                         raise NetworkBackendError(
-                            f"backend closed while waiting for wire idle: "
-                            f"{self._reader_exc}"
+                            f"backend closed while waiting for wire idle: {self._reader_exc}"
                         ) from self._reader_exc
                     raise NetworkBackendError("backend closed while waiting for wire idle")
                 if cancel_event is not None and cancel_event.is_set():
@@ -1112,9 +1056,7 @@ class NetworkBackend:
             error = (
                 exc
                 if isinstance(exc, NetworkBackendError)
-                else NetworkBackendError(
-                    f"failed to send OP_SYNC({sync_id}): {exc}"
-                )
+                else NetworkBackendError(f"failed to send OP_SYNC({sync_id}): {exc}")
             )
             self._mark_closed(error)
             raise error from exc
@@ -1198,10 +1140,7 @@ class NetworkBackend:
         ):
             edge_worker.join(timeout=max(0.0, deadline - time.monotonic()))
 
-        if (
-            isinstance(reader, threading.Thread)
-            and reader is not threading.current_thread()
-        ):
+        if isinstance(reader, threading.Thread) and reader is not threading.current_thread():
             reader.join(timeout=max(0.0, deadline - time.monotonic()))
         return not any(
             isinstance(worker, threading.Thread)
@@ -1236,9 +1175,7 @@ class NetworkBackend:
                     self._hello_received.set()
                 elif opcode == _OP_EDGE_REQ:
                     if payload > 1:
-                        raise NetworkBackendError(
-                            f"invalid EDGE_REQ bit payload {payload}"
-                        )
+                        raise NetworkBackendError(f"invalid EDGE_REQ bit payload {payload}")
                     with self._edge_pending_condition:
                         self._edge_pending += 1
                         self._edge_pending_condition.notify_all()
@@ -1249,49 +1186,35 @@ class NetworkBackend:
                         with self._edge_pending_condition:
                             self._edge_pending -= 1
                             self._edge_pending_condition.notify_all()
-                        raise NetworkBackendError(
-                            "incoming EDGE_REQ queue is full"
-                        ) from exc
+                        raise NetworkBackendError("incoming EDGE_REQ queue is full") from exc
                 elif opcode == _OP_EDGE_RESP:
                     if payload > 1:
-                        raise NetworkBackendError(
-                            f"invalid EDGE_RESP bit payload {payload}"
-                        )
+                        raise NetworkBackendError(f"invalid EDGE_RESP bit payload {payload}")
                     with self._edge_response_lock:
                         if not self._edge_inflight:
-                            raise NetworkBackendError(
-                                "unsolicited EDGE_RESP"
-                            )
+                            raise NetworkBackendError("unsolicited EDGE_RESP")
                         try:
                             self._resp_queue.put_nowait(payload & 1)
                         except queue.Full as exc:
-                            raise NetworkBackendError(
-                                "duplicate or unsolicited EDGE_RESP"
-                            ) from exc
+                            raise NetworkBackendError("duplicate or unsolicited EDGE_RESP") from exc
                 elif opcode == _OP_SYNC:
                     with self._sync_lock:
                         if payload in self._sync_pending:
-                            raise NetworkBackendError(
-                                f"duplicate pending OP_SYNC({payload})"
-                            )
+                            raise NetworkBackendError(f"duplicate pending OP_SYNC({payload})")
                         q = self._sync_queues.setdefault(
                             payload, queue.Queue(maxsize=_CONTROL_QUEUE_MAXSIZE)
                         )
                         try:
                             q.put_nowait(payload)
                         except queue.Full as exc:
-                            raise NetworkBackendError(
-                                f"OP_SYNC({payload}) queue is full"
-                            ) from exc
+                            raise NetworkBackendError(f"OP_SYNC({payload}) queue is full") from exc
                         self._sync_pending.add(payload)
                     self._stats["sync_received"] = int(self._stats["sync_received"]) + 1
                 elif opcode == _OP_EXCHANGE:
                     raw_len = self._recv_exactly(2)
                     (length,) = _LEN.unpack(raw_len)
                     data = self._recv_exactly(length)
-                    self._stats["exchange_received"] = (
-                        int(self._stats["exchange_received"]) + 1
-                    )
+                    self._stats["exchange_received"] = int(self._stats["exchange_received"]) + 1
                     with self._exchange_lock:
                         q = self._exchange_queues.setdefault(
                             payload, queue.Queue(maxsize=_CONTROL_QUEUE_MAXSIZE)
@@ -1299,13 +1222,9 @@ class NetworkBackend:
                     try:
                         q.put_nowait(data)
                     except queue.Full as exc:
-                        raise NetworkBackendError(
-                            f"OP_EXCHANGE({payload}) queue is full"
-                        ) from exc
+                        raise NetworkBackendError(f"OP_EXCHANGE({payload}) queue is full") from exc
                 else:
-                    raise NetworkBackendError(
-                        f"unknown NetworkBackend opcode 0x{opcode:02x}"
-                    )
+                    raise NetworkBackendError(f"unknown NetworkBackend opcode 0x{opcode:02x}")
         except NetworkBackendError as exc:
             # EOF exactly on a frame boundary is an orderly peer shutdown.
             # Keep it distinguishable from a truncated frame so a lifecycle
@@ -1388,9 +1307,7 @@ class NetworkBackend:
         requests applied, not the number merely observed or deferred.
         """
         if not self._dispatch_to_owner:
-            raise NetworkBackendError(
-                "service_pending_edges requires dispatch_to_owner=True"
-            )
+            raise NetworkBackendError("service_pending_edges requires dispatch_to_owner=True")
         if max_edges is not None:
             if isinstance(max_edges, bool) or not isinstance(max_edges, int):
                 raise TypeError("max_edges must be a positive integer or None")
@@ -1415,13 +1332,9 @@ class NetworkBackend:
                 ready = self._apply_owner_edge_if_ready(request)
             except Exception as exc:  # noqa: BLE001 - fail the link closed
                 request.error = exc
-                self._stats["owner_edge_errors"] = (
-                    int(self._stats["owner_edge_errors"]) + 1
-                )
+                self._stats["owner_edge_errors"] = int(self._stats["owner_edge_errors"]) + 1
                 self._mark_closed(
-                    NetworkBackendError(
-                        f"owner failed to apply incoming EDGE_REQ: {exc}"
-                    )
+                    NetworkBackendError(f"owner failed to apply incoming EDGE_REQ: {exc}")
                 )
                 self._decrement_edge_pending()
                 break
@@ -1431,26 +1344,16 @@ class NetworkBackend:
                 # deterministic. The queue has a free slot immediately after
                 # this get, so this put cannot block.
                 request.deferred = True
-                self._stats["owner_edge_deferred"] = (
-                    int(self._stats["owner_edge_deferred"]) + 1
-                )
+                self._stats["owner_edge_deferred"] = int(self._stats["owner_edge_deferred"]) + 1
                 self._edge_queue.put_nowait(request)
                 break
-            self._stats["owner_edge_applied"] = (
-                int(self._stats["owner_edge_applied"]) + 1
-            )
+            self._stats["owner_edge_applied"] = int(self._stats["owner_edge_applied"]) + 1
             try:
                 self._completed_edge_queue.put_nowait(request)
             except queue.Full as exc:
-                self._mark_closed(
-                    NetworkBackendError(
-                        "completed EDGE_REQ response queue is full"
-                    )
-                )
+                self._mark_closed(NetworkBackendError("completed EDGE_REQ response queue is full"))
                 self._decrement_edge_pending()
-                raise NetworkBackendError(
-                    "completed EDGE_REQ response queue is full"
-                ) from exc
+                raise NetworkBackendError("completed EDGE_REQ response queue is full") from exc
             applied += 1
         return applied
 
@@ -1463,9 +1366,7 @@ class NetworkBackend:
         """
         core = self._local_core
         if core is None:
-            raise NetworkBackendError(
-                "owner dispatch requires a local serial core"
-            )
+            raise NetworkBackendError("owner dispatch requires a local serial core")
         with self._serial_gate:
             transfer_enabled = bool(getattr(core, "transfer_enabled", 0))
             internal_clock = bool(getattr(core, "internal_clock", 0))
@@ -1485,9 +1386,7 @@ class NetworkBackend:
 
     def _apply_owner_keepalive(self, request: _InboundEdge, core: object) -> None:
         """Prepare one no-data response for a transient internal-clock edge."""
-        self._stats["edge_req_received"] = (
-            int(self._stats["edge_req_received"]) + 1
-        )
+        self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
         now = time.monotonic()
         if now < self._active_exchange_until:
             raise NetworkBackendError(
@@ -1495,12 +1394,8 @@ class NetworkBackend:
                 "during an active exchange"
             )
         if self._keepalive_bit_idx == 0:
-            self._stats["keepalive_bytes_started"] = (
-                int(self._stats["keepalive_bytes_started"]) + 1
-            )
-        self._stats["keepalive_bits_sent"] = (
-            int(self._stats["keepalive_bits_sent"]) + 1
-        )
+            self._stats["keepalive_bytes_started"] = int(self._stats["keepalive_bytes_started"]) + 1
+        self._stats["keepalive_bits_sent"] = int(self._stats["keepalive_bits_sent"]) + 1
         self._stats["last_keepalive_state"] = self._core_state_snapshot(core)
         request.response_bit = 0 if self._keepalive_bit_idx == 7 else 1
         request.completed = False
@@ -1510,33 +1405,21 @@ class NetworkBackend:
         """Perform one authentic external edge under the shared gate."""
         core = self._local_core
         if core is None:
-            raise NetworkBackendError(
-                "owner dispatch requires a local serial core"
-            )
+            raise NetworkBackendError("owner dispatch requires a local serial core")
         if not bool(getattr(core, "transfer_enabled", 0)):
-            raise NetworkBackendError(
-                "serial core became unarmed before EDGE_REQ dispatch"
-            )
+            raise NetworkBackendError("serial core became unarmed before EDGE_REQ dispatch")
         if bool(getattr(core, "internal_clock", 0)):
-            raise NetworkBackendError(
-                "serial core became internal-clock before EDGE_REQ dispatch"
-            )
+            raise NetworkBackendError("serial core became internal-clock before EDGE_REQ dispatch")
         our_bit = int(core.peek_out_bit()) & 1
         completed = bool(core.apply_external_edge(request.peer_bit & 1))
         request.response_bit = our_bit
         request.completed = completed
-        self._stats["edge_req_received"] = (
-            int(self._stats["edge_req_received"]) + 1
-        )
-        self._stats["slave_armed_edges"] = (
-            int(self._stats["slave_armed_edges"]) + 1
-        )
+        self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
+        self._stats["slave_armed_edges"] = int(self._stats["slave_armed_edges"]) + 1
         if completed:
             self._stats["last_slave_byte_complete_at"] = time.monotonic()
             if self._irq_callback is not None:
-                self._stats["irq_callbacks"] = (
-                    int(self._stats["irq_callbacks"]) + 1
-                )
+                self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
                 self._irq_callback()
 
     def _send_edge_response(self, request: _InboundEdge) -> None:
@@ -1546,9 +1429,7 @@ class NetworkBackend:
                 f"incoming EDGE_REQ failed: {request.error}"
             ) from request.error
         if request.response_bit not in (0, 1):
-            raise NetworkBackendError(
-                "owner produced an invalid EDGE_RESP bit"
-            )
+            raise NetworkBackendError("owner produced an invalid EDGE_RESP bit")
         with self._write_guard(
             timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
             operation="EDGE_RESP",
@@ -1560,16 +1441,10 @@ class NetworkBackend:
                 timeout=max(0.0, write_deadline - time.monotonic()),
                 operation="EDGE_RESP",
             )
-            self._stats["edge_resp_sent"] = (
-                int(self._stats["edge_resp_sent"]) + 1
-            )
+            self._stats["edge_resp_sent"] = int(self._stats["edge_resp_sent"]) + 1
 
     def _signal_edge_worker_stop(self) -> None:
-        target_queue = (
-            self._completed_edge_queue
-            if self._dispatch_to_owner
-            else self._edge_queue
-        )
+        target_queue = self._completed_edge_queue if self._dispatch_to_owner else self._edge_queue
         try:
             target_queue.put_nowait(None)
         except queue.Full:
@@ -1603,6 +1478,7 @@ class NetworkBackend:
         """
         core = self._local_core
         self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
+
         def armed() -> bool:
             return (
                 core is not None
@@ -1680,25 +1556,19 @@ class NetworkBackend:
                 self._stats["slave_armed_edges"] = slave_armed_edges
                 self._consecutive_armed_edges += 1
                 if slave_armed_edges >= _ACTIVE_EXCHANGE_EDGE_THRESHOLD:
-                    self._active_exchange_until = (
-                        time.monotonic() + _ACTIVE_EXCHANGE_GRACE_SECONDS
-                    )
+                    self._active_exchange_until = time.monotonic() + _ACTIVE_EXCHANGE_GRACE_SECONDS
                 our_bit = core.peek_out_bit()
                 completed = core.apply_external_edge(peer_bit)
                 if completed:
                     self._stats["last_slave_byte_complete_at"] = time.monotonic()
-                    self._post_byte_rearm_until = (
-                        time.monotonic() + _POST_BYTE_REARM_GRACE_SECONDS
-                    )
+                    self._post_byte_rearm_until = time.monotonic() + _POST_BYTE_REARM_GRACE_SECONDS
                 # Reset keep-alive counter so the next idle stretch starts
                 # fresh at the top of a 0xFE byte boundary rather than
                 # mid-byte.
                 self._keepalive_bit_idx = 0
             else:
                 if active_exchange:
-                    raise NetworkBackendError(
-                        "slave did not re-arm during active serial exchange"
-                    )
+                    raise NetworkBackendError("slave did not re-arm during active serial exchange")
                 self._consecutive_armed_edges = 0
                 if post_byte_rearm:
                     self._stats["keepalive_after_post_byte_waits"] = (
@@ -1712,9 +1582,7 @@ class NetworkBackend:
                     self._stats["keepalive_bytes_started"] = (
                         int(self._stats["keepalive_bytes_started"]) + 1
                     )
-                self._stats["keepalive_bits_sent"] = (
-                    int(self._stats["keepalive_bits_sent"]) + 1
-                )
+                self._stats["keepalive_bits_sent"] = int(self._stats["keepalive_bits_sent"]) + 1
                 self._stats["last_keepalive_state"] = self._core_state_snapshot(core)
                 our_bit = 0 if self._keepalive_bit_idx == 7 else 1
                 self._keepalive_bit_idx = (self._keepalive_bit_idx + 1) & 7
@@ -1730,9 +1598,7 @@ class NetworkBackend:
                         timeout=max(0.0, write_deadline - time.monotonic()),
                         operation="EDGE_RESP",
                     )
-                    self._stats["edge_resp_sent"] = (
-                        int(self._stats["edge_resp_sent"]) + 1
-                    )
+                    self._stats["edge_resp_sent"] = int(self._stats["edge_resp_sent"]) + 1
         except (OSError, NetworkBackendError):
             self._mark_closed()
             return
@@ -1744,9 +1610,7 @@ class NetworkBackend:
                 # IRQ callback errors shouldn't kill the reader thread. Keep a
                 # compact diagnostic so callers can inspect failures through
                 # debug_snapshot() without changing transport behavior.
-                self._stats["irq_callback_errors"] = (
-                    int(self._stats["irq_callback_errors"]) + 1
-                )
+                self._stats["irq_callback_errors"] = int(self._stats["irq_callback_errors"]) + 1
                 self._stats["last_irq_callback_error"] = type(exc).__name__
 
     @staticmethod
@@ -1781,9 +1645,7 @@ class NetworkBackend:
                 chunk = self._sock.recv(n - len(buf))
             except BlockingIOError:
                 try:
-                    select.select(
-                        [self._sock], [], [], _SEND_POLL_SECONDS
-                    )
+                    select.select([self._sock], [], [], _SEND_POLL_SECONDS)
                 except (OSError, ValueError) as exc:
                     if self._closed or self._closed_event.is_set():
                         raise NetworkBackendError("backend closed") from exc
@@ -1826,9 +1688,7 @@ class NetworkBackend:
                 raise NetworkBackendError(f"{operation}: backend closed")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise NetworkBackendError(
-                    f"{operation} write lock timed out after {timeout:g}s"
-                )
+                raise NetworkBackendError(f"{operation} write lock timed out after {timeout:g}s")
             if self._write_lock.acquire(timeout=min(_SEND_POLL_SECONDS, remaining)):
                 break
         try:
@@ -1862,9 +1722,7 @@ class NetworkBackend:
                 raise NetworkBackendError(f"{operation}: backend closed")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise NetworkBackendError(
-                    f"{operation} send timed out after {timeout:g}s"
-                )
+                raise NetworkBackendError(f"{operation} send timed out after {timeout:g}s")
             try:
                 sent = self._sock.send(view[offset:])
             except BlockingIOError:
@@ -1872,29 +1730,23 @@ class NetworkBackend:
             except InterruptedError:
                 continue
             except OSError as exc:
-                raise NetworkBackendError(
-                    f"failed to send {operation}: {exc}"
-                ) from exc
+                raise NetworkBackendError(f"failed to send {operation}: {exc}") from exc
             if sent > 0:
                 offset += sent
                 continue
             try:
                 _readable, writable, exceptional = select.select(
-                    [], [self._sock], [self._sock],
+                    [],
+                    [self._sock],
+                    [self._sock],
                     min(_SEND_POLL_SECONDS, remaining),
                 )
             except (OSError, ValueError) as exc:
                 if self._closed or self._closed_event.is_set():
-                    raise NetworkBackendError(
-                        f"{operation}: backend closed"
-                    ) from exc
-                raise NetworkBackendError(
-                    f"failed to poll socket for {operation}: {exc}"
-                ) from exc
+                    raise NetworkBackendError(f"{operation}: backend closed") from exc
+                raise NetworkBackendError(f"failed to poll socket for {operation}: {exc}") from exc
             if exceptional and not writable:
-                raise NetworkBackendError(
-                    f"socket became exceptional while sending {operation}"
-                )
+                raise NetworkBackendError(f"socket became exceptional while sending {operation}")
 
     def _queue_get(
         self,

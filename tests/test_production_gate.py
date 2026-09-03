@@ -18,6 +18,7 @@ from scripts.tcp_link_matrix import (
     LOCAL_VERSION_PAIR_NODEIDS,
     REMOTE_REVERSED_ROLE_NODEIDS,
     REMOTE_VERSION_PAIR_NODEIDS,
+    SUPPORTED_VERSIONS,
     _collection_environment,
     _collection_report_details,
     acceptance_matrix_gaps,
@@ -74,6 +75,7 @@ def _matrix_report(nodeid: str, *, outcome: str = "passed") -> dict:
 class _FakeMatrixPopen:
     mode = "pass"
     commands: ClassVar[list] = []
+    instances: ClassVar[list] = []
 
     def __init__(self, command, *, env, **kwargs):
         del kwargs
@@ -82,6 +84,7 @@ class _FakeMatrixPopen:
         self.pid = 999999999
         self.stdout = io.StringIO("")
         self.commands.append((command, env))
+        self.instances.append(self)
         nodeid = command[3]
         if self.mode != "hang":
             outcome = "passed" if self.mode == "pass" else self.mode
@@ -298,6 +301,7 @@ def test_fixture_manifest_input_pins_match_versions_and_inspected_bytes(tmp_path
 
 
 def test_required_matrix_manifest_covers_ordered_versions_and_variants():
+    assert SUPPORTED_VERSIONS == ("red", "blue", "yellow")
     assert len(TIER_REQUIRED_NODEIDS["remote"]) == 11
     assert len(TIER_REQUIRED_NODEIDS["local"]) == 18
     assert TIER_REQUIRED_NODEIDS == required_matrix_nodeids()
@@ -311,6 +315,26 @@ def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert any("[blue-red]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
     assert any("[red-vanilla-x-color]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["local"])
     assert any("[blue-color-x-vanilla]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["local"])
+
+    expected_pairs = {
+        f"[{left}-{right}]" for left in SUPPORTED_VERSIONS for right in SUPPORTED_VERSIONS
+    }
+    assert {nodeid[nodeid.index("[") :] for nodeid in REMOTE_VERSION_PAIR_NODEIDS} == expected_pairs
+    assert {nodeid[nodeid.index("[") :] for nodeid in LOCAL_VERSION_PAIR_NODEIDS} == expected_pairs
+    for operation, test_name in (
+        ("trade", "test_subprocess_pair_completes_trade_over_tcp"),
+        ("battle", "test_subprocess_pair_resolves_battle_turn_over_tcp"),
+    ):
+        strict_remote = {
+            nodeid[nodeid.index("[") :]
+            for nodeid in TIER_REQUIRED_NODEIDS[operation]
+            if test_name in nodeid
+        }
+        assert strict_remote == {
+            f"[{listener}-listen-{connector}-connect]"
+            for listener in ("red_color", "blue_color", "yellow")
+            for connector in ("red_color", "blue_color", "yellow")
+        }
 
 
 def test_matrix_audit_fails_closed_on_missing_cases_and_reports_unrun_runtime():
@@ -524,6 +548,7 @@ def test_strict_matrix_tier_rejects_a_skipped_required_row(tmp_path, monkeypatch
 def test_strict_matrix_supervisor_marks_timeout_and_queued_rows(tmp_path, monkeypatch):
     _FakeMatrixPopen.mode = "hang"
     _FakeMatrixPopen.commands = []
+    _FakeMatrixPopen.instances = []
     monkeypatch.setattr(gate.subprocess, "Popen", _FakeMatrixPopen)
     monkeypatch.setattr(gate.os, "killpg", lambda _pid, _signal: None)
     monkeypatch.setattr(gate, "MATRIX_CASE_TIMEOUT_SECONDS", {"trade": 0.05, "battle": 0.05})
@@ -560,6 +585,7 @@ def test_strict_matrix_supervisor_marks_timeout_and_queued_rows(tmp_path, monkey
     assert any(case.status == "TIMEOUT" for case in result.case_results)
     assert any(case.status == "NOT_STARTED" for case in result.case_results)
     assert any("aggregate deadline expired" in failure for failure in result.iteration_failures)
+    assert all(instance.poll() is not None for instance in _FakeMatrixPopen.instances)
 
 
 def test_asset_inspection_reports_hash_mismatch_and_missing_inputs(tmp_path):
@@ -751,12 +777,91 @@ def test_gate_report_loader_counts_xfail_and_skip_reasons(tmp_path):
     assert reasons == {"known issue": 1, "missing ROM": 1}
 
 
+def test_gate_report_loader_counts_collection_skip_reasons(tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "counts": {
+                    "total": 1,
+                    "passed": 1,
+                    "failed": 0,
+                    "skipped": 0,
+                    "xfailed": 0,
+                    "xpassed": 0,
+                    "errors": 0,
+                },
+                "tests": [
+                    {
+                        "nodeid": "tests/test_gate.py::test_pass",
+                        "outcome": "passed",
+                        "when": "call",
+                        "reason": "",
+                        "was_xfail": False,
+                    }
+                ],
+                "collection_errors": [],
+                "collection_skips": [
+                    {
+                        "nodeid": "tests/test_optional.py",
+                        "reason": "optional fixture unavailable",
+                    }
+                ],
+                "collected": 1,
+                "nodeids": ["tests/test_gate.py::test_pass"],
+                "exitstatus": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _counts, reasons, error = gate.load_gate_report(report)
+
+    assert error == ""
+    assert reasons == {"optional fixture unavailable": 1}
+
+
 def test_optional_skip_is_explicit_and_non_required():
     result = gate.synthetic_optional_skip("trade", "optional trade unavailable: no fixtures")
     assert result.status == "SKIP"
     assert result.required is False
     assert result.counts.skipped == 1
     assert result.skip_reasons == {"optional trade unavailable: no fixtures": 1}
+
+
+def test_optional_tier_with_partial_skips_is_not_reported_as_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "OPTIONAL_TIERS", frozenset({"unit"}))
+
+    def fake_run_pytest_once(**kwargs):
+        return (
+            0,
+            gate.GateReport(
+                counts=gate.Counts(total=2, passed=1, skipped=1),
+                skip_reasons={"optional fixture unavailable": 1},
+                nodeids=(
+                    "tests/test_optional.py::test_available",
+                    "tests/test_optional.py::test_missing_fixture",
+                ),
+            ),
+            "",
+            ["python", "-m", "pytest"],
+        )
+
+    monkeypatch.setattr(gate, "run_pytest_once", fake_run_pytest_once)
+    result = gate.run_tier(
+        name="unit",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+    )
+
+    assert result.status == "SKIP"
+    assert result.counts == gate.Counts(total=2, passed=1, skipped=1)
+    assert result.skip_reasons == {"optional fixture unavailable": 1}
 
 
 def test_rom_helper_honors_explicit_roots(tmp_path, monkeypatch):
@@ -781,6 +886,8 @@ def test_relative_roots_are_anchored_to_the_inspected_project(tmp_path, monkeypa
 
     assert gate.find_rom_root(tmp_path) == tmp_path / "external-rom"
     assert gate.find_fixture_root(tmp_path) == tmp_path / "external-fixtures"
+    assert find_rom_root(tmp_path) == tmp_path / "external-rom"
+    assert find_fixture_root(tmp_path) == tmp_path / "external-fixtures"
     assert gate.find_rom_root(tmp_path, Path("explicit-rom")) == tmp_path / "explicit-rom"
     assert gate.find_fixture_root(tmp_path, Path("explicit-fixtures")) == (
         tmp_path / "explicit-fixtures"

@@ -89,8 +89,7 @@ class _PyBoyLike(Protocol):
 
     mb: object
 
-    def tick(self, count: int = 1, render: bool = True, sound: bool = False) -> bool:
-        ...
+    def tick(self, count: int = 1, render: bool = True, sound: bool = False) -> bool: ...
 
 
 def _validate_positive_int(value: int, name: str) -> int:
@@ -280,9 +279,7 @@ class PyBoyLinkSession:
             raise RuntimeError(f"already attached: {pyboy!r}")
         max_attached = 1 if self._network_backend is not None else self.MAX_ATTACHED
         if len(self._pyboys) >= max_attached:
-            raise RuntimeError(
-                f"session is full ({max_attached} instances max)"
-            )
+            raise RuntimeError(f"session is full ({max_attached} instances max)")
 
         mb = pyboy.mb
         core = mb.serial  # prefer reusing the existing PyBoy Serial instance
@@ -336,9 +333,7 @@ class PyBoyLinkSession:
                         timeout=self._NETWORK_HELLO_TIMEOUT_SECONDS
                     )
                     if peer_version is None:
-                        raise RuntimeError(
-                            "versioned network backend did not report peer ROM"
-                        )
+                        raise RuntimeError("versioned network backend did not report peer ROM")
                     self.negotiate_network_clock_role(peer_version)
                 self._install_network_tick_owner(pyboy)
                 with self._serial_gate:
@@ -349,9 +344,7 @@ class PyBoyLinkSession:
                 self._restore_network_tick_owner(pyboy)
                 self._network_backend.stop()
                 try:
-                    core.backend = (
-                        prev_backend if prev_backend is not None else NullBackend()
-                    )
+                    core.backend = prev_backend if prev_backend is not None else NullBackend()
                 except AttributeError:
                     pass
                 self._pyboys.pop()
@@ -368,12 +361,8 @@ class PyBoyLinkSession:
                 self._coord = LockstepCoordinator(
                     self._cores[0],
                     self._cores[1],
-                    on_a_transfer_complete=self._make_serial_irq_raiser(
-                        self._pyboys[0]
-                    ),
-                    on_b_transfer_complete=self._make_serial_irq_raiser(
-                        self._pyboys[1]
-                    ),
+                    on_a_transfer_complete=self._make_serial_irq_raiser(self._pyboys[0]),
+                    on_b_transfer_complete=self._make_serial_irq_raiser(self._pyboys[1]),
                     on_a_peer_unarmed=self._make_peer_progressor(self._pyboys[1]),
                     on_b_peer_unarmed=self._make_peer_progressor(self._pyboys[0]),
                 )
@@ -386,14 +375,9 @@ class PyBoyLinkSession:
                     if prev_serial is not None:
                         mb.serial = prev_serial
                     else:
-                        core.backend = (
-                            prev_backend if prev_backend is not None else NullBackend()
-                        )
+                        core.backend = prev_backend if prev_backend is not None else NullBackend()
                 except BaseException as rollback_error:  # noqa: BLE001
-                    exc.add_note(
-                        "local attach rollback also failed: "
-                        f"{rollback_error!r}"
-                    )
+                    exc.add_note(f"local attach rollback also failed: {rollback_error!r}")
                 finally:
                     self._pyboys.pop()
                     self._cores.pop()
@@ -491,9 +475,7 @@ class PyBoyLinkSession:
             owner_attribute = "tick"
             original_tick = getattr(pyboy, owner_attribute, None)
         if not callable(original_tick):
-            raise TypeError(
-                "network link requires a callable PyBoy._tick or PyBoy.tick"
-            )
+            raise TypeError("network link requires a callable PyBoy._tick or PyBoy.tick")
 
         @wraps(original_tick)
         def owned_frame(*args, **kwargs):
@@ -544,9 +526,7 @@ class PyBoyLinkSession:
             # those integrations; the bundled patched PyBoy core always has
             # the fields and therefore gets the higher-throughput path.
             return
-        core.owner_dispatch_callback = PyBoyLinkSession._make_network_owner_pump(
-            backend
-        )
+        core.owner_dispatch_callback = PyBoyLinkSession._make_network_owner_pump(backend)
         core.owner_dispatch_enabled = True
 
     @staticmethod
@@ -638,8 +618,7 @@ class PyBoyLinkSession:
         set_sc = getattr(core, "set_SC", None)
         if not callable(set_sb) or not callable(set_sc):
             raise TypeError(
-                "network role initialization requires native Serial.set_SB "
-                "and Serial.set_SC"
+                "network role initialization requires native Serial.set_SB and Serial.set_SC"
             )
 
         with self._serial_gate:
@@ -784,10 +763,7 @@ class PyBoyLinkSession:
                     stop_error = exc
                 if stop_error is not None:
                     if errors:
-                        errors[0].add_note(
-                            "network backend cleanup also failed: "
-                            f"{stop_error!r}"
-                        )
+                        errors[0].add_note(f"network backend cleanup also failed: {stop_error!r}")
                     else:
                         errors.append(stop_error)
 
@@ -928,9 +904,7 @@ class PyBoyLinkSession:
                 # a common emulated-time counter, so their only safe frame
                 # boundary is the LCD flag; the outer bound prevents a
                 # broken double from turning this loop into an infinite one.
-                PyBoyLinkSession._advance_to_lcd_boundaries(
-                    a, b, chunk_cycles
-                )
+                PyBoyLinkSession._advance_to_lcd_boundaries(a, b, chunk_cycles)
         finally:
             for p in (a, b):
                 p.mb.breakpoint_singlestep = 0
@@ -1064,8 +1038,7 @@ class PyBoyLinkSession:
                 current = cls._cpu_cycles(pyboy)
                 if current is None:
                     raise TimeoutError(
-                        "PyBoy CPU cycle counter disappeared during "
-                        "interleaved stepping"
+                        "PyBoy CPU cycle counter disappeared during interleaved stepping"
                     )
                 max_cycles = max_cycles_a if pyboy is a else max_cycles_b
                 if current > max_cycles:
@@ -1098,8 +1071,7 @@ class PyBoyLinkSession:
                 current = cls._cpu_cycles(pyboy)
                 if current is None:
                     raise TimeoutError(
-                        "PyBoy CPU cycle counter disappeared during "
-                        "interleaved stepping"
+                        "PyBoy CPU cycle counter disappeared during interleaved stepping"
                     )
                 if current > max_cycles:
                     raise TimeoutError(
@@ -1114,9 +1086,7 @@ class PyBoyLinkSession:
                     reached_b = reached
 
     @classmethod
-    def _advance_to_lcd_boundaries(
-        cls, a: object, b: object, chunk_cycles: int
-    ) -> None:
+    def _advance_to_lcd_boundaries(cls, a: object, b: object, chunk_cycles: int) -> None:
         """Bounded fallback for test doubles without CPU cycle counters."""
         chunk = max(4, chunk_cycles)
         max_rounds = max(
@@ -1128,8 +1098,7 @@ class PyBoyLinkSession:
         while not (a_done and b_done):
             if rounds >= max_rounds:
                 raise TimeoutError(
-                    "PyBoy pair did not reach both LCD frame boundaries "
-                    f"within {max_rounds} rounds"
+                    f"PyBoy pair did not reach both LCD frame boundaries within {max_rounds} rounds"
                 )
             rounds += 1
             for pyboy in cls._serial_step_order(a, b):

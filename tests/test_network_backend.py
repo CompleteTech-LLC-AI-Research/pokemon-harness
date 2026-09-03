@@ -72,13 +72,15 @@ def test_network_backend_rejects_unbounded_accept():
 
 def test_localhost_resolution_must_remain_loopback(monkeypatch):
     def unsafe_resolution(*_args, **_kwargs):
-        return [(
-            _socket.AF_INET,
-            _socket.SOCK_STREAM,
-            0,
-            "",
-            ("192.0.2.1", 0),
-        )]
+        return [
+            (
+                _socket.AF_INET,
+                _socket.SOCK_STREAM,
+                0,
+                "",
+                ("192.0.2.1", 0),
+            )
+        ]
 
     monkeypatch.setattr(_socket, "getaddrinfo", unsafe_resolution)
     with pytest.raises(ValueError, match="resolved unsafely"):
@@ -323,10 +325,7 @@ def test_unsolicited_edge_responses_fail_closed_without_wedging_shutdown():
     """A response without an in-flight request is a protocol error."""
     a, b = NetworkBackend.pair()
     a.start_receiver(local_core=None)
-    b._sock.sendall(
-        struct.pack(">BB", _OP_EDGE_RESP, 1)
-        + struct.pack(">BB", _OP_EDGE_RESP, 0)
-    )
+    b._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, 1) + struct.pack(">BB", _OP_EDGE_RESP, 0))
     try:
         for _ in range(100):
             if a._reader_exc is not None:
@@ -422,9 +421,7 @@ def test_cancelled_network_connect_returns_promptly():
     cancel.set()
     started = time.monotonic()
     with pytest.raises(NetworkBackendError, match="cancelled"):
-        NetworkBackend.connect(
-            "127.0.0.1", 1, timeout_s=30.0, cancel_event=cancel
-        )
+        NetworkBackend.connect("127.0.0.1", 1, timeout_s=30.0, cancel_event=cancel)
     assert time.monotonic() - started < 1.0
 
 
@@ -453,7 +450,7 @@ def test_two_serialcores_exchange_byte_via_network_backend():
     master.set_SB(0xAA)
     slave.set_SB(0x55)
     master.set_SC(0x81)  # internal clock
-    slave.set_SC(0x80)   # external clock
+    slave.set_SC(0x80)  # external clock
 
     # Record slave-side IRQ fires.
     slave_irqs: list[int] = []
@@ -462,7 +459,7 @@ def test_two_serialcores_exchange_byte_via_network_backend():
         slave_irqs.append(1)
 
     ba.start_receiver(local_core=master)  # not strictly needed; keeps
-                                           # reader idle for master side
+    # reader idle for master side
     bb.start_receiver(local_core=slave, irq_callback=slave_irq)
 
     try:
@@ -709,10 +706,7 @@ def test_stop_releases_owner_queued_edge_accounting():
     sender.start()
     try:
         deadline = time.monotonic() + 1.0
-        while (
-            time.monotonic() < deadline
-            and b.debug_snapshot()["pending_edge_requests"] == 0
-        ):
+        while time.monotonic() < deadline and b.debug_snapshot()["pending_edge_requests"] == 0:
             time.sleep(0.005)
         assert b.debug_snapshot()["pending_edge_requests"] == 1
 
@@ -787,10 +781,7 @@ def test_wait_for_wire_idle_can_progress_owner_queued_edge():
     try:
         sender.start()
         deadline = time.monotonic() + 1.0
-        while (
-            time.monotonic() < deadline
-            and b.debug_snapshot()["pending_edge_requests"] == 0
-        ):
+        while time.monotonic() < deadline and b.debug_snapshot()["pending_edge_requests"] == 0:
             time.sleep(0.005)
         b.wait_for_wire_idle(
             timeout=1.0,
@@ -828,10 +819,7 @@ def test_owner_dispatch_uses_no_data_during_clock_role_transition():
     try:
         sender.start()
         deadline = time.monotonic() + 1.0
-        while (
-            time.monotonic() < deadline
-            and b.debug_snapshot()["pending_edge_requests"] == 0
-        ):
+        while time.monotonic() < deadline and b.debug_snapshot()["pending_edge_requests"] == 0:
             time.sleep(0.005)
         assert b.service_pending_edges(max_edges=1) == 1
         assert b.debug_snapshot()["pending_edge_requests"] == 1

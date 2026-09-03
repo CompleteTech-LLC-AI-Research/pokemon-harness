@@ -126,9 +126,7 @@ def _write_report(
         return
 
     config = getattr(session, "config", None)
-    collection_only = bool(
-        getattr(getattr(config, "option", None), "collectonly", False)
-    )
+    collection_only = bool(getattr(getattr(config, "option", None), "collectonly", False))
     records = list(_records().values())
     counts = {
         "passed": 0,
@@ -166,9 +164,7 @@ def _write_report(
     path = Path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     os.replace(temporary, path)
 
 

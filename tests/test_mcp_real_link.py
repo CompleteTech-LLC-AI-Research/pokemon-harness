@@ -100,3 +100,56 @@ def test_mcp_remote_link_attaches_native_serial_backend() -> None:
         dispatch_tool(connector_session, "link_disconnect", {}, link=connector_link)
         connector_session.close()
         listener_session.close()
+
+
+def test_mcp_local_link_attaches_native_serial_backend() -> None:
+    rom = rom_path("yellow")
+    sym = sym_path("yellow")
+    if not (rom.is_file() and sym.is_file()):
+        pytest.skip("Yellow ROM and symbols are not available")
+
+    pins = load_versions("VERSIONS.md")
+    expected_sha = pins.sha1_for_path(rom)
+    assert expected_sha is not None
+    quiet = io.StringIO()
+    with contextlib.redirect_stdout(quiet):
+        primary_session = Session.from_files(
+            rom,
+            sym,
+            expected_rom_sha1=expected_sha,
+            expected_pyboy_version=pins.pyboy_version,
+        )
+        peer_session = Session.from_files(
+            rom,
+            sym,
+            expected_rom_sha1=expected_sha,
+            expected_pyboy_version=pins.pyboy_version,
+        )
+
+    link = LinkState(
+        peer_session=peer_session,
+        primary_version="yellow",
+        peer_version="yellow",
+    )
+    try:
+        paired = dispatch_tool(primary_session, "link_pair", {}, link=link)
+        assert paired["paired"] is True
+        assert link.local_link_session is not None
+        assert link.remote_link is None
+        assert dispatch_tool(primary_session, "link_status", {}, link=link)[
+            "link_backend"
+        ] == "bit_accurate"
+
+        stepped = dispatch_tool(
+            primary_session, "link_step", {"count": 1}, link=link
+        )
+        assert stepped == {"primary_tick": 1, "peer_tick": 1}
+
+        assert dispatch_tool(primary_session, "link_unpair", {}, link=link) == {
+            "paired": False
+        }
+        assert link.local_link_session is None
+    finally:
+        dispatch_tool(primary_session, "link_disconnect", {}, link=link)
+        peer_session.close()
+        primary_session.close()

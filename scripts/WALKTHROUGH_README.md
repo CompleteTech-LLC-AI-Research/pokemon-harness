@@ -1,8 +1,12 @@
-# Walkthrough Driver — Status Report
+# Walkthrough Driver — Diagnostic Status Report
 
-This note records what the scripted Pokémon Red walkthrough achieves,
-what's verified to work in isolation, and where the integrated chain
-gets fragile.
+This note records a historical Pokémon Red walkthrough experiment. It is a
+diagnostic account of one pinned-ROM run, not current release evidence. The
+walkthrough can exercise the harness, but its generated states, screenshots,
+RAM shortcuts, and scripted menu control do not certify single-session,
+paired-link, trade, battle, or production readiness. Use the
+[production runbook](../docs/PRODUCTION_RUNBOOK.md) and
+[release checklist](../docs/RELEASE_CHECKLIST.md) for current release claims.
 
 ## What got built
 
@@ -22,23 +26,28 @@ walkthrough_output/
 Run with:
 
 ```bash
-POKERED_ROM_PATH=... POKERED_SYM_PATH=... python scripts/walkthrough.py --clean
+POKERED_ROM_PATH=<rom-path> POKERED_SYM_PATH=<sym-path> \
+  python scripts/walkthrough.py --clean
 ```
 
-## Achievements (all verified on the pinned ROM)
+## Historical observations on the pinned ROM
+
+The observations below came from the walkthrough experiment. They are useful
+for reproducing diagnostic behavior, but they are not a current release gate
+and do not generalize to other ROM variants or runtime modes.
 
 | Phase | Status | Evidence |
 |-------|--------|----------|
-| Boot → bedroom with walk control | ✅ reliable | press ~175 |
-| Bedroom → stairs warp → 1F | ✅ reliable | press ~188, warp at (7, 1) |
-| 1F → front door → Pallet Town | ✅ reliable | press ~202, door at (3, 7) |
-| Pallet → Oak intercept at (10, 1) → lab | ✅ reliable | press ~233 |
-| Oak's lab speech → walk to Bulbasaur → A | ✅ reliable | press ~314, **party=1 (Bulbasaur 0x99, level 5)** |
-| Rival picks his starter (script 6→9) | ✅ waits correctly | wOaksLabCurScript progresses |
-| Rival battle trigger at (5, 6) | ⚠️ flaky in chain | **works in isolation** — see Viridian artifact |
-| Rival battle (Tackle mash) | ✅ works in isolation | milestone 12/13 |
-| Lab exit → Pallet → Route 1 | ✅ verified by BFS | path `LEFT×3 UP×10 RIGHT UP×3` |
-| Route 1 → Viridian City | ✅ verified by BFS | 55-move zig-zag `UP×7 LEFT×3 UP×4 RIGHT×5 UP×4 LEFT×3 UP×6 RIGHT×5 UP×11 LEFT×3 UP×3` |
+| Boot → bedroom with walk control | observed in diagnostic run | press ~175 |
+| Bedroom → stairs warp → 1F | observed in diagnostic run | press ~188, warp at (7, 1) |
+| 1F → front door → Pallet Town | observed in diagnostic run | press ~202, door at (3, 7) |
+| Pallet → Oak intercept at (10, 1) → lab | observed in diagnostic run | press ~233 |
+| Oak's lab speech → walk to Bulbasaur → A | observed in diagnostic run | press ~314, party=1 (Bulbasaur 0x99, level 5) |
+| Rival picks his starter (script 6→9) | observed in diagnostic run | `wOaksLabCurScript` progresses |
+| Rival battle trigger at (5, 6) | timing-sensitive | works in isolation in the historical run |
+| Rival battle (Tackle mash) | isolated diagnostic only | milestone 12/13 |
+| Lab exit → Pallet → Route 1 | isolated diagnostic only | path `LEFT×3 UP×10 RIGHT UP×3` |
+| Route 1 → Viridian City | isolated diagnostic only | 55-move route recorded below |
 
 ## Concrete empirical findings baked into the script
 
@@ -57,9 +66,11 @@ POKERED_ROM_PATH=... POKERED_SYM_PATH=... python scripts/walkthrough.py --clean
 10. **Route 1 ledges** only allow southbound jumps. Northbound path requires zig-zagging around them.
 11. **PyBoy installs a stdout logging handler** that emits `.sym`-skip warnings — **`contextlib.redirect_stdout(sys.stderr)` around Session construction** is required for MCP stdio to work.
 
-## Committed milestone save states
+## Locally generated milestone save states
 
-In `walkthrough_output/milestones/` (gitignored — derived from the ROM):
+The files in `walkthrough_output/milestones/` are gitignored artifacts derived
+from the ROM. They are not committed, distributed, or interchangeable between
+ROM variants. Treat them as operator-managed diagnostic inputs:
 
 Each has a matching `.png` and `.json` alongside, load with:
 
@@ -86,10 +97,9 @@ When chained end-to-end, the step that breaks most often is:
   and the player's movement input.
 
 The path from the rival battle onward (exit lab → Pallet → Route 1 →
-Viridian) is verified to work from a clean post-battle state (see the
-standalone BFS that produced the Viridian milestone in earlier
-sessions). The integration point is the rival battle itself, not the
-downstream navigation.
+Viridian) was observed from a clean post-battle state in the historical
+standalone BFS. That observation is not a current release rerun. The
+integration point is the rival battle itself, not the downstream navigation.
 
 ## Remaining work to fully automate
 
@@ -107,24 +117,31 @@ downstream navigation.
    menu was never validated because the fresh Bulbasaur outpaces most
    early-route mons.
 
-All of these are additional state-machine refinements, not new
-discoveries — the full path to Viridian is proven to exist in the
-pinned ROM and the required button sequences are known.
+These are additional state-machine refinements recorded by the diagnostic
+experiment. They do not establish a current repeatable end-to-end path or
+production acceptance; the required button sequences are known for the pinned
+ROM used in that experiment.
 
-## End-state
+## Historical end-state
 
-### ✅ Proven to work end-to-end on real ROM
+### Diagnostic path recorded on a real ROM
 
-The walkthrough script reliably drives the game **from boot all the way
-into Viridian City** (723 presses, full per-press artifact trail). Final
-state: `map=VIRIDIAN_CITY xy=(21, 35) party=1 Bulbasaur L6 @ 19/19 HP`.
+The historical run recorded a path from boot into Viridian City (723 presses,
+with a per-press artifact trail). Its final state was
+`map=VIRIDIAN_CITY xy=(21, 35) party=1 Bulbasaur L6 @ 19/19 HP`. This is a
+single-run diagnostic observation, not a repeatable current acceptance result;
+the generated artifacts and exact runtime identity must be supplied before
+reproducing it.
 
-### 🚧 Post-Viridian: partial progress, two real blockers hit
+### 🚧 Post-Viridian: partial diagnostic progress, two real blockers hit
 
 Pushing further toward the first badge uncovered two legitimate
 automation challenges documented here as open problems:
 
-1. **Old Man gate (solved via RAM write).** Viridian's `Old Man`
+The post-Viridian shortcut below is an Option-B/RAM-boost diagnostic. It is
+not an untouched playthrough and must not be counted as release acceptance.
+
+1. **Old Man gate (bypassed via RAM write).** Viridian's `Old Man`
    blocks the north exit until `EVENT_GOT_POKEDEX` is set. The
    canonical path requires: Viridian Mart → get Oak's Parcel → back
    to Pallet → deliver to Oak → return. I verified steps 1-3 work
@@ -149,7 +166,7 @@ automation challenges documented here as open problems:
    PP, Grass-type — actually *super-effective* vs Brock's Rock team).
    I did not wire this up in this session.
 
-### Milestone saves preserved
+### More locally generated milestone saves
 
 Besides the early-game milestones, new checkpoints in
 `walkthrough_output/milestones/`:
@@ -183,6 +200,8 @@ Remaining work, in order:
    management works.
 5. **Check `wObtainedBadges` bit 0 is set** (Boulder Badge).
 
-The harness itself is fully capable of all of this; the remaining
-work is behavioural scripting on top of it. Every open problem has a
-concrete solution sketch in the pokered source.
+The harness provides the session, input, state, and hook plumbing used by this
+experiment. This walkthrough does not prove that every behavioral path is
+automated, that the native runtime matches source mode, or that any link/trade/
+battle acceptance matrix passes. The open items above are behavioral scripting
+work, not evidence of a production-ready release.

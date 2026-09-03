@@ -8,6 +8,13 @@ The goal is to prepare a reviewable upstream experiment from the candidate
 link modules in this repository. It does not create or certify a release of
 this harness or PyBoy.
 
+The current harness reference is repository head
+`84dc79d8098fe5fa298db6700b5ba0b81610ed53` (implementation
+`54a739be4a5f2d95a924c6f35c2aa695246ddd2f`). No upstream branch or pull request
+exists for it. Treat those
+identifiers as the source snapshot to record, not as evidence that PyBoy has
+accepted the proposal.
+
 ## Preconditions
 
 - Have separate checkouts of PyBoy and this repository.
@@ -20,7 +27,9 @@ this harness or PyBoy.
 ## Proposed bring-over
 
 Replace `<harness-root>` and `<pyboy-root>` with local paths. Work in a new
-branch in the PyBoy checkout and review each copied file before committing:
+branch in the PyBoy checkout and review each copied file before committing.
+The commands below are POSIX-shell examples; use equivalent PowerShell
+commands on Windows and keep the same explicit source paths:
 
 ```sh
 cd <pyboy-root>

@@ -330,9 +330,7 @@ class LockstepCoordinator:
                 except BaseException as rollback_error:  # noqa: BLE001 - preserve original attach failure during rollback
                     rollback_errors.append(rollback_error)
                 for rollback_error in rollback_errors:
-                    exc.add_note(
-                        f"coordinator attach rollback failed: {rollback_error!r}"
-                    )
+                    exc.add_note(f"coordinator attach rollback failed: {rollback_error!r}")
                 raise
             self._prev_backend_a = prev_backend_a
             self._prev_backend_b = prev_backend_b
@@ -407,10 +405,7 @@ class LockstepCoordinator:
         """
         cycles = _validate_positive_cycles(cycles)
         with self._lifecycle_lock:
-            masters = [
-                c for c in (self._a, self._b)
-                if c.internal_clock and c.transfer_enabled
-            ]
+            masters = [c for c in (self._a, self._b) if c.internal_clock and c.transfer_enabled]
             if len(masters) != 1:
                 return False
             master = masters[0]

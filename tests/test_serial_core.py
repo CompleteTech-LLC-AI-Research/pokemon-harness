@@ -480,3 +480,50 @@ def test_save_load_round_trip_preserves_all_state():
     assert restored.clock_target == original.clock_target
     assert restored._shift_register == original._shift_register
     assert restored._bits_remaining == original._bits_remaining
+
+
+def test_set_SC_reports_fast_clock_only_for_cgb_serial():
+    dmg = SerialCore(cgb_mode=False)
+    dmg.set_SC(0x82)
+
+    cgb = SerialCore(cgb_mode=True)
+    cgb.set_SC(0x82)
+
+    assert dmg.double_speed == 0
+    assert cgb.double_speed == 1
+
+
+def test_loading_legacy_state_drops_in_flight_transfer():
+    original = SerialCore(cgb_mode=True)
+    original.set_SB(0x42)
+    original.set_SC(0x81)
+
+    stream = _FakeStream()
+    original.save_state(stream)
+    stream._buf = stream._buf[:8]
+
+    restored = SerialCore(cgb_mode=True)
+    restored.load_state(stream, SerialCore.STATE_VERSION)
+
+    assert restored.transfer_enabled == 0
+    assert restored.SC & 0x80 == 0
+    assert restored.internal_clock == 1
+    assert restored._bits_remaining == 0
+    assert restored._shift_register == restored.SB
+    assert restored.clock_target == (1 << 31)
+    assert restored._cycles_to_interrupt == (1 << 31)
+
+
+def test_state_round_trip_restores_cgb_fast_clock_flag():
+    original = SerialCore(cgb_mode=True)
+    original.set_SB(0x42)
+    original.set_SC(0x83)
+
+    stream = _FakeStream()
+    original.save_state(stream)
+
+    restored = SerialCore(cgb_mode=True)
+    restored.double_speed = 0
+    restored.load_state(stream, SerialCore.STATE_VERSION)
+
+    assert restored.double_speed == 1

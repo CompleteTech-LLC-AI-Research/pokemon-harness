@@ -14,11 +14,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _configured_path(name: str) -> Path | None:
+def _configured_path(name: str, project_root: Path) -> Path | None:
     value = os.environ.get(name)
     if not value:
         return None
-    return Path(value).expanduser()
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else project_root / path
 
 
 def find_rom_root(project_root: Path | None = None) -> Path:
@@ -29,7 +30,7 @@ def find_rom_root(project_root: Path | None = None) -> Path:
     """
 
     root = project_root or PROJECT_ROOT
-    configured = _configured_path("POKERED_ROM_ROOT")
+    configured = _configured_path("POKERED_ROM_ROOT", root)
     if configured is not None:
         return configured
 
@@ -44,7 +45,7 @@ def find_fixture_root(project_root: Path | None = None) -> Path:
     """Return the configured or nearest link-fixture directory."""
 
     root = project_root or PROJECT_ROOT
-    configured = _configured_path("POKERED_FIXTURE_ROOT")
+    configured = _configured_path("POKERED_FIXTURE_ROOT", root)
     if configured is not None:
         return configured
 
