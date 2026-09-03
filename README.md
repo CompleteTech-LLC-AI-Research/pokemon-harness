@@ -62,7 +62,8 @@ and Pytest 9.1.1. It collected 706 tests and passed unit 562/562 and timing
 timeouts. This is historical PR #28-base evidence; ROM-backed tiers were not
 run in that asset-free command.
 
-On the current integrated candidate, the focused source and Cython transport,
+On the current integrated head `059bf9e5b5b868a81837eb58df0fea3f4b09f647`, the
+focused source and Cython transport,
 serial, and PyBoy-link suite passes 110/110 in each runtime. A source-runtime
 asset-backed strict trade gate recorded all 19/19 ordered local and remote
 acceptance rows. The corresponding native Cython trade gate completed 18/19:
@@ -74,6 +75,17 @@ evidence. The full native battle matrix has not been qualified.
 The source run was a trade-tier run whose supervisor started before PR #35 was
 published; its child runs loaded the current implementation, but it is not a
 clean post-merge all-tier sign-off.
+
+Follow-up isolated diagnostics on 2026-09-03 did not establish reliable
+cross-runtime behavior for that row. Two exact native retries completed in
+114.86 seconds and 116.33 seconds with exact party-record exchange, while
+another native run reached the trade path and failed party-record equality;
+separate source/native probes also stalled at different ROM phase boundaries.
+The focused diagnostic lanes passed their serial/backend checks (42/42 and
+35/35), and no queue overflow, owner-dispatch error, or unbalanced edge count
+was found. These differing outcomes are evidence of a scheduling-sensitive
+protocol/phase defect, not a verified fix. No timing hack, synthetic bit, or
+test-only game-state mutation was accepted.
 
 A fresh isolated source and Cython unit/timing gate on 2026-09-03 each
 collected 745 tests. Both runtimes passed unit 600/600 and timing 40/40 in each
@@ -167,9 +179,10 @@ The current candidate’s evidence is:
 - current MCP lifecycle hardening: `PASS` in the focused 159-test scoped
   suite, including real native local and remote lifecycle smokes; external
   trade fixtures were not part of that suite;
-- current Cython/native strict trade gate: `PARTIAL`, 18/19; the
-  `yellow-listen-blue_color-connect` row stalled before the party exchange and
-  reproduced the same failure in an isolated retry;
+- current Cython/native strict trade gate: `PARTIAL`, 18/19 in the complete
+  matrix; follow-up exact-row retries have both passed and failed, including a
+  party-record mismatch and phase stalls, so the row is not reliable
+  acceptance evidence;
 - current Cython/native gameplay: `PARTIAL`; representative Blue Color↔Yellow
   and Red Color↔Yellow trade/battle rows pass, but the complete native strict
   battle matrix remains unqualified;
