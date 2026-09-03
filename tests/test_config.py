@@ -199,3 +199,12 @@ def test_session_env_rejects_partial_or_unknown_configuration(monkeypatch):
         load_primary_env().validate(role="primary")
 
     assert SUPPORTED_ROM_VERSIONS == frozenset({"red", "blue", "yellow"})
+
+
+def test_session_env_rejects_hash_without_a_peer_asset(monkeypatch):
+    _clear_env(monkeypatch, _PEER_VARS)
+    monkeypatch.setenv(
+        "POKERED_PEER_ROM_SHA1", "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
+    )
+    with pytest.raises(VersionsConfigError, match="requires a ROM path"):
+        load_peer_env().validate(role="peer")

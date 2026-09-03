@@ -810,7 +810,7 @@ def test_listener_cleans_semantic_hooks_when_endpoint_install_fails(monkeypatch)
     )
     monkeypatch.setattr(
         "pokered_harness.mcp_server._deactivate_link_hooks",
-        lambda session, _peer=None: deactivated.append(session),
+        lambda session, _peer=None, **_kwargs: deactivated.append(session),
     )
 
     port = _free_port()

@@ -244,6 +244,23 @@ def test_mcp_entrypoint_rejects_hash_bypass(monkeypatch) -> None:
         main()
 
 
+def test_mcp_entrypoint_rejects_orphan_peer_symbol_pin(monkeypatch) -> None:
+    for name in (
+        "POKERED_SKIP_SHA1",
+        "POKERED_PEER_ROM_PATH",
+        "POKERED_PEER_SYM_PATH",
+        "POKERED_PEER_ROM_SHA1",
+        "POKERED_PEER_ROM_VERSION",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("POKERED_ROM_PATH", "/tmp/primary.gb")
+    monkeypatch.setenv("POKERED_SYM_PATH", "/tmp/primary.sym")
+    monkeypatch.setenv("POKERED_PEER_SYM_SHA1", "0" * 40)
+
+    with pytest.raises(SystemExit, match="POKERED_PEER_SYM_SHA1 requires"):
+        main()
+
+
 def _capture_error(call, errors: list[Exception]) -> None:
     try:
         call()
@@ -393,3 +410,42 @@ def test_failed_network_session_detach_is_retriable(monkeypatch) -> None:
     }
     assert network_session.calls == 2
     assert link._pending_network_session is None
+
+
+def test_remote_hook_cleanup_uses_one_total_deadline(monkeypatch) -> None:
+    """A held emulator lock must not multiply cleanup by hook count."""
+    session, _pyboy = _session()
+    link = LinkState()
+    link.remote_mode = "connected"
+    link.remote_endpoint = object()  # type: ignore[assignment]
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_session() -> None:
+        with session.locked():
+            entered.set()
+            release.wait(timeout=2.0)
+
+    holder = threading.Thread(target=hold_session, name="test-hook-lock-owner")
+    holder.start()
+    assert entered.wait(timeout=1.0)
+    monkeypatch.setattr(
+        "pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05
+    )
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(McpHarnessError) as exc_info:
+            dispatch_tool(session, "link_disconnect", {}, link=link)
+        assert exc_info.value.code == "link_teardown_failed"
+        assert time.monotonic() - started < 0.5
+        assert link.remote_mode == "disconnecting"
+        assert link._pending_remote_endpoint is not None
+    finally:
+        release.set()
+        holder.join(timeout=1.0)
+
+    assert not holder.is_alive()
+    assert dispatch_tool(session, "link_disconnect", {}, link=link) == {
+        "remote_mode": "idle"
+    }

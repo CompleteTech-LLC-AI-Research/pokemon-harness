@@ -434,7 +434,10 @@ class Session:
 
     @contextmanager
     def locked(
-        self, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
+        self,
+        *,
+        timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S,
+        allow_closed: bool = False,
     ) -> Iterator[Session]:
         """Serialize a compound operation that touches this emulator.
 
@@ -443,7 +446,9 @@ class Session:
         across more than one method without exposing the lock object itself.
         Lock acquisition is bounded by ``timeout_s`` (five seconds by
         default); callers that need a shorter request deadline should pass it
-        explicitly.
+        explicitly. Teardown code may set ``allow_closed`` to release
+        session-owned hooks after the public lifecycle has been closed; normal
+        emulator operations must leave it false.
         """
         timeout = _validate_timeout(timeout_s, "timeout_s")
         acquired = self._lock.acquire(timeout=timeout)
@@ -453,7 +458,8 @@ class Session:
                 f"{timeout:g}s deadline"
             )
         try:
-            self._ensure_open()
+            if not allow_closed:
+                self._ensure_open()
             yield self
         finally:
             self._lock.release()

@@ -1931,7 +1931,12 @@ def _close_serial_link(
     return close_ok and not any(worker.is_alive() for worker in workers)
 
 
-def _uninstall_remote_endpoint(endpoint: Any) -> list[Exception]:
+def _uninstall_remote_endpoint(
+    session: Session,
+    endpoint: Any,
+    *,
+    timeout_s: float = _DEFAULT_CLEANUP_TIMEOUT_S,
+) -> list[Exception]:
     """Release an endpoint's owned callbacks during transport teardown.
 
     The MCP lifecycle retains a legacy symbol-based cleanup fallback for
@@ -1943,7 +1948,15 @@ def _uninstall_remote_endpoint(endpoint: Any) -> list[Exception]:
     if not callable(uninstall):
         return []
     try:
-        uninstall()
+        # RemoteLinkEndpoint.uninstall() calls deactivate_hooks_at once per
+        # owned symbol. Acquire the Session lock once with the caller's
+        # remaining deadline so those re-entrant calls cannot each consume a
+        # fresh five-second lock timeout. ``allow_closed`` is intentional:
+        # hook guards must still be released during terminal cleanup.
+        with session.locked(
+            timeout_s=max(0.0, timeout_s), allow_closed=True
+        ):
+            uninstall()
     except Exception as exc:  # noqa: BLE001 - cleanup must continue
         return [exc]
     return []
@@ -1996,12 +2009,19 @@ def _cleanup_unpublished_remote(
                 )
             )
     if endpoint is not None:
-        endpoint_errors = _uninstall_remote_endpoint(endpoint)
+        endpoint_errors = _uninstall_remote_endpoint(
+            session,
+            endpoint,
+            timeout_s=_remaining(cleanup_deadline),
+        )
         if endpoint_errors:
             hook_cleanup_failed = True
             cleanup_errors.extend(endpoint_errors)
     try:
-        hook_errors = _deactivate_link_hooks(session)
+        hook_errors = _deactivate_link_hooks(
+            session,
+            timeout_s=_remaining(cleanup_deadline),
+        )
     except Exception as exc:  # noqa: BLE001 - cleanup must not mask the original error
         hook_errors = [exc]
     if hook_errors:
@@ -2070,26 +2090,43 @@ def _detach_local_link_session(
 
 
 def _deactivate_link_hooks(
-    session: Session, peer: Session | None = None
+    session: Session,
+    peer: Session | None = None,
+    *,
+    timeout_s: float = _DEFAULT_CLEANUP_TIMEOUT_S,
 ) -> list[Exception]:
-    """Disable and deregister link callbacks, retaining cleanup failures."""
+    """Disable and deregister link callbacks within one total deadline."""
+    deadline = time.monotonic() + max(0.0, timeout_s)
     errors: list[Exception] = []
     sessions: list[Session] = [session]
     if peer is not None and peer is not session:
         sessions.append(peer)
     for target in sessions:
         try:
-            target.deactivate_serial_hooks()
+            # Take one bounded lock acquisition per owned session. The
+            # nested calls are re-entrant and therefore cannot restart the
+            # timeout for every symbol. Teardown must work after the Session
+            # has published ``closed`` as well.
+            with target.locked(
+                timeout_s=_remaining(deadline), allow_closed=True
+            ):
+                try:
+                    target.deactivate_serial_hooks(timeout_s=0.0)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+                # A few legacy endpoint hooks are installed directly on
+                # PyBoy and cannot be reached through Session.serial_hook.
+                # Remove those by symbol where the runtime supports
+                # hook_deregister.
+                for symbol_name in _DIRECT_LINK_HOOKS:
+                    try:
+                        target.deactivate_hooks_at(
+                            symbol_name, timeout_s=0.0
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(exc)
         except Exception as exc:  # noqa: BLE001 - cleanup is best effort
             errors.append(exc)
-        # A few legacy endpoint hooks are installed directly on PyBoy and
-        # cannot be reached through Session.serial_hook. Remove those by
-        # symbol where the runtime supports hook_deregister.
-        for symbol_name in _DIRECT_LINK_HOOKS:
-            try:
-                target.deactivate_hooks_at(symbol_name)
-            except Exception as exc:  # noqa: BLE001 - cleanup is best effort
-                errors.append(exc)
     return errors
 
 
@@ -2249,11 +2286,18 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
         # in-process pair when link_disconnect is called in its idle state.
         if remote_endpoint is not None or network_session is not None:
             if remote_endpoint is not None:
-                endpoint_errors = _uninstall_remote_endpoint(remote_endpoint)
+                endpoint_errors = _uninstall_remote_endpoint(
+                    session,
+                    remote_endpoint,
+                    timeout_s=max(0.0, cleanup_deadline - time.monotonic()),
+                )
                 if endpoint_errors:
                     hook_cleanup_failed = True
                     cleanup_errors.extend(endpoint_errors)
-            hook_errors = _deactivate_link_hooks(session)
+            hook_errors = _deactivate_link_hooks(
+                session,
+                timeout_s=max(0.0, cleanup_deadline - time.monotonic()),
+            )
             if hook_errors:
                 hook_cleanup_failed = True
                 cleanup_errors.extend(hook_errors)
@@ -2776,6 +2820,16 @@ def main() -> None:
     primary_rom, primary_sym = primary_env.resolved_paths()
     assert primary_rom is not None and primary_sym is not None
     peer_rom, peer_sym = peer_env.resolved_paths()
+    peer_symbol_sha_override = os.environ.get("POKERED_PEER_SYM_SHA1")
+    if (
+        peer_sym is None
+        and peer_symbol_sha_override is not None
+        and peer_symbol_sha_override.strip()
+    ):
+        raise SystemExit(
+            "POKERED_PEER_SYM_SHA1 requires POKERED_PEER_SYM_PATH and a "
+            "configured peer ROM"
+        )
 
     versions = None
     if not _env_flag("POKERED_SKIP_SHA1"):

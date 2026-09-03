@@ -186,6 +186,11 @@ class SessionEnv:
                 f"{role} requires both ROM and symbol paths; got "
                 f"rom_path={self.rom_path!r}, sym_path={self.sym_path!r}"
             )
+        if not has_rom and self.rom_sha1 is not None:
+            raise VersionsConfigError(
+                f"{role} ROM SHA-1 requires a ROM path; got "
+                f"rom_sha1={self.rom_sha1!r}"
+            )
         if self.rom_sha1 is not None:
             _validate_sha1(self.rom_sha1, f"{role} ROM SHA-1")
         if self.version not in SUPPORTED_ROM_VERSIONS:
