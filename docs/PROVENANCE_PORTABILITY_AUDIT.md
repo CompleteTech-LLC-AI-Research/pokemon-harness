@@ -1,8 +1,9 @@
 # Fixture provenance and portability audit
 
-Audit scope: current repository head `8727779f1b89f966d9a631af546732a36a97cf51`
-(PR #28 documentation merge), implementing `b2a401612307d4fdfd3e7ba3352900a2d2e3d2a5`
-(PR #27 merge `b96ee7786782f16fa9408d59402938c145fb56c7`), and only the tracked
+Audit scope: the current isolated candidate based on published head
+`8727779f1b89f966d9a631af546732a36a97cf51` (PR #28), with the reviewed
+runtime, lifecycle, TCP, gate, and headless-performance commits `94f4429`,
+`9ce7c9f`, `3d04293`, `f046c34`, `8b4847b`, `9453d7a`, and `abf3d27`, and only the tracked
 manifest,
 producer/generator sources, packaging metadata, and platform-facing
 configuration. ROMs, symbol files, save states, and machine-local evidence
@@ -38,9 +39,15 @@ the complete native gameplay and matrix contract.
   generated native payload.
 - A fresh Linux Python 3.12.13 environment passed editable installation,
   `pip check`, the source runtime probe, and the explicit Cython build/check.
-  Both asset-free production gates collected 706 tests and passed unit 562/562
-  plus timing 40/40 in each of five repetitions; the Cython probe reported
-  native extensions for all five required PyBoy modules.
+  Both integrated asset-free production gates collected 730 tests and passed
+  unit 586/586 plus timing 40/40 in each of five repetitions; the Cython probe
+  reported native extensions for all five required PyBoy modules.
+- With the external hashed assets supplied, source and Cython remote tiers
+  passed 15/15, and the Cython local/session tier passed 47/47. Source strict
+  trade and battle gates each reached 18/19 under bounded parallel execution;
+  the isolated exact retry for each failed remote Yellow-to-Yellow selector
+  passed. Exact native Red-to-Red trade/battle and Blue Color-to-Red Color
+  trade rows pass, but the full native strict matrices remain open.
 - A fresh asset-free `python -m pytest -q -ra` run completed 566 passed, 140
   expected BYO-asset skips, and 2 warnings. The current remote, trade, and
   battle gates fail closed before execution when their required ROM, symbol,
@@ -76,7 +83,7 @@ the complete native gameplay and matrix contract.
 The following bounded checks passed in this current documentation audit:
 
 ```text
-git ls-remote <repository> refs/heads/master                  -> exact published head 8727779f...
+git ls-remote <repository> refs/heads/master                  -> published base 8727779f...
 python3 scripts/validate_fixture_manifest.py --schema-only  -> PASS, 10 entries
 uv lock --check                                             -> PASS
 python3 -m compileall <scoped-files>                        -> PASS
