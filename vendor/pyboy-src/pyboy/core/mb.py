@@ -372,6 +372,14 @@ class Motherboard:
             # TODO: Support General Purpose DMA
             # https://gbdev.io/pandocs/CGB_Registers.html#bit-7--0---general-purpose-dma
 
+            # Dispatch only after the CPU has completed its instruction
+            # batch. This is the first safe native boundary: a queued peer
+            # edge cannot re-enter a serial register read/write or mutate
+            # Serial while Serial.tick is active. Doing this before the
+            # motherboard's time-source ticks also lets the current frame's
+            # serial bookkeeping observe the newly completed edge.
+            self.serial.dispatch_owner()
+
             self.sound.tick(self.cpu.cycles)
 
             if self.serial.tick(self.cpu.cycles):

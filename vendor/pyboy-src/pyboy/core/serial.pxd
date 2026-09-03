@@ -35,11 +35,15 @@ cdef class Serial:
     cdef public object backend
 
     # Optional owner-thread pump installed by the link harness. The network
-    # reader only queues work; this callback is invoked from the native
-    # serial tick on the emulator owner thread while an external transfer is
-    # armed, so applying an incoming edge cannot race motherboard execution.
+    # reader only queues work; Motherboard invokes this callback at a safe
+    # instruction-batch boundary while an external transfer is armed, so
+    # applying an incoming edge cannot re-enter serial register access.
     cdef public object owner_dispatch_callback
     cdef public bint owner_dispatch_enabled
+
+    # Called by Motherboard after its CPU instruction batch, never from the
+    # serial tick/register access path itself.
+    cpdef void dispatch_owner(self) except *
 
     # Cython 3.0.12 emits cpdef vtable slots for ``unsigned long long``.
     # Using the spelling it uses for the callable ABI avoids a platform

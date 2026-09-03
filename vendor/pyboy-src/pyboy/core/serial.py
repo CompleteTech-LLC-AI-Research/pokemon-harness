@@ -181,10 +181,11 @@ class Serial:
         self._bits_remaining = 0
 
         self.backend = backend if backend is not None else NullBackend()
-        # Network owner-dispatch is opt-in. The callback is invoked from
-        # ``tick`` on the emulator owner thread, never from the reader
-        # thread; keeping it disabled by default preserves the disconnected
-        # and low-level serial paths.
+        # Network owner-dispatch is opt-in. The motherboard invokes the
+        # callback at an instruction-batch boundary on the emulator owner
+        # thread, never from the reader thread or from inside this class's
+        # tick/register methods; keeping it disabled by default preserves
+        # the disconnected and low-level serial paths.
         self.owner_dispatch_callback = None
         self.owner_dispatch_enabled = False
 
@@ -274,6 +275,24 @@ class Serial:
         else:
             self._cycles_to_interrupt = 0
 
+    def dispatch_owner(self):
+        """Pump queued peer edges at a safe motherboard boundary.
+
+        This is deliberately separate from :meth:`tick`: PyBoy also calls
+        ``serial.tick`` while executing FF01/FF02 memory accesses, and a
+        callback from inside that method can re-enter the native serial core
+        while a register operation is still in progress. ``Motherboard``
+        calls this only after its CPU instruction batch has returned.
+        """
+        if (
+            self.owner_dispatch_enabled
+            and self.transfer_enabled
+            and not self.internal_clock
+        ):
+            callback = self.owner_dispatch_callback
+            if callback is not None:
+                callback()
+
     # --- tick (master / idle) -------------------------------------------
 
     @cython.locals(
@@ -294,22 +313,6 @@ class Serial:
             return False
         self.last_cycles = _cycles
         self.clock += delta
-
-        # A remote slave edge is delivered by the network reader into an
-        # owner queue. Pump it from this native serial boundary, while the
-        # slave is armed, so a long motherboard frame cannot strand the
-        # master's EDGE_REQ behind a frame-level callback. The Python callback
-        # is entered only under the GIL; ``noexcept`` is preserved because
-        # the installed harness callback catches and records its own errors.
-        if (
-            self.owner_dispatch_enabled
-            and self.transfer_enabled
-            and not self.internal_clock
-        ):
-            with cython.gil:
-                callback = self.owner_dispatch_callback
-                if callback is not None:
-                    callback()
 
         interrupt = False
         if self.transfer_enabled and self.internal_clock:
