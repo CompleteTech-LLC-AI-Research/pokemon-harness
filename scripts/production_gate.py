@@ -982,6 +982,9 @@ def _reason_counter(payload: dict[str, Any]) -> dict[str, int]:
         if record.get("outcome") == "skipped" or record.get("was_xfail"):
             reason = str(record.get("reason") or "(no reason reported)").strip()
             reasons[reason] += 1
+    for entry in payload.get("collection_skips", []):
+        reason = str(entry.get("reason") or "(collection skip without a reason)").strip()
+        reasons[reason] += 1
     return dict(sorted(reasons.items()))
 
 
@@ -1878,32 +1881,51 @@ def _drain_matrix_stream(stream: Any, chunks: list[str]) -> None:
             pass
 
 
-def _kill_matrix_process(process: subprocess.Popen[str]) -> None:
-    """Kill a matrix child process group without waiting on guest code."""
+def _kill_matrix_process(process: subprocess.Popen[str]) -> bool:
+    """Kill and reap a matrix child process group within a bounded deadline."""
 
     pid = getattr(process, "pid", None)
     if pid is None:
-        return
-    if os.name == "posix":
+        return False
+
+    def wait_for_exit(timeout: float) -> bool:
         try:
-            os.killpg(pid, signal.SIGKILL)
-        except OSError:
-            pass
-    else:
+            process.wait(timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError):
+            return process.poll() is not None
+        return process.poll() is not None
+
+    if process.poll() is None:
+        if os.name == "posix":
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        else:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    # A successful signal does not mean that Popen has reaped the child. Give
+    # it a bounded wait, then fall back to the direct handle if a process-group
+    # signal was unavailable or ineffective. The return value lets the gate
+    # retain a cleanup failure rather than claiming a complete case result.
+    reaped = wait_for_exit(5.0)
+    if not reaped:
         try:
             process.kill()
         except OSError:
             pass
-    try:
-        process.wait(timeout=0)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+        reaped = wait_for_exit(5.0)
+
     stream = getattr(process, "stdout", None)
     if stream is not None:
         try:
             stream.close()
         except OSError:
             pass
+    return reaped
 
 
 def run_matrix_tier(
@@ -1990,12 +2012,15 @@ def run_matrix_tier(
         timed_out: bool = False,
         timeout_reason: str = "",
         report_kind: str = "final",
+        cleanup_error: str = "",
     ) -> None:
         _add_counts(aggregate, report.counts)
         aggregate_reasons.update(report.skip_reasons)
         problems: list[str] = []
         if timed_out:
             problems.append(timeout_reason or f"matrix case timed out after {timeout:.1f}s")
+        if cleanup_error:
+            problems.append(cleanup_error)
         if report.error:
             problems.append(report.error)
         if returncode not in (None, 0) and not timed_out:
@@ -2161,8 +2186,10 @@ def run_matrix_tier(
     def finish_case(nodeid: str, *, timed_out: bool, reason: str = "") -> None:
         state = active.pop(nodeid)
         process = state["process"]
+        cleanup_error = ""
         if timed_out:
-            _kill_matrix_process(process)
+            if not _kill_matrix_process(process):
+                cleanup_error = "matrix child did not terminate after the cleanup deadline"
             returncode = 124
         else:
             returncode = process.poll()
@@ -2173,6 +2200,10 @@ def run_matrix_tier(
         # fast case does not lose the very failure text needed to audit it.
         reader = state["reader"]
         reader.join(timeout=1.0)
+        if reader.is_alive():
+            cleanup_error = (
+                f"{cleanup_error}; " if cleanup_error else ""
+            ) + "matrix output reader did not terminate after the cleanup deadline"
         report, report_kind = load_case_report(
             state,
             returncode=int(returncode),
@@ -2187,6 +2218,7 @@ def run_matrix_tier(
             timed_out=timed_out,
             timeout_reason=reason,
             report_kind=report_kind,
+            cleanup_error=cleanup_error,
         )
 
     while pending or active:
@@ -2359,12 +2391,6 @@ def run_tier(
             problems.append(f"pytest reported {len(report.collection_errors)} collection error(s)")
         if report.collection_skips:
             problems.append(f"pytest reported {len(report.collection_skips)} collection skip(s)")
-            aggregate_reasons.update(
-                {
-                    str(entry.get("reason") or "(collection skip without a reason)"): 1
-                    for entry in report.collection_skips
-                }
-            )
         if counts.total == 0:
             problems.append("pytest selected no tests for the tier expression")
         if counts.failed or counts.errors or counts.xfailed or counts.xpassed:
@@ -2406,6 +2432,11 @@ def run_tier(
             f"required tier produced {aggregate.skipped} skip(s); "
             "missing/unsupported coverage is not accepted in the production gate\n" + output_tail
         )
+    elif aggregate.skipped:
+        # Optional coverage may be unavailable on a BYO-ROM machine, but a
+        # partial run must remain visibly optional instead of being reported as
+        # a full PASS merely because another optional case passed.
+        status = "SKIP"
     else:
         status = "PASS" if aggregate.passed else "SKIP"
 
