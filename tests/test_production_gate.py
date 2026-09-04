@@ -8,12 +8,14 @@ import io
 import json
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
+import scripts.tcp_link_matrix as matrix
 from scripts.tcp_link_matrix import (
     LOCAL_VARIANT_NODEIDS,
     LOCAL_VERSION_PAIR_NODEIDS,
@@ -442,6 +444,51 @@ def test_standalone_matrix_collection_environment_is_controlled(tmp_path, monkey
         str(tmp_path / "src"),
         str(tmp_path),
     ]
+
+
+def test_standalone_matrix_collection_timeout_reaps_process_group(tmp_path, monkeypatch):
+    class _HangingCollectionPopen:
+        instances: ClassVar[list] = []
+
+        def __init__(self, command, **kwargs):
+            self.command = command
+            self.kwargs = kwargs
+            self.pid = 31337
+            self.returncode = None
+            self.stdout = io.StringIO("partial collection output")
+            self.instances.append(self)
+
+        def communicate(self, timeout=None):
+            del timeout
+            raise subprocess.TimeoutExpired(self.command, 1.0, output="partial collection output")
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            del timeout
+            self.returncode = -signal.SIGTERM
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -signal.SIGTERM
+
+        def kill(self):
+            self.returncode = -signal.SIGKILL
+
+    killed_groups = []
+    monkeypatch.setattr(matrix.subprocess, "Popen", _HangingCollectionPopen)
+    monkeypatch.setattr(matrix.os, "killpg", lambda pid, sig: killed_groups.append((pid, sig)))
+
+    audit, command = matrix.collect_nodeids(tmp_path, Path("python"), timeout_seconds=1.0)
+
+    assert command[:3] == ["python", "-m", "pytest"]
+    assert audit["structural_pass"] is False
+    assert any("timed out after 1.0s" in error for error in audit["collection_errors"])
+    assert killed_groups == [(31337, signal.SIGTERM)]
+    process = _HangingCollectionPopen.instances[0]
+    assert process.kwargs["start_new_session"] is True
+    assert process.poll() is not None
 
 
 def test_strict_acceptance_gap_report_has_an_entrypoint_for_each_ordered_case():

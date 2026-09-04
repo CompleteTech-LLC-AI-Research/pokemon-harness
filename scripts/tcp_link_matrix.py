@@ -17,9 +17,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -199,6 +201,7 @@ _COLLECTION_REPORT_FIELDS = (
     "xpassed",
     "errors",
 )
+COLLECTION_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 def acceptance_matrix_classifications() -> dict[str, dict[tuple[str, str, str], str]]:
@@ -399,6 +402,102 @@ def _collection_environment(project_root: Path) -> dict[str, str]:
     return environment
 
 
+def _process_creation_kwargs() -> dict[str, object]:
+    """Return process-group options for the standalone collection child."""
+
+    if os.name == "posix":
+        return {"start_new_session": True}
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    }
+
+
+def _terminate_collection_process(
+    process: subprocess.Popen[str],
+    *,
+    deadline: float | None = None,
+) -> bool:
+    """Terminate and reap a collection child and its process group."""
+
+    pid = getattr(process, "pid", None)
+    if pid is None:
+        return False
+    cleanup_deadline = deadline
+    if cleanup_deadline is None:
+        cleanup_deadline = time.monotonic() + COLLECTION_CLEANUP_TIMEOUT_SECONDS
+
+    def wait_for_exit() -> bool:
+        if process.poll() is not None:
+            return True
+        remaining = cleanup_deadline - time.monotonic()
+        if remaining <= 0:
+            return process.poll() is not None
+        try:
+            process.wait(timeout=remaining)
+        except (OSError, subprocess.TimeoutExpired):
+            return process.poll() is not None
+        return process.poll() is not None
+
+    if os.name == "posix":
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except OSError:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+    else:
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+
+    if not wait_for_exit():
+        if os.name == "posix":
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+        else:
+            remaining = cleanup_deadline - time.monotonic()
+            if remaining > 0:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=remaining,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    reaped = wait_for_exit()
+    stream = getattr(process, "stdout", None)
+    if stream is not None:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+    return reaped
+
+
+def _text_output(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    if isinstance(value, str):
+        return value
+    return "" if value is None else str(value)
+
+
 def _collection_report_details(
     payload: object,
     *,
@@ -524,19 +623,32 @@ def collect_nodeids(
         environment = _collection_environment(project_root)
         environment["POKERED_GATE_REPORT"] = str(report_path)
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=project_root,
                 env=environment,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=timeout_seconds,
-                check=False,
+                **_process_creation_kwargs(),
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            _, _ = process.communicate(timeout=timeout_seconds)
+            raw_returncode = process.returncode
+            returncode = int(raw_returncode) if raw_returncode is not None else 125
+        except OSError as exc:
             audit = audit_collection(
                 (), collection_errors=(f"collection command: {type(exc).__name__}: {exc}",)
             )
+            return audit, command
+        except subprocess.TimeoutExpired as exc:
+            cleanup_ok = _terminate_collection_process(process)
+            partial_output = _text_output(exc.output)
+            timeout_error = f"collection command timed out after {timeout_seconds:.1f}s" + (
+                "; collection process did not terminate after cleanup" if not cleanup_ok else ""
+            )
+            if partial_output:
+                timeout_error += f"; output={partial_output[-4000:]}"
+            audit = audit_collection((), collection_errors=(timeout_error,))
             return audit, command
 
         try:
@@ -546,14 +658,14 @@ def collect_nodeids(
                 (),
                 collection_errors=(
                     f"collection report: {type(exc).__name__}: {exc}",
-                    f"pytest return code: {completed.returncode}",
+                    f"pytest return code: {returncode}",
                 ),
             )
             return audit, command
 
         nodeids, error_text, skip_text, report_problems = _collection_report_details(
             payload,
-            returncode=completed.returncode,
+            returncode=returncode,
         )
         error_text.extend(report_problems)
         return audit_collection(
