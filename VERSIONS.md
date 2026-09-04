@@ -5,26 +5,22 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` current audit candidate (2026-09-03). The published base for
-this candidate is `84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36). The
-underlying implementation commit is
-`54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35), which moves remote
-serial-edge dispatch to an explicit native instruction-batch boundary. The
-current candidate also contains serial save-state, bootstrap ownership and
-build-metadata cleanup, MCP teardown, gate-accounting, and
-partial-initialization cleanup changes. This is a
-`PARTIAL` publication candidate, not a
-`PRODUCTION-READY` release.
+Status: `PARTIAL` at merged head
+`daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03). Earlier PR #35
+introduced remote serial-edge dispatch at an explicit native instruction-batch
+boundary. The current candidate also contains serial save-state, bootstrap
+ownership and build-metadata cleanup, MCP teardown, gate-accounting, and
+partial-initialization cleanup changes. This is a `PARTIAL` publication
+candidate, not a `PRODUCTION-READY` release.
 
 Current controlled evidence is scoped as follows. The focused source and Cython
 transport/serial/PyBoy-link suite passes 110/110 in each runtime. An
 asset-backed source trade gate recorded 19/19 ordered local and remote party
-swaps. The corresponding native Cython trade gate completed 18/19: the sole
-failure is the remote `yellow-listen-blue_color-connect` row, which stalls
-before the party exchange at its configured 720-second bound; a valid isolated retry
-reproduced that stall. A timing-altered diagnostic reached the trade hooks but
-produced incorrect party records and is not acceptance evidence. The full
-native battle matrix has not been qualified.
+swaps. The historical native Cython strict-trade gate recorded 18/19. Exact-row
+follow-ups have both passed and failed, including exact party-record exchange,
+a party-record mismatch, and phase stalls, so native strict-trade reliability
+is unproven. Timing-altered diagnostics are not acceptance evidence. The full
+current native battle matrix has not been qualified.
 The source run was a trade-tier run whose supervisor started before PR #35 was
 published; its child runs loaded the current implementation, but it is not a
 clean post-merge all-tier sign-off.
@@ -48,7 +44,9 @@ results, not proof of current full native trade or battle parity. Vanilla
 fixture provenance, real-ROM concurrent load, full native-platform
 qualification, reproducible clean-install verification, independent review,
 and authenticated/encrypted cross-host TCP remain open, so the release decision
-remains `PARTIAL`.
+remains `PARTIAL`. Remote TCP is enforced as loopback-only and is
+unauthenticated and unencrypted; cross-host use is not supported until a secure
+transport is added.
 
 Historical PR #17 evidence collected 698 tests and passed unit 554/554, local
 real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19, strict battle
@@ -87,7 +85,8 @@ The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
 coordinator and remote TCP transport. The optional Cython/native build passes
 its compiled serial-contract probe and the focused 110/110 serial-link suite,
-but the current native strict trade gate is 18/19 and the full native battle
+but the historical native strict-trade result is 18/19 and mixed exact-row
+follow-ups leave its reliability unproven; the full current native battle
 matrix is unqualified. A pre-existing standalone PyBoy wheel must not be
 allowed to shadow this package; verify the runtime identity and selected mode
 before release. See the
@@ -231,9 +230,9 @@ matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 
 | Path | ROMs | Required fixture files | Evidence boundary |
 |---|---|---|---|
-| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Recorded source gate: 9/9 local rows; recorded native trade: 9/9 local rows, with its remaining failure in the remote half |
+| Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Recorded source gate: 9/9 local rows. The native strict-trade matrix has a historical 18/19 result; mixed exact-row follow-ups leave reliability unproven |
 | Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Historical source baseline passed 9/9 local rows; current full source rerun is not recorded, and native full battle coverage remains unqualified |
-| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Recorded source gate: 9/9 remote rows; current native rerun reproduces the 8/9 result, with `yellow-listen-blue_color-connect` stalled before party exchange |
+| Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Recorded source gate: 9/9 remote rows. Native follow-ups for the historical 18/19 matrix both passed and failed, including party mismatch and phase stalls |
 | Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Historical source baseline passed 9/9 remote rows; current native battle matrix is not qualified |
 
 The tracked
@@ -273,15 +272,15 @@ the manifest is checked with `--fixture-root`.
 
 The repository has strict local and remote entry points for every canonical
 Red/Blue/Yellow ordered pair. The current source trade gate recorded 19/19
-rows (9 local and 9 remote, plus the dedicated assertion). The current native
-trade gate recorded 18/19 rows because
-`yellow-listen-blue_color-connect` stalled before the party exchange; an
-isolated retry reproduced that result. The current native battle matrix has
-not been qualified, and the current source battle matrix was not rerun as a
-complete post-PR #35 gate. The PR #17 source-runtime 19/19 trade and 19/19
-battle results remain historical baseline evidence. Consult the test-surface
-table in the [README](README.md) and run the required tiers in the [production
-runbook](docs/PRODUCTION_RUNBOOK.md) before using any row as release evidence.
+rows (9 local and 9 remote, plus the dedicated assertion). The native strict-
+trade matrix has a historical 18/19 result, but exact-row follow-ups both
+passed and failed, including a party-record mismatch and phase stalls, so its
+reliability is unproven. The current native battle matrix has not been
+qualified, and the current source battle matrix was not rerun as a complete
+post-PR #35 gate. The PR #17 source-runtime 19/19 trade and 19/19 battle
+results remain historical baseline evidence. Consult the test-surface table in
+the [README](README.md) and run the required tiers in the [production runbook](docs/PRODUCTION_RUNBOOK.md)
+before using any row as release evidence.
 
 ## Performance
 

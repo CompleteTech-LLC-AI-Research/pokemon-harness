@@ -16,16 +16,14 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The published repository base for the current integration candidate is
-`84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36, 2026-09-03). The
-implementation commit below it is
-`54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35), which moves remote
-serial-edge dispatch to an explicit native instruction-batch boundary. The
-candidate also includes serial save-state restoration, native bootstrap
-ownership and build-metadata cleanup, bounded MCP teardown, fail-closed gate
-accounting, and partial-initialization cleanup. This remains a `PARTIAL`
-publication candidate
-until the remaining verification and review conditions are complete.
+The current merged head for this candidate is
+`daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03). Earlier PR #35
+introduced remote serial-edge dispatch at an explicit native instruction-batch
+boundary. The candidate also includes serial save-state restoration, native
+bootstrap ownership and build-metadata cleanup, bounded MCP teardown,
+fail-closed gate accounting, and partial-initialization cleanup. This remains a
+`PARTIAL` publication candidate until the remaining verification and review
+conditions are complete.
 The complete all-tier source-runtime baseline
 ran from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`,
 whose implementation tree is the PR #17 parent. The complete baseline gate
@@ -79,10 +77,11 @@ for these isolated environments. The host's bare `python3` still lacks
 After the pinned fork is built with `scripts/bootstrap_pyboy.py --mode cython`,
 the optional native path can be checked explicitly. The current focused source
 and Cython transport/serial/PyBoy-link suite passes 110/110 in each runtime.
-An asset-backed source trade gate recorded 19/19 ordered rows; the current
-native trade gate recorded 18/19, with
-`yellow-listen-blue_color-connect` stalled before party exchange and reproduced
-by an isolated retry. The full native battle matrix is not qualified.
+An asset-backed source trade gate recorded 19/19 ordered rows. The historical
+native strict-trade gate recorded 18/19; exact-row follow-ups have both passed
+and failed, including exact party-record exchange, a party-record mismatch,
+and phase stalls, so native strict-trade reliability is unproven. The full
+current native battle matrix is not qualified.
 
 Prior integrated source and Cython remote tiers pass 15/15, and the prior
 integrated Cython local/session tier passes 47/47. These are scoped follow-ups,
@@ -116,9 +115,10 @@ generation tracking. Its release-hygiene workflow passed. PR #23 fixes native
 lockstep timing; PR #26 fixes native `PyBoy.tick` instance ownership; PR #27
 adds explicit runtime selection and raises game-driven remote exchange
 timeouts to a bounded 30 seconds. PR #35 moves remote serial-edge dispatch to
-the native instruction-batch boundary; PR #36 publishes the documentation
-update. Current native trade remains 18/19 and native battle remains
-unqualified.
+the native instruction-batch boundary. The historical native strict-trade
+result is 18/19, but exact-row follow-ups have both passed and failed,
+including a party-record mismatch and phase stalls, so reliability remains
+unproven. Native battle remains unqualified.
 
 The fresh isolated asset-free source and Cython checks use managed Linux Python
 3.12.13 and Pytest 9.1.1: collection 745 in each mode, unit 600/600, and
@@ -140,22 +140,22 @@ MCP cases were intentionally skipped because their external assets were absent.
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, the bounded producer
 and tracked battle-fixture generator are present, and the source trade gate
-recorded 19/19. The native trade gate recorded 18/19 with one reproducible
-remote pre-party-exchange stall; native battle remains unqualified. Full
-sign-off still requires reproducible clean-install evidence for the documented
-source/native environments, current strict native trade and battle matrices,
-a complete current source battle matrix, a completed broad suite, vanilla
-source provenance, full
-native-platform and real-ROM load evidence, independent review, and secure
-cross-host networking.
+recorded 19/19. The historical native strict-trade result is 18/19, but
+exact-row follow-ups have both passed and failed, including a party-record
+mismatch and phase stalls, so native reliability is unproven; native battle
+remains unqualified. Full sign-off still requires reproducible clean-install
+evidence for the documented source/native environments, reliable current
+native trade and battle matrices, a complete current source battle matrix, a
+completed broad suite, vanilla source provenance, full native-platform and
+real-ROM load evidence, independent review, and secure cross-host networking.
 
 ## Source and artifact hygiene
 
-- [x] The published base for the current candidate is identified as `84dc79d`
-  (PR #36), with implementation commit `54a739b` (PR #35); the candidate also
-  records the serial, bootstrap, lifecycle, gate-accounting, and cleanup
-  changes, and the documentation worktree is isolated from the protected dirty
-  development checkout.
+- [x] The current merged head is identified as
+  `daa1d72f2cc559a6424067a9088dfae1b7b5f7bb`; the candidate records the
+  serial, bootstrap, lifecycle, gate-accounting, and cleanup changes, and the
+  documentation worktree is isolated from the protected dirty development
+  checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
 - [x] Documentation keeps BYO assets and external evidence outside the source
@@ -182,9 +182,10 @@ cross-host networking.
   earlier scoped source/MCP checks passed with one unrelated WSL-worktree skip
   and MCP stdio 4/4.
 - [ ] The integrated Cython build passes the full real-ROM strict gameplay
-  matrix. Its focused serial-link suite passes 110/110 and its native trade
-  gate passes 18/19, but `yellow-listen-blue_color-connect` remains blocked
-  before party exchange and the full native battle matrix is open.
+  matrix. Its focused serial-link suite passes 110/110. The historical native
+  strict-trade result is 18/19, but exact-row follow-ups have both passed and
+  failed, including a party-record mismatch and phase stalls, so reliability
+  remains unproven; the full native battle matrix is open.
 - [ ] Full Cython trade/battle acceptance is complete; source mode remains the
   documented release default while strict acceptance is unqualified.
 
@@ -205,9 +206,9 @@ cross-host networking.
 
 ## Test gates
 
-- [x] Both module and console-script collection paths complete in the
-  integrated gate; the current candidate collected 745 tests with no collection
-  errors.
+- [x] Both module and console-script collection paths complete; the fresh
+  isolated source and Cython asset-free gates each collected 745 tests with no
+  collection errors.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
 - [x] The fresh isolated current-head unit gate passes 600/600 in both source
@@ -238,10 +239,11 @@ cross-host networking.
   listener/connector directions; strict trade and strict battle each passed
   19/19 with bounded teardown.
 - [ ] A clean full strict rerun of the integrated candidate remains open. The
-  current source trade gate recorded 19/19; the current native trade gate
-  recorded 18/19 because `yellow-listen-blue_color-connect` stalled before
-  party exchange and the isolated retry reproduced it. The current full source
-  battle rerun and native strict battle matrix are not recorded.
+  current source trade gate recorded 19/19; the historical native strict-trade
+  result is 18/19, but exact-row follow-ups have both passed and failed,
+  including a party-record mismatch and phase stalls, so reliability remains
+  unproven. The current full source battle rerun and native strict battle
+  matrix are not recorded.
 - [x] The PR #19 bounded localhost concurrency/lifecycle probe passes 8/8 in
   each of five repetitions.
 - [ ] Real-ROM concurrent-load stability is complete on the merged runtime.

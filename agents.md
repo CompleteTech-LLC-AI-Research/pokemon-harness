@@ -27,28 +27,26 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The published repository base for the current integration candidate is
-`84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36, 2026-09-03). The
-underlying implementation commit is
-`54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35), which moves remote
-serial-edge dispatch to an explicit native instruction-batch boundary. The
-candidate also includes serial save-state restoration, native bootstrap
-ownership and build-metadata cleanup, bounded MCP teardown, fail-closed gate
-accounting, and partial-initialization cleanup. This remains a `PARTIAL`
-publication candidate,
-not a production release. The release runtime is the bundled PyBoy source
-snapshot pinned in `VERSIONS.md` (`2.7.0`, harness revision
+The current merged head for this candidate is
+`daa1d72f2cc559a6424067a9088dfae1b7b5f7bb`. This remains an audited
+`PARTIAL` publication candidate, not a production release. Earlier PR #35
+introduced remote serial-edge dispatch at an explicit native
+instruction-batch boundary. The candidate also includes serial save-state
+restoration, native bootstrap ownership and build-metadata cleanup, bounded MCP
+teardown, fail-closed gate accounting, and partial-initialization cleanup. The
+release runtime is the bundled PyBoy source snapshot pinned in `VERSIONS.md`
+(`2.7.0`, harness revision
 `c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode is
 the documented release default; Cython is an optional diagnostic build.
 
 Current controlled evidence: the focused source and Cython
 transport/serial/PyBoy-link suite passes 110/110 in each runtime; an
-asset-backed source trade gate recorded 19/19 ordered rows; and the native
-Cython trade gate recorded 18/19. Its only failed row is
-`yellow-listen-blue_color-connect`, which stalls before party exchange at the
-configured 720-second bound and reproduced on isolated retry. A timing-altered
-diagnostic produced incorrect party records and is not acceptance evidence;
-the full native battle matrix is unqualified. Fresh isolated uv-managed source
+asset-backed source trade gate recorded 19/19 ordered rows. The historical
+native Cython strict-trade gate recorded 18/19; exact-row follow-ups have both
+passed and failed, including exact party-record exchange, a party-record
+mismatch, and phase stalls. Native strict-trade reliability is therefore
+unproven. Timing-altered diagnostics are not acceptance evidence, and the full
+current native battle matrix is unqualified. Fresh isolated uv-managed source
 and Cython unit/timing gates collected 745 tests in each mode, passed unit
 600/600, and passed timing 40/40 in five repetitions; both installs passed
 `pip check`, and native bootstrap verified the `pyboy` and `pokered-harness`
@@ -81,9 +79,9 @@ transport 15/15.
 - Prior integrated source and Cython remote transport/MCP tiers pass 15/15,
   and the prior integrated Cython local/session tier passes 47/47. These are
   scoped follow-ups, not current full native trade/battle acceptance. The
-  current source trade gate recorded 19/19; current native trade recorded
-  18/19, with the exact remote failure named above. The current native battle
-  matrix is unqualified.
+  current source trade gate recorded 19/19. The native strict-trade result is
+  historically 18/19, but mixed exact-row follow-ups leave its reliability
+  unproven; the current native battle matrix is unqualified.
 - The current tree declares all canonical Red/Blue/Yellow listener and
   connector orderings over localhost TCP. The PR #19 synthetic concurrency
   probe passes, while real-ROM concurrent-load stability remains open.
@@ -92,8 +90,9 @@ transport 15/15.
   Collection is declaration evidence only; a LinkMenu milestone is not a
   gameplay acceptance. Complete 19/19 trade and battle results exist for the
   pre-PR #19 source-runtime baseline. The current source trade gate recorded
-  19/19, while the current native trade gate recorded 18/19; the current full
-  source battle rerun and native battle matrix remain unqualified. The
+  19/19, while mixed exact-row native trade follow-ups leave native strict-trade
+  reliability unproven; the current full source battle rerun and native battle
+  matrix remain unqualified. The
   historical native trade qualification of `FAIL` at 16/19 is not current
   evidence.
 - Vanilla ordinary and derived fixture rows are `PARTIAL` because their
