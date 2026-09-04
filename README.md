@@ -10,9 +10,10 @@ symbol files, save states, or other ROM-derived artifacts.
 ## Release status
 
 This repository remains an audited production-readiness candidate, not a
-production release. The live target is `CompleteDotTech/pokemon`. The current
-public documentation head is exact commit
-`f048870bdbd4837b5494006ae49fe40510832a89` (PR #45, 2026-09-04). The last
+production release. The live target is `CompleteDotTech/pokemon`. The
+prior/pre-reconciliation public documentation baseline is exact commit
+`f048870bdbd4837b5494006ae49fe40510832a89` (PR #45, 2026-09-04); it is not the
+current public head. The last
 verified pre-fix implementation/runtime snapshot under audit is exact commit
 `a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (the code snapshot associated with
 PR #44). Public changes after that snapshot are not documentation-only: the
@@ -75,8 +76,9 @@ strict real-ROM result rather than a bypass.
 ### Last verified pre-fix implementation/runtime snapshot: source-local battle
 
 At the last verified pre-fix implementation/runtime snapshot
-`a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (the current public documentation
-head is `f048870bdbd4837b5494006ae49fe40510832a89`), the source-runtime strict
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (the prior/pre-reconciliation public
+documentation baseline is `f048870bdbd4837b5494006ae49fe40510832a89`; it is not
+the current public head), the source-runtime strict
 local battle matrix completed 9/9 ordered canonical color pairs. The first six
 rows below were recorded earlier in the same source-local acceptance campaign;
 the final three are fresh rows at this pre-fix implementation snapshot. Every row
@@ -296,8 +298,8 @@ evidence, not full native qualification: strict Cython gameplay, real-ROM
 concurrent load, the remote trade/battle matrix, and macOS coverage remain
 open.
 
-The release status for public documentation head
-`f048870bdbd4837b5494006ae49fe40510832a89` remains `PARTIAL`; it records the
+The release status recorded by the prior/pre-reconciliation public documentation
+baseline `f048870bdbd4837b5494006ae49fe40510832a89` remains `PARTIAL`; it records the
 last verified pre-fix implementation/runtime snapshot
 `a8576b5ecb8e7039eefe0e02865b0bfc031387a7`. The post-fix serialized
 source-runtime strict-trade production gate completed all 19 declared and
