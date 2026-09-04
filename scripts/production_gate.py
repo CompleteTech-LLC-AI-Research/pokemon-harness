@@ -11,6 +11,8 @@ Examples::
     python scripts/production_gate.py --unit-only
     python scripts/production_gate.py --tier remote --repeat-timing 5
     python scripts/production_gate.py --runtime-mode both --unit-only
+    python scripts/production_gate.py --runtime-mode both --python .venv/bin/python \
+        --cython-python .venv-cython/bin/python --unit-only
     python scripts/production_gate.py --unit-only --evidence-dir /tmp/pokered-evidence
 
 The default command is strict for every selected tier, including the
@@ -2653,6 +2655,7 @@ def run_runtime_gates(
     runtime_mode: str,
     project_root: Path,
     python_executable: Path,
+    cython_python_executable: Path | None = None,
     rom_root: Path,
     fixture_root: Path,
     expected_sha1: dict[Path, str],
@@ -2666,14 +2669,27 @@ def run_runtime_gates(
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
 ) -> tuple[RuntimeGateResult, ...]:
-    """Run identical selected tiers for each runtime named by the CLI."""
+    """Run identical selected tiers for each runtime named by the CLI.
+
+    ``--python`` remains the source-runtime interpreter and the interpreter
+    used by single-runtime invocations.  A dual gate may provide a separate
+    ``--cython-python`` environment so source-mode packaging checks do not see
+    metadata left by a native PyBoy installation.  When it is omitted, retain
+    the historical one-interpreter behavior; the source child still has its
+    explicit source import environment and the gate remains fail-closed if
+    that environment violates the packaging contract.
+    """
 
     configuration_problems = tuple(configuration_problems)
+    python_by_mode = {
+        "source": python_executable,
+        "cython": cython_python_executable or python_executable,
+    }
     return tuple(
         run_runtime_gate(
             mode=mode,
             project_root=project_root,
-            python_executable=python_executable,
+            python_executable=python_by_mode[mode],
             rom_root=rom_root,
             fixture_root=fixture_root,
             expected_sha1=expected_sha1,
@@ -3607,6 +3623,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--python", dest="python_executable", type=Path, default=Path(sys.executable)
     )
     parser.add_argument(
+        "--cython-python",
+        dest="cython_python_executable",
+        type=Path,
+        help=(
+            "interpreter for the Cython runtime when --runtime-mode both; "
+            "defaults to --python"
+        ),
+    )
+    parser.add_argument(
         "--tier",
         action="append",
         choices=tuple(TIER_EXPRESSIONS),
@@ -3687,12 +3712,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--matrix-timeout-seconds must be positive")
     if args.unit_only and args.tier:
         parser.error("--unit-only cannot be combined with --tier")
+    if args.cython_python_executable is not None and args.runtime_mode != "both":
+        parser.error("--cython-python requires --runtime-mode both")
 
     project_root = args.repo_root.expanduser().resolve()
     # Do not call ``resolve()`` here: POSIX virtualenv interpreters are often
     # symlinks to the system interpreter, and resolving would silently drop
     # the environment containing pytest/PyBoy.
     python_executable = _python_path_from_argument(args.python_executable, project_root)
+    cython_python_executable = (
+        _python_path_from_argument(args.cython_python_executable, project_root)
+        if args.cython_python_executable is not None
+        else None
+    )
     rom_root = find_rom_root(project_root, args.rom_root)
     fixture_root = find_fixture_root(project_root, args.fixture_root)
     expected_sha1 = parse_expected_sha1(project_root / "VERSIONS.md")
@@ -3715,6 +3747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime_mode=args.runtime_mode,
         project_root=project_root,
         python_executable=python_executable,
+        cython_python_executable=cython_python_executable,
         rom_root=rom_root,
         fixture_root=fixture_root,
         expected_sha1=expected_sha1,
