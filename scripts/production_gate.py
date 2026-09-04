@@ -10,6 +10,7 @@ Examples::
     python scripts/production_gate.py
     python scripts/production_gate.py --unit-only
     python scripts/production_gate.py --tier remote --repeat-timing 5
+    python scripts/production_gate.py --runtime-mode both --unit-only
     python scripts/production_gate.py --unit-only --evidence-dir /tmp/pokered-evidence
 
 The default command is strict for every selected tier, including the
@@ -99,6 +100,8 @@ MATRIX_CASE_TIMEOUT_SECONDS: dict[str, float] = {
 MATRIX_AGGREGATE_GRACE_SECONDS = 10.0
 COLLECTION_TIMEOUT_SECONDS = 300.0
 RUNTIME_MODES = ("source", "cython")
+RUNTIME_MODE_ALIASES = {"dual": "both"}
+RUNTIME_MODE_CHOICES = (*RUNTIME_MODES, "both")
 PYBOY_RUNTIME_MODULES = (
     "pyboy",
     "pyboy.pyboy",
@@ -288,8 +291,38 @@ class CollectionResult:
     reason: str = ""
 
 
+@dataclass
+class RuntimeGateResult:
+    """Complete gate result for one explicit PyBoy runtime mode."""
+
+    mode: str
+    runtime: dict[str, Any]
+    collections: list[CollectionResult]
+    fixture_manifest: dict[str, Any]
+    matrix_audit: dict[str, Any]
+    tiers: list[TierResult]
+    gate_problems: list[str] = field(default_factory=list)
+
+
 def project_root_from_script() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def normalize_runtime_mode(value: str) -> str:
+    """Normalize the dual-runtime spelling while preserving old modes."""
+
+    return RUNTIME_MODE_ALIASES.get(value, value)
+
+
+def runtime_modes_for_gate(runtime_mode: str) -> tuple[str, ...]:
+    """Expand a CLI runtime selection into explicit runtime executions."""
+
+    normalized = normalize_runtime_mode(runtime_mode)
+    if normalized in RUNTIME_MODES:
+        return (normalized,)
+    if normalized == "both":
+        return RUNTIME_MODES
+    raise ValueError(f"unsupported runtime mode: {runtime_mode!r}")
 
 
 def _python_path_from_argument(value: Path, cwd: Path) -> Path:
@@ -2467,6 +2500,221 @@ def _optional_preflight_reason(name: str, records: list[AssetRecord]) -> str | N
     return None
 
 
+def run_runtime_gate(
+    *,
+    mode: str,
+    project_root: Path,
+    python_executable: Path,
+    rom_root: Path,
+    fixture_root: Path,
+    expected_sha1: dict[Path, str],
+    assets: list[AssetRecord],
+    selected: Sequence[str],
+    required_tests_by_tier: dict[str, frozenset[tuple[str, str]]],
+    required_nodeids_by_tier: dict[str, frozenset[str]],
+    configuration_problems: Iterable[str] = (),
+    repeat: int = 5,
+    timeout_override: float | None = None,
+    matrix_workers: int = DEFAULT_MATRIX_WORKERS,
+    matrix_timeout_override: float | None = None,
+) -> RuntimeGateResult:
+    """Run the complete gate once under one explicit runtime.
+
+    ``both`` is an orchestration choice, not a PyBoy runtime.  Keeping this
+    function restricted to ``source`` and ``cython`` makes it impossible for
+    a dual invocation to accidentally probe or run tests under an ambiguous
+    inherited environment.
+    """
+
+    if mode not in RUNTIME_MODES:
+        raise ValueError(f"runtime gate requires an explicit runtime mode: {mode!r}")
+
+    selected_tiers = tuple(selected)
+    real_rom_scope = bool(set(selected_tiers) & REQUIRED_TIER_ASSETS)
+    environment = build_test_environment(
+        project_root,
+        rom_root,
+        fixture_root,
+        expected_sha1,
+        runtime_mode=mode,
+    )
+    # Subprocess acceptance tests must use the exact interpreter whose runtime
+    # contract was probed above, not a stale auxiliary virtualenv discovered
+    # from the worktree.
+    environment["POKERED_PYTHON"] = str(python_executable)
+    runtime = probe_runtime(python_executable, project_root, environment)
+    gate_problems = runtime_problems(
+        project_root,
+        runtime,
+        expected_mode=mode,
+    )
+    gate_problems.extend(
+        environment_policy_problems(
+            project_root=project_root,
+            environment=environment,
+            assets=assets,
+        )
+    )
+    gate_problems.extend(configuration_problems)
+
+    collections = run_collection_preflight(
+        project_root=project_root,
+        python_executable=python_executable,
+        environment=environment,
+        timeout_seconds=timeout_override or COLLECTION_TIMEOUT_SECONDS,
+    )
+
+    fixture_manifest = run_fixture_manifest_validation(
+        project_root=project_root,
+        python_executable=python_executable,
+        environment=environment,
+        fixture_root=fixture_root,
+        validate_bytes=real_rom_scope,
+        timeout_seconds=timeout_override or COLLECTION_TIMEOUT_SECONDS,
+    )
+    if fixture_manifest["status"] != "PASS":
+        gate_problems.append(
+            "fixture manifest validation failed: "
+            f"mode={fixture_manifest['mode']} "
+            f"{fixture_manifest.get('reason') or 'unknown error'}"
+        )
+    elif real_rom_scope:
+        gate_problems.extend(
+            fixture_manifest_input_problems(
+                project_root / FIXTURE_MANIFEST_RELATIVE_PATH,
+                rom_root=rom_root,
+                assets=assets,
+                expected_sha1=expected_sha1,
+            )
+        )
+        gate_problems.extend(
+            fixture_manifest_provenance_problems(project_root / FIXTURE_MANIFEST_RELATIVE_PATH)
+        )
+
+    matrix_audit = run_matrix_collection_audit(
+        project_root=project_root,
+        collections=collections,
+    )
+    if real_rom_scope:
+        if not matrix_audit.get("structural_pass"):
+            gate_problems.append("link matrix structural audit failed")
+        if not matrix_audit.get("acceptance_matrix_complete"):
+            gaps = matrix_audit.get("acceptance_gaps", {})
+            gap_counts = ", ".join(
+                f"{name}={len(entries)}"
+                for name, entries in gaps.items()
+                if isinstance(entries, (tuple, list))
+            )
+            gate_problems.append(
+                "strict acceptance matrix declaration is incomplete"
+                + (f" ({gap_counts})" if gap_counts else "")
+            )
+
+    required_problems = required_asset_problems(assets)
+    tiers: list[TierResult] = []
+    with tempfile.TemporaryDirectory(prefix=f"pokered-gate-{mode}-") as temp_directory:
+        report_directory = Path(temp_directory)
+        for name in selected_tiers:
+            if name in OPTIONAL_TIERS:
+                reason = _optional_preflight_reason(name, assets)
+                if reason:
+                    tiers.append(synthetic_optional_skip(name, reason))
+                    continue
+            tiers.append(
+                run_tier(
+                    name=name,
+                    project_root=project_root,
+                    python_executable=python_executable,
+                    environment=environment,
+                    required_problems=required_problems,
+                    repeat=repeat,
+                    timeout_override=timeout_override,
+                    report_directory=report_directory,
+                    required_test_keys=required_tests_by_tier.get(name, ()),
+                    required_nodeids=required_nodeids_by_tier.get(name, ()),
+                    matrix_workers=matrix_workers,
+                    matrix_timeout_override=matrix_timeout_override,
+                )
+            )
+
+    return RuntimeGateResult(
+        mode=mode,
+        runtime=runtime,
+        collections=collections,
+        fixture_manifest=fixture_manifest,
+        matrix_audit=matrix_audit,
+        tiers=tiers,
+        gate_problems=gate_problems,
+    )
+
+
+def run_runtime_gates(
+    *,
+    runtime_mode: str,
+    project_root: Path,
+    python_executable: Path,
+    rom_root: Path,
+    fixture_root: Path,
+    expected_sha1: dict[Path, str],
+    assets: list[AssetRecord],
+    selected: Sequence[str],
+    required_tests_by_tier: dict[str, frozenset[tuple[str, str]]],
+    required_nodeids_by_tier: dict[str, frozenset[str]],
+    configuration_problems: Iterable[str] = (),
+    repeat: int = 5,
+    timeout_override: float | None = None,
+    matrix_workers: int = DEFAULT_MATRIX_WORKERS,
+    matrix_timeout_override: float | None = None,
+) -> tuple[RuntimeGateResult, ...]:
+    """Run identical selected tiers for each runtime named by the CLI."""
+
+    configuration_problems = tuple(configuration_problems)
+    return tuple(
+        run_runtime_gate(
+            mode=mode,
+            project_root=project_root,
+            python_executable=python_executable,
+            rom_root=rom_root,
+            fixture_root=fixture_root,
+            expected_sha1=expected_sha1,
+            assets=assets,
+            selected=selected,
+            required_tests_by_tier=required_tests_by_tier,
+            required_nodeids_by_tier=required_nodeids_by_tier,
+            configuration_problems=configuration_problems,
+            repeat=repeat,
+            timeout_override=timeout_override,
+            matrix_workers=matrix_workers,
+            matrix_timeout_override=matrix_timeout_override,
+        )
+        for mode in runtime_modes_for_gate(runtime_mode)
+    )
+
+
+def runtime_gate_passes(result: RuntimeGateResult) -> bool:
+    """Return whether one runtime result satisfies every existing gate rule."""
+
+    tier_ok = all(
+        tier.status == "PASS" if tier.required else tier.status in {"PASS", "SKIP"}
+        for tier in result.tiers
+    )
+    return (
+        result.runtime.get("pyboy_mode") == result.mode
+        and bool(result.collections)
+        and bool(result.tiers)
+        and not result.gate_problems
+        and all(collection.status == "PASS" for collection in result.collections)
+        and tier_ok
+    )
+
+
+def runtime_gates_pass(results: Iterable[RuntimeGateResult]) -> bool:
+    """Aggregate runtime results fail-closed, including an empty result set."""
+
+    result_list = tuple(results)
+    return bool(result_list) and all(runtime_gate_passes(result) for result in result_list)
+
+
 def _format_counts(counts: Counts) -> str:
     return (
         f"total={counts.total} passed={counts.passed} failed={counts.failed} "
@@ -2604,10 +2852,80 @@ def render_text(
     return "\n".join(lines)
 
 
+def render_dual_text(
+    *,
+    project_root: Path,
+    rom_root: Path,
+    fixture_root: Path,
+    assets: Sequence[AssetRecord],
+    runtime_results: Sequence[RuntimeGateResult],
+    overall: str,
+) -> str:
+    """Render explicit source/Cython results without collapsing either run."""
+
+    lines = [
+        "Pokémon harness production gate",
+        f"project={project_root}",
+        f"rom_root={rom_root}",
+        f"fixture_root={fixture_root}",
+        "runtime-mode=both",
+        "assets:",
+    ]
+    for asset in assets:
+        suffix = []
+        if asset.expected_sha1:
+            suffix.append(f"expected_sha1={asset.expected_sha1}")
+        if asset.actual_sha1:
+            suffix.append(f"actual_sha1={asset.actual_sha1}")
+        if asset.size is not None:
+            suffix.append(f"size={asset.size}")
+        detail = " " + " ".join(suffix) if suffix else ""
+        lines.append(
+            f"  {asset.status.upper():13} {asset.kind:7} {asset.label}: {asset.path}{detail}"
+        )
+    lines.append(
+        "runtime-results:",
+    )
+    for result in runtime_results:
+        status = "PASS" if runtime_gate_passes(result) else "FAIL"
+        lines.append(f"  {result.mode}: {status}")
+        detail = render_text(
+            project_root=project_root,
+            rom_root=rom_root,
+            fixture_root=fixture_root,
+            runtime=result.runtime,
+            assets=[],
+            collections=result.collections,
+            tiers=result.tiers,
+            gate_problems=result.gate_problems,
+            overall=status,
+            fixture_manifest=result.fixture_manifest,
+            matrix_audit=result.matrix_audit,
+        )
+        lines.extend(f"    {line}" for line in detail.splitlines()[4:])
+    lines.append(f"overall: {overall}")
+    return "\n".join(lines)
+
+
 def _jsonable_tier(tier: TierResult) -> dict[str, Any]:
     data = asdict(tier)
     data["counts"] = asdict(tier.counts)
     return data
+
+
+def _runtime_result_json(result: RuntimeGateResult) -> dict[str, Any]:
+    """Serialize one explicit runtime result for the dual JSON report."""
+
+    return {
+        "mode": result.mode,
+        "runtime": result.runtime,
+        "collections": [asdict(collection) for collection in result.collections],
+        "fixture_manifest": result.fixture_manifest,
+        "matrix_audit": result.matrix_audit,
+        "tiers": [_jsonable_tier(tier) for tier in result.tiers],
+        "gate_problems": result.gate_problems,
+        "overall": "PASS" if runtime_gate_passes(result) else "FAIL",
+    }
 
 
 def _safe_text(value: Any, *, limit: int = 8000) -> str:
@@ -2899,13 +3217,123 @@ def build_evidence_payload(
     return payload
 
 
+def build_dual_evidence_payload(
+    *,
+    project_root: Path,
+    rom_root: Path,
+    fixture_root: Path,
+    assets: list[AssetRecord],
+    runtime_results: Sequence[RuntimeGateResult],
+    overall: str,
+    requested_mode: str = "both",
+    generated_at: str | None = None,
+    evidence_error: str = "",
+) -> dict[str, Any]:
+    """Build a sanitized evidence bundle containing both runtime executions."""
+
+    roots = _evidence_roots(project_root, rom_root, fixture_root)
+    runtimes: list[dict[str, Any]] = []
+    for result in runtime_results:
+        runtimes.append(
+            {
+                "mode": result.mode,
+                "runtime": _safe_runtime(result.runtime, roots),
+                "collections": [
+                    _safe_collection(collection, roots) for collection in result.collections
+                ],
+                "fixture_manifest": _safe_fixture_manifest(result.fixture_manifest),
+                "matrix_audit": _safe_matrix_audit(result.matrix_audit),
+                "tiers": [_safe_tier(tier, roots) for tier in result.tiers],
+                "gate_problems": [
+                    _safe_diagnostic(problem, roots, limit=2000) for problem in result.gate_problems
+                ],
+                "overall": "PASS" if runtime_gate_passes(result) else "FAIL",
+            }
+        )
+
+    payload: dict[str, Any] = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "generated_at": generated_at or datetime.now(UTC).isoformat(),
+        "project_root": "<project-root>",
+        "rom_root": "<rom-root>",
+        "fixture_root": "<fixture-root>",
+        "runtime_mode": requested_mode,
+        "runtimes": runtimes,
+        "assets": [_safe_asset(item, roots) for item in assets],
+        "overall": overall,
+        "safety": {
+            "rom_bytes": "not included",
+            "credentials": "environment is not captured; free-form diagnostics are redacted",
+            "diagnostics": "bounded text tails only",
+        },
+    }
+    if evidence_error:
+        payload["evidence_error"] = _safe_diagnostic(evidence_error, roots, limit=2000)
+    return payload
+
+
 def _payload_counts_text(counts: dict[str, Any]) -> str:
     fields = ("total", "passed", "failed", "skipped", "xfailed", "xpassed", "errors")
     return " ".join(f"{field}={counts.get(field, 0)}" for field in fields)
 
 
+def _render_dual_evidence_text(payload: dict[str, Any]) -> str:
+    """Render a dual-runtime evidence payload with each run clearly scoped."""
+
+    lines = [
+        "Pokémon harness production gate evidence bundle",
+        f"generated_at={payload.get('generated_at', '')}",
+        f"overall: {payload.get('overall', 'UNKNOWN')}",
+        f"runtime-mode={payload.get('runtime_mode', 'both')}",
+        "assets:",
+    ]
+    for asset in payload.get("assets", []):
+        details = []
+        for key in ("expected_sha1", "actual_sha1", "size"):
+            if asset.get(key) is not None:
+                details.append(f"{key}={asset[key]}")
+        suffix = f" {' '.join(details)}" if details else ""
+        lines.append(
+            f"  {str(asset.get('status', 'unknown')).upper():13} "
+            f"{asset.get('kind', ''):7} {asset.get('label', '')}: "
+            f"{asset.get('path', '')}{suffix}"
+        )
+
+    lines.append("runtimes:")
+    for result in payload.get("runtimes", []):
+        if not isinstance(result, dict):
+            continue
+        child_payload = {
+            "generated_at": payload.get("generated_at", ""),
+            "overall": result.get("overall", "UNKNOWN"),
+            "runtime": result.get("runtime", {}),
+            "collections": result.get("collections", []),
+            "assets": [],
+            "fixture_manifest": result.get("fixture_manifest"),
+            "matrix_audit": result.get("matrix_audit"),
+            "tiers": result.get("tiers", []),
+            "gate_problems": result.get("gate_problems", []),
+            "safety": {},
+        }
+        child_lines = render_evidence_text(child_payload).rstrip("\n").splitlines()
+        lines.append(f"  {result.get('mode', 'unknown')}: {result.get('overall', 'UNKNOWN')}")
+        # Omit the child's title, timestamp, and duplicate overall line; the
+        # parent already identifies the combined evidence bundle.
+        lines.extend(f"    {line}" for line in child_lines[3:])
+
+    if payload.get("evidence_error"):
+        lines.append(f"evidence-error: {payload['evidence_error']}")
+    lines.append("safety:")
+    for key, value in payload.get("safety", {}).items():
+        lines.append(f"  {key}: {value}")
+    return "\n".join(lines) + "\n"
+
+
 def render_evidence_text(payload: dict[str, Any]) -> str:
     """Render the already-sanitized payload for human inspection."""
+
+    if isinstance(payload.get("runtimes"), list):
+        return _render_dual_evidence_text(payload)
 
     lines = [
         "Pokémon harness production gate evidence bundle",
@@ -3206,12 +3634,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--runtime-mode",
-        choices=RUNTIME_MODES,
+        type=normalize_runtime_mode,
+        choices=RUNTIME_MODE_CHOICES,
         default="source",
         help=(
             "PyBoy runtime to require for every selected tier: source uses the "
-            "vendored Python modules; cython uses installed extension modules "
-            "(default: source)"
+            "vendored Python modules; cython uses installed extension modules; "
+            "both runs every selected tier under each explicit runtime "
+            "(dual is accepted as an alias) (default: source)"
         ),
     )
     parser.add_argument(
@@ -3267,36 +3697,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     fixture_root = find_fixture_root(project_root, args.fixture_root)
     expected_sha1 = parse_expected_sha1(project_root / "VERSIONS.md")
     assets = inspect_assets(rom_root, fixture_root, expected_sha1)
-    environment = build_test_environment(
-        project_root,
-        rom_root,
-        fixture_root,
-        expected_sha1,
-        runtime_mode=args.runtime_mode,
-    )
-    # Subprocess acceptance tests must use the exact interpreter whose runtime
-    # contract was probed above, not a stale auxiliary virtualenv discovered
-    # from the worktree.
-    environment["POKERED_PYTHON"] = str(python_executable)
-    runtime = probe_runtime(python_executable, project_root, environment)
-    gate_problems = runtime_problems(
-        project_root,
-        runtime,
-        expected_mode=args.runtime_mode,
-    )
-    gate_problems.extend(
-        environment_policy_problems(
-            project_root=project_root,
-            environment=environment,
-            assets=assets,
-        )
-    )
     required_tests_by_tier, tier_config_error = load_required_test_keys(project_root)
+    configuration_problems: list[str] = []
     if tier_config_error:
-        gate_problems.append(tier_config_error)
+        configuration_problems.append(tier_config_error)
     required_nodeids_by_tier, nodeid_config_error = load_required_nodeids(project_root)
     if nodeid_config_error:
-        gate_problems.append(nodeid_config_error)
+        configuration_problems.append(nodeid_config_error)
 
     if args.unit_only:
         selected = ["unit", "timing"]
@@ -3304,146 +3711,63 @@ def main(argv: Sequence[str] | None = None) -> int:
         selected = list(dict.fromkeys(args.tier))
     else:
         selected = list(DEFAULT_TIERS)
-    real_rom_scope = bool(set(selected) & REQUIRED_TIER_ASSETS)
-
-    collections = run_collection_preflight(
+    runtime_results = run_runtime_gates(
+        runtime_mode=args.runtime_mode,
         project_root=project_root,
         python_executable=python_executable,
-        environment=environment,
-        timeout_seconds=args.timeout_seconds or COLLECTION_TIMEOUT_SECONDS,
-    )
-
-    fixture_manifest = run_fixture_manifest_validation(
-        project_root=project_root,
-        python_executable=python_executable,
-        environment=environment,
+        rom_root=rom_root,
         fixture_root=fixture_root,
-        validate_bytes=real_rom_scope,
-        timeout_seconds=args.timeout_seconds or COLLECTION_TIMEOUT_SECONDS,
+        expected_sha1=expected_sha1,
+        assets=assets,
+        selected=selected,
+        required_tests_by_tier=required_tests_by_tier,
+        required_nodeids_by_tier=required_nodeids_by_tier,
+        configuration_problems=configuration_problems,
+        repeat=args.repeat_timing,
+        timeout_override=args.timeout_seconds,
+        matrix_workers=args.matrix_workers,
+        matrix_timeout_override=args.matrix_timeout_seconds,
     )
-    if fixture_manifest["status"] != "PASS":
-        gate_problems.append(
-            "fixture manifest validation failed: "
-            f"mode={fixture_manifest['mode']} "
-            f"{fixture_manifest.get('reason') or 'unknown error'}"
-        )
-    elif real_rom_scope:
-        gate_problems.extend(
-            fixture_manifest_input_problems(
-                project_root / FIXTURE_MANIFEST_RELATIVE_PATH,
-                rom_root=rom_root,
-                assets=assets,
-                expected_sha1=expected_sha1,
-            )
-        )
-        gate_problems.extend(
-            fixture_manifest_provenance_problems(project_root / FIXTURE_MANIFEST_RELATIVE_PATH)
-        )
 
-    matrix_audit = run_matrix_collection_audit(
-        project_root=project_root,
-        collections=collections,
-    )
-    if real_rom_scope:
-        if not matrix_audit.get("structural_pass"):
-            gate_problems.append("link matrix structural audit failed")
-        if not matrix_audit.get("acceptance_matrix_complete"):
-            gaps = matrix_audit.get("acceptance_gaps", {})
-            gap_counts = ", ".join(
-                f"{name}={len(entries)}"
-                for name, entries in gaps.items()
-                if isinstance(entries, (tuple, list))
-            )
-            gate_problems.append(
-                "strict acceptance matrix declaration is incomplete"
-                + (f" ({gap_counts})" if gap_counts else "")
-            )
-
-    required_problems = required_asset_problems(assets)
-    tiers: list[TierResult] = []
-    with tempfile.TemporaryDirectory(prefix="pokered-gate-") as temp_directory:
-        report_directory = Path(temp_directory)
-        for name in selected:
-            if name in OPTIONAL_TIERS:
-                reason = _optional_preflight_reason(name, assets)
-                if reason:
-                    tiers.append(synthetic_optional_skip(name, reason))
-                    continue
-            tiers.append(
-                run_tier(
-                    name=name,
-                    project_root=project_root,
-                    python_executable=python_executable,
-                    environment=environment,
-                    required_problems=required_problems,
-                    repeat=args.repeat_timing,
-                    timeout_override=args.timeout_seconds,
-                    report_directory=report_directory,
-                    required_test_keys=required_tests_by_tier.get(name, ()),
-                    required_nodeids=required_nodeids_by_tier.get(name, ()),
-                    matrix_workers=args.matrix_workers,
-                    matrix_timeout_override=args.matrix_timeout_seconds,
-                )
-            )
-
-    tier_ok = all(
-        tier.status == "PASS" if tier.required else tier.status in {"PASS", "SKIP"}
-        for tier in tiers
-    )
-    overall = (
-        "PASS"
-        if not gate_problems
-        and all(collection.status == "PASS" for collection in collections)
-        and tier_ok
-        else "FAIL"
-    )
+    dual_runtime = len(runtime_results) > 1
+    if not dual_runtime:
+        result = runtime_results[0]
+        runtime = result.runtime
+        collections = result.collections
+        fixture_manifest = result.fixture_manifest
+        matrix_audit = result.matrix_audit
+        tiers = result.tiers
+        gate_problems = result.gate_problems
+        overall = "PASS" if runtime_gate_passes(result) else "FAIL"
+    else:
+        runtime = {}
+        collections = []
+        fixture_manifest = {}
+        matrix_audit = {}
+        tiers = []
+        gate_problems = [
+            f"{result.mode}: {problem}"
+            for result in runtime_results
+            for problem in result.gate_problems
+        ]
+        overall = "PASS" if runtime_gates_pass(runtime_results) else "FAIL"
     evidence_error = ""
     if args.evidence_dir is not None:
         evidence_dir = args.evidence_dir.expanduser()
         if not evidence_dir.is_absolute():
             evidence_dir = (Path.cwd() / evidence_dir).resolve()
-        evidence_payload = build_evidence_payload(
-            project_root=project_root,
-            rom_root=rom_root,
-            fixture_root=fixture_root,
-            runtime=runtime,
-            assets=assets,
-            collections=collections,
-            tiers=tiers,
-            gate_problems=gate_problems,
-            overall=overall,
-            fixture_manifest=fixture_manifest,
-            matrix_audit=matrix_audit,
-        )
-        try:
-            write_evidence_bundle(evidence_dir, evidence_payload)
-        except (OSError, TypeError, ValueError) as exc:
-            evidence_error = (
-                f"could not write evidence bundle to {evidence_dir}: {type(exc).__name__}: {exc}"
+        if dual_runtime:
+            evidence_payload = build_dual_evidence_payload(
+                project_root=project_root,
+                rom_root=rom_root,
+                fixture_root=fixture_root,
+                assets=assets,
+                runtime_results=runtime_results,
+                overall=overall,
+                requested_mode="both",
             )
-            gate_problems.append(evidence_error)
-            overall = "FAIL"
-
-    if args.format == "json":
-        payload = {
-            "project_root": str(project_root),
-            "rom_root": str(rom_root),
-            "fixture_root": str(fixture_root),
-            "runtime": runtime,
-            "collections": [asdict(collection) for collection in collections],
-            "assets": [asdict(asset) for asset in assets],
-            "tiers": [_jsonable_tier(tier) for tier in tiers],
-            "gate_problems": gate_problems,
-            "overall": overall,
-            "fixture_manifest": fixture_manifest,
-            "matrix_audit": matrix_audit,
-        }
-        if evidence_error:
-            payload["evidence_error"] = evidence_error
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(
-            render_text(
+        else:
+            evidence_payload = build_evidence_payload(
                 project_root=project_root,
                 rom_root=rom_root,
                 fixture_root=fixture_root,
@@ -3456,7 +3780,69 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fixture_manifest=fixture_manifest,
                 matrix_audit=matrix_audit,
             )
-        )
+        try:
+            write_evidence_bundle(evidence_dir, evidence_payload)
+        except (OSError, TypeError, ValueError) as exc:
+            evidence_error = (
+                f"could not write evidence bundle to {evidence_dir}: {type(exc).__name__}: {exc}"
+            )
+            gate_problems.append(evidence_error)
+            overall = "FAIL"
+
+    if args.format == "json":
+        if dual_runtime:
+            payload = {
+                "project_root": str(project_root),
+                "rom_root": str(rom_root),
+                "fixture_root": str(fixture_root),
+                "runtime_mode": "both",
+                "runtimes": [_runtime_result_json(result) for result in runtime_results],
+                "assets": [asdict(asset) for asset in assets],
+                "gate_problems": gate_problems,
+                "overall": overall,
+            }
+        else:
+            payload = {
+                "project_root": str(project_root),
+                "rom_root": str(rom_root),
+                "fixture_root": str(fixture_root),
+                "runtime": runtime,
+                "collections": [asdict(collection) for collection in collections],
+                "assets": [asdict(asset) for asset in assets],
+                "tiers": [_jsonable_tier(tier) for tier in tiers],
+                "gate_problems": gate_problems,
+                "overall": overall,
+                "fixture_manifest": fixture_manifest,
+                "matrix_audit": matrix_audit,
+            }
+        if evidence_error:
+            payload["evidence_error"] = evidence_error
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        if dual_runtime:
+            output = render_dual_text(
+                project_root=project_root,
+                rom_root=rom_root,
+                fixture_root=fixture_root,
+                assets=assets,
+                runtime_results=runtime_results,
+                overall=overall,
+            )
+        else:
+            output = render_text(
+                project_root=project_root,
+                rom_root=rom_root,
+                fixture_root=fixture_root,
+                runtime=runtime,
+                assets=assets,
+                collections=collections,
+                tiers=tiers,
+                gate_problems=gate_problems,
+                overall=overall,
+                fixture_manifest=fixture_manifest,
+                matrix_audit=matrix_audit,
+            )
+        print(output)
     return 0 if overall == "PASS" else 1
 
 
