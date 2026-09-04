@@ -37,6 +37,15 @@ REVISION_FILE = PYBOY_SOURCE / "POKERED_HARNESS_PYBOY_REVISION"
 EXPECTED_PYBOY_VERSION = "2.7.0"
 EXPECTED_REVISION = "c565df66c3731fad2856169a90f6bbec99925915"
 CYTHON_REQUIREMENT = "cython==3.0.12"
+SETUPTOOLS_REQUIREMENT = "setuptools==77.0.3"
+WHEEL_REQUIREMENT = "wheel==0.45.1"
+NUMPY_REQUIREMENT = "numpy==2.5.2"
+BUILD_REQUIREMENTS = (
+    SETUPTOOLS_REQUIREMENT,
+    WHEEL_REQUIREMENT,
+    CYTHON_REQUIREMENT,
+    NUMPY_REQUIREMENT,
+)
 PROJECT_DISTRIBUTION = "pokered-harness"
 PIP_PROBE_TIMEOUT_SECONDS = 60
 INSTALL_TIMEOUT_SECONDS = 1800
@@ -530,6 +539,20 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         pip_install = _pip_command()
+        build_result = _run_bounded(
+            [
+                *pip_install,
+                "--force-reinstall",
+                "--no-deps",
+                *BUILD_REQUIREMENTS,
+            ],
+            cwd=ROOT,
+            env=env,
+            timeout=INSTALL_TIMEOUT_SECONDS,
+        )
+        if build_result.returncode:
+            return build_result.returncode
+
         if args.mode == "cython":
             # Keep the harness distribution installed in native environments too.
             # The vendored fork has its own ``pyboy`` distribution metadata, but
@@ -540,6 +563,7 @@ def main(argv: list[str] | None = None) -> int:
                 *pip_install,
                 "--force-reinstall",
                 "--no-deps",
+                "--no-build-isolation",
                 "-e",
                 str(ROOT),
             ]
@@ -556,6 +580,7 @@ def main(argv: list[str] | None = None) -> int:
             *pip_install,
             "--force-reinstall",
             "--no-deps",
+            "--no-build-isolation",
             CYTHON_REQUIREMENT,
             str(install_target),
         ]

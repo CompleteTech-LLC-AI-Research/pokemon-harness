@@ -308,6 +308,17 @@ def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
     assert "cython_compiled" in bootstrap
 
 
+def test_bootstrap_pins_build_dependencies_and_disables_implicit_resolution() -> None:
+    module = _load_bootstrap()
+
+    assert module.BUILD_REQUIREMENTS == (
+        "setuptools==77.0.3",
+        "wheel==0.45.1",
+        "cython==3.0.12",
+        "numpy==2.5.2",
+    )
+
+
 def _load_bootstrap():
     spec = importlib.util.spec_from_file_location(
         "pokered_bootstrap_runtime_test", ROOT / "scripts" / "bootstrap_pyboy.py"
@@ -627,13 +638,24 @@ def test_bootstrap_source_mode_installs_the_harness_distribution(monkeypatch) ->
     monkeypatch.setattr(module, "_run_bounded", fake_run)
 
     assert module.main(["--mode", "source"]) == 0
-    assert len(calls) == 1
-    command, kwargs = calls[0]
+    assert len(calls) == 2
+    build_command, build_kwargs = calls[0]
+    assert build_command == [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        *module.BUILD_REQUIREMENTS,
+    ]
+    assert build_kwargs["cwd"] == module.ROOT
+
+    command, kwargs = calls[1]
     assert command == [
         "pip",
         "install",
         "--force-reinstall",
         "--no-deps",
+        "--no-build-isolation",
         module.CYTHON_REQUIREMENT,
         str(module.ROOT),
     ]
@@ -658,21 +680,38 @@ def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(monkeypatch) -> 
     monkeypatch.setattr(module, "_run_bounded", fake_run)
 
     assert module.main(["--mode", "cython"]) == 0
-    assert len(calls) == 2
-    project_command, project_kwargs = calls[0]
+    assert len(calls) == 3
+    build_command, build_kwargs = calls[0]
+    assert build_command == [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        *module.BUILD_REQUIREMENTS,
+    ]
+    assert build_kwargs["cwd"] == module.ROOT
+
+    project_command, project_kwargs = calls[1]
     assert project_command == [
         "pip",
         "install",
         "--force-reinstall",
         "--no-deps",
+        "--no-build-isolation",
         "-e",
         str(module.ROOT),
     ]
     assert project_kwargs["cwd"] == module.ROOT
     assert "PYBOY_NO_CYTHON" not in project_kwargs["env"]
 
-    command, kwargs = calls[1]
-    assert command[:4] == ["pip", "install", "--force-reinstall", "--no-deps"]
+    command, kwargs = calls[2]
+    assert command[:5] == [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        "--no-build-isolation",
+    ]
     assert command[-2:] == [module.CYTHON_REQUIREMENT, str(module.PYBOY_SOURCE)]
     assert "PYBOY_NO_CYTHON" not in kwargs["env"]
     assert module.CYTHON_MODULES == (
