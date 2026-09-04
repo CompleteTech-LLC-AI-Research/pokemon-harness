@@ -3,11 +3,14 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
-current merged implementation head is
-`6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04). The prior merged
-head `daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03) and prior exact
-candidate snapshot `3399407aa04f6e5e496df628442597c03e0adcc6` (2026-09-04) are
-historical references, not current-head release evidence. External ROMs,
+current public head is
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (PR #44, docs-only,
+2026-09-04). Its merged implementation baseline is
+`6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04). The prior
+merged head `daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03) and prior
+exact candidate snapshot `3399407aa04f6e5e496df628442597c03e0adcc6`
+(2026-09-04) are historical references, not current-head release evidence.
+External ROMs,
 symbols, save states, and sanitized evidence remain operator-managed and are
 not distributed by this repository.
 
@@ -21,11 +24,14 @@ context and do not establish current-head runtime or end-to-end behavior.
 The release decision for the current merged head remains `PARTIAL`, not
 `PRODUCTION-READY`. Current open-gate status is:
 
-- current strict full trade and battle reruns are `PENDING`. Declarations,
-  collection audits, LinkMenu milestones, and historical rows do not qualify
-  either current gameplay matrix;
-- current live MCP gameplay is `PENDING`. Scoped MCP stdio and transport
-  checks do not establish gameplay through the live MCP lane;
+- current strict full trade remains `PENDING`. Current-head source-local strict
+  battle is `PASS` for 9/9 ordered canonical pairs, but the current remote full
+  matrix and fresh native full strict matrix remain `PENDING`;
+- current live MCP gameplay is `PARTIAL`. Six real MCP integration checks passed
+  in 13.11 seconds with one SDL warning, and 104 dispatch tests passed. Public
+  tools reached Red's bedroom, the house exit, Pallet Town, Oak's Lab, and lab
+  movement; bounded starter acquisition ended at map 40, position `(5,3)`, with
+  `party.count=0`. No bypass was used, and MCP trade/battle remains unproven;
 - fixture provenance is `PARTIAL`: the stock ROM/SYM pins and existing vanilla
   fixture bytes validate, six canonical manifest entries have verified
   provenance, and four vanilla-derived entries remain `PARTIAL`. Vanilla
@@ -34,15 +40,23 @@ The release decision for the current merged head remains `PARTIAL`, not
   producer revision `25e231c` is historical. Do not claim current-head
   reproducibility for those fixture bytes;
 - TCP remains loopback-only, unauthenticated, and unencrypted;
+- platform and real-ROM concurrency qualification remain open, as does secure
+  cross-host TCP qualification;
 - timing-altered diagnostics are not acceptance evidence.
 
-The acceptance update merged in PR #42 has current source-runtime
-representative evidence for in-process and TCP Red-color/Yellow trade and
-battle, plus 4/4 real MCP stdio tests. Its source unit/timing gate passed
-954/954 unit tests and 50/50 timing cases in each of five repetitions. These
-results validate scoped candidate behavior only; they do not close the full
-19-row trade/battle matrix, native-runtime, MCP gameplay, fixture-provenance,
-platform, or security gates.
+Current-head source-local strict battle acceptance passed all 9/9 ordered
+canonical pairs. Three fresh rows were `Yellow↔Red` in 182.89 seconds,
+`Blue↔Yellow` in 443.50 seconds, and `Yellow↔Blue` in 480.31 seconds; the other
+six rows are the existing campaign results. Every row reached Link Battle and
+the required move and damage hooks. This is current source-local evidence only;
+it does not qualify remote or native battle, or the full strict trade gate.
+
+The implementation baseline merged in PR #42 has source-runtime representative
+evidence for in-process and TCP Red-color/Yellow trade and battle. Its source
+unit/timing gate passed 954/954 unit tests and 50/50 timing cases in each of
+five repetitions. These results validate scoped candidate behavior only; they
+do not close the full strict trade matrix, native-runtime, remote full-matrix,
+MCP gameplay, fixture-provenance, platform, or security gates.
 
 Historical prior exact-candidate evidence retained for context is:
 
@@ -514,9 +528,15 @@ verified clean installation, `pip check`, and bundled runtime identity; it did
 not run this real-ROM stdio tier on Linux. The historical fresh Windows
 validation separately passed
 the selected MCP stdio integration (4/4), but did not replace the full
-real-ROM tier. Any current real-ROM result must identify the tested commit,
-ROM/SYM hashes, and complete test output. These tests prove only the tested
-boot/state/MCP surface; they do not prove link gameplay.
+real-ROM tier. At current public head `a8576b5`, six real MCP integration
+checks passed in 13.11 seconds with one SDL warning; the accompanying dispatch
+suite passed 104 tests. Public MCP tools reached Red's bedroom, the house exit,
+Pallet Town, Oak's Lab, and lab movement. A bounded starter attempt ended at
+map 40, position `(5,3)`, with `party.count=0`; no test-only bypass was used.
+MCP-driven trade and battle remain unproven. Any current real-ROM result must
+identify the tested commit, ROM/SYM hashes, and complete test output. These
+tests prove only the tested boot/state/MCP surface; they do not prove link
+gameplay.
 
 ### Tier C: real symbol and local-link smoke
 
@@ -565,9 +585,14 @@ calculation hook. Neither case writes party or battle state during acceptance.
 These selectors and their declaration are not live evidence by themselves; a
 current complete run must provide the retained result for every row. A skipped
 or partially parameterized matrix is not full Red/Blue/Yellow coverage. The
-dedicated Red/Yellow assertions remain useful focused checks, but the
-production gate also requires every parametrized local row and every remote row
-below to execute without skips.
+current-head source-local battle run passed 9/9 ordered pairs: fresh
+`Yellow↔Red` (182.89 seconds), `Blue↔Yellow` (443.50 seconds), and
+`Yellow↔Blue` (480.31 seconds), plus the existing six campaign rows. All rows
+reached Link Battle and the required move and damage hooks. This does not close
+the current full strict trade gate, current remote full matrix, or fresh native
+full strict matrix. The dedicated Red/Yellow assertions remain useful focused
+checks, but the production gate still requires the complete trade and remote
+matrices to execute without skips.
 
 ### Tier E: remote transport and subprocess acceptance/diagnostics
 
@@ -607,8 +632,10 @@ the out-of-band exchange counter. A declaration or collection result does not
 execute these gameplay assertions. The PR #17 baseline passed the strict trade
 and battle matrices; the PR #19 follow-up reran the 15-row remote transport
 slice and the focused transport/lifecycle checks, not the full strict
-trade/battle matrix. Record both child traces and the exact deadline when
-investigating a regression.
+trade/battle matrix. The current remote full matrix remains `PENDING`; the
+current source-local 9/9 battle result above must not be relabeled as remote
+evidence. Record both child traces and the exact deadline when investigating a
+regression.
 
 The ROM-free concurrency/lifecycle probe is:
 
