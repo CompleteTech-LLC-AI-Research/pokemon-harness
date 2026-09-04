@@ -34,8 +34,10 @@ logger = pyboy.logging.get_logger(__name__)
 
 # One shift edge (rising or falling) every 128 CPU cycles gives the
 # classic 8192 Hz DMG serial clock. Eight edges = one byte = 1024 Hz of
-# byte-rate throughput. CGB fast-clock (SC bit 1) is not modelled yet.
+# byte-rate throughput. CGB fast serial is 32x faster at normal CPU speed
+# and 64x faster in CGB double-speed hardware.
 CYCLES_PER_EDGE_DMG = 128
+CYCLES_PER_EDGE_CGB_FAST = CYCLES_PER_EDGE_DMG // 32
 CYCLES_PER_BYTE_DMG = 8 * CYCLES_PER_EDGE_DMG
 
 # Kept for back-compat with any external consumer that imported the
@@ -44,7 +46,7 @@ CYCLES_8192HZ = 128
 
 # FF02 bits.
 SC_TRANSFER_ENABLE = 0x80
-SC_CLOCK_SPEED = 0x02   # CGB only; stored but not acted on (milestone 9)
+SC_CLOCK_SPEED = 0x02  # CGB-only fast internal clock
 SC_CLOCK_SOURCE = 0x01  # 1 = internal (master), 0 = external (slave)
 
 # INTR_SERIAL bitmask in IF.
@@ -210,14 +212,15 @@ class Serial:
     @cython.locals(
         was_transfer_enabled=cython.bint,
         was_internal_clock=cython.bint,
+        was_double_speed=cython.bint,
         fresh_transfer=cython.bint,
     )
     def set_SC(self, value):
         """Write FF02.
 
         Bit 7 arms a transfer. Bit 0 picks internal (master) vs
-        external (slave) clock. Bit 1 (CGB fast clock) is stored but
-        not acted on in this milestone. Unused hardware bits read as 1.
+        external (slave) clock. Bit 1 selects the CGB fast internal clock.
+        Unused hardware bits read as 1.
 
         Rewriting an already-armed transfer with the same clock source
         updates the visible control register without restarting the byte.
@@ -225,10 +228,13 @@ class Serial:
         waiting for an external clock; restarting the shift register on
         each probe would prevent the eight hardware edges from completing.
         A newly armed transfer, or a write that changes the clock source,
-        starts a fresh byte from ``SB``.
+        starts a fresh byte from ``SB``. Changing the speed of an active
+        internal transfer preserves the in-flight byte and retimes its next
+        edge from the current clock.
         """
         was_transfer_enabled = self.transfer_enabled
         was_internal_clock = self.internal_clock
+        was_double_speed = self.double_speed
 
         if self.cgb_mode:
             self.SC = (value & 0xFF) | 0b01111100
@@ -258,16 +264,25 @@ class Serial:
             self._bits_remaining = 8
             if self.internal_clock:
                 # Master: schedule first edge.
-                self.clock_target = self.clock + (128 << self.cpu_speed_shift)
+                # Fast serial and the CPU both double in CGB double-speed
+                # mode, so fast mode remains four raw CPU cycles per edge.
+                # Two raw cycles would double the hardware rate twice.
+                self.clock_target = self.clock + (
+                    4 if self.double_speed else (128 << self.cpu_speed_shift)
+                )
             else:
                 # Slave: no internal clock, waits for apply_external_edge.
                 # Literal to stay nogil-safe (cpdef void ... nogil can't
                 # touch Python-module globals like MAX_CYCLES).
                 self.clock_target = (1 << 31)
         elif self.internal_clock:
-            # Same-role writes do not disturb an active master transfer or
-            # its next edge deadline. Recompute only the derived countdown.
-            pass
+            # Same-role writes do not restart an active master transfer. A
+            # speed change retimes its next edge from the current clock,
+            # preserving the already-shifted bits.
+            if was_double_speed != self.double_speed:
+                self.clock_target = self.clock + (
+                    4 if self.double_speed else (128 << self.cpu_speed_shift)
+                )
         else:
             # Same-role writes do not disturb an active slave transfer.
             # There is no local timebase to reschedule.
@@ -347,7 +362,9 @@ class Serial:
                             break
                         else:
                             self.clock_target = self.clock_target + (
-                                128 << self.cpu_speed_shift
+                                4
+                                if self.double_speed
+                                else (128 << self.cpu_speed_shift)
                             )
 
         if self.clock_target > self.clock:
@@ -455,6 +472,7 @@ class Serial:
 __all__ = [
     "CYCLES_8192HZ",
     "CYCLES_PER_BYTE_DMG",
+    "CYCLES_PER_EDGE_CGB_FAST",
     "CYCLES_PER_EDGE_DMG",
     "IF_SERIAL",
     "LocalBackend",
