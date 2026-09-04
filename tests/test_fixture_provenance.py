@@ -126,18 +126,14 @@ def test_manifest_has_exact_supported_fixture_matrix_and_status_boundary() -> No
     }
     assert actual_rows == _EXPECTED_FIXTURE_ROWS
     assert {
-        fixture["id"]
-        for fixture in fixtures
-        if fixture["provenance"]["status"] == "verified"
+        fixture["id"] for fixture in fixtures if fixture["provenance"]["status"] == "verified"
     } == _VERIFIED_FIXTURE_IDS
     assert {
-        fixture["id"]
-        for fixture in fixtures
-        if fixture["provenance"]["status"] == "partial"
+        fixture["id"] for fixture in fixtures if fixture["provenance"]["status"] == "partial"
     } == _VANILLA_FIXTURE_IDS
-    assert {
-        fixture["id"] for fixture in fixtures if fixture["kind"] == "battle"
-    } == set(_BATTLE_RECIPES)
+    assert {fixture["id"] for fixture in fixtures if fixture["kind"] == "battle"} == set(
+        _BATTLE_RECIPES
+    )
 
 
 def test_ordinary_provenance_uses_matching_recipe_and_external_source() -> None:
@@ -150,13 +146,9 @@ def test_ordinary_provenance_uses_matching_recipe_and_external_source() -> None:
         recipe = producer._VERSIONS[(fixture["version"], fixture["variant"])]
         provenance = fixture["provenance"]
         assert provenance["producer"] == "scripts/produce_cable_club_fixture.py"
-        assert provenance["source_state"].startswith(
-            _ORDINARY_SOURCE_PREFIXES[fixture["version"]]
-        )
+        assert provenance["source_state"].startswith(_ORDINARY_SOURCE_PREFIXES[fixture["version"]])
         assert str(recipe["rom"]) == fixture["expected_rom"]["path"].removeprefix("rom/")
-        assert str(recipe["sym"]) == fixture["expected_symbols"]["path"].removeprefix(
-            "rom/"
-        )
+        assert str(recipe["sym"]) == fixture["expected_symbols"]["path"].removeprefix("rom/")
         assert recipe["out_name"] == Path(fixture["path"]).name
 
 
@@ -171,9 +163,7 @@ def test_battle_provenance_binds_each_derived_state_to_ordinary_input() -> None:
         battle_provenance = battle["provenance"]
         recipe = VARIANTS[recipe_key]
 
-        assert battle_provenance["producer"] == (
-            "scripts/prepare_battle_cable_club_fixtures.py"
-        )
+        assert battle_provenance["producer"] == ("scripts/prepare_battle_cable_club_fixtures.py")
         assert _source_digests(battle_provenance["source_state"]) == (
             ordinary["sha1"],
             ordinary["sha256"],
@@ -183,9 +173,7 @@ def test_battle_provenance_binds_each_derived_state_to_ordinary_input() -> None:
         assert recipe["source"] == Path(ordinary["path"]).name
         assert recipe["output"] == Path(battle["path"]).name
         assert str(recipe["rom"]) == battle["expected_rom"]["path"].removeprefix("rom/")
-        assert str(recipe["symbols"]) == battle["expected_symbols"]["path"].removeprefix(
-            "rom/"
-        )
+        assert str(recipe["symbols"]) == battle["expected_symbols"]["path"].removeprefix("rom/")
         assert f"--variants {recipe_key}" in battle_provenance["capture_command_template"]
 
 

@@ -553,9 +553,7 @@ class PyBoyLinkSession:
                 core.owner_dispatch_enabled = previous_enabled
                 core.owner_dispatch_callback = previous_callback
             except BaseException as rollback_error:  # noqa: BLE001
-                exc.add_note(
-                    f"owner-dispatch callback rollback also failed: {rollback_error!r}"
-                )
+                exc.add_note(f"owner-dispatch callback rollback also failed: {rollback_error!r}")
             raise
         return previous_callback, previous_enabled, owner_pump
 

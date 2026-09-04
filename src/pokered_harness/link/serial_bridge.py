@@ -177,8 +177,7 @@ class SerialBridge:
                 raise RuntimeError("SerialBridge.install called twice")
             if self._owned_serial_hooks or self._owned_raw_hooks:
                 raise RuntimeError(
-                    "SerialBridge.install cannot proceed while callback cleanup "
-                    "is pending"
+                    "SerialBridge.install cannot proceed while callback cleanup is pending"
                 )
             baselines = self._serial_hook_baselines()
             hook_baselines = self._physical_hook_baselines()

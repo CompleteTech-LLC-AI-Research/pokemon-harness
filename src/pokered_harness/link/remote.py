@@ -122,17 +122,13 @@ class RemoteLinkEndpoint:
     # --- construction -------------------------------------------------
 
     @classmethod
-    def as_listener(
-        cls, session: Session, serial_link: SerialLink
-    ) -> RemoteLinkEndpoint:
+    def as_listener(cls, session: Session, serial_link: SerialLink) -> RemoteLinkEndpoint:
         """The peer that called ``TcpSerialLink.listen`` — drives the
         clock (status = USING_INTERNAL_CLOCK 0x02)."""
         return cls(session, serial_link, is_internal_clock=True)
 
     @classmethod
-    def as_connector(
-        cls, session: Session, serial_link: SerialLink
-    ) -> RemoteLinkEndpoint:
+    def as_connector(cls, session: Session, serial_link: SerialLink) -> RemoteLinkEndpoint:
         """The peer that called ``TcpSerialLink.connect`` — follows the
         clock (status = USING_EXTERNAL_CLOCK 0x01)."""
         return cls(session, serial_link, is_internal_clock=False)
@@ -189,9 +185,7 @@ class RemoteLinkEndpoint:
                 # ``deactivate_hooks_at`` is intentionally usable after the
                 # Session itself has been marked closed; teardown still has
                 # to release physical PyBoy breakpoints.
-                self._session.deactivate_hooks_at(
-                    symbol_name, timeout_s=_HOOK_LOCK_TIMEOUT_S
-                )
+                self._session.deactivate_hooks_at(symbol_name, timeout_s=_HOOK_LOCK_TIMEOUT_S)
             except Exception as exc:  # noqa: BLE001 - continue best-effort cleanup
                 errors.append(exc)
         if errors:
@@ -237,9 +231,7 @@ class RemoteLinkEndpoint:
                 self._session.step(1, render=render)
                 self.serial_tick()
 
-    def _register_serial_hook(
-        self, symbol_name: str, callback: Callable[[object], None]
-    ) -> None:
+    def _register_serial_hook(self, symbol_name: str, callback: Callable[[object], None]) -> None:
         """Register and retain ownership of a guarded Session hook."""
         self._session.serial_hook(symbol_name, callback)
         self._owned_hook_symbols.append(symbol_name)
@@ -260,9 +252,7 @@ class RemoteLinkEndpoint:
             mem[status_addr] = my_status
 
         try:
-            self._register_serial_hook(
-                "Serial_TryEstablishingExternallyClockedConnection", _cb
-            )
+            self._register_serial_hook("Serial_TryEstablishingExternallyClockedConnection", _cb)
         except (KeyError, LookupError):
             pass
 
