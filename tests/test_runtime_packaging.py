@@ -521,7 +521,28 @@ def test_pyboy_runtime_exposes_the_harness_serial_contract() -> None:
         name.lower().replace("_", "-")
         for name in importlib.metadata.packages_distributions().get("pyboy", ())
     }
-    expected_owners = {"pokered-harness", "pyboy"} if utils.cython_compiled else {"pokered-harness"}
+    # The dual gate reuses a Cython-capable interpreter for its source pass.
+    # PYBOY_NO_CYTHON changes the imported runtime, but it does not remove the
+    # legitimate ``pyboy`` distribution metadata installed for the native pass.
+    # Permit that dormant owner only after confirming that source mode really
+    # resolved every PyBoy runtime module from this checkout.
+    vendored_root = (ROOT / "vendor" / "pyboy-src").resolve()
+    pyboy_runtime_modules = (
+        "pyboy",
+        "pyboy.pyboy",
+        "pyboy.utils",
+        "pyboy.core.mb",
+        "pyboy.core.serial",
+    )
+    vendored_source_runtime = all(
+        (spec := importlib.util.find_spec(name)) is not None
+        and spec.origin is not None
+        and Path(spec.origin).resolve().is_relative_to(vendored_root)
+        for name in pyboy_runtime_modules
+    )
+    expected_owners = {"pokered-harness"}
+    if utils.cython_compiled or vendored_source_runtime:
+        expected_owners.add("pyboy")
     assert owners <= expected_owners
     assert "pokered-harness" in owners
 
