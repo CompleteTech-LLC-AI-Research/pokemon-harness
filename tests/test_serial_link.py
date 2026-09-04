@@ -126,6 +126,68 @@ def test_in_process_fifo_within_kind():
     assert results_b == [b"\x01", b"\x02"]
 
 
+def test_in_process_same_kind_exchanges_are_single_flight():
+    """Local callers cannot race for an unidentifiable v1 response."""
+    a, b = InProcessSerialLink.pair("blue", "blue")
+    results: dict[str, object] = {}
+    threads: list[threading.Thread] = []
+    try:
+
+        def call_first() -> None:
+            try:
+                results["first"] = a.exchange("same", b"first", timeout_ms=2000)
+            except Exception as exc:  # noqa: BLE001 - assert the worker outcome below
+                results["first"] = exc
+
+        def call_second() -> None:
+            try:
+                results["second"] = a.exchange("same", b"second", timeout_ms=2000)
+            except Exception as exc:  # noqa: BLE001 - assert the worker outcome below
+                results["second"] = exc
+
+        first = threading.Thread(target=call_first, daemon=True)
+        first.start()
+        threads.append(first)
+        deadline = time.monotonic() + 1.0
+        while a._out["same"].qsize() < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert a._out["same"].qsize() == 1
+
+        second_started = threading.Event()
+
+        def call_second_started() -> None:
+            second_started.set()
+            call_second()
+
+        second = threading.Thread(target=call_second_started, daemon=True)
+        second.start()
+        threads.append(second)
+        assert second_started.wait(timeout=1.0)
+        time.sleep(0.1)
+        assert a._out["same"].qsize() == 1
+
+        peer_results: list[bytes] = []
+
+        def peer_work() -> None:
+            peer_results.append(b.exchange("same", b"peer-1", timeout_ms=2000))
+            peer_results.append(b.exchange("same", b"peer-2", timeout_ms=2000))
+
+        peer = threading.Thread(target=peer_work, daemon=True)
+        peer.start()
+        threads.append(peer)
+        for thread in threads:
+            thread.join(timeout=2.0)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert results == {"first": b"peer-1", "second": b"peer-2"}
+        assert peer_results == [b"first", b"second"]
+    finally:
+        a.close()
+        b.close()
+        for thread in threads:
+            thread.join(timeout=1.0)
+
+
 def test_in_process_different_kinds_dont_cross():
     """Different ``kind`` queues are independent: a ``foo`` exchange on
     one peer will never deliver into the other's ``bar`` queue, even
@@ -194,6 +256,64 @@ def test_in_process_peer_close_wakes_exchange_waiter_promptly():
 
     assert not worker.is_alive()
     assert result and isinstance(result[0], SerialLinkClosed)
+
+
+def test_in_process_exchange_cancelled_before_send_is_reusable():
+    a, b = InProcessSerialLink.pair("blue", "blue")
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(SerialLinkClosed, match="cancelled"):
+        a.exchange("cancel", b"local", timeout_ms=500, cancel_event=cancel)
+
+    assert a.connected
+    assert b.connected
+    cancel.clear()
+    peer_result: list[bytes] = []
+
+    def peer_work() -> None:
+        peer_result.append(b.exchange("cancel", b"peer", timeout_ms=1000))
+
+    worker = threading.Thread(target=peer_work, daemon=True)
+    worker.start()
+    try:
+        assert a.exchange("cancel", b"local", timeout_ms=1000, cancel_event=cancel) == b"peer"
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert peer_result == [b"local"]
+    finally:
+        a.close()
+        b.close()
+
+
+def test_in_process_exchange_cancelled_after_send_closes_shared_link():
+    a, b = InProcessSerialLink.pair("blue", "blue")
+    cancel = threading.Event()
+    result: list[Exception] = []
+
+    def blocked_exchange() -> None:
+        try:
+            a.exchange("cancel", b"local", timeout_ms=5000, cancel_event=cancel)
+        except Exception as exc:  # noqa: BLE001 - assert cancellation type below
+            result.append(exc)
+
+    worker = threading.Thread(target=blocked_exchange, daemon=True)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 1.0
+        while a._out["cancel"].qsize() < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert a._out["cancel"].qsize() == 1
+        cancel.set()
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert result and isinstance(result[0], SerialLinkClosed)
+        assert "cancelled" in str(result[0])
+        assert not a.connected
+        assert not b.connected
+    finally:
+        a.close()
+        b.close()
 
 
 def test_in_process_rejects_unsupported_rom_version():
@@ -338,6 +458,41 @@ def test_tcp_exchange_timeout_is_terminal():
         # safely accept a later response or be reused for the same kind.
         with pytest.raises(SerialLinkClosed):
             client.exchange("stale", b"y", timeout_ms=75)
+    finally:
+        server.close()
+        client.close()
+
+
+def test_tcp_exchange_cancelled_after_send_closes_channel():
+    server, client = _make_tcp_pair()
+    cancel = threading.Event()
+    result: list[Exception] = []
+
+    def blocked_exchange() -> None:
+        try:
+            client.exchange("cancel", b"local", timeout_ms=5000, cancel_event=cancel)
+        except Exception as exc:  # noqa: BLE001 - assert cancellation type below
+            result.append(exc)
+
+    worker = threading.Thread(target=blocked_exchange, daemon=True)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 1.0
+        while (
+            server._inbound.get("cancel") is None or server._inbound["cancel"].qsize() < 1
+        ) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert server._inbound["cancel"].qsize() == 1
+        cancel.set()
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert result and isinstance(result[0], SerialLinkClosed)
+        assert "cancelled" in str(result[0])
+
+        deadline = time.monotonic() + 1.0
+        while server.connected and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert not server.connected
     finally:
         server.close()
         client.close()
