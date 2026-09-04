@@ -3626,10 +3626,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--cython-python",
         dest="cython_python_executable",
         type=Path,
-        help=(
-            "interpreter for the Cython runtime when --runtime-mode both; "
-            "defaults to --python"
-        ),
+        help=("interpreter for the Cython runtime when --runtime-mode both; defaults to --python"),
     )
     parser.add_argument(
         "--tier",
