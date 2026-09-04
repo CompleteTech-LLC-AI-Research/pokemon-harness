@@ -50,6 +50,13 @@ mode is the documented release runtime; Cython is an optional diagnostic build.
 The host's bare `python3` still lacks `ensurepip`, so that alternate
 standard-library venv path remains open.
 
+A current post-hardening asset-backed check used pinned ROM/SYM/fixtures and
+separate source and native (Cython) interpreters. The local/session checks
+passed 47/47 in source mode (758.1s) and 47/47 in native mode (38.1s); the
+remote transport/MCP checks passed 16/16 in source mode (75.0s) and 16/16 in
+native mode (28.8s). These results are scoped to local/session and remote
+transport/MCP checks only; they are not strict trade/battle qualification.
+
 The complete all-tier source-runtime gate is historical PR #17 baseline
 evidence: collection 698, unit 554/554, local real-ROM 47/47, remote
 transport/MCP 15/15, strict trade 19/19, strict battle 19/19, and timing
