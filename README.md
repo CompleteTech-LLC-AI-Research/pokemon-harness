@@ -41,19 +41,23 @@ The latest verification supports:
   transport/MCP tier passed `23/23` in `39.1s`, and the ten-entry fixture
   manifest passed byte validation. These tiers cover LinkMenu, transport, and
   lifecycle behavior; they are not strict trade or battle acceptance.
+- **Strict battle acceptance:** the current source-runtime gate passed all
+  `19/19` real-ROM local and TCP battle entrypoints in `1,675.4s` with four
+  matrix workers, with no skips or errors. This establishes battle-turn
+  acceptance only; it does not clear the unresolved trade gate.
 - **MCP EOF reliability:** the real stdio remote-lifecycle test passed five
   consecutive isolated runs after the full local-tier rerun passed. The
   earlier `46/47` ordered-suite result was a non-reproducing failure and is not
   treated as a passing release gate.
 
-Strict end-to-end remote trade/link readiness is **not proven**. On this
-candidate, the bounded source strict-trade gate was `FAIL`: eight started rows
-passed, then the `yellow-yellow` local row consumed the 900-second aggregate
-deadline and the remaining ten rows were not started. The earlier recorded
-source result was `FAIL` at `18/19`, and the retained native/Cython strict gate
-was `FAIL` at `16/19` trade and `17/19` battle. These are scoped artifacts, not
-a current-head pass. Transport, LinkMenu, fixture, or MCP lifecycle results do
-not substitute for a complete current-head real-ROM trade/battle matrix.
+Strict end-to-end trade readiness is **not proven**. On this candidate, the
+bounded source strict-trade gate was `FAIL`: eight started rows passed, then the
+`yellow-yellow` local row consumed the 900-second aggregate deadline and the
+remaining ten rows were not started. The earlier recorded source result was
+`FAIL` at `18/19`, and the retained native/Cython strict gate was `FAIL` at
+`16/19` trade and `17/19` battle. These are scoped artifacts, not a current-head
+pass. Transport, LinkMenu, fixture, MCP lifecycle, or battle-turn results do
+not substitute for a complete current-head real-ROM trade matrix.
 
 A current-head follow-up reproduction on `d8391102a01b2c75c6009a09b426606ca59bb5d9`
 also failed the Blue-color/Blue-color TCP trade path under the bounded
