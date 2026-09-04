@@ -3,21 +3,40 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
-last published merged head covered by the evidence below is
-`daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03). The current evidence
-snapshot is for exact candidate commit
-`3399407aa04f6e5e496df628442597c03e0adcc6` (2026-09-04). External ROMs,
+current merged head is
+`71ca834d673c52eb74044089e92b09e7e3ae00a0` (2026-09-04). The older merged
+head `daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03) and prior exact
+candidate snapshot `3399407aa04f6e5e496df628442597c03e0adcc6` (2026-09-04) are
+historical references, not current-head release evidence. External ROMs,
 symbols, save states, and sanitized evidence remain operator-managed and are
 not distributed by this repository.
 
-The current integration candidate also includes serial save-state restoration,
+The prior exact-candidate snapshot included serial save-state restoration,
 native bootstrap ownership and build-metadata cleanup, bounded MCP teardown,
 fail-closed gate accounting, and safe cleanup for partially initialized PyBoy
 objects. Earlier PR #35 introduced remote serial-edge dispatch at an explicit
-native instruction-batch boundary.
+native instruction-batch boundary. These implementation notes are historical
+context and do not establish current-head runtime or end-to-end behavior.
 
-The release decision for this candidate is `PARTIAL`, not `PRODUCTION-READY`.
-Current verified operational status is:
+The release decision for the current merged head remains `PARTIAL`, not
+`PRODUCTION-READY`. Current open-gate status is:
+
+- current strict full trade and battle reruns are `PENDING`. Declarations,
+  collection audits, LinkMenu milestones, and historical rows do not qualify
+  either current gameplay matrix;
+- current live MCP gameplay is `PENDING`. Scoped MCP stdio and transport
+  checks do not establish gameplay through the live MCP lane;
+- fixture provenance is `PARTIAL`: the stock ROM/SYM pins and existing vanilla
+  fixture bytes validate, six canonical manifest entries have verified
+  provenance, and four vanilla-derived entries remain `PARTIAL`. Vanilla
+  ordinary capture provenance cannot be established: replay against the
+  retained source failed at the 64-step bound, and the manifest's ordinary
+  producer revision `25e231c` is historical. Do not claim current-head
+  reproducibility for those fixture bytes;
+- TCP remains loopback-only, unauthenticated, and unencrypted;
+- timing-altered diagnostics are not acceptance evidence.
+
+Historical prior exact-candidate evidence retained for context is:
 
 - a clean dual source/native `--unit-only --repeat-timing 5` gate collected
   1,094 tests in each runtime; each runtime had 949 unit tests pass and timing
@@ -25,22 +44,19 @@ Current verified operational status is:
   ROM-backed gameplay evidence;
 - exact asset preflight matched 5/5 ROMs, 3/3 symbol files, and 3/3 fixture
   hashes by SHA-1, and the ten-entry fixture manifest byte validation passed;
-- the current local asset tier passed 47/47 in source in 531.3477 seconds and
+- the local asset tier passed 47/47 in source in 531.3477 seconds and
   47/47 in native in 38.2974 seconds. This is scoped local/session/link
   evidence, not strict trade or battle proof;
-- the current remote asset tier passed 16/16 in source in 35.6044 seconds and
+- the remote asset tier passed 16/16 in source in 35.6044 seconds and
   16/16 in native in 30.8627 seconds. This is scoped remote transport/MCP
   evidence, not strict trade or battle proof. An earlier source failure report
   used a dirty shared checkout and shared vendored runtime, so it is invalid
-  and excluded from the exact-head result;
-- strict full trade and battle acceptance remain unqualified. Matrix
-  declarations, collection audits, LinkMenu milestones, and historical rows
-  are not current live trade/battle proof;
-- timing-altered diagnostics are not acceptance evidence.
+  and excluded from the prior-candidate result.
 
-The current separate-interpreter dual source/native `--unit-only --repeat-timing
-5` gate collected 1,094 tests in each runtime. Each runtime had
-949 unit tests pass and timing pass 50/50 in each of five repetitions; source
+The historical prior exact-candidate separate-interpreter dual source/native
+`--unit-only --repeat-timing 5` gate collected 1,094 tests in each runtime.
+Each runtime had 949 unit tests pass and timing pass 50/50 in each of five
+repetitions; source
 reported `python-source` and Cython reported `cython/native-extension`. This
 selection does not execute ROM-backed tiers, strict trade, or battle. Fresh
 uv-managed source and native environments installed the candidate, passed
@@ -51,9 +67,9 @@ documented release runtime; Cython is an optional diagnostic build. The host's
 bare `python3` still lacks `ensurepip`, so that alternate standard-library venv
 path remains open.
 
-The current exact-head asset-backed reports used pinned ROM/SYM/fixtures and
-separate source and native (Cython) interpreters. The local asset tier passed
-47/47 in source in 531.3477 seconds and 47/47 in native in 38.2974 seconds;
+The historical prior exact-candidate asset-backed reports used pinned ROM/SYM/
+fixtures and separate source and native (Cython) interpreters. The local asset
+tier passed 47/47 in source in 531.3477 seconds and 47/47 in native in 38.2974 seconds;
 the remote transport/MCP tier passed 16/16 in source in 35.6044 seconds and
 16/16 in native in 30.8627 seconds. The earlier source remote failure report
 used a dirty shared checkout and shared vendored runtime, so it is invalid and
@@ -73,7 +89,8 @@ results must not be relabeled as a current full native gate.
 A historical asset-free `python -m pytest -q -ra` diagnostic completed 604 passed, 141
 expected BYO-asset skips, and one SDL warning after the partial-initialization
 destructor guard was added. It proves clean-checkout test collection can
-complete without assets; skipped real-ROM tiers remain unverified. Fresh Windows evidence covers install, source/Cython bootstrap,
+complete without assets; skipped real-ROM tiers remain unverified. Historical
+fresh Windows validation covers install, source/Cython bootstrap,
 MCP stdio, and three-ROM Cython lifecycle checks, but not full native
 gameplay, real-ROM concurrent load, the remote trade/battle matrix, or macOS.
 
@@ -102,12 +119,12 @@ not live MCP gameplay evidence.
 
 | Capability | Current status | Evidence boundary |
 |---|---|---|
-| Single session and MCP | `PASS` for scoped evidence; release remains `PARTIAL` | The current exact-head local asset tier passed 47/47 in source in 531.3477 seconds and 47/47 in native in 38.2974 seconds; Windows MCP stdio separately passed 4/4. These checks do not establish actual MCP gameplay or every platform. |
-| In-process paired link | `PASS` for scoped evidence; release remains `PARTIAL` | The current exact-head local asset tier passed 47/47 in source in 531.3477 seconds and 47/47 in native in 38.2974 seconds. No strict trade or battle result is inferred. |
-| Remote TCP transport | `PASS` for scoped evidence; release remains `PARTIAL` | The current exact-head remote asset tier passed 16/16 in source in 35.6044 seconds and 16/16 in native in 30.8627 seconds. TCP is loopback-only and has no authentication or encryption. |
-| Remote trade | Not qualified | The declaration and collection audit are structural only. Historical source `19/19` and native `18/19` rows are not current full-runtime sign-off. |
-| Remote battle | Not qualified | The declaration and collection audit are structural only. Historical source/native rows and LinkMenu milestones are not current live battle proof. |
-| Manual fixtures | `PASS` for scoped asset identity | Current asset preflight verified exact SHA-1 matches for 5/5 ROMs, 3/3 symbols, and 3/3 fixture hashes; the ten-entry manifest byte validation passed. Fixture provenance and gameplay remain separate gates. |
+| Single session and MCP | `PENDING` for live gameplay; `PASS` only for scoped historical checks; release remains `PARTIAL` | The historical prior-candidate local asset tier passed 47/47 in source in 531.3477 seconds and 47/47 in native in 38.2974 seconds; historical Windows MCP stdio separately passed 4/4. These checks do not establish current live MCP gameplay or every platform. |
+| In-process paired link | `PASS` for scoped historical evidence; release remains `PARTIAL` | The historical prior-candidate local asset tier passed 47/47 in source in 531.3477 seconds and 47/47 in native in 38.2974 seconds. No strict trade or battle result is inferred. |
+| Remote TCP transport | `PASS` for scoped historical transport evidence; live gameplay remains `PENDING`; release remains `PARTIAL` | The historical prior-candidate remote asset tier passed 16/16 in source in 35.6044 seconds and 16/16 in native in 30.8627 seconds. TCP is loopback-only and has no authentication or encryption. |
+| Remote trade | `PENDING` | The current strict full trade rerun is pending. The declaration and collection audit are structural only; historical source `19/19` and native `18/19` rows are not current full-runtime sign-off. |
+| Remote battle | `PENDING` | The current strict full battle rerun is pending. The declaration and collection audit are structural only; historical source/native rows and LinkMenu milestones are not current live battle proof. |
+| Manual fixtures | `PASS` for supplied-byte identity; `PARTIAL` for provenance | Historical prior-candidate preflight verified the pinned ROM/SYM and existing fixture bytes. Six canonical manifest entries have verified provenance; four vanilla-derived entries remain `PARTIAL` because vanilla ordinary capture provenance cannot be established. The historical producer revision `25e231c` and failed 64-step replay do not support current-head reproducibility. |
 | Option-B / RAM-boost walkthroughs | Diagnostic only | Direct game-memory writes and `--option-b` shortcuts are not human-valid gameplay or release acceptance. |
 
 ## 1. Start from a clean checkout
@@ -170,14 +187,15 @@ The default installed runtime is PyBoy source mode, verified with:
 python scripts/bootstrap_pyboy.py --mode source --check
 ```
 
-The pinned fork has an optional Cython mode. Its semantic serial-contract probe
-and three canonical real-ROM attach/step/close smokes pass, but it is not the
-documented release default. The current exact-commit dual source/native
-unit/timing gate collected 1,094 tests in each runtime, had 949 unit tests pass,
-and passed timing 50/50 in each of five repetitions. The current exact-head
-local asset tier passed 47/47 in source in 531.3477 seconds and 47/47 in native
-in 38.2974 seconds; the remote asset tier passed 16/16 in source in 35.6044
-seconds and 16/16 in native in 30.8627 seconds. These are scoped tests, not
+The prior exact-candidate pinned fork had an optional Cython mode whose semantic
+serial-contract probe and three canonical real-ROM attach/step/close smokes
+passed, but it was not the documented release default. The historical prior
+exact-candidate dual source/native unit/timing gate collected 1,094 tests in
+each runtime, had 949 unit tests pass, and passed timing 50/50 in each of five
+repetitions. The historical prior-candidate local asset tier passed 47/47 in
+source in 531.3477 seconds and 47/47 in native in 38.2974 seconds; the remote
+asset tier passed 16/16 in source in 35.6044 seconds and 16/16 in native in
+30.8627 seconds. These are scoped tests, not
 actual MCP gameplay or strict trade/battle evidence. Do not substitute an
 arbitrary standalone PyBoy wheel: record the version, harness revision, and
 runtime mode, and require the serial contract before running link tests.
@@ -234,6 +252,12 @@ acceptance tests require the three canonical battle files, and the manifest
 byte validator checks all ten listed entries. A missing required file or a
 manifest hash mismatch is a blocked/failed release result, never a passing
 skip.
+
+The stock ROM/SYM pins and existing vanilla fixture bytes validate, but vanilla
+ordinary capture provenance cannot be established: replay against the retained
+source failed at the 64-step bound. The manifest's ordinary producer revision
+`25e231c` is historical, so these fixture bytes must not be described as
+reproducible from the current merged head.
 
 For the currently controlled stateful scope, the BYO asset set is:
 
@@ -329,7 +353,7 @@ python scripts/production_gate.py \
   --format text
 ```
 
-The latest exact-commit dual `--unit-only --repeat-timing 5` check collected
+The historical prior exact-candidate dual `--unit-only --repeat-timing 5` check collected
 1,094 tests in each runtime, had 949 unit tests pass, and passed timing 50/50 in
 each of five repetitions. Source reported `python-source`; Cython reported
 `cython/native-extension`. The gate also performs schema-only validation of the
@@ -380,10 +404,10 @@ EVIDENCE_DIR="$(mktemp -d)"
 the Cython interpreter. The latter is accepted only with
 `--runtime-mode both`; omitting it makes both modes reuse `--python`. The gate
 runs the selected tiers under each explicit runtime and retains both results in
-the dual report. The latest exact-commit post-gate run collected 1,094 tests per
-runtime, had 949 unit tests pass in each runtime, and passed timing 50/50 in
-each of five repetitions. This is scoped runtime evidence, not ROM gameplay or
-release sign-off; the release decision remains `PARTIAL`.
+the dual report. The historical prior exact-candidate post-gate run collected
+1,094 tests per runtime, had 949 unit tests pass in each runtime, and passed
+timing 50/50 in each of five repetitions. This is scoped runtime evidence, not
+ROM gameplay or release sign-off; the current merged head remains `PARTIAL`.
 
 The source default and native command are separate evidence scopes. Do not
 describe a source result as native parity, or a native unit/timing result as
@@ -477,11 +501,12 @@ python -m pytest -q -ra \
 ```
 
 Repeat with the appropriate path, symbol file, and hash for each release input
-that will be advertised. The wheel-install probe in this audit verified clean
-installation, `pip check`, and bundled runtime identity; it did not run this
-real-ROM stdio tier on Linux. The fresh Windows validation separately passed
+that will be advertised. The wheel-install probe in this historical audit
+verified clean installation, `pip check`, and bundled runtime identity; it did
+not run this real-ROM stdio tier on Linux. The historical fresh Windows
+validation separately passed
 the selected MCP stdio integration (4/4), but did not replace the full
-real-ROM tier. Any real-ROM result must identify the current candidate,
+real-ROM tier. Any current real-ROM result must identify the tested commit,
 ROM/SYM hashes, and complete test output. These tests prove only the tested
 boot/state/MCP surface; they do not prove link gameplay.
 
@@ -499,8 +524,8 @@ The local integration module's active matrix is fixture-gated and covers
 transport milestones. Its pair-smoke test proves construction, hook
 installation, a short step, and teardown; its trade test is a fixture-gated
 round-trip. Neither result should be generalized to every ROM variant or to
-remote play. The current exact-head local asset tier passed 47/47 in source in
-531.3477 seconds and 47/47 in native in 38.2974 seconds. This is scoped
+remote play. The historical prior-candidate local asset tier passed 47/47 in
+source in 531.3477 seconds and 47/47 in native in 38.2974 seconds. This is scoped
 local/session/link evidence and does not qualify strict trade or battle.
 
 ### Tier D: local link session, trade, and battle acceptance
@@ -513,8 +538,8 @@ python -m pytest -q -ra \
 ```
 
 The diagnostic matrix in this module is broader than the release acceptance
-assertions. Historical LinkMenu, trade, and battle observations are not current
-candidate evidence. The strict local acceptance selectors are parametrized over
+assertions. Historical LinkMenu, trade, and battle observations are not
+current-head evidence. The strict local acceptance selectors are parametrized over
 all nine canonical Red/Blue/Yellow ordered pairs:
 
 ```bash
@@ -549,12 +574,13 @@ This module exercises remote TCP plumbing and selected real-ROM milestones.
 Some cases stop at LinkMenu or use controlled menu/fixture setup; that is not
 the same as a user-driven full trade or battle.
 
-The current exact-head remote asset tier selected 16 transport/MCP tests in
-each runtime. Source passed 16/16 in 35.6044 seconds and native passed 16/16
+The historical prior-candidate remote asset tier selected 16 transport/MCP tests
+in each runtime. Source passed 16/16 in 35.6044 seconds and native passed 16/16
 in 30.8627 seconds. An earlier source failure report used a dirty shared
 checkout and shared vendored runtime, so it is invalid and excluded from the
-current result. These are transport/MCP checks and do not establish trade or
-battle behavior; a LinkMenu milestone is not live gameplay proof.
+historical result. These historical transport/MCP checks do not establish
+current live MCP gameplay, trade, or battle behavior; a LinkMenu milestone is
+not live gameplay proof.
 
 The separate-process acceptance uses the same bundled source runtime as the
 normal package and the canonical color Red, color Blue, and Yellow fixtures:
@@ -606,12 +632,13 @@ label.
 The current collection audit verifies declaration shape only; it does not
 execute trade or battle. The PR #17 complete source-runtime baseline executed
 every declared row; the PR #19 follow-up did not silently relabel that baseline
-as a full strict-matrix rerun. The strict runtime scope is:
+as a full strict-matrix rerun. The current strict full trade and battle reruns
+are `PENDING`. The strict runtime scope is:
 
 | Operation | Local ordered rows | Remote ordered listener/connector rows | Dedicated assertion | Current status |
 |---|---:|---:|---|---|
-| Trade | 9 | 9 | Red/Yellow party-record swap | Not currently qualified. The declaration and collection audit are structural only. Historical source `19/19` and native `18/19` rows are not current full-runtime sign-off |
-| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | Not currently qualified. The declaration and collection audit are structural only. Historical source/native rows and LinkMenu milestones are not current live battle proof |
+| Trade | 9 | 9 | Red/Yellow party-record swap | `PENDING`: the current strict full trade rerun is pending. The declaration and collection audit are structural only; historical source `19/19` and native `18/19` rows are not current full-runtime sign-off |
+| Battle | 9 | 9 | Red/Yellow resolved-turn assertion | `PENDING`: the current strict full battle rerun is pending. The declaration and collection audit are structural only; historical source/native rows and LinkMenu milestones are not current live battle proof |
 
 That is 19 strict entrypoints per operation. The remote rows use canonical color
 Red, color Blue, and Yellow profiles; listener/connector order is significant.
@@ -771,27 +798,31 @@ transport or LinkMenu milestone as a completed trade or battle.
 
 ## 8. Current sign-off blockers
 
-The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
-are:
+The current merged head `71ca834d673c52eb74044089e92b09e7e3ae00a0` remains
+`PARTIAL`, not `PRODUCTION-READY`. The observed blockers are:
 
-1. The exact-commit dual source and Cython unit/timing gate collected 1,094
+1. The historical prior exact-candidate dual source and Cython unit/timing
+   gate collected 1,094
    tests in each runtime, had 949 unit tests pass, and passed timing 50/50 in
-   each of five repetitions. This scoped result does not close ROM-backed
+   each of five repetitions. This historical scoped result does not close
+   current-head ROM-backed
    gameplay, platform, or release-sign-off requirements. The explicit dual
    invocation uses `--python` for the source environment and
    `--cython-python` for the native environment; its green unit/timing result
    does not replace the required real-ROM tiers. A new standard-library
-   virtual environment was not created on this host because its `python3`
+   virtual environment was not created for that run because its `python3`
    lacked `ensurepip`; the passing gates used existing managed environments.
    Source mode remains the documented release runtime; Cython is optional and
    must be explicitly selected.
-2. The current exact-head remote asset tier passed 16/16 in source in 35.6044
-   seconds and 16/16 in native in 30.8627 seconds. An earlier source failure
+2. The historical prior-candidate remote asset tier passed 16/16 in source in
+   35.6044 seconds and 16/16 in native in 30.8627 seconds. An earlier source failure
    report used a dirty shared checkout and shared vendored runtime, so it is
-   invalid and excluded. This is remote transport/MCP evidence, not live trade
-   or battle proof. Historical source `19/19` trade, native `18/19` trade, and
-   partial native battle observations remain unqualified for the current
-   runtime; timing-altered diagnostics do not close either matrix.
+   invalid and excluded from the historical result. This is historical remote
+   transport/MCP evidence, not current live MCP gameplay, trade, or battle
+   proof. The current strict full trade and battle reruns and current MCP
+   live-gameplay lane remain `PENDING`; historical source `19/19` trade, native
+   `18/19` trade, and partial native battle observations remain unqualified.
+   Timing-altered diagnostics do not close either matrix.
 3. The strict declaration is complete: nine ordered local pairs, nine ordered
    remote listener/connector pairs, six reversed-role rows, nine local variant
    rows, and 19 trade plus 19 battle entrypoints collect. This is structural
@@ -803,24 +834,30 @@ are:
    qualification, independent review, and a complete post-fix broad rerun
    remain open. Scoped Windows install/bootstrap/MCP/Cython lifecycle evidence
    does not replace full Windows gameplay/load or macOS coverage.
-4. Current asset preflight verified exact SHA-1 matches for 5/5 ROMs, 3/3
-   symbols, and 3/3 fixture hashes, with the ten-entry manifest byte validation
-   passing. The current local asset tier passed 47/47 in source in 531.3477
-   seconds and 47/47 in native in 38.2974 seconds; the current remote asset
-   tier passed 16/16 in source in 35.6044 seconds and 16/16 in native in
-   30.8627 seconds. This establishes supplied asset and scoped runtime
-   evidence only; the ten states remain external/operator-managed. Six
-   manifest entries are canonical with verified provenance, while four are
-   vanilla-derived with `PARTIAL` provenance; derived vanilla battle states
-   inherit that status. A release run must retain sanitized evidence with the
-   ROM, symbol, fixture, runtime, and teardown identities.
+4. The historical prior-candidate asset preflight verified exact SHA-1 matches
+   for 5/5 ROMs, 3/3 symbols, and 3/3 fixture hashes, with the ten-entry
+   manifest byte validation passing. The historical prior-candidate local asset
+   tier passed 47/47 in source in 531.3477 seconds and 47/47 in native in
+   38.2974 seconds; the historical prior-candidate remote asset tier passed
+   16/16 in source in 35.6044 seconds and 16/16 in native in 30.8627 seconds.
+   This establishes supplied asset and scoped runtime evidence only; the ten
+   states remain external/operator-managed. Current fixture provenance is
+   `PARTIAL`: six manifest entries are canonical with verified provenance,
+   while four are vanilla-derived with `PARTIAL` provenance; derived vanilla
+   battle states inherit that status. The stock ROM/SYM pins and existing
+   vanilla fixture bytes validate, but vanilla ordinary capture provenance
+   cannot be established: replay against the retained source failed at the
+   64-step bound, and the manifest's ordinary producer revision `25e231c` is
+   historical. Do not claim current-head reproducibility for those fixture
+   bytes. A release run must retain sanitized evidence with the ROM, symbol,
+   fixture, runtime, and teardown identities.
 5. Remote TCP is enforced as loopback-only and provides no authentication or
    encryption. Cross-host operation is blocked until a secure transport is
    added; `peer_rom_version` is a label check, not authentication.
 
-The smallest next actions are to complete current strict trade and battle
-matrices, establish actual MCP gameplay, native-platform and real-ROM load
+The smallest next actions are to complete the current strict trade and battle
+matrices, establish current live MCP gameplay, native-platform and real-ROM load
 evidence, verify vanilla fixture provenance, finish the broad suite, and obtain
-independent release review. Retain the exact-head local and remote reports and
-their runtime, timing, asset-hash, and teardown identities when reproducing the
-scoped evidence above.
+independent release review. Retain the historical prior-candidate local and
+remote reports and their runtime, timing, asset-hash, and teardown identities
+when reproducing the scoped evidence above.
