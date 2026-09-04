@@ -57,6 +57,11 @@ _BATTLE_RECIPES = {
     "blue-vanilla-battle": "blue_gb",
     "yellow-cgb-battle": "yellow",
 }
+_ORDINARY_SOURCE_PREFIXES = {
+    "red": "external walkthrough_red/milestones/cerulean_pc.state;",
+    "blue": "external walkthrough_blue/milestones/cerulean_pc.state;",
+    "yellow": "external walkthrough_yellow/milestones/cerulean_pc.state;",
+}
 _VERIFIED_FIXTURE_IDS = frozenset(
     {
         "red-color-ordinary",
@@ -130,6 +135,29 @@ def test_manifest_has_exact_supported_fixture_matrix_and_status_boundary() -> No
         for fixture in fixtures
         if fixture["provenance"]["status"] == "partial"
     } == _VANILLA_FIXTURE_IDS
+    assert {
+        fixture["id"] for fixture in fixtures if fixture["kind"] == "battle"
+    } == set(_BATTLE_RECIPES)
+
+
+def test_ordinary_provenance_uses_matching_recipe_and_external_source() -> None:
+    document = _load_manifest()
+
+    for fixture in document["fixtures"]:
+        if fixture["kind"] != "ordinary":
+            continue
+
+        recipe = producer._VERSIONS[(fixture["version"], fixture["variant"])]
+        provenance = fixture["provenance"]
+        assert provenance["producer"] == "scripts/produce_cable_club_fixture.py"
+        assert provenance["source_state"].startswith(
+            _ORDINARY_SOURCE_PREFIXES[fixture["version"]]
+        )
+        assert str(recipe["rom"]) == fixture["expected_rom"]["path"].removeprefix("rom/")
+        assert str(recipe["sym"]) == fixture["expected_symbols"]["path"].removeprefix(
+            "rom/"
+        )
+        assert recipe["out_name"] == Path(fixture["path"]).name
 
 
 def test_battle_provenance_binds_each_derived_state_to_ordinary_input() -> None:
@@ -150,6 +178,7 @@ def test_battle_provenance_binds_each_derived_state_to_ordinary_input() -> None:
             ordinary["sha1"],
             ordinary["sha256"],
         )
+        assert f"external {ordinary['path']};" in battle_provenance["source_state"]
         assert recipe["fixture_version"] == battle["version"]
         assert recipe["source"] == Path(ordinary["path"]).name
         assert recipe["output"] == Path(battle["path"]).name
