@@ -16,10 +16,12 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The merged implementation head for this checklist is
-`6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04); the prior
-merged head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. No full current-
-head matrix or native-runtime sign-off is claimed here; the release gate
+The public audit head for this checklist is
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (PR #44, docs-only); its merged
+implementation baseline is `6d541b7867e82fa548c456008e6acd7fb1071586`
+(PR #42, 2026-09-04). The prior merged head was
+`71ca834d673c52eb74044089e92b09e7e3ae00a0`. No full current-head trade,
+native-runtime, or remote-matrix sign-off is claimed here; the release gate
 remains `PARTIAL`.
 
 The exact prior-candidate evidence at
@@ -50,22 +52,32 @@ the 64-step bound, and the manifest's ordinary producer revision is historical
 (`25e231c`). Those fixture bytes must not be described as current-head
 reproducible.
 
-Current strict trade and battle acceptance remains unresolved. A LinkMenu or
-transport milestone is not a completed trade or battle. Actual MCP-driven
-gameplay is also not established by unit, transport, lifecycle, or LinkMenu
-evidence.
+Current-head source-local strict battle acceptance is `PASS`: all 9/9 ordered
+canonical Red/Blue/Yellow pairs reached Link Battle and move/damage hooks. The
+fresh rows were Yellow-Red (`182.89s`), Blue-Yellow (`443.50s`), and
+Yellow-Blue (`480.31s`); six prior same-campaign rows complete the 9/9 set.
+Current strict trade, the native strict matrix, and the current remote matrix
+remain unresolved. A LinkMenu or transport milestone is not a completed trade
+or battle. Actual MCP-driven gameplay is only partially scoped: public calls
+reached Red's bedroom, the house exit, Pallet Town, Oak's Lab, and lab
+movement, but a bounded starter attempt ended at map `40`, position `(5,3)`,
+with `party.count=0`; no bypass was used, so MCP starter/trade/battle remains
+unproven.
 
-**Release decision: `PARTIAL`.** Sign-off remains open for current strict trade
-and battle, vanilla fixture provenance, clean-install and broad-suite coverage,
-platform and real-ROM load coverage, actual MCP gameplay, independent review,
-and secure networking.
+**Release decision: `PARTIAL`.** Sign-off remains open for current strict trade,
+the native strict matrix, the current remote matrix, vanilla fixture
+provenance, clean-install and broad-suite coverage, platform and real-ROM load
+coverage, actual MCP starter/trade/battle gameplay, independent review, and
+secure networking.
 
-The acceptance update merged in PR #42 passed current
-source-runtime representative in-process and TCP Red-color/Yellow trade and
-battle checks, the 4/4 real MCP stdio suite, 954/954 unit tests, and 50/50
-timing cases in each of five repetitions. This is scoped candidate evidence,
-not a full strict matrix or native-runtime sign-off, so it does not change the
-release decision.
+The acceptance update merged in PR #42 passed current source-runtime
+representative in-process and TCP Red-color/Yellow trade and battle checks,
+the source-local strict battle matrix at 9/9, 954/954 unit tests, and 50/50
+timing cases in each of five repetitions. The current-head MCP scoped suite
+passed 6/6 real integration checks in `13.11s` with one SDL warning, and 104
+dispatch tests passed. This is scoped candidate evidence, not full strict
+trade, native-runtime, current remote-matrix, or MCP starter/trade/battle
+sign-off, so it does not change the release decision.
 
 ## Change summary
 
@@ -108,8 +120,9 @@ does not itself establish MCP gameplay, trade, battle, or release readiness.
   and MCP stdio 4/4. This is scoped build/runtime evidence, not current-head
   full native gameplay evidence.
 - [ ] The current Cython/native build passes the full real-ROM strict gameplay
-  matrix. Current strict trade and battle acceptance remain unresolved even
-  though the prior-candidate local and remote real-ROM tiers passed.
+  matrix. Current strict trade and battle acceptance remain unresolved for the
+  unverified native tier even though current source-local strict battle is 9/9
+  and the prior-candidate local and remote real-ROM tiers passed.
 - [ ] Full source/native trade and battle acceptance is complete; unit, timing,
   transport, and LinkMenu results do not substitute for gameplay acceptance.
 
@@ -136,10 +149,11 @@ does not itself establish MCP gameplay, trade, battle, or release readiness.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
 - [ ] A current-head dual source/native unit gate has not been independently
-  rerun. The exact prior-candidate evidence recorded `1,094` tests collected
-  in each gate, `949` unit tests passing, and timing `50/50` in each of five
-  repetitions in both runtimes; this historical scoped gate did not establish
-  ROM-backed gameplay.
+  rerun. The current source gate records `954/954` unit tests and timing
+  `50/50` in each of five repetitions; the exact prior-candidate evidence
+  recorded `1,094` tests collected in each gate, `949` unit tests passing, and
+  timing `50/50` in each of five repetitions in both runtimes. Neither scoped
+  unit result establishes ROM-backed native gameplay.
 - [ ] A fresh standard-library virtual environment and editable install have
   not been independently verified on this host; the system `python3` lacks
   `ensurepip`, while the passing gates used existing managed environments.
@@ -159,10 +173,13 @@ does not itself establish MCP gameplay, trade, battle, or release readiness.
   dedicated Red/Yellow assertions passed for each operation.
 - [x] The historical PR #19 post-change remote transport/MCP slice passes 15/15; the PR
   #17 baseline strict trade and battle remote rows passed 9/9 each.
-- [ ] A current-head local real-ROM tier has not been independently rerun. The
+- [ ] A current-head full local real-ROM tier has not been independently
+  rerun. The current source-local strict battle sub-tier is `PASS` at 9/9
+  ordered canonical pairs, including fresh Yellow-Red (`182.89s`),
+  Blue-Yellow (`443.50s`), and Yellow-Blue (`480.31s`) rows plus six prior
+  same-campaign rows; all reached Link Battle and move/damage hooks. The
   prior-candidate asset-backed evidence passed source `47/47` and native
-  `47/47`; that historical scoped result does not qualify current strict
-  gameplay acceptance.
+  `47/47`; neither result qualifies full current trade/native acceptance.
 - [ ] A current-head remote real-ROM tier has not been independently rerun. The
   prior-candidate asset-backed evidence passed source `16/16` and native
   `16/16`; that historical scoped result does not qualify current strict
@@ -173,9 +190,10 @@ does not itself establish MCP gameplay, trade, battle, or release readiness.
 - [x] The historical PR #17 baseline local and remote strict runtime rows pass in both
   listener/connector directions; strict trade and strict battle each passed
   19/19 with bounded teardown.
-- [ ] A clean current-head strict trade and battle rerun is complete. The
-  prior-candidate evidence does not qualify either strict gameplay matrix;
-  historical strict results are not current-head acceptance.
+- [ ] A clean current-head strict trade and battle rerun is complete. Current
+  source-local strict battle is `PASS` at 9/9, but current strict trade,
+  native strict gameplay, and the full current remote matrix remain
+  unverified; historical strict results do not qualify those gates.
 - [x] The historical PR #19 bounded localhost concurrency/lifecycle probe passes 8/8 in
   each of five repetitions.
 - [ ] Real-ROM concurrent-load stability is complete on the current runtime;
@@ -230,8 +248,12 @@ does not itself establish MCP gameplay, trade, battle, or release readiness.
 - [ ] Cross-host TCP is supported securely; the current transport is
   loopback-only, unauthenticated, and unencrypted.
 - [ ] Actual MCP-driven gameplay is complete and independently verified. Unit,
-  transport, lifecycle, and LinkMenu evidence do not prove MCP-driven boot,
-  state progression, trade, or battle.
+  transport, lifecycle, and LinkMenu evidence do not prove MCP-driven starter,
+  trade, or battle. Current-head scoped MCP evidence is 6/6 real integration
+  checks in `13.11s` with one SDL warning, plus 104 passing dispatch tests;
+  public calls reached Red's bedroom, the house exit, Pallet Town, Oak's Lab,
+  and lab movement, but the bounded starter attempt ended at map `40`,
+  position `(5,3)`, with `party.count=0`, without a bypass.
 
 ## Required release commands
 
