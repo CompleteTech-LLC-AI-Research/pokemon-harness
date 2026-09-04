@@ -29,10 +29,10 @@ The source run was a trade-tier run whose supervisor started before PR #35 was
 published; its child runs loaded the current implementation, but it is not a
 clean post-merge all-tier sign-off.
 
-The latest verified candidate used the dual `--unit-only --repeat-timing 5`
-gate on 2026-09-03 with separate source and Cython interpreters (`--python`
-plus `--cython-python`). It collected 753 tests in each mode. Both passed unit
-608/608 and timing 40/40 in all five repetitions; source reported
+The current-head verified candidate used the dual `--unit-only --repeat-timing
+5` gate on 2026-09-03 with separate source and Cython interpreters
+(`--python` plus `--cython-python`). It collected 756 tests in each mode. Both
+passed unit 611/611 and timing 40/40 in all five repetitions; source reported
 `python-source` and Cython reported `cython/native-extension`. The clone had no
 ROM, symbol, or save-state assets, so fixture schema and matrix declaration
 were checked but ROM gameplay was not run. An earlier environment-specific
