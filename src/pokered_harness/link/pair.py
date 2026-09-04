@@ -713,14 +713,30 @@ class LinkPair:
             mem_b[recv_addr_b] = 0xD4
             mem_b[recv_addr_b + 1] = 0xD4
 
+        handles: list[HookRegistration] = []
         try:
-            owned_hooks.append(self._register_owned_address_hook(pa, bank_a, addr_a, force_trade_a))
-        except (KeyError, LookupError, ValueError):
-            pass
-        try:
-            owned_hooks.append(self._register_owned_address_hook(pb, bank_b, addr_b, force_trade_b))
-        except (KeyError, LookupError, ValueError):
-            pass
+            handles.append(
+                self._register_owned_address_hook(pa, bank_a, addr_a, force_trade_a)
+            )
+            handles.append(
+                self._register_owned_address_hook(pb, bank_b, addr_b, force_trade_b)
+            )
+        except BaseException as exc:
+            # A forced menu choice is a protocol-wide phase decision. Leaving
+            # only one side installed would make the pair look usable while
+            # driving the two games into different LinkMenu branches. Publish
+            # all handles to the transaction first so the outer rollback can
+            # retry cleanup even if a local close fails.
+            owned_hooks.extend(handles)
+            cleanup_errors = self._close_owned_hooks(handles)
+            exc.add_note(
+                "symmetric TRADE LinkMenu hooks are required; pair installation aborted"
+            )
+            for cleanup_error in cleanup_errors:
+                exc.add_note(f"LinkMenu hook rollback cleanup failed: {cleanup_error!r}")
+            raise
+
+        owned_hooks.extend(handles)
 
     def unpair(self) -> None:
         """Remove pair-owned hooks and transport state atomically."""
