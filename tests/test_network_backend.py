@@ -295,6 +295,40 @@ def test_on_edge_uses_one_total_deadline_for_send_and_response(monkeypatch):
         b.stop()
 
 
+def test_stale_edge_response_fails_closed_without_wedging_on_edge():
+    """A queued stale response closes the backend and returns promptly."""
+    a, b = NetworkBackend.pair()
+    a._resp_queue.put_nowait(1)
+    finished = threading.Event()
+    result: list[BaseException] = []
+
+    def invoke_on_edge() -> None:
+        try:
+            a.on_edge(our_bit=1, our_role=1)
+        except BaseException as exc:  # noqa: BLE001
+            result.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=invoke_on_edge, daemon=True)
+    worker.start()
+    try:
+        assert finished.wait(timeout=1.0), "stale EDGE_RESP wedged on_edge"
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert result and isinstance(result[0], NetworkBackendError)
+        assert str(result[0]) == "stale EDGE_RESP before EDGE_REQ"
+        assert not a.connected
+    finally:
+        if worker.is_alive():
+            # The pre-fix implementation deadlocks while holding the lock;
+            # do not call stop() on that path during failure cleanup.
+            a._sock.close()
+        else:
+            a.stop()
+        b.stop()
+
+
 def test_on_edge_with_peer_hangup_raises():
     """If the peer closes the socket before responding, ``on_edge``
     times out and raises :class:`NetworkBackendError`."""

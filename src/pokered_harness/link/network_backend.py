@@ -702,16 +702,20 @@ class NetworkBackend:
         """
         del our_role  # the wire role is carried by the ROM's SC register
         with self._edge_call_lock:
+            stale_error: NetworkBackendError | None = None
             with self._edge_response_lock:
                 if self._closed:
                     raise NetworkBackendError("backend closed")
                 if self._edge_inflight:
                     raise NetworkBackendError("concurrent EDGE_REQ is not supported")
                 if not self._resp_queue.empty():
-                    error = NetworkBackendError("stale EDGE_RESP before EDGE_REQ")
-                    self._mark_closed(error)
-                    raise error
-                self._edge_inflight = True
+                    stale_error = NetworkBackendError("stale EDGE_RESP before EDGE_REQ")
+                else:
+                    self._edge_inflight = True
+
+            if stale_error is not None:
+                self._mark_closed(stale_error)
+                raise stale_error
 
             frame_out = _FRAME.pack(_OP_EDGE_REQ, our_bit & 1)
             self._stats["edge_req_sent"] = int(self._stats["edge_req_sent"]) + 1
