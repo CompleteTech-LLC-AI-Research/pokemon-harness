@@ -5,11 +5,13 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` at merged implementation head
-`6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04). The prior
-merged head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. This exact code-head
-scope establishes the current candidate identity and release-status record; it
-does not carry forward superseded gameplay evidence. Earlier PR #35
+Status: `PARTIAL` at public head
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (PR #44, docs-only, 2026-09-04),
+with implementation baseline
+`6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42). The prior merged
+implementation head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. This exact
+public-head identity and implementation baseline establish the current audit
+scope; they do not promote superseded gameplay evidence. Earlier PR #35
 introduced remote serial-edge dispatch at an explicit native instruction-batch
 boundary. The candidate history also contains serial save-state, bootstrap
 ownership and build-metadata cleanup, MCP teardown, gate-accounting, and
@@ -20,11 +22,14 @@ The acceptance update merged in PR #42 adds bounded setup and
 matrix deadlines, runtime-provenance checks, fail-closed subprocess result
 validation, and network close diagnostics. Current source-runtime
 representative checks passed in-process and over TCP for Red-color/Yellow
-trade and battle, and the real MCP stdio suite passed 4/4. Its source
+trade and battle, and the real MCP stdio suite passed 4/4. The current-head
+source-runtime local strict battle matrix also passed all nine ordered
+canonical color pairs; the row-level snapshot is recorded below. Its source
 unit/timing gate passed 954/954 unit tests and 50/50 timing cases in each of
-five repetitions. This is not a full 19-row matrix or native-runtime result;
-MCP-driven starter/trade/battle gameplay, vanilla fixture provenance, and the
-other open release conditions remain `PENDING` or `PARTIAL`.
+five repetitions. This is not a full strict trade matrix, fresh native full
+matrix, or current remote full-matrix result; MCP-driven starter/trade/battle
+gameplay, vanilla fixture provenance, platform/concurrency qualification, and
+secure cross-host TCP remain `PENDING` or `PARTIAL`.
 
 Evidence remains separated by layer. Historical prior-candidate
 static/build/runtime evidence at `3399407aa04f6e5e496df628442597c03e0adcc6`
@@ -34,9 +39,12 @@ runtime tiers passed source local 47/47 in 531.3477s and native local 47/47 in
 38.2974s, plus source remote 16/16 in 35.6044s and native remote 16/16 in
 30.8627s. These prior-candidate runtime results are not current-head strict
 end-to-end acceptance.
-The current full strict trade and battle rerun at `71ca834` is pending, as is
-the MCP live-gameplay lane. Unit/timing results, LinkMenu milestones,
-declarations, and partial current rows do not upgrade the release.
+The current full strict trade rerun remains pending, as do the fresh native
+full matrix, current remote full-matrix, and MCP live-gameplay lanes.
+Unit/timing results, LinkMenu milestones, declarations, and partial current
+rows do not upgrade the release. The source-runtime local strict battle result
+recorded below is current-head evidence only and does not upgrade the other
+open release conditions.
 Timing-altered diagnostics are not acceptance evidence. A historical source
 trade-tier supervisor started before PR #35 was published; its child runs
 loaded the then-current implementation, but it was not a clean post-merge
@@ -129,8 +137,9 @@ coordinator and remote TCP transport. The optional Cython/native build's
 compiled serial-contract probe and focused 110/110 serial-link suite are
 historical prior-candidate diagnostic evidence. The historical native
 strict-trade result is 18/19 and mixed exact-row follow-ups leave its
-reliability unproven; the current full strict trade and battle rerun remains
-pending. A pre-existing standalone PyBoy wheel must not be allowed to shadow
+reliability unproven; the current full strict trade rerun remains pending, and
+the fresh native full battle matrix is not qualified. A pre-existing standalone
+PyBoy wheel must not be allowed to shadow
 this package; verify the runtime identity and selected mode before release. See
 the
 [production runbook](docs/PRODUCTION_RUNBOOK.md).
@@ -272,16 +281,42 @@ ordinary capture provenance or current-head fixture reproducibility.
 The strict local acceptance fixtures and remote acceptance/diagnostic fixtures are
 distinct from the default Cable Club fixtures. The acceptance matrix defines
 the color Red, color Blue, and Yellow ordinary/battle rows below. The current
-`71ca834` strict trade and battle rerun is pending; the historical row results
-below are not current-head end-to-end evidence. The MCP live-gameplay lane is
-also pending.
+source-runtime local strict battle result is recorded as current-head evidence
+below. Full strict trade, fresh native full-matrix, current remote full-matrix,
+and MCP live-gameplay qualification remain `PENDING` or `PARTIAL`; historical
+rows outside that result are not current-head end-to-end evidence.
 
 | Path | ROMs | Required fixture files | Evidence boundary |
 |---|---|---|---|
 | Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Historical source gate: 9/9 local rows. The historical native strict-trade matrix has an 18/19 result; mixed exact-row follow-ups leave reliability unproven. The current full rerun is pending |
-| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Historical source baseline passed 9/9 local rows; the current full source/native rerun is pending, and native full battle coverage remains unqualified |
+| Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Current public-head source runtime: 9/9 ordered canonical color pairs passed and reached Link Battle with move/damage hooks. Fresh native full battle coverage remains unqualified |
 | Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Historical source gate: 9/9 remote rows. Native follow-ups for the historical 18/19 matrix both passed and failed, including party mismatch and phase stalls. The current full rerun is pending |
 | Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Historical source baseline passed 9/9 remote rows; a historical native direct lane exercised 3/9 under a bounded 155-second pair deadline (one pass, two fail, six unrun), with no test-only bypasses. The current full rerun is pending and the full 19-entrypoint battle set remains unqualified |
+
+### Current-head source-local battle snapshot
+
+At public head `a8576b5ecb8e7039eefe0e02865b0bfc031387a7`, the source-runtime
+strict local battle matrix completed 9/9 ordered canonical color pairs. The
+first six rows below are existing same-campaign records; the final three are
+fresh rows. Every row reached Link Battle and recorded the move and damage
+hooks used by the assertion.
+
+| Pair | Result | Duration |
+|---|---|---:|
+| `yellow-yellow` | `PASS` | 125.397s |
+| `blue-blue` | `PASS` | 303.395s |
+| `red-red` | `PASS` | 231.966s |
+| `red-blue` | `PASS` | 612.110s |
+| `blue-red` | `PASS` | 629.876s |
+| `red-yellow` | `PASS` | 179.162s |
+| `yellow-red` | `PASS` | 182.89s |
+| `blue-yellow` | `PASS` | 443.50s |
+| `yellow-blue` | `PASS` | 480.31s |
+
+This is source-local battle evidence only. It does not close the full strict
+trade matrix, fresh native full matrix, current remote full-matrix
+qualification, MCP-driven gameplay, vanilla fixture provenance,
+platform/concurrency qualification, or secure cross-host TCP.
 
 The tracked
 [`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)
@@ -326,11 +361,11 @@ Red/Blue/Yellow ordered pair. A historical prior-candidate source trade gate
 recorded 19/19 rows (9 local and 9 remote, plus the dedicated assertion). The
 native strict-trade matrix has a historical 18/19 result, but exact-row
 follow-ups both passed and failed, including a party-record mismatch and phase
-stalls, so its reliability is unproven. The current `71ca834` strict trade and
-battle rerun is pending; the current native battle matrix is not qualified,
-and the current source battle matrix has not been rerun as a complete
-post-PR #35 gate. The PR #17 source-runtime 19/19 trade and 19/19 battle
-results remain historical baseline evidence. Consult the test-surface table in
+stalls, so its reliability is unproven. The current public-head source-runtime
+local battle matrix passed 9/9 as recorded above. The full strict trade matrix,
+fresh native full matrix, and current remote full-matrix remain `PENDING` or
+`PARTIAL`; the PR #17 source-runtime 19/19 trade and 19/19 battle results
+remain historical baseline evidence. Consult the test-surface table in
 the [README](README.md) and run the required tiers in the [production runbook](docs/PRODUCTION_RUNBOOK.md)
 before using any row as release evidence.
 
