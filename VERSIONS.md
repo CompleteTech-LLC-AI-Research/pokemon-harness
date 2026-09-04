@@ -32,9 +32,10 @@ Cython reported `cython/native-extension`. The clone had no ROM, symbol, or
 save-state assets, so fixture schema and matrix declaration were checked but
 ROM gameplay was not run. An earlier environment-specific 585/586 ownership
 result is superseded for these isolated environments. Fresh uv-managed source
-and native environments installed the candidate, passed `pip check`, and the
-native bootstrap verified both `pyboy` and `pokered-harness` package owners. The
-vendored source PyBoy runtime remains the documented release default; Cython is
+and native environments installed the candidate; `uv pip check` passed in both,
+and the native bootstrap verified both `pyboy` and `pokered-harness` package
+owners. The vendored source PyBoy runtime remains the documented release
+default; Cython is
 an optional diagnostic build. The host's bare `python3` still lacks `ensurepip`,
 so that alternate standard-library venv path remains open.
 
@@ -78,8 +79,8 @@ reformatted.
 | Component | Pin | Source of truth |
 |---|---|---|
 | Python | `>=3.12` | `pyproject.toml` |
-| PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `pyproject.toml` |
-| MCP | `1.29.1` | `pyproject.toml` and the stdio acceptance test |
+| PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `vendor/pyboy-src/pyboy/__init__.py` |
+| MCP | `1.29.1` | `pyproject.toml` and `uv.lock` |
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
@@ -121,7 +122,7 @@ for release evidence.
 | Path | `rom/red/pokemon-red-color.gb` |
 | Symbols | `rom/red/pokemon-red.sym` only when verified against this variant |
 | Symbol SHA-1 | `03783c86a42588bd77f73bd7814cf8d70e590118` |
-| Role | Canonical color-Red input; source strict rows pass in the current local matrix and representative native/remote rows; full native matrix remains open |
+| Role | Canonical color-Red input; selected source/Cython transport checks are recorded, but strict trade/battle qualification remains incomplete |
 
 ### Pokémon Blue (UE)
 
@@ -143,7 +144,7 @@ for release evidence.
 | Path | `rom/blue/pokemon-blue-color.gb` |
 | Symbols | `rom/blue/pokemon-blue.sym` only when verified against this variant |
 | Symbol SHA-1 | `c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6` |
-| Role | Canonical color-Blue input; source strict rows pass in the current local matrix and representative native/remote rows; full native matrix remains open |
+| Role | Canonical color-Blue input; selected source/Cython transport checks are recorded, but strict trade/battle qualification remains incomplete |
 
 ### Pokémon Yellow (UE)
 
@@ -154,7 +155,7 @@ for release evidence.
 | Path | `rom/yellow/pokemon-yellow.gbc` |
 | Symbols | `rom/yellow/pokemon-yellow.sym` |
 | Symbol SHA-1 | `7c4205723943e7722230dcf014e5e8a2012474aa` |
-| Role | Canonical Yellow input; source strict rows pass in the current local matrix and isolated remote retries; full native matrix remains open |
+| Role | Canonical Yellow input; selected source/Cython transport checks and mixed native exact-row diagnostics are recorded, but strict trade/battle qualification remains incomplete |
 
 Other localisations, hacks, and variants are out of scope unless they receive
 their own ROM hash, matching symbols, fixture provenance, and acceptance
