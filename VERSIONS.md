@@ -9,8 +9,9 @@ Status: `PARTIAL` at public docs head
 `f048870bdbd4837b5494006ae49fe40510832a89` (current public docs head,
 2026-09-04), with the last verified pre-fix implementation/runtime snapshot
 `a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (code snapshot, 2026-09-04).
-Documentation-only public changes after that snapshot update this record but do
-not change the audited pre-fix runtime. The targeted post-snapshot code fix is
+Public changes after that snapshot include documentation and the targeted
+post-snapshot code fix described below; the strict evidence remains tied to the
+audited pre-fix runtime unless explicitly labeled otherwise. The targeted fix is
 integrated as `7b4b5b72ad373d2293d51e3d11717314606ee442` (cherry-picked as
 `7b4b5b7`): it moves stale `EDGE_RESP` closure outside
 `_edge_response_lock` and adds a bounded regression test. Its focused
@@ -54,6 +55,10 @@ qualification, and secure cross-host TCP remain `PENDING` or `PARTIAL`.
 A previously recorded source unit/timing gate passed 954/954 unit tests and
 50/50 timing cases in each of five repetitions; those are unit/timing results
 only, not end-to-end acceptance.
+
+The integrated post-fix candidate's asset-free full suite passed 966 tests,
+with 141 explicit BYO-asset skips and one SDL warning. This validates the
+package and test surface only; skipped ROM-backed rows remain unqualified.
 
 Evidence remains separated by layer. Historical prior-candidate
 static/build/runtime evidence at `3399407aa04f6e5e496df628442597c03e0adcc6`

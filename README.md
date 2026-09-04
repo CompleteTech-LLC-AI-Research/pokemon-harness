@@ -245,6 +245,11 @@ diagnostic rather than a release result: the ROM-backed tests were skipped
 because this isolated checkout intentionally contains no ROMs, symbols, or
 save states.
 
+The integrated post-fix candidate's asset-free full suite passed 966 tests,
+with 141 explicit BYO-asset skips and one SDL warning. This is a clean
+package/test-surface regression result; the skipped ROM-backed rows remain
+outside its evidence boundary.
+
 Historical scoped Windows validation on 2026-09-02 used Windows Python 3.12.10 and new
 virtual environments in isolated checkouts. The editable install, `pip check`,
 source bootstrap, and the post-PR #23 pinned Cython build/check passed. The

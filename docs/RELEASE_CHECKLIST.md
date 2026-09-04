@@ -20,9 +20,10 @@ runtime evidence required by the capability being advertised.
 
 The current public documentation head for this checklist is
 `f048870bdbd4837b5494006ae49fe40510832a89` (2026-09-04). The last verified
-implementation/runtime snapshot under audit is
-`a8576b5ecb8e7039eefe0e02865b0bfc031387a7`; documentation-only public changes
-follow that code snapshot. The earlier merged implementation baseline was
+pre-fix implementation/runtime snapshot under audit is
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7`; public changes after that snapshot
+include the targeted network fix and documentation, so strict evidence below is
+pre-fix unless explicitly labeled otherwise. The earlier merged implementation baseline was
 `6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04), and the
 prior merged head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. No
 production sign-off is claimed here; the release gate remains `PARTIAL`.
@@ -91,6 +92,11 @@ the clean source strict-trade run is pre-fix at the
 `f048870bdbd4837b5494006ae49fe40510832a89` documentation snapshot and remains
 `PENDING`; the post-fix suite does not change the native trade `16/19`, native
 battle `17/19`, or source-trade acceptance boundaries.
+
+The integrated post-fix candidate's asset-free full suite passed 966 tests,
+with 141 explicit BYO-asset skips and one SDL warning. This is regression
+evidence for the package/test surface only; it does not qualify the skipped
+ROM-backed tiers.
 
 The clean source strict-trade gate is `PENDING`: it is still running in
 another isolated worktree, and no result is recorded until the lead supplies

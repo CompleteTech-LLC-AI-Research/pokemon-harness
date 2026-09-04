@@ -6,8 +6,9 @@ checkout. The live target is
 current public/docs head is
 `f048870bdbd4837b5494006ae49fe40510832a89` (PR #45, docs-only,
 2026-09-04). The last verified implementation/runtime snapshot under audit is
-`a8576b5ecb8e7039eefe0e02865b0bfc031387a7`; documentation-only public changes
-after that snapshot do not change the audited code. Its merged implementation
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7`; public changes after that snapshot
+include the targeted network fix described below and documentation, so strict
+evidence is labeled pre-fix unless explicitly stated otherwise. Its merged implementation
 baseline is
 `6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04). The prior
 merged head `daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03) and prior
@@ -157,6 +158,10 @@ complete without assets; skipped real-ROM tiers remain unverified. Historical
 fresh Windows validation covers install, source/Cython bootstrap,
 MCP stdio, and three-ROM Cython lifecycle checks, but not full native
 gameplay, real-ROM concurrent load, the remote trade/battle matrix, or macOS.
+
+The integrated post-fix candidate's asset-free full suite passed 966 tests,
+with 141 explicit BYO-asset skips and one SDL warning. This is package and
+test-surface evidence only; skipped real-ROM tiers remain unverified.
 
 Status semantics:
 
