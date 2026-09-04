@@ -17,9 +17,10 @@ runtime evidence required by the capability being advertised.
 ## Current audit snapshot
 
 The merged implementation head for this checklist is
-`71ca834d673c52eb74044089e92b09e7e3ae00a0` (2026-09-04). No current-head
-runtime or end-to-end rerun is claimed here; the release gate remains
-`PARTIAL`.
+`6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04); the prior
+merged head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. No full current-
+head matrix or native-runtime sign-off is claimed here; the release gate
+remains `PARTIAL`.
 
 The exact prior-candidate evidence at
 `3399407aa04f6e5e496df628442597c03e0adcc` recorded `1,094` tests collected in
@@ -59,7 +60,7 @@ and battle, vanilla fixture provenance, clean-install and broad-suite coverage,
 platform and real-ROM load coverage, actual MCP gameplay, independent review,
 and secure networking.
 
-The unmerged acceptance branch audited on 2026-09-04 passed current
+The acceptance update merged in PR #42 passed current
 source-runtime representative in-process and TCP Red-color/Yellow trade and
 battle checks, the 4/4 real MCP stdio suite, 954/954 unit tests, and 50/50
 timing cases in each of five repetitions. This is scoped candidate evidence,
@@ -75,7 +76,7 @@ does not itself establish MCP gameplay, trade, battle, or release readiness.
 ## Source and artifact hygiene
 
 - [x] The merged implementation head under audit is identified as
-  `71ca834d673c52eb74044089e92b09e7e3ae00a0`; the state-validity metadata is
+  `6d541b7867e82fa548c456008e6acd7fb1071586`; the state-validity metadata is
   additive, and this checklist is maintained in an isolated worktree separate
   from the protected dirty development checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,

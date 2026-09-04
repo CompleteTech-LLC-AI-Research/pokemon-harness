@@ -5,17 +5,18 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` at merged head
-`71ca834d673c52eb74044089e92b09e7e3ae00a0` (2026-09-04). This exact-head
-scope establishes the current candidate identity and release-status record;
-it does not carry forward superseded gameplay evidence. Earlier PR #35
+Status: `PARTIAL` at merged implementation head
+`6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04). The prior
+merged head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. This exact code-head
+scope establishes the current candidate identity and release-status record; it
+does not carry forward superseded gameplay evidence. Earlier PR #35
 introduced remote serial-edge dispatch at an explicit native instruction-batch
 boundary. The candidate history also contains serial save-state, bootstrap
 ownership and build-metadata cleanup, MCP teardown, gate-accounting, and
 partial-initialization cleanup changes. This is a `PARTIAL` publication
 candidate, not a `PRODUCTION-READY` release.
 
-The unmerged acceptance branch audited on 2026-09-04 adds bounded setup and
+The acceptance update merged in PR #42 adds bounded setup and
 matrix deadlines, runtime-provenance checks, fail-closed subprocess result
 validation, and network close diagnostics. Current source-runtime
 representative checks passed in-process and over TCP for Red-color/Yellow

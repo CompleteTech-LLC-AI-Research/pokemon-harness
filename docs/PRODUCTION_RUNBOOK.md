@@ -3,8 +3,8 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
-current merged head is
-`71ca834d673c52eb74044089e92b09e7e3ae00a0` (2026-09-04). The older merged
+current merged implementation head is
+`6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04). The prior merged
 head `daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03) and prior exact
 candidate snapshot `3399407aa04f6e5e496df628442597c03e0adcc6` (2026-09-04) are
 historical references, not current-head release evidence. External ROMs,
@@ -36,7 +36,7 @@ The release decision for the current merged head remains `PARTIAL`, not
 - TCP remains loopback-only, unauthenticated, and unencrypted;
 - timing-altered diagnostics are not acceptance evidence.
 
-The unmerged acceptance branch audited on 2026-09-04 has current source-runtime
+The acceptance update merged in PR #42 has current source-runtime
 representative evidence for in-process and TCP Red-color/Yellow trade and
 battle, plus 4/4 real MCP stdio tests. Its source unit/timing gate passed
 954/954 unit tests and 50/50 timing cases in each of five repetitions. These
@@ -806,7 +806,7 @@ transport or LinkMenu milestone as a completed trade or battle.
 
 ## 8. Current sign-off blockers
 
-The current merged head `71ca834d673c52eb74044089e92b09e7e3ae00a0` remains
+The current merged implementation head `6d541b7867e82fa548c456008e6acd7fb1071586` remains
 `PARTIAL`, not `PRODUCTION-READY`. The observed blockers are:
 
 1. The historical prior exact-candidate dual source and Cython unit/timing
