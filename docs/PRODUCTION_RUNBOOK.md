@@ -3,9 +3,9 @@
 This runbook defines how to prepare and evaluate a clean `pokered-harness`
 checkout. The live target is
 [`CompleteDotTech/pokemon`](https://github.com/CompleteDotTech/pokemon). The
-current public/docs head is
+pre-reconciliation public documentation baseline was
 `f048870bdbd4837b5494006ae49fe40510832a89` (PR #45, docs-only,
-2026-09-04). The last verified implementation/runtime snapshot under audit is
+2026-09-04), not the current public head. The last verified implementation/runtime snapshot under audit is
 `a8576b5ecb8e7039eefe0e02865b0bfc031387a7`; public changes after that snapshot
 include the targeted network fix described below and documentation, so strict
 evidence is labeled pre-fix unless explicitly stated otherwise. Its merged implementation
