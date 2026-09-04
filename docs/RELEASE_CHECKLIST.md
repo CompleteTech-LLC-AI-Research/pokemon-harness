@@ -161,6 +161,12 @@ timing 50/50 in each of five repetitions. The native probe/build and current
 focused 78/78 serial-link+network scope are separate scoped checks. These gates do
 not establish ROM-backed gameplay coverage.
 
+The current post-hardening asset-backed evidence used pinned ROM/SYM/fixtures
+and separate source/native interpreters: local 47/47 source/native
+(758.1s/38.1s) and remote 16/16 source/native (75.0s/28.8s). This does not
+satisfy the strict trade/battle matrix, provenance, security, platform, or
+clean-checkout release items.
+
 The pre-PR #27 source broad diagnostic remains incomplete: 418/703 tests
 completed before a 5,400-second supervisor bound (386 passed, 20 skipped, 12
 failed, and 285 not started). The failed cases were remote TCP timing cases
