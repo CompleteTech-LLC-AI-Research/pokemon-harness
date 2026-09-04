@@ -50,6 +50,19 @@ def _send_raw(sock: socket.socket, data: bytes) -> None:
         view = view[sent:]
 
 
+def _send_wire_frame(sock: socket.socket, body: bytes) -> None:
+    """Send one complete length-prefixed frame through a raw test socket."""
+    _send_raw(sock, struct.pack(">I", len(body)) + body)
+
+
+def _wait_for_reader_stop(link: TcpSerialLink, timeout_s: float = 1.0) -> None:
+    """Wait for a link reader to finish without allowing an unbounded test."""
+    deadline = time.monotonic() + timeout_s
+    while link._reader.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert not link._reader.is_alive(), "serial-link reader did not stop before deadline"
+
+
 def _make_tcp_pair(a_rom: str = "blue", b_rom: str = "blue") -> tuple[TcpSerialLink, TcpSerialLink]:
     """Spin up a listener + connector on localhost and return both ends."""
     port = _free_port()
@@ -141,9 +154,13 @@ def test_in_process_different_kinds_dont_cross():
 
 
 def test_in_process_timeout_when_peer_silent():
-    a, _b = InProcessSerialLink.pair("blue", "blue")
+    a, b = InProcessSerialLink.pair("blue", "blue")
     with pytest.raises(SerialLinkTimeout):
         a.exchange("orphan", b"\x00", timeout_ms=50)
+    assert not a.connected
+    assert not b.connected
+    with pytest.raises(SerialLinkClosed):
+        b.exchange("orphan", b"\x00", timeout_ms=50)
 
 
 def test_in_process_closed_after_close():
@@ -307,6 +324,25 @@ def test_tcp_timeout_when_peer_silent():
         client.close()
 
 
+def test_tcp_exchange_timeout_is_terminal():
+    server, client = _make_tcp_pair()
+    try:
+        started = time.monotonic()
+        with pytest.raises(SerialLinkTimeout):
+            client.exchange("stale", b"x", timeout_ms=75)
+        assert time.monotonic() - started < 1.0
+        assert not client.connected
+        _wait_for_reader_stop(client)
+
+        # EXCHANGE has no request identifier, so a timed-out channel cannot
+        # safely accept a later response or be reused for the same kind.
+        with pytest.raises(SerialLinkClosed):
+            client.exchange("stale", b"y", timeout_ms=75)
+    finally:
+        server.close()
+        client.close()
+
+
 def test_tcp_peer_close_causes_closed_error():
     server, client = _make_tcp_pair()
     server.close()
@@ -340,6 +376,71 @@ def test_tcp_peer_close_wakes_exchange_waiter_promptly():
         assert not worker.is_alive()
         assert result and isinstance(result[0], SerialLinkClosed)
     finally:
+        client.close()
+
+
+@pytest.mark.timing_sensitive
+@pytest.mark.parametrize(
+    "partial_frame",
+    [
+        pytest.param(b"\x00", id="partial-header"),
+        pytest.param(struct.pack(">I", 5) + b"x", id="partial-body"),
+    ],
+)
+def test_tcp_partial_frame_cannot_hold_exchange_past_deadline(partial_frame: bytes):
+    """A stalled frame read must not outlive the public exchange deadline."""
+    local, peer = socket.socketpair()
+    link = TcpSerialLink(local, "blue")
+    try:
+        _send_wire_frame(
+            peer,
+            bytes([serial_link_module.OP_HELLO]) + serial_link_module._pack_lp_str("blue"),
+        )
+        assert link.peer_rom_version == "blue"
+
+        # Leave the reader waiting for the rest of this frame. The exchange
+        # deadline must still close the channel and return to its caller.
+        _send_raw(peer, partial_frame)
+        started = time.monotonic()
+        with pytest.raises(SerialLinkTimeout):
+            link.exchange("partial", b"x", timeout_ms=100)
+        assert time.monotonic() - started < 1.0
+        assert not link.connected
+        _wait_for_reader_stop(link)
+    finally:
+        link.close()
+        peer.close()
+
+
+def test_tcp_clean_eof_is_not_reader_failure():
+    server, client = _make_tcp_pair()
+    try:
+        assert server.peer_rom_version == "blue"
+        client._sock.shutdown(socket.SHUT_WR)
+
+        _wait_for_reader_stop(server)
+        assert not server.connected
+        assert server._reader_exc is None
+        with pytest.raises(SerialLinkClosed):
+            server.exchange("after-eof", b"x", timeout_ms=50)
+    finally:
+        server.close()
+        client.close()
+
+
+def test_tcp_bye_is_not_reader_failure():
+    server, client = _make_tcp_pair()
+    try:
+        assert server.peer_rom_version == "blue"
+        client.close()
+
+        _wait_for_reader_stop(server)
+        assert not server.connected
+        assert server._reader_exc is None
+        with pytest.raises(SerialLinkClosed):
+            server.exchange("after-bye", b"x", timeout_ms=50)
+    finally:
+        server.close()
         client.close()
 
 
@@ -413,9 +514,13 @@ def test_tcp_close_sends_bye_before_shutdown():
         size = struct.unpack(">I", header)[0]
         assert peer.recv(size) == bytes([1, 4]) + b"blue"
         link.close()
+        assert not link.connected
+        assert not link._reader.is_alive()
         header = peer.recv(4)
         size = struct.unpack(">I", header)[0]
         assert peer.recv(size) == bytes([0xFE])
+        link.close()
+        assert not link.connected
     finally:
         link.close()
         peer.close()
@@ -454,6 +559,84 @@ def test_tcp_truncated_frame_is_protocol_error_and_closes():
         while server._reader_exc is None and time.monotonic() < deadline:
             time.sleep(0.005)
         assert isinstance(server._reader_exc, SerialLinkProtocolError)
+        assert not server.connected
+    finally:
+        server.close()
+        client.close()
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        pytest.param(b"\x7f", "unknown opcode", id="unknown-opcode"),
+        pytest.param(
+            bytes([serial_link_module.OP_HELLO])
+            + serial_link_module._pack_lp_str("blue")
+            + b"\x00",
+            "HELLO has trailing bytes",
+            id="hello-trailing-bytes",
+        ),
+        pytest.param(
+            bytes([serial_link_module.OP_EXCHANGE])
+            + serial_link_module._pack_lp_str("kind")
+            + b"\x00",
+            "length-prefixed bytes",
+            id="exchange-missing-length",
+        ),
+        pytest.param(
+            bytes([serial_link_module.OP_HELLO, 1, 0xFF]),
+            "not UTF-8",
+            id="hello-invalid-utf8",
+        ),
+    ],
+)
+def test_tcp_rejects_malformed_frames(body: bytes, message: str):
+    server, client = _make_tcp_pair()
+    try:
+        assert server.peer_rom_version == "blue"
+        _send_wire_frame(client._sock, body)
+
+        _wait_for_reader_stop(server)
+        assert isinstance(server._reader_exc, SerialLinkProtocolError)
+        assert message in str(server._reader_exc)
+        assert not server.connected
+    finally:
+        server.close()
+        client.close()
+
+
+def test_tcp_rejects_oversized_frame_before_body():
+    server, client = _make_tcp_pair()
+    try:
+        assert server.peer_rom_version == "blue"
+        # Do not send the body: the bounded header must be rejected before the
+        # reader waits for or allocates the advertised payload.
+        _send_raw(
+            client._sock,
+            struct.pack(">I", serial_link_module._MAX_FRAME_SIZE + 1),
+        )
+
+        _wait_for_reader_stop(server)
+        assert isinstance(server._reader_exc, SerialLinkProtocolError)
+        assert "frame too large" in str(server._reader_exc)
+        assert not server.connected
+    finally:
+        server.close()
+        client.close()
+
+
+def test_tcp_rejects_duplicate_hello():
+    server, client = _make_tcp_pair()
+    try:
+        assert server.peer_rom_version == "blue"
+        _send_wire_frame(
+            client._sock,
+            bytes([serial_link_module.OP_HELLO]) + serial_link_module._pack_lp_str("blue"),
+        )
+
+        _wait_for_reader_stop(server)
+        assert isinstance(server._reader_exc, SerialLinkProtocolError)
+        assert "duplicate HELLO" in str(server._reader_exc)
         assert not server.connected
     finally:
         server.close()
