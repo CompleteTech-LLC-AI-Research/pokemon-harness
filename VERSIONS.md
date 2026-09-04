@@ -46,10 +46,12 @@ default; Cython is an optional diagnostic build. The host's bare `python3` still
 lacks `ensurepip`,
 so that alternate standard-library venv path remains open.
 
-The current post-hardening asset-backed gate is scoped to the pinned
-ROM/SYM/fixtures and separate source/native interpreters: source local 47/47 in
-758.1s and native local 47/47 in 38.1s; source remote 16/16 in 75.0s and
-native remote 16/16 in 28.8s. This scoped result leaves the release `PARTIAL`;
+At verification commit `3399407aa04f6e5e496df628442597c03e0adcc6` (2026-09-04),
+the current asset tier verified 5/5 ROM hashes, 3/3 symbol hashes, and 3/3
+link fixtures. The remote tier recorded source 15/16 and native 16/16; the
+source failure was `test_subprocess_pair_reaches_link_menu_over_tcp`. No
+complete authoritative local report is available for this commit, so the
+local result remains `PENDING`. This scoped result leaves the release `PARTIAL`;
 the existing strict trade/battle, provenance, security, and platform blockers
 remain.
 
