@@ -95,6 +95,8 @@ _DEFAULT_SEND_TIMEOUT_SECONDS = 10.0
 _DEFAULT_ACCEPT_TIMEOUT_SECONDS = 30.0
 _SEND_POLL_SECONDS = 0.05
 _CONTROL_QUEUE_MAXSIZE = 256
+_FRAME_READ_TIMEOUT_SECONDS = 10.0
+_READ_POLL_SECONDS = 0.05
 _REARM_WAIT_SECONDS = 0.100
 _POST_BYTE_REARM_GRACE_SECONDS = 1.500
 _ACTIVE_EXCHANGE_GRACE_SECONDS = 1.000
@@ -1637,27 +1639,54 @@ class NetworkBackend:
         return snap
 
     def _recv_exactly(self, n: int) -> bytes:
+        """Read one frame fragment with a bounded partial-frame deadline.
+
+        An idle link is valid, so the first byte has no protocol timeout.
+        Once a fragment arrives, the remaining bytes must arrive within a
+        bounded interval. Short select polls let ``stop()`` interrupt a
+        reader waiting for either the first byte or the remainder.
+        """
+        if n < 0:
+            raise ValueError(f"read length must be non-negative, got {n}")
         buf = bytearray()
+        partial_deadline: float | None = None
         while len(buf) < n:
-            if self._closed or self._closed_event.is_set():
+            if self._closed_event.is_set():
                 raise NetworkBackendError("backend closed")
+            if partial_deadline is None:
+                wait_timeout = _READ_POLL_SECONDS
+            else:
+                remaining = partial_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise NetworkBackendError(
+                        "peer frame timed out while waiting for remaining bytes"
+                    )
+                wait_timeout = min(_READ_POLL_SECONDS, remaining)
+            try:
+                readable, _writable, exceptional = select.select(
+                    [self._sock], [], [self._sock], wait_timeout
+                )
+            except (OSError, ValueError) as exc:
+                if self._closed_event.is_set():
+                    raise NetworkBackendError("backend closed") from exc
+                raise NetworkBackendError(
+                    f"failed to poll socket while reading frame: {exc}"
+                ) from exc
+            if exceptional and not readable:
+                raise NetworkBackendError("socket became exceptional while reading frame")
+            if not readable:
+                continue
             try:
                 chunk = self._sock.recv(n - len(buf))
-            except BlockingIOError:
-                try:
-                    select.select([self._sock], [], [], _SEND_POLL_SECONDS)
-                except (OSError, ValueError) as exc:
-                    if self._closed or self._closed_event.is_set():
-                        raise NetworkBackendError("backend closed") from exc
-                    raise
-                continue
-            except InterruptedError:
+            except (TimeoutError, BlockingIOError, InterruptedError):
                 continue
             if not chunk:
                 if buf:
                     raise NetworkBackendError("peer closed socket mid-frame")
                 raise NetworkBackendError("peer closed socket")
             buf.extend(chunk)
+            if partial_deadline is None:
+                partial_deadline = time.monotonic() + _FRAME_READ_TIMEOUT_SECONDS
         return bytes(buf)
 
     @contextmanager
