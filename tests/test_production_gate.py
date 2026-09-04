@@ -765,6 +765,7 @@ def test_runtime_gate_orchestrator_runs_identical_selection_under_both_modes(tmp
 
     assert [result.mode for result in results] == ["source", "cython"]
     assert [call["mode"] for call in calls] == ["source", "cython"]
+    assert [call["python_executable"] for call in calls] == [Path("python")] * 2
     assert all(call["selected"] == selected for call in calls)
     assert all(call["required_tests_by_tier"] == required_tests for call in calls)
     assert all(call["required_nodeids_by_tier"] == required_nodeids for call in calls)
@@ -860,6 +861,103 @@ def test_dual_evidence_retains_both_explicit_runtime_results(tmp_path):
     assert "runtime-mode=both" in rendered
     assert "source: PASS" in rendered
     assert "cython: PASS" in rendered
+
+
+def test_dual_evidence_bundle_retains_failure_diagnostics_per_runtime(tmp_path):
+    source = _runtime_result("source")
+    cython = _runtime_result("cython", gate_problems=("probe failed",))
+    payload = gate.build_dual_evidence_payload(
+        project_root=tmp_path / "checkout",
+        rom_root=tmp_path / "rom",
+        fixture_root=tmp_path / "fixtures",
+        assets=[],
+        runtime_results=(source, cython),
+        overall="FAIL",
+        generated_at="2026-09-03T00:00:00+00:00",
+    )
+
+    assert gate.runtime_gates_pass((source, cython)) is False
+    assert [item["overall"] for item in payload["runtimes"]] == ["PASS", "FAIL"]
+    assert payload["runtimes"][1]["gate_problems"] == ["probe failed"]
+
+    paths = gate.write_evidence_bundle(tmp_path / "evidence", payload)
+    report = json.loads(paths["report"].read_text(encoding="utf-8"))
+    text = paths["text"].read_text(encoding="utf-8")
+    assert report["overall"] == "FAIL"
+    assert [item["mode"] for item in report["runtimes"]] == ["source", "cython"]
+    assert report["runtimes"][1]["gate_problems"] == ["probe failed"]
+    assert "cython: FAIL" in text
+    assert "probe failed" in text
+    gate.verify_evidence_bundle(tmp_path / "evidence")
+
+
+def _patch_main_inputs(monkeypatch, tmp_path):
+    monkeypatch.setattr(gate, "parse_expected_sha1", lambda _path: {})
+    monkeypatch.setattr(gate, "inspect_assets", lambda *_args: [])
+    monkeypatch.setattr(gate, "load_required_test_keys", lambda _root: ({}, ""))
+    monkeypatch.setattr(gate, "load_required_nodeids", lambda _root: ({}, ""))
+    return [
+        "--repo-root",
+        str(tmp_path),
+        "--rom-root",
+        str(tmp_path / "rom"),
+        "--fixture-root",
+        str(tmp_path / "fixtures"),
+        "--python",
+        str(tmp_path / "bin" / "python"),
+        "--unit-only",
+        "--format",
+        "json",
+    ]
+
+
+def test_main_preserves_single_runtime_json_schema(tmp_path, monkeypatch, capsys):
+    result = _runtime_result("source")
+    monkeypatch.setattr(gate, "run_runtime_gates", lambda **_kwargs: (result,))
+
+    exit_code = gate.main(_patch_main_inputs(monkeypatch, tmp_path))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["runtime"] == result.runtime
+    assert "runtime_mode" not in payload
+    assert "runtimes" not in payload
+    assert {
+        "runtime",
+        "collections",
+        "assets",
+        "tiers",
+        "gate_problems",
+        "overall",
+        "fixture_manifest",
+        "matrix_audit",
+    } <= payload.keys()
+
+
+def test_main_dual_alias_reports_each_runtime_and_fails_closed(tmp_path, monkeypatch, capsys):
+    source = _runtime_result("source")
+    cython = _runtime_result("cython", gate_problems=("cython probe failed",))
+    observed = {}
+
+    def fake_run_runtime_gates(**kwargs):
+        observed.update(kwargs)
+        return source, cython
+
+    monkeypatch.setattr(gate, "run_runtime_gates", fake_run_runtime_gates)
+    args = _patch_main_inputs(monkeypatch, tmp_path)
+    args[args.index("--format") + 1] = "json"
+    args.extend(("--runtime-mode", "dual"))
+
+    exit_code = gate.main(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert observed["runtime_mode"] == "both"
+    assert payload["runtime_mode"] == "both"
+    assert [item["mode"] for item in payload["runtimes"]] == ["source", "cython"]
+    assert payload["runtimes"][1]["overall"] == "FAIL"
+    assert payload["gate_problems"] == ["cython: cython probe failed"]
+    assert payload["overall"] == "FAIL"
 
 
 def test_environment_pins_selected_symbol_file_when_available(tmp_path, monkeypatch):
