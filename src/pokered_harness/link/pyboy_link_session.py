@@ -686,8 +686,12 @@ class PyBoyLinkSession:
         Pokémon hardware rule. Color Red/Blue and Yellow use different
         startup paths in their connection probe; for a cross-family pair the
         color Red/Blue endpoint must provide the first internal clock while
-        Yellow waits as the external-clock endpoint. Same-family pairs keep
-        the caller's listener/connector default.
+        Yellow waits as the external-clock endpoint. The Red/Blue family also
+        needs a stable startup orientation when it is linked over independent
+        processes: Red provides the initial clock and Blue waits as the
+        external-clock endpoint. Same-family pairs retain their
+        caller-provided orientation; full TCP trade acceptance for
+        Blue-to-Blue is not implied by this register-level policy.
 
         This is deliberately limited to the native FF01/FF02 serial
         registers. The ROM still observes the resulting bytes and owns
@@ -719,6 +723,14 @@ class PyBoyLinkSession:
             # source when it is paired with Yellow. The ROM remains free to
             # swap roles once the native handshake has completed.
             selected_internal = local != "yellow"
+        elif local in {"red", "blue"} and peer in {"red", "blue"} and local != peer:
+            # The color Red/Blue connection probe is direction-sensitive when
+            # two independently scheduled emulators start from the restored
+            # Cable Club fixture. Keep Red as the initial clock source and
+            # Blue as the external-clock side regardless of TCP direction.
+            # This is only a native FF01/FF02 bootstrap choice; the ROM still
+            # owns hSerialConnectionStatus and all later role changes.
+            selected_internal = local == "red"
 
         if selected_internal != self._network_is_internal_clock:
             self._network_is_internal_clock = selected_internal

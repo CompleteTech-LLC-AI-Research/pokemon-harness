@@ -579,6 +579,36 @@ def main() -> int:
             f"local={state_snapshot()} backend={backend_snapshot()}"
         )
 
+    def passive_sync(
+        *, ready_sync_id: int, release_sync_id: int, timeout: float = 60.0
+    ) -> None:
+        """Rendezvous without advancing the restored game state.
+
+        This is used only before the first gameplay input. Both peers have
+        already attached and negotiated their native roles, so progressing a
+        ROM while the other process is still in setup can create a
+        direction-dependent first exchange. A two-marker control handshake
+        keeps this pre-drive phase transport-only and clamps its deadline to
+        the process-wide cutoff.
+        """
+        backend = link._network_backend
+        deadline_at = min(deadline, time.monotonic() + timeout)
+
+        def wait_for_peer(marker: int, *, phase: str) -> None:
+            while not backend.poll_peer_sync(sync_id=marker):
+                remaining_at = deadline_at - time.monotonic()
+                if remaining_at <= 0:
+                    raise RuntimeError(
+                        f"passive sync {phase} did not converge: "
+                        f"marker={marker} backend={backend_snapshot()}"
+                    )
+                time.sleep(min(0.001, remaining_at))
+
+        backend.announce_sync(sync_id=ready_sync_id)
+        wait_for_peer(ready_sync_id, phase="ready")
+        backend.announce_sync(sync_id=release_sync_id)
+        wait_for_peer(release_sync_id, phase="release")
+
     def peer_shutdown_sync(
         *, ready_sync_id: int, release_sync_id: int, timeout: float = 120.0
     ) -> None:
@@ -832,6 +862,12 @@ def main() -> int:
         )
 
     try:
+        # Both independent processes must finish attach/HELLO/clock-role
+        # selection before either owner begins driving the restored game
+        # state. Keep this rendezvous passive: advancing one ROM while the
+        # other is still constructing its PyBoy can produce a
+        # direction-dependent first serial exchange.
+        passive_sync(ready_sync_id=99, release_sync_id=98, timeout=60.0)
         # Phase 1: walk UP ×3 + A-mash to reach LinkMenu.
         for _ in range(3):
             session.press("up", duration=6)
