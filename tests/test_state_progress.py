@@ -10,6 +10,38 @@ from pokered_harness.state.progress import (
 )
 from pokered_harness.symbols.loader import load_sym_text
 
+_OPTIONAL_PROGRESS_SYMBOLS = (
+    ("wPlayerID", 0xC010, "trainer_id"),
+    ("wPlayerMoney", 0xC020, "money"),
+    ("wPlayTimeHours", 0xC030, "play_time_hours"),
+    ("wPlayTimeMaxed", 0xC031, "play_time_maxed"),
+    ("wPlayTimeMinutes", 0xC032, "play_time_minutes"),
+    ("wPlayTimeSeconds", 0xC033, "play_time_seconds"),
+)
+
+
+def _relocated_progress_symbols(*, without: str | None = None):
+    lines = ["00:C001 wObtainedBadges"]
+    lines.extend(
+        f"00:{addr:04X} {name}"
+        for name, addr, _field in _OPTIONAL_PROGRESS_SYMBOLS
+        if name != without
+    )
+    return load_sym_text("\n".join(lines))
+
+
+def _write_relocated_progress(mem):
+    mem[0xC001] = 1 << Badge.THUNDER.value
+    mem[0xC010] = 0x12
+    mem[0xC011] = 0x34
+    mem[0xC020] = 0x12
+    mem[0xC021] = 0x34
+    mem[0xC022] = 0x56
+    mem[0xC030] = 7
+    mem[0xC031] = 1
+    mem[0xC032] = 42
+    mem[0xC033] = 58
+
 
 def test_no_badges_default(mem, symbols):
     state = parse_progress(mem, symbols)
@@ -56,6 +88,73 @@ def test_money_zero(mem, symbols):
     assert state.money == 0
 
 
+def test_progress_reads_every_field_from_its_symbol(mem):
+    sym = _relocated_progress_symbols()
+    _write_relocated_progress(mem)
+
+    state = parse_progress(mem, sym)
+
+    assert state.badges_raw == 1 << Badge.THUNDER.value
+    assert state.trainer_id == 0x1234
+    assert state.money == 123456
+    assert state.play_time_hours == 7
+    assert state.play_time_maxed is True
+    assert state.play_time_minutes == 42
+    assert state.play_time_seconds == 58
+
+
+@pytest.mark.parametrize(
+    ("missing_symbol", "field"),
+    [
+        (name, field)
+        for name, _addr, field in _OPTIONAL_PROGRESS_SYMBOLS
+        if name != "wPlayTimeMaxed"
+    ],
+)
+def test_missing_optional_progress_symbol_is_unknown(mem, missing_symbol, field):
+    sym = _relocated_progress_symbols(without=missing_symbol)
+    _write_relocated_progress(mem)
+
+    state = parse_progress(mem, sym)
+
+    assert getattr(state, field) is None
+    # Other symbol-backed values remain observable when only one optional
+    # label is absent; absence must not invalidate the whole snapshot.
+    assert state.badges_raw == 1 << Badge.THUNDER.value
+    assert state.trainer_id == (None if field == "trainer_id" else 0x1234)
+    assert state.money == (None if field == "money" else 123456)
+    assert state.play_time_hours == (
+        None if field == "play_time_hours" else 7
+    )
+    assert state.play_time_minutes == (
+        None if field == "play_time_minutes" else 42
+    )
+    assert state.play_time_seconds == (
+        None if field == "play_time_seconds" else 58
+    )
+    assert state.play_time_maxed is True
+
+
+def test_present_zero_progress_values_are_known(mem):
+    sym = _relocated_progress_symbols()
+
+    state = parse_progress(mem, sym)
+
+    assert state.trainer_id == 0
+    assert state.money == 0
+    assert state.play_time_hours == 0
+    assert state.play_time_minutes == 0
+    assert state.play_time_seconds == 0
+    assert state.play_time_maxed is False
+
+
+def test_progress_requires_badges_symbol(mem):
+    sym = load_sym_text("00:C010 wPlayerID\n")
+
+    with pytest.raises(KeyError, match="wObtainedBadges"):
+        parse_progress(mem, sym)
+
+
 def test_play_time_fields(mem, symbols):
     mem[0xDA40] = 2  # hours
     mem[0xDA41] = 0  # maxed flag
@@ -90,9 +189,21 @@ def test_event_flag_first_and_last_byte_boundaries(mem, symbols):
     assert read_event_flag(mem, symbols, 7) is True
 
 
+def test_event_flag_reads_from_symbol_declared_base(mem):
+    sym = load_sym_text("00:C100 wEventFlags\n")
+    mem[0xC100 + 1] = 1 << 3
+
+    assert read_event_flag(mem, sym, 11) is True
+
+
 def test_event_flag_negative_bit_rejected(mem, symbols):
     with pytest.raises(ValueError):
         read_event_flag(mem, symbols, -1)
+
+
+def test_event_flag_requires_symbol_base(mem):
+    with pytest.raises(KeyError, match="wEventFlags"):
+        read_event_flag(mem, load_sym_text(""), 0)
 
 
 def test_progress_optional_symbols_absent(mem):
@@ -102,4 +213,8 @@ def test_progress_optional_symbols_absent(mem):
     assert state.trainer_id is None
     assert state.money is None
     assert state.play_time_hours is None
+    assert state.play_time_minutes is None
+    assert state.play_time_seconds is None
+    # Keep the existing bool API: without this optional label, False is a
+    # compatibility default, not evidence that the flag was observed.
     assert state.play_time_maxed is False

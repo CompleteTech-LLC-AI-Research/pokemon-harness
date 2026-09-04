@@ -46,12 +46,19 @@ default; Cython is an optional diagnostic build. The host's bare `python3` still
 lacks `ensurepip`,
 so that alternate standard-library venv path remains open.
 
-The current post-hardening asset-backed gate is scoped to the pinned
-ROM/SYM/fixtures and separate source/native interpreters: source local 47/47 in
-758.1s and native local 47/47 in 38.1s; source remote 16/16 in 75.0s and
-native remote 16/16 in 28.8s. This scoped result leaves the release `PARTIAL`;
-the existing strict trade/battle, provenance, security, and platform blockers
-remain.
+Exact-head verification at commit `3399407aa04f6e5e496df628442597c03e0adcc6`
+(2026-09-04) passed 5/5 ROM hashes, 3/3 symbol hashes, 3/3 fixture hashes,
+and the 10-entry fixture manifest. In both source and native runtimes, dual
+unit collection was 1,094 with 949 passed, and timing passed 50/50 in each of
+five repetitions. The asset-backed tiers passed source local 47/47 in 531.3477s
+and native local 47/47 in 38.2974s; source remote 16/16 in 35.6044s and native
+remote 16/16 in 30.8627s. The earlier source 15/16 result is invalid
+shared-dirty-vendor environment evidence, not an exact-head failure; its
+`test_subprocess_pair_reaches_link_menu_over_tcp` failure came from that
+environment. The six canonical fixture rows remain `verified` and the four
+vanilla-derived rows remain `PARTIAL`; strict trade/battle qualification and
+the existing provenance, security, and platform caveats remain, so the release
+stays `PARTIAL`.
 
 Prior integrated source and Cython transport slices passed remote 15/15 and
 the Cython local/session slice passed 47/47. Those are scoped follow-up

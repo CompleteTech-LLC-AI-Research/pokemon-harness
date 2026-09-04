@@ -1213,7 +1213,12 @@ def _dispatch_link_tool(
                     _remaining(deadline),
                     expected_peer_rom_version=expected_peer_version,
                 )
-                network_session.negotiate_network_clock_role(peer_version)
+                _negotiate_network_clock_role(
+                    session,
+                    network_session,
+                    peer_version,
+                    timeout_s=_remaining(deadline),
+                )
             else:
                 _require_native_network_contract(
                     session,
@@ -1595,6 +1600,25 @@ def _attach_network_backend(
     return network_session
 
 
+def _negotiate_network_clock_role(
+    session: Session,
+    network_session: PyBoyLinkSession,
+    peer_rom_version: str,
+    *,
+    timeout_s: float,
+) -> bool | None:
+    """Negotiate native serial registers while owning the Session lock.
+
+    ``PyBoyLinkSession.negotiate_network_clock_role`` intentionally owns the
+    link-session lifecycle and serial gate, but it mutates the attached
+    PyBoy serial cores directly. MCP callers must also hold the owning
+    :class:`Session` lock so a concurrent step, state operation, or teardown
+    cannot observe or modify the registers mid-negotiation.
+    """
+    with session.locked(timeout_s=max(0.0, timeout_s)):
+        return network_session.negotiate_network_clock_role(peer_rom_version)
+
+
 def _bind_listener(host: str, port: int) -> socket.socket:
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     listener = socket.socket(family, socket.SOCK_STREAM)
@@ -1782,8 +1806,11 @@ def _accept_remote(
                         timeout_s,
                         expected_peer_rom_version=expected_peer_rom_version,
                     )
-                    network_session.negotiate_network_clock_role(
-                        transport.peer_rom_version
+                    _negotiate_network_clock_role(
+                        session,
+                        network_session,
+                        transport.peer_rom_version,
+                        timeout_s=timeout_s,
                     )
                 else:
                     _require_native_network_contract(

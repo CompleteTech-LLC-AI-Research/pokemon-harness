@@ -279,7 +279,7 @@ class RemoteLinkEndpoint:
                 )
             except (SerialLinkClosed, SerialLinkTimeout):
                 return  # leave recv cell untouched; game will retry/fail
-            if peer_bytes:
+            if isinstance(peer_bytes, bytes) and len(peer_bytes) == 1:
                 mem[recv_addr] = peer_bytes[0] & 0xFF
 
         self._register_serial_hook("Serial_ExchangeNybble", _cb)
@@ -307,7 +307,7 @@ class RemoteLinkEndpoint:
                 )
             except (SerialLinkClosed, SerialLinkTimeout):
                 return
-            if len(peer_bytes) >= 2:
+            if isinstance(peer_bytes, bytes) and len(peer_bytes) == 2:
                 mem[recv_addr] = peer_bytes[0] & 0xFF
                 mem[recv_addr + 1] = peer_bytes[1] & 0xFF
 
@@ -374,7 +374,7 @@ class RemoteLinkEndpoint:
                 )
             except (SerialLinkClosed, SerialLinkTimeout):
                 return  # leave buffer untouched; peer cable unplugged
-            if len(peer_bytes) != bc:
+            if not isinstance(peer_bytes, bytes) or len(peer_bytes) != bc:
                 return  # protocol mismatch — drop rather than corrupt
             for i, b in enumerate(peer_bytes):
                 mem[(de + i) & 0xFFFF] = b & 0xFF

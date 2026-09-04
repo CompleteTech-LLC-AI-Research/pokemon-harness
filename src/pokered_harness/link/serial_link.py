@@ -39,7 +39,11 @@ The payload's first byte is an opcode:
 Matching is FIFO within a given ``kind`` — important because the game
 may issue ``Serial_ExchangeBytes`` multiple times during one trade and
 we can't rely on strict one-at-a-time pairing if either peer runs a
-few frames ahead.
+few frames ahead. Each endpoint permits only one locally active exchange
+for a given ``kind``; this prevents two local callers from racing for the
+same unidentifiable FIFO response. The v1 frame has no request identifier,
+so a timeout or cancellation after a request is sent closes the channel;
+independent late-response recovery requires a versioned wire protocol.
 
 Threading model
 ---------------
@@ -186,6 +190,41 @@ def _validate_timeout_seconds(timeout_s: float, name: str) -> float:
     return value
 
 
+def _validate_cancel_event(cancel_event: threading.Event | None) -> threading.Event | None:
+    if cancel_event is None:
+        return None
+    if not callable(getattr(cancel_event, "is_set", None)) or not callable(
+        getattr(cancel_event, "wait", None)
+    ):
+        raise TypeError("cancel_event must provide is_set() and wait()")
+    return cancel_event
+
+
+def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise SerialLinkClosed("exchange cancelled")
+
+
+def _acquire_exchange_slot(
+    lock: threading.Lock,
+    *,
+    kind: str,
+    deadline: float,
+    timeout_ms: int,
+    cancel_event: threading.Event | None,
+) -> None:
+    """Acquire the one-in-flight slot without hiding cancellation/deadlines."""
+    while True:
+        _raise_if_cancelled(cancel_event)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SerialLinkTimeout(
+                f"exchange slot for kind={kind!r} unavailable within {timeout_ms}ms"
+            )
+        if lock.acquire(timeout=min(_IO_POLL_S, remaining)):
+            return
+
+
 def _validate_port(port: int, *, allow_zero: bool = False) -> int:
     if isinstance(port, bool) or not isinstance(port, int):
         raise TypeError("port must be an integer")
@@ -219,13 +258,23 @@ class SerialLink(Protocol):
         complete."""
         ...
 
-    def exchange(self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000) -> bytes:
+    def exchange(
+        self,
+        kind: str,
+        my_bytes: bytes,
+        *,
+        timeout_ms: int = 5000,
+        cancel_event: threading.Event | None = None,
+    ) -> bytes:
         """Send ``my_bytes`` tagged with ``kind`` and block until peer
         sends a matching EXCHANGE for the same ``kind``. Returns peer's
         bytes.
 
         FIFO within kind: two rapid back-to-back exchanges of the same
-        kind pair up in order.
+        kind pair up in order. ``cancel_event`` is optional and is polled
+        while waiting. If cancellation happens after this call sends its
+        request, the connection is closed because v1 has no request id with
+        which a later response could be safely correlated.
         """
         ...
 
@@ -451,6 +500,8 @@ class TcpSerialLink:
         self._inbound_lock = threading.Lock()
         self._inbound_frame_count = 0
         self._inbound_byte_count = 0
+        self._exchange_locks: dict[str, threading.Lock] = {}
+        self._exchange_locks_lock = threading.Lock()
         self._reader_exc: Exception | None = None
         self._hello_received = threading.Event()
 
@@ -573,48 +624,80 @@ class TcpSerialLink:
     def peer_rom_version(self) -> str:
         return self._wait_for_hello(_HELLO_TIMEOUT_SECONDS)
 
-    def exchange(self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000) -> bytes:
+    def exchange(
+        self,
+        kind: str,
+        my_bytes: bytes,
+        *,
+        timeout_ms: int = 5000,
+        cancel_event: threading.Event | None = None,
+    ) -> bytes:
         timeout_ms = _validate_timeout_ms(timeout_ms)
         kind = _validate_exchange_kind(kind)
         payload = _coerce_exchange_payload(my_bytes)
+        cancel_event = _validate_cancel_event(cancel_event)
         if self._is_closed():
             raise SerialLinkClosed("link is closed")
         self._raise_if_reader_failed()
 
         deadline = time.monotonic() + timeout_ms / 1000.0
-        self._wait_for_hello(max(0.0, deadline - time.monotonic()))
-        frame = bytes([OP_EXCHANGE]) + _pack_lp_str(kind) + _pack_lp_bytes(payload)
-        with self._inbound_lock:
-            q = self._get_inbound_queue_locked(kind)
-        self._send_frame(frame, deadline=deadline)
-
-        while True:
-            if self._closed_event.is_set():
-                self._raise_if_reader_failed()
-                raise SerialLinkClosed("link is closed")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                self._raise_if_reader_failed()
-                error = SerialLinkTimeout(
-                    f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
-                )
-                # EXCHANGE has no request id.  Leaving the channel reusable
-                # after a timeout would let a delayed response satisfy a
-                # later call of the same kind, so timeout is terminal and a
-                # fresh connection is required.
-                self._mark_closed(error)
-                self._join_reader()
-                raise error
+        exchange_lock = self._get_exchange_lock(kind)
+        _acquire_exchange_slot(
+            exchange_lock,
+            kind=kind,
+            deadline=deadline,
+            timeout_ms=timeout_ms,
+            cancel_event=cancel_event,
+        )
+        try:
+            _raise_if_cancelled(cancel_event)
+            self._wait_for_hello(max(0.0, deadline - time.monotonic()), cancel_event=cancel_event)
+            _raise_if_cancelled(cancel_event)
+            frame = bytes([OP_EXCHANGE]) + _pack_lp_str(kind) + _pack_lp_bytes(payload)
             with self._inbound_lock:
-                try:
-                    payload = q.get_nowait()
-                except queue.Empty:
-                    payload = None
+                q = self._get_inbound_queue_locked(kind)
+            self._send_frame(frame, deadline=deadline, cancel_event=cancel_event)
+
+            while True:
+                if self._closed_event.is_set():
+                    self._raise_if_reader_failed()
+                    raise SerialLinkClosed("link is closed")
+                if cancel_event is not None and cancel_event.is_set():
+                    error = SerialLinkClosed("exchange cancelled")
+                    # A response that arrives after cancellation has no
+                    # request id to identify it. Make the v1 channel
+                    # terminal rather than allowing response poisoning.
+                    self._mark_closed(error)
+                    self._join_reader()
+                    raise error
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._raise_if_reader_failed()
+                    error = SerialLinkTimeout(
+                        f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
+                    )
+                    # EXCHANGE has no request id. Leaving the channel reusable
+                    # after a timeout would let a delayed response satisfy a
+                    # later call of the same kind, so timeout is terminal and a
+                    # fresh connection is required.
+                    self._mark_closed(error)
+                    self._join_reader()
+                    raise error
+                with self._inbound_lock:
+                    try:
+                        payload = q.get_nowait()
+                    except queue.Empty:
+                        payload = None
+                    else:
+                        self._inbound_frame_count -= 1
+                        self._inbound_byte_count -= len(payload)
+                        return payload
+                if cancel_event is None:
+                    self._closed_event.wait(timeout=min(_IO_POLL_S, remaining))
                 else:
-                    self._inbound_frame_count -= 1
-                    self._inbound_byte_count -= len(payload)
-                    return payload
-            self._closed_event.wait(timeout=min(_IO_POLL_S, remaining))
+                    cancel_event.wait(timeout=min(_IO_POLL_S, remaining))
+        finally:
+            exchange_lock.release()
 
     def close(self) -> None:
         with self._close_lock:
@@ -707,6 +790,17 @@ class TcpSerialLink:
         with self._state_lock:
             return self._closed
 
+    def _get_exchange_lock(self, kind: str) -> threading.Lock:
+        with self._exchange_locks_lock:
+            lock = self._exchange_locks.get(kind)
+            if lock is not None:
+                return lock
+            if len(self._exchange_locks) >= _MAX_INBOUND_KINDS:
+                raise SerialLinkProtocolError("exchange kind limit exceeded")
+            lock = threading.Lock()
+            self._exchange_locks[kind] = lock
+            return lock
+
     def _get_inbound_queue_locked(self, kind: str) -> queue.Queue[bytes]:
         q = self._inbound.get(kind)
         if q is not None:
@@ -746,11 +840,23 @@ class TcpSerialLink:
         except OSError:
             pass
 
-    def _send_frame(self, payload: bytes, *, deadline: float | None = None) -> None:
+    def _send_frame(
+        self,
+        payload: bytes,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         with self._write_lock:
-            self._send_frame_locked(payload, deadline=deadline)
+            self._send_frame_locked(payload, deadline=deadline, cancel_event=cancel_event)
 
-    def _send_frame_locked(self, payload: bytes, *, deadline: float | None = None) -> None:
+    def _send_frame_locked(
+        self,
+        payload: bytes,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         payload = bytes(payload)
         if not payload:
             raise ValueError("frame payload must not be empty")
@@ -763,10 +869,14 @@ class TcpSerialLink:
             write_deadline = min(write_deadline, deadline)
         if self._is_closed():
             raise SerialLinkClosed("link is closed")
+        _raise_if_cancelled(cancel_event)
         offset = 0
         while offset < len(frame):
             if self._is_closed():
                 raise SerialLinkClosed("link is closed")
+            if cancel_event is not None and cancel_event.is_set():
+                self._mark_closed()
+                raise SerialLinkClosed("exchange cancelled")
             try:
                 sent = self._sock.send(frame[offset:])
             except (BlockingIOError, InterruptedError):
@@ -798,15 +908,28 @@ class TcpSerialLink:
                 raise SerialLinkClosed("socket write returned no progress")
             offset += sent
 
-    def _wait_for_hello(self, timeout_s: float) -> str:
-        if not self._hello_received.wait(timeout=max(0.0, timeout_s)):
-            self._raise_if_reader_failed()
-            error = SerialLinkTimeout("peer did not send HELLO before the deadline")
-            # HELLO has no request id or retry epoch. A timed-out handshake
-            # cannot safely be resumed on this socket.
-            self._mark_closed(error)
-            self._join_reader()
-            raise error
+    def _wait_for_hello(
+        self,
+        timeout_s: float,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while not self._hello_received.is_set():
+            _raise_if_cancelled(cancel_event)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._raise_if_reader_failed()
+                error = SerialLinkTimeout("peer did not send HELLO before the deadline")
+                # HELLO has no request id or retry epoch. A timed-out handshake
+                # cannot safely be resumed on this socket.
+                self._mark_closed(error)
+                self._join_reader()
+                raise error
+            if cancel_event is None:
+                self._hello_received.wait(timeout=min(_IO_POLL_S, remaining))
+            else:
+                cancel_event.wait(timeout=min(_IO_POLL_S, remaining))
         self._raise_if_reader_failed()
         if self._is_closed():
             raise SerialLinkClosed("link is closed before HELLO completed")
@@ -866,6 +989,8 @@ class InProcessSerialLink:
         self._out_lock, self._in_lock = locks
         self._state = state if state is not None else _InProcessState()
         self._closed = False
+        self._exchange_locks: dict[str, threading.Lock] = {}
+        self._exchange_locks_lock = threading.Lock()
 
     @classmethod
     def pair(
@@ -905,29 +1030,51 @@ class InProcessSerialLink:
     def peer_rom_version(self) -> str:
         return self._peer_rom
 
-    def exchange(self, kind: str, my_bytes: bytes, *, timeout_ms: int = 5000) -> bytes:
+    def exchange(
+        self,
+        kind: str,
+        my_bytes: bytes,
+        *,
+        timeout_ms: int = 5000,
+        cancel_event: threading.Event | None = None,
+    ) -> bytes:
         timeout_ms = _validate_timeout_ms(timeout_ms)
         kind = _validate_exchange_kind(kind)
         payload = _coerce_exchange_payload(my_bytes)
+        cancel_event = _validate_cancel_event(cancel_event)
         if self._state.closed.is_set():
             raise SerialLinkClosed("link is closed")
         deadline = time.monotonic() + timeout_ms / 1000.0
-        with self._out_lock:
-            if self._state.closed.is_set():
-                raise SerialLinkClosed("link is closed")
-            try:
-                self._out[kind].put_nowait(payload)
-            except queue.Full as exc:
-                self._state.closed.set()
-                raise SerialLinkProtocolError(
-                    f"inbound EXCHANGE queue is full for kind={kind!r}"
-                ) from exc
-        with self._in_lock:
-            q = self._in[kind]
+        exchange_lock = self._get_exchange_lock(kind)
+        _acquire_exchange_slot(
+            exchange_lock,
+            kind=kind,
+            deadline=deadline,
+            timeout_ms=timeout_ms,
+            cancel_event=cancel_event,
+        )
+        request_sent = False
         try:
+            _raise_if_cancelled(cancel_event)
+            with self._out_lock:
+                if self._state.closed.is_set():
+                    raise SerialLinkClosed("link is closed")
+                try:
+                    self._out[kind].put_nowait(payload)
+                except queue.Full as exc:
+                    self._state.closed.set()
+                    raise SerialLinkProtocolError(
+                        f"inbound EXCHANGE queue is full for kind={kind!r}"
+                    ) from exc
+            request_sent = True
+            with self._in_lock:
+                q = self._in[kind]
             while True:
                 if self._state.closed.is_set():
                     raise SerialLinkClosed("link is closed")
+                if cancel_event is not None and cancel_event.is_set():
+                    self.close()
+                    raise SerialLinkClosed("exchange cancelled")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise SerialLinkTimeout(
@@ -936,13 +1083,30 @@ class InProcessSerialLink:
                 try:
                     return q.get_nowait()
                 except queue.Empty:
-                    self._state.closed.wait(timeout=min(_IO_POLL_S, remaining))
+                    if cancel_event is None:
+                        self._state.closed.wait(timeout=min(_IO_POLL_S, remaining))
+                    else:
+                        cancel_event.wait(timeout=min(_IO_POLL_S, remaining))
         except SerialLinkTimeout:
             # EXCHANGE has no request identifier. A delayed response after a
             # timeout cannot safely be matched to a later call of this kind,
             # so the shared in-process stream becomes terminal too.
-            self.close()
+            if request_sent:
+                self.close()
             raise
+        finally:
+            exchange_lock.release()
+
+    def _get_exchange_lock(self, kind: str) -> threading.Lock:
+        with self._exchange_locks_lock:
+            lock = self._exchange_locks.get(kind)
+            if lock is not None:
+                return lock
+            if len(self._exchange_locks) >= _MAX_INBOUND_KINDS:
+                raise SerialLinkProtocolError("exchange kind limit exceeded")
+            lock = threading.Lock()
+            self._exchange_locks[kind] = lock
+            return lock
 
     def close(self) -> None:
         self._closed = True

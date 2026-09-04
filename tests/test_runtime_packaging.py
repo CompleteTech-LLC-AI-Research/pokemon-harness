@@ -8,12 +8,15 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import sysconfig
 import tempfile
+import time
 import tomllib
 from pathlib import Path, PureWindowsPath
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from pyboy.core.serial import Serial
@@ -305,6 +308,17 @@ def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
     assert "cython_compiled" in bootstrap
 
 
+def test_bootstrap_pins_build_dependencies_and_disables_implicit_resolution() -> None:
+    module = _load_bootstrap()
+
+    assert module.BUILD_REQUIREMENTS == (
+        "setuptools==77.0.3",
+        "wheel==0.45.1",
+        "cython==3.0.12",
+        "numpy==2.5.2",
+    )
+
+
 def _load_bootstrap():
     spec = importlib.util.spec_from_file_location(
         "pokered_bootstrap_runtime_test", ROOT / "scripts" / "bootstrap_pyboy.py"
@@ -318,13 +332,242 @@ def _load_bootstrap():
 def test_bootstrap_removes_transient_pyboy_metadata(tmp_path, monkeypatch) -> None:
     module = _load_bootstrap()
     metadata_dir = tmp_path / "pyboy.egg-info"
+    monkeypatch.setattr(module, "PYBOY_SOURCE", tmp_path)
+    was_present = module._metadata_was_present()
     metadata_dir.mkdir()
     (metadata_dir / "PKG-INFO").write_text("generated", encoding="utf-8")
-    monkeypatch.setattr(module, "PYBOY_SOURCE", tmp_path)
 
-    module._remove_generated_pyboy_metadata()
+    module._remove_generated_pyboy_metadata(was_present=was_present)
 
     assert not metadata_dir.exists()
+
+
+def test_bootstrap_cleanup_refuses_a_symlinked_metadata_directory(tmp_path, monkeypatch) -> None:
+    module = _load_bootstrap()
+    source_root = tmp_path / "pyboy-src"
+    source_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    metadata_dir = source_root / "pyboy.egg-info"
+    try:
+        metadata_dir.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("directory symlinks are unavailable on this platform")
+    monkeypatch.setattr(module, "PYBOY_SOURCE", source_root)
+
+    module._remove_generated_pyboy_metadata(was_present=False)
+
+    assert metadata_dir.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
+def test_bootstrap_cleanup_does_not_mask_metadata_removal_errors(tmp_path, monkeypatch) -> None:
+    module = _load_bootstrap()
+    source_root = tmp_path / "pyboy-src"
+    source_root.mkdir()
+    metadata_dir = source_root / "pyboy.egg-info"
+    metadata_dir.mkdir()
+    monkeypatch.setattr(module, "PYBOY_SOURCE", source_root)
+
+    def refuse_removal(_path) -> None:
+        raise PermissionError("metadata is temporarily locked")
+
+    monkeypatch.setattr(module.shutil, "rmtree", refuse_removal)
+
+    module._remove_generated_pyboy_metadata(was_present=False)
+
+    assert metadata_dir.is_dir()
+
+
+def test_bootstrap_cleanup_preserves_preexisting_metadata(tmp_path, monkeypatch) -> None:
+    module = _load_bootstrap()
+    source_root = tmp_path / "pyboy-src"
+    source_root.mkdir()
+    metadata_dir = source_root / "pyboy.egg-info"
+    metadata_dir.mkdir()
+    (metadata_dir / "PKG-INFO").write_text("preexisting", encoding="utf-8")
+    monkeypatch.setattr(module, "PYBOY_SOURCE", source_root)
+
+    module._remove_generated_pyboy_metadata(was_present=True)
+
+    assert (metadata_dir / "PKG-INFO").read_text(encoding="utf-8") == "preexisting"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group descendant checks require POSIX")
+def test_bootstrap_timeout_terminates_posix_process_descendants(tmp_path) -> None:
+    module = _load_bootstrap()
+    pid_file = tmp_path / "descendant.pid"
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(
+        "import subprocess\n"
+        "import sys\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        "Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf-8",
+    )
+
+    descendant_pid: int | None = None
+
+    def pid_is_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            module._run_bounded(
+                [sys.executable, str(launcher), str(pid_file)],
+                cwd=ROOT,
+                env=os.environ.copy(),
+                timeout=0.5,
+            )
+
+        deadline = time.monotonic() + 5.0
+        while not pid_file.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pid_file.is_file(), "launcher did not publish its descendant PID"
+        descendant_pid = int(pid_file.read_text(encoding="ascii"))
+
+        deadline = time.monotonic() + 5.0
+        while pid_is_alive(descendant_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not pid_is_alive(descendant_pid), "timeout left an installer descendant alive"
+    finally:
+        if descendant_pid is not None and pid_is_alive(descendant_pid):
+            os.kill(descendant_pid, signal.SIGKILL)
+
+
+def test_bootstrap_interrupt_runs_descendant_safe_cleanup(monkeypatch) -> None:
+    module = _load_bootstrap()
+
+    class InterruptingProcess:
+        pid = 12345
+
+        def wait(self, timeout) -> int:
+            raise KeyboardInterrupt
+
+    process = InterruptingProcess()
+    terminated: list[object] = []
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(module, "_terminate_process_tree", terminated.append)
+
+    with pytest.raises(KeyboardInterrupt):
+        module._run_bounded(["installer"], timeout=1.0)
+
+    assert terminated == [process]
+
+
+def test_bootstrap_windows_timeout_uses_recursive_taskkill(monkeypatch) -> None:
+    module = _load_bootstrap()
+    process_calls: list[tuple[list[str], dict]] = []
+
+    class Process:
+        pid = 12345
+
+        def wait(self, timeout) -> int:
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    def fake_run(command, **kwargs):
+        process_calls.append((list(command), kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(module.shutil, "which", lambda name: "C:/Windows/System32/taskkill.exe")
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    module._terminate_process_tree(Process())
+
+    assert process_calls == [
+        (
+            ["C:/Windows/System32/taskkill.exe", "/PID", "12345", "/T", "/F"],
+            {
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "check": False,
+                "timeout": module.PROCESS_TERMINATION_GRACE_SECONDS,
+            },
+        )
+    ]
+
+
+def test_bootstrap_source_validation_rejects_a_symlinked_vendor_root(tmp_path, monkeypatch) -> None:
+    module = _load_bootstrap()
+    actual_root = tmp_path / "actual-pyboy"
+    actual_root.mkdir()
+    (actual_root / "POKERED_HARNESS_PYBOY_REVISION").write_text(
+        EXPECTED_PYBOY_REVISION + "\n", encoding="ascii"
+    )
+    linked_root = tmp_path / "linked-pyboy"
+    try:
+        linked_root.symlink_to(actual_root, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("directory symlinks are unavailable on this platform")
+    monkeypatch.setattr(module, "PYBOY_SOURCE", linked_root)
+    monkeypatch.setattr(
+        module,
+        "REVISION_FILE",
+        linked_root / "POKERED_HARNESS_PYBOY_REVISION",
+    )
+
+    with pytest.raises(SystemExit):
+        module._validate_source()
+
+
+def test_bootstrap_rejects_modules_hidden_inside_a_foreign_distribution_root(
+    tmp_path, monkeypatch
+) -> None:
+    module = _load_bootstrap()
+    pinned_root = tmp_path / "vendor" / "pyboy-src"
+    pinned_root.mkdir(parents=True)
+    site_packages = tmp_path / "site-packages"
+    foreign_root = site_packages / "untrusted"
+    foreign_root.mkdir(parents=True)
+    module_paths = {
+        name: foreign_root / f"{name.rsplit('.', 1)[-1]}.py" for name in module.RUNTIME_MODULES
+    }
+    fake_modules = {name: ModuleType(name) for name in module.RUNTIME_MODULES}
+    for name, fake_module in fake_modules.items():
+        fake_module.__file__ = str(module_paths[name])
+    fake_pyboy = fake_modules["pyboy"]
+    fake_pyboy.__version__ = "2.7.0"
+    fake_pyboy.__pokered_harness_revision__ = EXPECTED_PYBOY_REVISION
+    fake_utils = fake_modules["pyboy.utils"]
+    fake_utils.cython_compiled = False
+    fake_pyboy.utils = fake_utils
+    monkeypatch.setattr(module, "PYBOY_SOURCE", pinned_root)
+    monkeypatch.setattr(module.importlib, "import_module", fake_modules.__getitem__)
+    monkeypatch.setitem(sys.modules, "pyboy", fake_pyboy)
+
+    class Distribution:
+        def locate_file(self, relative) -> Path:
+            return site_packages / Path(relative)
+
+    monkeypatch.setattr(module.importlib.metadata, "distribution", lambda _name: Distribution())
+    monkeypatch.setattr(module, "_package_distributions", lambda _package: {"pokered-harness"})
+    monkeypatch.setattr(
+        module,
+        "_new_serial_instance",
+        lambda: SimpleNamespace(
+            backend=object(), apply_external_edge=lambda *_args: None, peek_out_bit=lambda: 0
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="loaded outside"):
+        module._verify_runtime("source")
 
 
 def test_bootstrap_rehydrates_missing_pip(monkeypatch) -> None:
@@ -347,7 +590,7 @@ def test_bootstrap_rehydrates_missing_pip(monkeypatch) -> None:
             return Result(0)
         raise AssertionError(f"unexpected command: {command!r}")
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_bounded", fake_run)
 
     assert module._pip_command() == [sys.executable, "-m", "pip", "install"]
     assert calls == [
@@ -368,7 +611,7 @@ def test_bootstrap_uses_uv_when_pip_and_ensurepip_are_unavailable(monkeypatch) -
         calls.append(list(command))
         return Result()
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_bounded", fake_run)
     monkeypatch.setattr(module.shutil, "which", lambda name: "/opt/uv" if name == "uv" else None)
 
     assert module._pip_command() == ["/opt/uv", "pip", "install", "--python", sys.executable]
@@ -392,16 +635,27 @@ def test_bootstrap_source_mode_installs_the_harness_distribution(monkeypatch) ->
     monkeypatch.setattr(module, "_validate_source", lambda: None)
     monkeypatch.setattr(module, "_verify_runtime", lambda _mode: None)
     monkeypatch.setattr(module, "_pip_command", lambda: ["pip", "install"])
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_bounded", fake_run)
 
     assert module.main(["--mode", "source"]) == 0
-    assert len(calls) == 1
-    command, kwargs = calls[0]
+    assert len(calls) == 2
+    build_command, build_kwargs = calls[0]
+    assert build_command == [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        *module.BUILD_REQUIREMENTS,
+    ]
+    assert build_kwargs["cwd"] == module.ROOT
+
+    command, kwargs = calls[1]
     assert command == [
         "pip",
         "install",
         "--force-reinstall",
         "--no-deps",
+        "--no-build-isolation",
         module.CYTHON_REQUIREMENT,
         str(module.ROOT),
     ]
@@ -423,24 +677,41 @@ def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(monkeypatch) -> 
     monkeypatch.setattr(module, "_validate_source", lambda: None)
     monkeypatch.setattr(module, "_verify_runtime", lambda _mode: None)
     monkeypatch.setattr(module, "_pip_command", lambda: ["pip", "install"])
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_bounded", fake_run)
 
     assert module.main(["--mode", "cython"]) == 0
-    assert len(calls) == 2
-    project_command, project_kwargs = calls[0]
+    assert len(calls) == 3
+    build_command, build_kwargs = calls[0]
+    assert build_command == [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        *module.BUILD_REQUIREMENTS,
+    ]
+    assert build_kwargs["cwd"] == module.ROOT
+
+    project_command, project_kwargs = calls[1]
     assert project_command == [
         "pip",
         "install",
         "--force-reinstall",
         "--no-deps",
+        "--no-build-isolation",
         "-e",
         str(module.ROOT),
     ]
     assert project_kwargs["cwd"] == module.ROOT
     assert "PYBOY_NO_CYTHON" not in project_kwargs["env"]
 
-    command, kwargs = calls[1]
-    assert command[:4] == ["pip", "install", "--force-reinstall", "--no-deps"]
+    command, kwargs = calls[2]
+    assert command[:5] == [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        "--no-build-isolation",
+    ]
     assert command[-2:] == [module.CYTHON_REQUIREMENT, str(module.PYBOY_SOURCE)]
     assert "PYBOY_NO_CYTHON" not in kwargs["env"]
     assert module.CYTHON_MODULES == (

@@ -12,10 +12,11 @@ from dataclasses import dataclass
 from pokered_harness.state.base import Direction, parse_direction
 from pokered_harness.symbols.loader import MemoryLike, SymbolTable
 
-# ``BIT_SCRIPTED_MOVEMENT_STATE`` in ``constants/status_constants.asm``.
-# If this bit position turns out wrong against a freshly-built pokered
-# .sym, fix it here — every callsite goes through the helper below.
-BIT_SCRIPTED_MOVEMENT_STATE = 5
+# ``BIT_SCRIPTED_MOVEMENT_STATE`` in
+# ``pret/pokered/constants/ram_constants.asm`` and the matching
+# ``pret/pokeyellow`` source.  The flag is the high bit of wStatusFlags5.
+# Keep this source-derived value centralized so every callsite agrees.
+BIT_SCRIPTED_MOVEMENT_STATE = 7
 
 
 @dataclass(frozen=True, slots=True)

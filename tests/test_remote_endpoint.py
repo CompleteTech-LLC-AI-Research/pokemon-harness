@@ -77,16 +77,16 @@ def test_handshake_writes_clock_status_byte():
     sb, pb, mb = _make_session(_BLUE_SYM)
     la, lb = InProcessSerialLink.pair("blue", "blue")
 
-    ea = RemoteLinkEndpoint.as_listener(sa, la)     # master
-    eb = RemoteLinkEndpoint.as_connector(sb, lb)    # slave
+    ea = RemoteLinkEndpoint.as_listener(sa, la)  # master
+    eb = RemoteLinkEndpoint.as_connector(sb, lb)  # slave
     ea.install()
     eb.install()
 
     # Fire the handshake hook on each side: listener should get 0x02,
     # connector 0x01.
     status_addr = sa.symbols.addr_of("hSerialConnectionStatus")
-    pa.fire(0x00, 0x22fa)
-    pb.fire(0x00, 0x22fa)
+    pa.fire(0x00, 0x22FA)
+    pb.fire(0x00, 0x22FA)
     assert ma[status_addr] == STATUS_INTERNAL
     assert mb[status_addr] == STATUS_EXTERNAL
 
@@ -132,14 +132,14 @@ def test_exchange_nybble_exchanges_bytes_between_peers():
 
     def fire_a():
         try:
-            pa.fire(0x00, 0x22c3)
+            pa.fire(0x00, 0x22C3)
             results["a"] = None
         except Exception as exc:  # noqa: BLE001
             results["a"] = exc
 
     t = threading.Thread(target=fire_a, daemon=True)
     t.start()
-    pbb.fire(0x00, 0x22c3)
+    pbb.fire(0x00, 0x22C3)
     t.join(timeout=2.0)
     assert results.get("a") is None, results.get("a")
     assert ma[recv_addr] == 0x67
@@ -183,6 +183,68 @@ def test_game_driven_exchanges_use_a_long_bounded_timeout():
     pyboy.fire(0x00, 0x216F)
 
     assert link.timeouts == [30_000, 30_000, 30_000]
+
+
+@pytest.mark.parametrize(
+    ("hook", "send_symbol", "recv_symbol", "send_length", "bad_response"),
+    [
+        pytest.param(
+            "Serial_ExchangeNybble",
+            "wSerialExchangeNybbleSendData",
+            "wSerialExchangeNybbleReceiveData",
+            1,
+            b"\x42\x43",
+            id="nybble-overlong",
+        ),
+        pytest.param(
+            "Serial_ExchangeLinkMenuSelection",
+            "wLinkMenuSelectionSendBuffer",
+            "wLinkMenuSelectionReceiveBuffer",
+            2,
+            b"\x42\x43\x44",
+            id="menu-overlong",
+        ),
+        pytest.param(
+            "Serial_ExchangeNybble",
+            "wSerialExchangeNybbleSendData",
+            "wSerialExchangeNybbleReceiveData",
+            1,
+            bytearray(b"\x42"),
+            id="nybble-non-bytes",
+        ),
+    ],
+)
+def test_exchange_hooks_reject_non_exact_peer_payloads(
+    hook: str,
+    send_symbol: str,
+    recv_symbol: str,
+    send_length: int,
+    bad_response: object,
+):
+    session, pyboy, memory = _make_session(_BLUE_SYM)
+
+    class InvalidResponseLink:
+        def exchange(self, _kind, _payload, *, timeout_ms):
+            assert timeout_ms == 30_000
+            return bad_response
+
+    link = InvalidResponseLink()
+    endpoint = RemoteLinkEndpoint.as_listener(session, link)
+    endpoint.install()
+    send_addr = session.symbols.addr_of(send_symbol)
+    recv_addr = session.symbols.addr_of(recv_symbol)
+    for index in range(send_length):
+        memory[send_addr + index] = 0x10 + index
+        memory[recv_addr + index] = 0x90 + index
+
+    try:
+        pyboy.fire(0x00, session.symbols.addr_of(hook))
+        assert [memory[recv_addr + index] for index in range(send_length)] == [
+            0x90 + index for index in range(send_length)
+        ]
+    finally:
+        endpoint.uninstall()
+        session.close()
 
 
 # --- exchange menu selection ---------------------------------------------
@@ -236,7 +298,7 @@ def test_exchange_bytes_cross_version_translates_via_symbol():
     eb.install()
 
     # Blue addrs
-    blue_send = sa.symbols.addr_of("wSerialPlayerDataBlock")    # 0xD173
+    blue_send = sa.symbols.addr_of("wSerialPlayerDataBlock")  # 0xD173
     blue_recv = sa.symbols.addr_of("wSerialRandomNumberListBlock")  # 0xD141
     # Yellow addrs (different!)
     yellow_send = sb.symbols.addr_of("wSerialPlayerDataBlock")  # 0xD17A
@@ -274,11 +336,11 @@ def test_exchange_bytes_cross_version_translates_via_symbol():
     mb[0x2001] = 0x56
 
     def fire_a():
-        pa.fire(0x00, 0x216f)  # Blue's Serial_ExchangeBytes
+        pa.fire(0x00, 0x216F)  # Blue's Serial_ExchangeBytes
 
     t = threading.Thread(target=fire_a, daemon=True)
     t.start()
-    pbb.fire(0x00, 0x1fcb)  # Yellow's Serial_ExchangeBytes
+    pbb.fire(0x00, 0x1FCB)  # Yellow's Serial_ExchangeBytes
     t.join(timeout=2.0)
 
     # Verify cross-version exchange: Blue received Yellow's bytes,
@@ -399,14 +461,8 @@ def test_install_twice_raises():
 def test_clock_status_byte_depends_on_role():
     session, _pb, _mem = _make_session(_BLUE_SYM)
     la, lb = InProcessSerialLink.pair("blue", "blue")
-    assert (
-        RemoteLinkEndpoint.as_listener(session, la).clock_status_byte
-        == STATUS_INTERNAL
-    )
+    assert RemoteLinkEndpoint.as_listener(session, la).clock_status_byte == STATUS_INTERNAL
     # Create a second session for the other endpoint since install()
     # registers hooks.
     s2, _, _ = _make_session(_BLUE_SYM)
-    assert (
-        RemoteLinkEndpoint.as_connector(s2, lb).clock_status_byte
-        == STATUS_EXTERNAL
-    )
+    assert RemoteLinkEndpoint.as_connector(s2, lb).clock_status_byte == STATUS_EXTERNAL
