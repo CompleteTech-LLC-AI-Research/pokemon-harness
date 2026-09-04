@@ -100,6 +100,8 @@ MATRIX_CASE_TIMEOUT_SECONDS: dict[str, float] = {
     "battle": 1200.0,
 }
 MATRIX_AGGREGATE_GRACE_SECONDS = 10.0
+MATRIX_CLEANUP_TIMEOUT_SECONDS = 5.0
+MATRIX_READER_JOIN_TIMEOUT_SECONDS = 1.0
 COLLECTION_TIMEOUT_SECONDS = 300.0
 RUNTIME_MODES = ("source", "cython")
 RUNTIME_MODE_ALIASES = {"dual": "both"}
@@ -710,6 +712,7 @@ def module_kind(path):
 
 result = {
     "python_executable": sys.executable,
+    "python_prefix": sys.prefix,
     "python_version": platform.python_version(),
     "platform": platform.platform(),
     "pytest_version": None,
@@ -854,6 +857,90 @@ def runtime_problems(
         problems.append("selected interpreter cannot resolve the PyBoy module")
     if not runtime.get("harness_module"):
         problems.append("selected interpreter cannot resolve the harness package")
+
+    mode = expected_mode or runtime.get("pyboy_mode")
+    if mode in RUNTIME_MODES:
+        problems.extend(_runtime_identity_problems(project_root, runtime, mode))
+    return problems
+
+
+def _runtime_identity_problems(
+    project_root: Path,
+    runtime: dict[str, Any],
+    mode: str,
+) -> list[str]:
+    """Reject imports that do not belong to this checkout and selected runtime."""
+
+    problems: list[str] = []
+
+    def resolved_path(value: Any, label: str) -> Path | None:
+        if not isinstance(value, str) or not value:
+            problems.append(f"{label} path was not reported by the selected interpreter")
+            return None
+        try:
+            return Path(value).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError) as exc:
+            problems.append(f"{label} path could not be resolved: {type(exc).__name__}: {exc}")
+            return None
+
+    def within(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return False
+        return True
+
+    project_source = (project_root / "src").resolve(strict=False)
+    vendored_pyboy = project_root / "vendor" / "pyboy-src"
+    vendored_pyboy_resolved = vendored_pyboy.resolve(strict=False)
+    if mode == "source" and vendored_pyboy.is_symlink():
+        problems.append(f"selected vendored PyBoy root is a symlink: {vendored_pyboy}")
+    if mode == "source" and not vendored_pyboy.is_dir():
+        problems.append(f"selected vendored PyBoy root is missing: {vendored_pyboy}")
+    if not project_source.is_dir():
+        problems.append(f"selected harness source root is missing: {project_source}")
+
+    harness_module = resolved_path(runtime.get("harness_module"), "harness module")
+    if harness_module is not None and not within(harness_module, project_source):
+        problems.append(
+            "harness module resolves outside the selected project source: "
+            f"{runtime.get('harness_module')}"
+        )
+
+    raw_modules = runtime.get("pyboy_modules")
+    if not isinstance(raw_modules, dict):
+        problems.append("selected interpreter did not report all PyBoy module paths")
+        return problems
+
+    allowed_pyboy_roots = [vendored_pyboy_resolved]
+    if mode == "cython":
+        python_prefix = resolved_path(runtime.get("python_prefix"), "Python prefix")
+        if python_prefix is not None:
+            allowed_pyboy_roots.append(python_prefix)
+
+    resolved_modules: dict[str, Path] = {}
+    for module_name in PYBOY_RUNTIME_MODULES:
+        module_path = resolved_path(raw_modules.get(module_name), f"{module_name} module")
+        if module_path is None:
+            continue
+        resolved_modules[module_name] = module_path
+        if not any(within(module_path, root) for root in allowed_pyboy_roots):
+            roots = ", ".join(str(root) for root in allowed_pyboy_roots)
+            problems.append(
+                f"{module_name} module resolves outside the selected runtime roots "
+                f"({roots}): {raw_modules.get(module_name)}"
+            )
+
+    for field_name, module_name in (
+        ("pyboy_module", "pyboy"),
+        ("serial_module", "pyboy.core.serial"),
+    ):
+        field_path = resolved_path(runtime.get(field_name), field_name)
+        module_path = resolved_modules.get(module_name)
+        if field_path is not None and module_path is not None and field_path != module_path:
+            problems.append(
+                f"runtime {field_name} does not match the probed {module_name} module path"
+            )
     return problems
 
 
@@ -1574,6 +1661,7 @@ def run_matrix_collection_audit(
     try:
         namespace = runpy.run_path(str(matrix_path))
         audit_collection = namespace["audit_collection"]
+        audited_nodeids = _audited_matrix_nodeids(namespace)
     except (OSError, KeyError, TypeError, ValueError) as exc:
         return {
             "status": "FAIL",
@@ -1619,6 +1707,7 @@ def run_matrix_collection_audit(
         if audit.get("structural_pass") and audit.get("acceptance_matrix_complete")
         else "FAIL"
     )
+    audit["audited_nodeids"] = audited_nodeids
     return audit
 
 
@@ -1863,6 +1952,27 @@ def _normalize_nodeid(nodeid: str) -> str:
     return f"{normalized_path}::{test_name}" if separator else normalized_path
 
 
+def _audited_matrix_nodeids(namespace: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Return the exact strict rows used by the collection auditor."""
+
+    raw = namespace.get("STRICT_ACCEPTANCE_NODEIDS")
+    if not isinstance(raw, dict):
+        raise TypeError("matrix auditor has no strict acceptance node IDs")
+
+    result: dict[str, tuple[str, ...]] = {}
+    for name in ("trade", "battle"):
+        values = raw.get(name)
+        if not isinstance(values, (set, frozenset, tuple, list)):
+            raise TypeError(f"matrix auditor has no strict {name} node IDs")
+        if any(not isinstance(nodeid, str) or "::" not in nodeid for nodeid in values):
+            raise ValueError(f"matrix auditor has invalid strict {name} node ID")
+        normalized = tuple(sorted({_normalize_nodeid(nodeid) for nodeid in values}))
+        if not normalized:
+            raise ValueError(f"matrix auditor has no strict {name} node IDs")
+        result[name] = normalized
+    return result
+
+
 def _required_test_problems(
     nodeids: Iterable[str],
     required_test_keys: Iterable[tuple[str, str]],
@@ -1882,6 +1992,65 @@ def _required_nodeid_problems(
     actual = {_normalize_nodeid(nodeid) for nodeid in nodeids}
     missing = sorted({_normalize_nodeid(nodeid) for nodeid in required_nodeids} - actual)
     return [f"required matrix case is absent from selected items: {nodeid}" for nodeid in missing]
+
+
+def _matrix_execution_problems(
+    *,
+    matrix_audit: dict[str, Any],
+    required_nodeids_by_tier: dict[str, frozenset[str]],
+    selected: Iterable[str],
+) -> list[str]:
+    """Ensure strict execution uses every row counted by the collection audit."""
+
+    selected_names = set(selected)
+    strict_tiers = tuple(name for name in ("trade", "battle") if name in selected_names)
+    if not strict_tiers:
+        return []
+
+    raw_audited = matrix_audit.get("audited_nodeids")
+    if not isinstance(raw_audited, dict):
+        return [
+            (
+                "strict matrix execution cannot be coupled to the collection audit: "
+                "canonical node IDs were not retained"
+            )
+        ]
+
+    groups = matrix_audit.get("groups")
+    problems: list[str] = []
+    for name in strict_tiers:
+        expected_raw = raw_audited.get(name)
+        if not isinstance(expected_raw, (tuple, list)) or any(
+            not isinstance(nodeid, str) for nodeid in expected_raw
+        ):
+            problems.append(f"{name} collection audit has no canonical strict node IDs")
+            continue
+        expected = {_normalize_nodeid(nodeid) for nodeid in expected_raw}
+
+        group_name = f"strict-{name}-entrypoints"
+        group = groups.get(group_name) if isinstance(groups, dict) else None
+        if not isinstance(group, dict) or group.get("expected") != len(expected):
+            problems.append(
+                f"{name} collection audit expected count does not match its canonical "
+                f"node IDs ({group_name})"
+            )
+
+        configured_raw = required_nodeids_by_tier.get(name, ())
+        if not isinstance(configured_raw, (set, frozenset, tuple, list)):
+            configured = set()
+        else:
+            configured = {
+                _normalize_nodeid(nodeid) for nodeid in configured_raw if isinstance(nodeid, str)
+            }
+        missing = expected - configured
+        extra = configured - expected
+        if missing or extra:
+            problems.append(
+                f"{name} execution manifest does not match the audited strict matrix: "
+                f"expected={len(expected)} configured={len(configured)} "
+                f"missing={len(missing)} extra={len(extra)}"
+            )
+    return problems
 
 
 def _add_counts(target: Counts, source: Counts) -> None:
@@ -1916,49 +2085,75 @@ def _drain_matrix_stream(stream: Any, chunks: list[str]) -> None:
             pass
 
 
-def _kill_matrix_process(process: subprocess.Popen[str]) -> bool:
-    """Kill and reap a matrix child process group within a bounded deadline."""
+def _kill_matrix_process(
+    process: subprocess.Popen[str],
+    *,
+    deadline: float | None = None,
+) -> bool:
+    """Kill and reap a matrix process tree without crossing ``deadline``."""
 
     pid = getattr(process, "pid", None)
     if pid is None:
         return False
+    cleanup_deadline = deadline
+    if cleanup_deadline is None:
+        cleanup_deadline = time.monotonic() + MATRIX_CLEANUP_TIMEOUT_SECONDS
 
-    def wait_for_exit(timeout: float) -> bool:
+    def wait_for_exit() -> bool:
+        if process.poll() is not None:
+            return True
+        remaining = cleanup_deadline - time.monotonic()
+        if remaining <= 0:
+            return process.poll() is not None
         try:
-            process.wait(timeout=timeout)
+            process.wait(timeout=remaining)
         except (subprocess.TimeoutExpired, OSError):
             return process.poll() is not None
         return process.poll() is not None
 
-    if process.poll() is None:
-        if os.name == "posix":
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except OSError:
-                pass
-        else:
+    # Signal the complete private process group even if the direct pytest
+    # process already exited: a descendant can otherwise retain the pipe.
+    if os.name == "posix":
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
             try:
                 process.kill()
             except OSError:
                 pass
+    else:
+        remaining = cleanup_deadline - time.monotonic()
+        if remaining > 0:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=remaining,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        try:
+            process.kill()
+        except OSError:
+            pass
 
-    # A successful signal does not mean that Popen has reaped the child. Give
-    # it a bounded wait, then fall back to the direct handle if a process-group
-    # signal was unavailable or ineffective. The return value lets the gate
-    # retain a cleanup failure rather than claiming a complete case result.
-    reaped = wait_for_exit(5.0)
+    # Reaping is still required, but it shares one absolute cleanup budget
+    # with the process-tree kill. A failed reap is retained as gate evidence.
+    reaped = wait_for_exit()
     if not reaped:
         try:
             process.kill()
         except OSError:
             pass
-        reaped = wait_for_exit(5.0)
+        reaped = wait_for_exit()
 
     stream = getattr(process, "stdout", None)
     if stream is not None:
         try:
             stream.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
     return reaped
 
@@ -2030,6 +2225,7 @@ def run_matrix_tier(
         raise ValueError("matrix aggregate timeout must be positive")
     started = time.monotonic()
     aggregate_deadline = started + aggregate_timeout
+    aggregate_cleanup_deadline = aggregate_deadline + MATRIX_CLEANUP_TIMEOUT_SECONDS
     aggregate = Counts()
     aggregate_reasons: Counter[str] = Counter()
     case_results_by_nodeid: dict[str, MatrixCaseResult] = {}
@@ -2218,12 +2414,24 @@ def run_matrix_tier(
             "progress_path": progress_path,
         }
 
-    def finish_case(nodeid: str, *, timed_out: bool, reason: str = "") -> None:
+    def finish_case(
+        nodeid: str,
+        *,
+        timed_out: bool,
+        reason: str = "",
+        cleanup_deadline: float | None = None,
+    ) -> None:
         state = active.pop(nodeid)
         process = state["process"]
         cleanup_error = ""
+        if cleanup_deadline is None:
+            cleanup_deadline = min(
+                aggregate_cleanup_deadline,
+                time.monotonic() + MATRIX_CLEANUP_TIMEOUT_SECONDS,
+            )
+        cleanup_attempted = timed_out
         if timed_out:
-            if not _kill_matrix_process(process):
+            if not _kill_matrix_process(process, deadline=cleanup_deadline):
                 cleanup_error = "matrix child did not terminate after the cleanup deadline"
             returncode = 124
         else:
@@ -2234,7 +2442,25 @@ def run_matrix_tier(
         # be draining its pipe.  Join it before retaining diagnostics so a
         # fast case does not lose the very failure text needed to audit it.
         reader = state["reader"]
-        reader.join(timeout=1.0)
+        reader.join(
+            timeout=max(
+                0.0,
+                min(
+                    MATRIX_READER_JOIN_TIMEOUT_SECONDS,
+                    cleanup_deadline - time.monotonic(),
+                ),
+            )
+        )
+        if reader.is_alive():
+            if not cleanup_attempted:
+                cleanup_attempted = True
+                if not _kill_matrix_process(process, deadline=cleanup_deadline):
+                    cleanup_error = (
+                        f"{cleanup_error}; " if cleanup_error else ""
+                    ) + "matrix child did not terminate after the cleanup deadline"
+            remaining = cleanup_deadline - time.monotonic()
+            if remaining > 0:
+                reader.join(timeout=remaining)
         if reader.is_alive():
             cleanup_error = (
                 f"{cleanup_error}; " if cleanup_error else ""
@@ -2257,16 +2483,34 @@ def run_matrix_tier(
         )
 
     while pending or active:
-        now = time.monotonic()
         for nodeid, state in list(active.items()):
             process = state["process"]
-            if process.poll() is not None:
-                finish_case(nodeid, timed_out=False)
-            elif now >= state["deadline_at"]:
+            current = time.monotonic()
+            if current >= aggregate_deadline:
+                finish_case(
+                    nodeid,
+                    timed_out=True,
+                    reason=(f"matrix aggregate deadline exceeded after {aggregate_timeout:.1f}s"),
+                    cleanup_deadline=aggregate_cleanup_deadline,
+                )
+            elif current >= state["deadline_at"]:
                 finish_case(
                     nodeid,
                     timed_out=True,
                     reason=f"matrix case timed out after {timeout:.1f}s",
+                    cleanup_deadline=min(
+                        aggregate_cleanup_deadline,
+                        current + MATRIX_CLEANUP_TIMEOUT_SECONDS,
+                    ),
+                )
+            elif process.poll() is not None:
+                finish_case(
+                    nodeid,
+                    timed_out=False,
+                    cleanup_deadline=min(
+                        aggregate_cleanup_deadline,
+                        current + MATRIX_CLEANUP_TIMEOUT_SECONDS,
+                    ),
                 )
 
         if time.monotonic() >= aggregate_deadline:
@@ -2275,6 +2519,7 @@ def run_matrix_tier(
                     nodeid,
                     timed_out=True,
                     reason=(f"matrix aggregate deadline exceeded after {aggregate_timeout:.1f}s"),
+                    cleanup_deadline=aggregate_cleanup_deadline,
                 )
             while pending:
                 record_not_started(
@@ -2611,6 +2856,13 @@ def run_runtime_gate(
                 "strict acceptance matrix declaration is incomplete"
                 + (f" ({gap_counts})" if gap_counts else "")
             )
+        gate_problems.extend(
+            _matrix_execution_problems(
+                matrix_audit=matrix_audit,
+                required_nodeids_by_tier=required_nodeids_by_tier,
+                selected=selected_tiers,
+            )
+        )
 
     required_problems = required_asset_problems(assets)
     tiers: list[TierResult] = []
@@ -3148,6 +3400,17 @@ def _safe_matrix_audit(result: dict[str, Any]) -> dict[str, Any]:
             for pair in raw_profile_pairs
             if isinstance(pair, dict)
         ]
+    raw_audited_nodeids = result.get("audited_nodeids")
+    if isinstance(raw_audited_nodeids, dict):
+        safe["audited_nodeids"] = {
+            str(name): [
+                _safe_diagnostic(nodeid, (), limit=1000)
+                for nodeid in nodeids
+                if isinstance(nodeid, str)
+            ]
+            for name, nodeids in raw_audited_nodeids.items()
+            if isinstance(nodeids, (tuple, list))
+        }
     return safe
 
 

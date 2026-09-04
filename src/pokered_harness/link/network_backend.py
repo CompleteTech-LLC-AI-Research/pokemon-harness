@@ -391,6 +391,10 @@ class NetworkBackend:
         self._closed = False
         self._closed_event = threading.Event()
         self._reader_exc: Exception | None = None
+        # Kept once, at the terminal transition, so cleanup/status callers
+        # can inspect wire work that is deliberately cleared from the live
+        # accounting below.
+        self._pre_close_snapshot: dict[str, object] | None = None
         self._local_rom_version = (
             _validate_rom_version(local_rom_version) if local_rom_version is not None else None
         )
@@ -889,12 +893,21 @@ class NetworkBackend:
         )
 
     def debug_snapshot(self) -> dict[str, object]:
-        """Return a shallow, JSON-serializable diagnostic snapshot."""
+        """Return a shallow, JSON-serializable diagnostic snapshot.
+
+        Once closed, ``pre_close_snapshot`` retains the counters and pending
+        edge state observed at the terminal transition. The live
+        ``pending_edge_requests`` field continues to report the post-close
+        value, which is zero by contract.
+        """
         snap = dict(self._stats)
         last_keepalive = snap.get("last_keepalive_state")
         if isinstance(last_keepalive, dict):
             snap["last_keepalive_state"] = dict(last_keepalive)
-        snap["closed"] = self._closed
+        with self._close_lock:
+            closed = self._closed
+            pre_close = self._pre_close_snapshot
+        snap["closed"] = closed
         snap["reader_started"] = self._reader is not None
         now = time.monotonic()
         snap["active_exchange"] = now < self._active_exchange_until
@@ -902,6 +915,15 @@ class NetworkBackend:
         snap["consecutive_armed_edges"] = self._consecutive_armed_edges
         with self._edge_pending_condition:
             snap["pending_edge_requests"] = self._edge_pending
+        if pre_close is not None:
+            pre_close_copy = dict(pre_close)
+            last_keepalive = pre_close_copy.get("last_keepalive_state")
+            if isinstance(last_keepalive, dict):
+                pre_close_copy["last_keepalive_state"] = dict(last_keepalive)
+            reader_error = pre_close_copy.get("reader_error")
+            if isinstance(reader_error, dict):
+                pre_close_copy["reader_error"] = dict(reader_error)
+            snap["pre_close_snapshot"] = pre_close_copy
         return snap
 
     def wait_for_wire_idle(
@@ -1105,8 +1127,27 @@ class NetworkBackend:
             # Requests which have not produced a response cannot complete
             # after the transport is terminal. Clear the admitted-work
             # accounting now; worker finally blocks use the saturating helper
-            # below so a racing worker cannot make it negative.
-            with self._edge_pending_condition:
+            # below so a racing worker cannot make it negative. Capture the
+            # live values first so cleanup/status callers retain the wire
+            # state that caused or accompanied closure.
+            with self._edge_pending_condition, self._edge_response_lock:
+                edge_inflight = self._edge_inflight
+                response_pending = not self._resp_queue.empty()
+                pre_close = dict(self._stats)
+                pre_close["pending_edge_requests"] = self._edge_pending
+                pre_close["edge_inflight"] = edge_inflight
+                pre_close["response_pending"] = response_pending
+                if self._reader_exc is None:
+                    pre_close["reader_error"] = None
+                else:
+                    pre_close["reader_error"] = {
+                        "type": type(self._reader_exc).__name__,
+                        "message": str(self._reader_exc),
+                    }
+                last_keepalive = pre_close.get("last_keepalive_state")
+                if isinstance(last_keepalive, dict):
+                    pre_close["last_keepalive_state"] = dict(last_keepalive)
+                self._pre_close_snapshot = pre_close
                 self._edge_pending = 0
                 self._edge_pending_condition.notify_all()
             self._signal_edge_worker_stop()
@@ -1179,6 +1220,8 @@ class NetworkBackend:
                     if payload > 1:
                         raise NetworkBackendError(f"invalid EDGE_REQ bit payload {payload}")
                     with self._edge_pending_condition:
+                        if self._closed:
+                            continue
                         self._edge_pending += 1
                         self._edge_pending_condition.notify_all()
                     request = _InboundEdge(payload & 1)
