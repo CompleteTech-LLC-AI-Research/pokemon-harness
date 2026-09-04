@@ -81,6 +81,17 @@ when the battle Colosseum warp rendezvous did not converge after `952`
 balanced edges. No native owner/IRQ errors were recorded; these are strict
 real-ROM outcomes, not bypasses.
 
+A targeted post-snapshot integrated code fix is recorded as
+`7b4b5b72ad373d2293d51e3d11717314606ee442` (cherry-picked as `7b4b5b7`). It
+moves stale `EDGE_RESP` closure outside `_edge_response_lock` and adds a
+bounded regression test. The focused post-fix network suite passes `38/38`,
+with Ruff and formatting clean. This is targeted network/regression evidence
+only: the native strict gate above is pre-fix at code snapshot `a8576b5`, and
+the clean source strict-trade run is pre-fix at the
+`f048870bdbd4837b5494006ae49fe40510832a89` documentation snapshot and remains
+`PENDING`; the post-fix suite does not change the native trade `16/19`, native
+battle `17/19`, or source-trade acceptance boundaries.
+
 The clean source strict-trade gate is `PENDING`: it is still running in
 another isolated worktree, and no result is recorded until the lead supplies
 its terminal artifact. A LinkMenu or transport milestone is not a completed
@@ -108,9 +119,10 @@ release decision.
 ## Change summary
 
 The state-validity, transport, and release-gate hardening represented by the
-audited code snapshot is additive: it improves classification, lifecycle
-behavior, and observability but does not itself establish MCP gameplay, trade,
-battle, or release readiness.
+audited code snapshot, plus the targeted post-snapshot `EDGE_RESP` closure
+fix, are additive: they improve classification, lifecycle behavior, and
+observability but do not themselves establish MCP gameplay, trade, battle, or
+release readiness.
 
 ## Source and artifact hygiene
 
@@ -192,6 +204,11 @@ battle, or release readiness.
 - [x] Historical timing tests pass 40/40 in each of five repetitions in the
   PR #19 follow-up gate and the post-PR #23 gate; the prior-candidate timing
   result is recorded above as 50/50 × 5.
+- [x] The targeted post-snapshot `EDGE_RESP` closure fix
+  (`7b4b5b72ad373d2293d51e3d11717314606ee442`, cherry-picked as `7b4b5b7`)
+  passes the focused post-fix network suite at 38/38, with Ruff and formatting
+  clean. This is scoped regression/network evidence and does not rerun or
+  upgrade strict real-ROM acceptance.
 - [x] The explicit production-file Ruff boundary is clean; broad legacy files
   outside that boundary are not used as release evidence.
 - [ ] `python -m pytest -q -ra` completes with no unexpected failure, skip,
