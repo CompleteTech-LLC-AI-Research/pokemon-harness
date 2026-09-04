@@ -27,12 +27,12 @@ The latest verification supports:
   `python -m pokered_harness.mcp_server` reached clean EOF and exited
   successfully. ROMs and symbols are not distributed in the wheel; without
   the required paths, launch fails closed.
-- **Focused hardening:** the serial-link, network-backend, and production-gate
-  regression suite passed `145` tests with one SDL warning. The session/MCP
-  lifecycle additions then passed a further `122` focused tests with one SDL
-  warning; Ruff and whitespace checks passed.
-- **ROM-free production gate:** the complete current unit tier passed `962/962`
-  and five timing repetitions passed `50/50`. The required ROM, symbol, and
+- **Focused hardening:** the serial-link, network-backend, production-gate,
+  coordinator, session, and MCP regression suites passed `292` tests with one
+  SDL warning; Ruff and whitespace checks passed.
+- **ROM-free production gate:** the complete current unit tier passed `963/963`
+  (including the Cython serial translation-unit smoke) and five timing
+  repetitions passed `50/50`. The required ROM, symbol, and
   derived-fixture inputs were explicitly reported missing in this checkout,
   so the real-ROM tiers were not presented as green.
 
