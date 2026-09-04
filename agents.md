@@ -46,12 +46,13 @@ native Cython strict-trade gate recorded 18/19; exact-row follow-ups have both
 passed and failed, including exact party-record exchange, a party-record
 mismatch, and phase stalls. Native strict-trade reliability is therefore
 unproven. Timing-altered diagnostics are not acceptance evidence, and the full
-current native battle matrix is unqualified. Fresh isolated uv-managed source
-and Cython unit/timing gates collected 745 tests in each mode, passed unit
-600/600, and passed timing 40/40 in five repetitions; both uv-managed
-environments passed `uv pip check`, and native bootstrap verified the `pyboy`
-and `pokered-harness`
-owners. The asset-free run did not exercise ROM-backed gameplay. An earlier
+current native battle matrix is unqualified. The current dual gate, run with
+separate source and Cython interpreters (`--python` plus `--cython-python`),
+collected 753 tests in each mode, passed unit 608/608, and passed timing 40/40
+in each of five repetitions for each runtime. Both uv-managed environments
+passed `uv pip check`, and native bootstrap verified the `pyboy` and
+`pokered-harness` owners. The asset-free run did not exercise ROM-backed
+gameplay. An earlier
 environment-specific 585/586 ownership result is superseded for these isolated
 environments. The host's bare `python3` still lacks `ensurepip`, so that
 alternate standard-library venv path remains open. Use explicit ROM, symbol,
@@ -115,9 +116,12 @@ not full native qualification.
 ## Verification and handoff
 
 Use `scripts/production_gate.py` with the same interpreter used by installation
-and MCP. `--unit-only` is an asset-free scoped gate, not a release gate; the
-default command additionally requires the five ROMs, three symbols, external
-fixture bytes, complete strict matrix declaration, and required real-ROM tiers.
+and MCP for a single-runtime gate. For the dual gate, pass the source
+environment with `--python` and the separately bootstrapped Cython environment
+with `--cython-python`; retain both runtime identities and outputs. `--unit-only`
+is an asset-free scoped gate, not a release gate; the default command additionally
+requires the five ROMs, three symbols, external fixture bytes, complete strict
+matrix declaration, and required real-ROM tiers.
 The default strict matrix worker count is one because each row runs an emulator
 pair; increase `--matrix-workers` only after measuring the host budget.
 The clean-install baseline is `python3 -m venv .venv`, activation, `python -m
