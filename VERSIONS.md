@@ -46,6 +46,13 @@ default; Cython is an optional diagnostic build. The host's bare `python3` still
 lacks `ensurepip`,
 so that alternate standard-library venv path remains open.
 
+The current post-hardening asset-backed gate is scoped to the pinned
+ROM/SYM/fixtures and separate source/native interpreters: source local 47/47 in
+758.1s and native local 47/47 in 38.1s; source remote 16/16 in 75.0s and
+native remote 16/16 in 28.8s. This scoped result leaves the release `PARTIAL`;
+the existing strict trade/battle, provenance, security, and platform blockers
+remain.
+
 Prior integrated source and Cython transport slices passed remote 15/15 and
 the Cython local/session slice passed 47/47. Those are scoped follow-up
 results, not proof of current full native trade or battle parity. Vanilla
