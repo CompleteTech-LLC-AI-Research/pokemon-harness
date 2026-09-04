@@ -36,9 +36,9 @@ Current controlled evidence is:
 - the current source and Cython packaging/runtime contract is 27/27 in each
   runtime, including native bootstrap ownership and transient metadata cleanup.
 
-A fresh isolated source and Cython `--unit-only --repeat-timing 5` gate on
-2026-09-03, using separate source and Cython interpreters, collected 753 tests
-in each runtime. Both passed unit 608/608 and timing 40/40 in all five
+A current-head dual source and Cython `--unit-only --repeat-timing 5` gate on
+2026-09-03, using separate source and Cython interpreters, collected 756 tests
+in each runtime. Both passed unit 611/611 and timing 40/40 in all five
 repetitions; source reported `python-source` and
 Cython reported `cython/native-extension`. The clone had no ROM, symbol, or
 save-state assets, so fixture schema and matrix declaration were checked but
@@ -302,8 +302,8 @@ python scripts/production_gate.py \
   --format text
 ```
 
-The latest isolated `--unit-only --repeat-timing 5` check collected 753 tests in
-each runtime, passed unit 608/608, and passed timing 40/40 in all five
+The latest current-head dual `--unit-only --repeat-timing 5` check collected 756
+tests in each runtime, passed unit 611/611, and passed timing 40/40 in all five
 repetitions. Source reported `python-source`; Cython reported
 `cython/native-extension`. The gate also performs schema-only validation of the
 ten-entry fixture manifest. Because the isolated clone had no ROM, symbol, or
@@ -356,8 +356,8 @@ EVIDENCE_DIR="$(mktemp -d)"
 the Cython interpreter. The latter is accepted only with
 `--runtime-mode both`; omitting it makes both modes reuse `--python`. The gate
 runs the selected tiers under each explicit runtime and retains both results in
-the dual report. The latest post-gate run collected 753 tests per runtime,
-passed unit 608/608 in each runtime, and passed timing 40/40 in each of five
+the dual report. The latest current-head post-gate run collected 756 tests per
+runtime, passed unit 611/611 in each runtime, and passed timing 40/40 in each of five
 repetitions. This is asset-free runtime evidence, not ROM gameplay or release
 sign-off; the release decision remains `PARTIAL`.
 
@@ -737,8 +737,9 @@ transport or LinkMenu milestone as a completed trade or battle.
 The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
-1. The latest isolated source and Cython unit/timing gates each collected 753
-   tests, passed unit 608/608, and passed timing 40/40 in five repetitions.
+1. The latest current-head dual source and Cython unit/timing gates each
+   collected 756 tests, passed unit 611/611, and passed timing 40/40 in five
+   repetitions.
    They were asset-free and therefore do not close ROM-backed gameplay,
    platform, or release-sign-off requirements. The explicit dual invocation
    uses `--python` for the source environment and `--cython-python` for the
