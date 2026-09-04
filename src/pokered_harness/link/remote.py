@@ -51,7 +51,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from pokered_harness.link.serial_link import SerialLink, SerialLinkTimeout
+from pokered_harness.link.serial_link import (
+    SerialLink,
+    SerialLinkClosed,
+    SerialLinkTimeout,
+)
 
 if TYPE_CHECKING:
     from pokered_harness.session import Session
@@ -95,7 +99,7 @@ class RemoteLinkEndpoint:
 
     Typical flow in an MCP server::
 
-        link = TcpSerialLink.connect("peer.host", 9999, "blue")
+        link = TcpSerialLink.connect("127.0.0.1", 9999, "blue")
         endpoint = RemoteLinkEndpoint.as_connector(session, link)
         endpoint.install()
         # session.press('a'), session.step(...) as normal — the
@@ -283,7 +287,7 @@ class RemoteLinkEndpoint:
                     my_byte,
                     timeout_ms=_REMOTE_EXCHANGE_TIMEOUT_MS,
                 )
-            except SerialLinkTimeout:
+            except (SerialLinkClosed, SerialLinkTimeout):
                 return  # leave recv cell untouched; game will retry/fail
             if peer_bytes:
                 mem[recv_addr] = peer_bytes[0] & 0xFF
@@ -311,7 +315,7 @@ class RemoteLinkEndpoint:
                     my_bytes,
                     timeout_ms=_REMOTE_EXCHANGE_TIMEOUT_MS,
                 )
-            except SerialLinkTimeout:
+            except (SerialLinkClosed, SerialLinkTimeout):
                 return
             if len(peer_bytes) >= 2:
                 mem[recv_addr] = peer_bytes[0] & 0xFF
@@ -378,7 +382,7 @@ class RemoteLinkEndpoint:
                     my_bytes,
                     timeout_ms=_REMOTE_EXCHANGE_TIMEOUT_MS,
                 )
-            except SerialLinkTimeout:
+            except (SerialLinkClosed, SerialLinkTimeout):
                 return  # leave buffer untouched; peer cable unplugged
             if len(peer_bytes) != bc:
                 return  # protocol mismatch — drop rather than corrupt
