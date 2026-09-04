@@ -677,32 +677,33 @@ def test_strict_matrix_supervisor_marks_timeout_and_queued_rows(tmp_path, monkey
 
 
 @pytest.mark.parametrize("tier", ("trade", "battle"))
-def test_strict_matrix_execution_rejects_a_reduced_required_manifest(tier, tmp_path, monkeypatch):
-    _FakeMatrixPopen.mode = "pass"
-    _FakeMatrixPopen.commands = []
-    _FakeMatrixPopen.instances = []
-    _FakeMatrixPopen.creation_kwargs = []
-    monkeypatch.setattr(gate.subprocess, "Popen", _FakeMatrixPopen)
-
+def test_strict_matrix_execution_rejects_a_reduced_required_manifest(tier):
     complete_matrix = tuple(sorted(required_matrix_nodeids()[tier]))
     reduced_manifest = complete_matrix[:-1]
+    matrix_audit = {
+        "audited_nodeids": {
+            "trade": tuple(sorted(required_matrix_nodeids()["trade"])),
+            "battle": tuple(sorted(required_matrix_nodeids()["battle"])),
+        },
+        "groups": {
+            "strict-trade-entrypoints": {
+                "expected": len(required_matrix_nodeids()["trade"]),
+            },
+            "strict-battle-entrypoints": {
+                "expected": len(required_matrix_nodeids()["battle"]),
+            },
+        },
+    }
 
     # A passing subprocess cannot make an incomplete required manifest safe.
-    result = gate.run_tier(
-        name=tier,
-        project_root=tmp_path,
-        python_executable=Path("python"),
-        environment={},
-        required_problems=[],
-        repeat=1,
-        timeout_override=1,
-        report_directory=tmp_path,
-        required_nodeids=reduced_manifest,
-        matrix_workers=1,
+    problems = gate._matrix_execution_problems(
+        matrix_audit=matrix_audit,
+        required_nodeids_by_tier={tier: frozenset(reduced_manifest)},
+        selected=(tier,),
     )
 
-    assert result.status == "FAIL", "a reduced required matrix must fail closed"
-    assert result.iteration_failures
+    assert problems, "a reduced required matrix must fail closed"
+    assert "does not match the audited strict matrix" in problems[0]
 
 
 def test_strict_matrix_aggregate_timeout_kills_and_reaps_the_process_group(tmp_path, monkeypatch):
