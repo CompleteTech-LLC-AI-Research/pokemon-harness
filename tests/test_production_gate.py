@@ -772,6 +772,35 @@ def test_runtime_gate_orchestrator_runs_identical_selection_under_both_modes(tmp
     assert all(call["configuration_problems"] == ("configuration problem",) for call in calls)
 
 
+def test_runtime_gate_orchestrator_maps_a_separate_cython_interpreter(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run_runtime_gate(**kwargs):
+        calls.append(kwargs)
+        return _runtime_result(kwargs["mode"])
+
+    monkeypatch.setattr(gate, "run_runtime_gate", fake_run_runtime_gate)
+    source_python = tmp_path / "source" / "bin" / "python"
+    cython_python = tmp_path / "cython" / "bin" / "python"
+
+    results = gate.run_runtime_gates(
+        runtime_mode="both",
+        project_root=tmp_path,
+        python_executable=source_python,
+        cython_python_executable=cython_python,
+        rom_root=tmp_path / "rom",
+        fixture_root=tmp_path / "fixtures",
+        expected_sha1={},
+        assets=[],
+        selected=("unit",),
+        required_tests_by_tier={},
+        required_nodeids_by_tier={},
+    )
+
+    assert [result.mode for result in results] == ["source", "cython"]
+    assert [call["python_executable"] for call in calls] == [source_python, cython_python]
+
+
 def test_single_runtime_gate_keeps_environment_and_tiers_explicit(tmp_path, monkeypatch):
     observed = {"modes": [], "tier_modes": []}
 
@@ -934,6 +963,22 @@ def test_main_preserves_single_runtime_json_schema(tmp_path, monkeypatch, capsys
     } <= payload.keys()
 
 
+@pytest.mark.parametrize("runtime_mode", ("source", "cython"))
+def test_main_rejects_cython_interpreter_outside_both(runtime_mode, capsys):
+    with pytest.raises(SystemExit) as error:
+        gate.main(
+            [
+                "--runtime-mode",
+                runtime_mode,
+                "--cython-python",
+                ".venv-cython/bin/python",
+            ]
+        )
+
+    assert error.value.code == 2
+    assert "--cython-python requires --runtime-mode both" in capsys.readouterr().err
+
+
 def test_main_dual_alias_reports_each_runtime_and_fails_closed(tmp_path, monkeypatch, capsys):
     source = _runtime_result("source")
     cython = _runtime_result("cython", gate_problems=("cython probe failed",))
@@ -946,13 +991,15 @@ def test_main_dual_alias_reports_each_runtime_and_fails_closed(tmp_path, monkeyp
     monkeypatch.setattr(gate, "run_runtime_gates", fake_run_runtime_gates)
     args = _patch_main_inputs(monkeypatch, tmp_path)
     args[args.index("--format") + 1] = "json"
-    args.extend(("--runtime-mode", "dual"))
+    cython_python = tmp_path / ".venv-cython" / "bin" / "python"
+    args.extend(("--runtime-mode", "dual", "--cython-python", str(cython_python)))
 
     exit_code = gate.main(args)
 
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 1
     assert observed["runtime_mode"] == "both"
+    assert observed["cython_python_executable"] == cython_python
     assert payload["runtime_mode"] == "both"
     assert [item["mode"] for item in payload["runtimes"]] == ["source", "cython"]
     assert payload["runtimes"][1]["overall"] == "FAIL"
