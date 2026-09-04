@@ -11,6 +11,8 @@ symbol files, save states, or other ROM-derived artifacts.
 
 This repository remains an audited production-readiness candidate, not a
 production release. The live target is `CompleteDotTech/pokemon`. The current
+public audit snapshot is exact commit
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (PR #44, 2026-09-04). The current
 merged implementation head is exact commit
 `6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04). The prior
 merged head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. The retained exact
@@ -35,12 +37,26 @@ The acceptance update merged in PR #42 adds bounded production-
 gate deadlines, runtime-provenance checks, fail-closed matrix accounting,
 preserved network-close diagnostics, and strict subprocess result validation.
 Its source-runtime representative checks passed: in-process Red-color/Yellow
-trade and battle, TCP Red-color/Yellow trade and battle, and the four-test real
-MCP stdio suite (including save/load and TCP EOF cleanup). The source
+trade and battle, TCP Red-color/Yellow trade and battle, and the real MCP
+integration suite (including save/load and TCP EOF cleanup). At the current
+public audit snapshot, six real MCP integration checks passed in 13.11 seconds
+with one SDL warning, and 104 MCP dispatch tests passed. The source
 unit/timing gate also passed 954/954 unit tests and 50/50 timing cases in each
 of five repetitions. These are candidate-branch results, not a full 19-row
 trade/battle matrix, native-runtime qualification, or MCP-driven
 starter/trade/battle gameplay; the release decision remains `PARTIAL`.
+
+The same current-head MCP run used ordinary real-ROM calls without a memory or
+state bypass: it reached Red's bedroom (map 38, `(3,7)`), exited the house,
+reached Pallet Town (map 0, `(5,5)`), reached Oak's Lab (map 40), and moved in
+the lab. A bounded starter attempt ended at map 40, `(5,3)`, with
+`party.count=0`. This proves MCP control and observation over a real session,
+not starter acquisition or MCP-facing trade/battle; those remain unproven.
+
+Current source-local battle evidence is 9/9 ordered pairs: three fresh rows and
+six existing campaign rows all reached Link Battle and exercised the move and
+damage hooks. This is scoped source-runtime local evidence, not the 19-entrypoint
+strict battle acceptance, current remote matrix, or native-runtime qualification.
 
 The merged head includes the MCP lifecycle, runtime packaging, in-process
 serial/lifecycle, remote TCP follow-ups from PRs #12-#17, concurrency/lifecycle
@@ -136,8 +152,10 @@ At that prior candidate, the local asset tier passed source 47/47 in
 531.3477s and native 47/47 in 38.2974s. The remote asset tier passed source
 16/16 in 35.6044s and native 16/16 in 30.8627s. The gate verified 5/5 ROM
 hashes, 3/3 symbol hashes, and 3/3 fixture hashes, and the 10-entry fixture
-manifest passed. These are scoped asset and transport/session results; actual
-MCP live gameplay and the current strict full trade/battle rerun remain pending.
+manifest passed. These are scoped asset and transport/session results; the
+current-head MCP integration/navigation evidence above does not establish
+starter acquisition, MCP-facing trade/battle, or the current strict full
+trade/battle rerun.
 
 An earlier `python -m pytest -q -ra` run completed 604 passed,
 141 expected BYO-asset skips, and one SDL warning. It is a clean-checkout
@@ -160,10 +178,12 @@ The release status for merged implementation head
 `6d541b7867e82fa548c456008e6acd7fb1071586`
 remains `PARTIAL`. The retained prior-candidate unit/timing gate and both local
 and remote asset tiers pass in source and native within their scoped
-boundaries, but the current strict full trade and battle rerun remains pending.
-Fixture provenance, especially vanilla provenance,
-concurrent real-ROM load, cross-platform native qualification, standard-library
-clean-install verification, actual MCP live gameplay, independent review, and
+boundaries, and the current-head MCP integration/navigation checks pass in their
+scoped boundary. The current strict full trade and battle rerun remains
+pending. Fixture provenance, especially vanilla provenance, fresh native full
+matrix coverage, current remote full matrix coverage, concurrent real-ROM load,
+cross-platform native qualification, standard-library clean-install
+verification, MCP-facing starter/trade/battle gameplay, independent review, and
 authenticated/encrypted cross-host TCP also remain open. TCP remains
 loopback-only and unauthenticated/unencrypted.
 
@@ -285,9 +305,9 @@ actual MCP live gameplay, review, or network-security claims.
 | ROM-free unit and timing regressions | `PASS` (prior-candidate unit/timing scope; release remains `PARTIAL`) | The retained prior-candidate dual source/native gate collected 1,094 tests in each runtime, had 949 unit tests pass, and passed timing 50/50 in each of five repetitions. No ROM-backed gameplay ran. |
 | Runtime/package identity | `PASS` (retained source/native scope) | The retained prior-candidate gate selected and reported vendored source or installed Cython PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, the packaged entry point, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` (prior-candidate asset and fixture scope; release remains `PARTIAL`) | The prior-candidate checks validated 5/5 ROM hashes, 3/3 symbol hashes, 3/3 fixture hashes, and the 10-entry fixture manifest. Six canonical fixtures have verified provenance; four vanilla-derived fixtures remain `PARTIAL`. Existing vanilla bytes validate, but vanilla ordinary capture provenance cannot be established or reproduced at the merged head. |
-| Single-session/MCP | `PASS` (prior-candidate scoped; release remains `PARTIAL`) | The retained prior-candidate local asset tier passed source 47/47 in 531.3477s and native 47/47 in 38.2974s. This does not establish actual MCP live gameplay, which remains pending. |
+| Single-session/MCP | `PASS` (current-head integration/navigation scope; release remains `PARTIAL`) | Six current-head real MCP integration checks passed in 13.11s with one SDL warning, and 104 MCP dispatch tests passed. Ordinary MCP calls reached Red's bedroom (map 38, `(3,7)`), the house exit, Pallet Town (map 0, `(5,5)`), Oak's Lab (map 40), and lab movement. A bounded starter attempt ended at map 40, `(5,3)` with `party.count=0`; no memory/state bypass was used. MCP-facing starter acquisition and trade/battle remain unproven. |
 | In-process link acceptance | `PASS` (prior-candidate scoped; strict trade/battle remain pending) | The retained prior-candidate local asset tier passed source 47/47 in 531.3477s and native 47/47 in 38.2974s. These are local/session results, not current strict full trade or battle acceptance; stock-ROM link support remains unclaimed. |
-| Remote TCP and MCP lifecycle | `PASS` (prior-candidate scoped; release remains `PARTIAL`) | The retained prior-candidate remote asset tier passed source 16/16 in 35.6044s and native 16/16 in 30.8627s. This is scoped remote transport/MCP evidence, not actual MCP live gameplay or current strict full trade/battle acceptance. TCP remains loopback-only, unauthenticated, and unencrypted. |
+| Remote TCP and MCP lifecycle | `PASS` (current-head integration scope; release remains `PARTIAL`) | The current-head MCP integration suite passed 6/6 in 13.11s with one SDL warning and 104 MCP dispatch tests passed, including listen/connect and EOF cleanup. This is scoped MCP lifecycle and navigation evidence, not MCP-facing trade/battle or current strict full trade/battle acceptance. TCP remains loopback-only, unauthenticated, and unencrypted. |
 | Strict full trade acceptance | `PENDING` | The current merged-head rerun is still pending. Historical 19/19 source rows, native partial rows, LinkMenu milestones, and transport/session results are not current-head trade acceptance. |
 | Strict full battle acceptance | `PENDING` | The current merged-head rerun is still pending. Historical rows, LinkMenu milestones, and transport/session results are not current-head battle acceptance. |
 | Synthetic concurrency/lifecycle boundary | `PASS` (historical localhost probe scope) | Eight bounded probes passed in each of five repetitions, including concurrent exchange load, shutdown overlap, receiver races, terminal timeouts, resolver rechecks, BYE ordering, and raw-socket boundaries. Real-ROM load remains unverified. |
@@ -548,10 +568,14 @@ The single-session server exposes tools for:
 
 When a peer session is configured with `POKERED_PEER_*` variables, the
 link-related tools are also exposed. The peer is constructed at startup but
-is not paired automatically. These controls and observations are an MCP
-surface, not a verified live-gameplay lane: actual MCP-driven gameplay remains
-pending, and unit, transport, lifecycle, LinkMenu, and state-validity evidence
-does not establish it.
+is not paired automatically. Current-head evidence includes six real MCP
+integration checks in 13.11 seconds with one SDL warning and 104 MCP dispatch
+tests. Ordinary MCP calls drove a real Red session from bedroom map 38 at
+`(3,7)` through the house exit, Pallet Town map 0 at `(5,5)`, Oak's Lab map 40,
+and lab movement. A bounded starter attempt ended at map 40 `(5,3)` with
+`party.count=0`; no memory/state bypass was used. These results establish MCP
+control and observation plus lifecycle behavior, but not starter acquisition or
+MCP-facing trade/battle; those remain unproven.
 
 ## Link cable modes
 
@@ -620,7 +644,7 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Parameterized two-process LinkMenu smoke plus canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints | The retained prior-candidate remote asset tier passed source 16/16 in 35.6044s and native 16/16 in 30.8627s; actual MCP live gameplay and current strict full trade and battle remain pending |
+| `tests/test_pyboy_link_session_subprocess.py` | Parameterized two-process LinkMenu smoke plus canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints | The retained prior-candidate remote asset tier passed source 16/16 in 35.6044s and native 16/16 in 30.8627s; MCP-facing starter/trade/battle gameplay and current strict full trade and battle remain unproven |
 | `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus parameterized canonical Red/Blue/Yellow local trade and battle acceptance entrypoints | Stock-variant coverage, or a release result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
@@ -636,9 +660,10 @@ evidence rather than current full-runtime sign-off. The retained prior-candidate
 remote asset tier passed source 16/16 in 35.6044s and native 16/16 in 30.8627s;
 the local asset tier passed source 47/47 in 531.3477s and native 47/47 in
 38.2974s. The current merged-head strict full trade and battle rerun remains
-pending. Cython gameplay, vanilla fixture provenance,
-broad-suite/platform/load/review coverage, actual MCP live gameplay, and secure
-cross-host networking remain outside the release result.
+pending. Cython gameplay, vanilla fixture provenance, fresh native full-matrix
+and current remote full-matrix coverage, broad-suite/platform/load/review
+coverage, MCP-facing starter/trade/battle gameplay, and secure cross-host
+networking remain outside the release result.
 
 ## Walkthrough scripts
 
@@ -744,7 +769,7 @@ native 47/47 in 38.2974s; its remote asset tier passed source 16/16 in 35.6044s
 and native 16/16 in 30.8627s. The gate verified 5/5 ROM hashes, 3/3 symbol
 hashes, and 3/3 fixture hashes, and the 10-entry fixture manifest passed.
 These retained prior-candidate results do not establish current-head strict
-full trade or battle, actual MCP live gameplay, vanilla fixture provenance,
+full trade or battle, MCP-facing starter/trade/battle gameplay, vanilla fixture provenance,
 broad-suite completion, full native-platform coverage, real-ROM load evidence,
 security, or independent-review conditions. An earlier environment-specific
 585/586 ownership result is superseded.
