@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import ClassVar
@@ -110,15 +111,16 @@ class _FakeMatrixPopen:
     mode = "pass"
     commands: ClassVar[list] = []
     instances: ClassVar[list] = []
+    creation_kwargs: ClassVar[list[dict[str, object]]] = []
 
     def __init__(self, command, *, env, **kwargs):
-        del kwargs
         self.command = command
         self.returncode = None if self.mode == "hang" else 0
         self.pid = 999999999
         self.stdout = io.StringIO("")
         self.commands.append((command, env))
         self.instances.append(self)
+        self.creation_kwargs.append(dict(kwargs))
         nodeid = command[3]
         if self.mode != "hang":
             outcome = "passed" if self.mode == "pass" else self.mode
@@ -674,6 +676,96 @@ def test_strict_matrix_supervisor_marks_timeout_and_queued_rows(tmp_path, monkey
     assert all(instance.poll() is not None for instance in _FakeMatrixPopen.instances)
 
 
+@pytest.mark.parametrize("tier", ("trade", "battle"))
+def test_strict_matrix_execution_rejects_a_reduced_required_manifest(tier, tmp_path, monkeypatch):
+    _FakeMatrixPopen.mode = "pass"
+    _FakeMatrixPopen.commands = []
+    _FakeMatrixPopen.instances = []
+    _FakeMatrixPopen.creation_kwargs = []
+    monkeypatch.setattr(gate.subprocess, "Popen", _FakeMatrixPopen)
+
+    complete_matrix = tuple(sorted(required_matrix_nodeids()[tier]))
+    reduced_manifest = complete_matrix[:-1]
+
+    # A passing subprocess cannot make an incomplete required manifest safe.
+    result = gate.run_tier(
+        name=tier,
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+        required_nodeids=reduced_manifest,
+        matrix_workers=1,
+    )
+
+    assert result.status == "FAIL", "a reduced required matrix must fail closed"
+    assert result.iteration_failures
+
+
+def test_strict_matrix_aggregate_timeout_kills_and_reaps_the_process_group(tmp_path, monkeypatch):
+    _FakeMatrixPopen.mode = "hang"
+    _FakeMatrixPopen.commands = []
+    _FakeMatrixPopen.instances = []
+    _FakeMatrixPopen.creation_kwargs = []
+    monkeypatch.setattr(gate.subprocess, "Popen", _FakeMatrixPopen)
+
+    class _Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, duration):
+            self.now += duration
+
+    clock = _Clock()
+    monkeypatch.setattr(gate, "time", clock)
+    monkeypatch.setattr(gate, "MATRIX_CASE_TIMEOUT_SECONDS", {"trade": 10.0})
+
+    killed_groups = []
+
+    def fake_killpg(pid, sig):
+        killed_groups.append((pid, sig))
+        for instance in _FakeMatrixPopen.instances:
+            if instance.pid == pid:
+                instance.returncode = -int(sig)
+
+    monkeypatch.setattr(gate.os, "killpg", fake_killpg)
+
+    nodeids = (
+        "tests/test_matrix.py::test_pair[blue-red]",
+        "tests/test_matrix.py::test_pair[red-blue]",
+    )
+    result = gate.run_tier(
+        name="trade",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=None,
+        report_directory=tmp_path,
+        required_nodeids=nodeids,
+        matrix_workers=1,
+        matrix_timeout_override=0.1,
+    )
+
+    statuses = {case.nodeid: case.status for case in result.case_results}
+    assert result.status == "FAIL"
+    assert statuses == {
+        nodeids[0]: "TIMEOUT",
+        nodeids[1]: "NOT_STARTED",
+    }
+    assert killed_groups == [(999999999, signal.SIGKILL)]
+    assert all(instance.poll() is not None for instance in _FakeMatrixPopen.instances)
+    assert len(_FakeMatrixPopen.creation_kwargs) == 1
+    assert _FakeMatrixPopen.creation_kwargs[0]["start_new_session"] is True
+    assert any("aggregate deadline exceeded" in failure for failure in result.iteration_failures)
+
+
 def test_asset_inspection_reports_hash_mismatch_and_missing_inputs(tmp_path):
     rom_root = tmp_path / "rom"
     fixture_root = tmp_path / "fixtures"
@@ -771,6 +863,48 @@ def test_runtime_problems_reject_an_unexpected_runtime_mode(tmp_path):
     problems = gate.runtime_problems(tmp_path, runtime, expected_mode="cython")
 
     assert any("runtime mode mismatch" in problem for problem in problems)
+
+
+def test_runtime_problems_reject_foreign_project_and_vendor_module_paths(tmp_path):
+    project_root = tmp_path / "selected-project"
+    vendor_root = project_root / "vendor" / "pyboy-src"
+    vendor_root.mkdir(parents=True)
+    revision = "a" * 40
+    (project_root / "VERSIONS.md").write_text(
+        f"| PyBoy | `2.7.0` + fork `{revision}` |\n",
+        encoding="utf-8",
+    )
+    (vendor_root / "POKERED_HARNESS_PYBOY_REVISION").write_text(
+        revision + "\n",
+        encoding="ascii",
+    )
+
+    foreign_vendor_root = tmp_path / "foreign-project" / "vendor" / "pyboy-src"
+    foreign_harness_root = tmp_path / "foreign-project" / "src" / "pokered_harness"
+    pyboy_modules = {}
+    for name in gate.PYBOY_RUNTIME_MODULES:
+        relative = Path(*name.split("."))
+        module_path = relative / "__init__.py" if name == "pyboy" else relative.with_suffix(".py")
+        pyboy_modules[name] = str(foreign_vendor_root / module_path)
+
+    runtime = {
+        "pyboy_mode": "source",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": revision,
+        "serial_contract": "bit-accurate-backend",
+        "pyboy_kind": "python-source",
+        "pyboy_module": pyboy_modules["pyboy"],
+        "serial_module": pyboy_modules["pyboy.core.serial"],
+        "pyboy_modules": pyboy_modules,
+        "pyboy_module_kinds": {name: "python-source" for name in gate.PYBOY_RUNTIME_MODULES},
+        "harness_module": str(foreign_harness_root / "__init__.py"),
+    }
+
+    problems = gate.runtime_problems(project_root, runtime, expected_mode="source")
+
+    # Version, revision, mode, and serial contract are valid; only module
+    # provenance is foreign to the selected checkout.
+    assert problems, "foreign project/vendor modules must fail the runtime gate"
 
 
 def test_runtime_mode_parser_preserves_explicit_modes_and_accepts_dual_selection():
