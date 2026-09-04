@@ -986,6 +986,38 @@ class _LateRearmingSlaveCore:
         threading.Thread(target=_rearm, daemon=True).start()
 
 
+class _DisarmingSlaveCore:
+    """Become unarmed between the worker's readiness checks."""
+
+    def __init__(self) -> None:
+        self._transfer_reads = 0
+        self.internal_clock = 0
+        self.SB = 0
+        self.SC = 0x80
+
+    @property
+    def transfer_enabled(self) -> int:
+        self._transfer_reads += 1
+        return 1 if self._transfer_reads == 1 else 0
+
+
+def test_rearm_race_falls_back_to_keepalive_without_worker_crash():
+    """A transfer ending during dispatch must not reference an unbound phase."""
+    a, b = NetworkBackend.pair()
+    core = _DisarmingSlaveCore()
+    a.start_receiver(local_core=None)
+    b.start_receiver(local_core=core)
+    try:
+        assert a.on_edge(our_bit=1, our_role=1) == 1
+        assert b.connected
+        snapshot = b.debug_snapshot()
+        assert snapshot["keepalive_bits_sent"] == 1
+        assert snapshot["edge_resp_sent"] == 1
+    finally:
+        a.stop()
+        b.stop()
+
+
 def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive():
     """A slave that rearms after the default wait but within the post-byte
     grace window should send its real next byte, not 0xFE keep-alive."""

@@ -1543,6 +1543,14 @@ class NetworkBackend:
                 and not getattr(core, "internal_clock", 0)
             )
 
+        # Capture these phase flags before the readiness check.  The core can
+        # legitimately finish a transfer between the first ``armed()`` call
+        # and the final check under ``_serial_gate``; the fallback path still
+        # needs a defined phase classification in that race.
+        phase_now = time.monotonic()
+        active_exchange = phase_now < self._active_exchange_until
+        post_byte_rearm = phase_now < self._post_byte_rearm_until
+
         if not armed():
             self._stats["slave_rearm_waits"] = int(self._stats["slave_rearm_waits"]) + 1
             now = time.monotonic()

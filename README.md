@@ -53,6 +53,12 @@ responses. Owner-edge errors and pending requests were zero at the terminal
 snapshot. This is diagnostic reproduction evidence, not a release gate or a
 passing result, and reinforces the `PARTIAL` status.
 
+The follow-up native-backend audit also found a race when a slave core became
+unarmed between two readiness checks. The backend now classifies that transition
+and emits its bounded no-data fallback instead of crashing the worker; a focused
+regression test covers the interleaving. This is a lifecycle fix only and does
+not qualify the unresolved real-ROM trade or battle gates.
+
 The detailed records below are retained historical or scoped evidence; they do
 not supersede the current status above.
 
