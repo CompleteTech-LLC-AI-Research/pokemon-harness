@@ -121,6 +121,13 @@ were validated, but ROM gameplay was not run. This dual gate does not close the
 release: native strict trade remains unreliable and the full native battle
 matrix remains unqualified.
 
+A current post-hardening asset-backed gate used pinned ROM/SYM/fixtures and
+separate source and native interpreters. Its scoped local and remote
+transport/session tiers passed: source local 47/47 in 758.1s, native local
+47/47 in 38.1s, source remote 16/16 in 75.0s, and native remote 16/16 in
+28.8s. These results do not close the strict trade/battle matrices,
+provenance, security, or platform blockers.
+
 A fresh `python -m pytest -q -ra` run at the current head completed 604 passed,
 141 expected BYO-asset skips, and one SDL warning. It is a clean-checkout
 diagnostic rather than a release result: the ROM-backed tests were skipped
