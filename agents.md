@@ -48,7 +48,7 @@ mismatch, and phase stalls. Native strict-trade reliability is therefore
 unproven. Timing-altered diagnostics are not acceptance evidence, and the full
 current native battle matrix is unqualified. The current dual gate, run with
 separate source and Cython interpreters (`--python` plus `--cython-python`),
-collected 753 tests in each mode, passed unit 608/608, and passed timing 40/40
+collected 756 tests in each mode, passed unit 611/611, and passed timing 40/40
 in each of five repetitions for each runtime. Both uv-managed environments
 passed `uv pip check`, and native bootstrap verified the `pyboy` and
 `pokered-harness` owners. The asset-free run did not exercise ROM-backed
