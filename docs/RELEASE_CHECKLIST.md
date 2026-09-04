@@ -91,9 +91,8 @@ defaults to `--python`, and it is valid only with `--runtime-mode both`. The
 gate does not create either environment. Keep the two install records and
 their gate evidence separate for release sign-off.
 
-At the separate-interpreter dual-gate evidence point (`b1134c4`), before the
-later mapping-test additions, source (`--python`) and Cython (`--cython-python`)
-each collected 753 tests, passed unit 608/608, and
+At the current-head separate-interpreter dual-gate check, source (`--python`)
+and Cython (`--cython-python`) each collected 756 tests, passed unit 611/611, and
 passed timing 40/40 in each of five repetitions. Source reported
 `python-source`; Cython reported `cython/native-extension`. The clone
 contained no ROM, symbol, or save-state assets, so no ROM-backed tier ran and
@@ -156,8 +155,8 @@ result is 18/19, but exact-row follow-ups have both passed and failed,
 including a party-record mismatch and phase stalls, so reliability remains
 unproven. Native battle remains unqualified.
 
-The separate-interpreter dual-gate evidence uses managed Linux Python 3.12.13
-and Pytest 9.1.1: collection 753 in each mode, unit 608/608, and
+The current-head separate-interpreter dual-gate evidence uses managed Linux
+Python 3.12.13 and Pytest 9.1.1: collection 756 in each mode, unit 611/611, and
 timing 40/40 in each of five repetitions. The native probe/build and current
 focused 110/110 serial-link suite are separate scoped checks. These gates do
 not establish ROM-backed gameplay coverage.
@@ -252,11 +251,11 @@ real-ROM load evidence, independent review, and secure cross-host networking.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete; the recorded
-  separate-interpreter source and Cython asset-free gates each collected 753 tests with no
+  separate-interpreter source and Cython asset-free gates each collected 756 tests with no
   collection errors.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
-- [x] The recorded separate-interpreter dual gate passes 608/608 in both source
+- [x] The recorded separate-interpreter dual gate passes 611/611 in both source
   and Cython modes, and timing passes 40/40 in each of five repetitions; the
   asset-free run did not exercise ROM-backed gameplay.
 - [ ] A fresh standard-library virtual environment and editable install have
@@ -378,9 +377,10 @@ strict declaration checks pass. The asset-free gate may return `PASS`
 without ROMs because it selects only unit and timing. A full gate must return
 `PASS` only after assets, strict matrix, fixture, and all required real-ROM
 tiers pass in each selected runtime. Because the CLI default is `source`,
-repeat the full command with `--runtime-mode cython` (or use `both` only when
-the one selected interpreter satisfies both runtime contracts). Keep the
-sanitized evidence bundle outside version control.
+repeat the full command with `--runtime-mode cython`, or use `--runtime-mode
+both` with `--python` set to the source interpreter and `--cython-python` set to
+the native interpreter. Keep the sanitized evidence bundle outside version
+control.
 
 Do not describe a skipped, xfailed, timed-out, synthetic, hook-only,
 RAM-mutated, or LinkMenu-only result as a completed trade or battle.
