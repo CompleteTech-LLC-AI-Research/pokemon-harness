@@ -72,6 +72,40 @@ def _matrix_report(nodeid: str, *, outcome: str = "passed") -> dict:
     }
 
 
+def _runtime_result(
+    mode: str,
+    *,
+    gate_problems: tuple[str, ...] = (),
+    collection_status: str = "PASS",
+    tier_status: str = "PASS",
+) -> gate.RuntimeGateResult:
+    return gate.RuntimeGateResult(
+        mode=mode,
+        runtime={"pyboy_mode": mode},
+        collections=[
+            gate.CollectionResult(
+                name="python-module",
+                command=["python", "-m", "pytest"],
+                status=collection_status,
+                returncode=0 if collection_status == "PASS" else 1,
+            )
+        ],
+        fixture_manifest={"status": "PASS", "mode": "schema"},
+        matrix_audit={"status": "PASS"},
+        tiers=[
+            gate.TierResult(
+                name="unit",
+                description="unit",
+                expression="unit",
+                required=True,
+                status=tier_status,
+                counts=gate.Counts(total=1, passed=1 if tier_status == "PASS" else 0),
+            )
+        ],
+        gate_problems=list(gate_problems),
+    )
+
+
 class _FakeMatrixPopen:
     mode = "pass"
     commands: ClassVar[list] = []
@@ -685,6 +719,292 @@ def test_runtime_problems_reject_an_unexpected_runtime_mode(tmp_path):
     problems = gate.runtime_problems(tmp_path, runtime, expected_mode="cython")
 
     assert any("runtime mode mismatch" in problem for problem in problems)
+
+
+def test_runtime_mode_parser_preserves_explicit_modes_and_accepts_dual_selection():
+    parser = gate.build_parser()
+
+    assert parser.parse_args(["--runtime-mode", "source"]).runtime_mode == "source"
+    assert parser.parse_args(["--runtime-mode", "cython"]).runtime_mode == "cython"
+    assert parser.parse_args(["--runtime-mode", "both"]).runtime_mode == "both"
+    assert parser.parse_args(["--runtime-mode", "dual"]).runtime_mode == "both"
+    assert gate.runtime_modes_for_gate("source") == ("source",)
+    assert gate.runtime_modes_for_gate("cython") == ("cython",)
+    assert gate.runtime_modes_for_gate("both") == ("source", "cython")
+
+
+def test_runtime_gate_orchestrator_runs_identical_selection_under_both_modes(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run_runtime_gate(**kwargs):
+        calls.append(kwargs)
+        return _runtime_result(kwargs["mode"])
+
+    monkeypatch.setattr(gate, "run_runtime_gate", fake_run_runtime_gate)
+    selected = ("unit", "timing")
+    required_tests = {"unit": frozenset({("test_gate.py", "test_one")})}
+    required_nodeids = {"unit": frozenset({"tests/test_gate.py::test_one"})}
+
+    results = gate.run_runtime_gates(
+        runtime_mode="both",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        rom_root=tmp_path / "rom",
+        fixture_root=tmp_path / "fixtures",
+        expected_sha1={},
+        assets=[],
+        selected=selected,
+        required_tests_by_tier=required_tests,
+        required_nodeids_by_tier=required_nodeids,
+        configuration_problems=("configuration problem",),
+        repeat=5,
+        timeout_override=3.0,
+        matrix_workers=2,
+        matrix_timeout_override=4.0,
+    )
+
+    assert [result.mode for result in results] == ["source", "cython"]
+    assert [call["mode"] for call in calls] == ["source", "cython"]
+    assert [call["python_executable"] for call in calls] == [Path("python")] * 2
+    assert all(call["selected"] == selected for call in calls)
+    assert all(call["required_tests_by_tier"] == required_tests for call in calls)
+    assert all(call["required_nodeids_by_tier"] == required_nodeids for call in calls)
+    assert all(call["configuration_problems"] == ("configuration problem",) for call in calls)
+
+
+def test_runtime_gate_orchestrator_maps_a_separate_cython_interpreter(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run_runtime_gate(**kwargs):
+        calls.append(kwargs)
+        return _runtime_result(kwargs["mode"])
+
+    monkeypatch.setattr(gate, "run_runtime_gate", fake_run_runtime_gate)
+    source_python = tmp_path / "source" / "bin" / "python"
+    cython_python = tmp_path / "cython" / "bin" / "python"
+
+    results = gate.run_runtime_gates(
+        runtime_mode="both",
+        project_root=tmp_path,
+        python_executable=source_python,
+        cython_python_executable=cython_python,
+        rom_root=tmp_path / "rom",
+        fixture_root=tmp_path / "fixtures",
+        expected_sha1={},
+        assets=[],
+        selected=("unit",),
+        required_tests_by_tier={},
+        required_nodeids_by_tier={},
+    )
+
+    assert [result.mode for result in results] == ["source", "cython"]
+    assert [call["python_executable"] for call in calls] == [source_python, cython_python]
+
+
+def test_single_runtime_gate_keeps_environment_and_tiers_explicit(tmp_path, monkeypatch):
+    observed = {"modes": [], "tier_modes": []}
+
+    def fake_build_environment(*args, runtime_mode):
+        del args
+        observed["modes"].append(runtime_mode)
+        return {"runtime_mode": runtime_mode}
+
+    def fake_runtime_problems(_project_root, runtime, *, expected_mode):
+        assert runtime["pyboy_mode"] == expected_mode
+        return []
+
+    def fake_run_tier(**kwargs):
+        observed["tier_modes"].append(kwargs["environment"]["runtime_mode"])
+        return gate.TierResult(
+            name=kwargs["name"],
+            description=kwargs["name"],
+            expression=kwargs["name"],
+            required=True,
+            status="PASS",
+            counts=gate.Counts(total=1, passed=1),
+        )
+
+    monkeypatch.setattr(gate, "build_test_environment", fake_build_environment)
+    monkeypatch.setattr(gate, "probe_runtime", lambda *_args: {"pyboy_mode": "source"})
+    monkeypatch.setattr(gate, "runtime_problems", fake_runtime_problems)
+    monkeypatch.setattr(gate, "environment_policy_problems", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        gate,
+        "run_collection_preflight",
+        lambda **_kwargs: [gate.CollectionResult("python-module", [], "PASS", 0)],
+    )
+    monkeypatch.setattr(
+        gate,
+        "run_fixture_manifest_validation",
+        lambda **_kwargs: {"status": "PASS", "mode": "schema"},
+    )
+    monkeypatch.setattr(gate, "run_matrix_collection_audit", lambda **_kwargs: {"status": "PASS"})
+    monkeypatch.setattr(gate, "run_tier", fake_run_tier)
+
+    result = gate.run_runtime_gate(
+        mode="source",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        rom_root=tmp_path / "rom",
+        fixture_root=tmp_path / "fixtures",
+        expected_sha1={},
+        assets=[],
+        selected=("unit", "timing"),
+        required_tests_by_tier={},
+        required_nodeids_by_tier={},
+    )
+
+    assert result.mode == "source"
+    assert observed["modes"] == ["source"]
+    assert observed["tier_modes"] == ["source", "source"]
+    assert gate.runtime_gate_passes(result) is True
+
+
+def test_runtime_gate_aggregation_is_fail_closed_for_any_runtime_failure():
+    source = _runtime_result("source")
+    cython_failure = _runtime_result("cython", gate_problems=("probe failed",))
+
+    assert gate.runtime_gates_pass((source, cython_failure)) is False
+    assert gate.runtime_gates_pass((source,)) is True
+    assert gate.runtime_gates_pass(()) is False
+    assert gate.runtime_gates_pass((_runtime_result("cython", collection_status="FAIL"),)) is False
+    assert gate.runtime_gates_pass((_runtime_result("cython", tier_status="FAIL"),)) is False
+    inconsistent = _runtime_result("cython")
+    inconsistent.runtime["pyboy_mode"] = "source"
+    assert gate.runtime_gates_pass((inconsistent,)) is False
+
+
+def test_dual_evidence_retains_both_explicit_runtime_results(tmp_path):
+    payload = gate.build_dual_evidence_payload(
+        project_root=tmp_path / "checkout",
+        rom_root=tmp_path / "rom",
+        fixture_root=tmp_path / "fixtures",
+        assets=[],
+        runtime_results=(_runtime_result("source"), _runtime_result("cython")),
+        overall="PASS",
+    )
+
+    assert payload["runtime_mode"] == "both"
+    assert [item["mode"] for item in payload["runtimes"]] == ["source", "cython"]
+    rendered = gate.render_evidence_text(payload)
+    assert "runtime-mode=both" in rendered
+    assert "source: PASS" in rendered
+    assert "cython: PASS" in rendered
+
+
+def test_dual_evidence_bundle_retains_failure_diagnostics_per_runtime(tmp_path):
+    source = _runtime_result("source")
+    cython = _runtime_result("cython", gate_problems=("probe failed",))
+    payload = gate.build_dual_evidence_payload(
+        project_root=tmp_path / "checkout",
+        rom_root=tmp_path / "rom",
+        fixture_root=tmp_path / "fixtures",
+        assets=[],
+        runtime_results=(source, cython),
+        overall="FAIL",
+        generated_at="2026-09-03T00:00:00+00:00",
+    )
+
+    assert gate.runtime_gates_pass((source, cython)) is False
+    assert [item["overall"] for item in payload["runtimes"]] == ["PASS", "FAIL"]
+    assert payload["runtimes"][1]["gate_problems"] == ["probe failed"]
+
+    paths = gate.write_evidence_bundle(tmp_path / "evidence", payload)
+    report = json.loads(paths["report"].read_text(encoding="utf-8"))
+    text = paths["text"].read_text(encoding="utf-8")
+    assert report["overall"] == "FAIL"
+    assert [item["mode"] for item in report["runtimes"]] == ["source", "cython"]
+    assert report["runtimes"][1]["gate_problems"] == ["probe failed"]
+    assert "cython: FAIL" in text
+    assert "probe failed" in text
+    gate.verify_evidence_bundle(tmp_path / "evidence")
+
+
+def _patch_main_inputs(monkeypatch, tmp_path):
+    monkeypatch.setattr(gate, "parse_expected_sha1", lambda _path: {})
+    monkeypatch.setattr(gate, "inspect_assets", lambda *_args: [])
+    monkeypatch.setattr(gate, "load_required_test_keys", lambda _root: ({}, ""))
+    monkeypatch.setattr(gate, "load_required_nodeids", lambda _root: ({}, ""))
+    return [
+        "--repo-root",
+        str(tmp_path),
+        "--rom-root",
+        str(tmp_path / "rom"),
+        "--fixture-root",
+        str(tmp_path / "fixtures"),
+        "--python",
+        str(tmp_path / "bin" / "python"),
+        "--unit-only",
+        "--format",
+        "json",
+    ]
+
+
+def test_main_preserves_single_runtime_json_schema(tmp_path, monkeypatch, capsys):
+    result = _runtime_result("source")
+    monkeypatch.setattr(gate, "run_runtime_gates", lambda **_kwargs: (result,))
+
+    exit_code = gate.main(_patch_main_inputs(monkeypatch, tmp_path))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["runtime"] == result.runtime
+    assert "runtime_mode" not in payload
+    assert "runtimes" not in payload
+    assert {
+        "runtime",
+        "collections",
+        "assets",
+        "tiers",
+        "gate_problems",
+        "overall",
+        "fixture_manifest",
+        "matrix_audit",
+    } <= payload.keys()
+
+
+@pytest.mark.parametrize("runtime_mode", ("source", "cython"))
+def test_main_rejects_cython_interpreter_outside_both(runtime_mode, capsys):
+    with pytest.raises(SystemExit) as error:
+        gate.main(
+            [
+                "--runtime-mode",
+                runtime_mode,
+                "--cython-python",
+                ".venv-cython/bin/python",
+            ]
+        )
+
+    assert error.value.code == 2
+    assert "--cython-python requires --runtime-mode both" in capsys.readouterr().err
+
+
+def test_main_dual_alias_reports_each_runtime_and_fails_closed(tmp_path, monkeypatch, capsys):
+    source = _runtime_result("source")
+    cython = _runtime_result("cython", gate_problems=("cython probe failed",))
+    observed = {}
+
+    def fake_run_runtime_gates(**kwargs):
+        observed.update(kwargs)
+        return source, cython
+
+    monkeypatch.setattr(gate, "run_runtime_gates", fake_run_runtime_gates)
+    args = _patch_main_inputs(monkeypatch, tmp_path)
+    args[args.index("--format") + 1] = "json"
+    cython_python = tmp_path / ".venv-cython" / "bin" / "python"
+    args.extend(("--runtime-mode", "dual", "--cython-python", str(cython_python)))
+
+    exit_code = gate.main(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert observed["runtime_mode"] == "both"
+    assert observed["cython_python_executable"] == cython_python
+    assert payload["runtime_mode"] == "both"
+    assert [item["mode"] for item in payload["runtimes"]] == ["source", "cython"]
+    assert payload["runtimes"][1]["overall"] == "FAIL"
+    assert payload["gate_problems"] == ["cython: cython probe failed"]
+    assert payload["overall"] == "FAIL"
 
 
 def test_environment_pins_selected_symbol_file_when_available(tmp_path, monkeypatch):

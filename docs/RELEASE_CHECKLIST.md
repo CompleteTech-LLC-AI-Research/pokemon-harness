@@ -16,16 +16,14 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The published repository base for the current integration candidate is
-`84dc79d8098fe5fa298db6700b5ba0b81610ed53` (PR #36, 2026-09-03). The
-implementation commit below it is
-`54a739be4a5f2d95a924c6f35c2aa695246ddd2f` (PR #35), which moves remote
-serial-edge dispatch to an explicit native instruction-batch boundary. The
-candidate also includes serial save-state restoration, native bootstrap
-ownership and build-metadata cleanup, bounded MCP teardown, fail-closed gate
-accounting, and partial-initialization cleanup. This remains a `PARTIAL`
-publication candidate
-until the remaining verification and review conditions are complete.
+The current merged head for this candidate is
+`daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03). Earlier PR #35
+introduced remote serial-edge dispatch at an explicit native instruction-batch
+boundary. The candidate also includes serial save-state restoration, native
+bootstrap ownership and build-metadata cleanup, bounded MCP teardown,
+fail-closed gate accounting, and partial-initialization cleanup. This remains a
+`PARTIAL` publication candidate until the remaining verification and review
+conditions are complete.
 The complete all-tier source-runtime baseline
 ran from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`,
 whose implementation tree is the PR #17 parent. The complete baseline gate
@@ -52,7 +50,7 @@ entries validated; no selected test skipped, xfailed, failed, errored, or
 timed out. The sanitized evidence bundle is retained outside version control
 because ROMs, symbols, and save states are external BYO assets.
 
-The clean asset-free command remains:
+The clean asset-free source command remains:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -66,23 +64,59 @@ python scripts/production_gate.py \
   --format text
 ```
 
-passed in the fresh isolated current-head check: collection 745 in each
-runtime, unit 600/600, and timing 40/40 in each of five repetitions. Source
-reported `python-source`; Cython reported `cython/native-extension`. The clone
+The corresponding native check uses the same command from the separately
+bootstrapped Cython environment with `--runtime-mode cython`. For a
+separate-interpreter dual gate, pass the source environment as `--python` and
+the Cython environment as `--cython-python`:
+
+```bash
+SOURCE_PYTHON="$PWD/.venv/bin/python"
+CYTHON_PYTHON="$PWD/.venv-cython/bin/python"
+EVIDENCE_DIR="$(mktemp -d)"
+"$SOURCE_PYTHON" scripts/production_gate.py \
+  --repo-root "$PWD" \
+  --python "$SOURCE_PYTHON" \
+  --cython-python "$CYTHON_PYTHON" \
+  --runtime-mode both \
+  --unit-only \
+  --repeat-timing 5 \
+  --evidence-dir "$EVIDENCE_DIR" \
+  --format text
+```
+
+`--runtime-mode both` (with `dual` as an alias) runs the selected tiers under
+both explicit runtimes. `--python` selects the source interpreter and
+`--cython-python` selects the Cython interpreter; if the latter is omitted it
+defaults to `--python`, and it is valid only with `--runtime-mode both`. The
+gate does not create either environment. Keep the two install records and
+their gate evidence separate for release sign-off.
+
+At the current-head separate-interpreter dual-gate check, source (`--python`)
+and Cython (`--cython-python`) each collected 756 tests, passed unit 611/611, and
+passed timing 40/40 in each of five repetitions. Source reported
+`python-source`; Cython reported `cython/native-extension`. The clone
 contained no ROM, symbol, or save-state assets, so no ROM-backed tier ran and
 the check is not a production sign-off. Both uv-managed environments passed
-`pip check`, and native bootstrap verified the `pyboy` and `pokered-harness`
-owners. An earlier environment-specific 585/586 ownership result is superseded
-for these isolated environments. The host's bare `python3` still lacks
-`ensurepip`, so that alternate standard-library venv path remains open.
+`uv pip check --python <interpreter>`, and native bootstrap verified the
+`pyboy` and `pokered-harness` owners. An earlier environment-specific 585/586
+ownership result is superseded for these isolated environments. The host's
+bare `python3` still lacks `ensurepip`, so that alternate standard-library venv
+path remains open.
 
 After the pinned fork is built with `scripts/bootstrap_pyboy.py --mode cython`,
 the optional native path can be checked explicitly. The current focused source
 and Cython transport/serial/PyBoy-link suite passes 110/110 in each runtime.
-An asset-backed source trade gate recorded 19/19 ordered rows; the current
-native trade gate recorded 18/19, with
-`yellow-listen-blue_color-connect` stalled before party exchange and reproduced
-by an isolated retry. The full native battle matrix is not qualified.
+An asset-backed source trade gate recorded 19/19 ordered rows. The historical
+native strict-trade gate recorded 18/19; exact-row follow-ups have both passed
+and failed, including exact party-record exchange, a party-record mismatch,
+and phase stalls, so native strict-trade reliability is unproven. The full
+current native battle matrix is not qualified. The source run's supervisor
+started before PR #35 was published, so it is useful current evidence but not a
+clean post-merge all-tier sign-off. The latest acceptance lane exercised 3/9
+direct native remote battle rows under a bounded 155-second pair deadline:
+`Blue-color↔Blue-color` passed; `Red-color↔Yellow` and
+`Yellow↔Red-color` failed. No bypasses were used; six rows remain unrun, and
+the full 19-entrypoint battle set remains unqualified.
 
 Prior integrated source and Cython remote tiers pass 15/15, and the prior
 integrated Cython local/session tier passes 47/47. These are scoped follow-ups,
@@ -116,12 +150,13 @@ generation tracking. Its release-hygiene workflow passed. PR #23 fixes native
 lockstep timing; PR #26 fixes native `PyBoy.tick` instance ownership; PR #27
 adds explicit runtime selection and raises game-driven remote exchange
 timeouts to a bounded 30 seconds. PR #35 moves remote serial-edge dispatch to
-the native instruction-batch boundary; PR #36 publishes the documentation
-update. Current native trade remains 18/19 and native battle remains
-unqualified.
+the native instruction-batch boundary. The historical native strict-trade
+result is 18/19, but exact-row follow-ups have both passed and failed,
+including a party-record mismatch and phase stalls, so reliability remains
+unproven. Native battle remains unqualified.
 
-The fresh isolated asset-free source and Cython checks use managed Linux Python
-3.12.13 and Pytest 9.1.1: collection 745 in each mode, unit 600/600, and
+The current-head separate-interpreter dual-gate evidence uses managed Linux
+Python 3.12.13 and Pytest 9.1.1: collection 756 in each mode, unit 611/611, and
 timing 40/40 in each of five repetitions. The native probe/build and current
 focused 110/110 serial-link suite are separate scoped checks. These gates do
 not establish ROM-backed gameplay coverage.
@@ -132,30 +167,33 @@ failed, and 285 not started). The failed cases were remote TCP timing cases
 from before PR #27's 30-second game-exchange timeout; this is not a full-suite
 pass.
 
-A fresh asset-free `python -m pytest -q -ra` run at the current head completed
-604 passed, 141 expected BYO-asset skips, and one SDL warning. This is a completed
-clean-checkout diagnostic, not a release gate; ROM-backed trade, battle, and
-MCP cases were intentionally skipped because their external assets were absent.
+An earlier asset-free `python -m pytest -q -ra` diagnostic completed 604 passed,
+141 expected BYO-asset skips, and one SDL warning before the dual-runtime gate
+tests were added. This is a completed clean-checkout diagnostic, not a release
+gate; ROM-backed trade, battle, and MCP cases were intentionally skipped
+because their external assets were absent.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, the bounded producer
 and tracked battle-fixture generator are present, and the source trade gate
-recorded 19/19. The native trade gate recorded 18/19 with one reproducible
-remote pre-party-exchange stall; native battle remains unqualified. Full
-sign-off still requires reproducible clean-install evidence for the documented
-source/native environments, current strict native trade and battle matrices,
-a complete current source battle matrix, a completed broad suite, vanilla
-source provenance, full
-native-platform and real-ROM load evidence, independent review, and secure
-cross-host networking.
+recorded 19/19. The historical native strict-trade result is 18/19, but
+exact-row follow-ups have both passed and failed, including a party-record
+mismatch and phase stalls, so native reliability is unproven; native battle
+remains unqualified: the latest direct native remote battle lane exercised
+only 3/9 rows (one pass and two bounded failures), leaving six unrun and the
+full 19-entrypoint set open. Full sign-off still requires reproducible clean-install
+evidence for the documented source/native environments, reliable current
+native trade and battle matrices, a complete current source battle matrix, a
+completed broad suite, vanilla source provenance, full native-platform and
+real-ROM load evidence, independent review, and secure cross-host networking.
 
 ## Source and artifact hygiene
 
-- [x] The published base for the current candidate is identified as `84dc79d`
-  (PR #36), with implementation commit `54a739b` (PR #35); the candidate also
-  records the serial, bootstrap, lifecycle, gate-accounting, and cleanup
-  changes, and the documentation worktree is isolated from the protected dirty
-  development checkout.
+- [x] The current merged head is identified as
+  `daa1d72f2cc559a6424067a9088dfae1b7b5f7bb`; the candidate records the
+  serial, bootstrap, lifecycle, gate-accounting, and cleanup changes, and the
+  documentation worktree is isolated from the protected dirty development
+  checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
   logs, caches, and virtual environments are not tracked.
 - [x] Documentation keeps BYO assets and external evidence outside the source
@@ -173,8 +211,10 @@ cross-host networking.
 - [x] The asset-free source gate resolves the bundled source runtime and the
   bit-accurate serial contract; the native gate resolves the same contract
   through explicitly selected Cython extensions.
-- [x] The audited environment runs `python -m pip check` and records the
-  interpreter/runtime identity from the same environment used by MCP.
+- [x] The audited environment passes its dependency check (`uv pip check
+  --python <interpreter>` for uv-managed environments, or `python -m pip check`
+  when pip is installed) and records the interpreter/runtime identity from the
+  same environment used by MCP.
 - [x] Cython/native-accelerator mode builds and passes its explicit semantic
   serial contract and canonical three-ROM attach/step/close smoke.
 - [x] A fresh Windows environment passes install, dependency, source/Cython
@@ -182,9 +222,13 @@ cross-host networking.
   earlier scoped source/MCP checks passed with one unrelated WSL-worktree skip
   and MCP stdio 4/4.
 - [ ] The integrated Cython build passes the full real-ROM strict gameplay
-  matrix. Its focused serial-link suite passes 110/110 and its native trade
-  gate passes 18/19, but `yellow-listen-blue_color-connect` remains blocked
-  before party exchange and the full native battle matrix is open.
+  matrix. Its focused serial-link suite passes 110/110. The historical native
+  strict-trade result is 18/19, but exact-row follow-ups have both passed and
+  failed, including a party-record mismatch and phase stalls, so reliability
+  remains unproven. The latest direct native remote battle lane exercised 3/9
+  rows under a bounded 155-second pair deadline: one passed and two failed
+  without bypasses; six rows remain unrun and the full 19-entrypoint battle
+  matrix is open.
 - [ ] Full Cython trade/battle acceptance is complete; source mode remains the
   documented release default while strict acceptance is unqualified.
 
@@ -196,8 +240,9 @@ cross-host networking.
   obtained and matches the documented pin.
 - [x] Release commands require explicit `POKERED_ROM_SHA1` and do not use
   `POKERED_SKIP_SHA1=1`.
-- [x] The default real-ROM gate expects five ROMs and three symbols; the
-  acceptance scope additionally requires the canonical ordinary and battle
+- [x] The full real-ROM gate preflights five ROMs, three symbols, and three
+  ordinary Cable Club fixtures; a real-ROM acceptance run additionally
+  validates all ten manifest entries, including canonical ordinary and battle
   states for color Red, color Blue, and Yellow.
 - [x] The historical PR #17 full gate with those assets recorded exact hashes,
   sizes, deadlines, skips, xfails, failures, errors, and bounded diagnostics in
@@ -205,12 +250,12 @@ cross-host networking.
 
 ## Test gates
 
-- [x] Both module and console-script collection paths complete in the
-  integrated gate; the current candidate collected 745 tests with no collection
-  errors.
+- [x] Both module and console-script collection paths complete; the recorded
+  separate-interpreter source and Cython asset-free gates each collected 756 tests with no
+  collection errors.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
-- [x] The fresh isolated current-head unit gate passes 600/600 in both source
+- [x] The recorded separate-interpreter dual gate passes 611/611 in both source
   and Cython modes, and timing passes 40/40 in each of five repetitions; the
   asset-free run did not exercise ROM-backed gameplay.
 - [ ] A fresh standard-library virtual environment and editable install have
@@ -238,10 +283,13 @@ cross-host networking.
   listener/connector directions; strict trade and strict battle each passed
   19/19 with bounded teardown.
 - [ ] A clean full strict rerun of the integrated candidate remains open. The
-  current source trade gate recorded 19/19; the current native trade gate
-  recorded 18/19 because `yellow-listen-blue_color-connect` stalled before
-  party exchange and the isolated retry reproduced it. The current full source
-  battle rerun and native strict battle matrix are not recorded.
+  current source trade gate recorded 19/19; the historical native strict-trade
+  result is 18/19, but exact-row follow-ups have both passed and failed,
+  including a party-record mismatch and phase stalls, so reliability remains
+  unproven. The latest direct native remote battle lane exercised 3/9 rows
+  under a bounded 155-second pair deadline, with one pass and two failures;
+  six rows remain unrun, and the current full source battle rerun plus the
+  complete 19-entrypoint native strict battle matrix remain unqualified.
 - [x] The PR #19 bounded localhost concurrency/lifecycle probe passes 8/8 in
   each of five repetitions.
 - [ ] Real-ROM concurrent-load stability is complete on the merged runtime.
@@ -316,11 +364,22 @@ python scripts/production_gate.py \
   --format text
 ```
 
+The production-gate command above is the source-runtime run. Repeat it after
+`scripts/bootstrap_pyboy.py --mode cython --check` in the native environment,
+changing `--runtime-mode source` to `--runtime-mode cython` and retaining a
+separate evidence directory. To run the separate-interpreter dual gate, keep
+the source path in `--python` and add the native path with `--cython-python`,
+then select `--runtime-mode both`. If `--cython-python` is omitted, the gate
+falls back to the `--python` interpreter; it does not create an environment.
+
 The matrix command is collection-only and returns zero when its structural and
 strict declaration checks pass. The asset-free gate may return `PASS`
-without ROMs because it selects only unit and timing; the default gate must
-return `PASS` only after assets, strict matrix, fixture, and all required
-real-ROM tiers pass. Keep the sanitized evidence bundle outside version
+without ROMs because it selects only unit and timing. A full gate must return
+`PASS` only after assets, strict matrix, fixture, and all required real-ROM
+tiers pass in each selected runtime. Because the CLI default is `source`,
+repeat the full command with `--runtime-mode cython`, or use `--runtime-mode
+both` with `--python` set to the source interpreter and `--cython-python` set to
+the native interpreter. Keep the sanitized evidence bundle outside version
 control.
 
 Do not describe a skipped, xfailed, timed-out, synthetic, hook-only,
