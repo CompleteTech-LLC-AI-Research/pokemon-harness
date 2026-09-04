@@ -23,6 +23,8 @@ from pokered_harness.mcp_server import (
     _close_serial_link,
     _disconnect_remote,
     _error_code,
+    _error_reply,
+    _negotiate_network_clock_role,
     _wait_for_network_hello,
     build_server,
     dispatch_tool,
@@ -30,7 +32,14 @@ from pokered_harness.mcp_server import (
     register_default_hooks,
     serve_stdio,
 )
-from pokered_harness.session import Session
+from pokered_harness.session import (
+    RomHashMismatch,
+    RomNotFoundError,
+    Session,
+    SessionConfigurationError,
+    SymbolHashMismatch,
+    SymbolNotFoundError,
+)
 from pokered_harness.symbols.loader import load_sym_text
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
@@ -70,6 +79,65 @@ def _session() -> tuple[Session, FakePyBoy, EventBus]:
     sym = load_sym_text(_harness_sym())
     bus = EventBus()
     return Session(pyboy=pb, symbols=sym, event_bus=bus), pb, bus
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (RomNotFoundError("missing ROM"), "rom_not_found"),
+        (SymbolNotFoundError("missing symbols"), "symbol_not_found"),
+        (RomHashMismatch("bad ROM hash"), "rom_hash_mismatch"),
+        (SymbolHashMismatch("bad symbol hash"), "symbol_hash_mismatch"),
+    ],
+)
+def test_session_asset_errors_keep_stable_mcp_codes(error, code):
+    assert _error_code(error) == code
+    reply = _error_reply(error)
+    assert reply.isError is True
+    assert reply.structuredContent is not None
+    assert reply.structuredContent["error"]["code"] == code
+
+
+def test_session_configuration_rejects_malformed_pin_types(tmp_path):
+    rom = tmp_path / "game.gb"
+    rom.write_bytes(b"rom")
+    sym = tmp_path / "game.sym"
+    sym.write_text("00:D35E wCurMap\n", encoding="utf-8")
+
+    with pytest.raises(SessionConfigurationError) as exc_info:
+        Session.from_files(
+            rom,
+            sym,
+            expected_rom_sha1=object(),  # type: ignore[arg-type]
+            pyboy_factory=lambda _path: FakePyBoy(DictMemory()),
+        )
+
+    assert _error_code(exc_info.value) == "invalid_session_configuration"
+
+    with pytest.raises(SessionConfigurationError) as exc_info:
+        Session.from_files(
+            rom,
+            sym,
+            expected_pyboy_version=object(),  # type: ignore[arg-type]
+            pyboy_factory=lambda _path: FakePyBoy(DictMemory()),
+        )
+
+    assert _error_code(exc_info.value) == "invalid_session_configuration"
+
+
+def test_factory_missing_rom_is_reported_as_rom_not_found(tmp_path):
+    rom = tmp_path / "game.gb"
+    rom.write_bytes(b"rom")
+    sym = tmp_path / "game.sym"
+    sym.write_text("00:D35E wCurMap\n", encoding="utf-8")
+
+    def disappearing_factory(_path):
+        raise FileNotFoundError("ROM disappeared")
+
+    with pytest.raises(RomNotFoundError) as exc_info:
+        Session.from_files(rom, sym, pyboy_factory=disappearing_factory)
+
+    assert _error_code(exc_info.value) == "rom_not_found"
 
 
 # -- tool dispatch ----------------------------------------------------------
@@ -879,6 +947,49 @@ def test_native_network_attach_honors_mcp_hello_deadline():
     finally:
         backend.stop(timeout_s=1.0)
         peer_sock.close()
+
+
+def test_network_clock_role_negotiation_holds_session_lock():
+    """Native serial register negotiation is serialized with Session work."""
+
+    class TrackingRLock:
+        def __init__(self):
+            self._lock = threading.RLock()
+            self.owner: int | None = None
+
+        def acquire(self, timeout=-1):
+            acquired = (
+                self._lock.acquire()
+                if timeout == -1
+                else self._lock.acquire(timeout=timeout)
+            )
+            if acquired:
+                self.owner = threading.get_ident()
+            return acquired
+
+        def release(self):
+            self.owner = None
+            self._lock.release()
+
+    session, _ = _endpoint_session()
+    lock = TrackingRLock()
+    session._lock = lock  # type: ignore[assignment]
+    observed: list[bool] = []
+
+    class ProbeNetworkSession:
+        def negotiate_network_clock_role(self, peer_rom_version):
+            observed.append(lock.owner == threading.get_ident())
+            return True
+
+    result = _negotiate_network_clock_role(
+        session,
+        ProbeNetworkSession(),  # type: ignore[arg-type]
+        "blue",
+        timeout_s=1.0,
+    )
+
+    assert result is True
+    assert observed == [True]
 
 
 def test_native_network_hello_timeout_has_structured_timeout_code(monkeypatch):

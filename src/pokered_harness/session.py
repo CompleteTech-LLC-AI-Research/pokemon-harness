@@ -222,6 +222,10 @@ class Session:
             import pyboy as _pyboy_module
 
             if expected_pyboy_version is not None:
+                if not isinstance(expected_pyboy_version, str):
+                    raise SessionConfigurationError(
+                        "expected PyBoy version must be a string"
+                    )
                 expected_pyboy_version = expected_pyboy_version.strip()
                 if not expected_pyboy_version:
                     raise SessionConfigurationError(
@@ -266,6 +270,10 @@ class Session:
             # the ROM path — it's responsible for its own window/cgb config.
             try:
                 pyboy = pyboy_factory(str(rom_path))
+            except FileNotFoundError as exc:
+                raise RomNotFoundError(
+                    f"unable to open ROM file {rom_path}: {exc}"
+                ) from exc
             except Exception as exc:  # Wrap factory errors at the session boundary.
                 raise SessionConfigurationError(
                     f"unable to create emulator for {rom_path}: {exc}"
@@ -862,6 +870,10 @@ def _validate_timeout(value: float, name: str) -> float:
 
 
 def _normalise_sha1(value: str, *, label: str = "ROM SHA-1") -> str:
+    if not isinstance(value, str):
+        raise SessionConfigurationError(
+            f"{label} must be exactly 40 hexadecimal characters, got {value!r}"
+        )
     candidate = value.strip()
     if not _SHA1_RE.fullmatch(candidate):
         raise SessionConfigurationError(
