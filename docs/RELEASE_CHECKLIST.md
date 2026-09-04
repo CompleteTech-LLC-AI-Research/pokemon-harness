@@ -50,7 +50,7 @@ entries validated; no selected test skipped, xfailed, failed, errored, or
 timed out. The sanitized evidence bundle is retained outside version control
 because ROMs, symbols, and save states are external BYO assets.
 
-The clean asset-free command remains:
+The clean asset-free source command remains:
 
 ```bash
 EVIDENCE_DIR="$(mktemp -d)"
@@ -64,15 +64,23 @@ python scripts/production_gate.py \
   --format text
 ```
 
-passed in the fresh isolated current-head check: collection 745 in each
-runtime, unit 600/600, and timing 40/40 in each of five repetitions. Source
-reported `python-source`; Cython reported `cython/native-extension`. The clone
-contained no ROM, symbol, or save-state assets, so no ROM-backed tier ran and
-the check is not a production sign-off. Both uv-managed environments passed
-`pip check`, and native bootstrap verified the `pyboy` and `pokered-harness`
-owners. An earlier environment-specific 585/586 ownership result is superseded
-for these isolated environments. The host's bare `python3` still lacks
-`ensurepip`, so that alternate standard-library venv path remains open.
+The corresponding native check uses the same command from the separately
+bootstrapped Cython environment with `--runtime-mode cython`. The gate also
+accepts `--runtime-mode both` (and `dual` as an alias), but that runs the
+selected tiers twice under one `--python` interpreter; it does not create or
+validate two installed environments. Keep source and Cython install and gate
+evidence separate for release sign-off.
+
+These fresh isolated current-candidate checks passed separately for source and
+Cython: collection 750 in each runtime, unit 605/605, and timing 40/40 in each
+of five repetitions. Source reported `python-source`; Cython reported
+`cython/native-extension`. The clone contained no ROM, symbol, or save-state
+assets, so no ROM-backed tier ran and the check is not a production sign-off.
+Both uv-managed environments passed `uv pip check --python <interpreter>`, and
+native bootstrap verified the `pyboy` and `pokered-harness` owners. An earlier
+environment-specific 585/586 ownership result is superseded for these isolated
+environments. The host's bare `python3` still lacks `ensurepip`, so that
+alternate standard-library venv path remains open.
 
 After the pinned fork is built with `scripts/bootstrap_pyboy.py --mode cython`,
 the optional native path can be checked explicitly. The current focused source
@@ -81,7 +89,9 @@ An asset-backed source trade gate recorded 19/19 ordered rows. The historical
 native strict-trade gate recorded 18/19; exact-row follow-ups have both passed
 and failed, including exact party-record exchange, a party-record mismatch,
 and phase stalls, so native strict-trade reliability is unproven. The full
-current native battle matrix is not qualified.
+current native battle matrix is not qualified. The source run's supervisor
+started before PR #35 was published, so it is useful current evidence but not a
+clean post-merge all-tier sign-off.
 
 Prior integrated source and Cython remote tiers pass 15/15, and the prior
 integrated Cython local/session tier passes 47/47. These are scoped follow-ups,
@@ -121,7 +131,7 @@ including a party-record mismatch and phase stalls, so reliability remains
 unproven. Native battle remains unqualified.
 
 The fresh isolated asset-free source and Cython checks use managed Linux Python
-3.12.13 and Pytest 9.1.1: collection 745 in each mode, unit 600/600, and
+3.12.13 and Pytest 9.1.1: collection 750 in each mode, unit 605/605, and
 timing 40/40 in each of five repetitions. The native probe/build and current
 focused 110/110 serial-link suite are separate scoped checks. These gates do
 not establish ROM-backed gameplay coverage.
@@ -132,10 +142,11 @@ failed, and 285 not started). The failed cases were remote TCP timing cases
 from before PR #27's 30-second game-exchange timeout; this is not a full-suite
 pass.
 
-A fresh asset-free `python -m pytest -q -ra` run at the current head completed
-604 passed, 141 expected BYO-asset skips, and one SDL warning. This is a completed
-clean-checkout diagnostic, not a release gate; ROM-backed trade, battle, and
-MCP cases were intentionally skipped because their external assets were absent.
+An earlier asset-free `python -m pytest -q -ra` diagnostic completed 604 passed,
+141 expected BYO-asset skips, and one SDL warning before the dual-runtime gate
+tests were added. This is a completed clean-checkout diagnostic, not a release
+gate; ROM-backed trade, battle, and MCP cases were intentionally skipped
+because their external assets were absent.
 
 **Release decision: `PARTIAL`.** The canonical color Red, color Blue, and
 Yellow fixture bytes have recorded reproduction evidence, the bounded producer
@@ -173,8 +184,10 @@ real-ROM load evidence, independent review, and secure cross-host networking.
 - [x] The asset-free source gate resolves the bundled source runtime and the
   bit-accurate serial contract; the native gate resolves the same contract
   through explicitly selected Cython extensions.
-- [x] The audited environment runs `python -m pip check` and records the
-  interpreter/runtime identity from the same environment used by MCP.
+- [x] The audited environment passes its dependency check (`uv pip check
+  --python <interpreter>` for uv-managed environments, or `python -m pip check`
+  when pip is installed) and records the interpreter/runtime identity from the
+  same environment used by MCP.
 - [x] Cython/native-accelerator mode builds and passes its explicit semantic
   serial contract and canonical three-ROM attach/step/close smoke.
 - [x] A fresh Windows environment passes install, dependency, source/Cython
@@ -197,8 +210,9 @@ real-ROM load evidence, independent review, and secure cross-host networking.
   obtained and matches the documented pin.
 - [x] Release commands require explicit `POKERED_ROM_SHA1` and do not use
   `POKERED_SKIP_SHA1=1`.
-- [x] The default real-ROM gate expects five ROMs and three symbols; the
-  acceptance scope additionally requires the canonical ordinary and battle
+- [x] The full real-ROM gate preflights five ROMs, three symbols, and three
+  ordinary Cable Club fixtures; a real-ROM acceptance run additionally
+  validates all ten manifest entries, including canonical ordinary and battle
   states for color Red, color Blue, and Yellow.
 - [x] The historical PR #17 full gate with those assets recorded exact hashes,
   sizes, deadlines, skips, xfails, failures, errors, and bounded diagnostics in
@@ -207,13 +221,13 @@ real-ROM load evidence, independent review, and secure cross-host networking.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete; the fresh
-  isolated source and Cython asset-free gates each collected 745 tests with no
+  isolated source and Cython asset-free gates each collected 750 tests with no
   collection errors.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
-- [x] The fresh isolated current-head unit gate passes 600/600 in both source
-  and Cython modes, and timing passes 40/40 in each of five repetitions; the
-  asset-free run did not exercise ROM-backed gameplay.
+- [x] The fresh isolated current-candidate unit gate passes 605/605 in both
+  source and Cython modes, and timing passes 40/40 in each of five repetitions;
+  the asset-free run did not exercise ROM-backed gameplay.
 - [ ] A fresh standard-library virtual environment and editable install have
   not been independently verified on this host; the system `python3` lacks
   `ensurepip`, while the passing gates used existing managed environments.
@@ -318,12 +332,21 @@ python scripts/production_gate.py \
   --format text
 ```
 
+The production-gate command above is the source-runtime run. Repeat it after
+`scripts/bootstrap_pyboy.py --mode cython --check` in the native environment,
+changing `--runtime-mode source` to `--runtime-mode cython` and retaining a
+separate evidence directory. `--runtime-mode both` runs both explicit modes
+under the same selected interpreter; it is not a substitute for recording the
+two independently installed environments.
+
 The matrix command is collection-only and returns zero when its structural and
 strict declaration checks pass. The asset-free gate may return `PASS`
-without ROMs because it selects only unit and timing; the default gate must
-return `PASS` only after assets, strict matrix, fixture, and all required
-real-ROM tiers pass. Keep the sanitized evidence bundle outside version
-control.
+without ROMs because it selects only unit and timing. A full gate must return
+`PASS` only after assets, strict matrix, fixture, and all required real-ROM
+tiers pass in each selected runtime. Because the CLI default is `source`,
+repeat the full command with `--runtime-mode cython` (or use `both` only when
+the one selected interpreter satisfies both runtime contracts). Keep the
+sanitized evidence bundle outside version control.
 
 Do not describe a skipped, xfailed, timed-out, synthetic, hook-only,
 RAM-mutated, or LinkMenu-only result as a completed trade or battle.
