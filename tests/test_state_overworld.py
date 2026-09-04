@@ -88,9 +88,11 @@ def test_overworld_mid_step_not_standing(mem, symbols):
     ("raw_flags", "active"),
     (
         (0x00, False),
+        # wStatusFlags5 is a u8. Bit 7 is the highest representable bit, so
+        # there is no valid ``BIT_SCRIPTED_MOVEMENT_STATE + 1`` case.
+        (0x01, False),
         (1 << (BIT_SCRIPTED_MOVEMENT_STATE - 1), False),
         (1 << BIT_SCRIPTED_MOVEMENT_STATE, True),
-        (1 << (BIT_SCRIPTED_MOVEMENT_STATE + 1), False),
         (0xFF, True),
     ),
 )
