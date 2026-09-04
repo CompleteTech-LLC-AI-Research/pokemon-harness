@@ -16,29 +16,38 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The exact candidate head for this checklist is
-`3399407aa04f6e5e496df628442597c03e0adcc` (2026-09-04). The release gate is
+The merged implementation head for this checklist is
+`71ca834d673c52eb74044089e92b09e7e3ae00a0` (2026-09-04). No current-head
+runtime or end-to-end rerun is claimed here; the release gate remains
 `PARTIAL`.
 
-The current dual source/native unit gate reports pass counts of `1,094/949`
-(source/native). Timing passes `50/50` in each of five repetitions in both
-runtimes. This is asset-independent unit/timing evidence only; it is not a
+The exact prior-candidate evidence at
+`3399407aa04f6e5e496df628442597c03e0adcc` recorded `1,094` tests collected in
+each source/native unit gate, with `949` unit tests passing. Timing passed
+`50/50` in each of five repetitions in both runtimes. This is historical,
+asset-independent unit/timing evidence only; it is not a current-head
 ROM-backed gameplay sign-off.
 
-The current exact-head asset checks pass: `5/5` ROM hashes, `3/3` symbol
-hashes, `3/3` fixture hashes, and the 10-entry fixture manifest. These remain
-external BYO assets; matching hashes do not establish fixture provenance or
-gameplay success.
+The prior-candidate asset checks recorded `5/5` ROM hashes, `3/3` symbol
+hashes, `3/3` fixture hashes, and the 10-entry fixture manifest. These are
+historical external-BYO-asset checks; matching hashes do not establish fixture
+provenance or gameplay success.
 
-The current exact-head local real-ROM tier passes source `47/47` in
-`531.3477s` and native `47/47` in `38.2974s`. The current exact-head remote
-real-ROM tier passes source `16/16` in `35.6044s` and native `16/16` in
-`30.8627s`. The earlier source `15/16` result came from a dirty shared
-vendored runtime and is invalid; it is not an exact-head failure.
+The prior-candidate asset-backed local real-ROM tier passed source `47/47` in
+`531.3477s` and native `47/47` in `38.2974s`. Its remote real-ROM tier passed
+source `16/16` in `35.6044s` and native `16/16` in `30.8627s`. These are
+historical scoped runtime results, not current-head strict gameplay evidence.
 
 Fixture provenance remains partial: six canonical entries are verified, while
 four vanilla-derived entries remain `PARTIAL` because their vanilla source
 provenance is not established.
+
+Static provenance review confirms that the documented stock ROM/SYM pins and
+the existing vanilla fixture bytes validate. Vanilla ordinary capture
+provenance cannot be established: replay against the retained source failed at
+the 64-step bound, and the manifest's ordinary producer revision is historical
+(`25e231c`). Those fixture bytes must not be described as current-head
+reproducible.
 
 Current strict trade and battle acceptance remains unresolved. A LinkMenu or
 transport milestone is not a completed trade or battle. Actual MCP-driven
@@ -46,19 +55,20 @@ gameplay is also not established by unit, transport, lifecycle, or LinkMenu
 evidence.
 
 **Release decision: `PARTIAL`.** Sign-off remains open for current strict trade
-and battle, vanilla fixture provenance, platform and real-ROM load coverage,
-actual MCP gameplay, and secure networking.
+and battle, vanilla fixture provenance, clean-install and broad-suite coverage,
+platform and real-ROM load coverage, actual MCP gameplay, independent review,
+and secure networking.
 
 ## Change summary
 
-The state-validity metadata added at this exact head is additive: it improves
-state classification and observability but does not itself establish MCP
-gameplay, trade, battle, or release readiness.
+The state-validity, transport, and release-gate hardening at this merged head is
+additive: it improves classification, lifecycle behavior, and observability but
+does not itself establish MCP gameplay, trade, battle, or release readiness.
 
 ## Source and artifact hygiene
 
-- [x] The current exact candidate head is identified as
-  `3399407aa04f6e5e496df628442597c03e0adcc`; the state-validity metadata is
+- [x] The merged implementation head under audit is identified as
+  `71ca834d673c52eb74044089e92b09e7e3ae00a0`; the state-validity metadata is
   additive, and this checklist is maintained in an isolated worktree separate
   from the protected dirty development checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
@@ -82,15 +92,16 @@ gameplay, trade, battle, or release readiness.
   --python <interpreter>` for uv-managed environments, or `python -m pip check`
   when pip is installed) and records the interpreter/runtime identity from the
   same environment used by MCP.
-- [x] Cython/native-accelerator mode builds and passes its explicit semantic
+- [x] The recorded Cython/native-accelerator check builds and passes its explicit semantic
   serial contract and canonical three-ROM attach/step/close smoke.
-- [x] A fresh Windows environment passes install, dependency, source/Cython
+- [x] Historical Windows validation passed install, dependency, source/Cython
   bootstrap, and post-PR #23 canonical three-ROM Cython lifecycle checks;
   earlier scoped source/MCP checks passed with one unrelated WSL-worktree skip
-  and MCP stdio 4/4.
+  and MCP stdio 4/4. This is scoped build/runtime evidence, not current-head
+  full native gameplay evidence.
 - [ ] The current Cython/native build passes the full real-ROM strict gameplay
   matrix. Current strict trade and battle acceptance remain unresolved even
-  though the local and remote real-ROM tiers pass.
+  though the prior-candidate local and remote real-ROM tiers passed.
 - [ ] Full source/native trade and battle acceptance is complete; unit, timing,
   transport, and LinkMenu results do not substitute for gameplay acceptance.
 
@@ -102,9 +113,10 @@ gameplay, trade, battle, or release readiness.
   obtained and matches the documented pin.
 - [x] Release commands require explicit `POKERED_ROM_SHA1` and do not use
   `POKERED_SKIP_SHA1=1`.
-- [x] The current exact-head asset checks pass `5/5` ROM hashes, `3/3` symbol
-  hashes, `3/3` fixture hashes, and the 10-entry fixture manifest; these checks
-  do not certify gameplay.
+- [x] Static provenance review confirms the documented stock ROM/SYM pins and
+  the existing vanilla fixture bytes validate; these checks do not certify
+  vanilla ordinary capture provenance, current-head reproducibility, or
+  gameplay.
 - [x] The historical PR #17 full gate with those assets recorded exact hashes,
   sizes, deadlines, skips, xfails, failures, errors, and bounded diagnostics in
   a sanitized external evidence bundle; this does not certify the current head.
@@ -115,15 +127,16 @@ gameplay, trade, battle, or release readiness.
   gate scopes without collection errors.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
-- [x] The current exact-head dual source/native unit gate reports pass counts of
-  `1,094/949` (source/native), and timing passes `50/50` in each of five
-  repetitions in both runtimes; this scoped gate did not establish ROM-backed
-  gameplay.
+- [ ] A current-head dual source/native unit gate has not been independently
+  rerun. The exact prior-candidate evidence recorded `1,094` tests collected
+  in each gate, `949` unit tests passing, and timing `50/50` in each of five
+  repetitions in both runtimes; this historical scoped gate did not establish
+  ROM-backed gameplay.
 - [ ] A fresh standard-library virtual environment and editable install have
   not been independently verified on this host; the system `python3` lacks
   `ensurepip`, while the passing gates used existing managed environments.
 - [x] Historical timing tests pass 40/40 in each of five repetitions in the
-  PR #19 follow-up gate and the post-PR #23 gate; the current exact-head timing
+  PR #19 follow-up gate and the post-PR #23 gate; the prior-candidate timing
   result is recorded above as 50/50 × 5.
 - [x] The explicit production-file Ruff boundary is clean; broad legacy files
   outside that boundary are not used as release evidence.
@@ -136,24 +149,26 @@ gameplay, trade, battle, or release readiness.
 - [x] The PR #17 baseline controlled local evidence covers the complete
   canonical strict trade and battle matrix: 9/9 local ordered rows plus the
   dedicated Red/Yellow assertions passed for each operation.
-- [x] The PR #19 post-change remote transport/MCP slice passes 15/15; the PR
+- [x] The historical PR #19 post-change remote transport/MCP slice passes 15/15; the PR
   #17 baseline strict trade and battle remote rows passed 9/9 each.
-- [x] The current exact-head local real-ROM tier passes source `47/47` in
-  `531.3477s` and native `47/47` in `38.2974s`.
-- [x] The current exact-head remote real-ROM tier passes source `16/16` in
-  `35.6044s` and native `16/16` in `30.8627s`. The earlier source `15/16`
-  result came from a dirty shared vendored runtime and is invalid, not an
-  exact-head failure.
+- [ ] A current-head local real-ROM tier has not been independently rerun. The
+  prior-candidate asset-backed evidence passed source `47/47` and native
+  `47/47`; that historical scoped result does not qualify current strict
+  gameplay acceptance.
+- [ ] A current-head remote real-ROM tier has not been independently rerun. The
+  prior-candidate asset-backed evidence passed source `16/16` and native
+  `16/16`; that historical scoped result does not qualify current strict
+  gameplay acceptance.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
   ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
   IDs).
-- [x] The PR #17 baseline local and remote strict runtime rows pass in both
+- [x] The historical PR #17 baseline local and remote strict runtime rows pass in both
   listener/connector directions; strict trade and strict battle each passed
   19/19 with bounded teardown.
-- [ ] A clean current strict trade and battle rerun is complete. The current
-  exact-head evidence does not qualify either strict gameplay matrix; historical
-  strict results are not current exact-head acceptance.
-- [x] The PR #19 bounded localhost concurrency/lifecycle probe passes 8/8 in
+- [ ] A clean current-head strict trade and battle rerun is complete. The
+  prior-candidate evidence does not qualify either strict gameplay matrix;
+  historical strict results are not current-head acceptance.
+- [x] The historical PR #19 bounded localhost concurrency/lifecycle probe passes 8/8 in
   each of five repetitions.
 - [ ] Real-ROM concurrent-load stability is complete on the current runtime;
   platform and load evidence remain open.
@@ -166,8 +181,12 @@ gameplay, trade, battle, or release readiness.
 - [x] `release-evidence/fixture-manifest.json` records ten external state
   entries with sizes, SHA-1/SHA-256 values, expected ROM/SYM pins, source-state
   records, runtime identity, and command templates.
-- [x] Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
-  fixture bytes have deterministic reproduction evidence.
+- [ ] Current-head deterministic reproduction of the four vanilla-derived
+  fixture bytes is established. Static validation confirms the stock ROM/SYM
+  pins and existing vanilla fixture bytes, but vanilla ordinary capture
+  provenance cannot be established: replay against the retained source failed
+  at the 64-step bound, and the manifest's ordinary producer revision is
+  historical (`25e231c`).
 - [x] `scripts/produce_cable_club_fixture.py` validates pins and has bounded
   defaults of 180 seconds and 64 movement steps.
 - [x] `scripts/prepare_battle_cable_club_fixtures.py` is tracked and produces
@@ -175,8 +194,9 @@ gameplay, trade, battle, or release readiness.
   in emulator RAM.
 - [x] Provenance is verified for six canonical fixture entries.
 - [ ] Provenance for the four vanilla-derived entries is verified. Their
-  vanilla source states are not proven to match the vanilla ROM, so those rows
-  remain `PARTIAL`.
+  vanilla source states are not proven to match the vanilla ROM; replay against
+  the retained source failed at the 64-step bound, and the manifest's ordinary
+  producer revision is historical (`25e231c`), so those rows remain `PARTIAL`.
 - [ ] The operator validates all ten manifest entries with
   `python scripts/validate_fixture_manifest.py --fixture-root ...` and keeps
   the external fixture root available to the release runner.
