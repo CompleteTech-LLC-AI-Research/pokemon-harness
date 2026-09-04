@@ -19,24 +19,30 @@ asset-backed source trade gate recorded 19/19 ordered local and remote party
 swaps. The historical native Cython strict-trade gate recorded 18/19. Exact-row
 follow-ups have both passed and failed, including exact party-record exchange,
 a party-record mismatch, and phase stalls, so native strict-trade reliability
-is unproven. Timing-altered diagnostics are not acceptance evidence. The full
-current native battle matrix has not been qualified.
+is unproven. Timing-altered diagnostics are not acceptance evidence. The
+latest native remote-battle acceptance lane exercised 3/9 direct strict rows
+under a bounded 155-second pair deadline: one PASS for
+Blue-color↔Blue-color, two FAIL results for Red-color↔Yellow and
+Yellow↔Red-color, and six rows remain unrun. No test-only bypasses were used;
+the full 19-entrypoint battle set remains unqualified.
 The source run was a trade-tier run whose supervisor started before PR #35 was
 published; its child runs loaded the current implementation, but it is not a
 clean post-merge all-tier sign-off.
 
-A fresh isolated source and Cython `--unit-only --repeat-timing 5` gate on
-2026-09-03 collected 745 tests in each runtime. Both passed unit 600/600 and
-timing 40/40 in all five repetitions; source reported `python-source` and
-Cython reported `cython/native-extension`. The clone had no ROM, symbol, or
-save-state assets, so fixture schema and matrix declaration were checked but
-ROM gameplay was not run. An earlier environment-specific 585/586 ownership
-result is superseded for these isolated environments. Fresh uv-managed source
-and native environments installed the candidate; `uv pip check` passed in both,
+The latest verified candidate used the dual `--unit-only --repeat-timing 5`
+gate on 2026-09-03 with separate source and Cython interpreters (`--python`
+plus `--cython-python`). It collected 753 tests in each mode. Both passed unit
+608/608 and timing 40/40 in all five repetitions; source reported
+`python-source` and Cython reported `cython/native-extension`. The clone had no
+ROM, symbol, or save-state assets, so fixture schema and matrix declaration
+were checked but ROM gameplay was not run. An earlier environment-specific
+585/586 ownership result is superseded for these isolated environments. Fresh
+uv-managed source and native environments installed the candidate;
+`uv pip check` passed in both,
 and the native bootstrap verified both `pyboy` and `pokered-harness` package
 owners. The vendored source PyBoy runtime remains the documented release
-default; Cython is
-an optional diagnostic build. The host's bare `python3` still lacks `ensurepip`,
+default; Cython is an optional diagnostic build. The host's bare `python3` still
+lacks `ensurepip`,
 so that alternate standard-library venv path remains open.
 
 Prior integrated source and Cython transport slices passed remote 15/15 and
@@ -234,7 +240,7 @@ matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 | Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Recorded source gate: 9/9 local rows. The native strict-trade matrix has a historical 18/19 result; mixed exact-row follow-ups leave reliability unproven |
 | Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Historical source baseline passed 9/9 local rows; current full source rerun is not recorded, and native full battle coverage remains unqualified |
 | Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Recorded source gate: 9/9 remote rows. Native follow-ups for the historical 18/19 matrix both passed and failed, including party mismatch and phase stalls |
-| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Historical source baseline passed 9/9 remote rows; current native battle matrix is not qualified |
+| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Historical source baseline passed 9/9 remote rows; latest native direct lane exercised 3/9 under a bounded 155-second pair deadline (one pass, two fail, six unrun), with no test-only bypasses; the full 19-entrypoint battle set remains unqualified |
 
 The tracked
 [`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)
