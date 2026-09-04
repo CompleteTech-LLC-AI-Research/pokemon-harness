@@ -18,9 +18,10 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-The current public documentation head for this checklist is
-`f048870bdbd4837b5494006ae49fe40510832a89` (2026-09-04). The last verified
-pre-fix implementation/runtime snapshot under audit is
+The pre-reconciliation public documentation baseline for this checklist is
+`f048870bdbd4837b5494006ae49fe40510832a89` (the prior public head,
+2026-09-04). The last verified pre-fix implementation/runtime snapshot under
+audit is
 `a8576b5ecb8e7039eefe0e02865b0bfc031387a7`; public changes after that snapshot
 include the targeted network fix and documentation, so strict evidence below is
 pre-fix unless explicitly labeled otherwise. The earlier merged implementation baseline was
@@ -154,9 +155,9 @@ release readiness.
 
 ## Source and artifact hygiene
 
-- [x] The current public documentation head is identified as
-  `f048870bdbd4837b5494006ae49fe40510832a89`, and the last verified
-  implementation/runtime snapshot under audit is
+- [x] The pre-reconciliation public documentation baseline is identified as
+  `f048870bdbd4837b5494006ae49fe40510832a89` (the prior public head), and the
+  last verified implementation/runtime snapshot under audit is
   `a8576b5ecb8e7039eefe0e02865b0bfc031387a7`; this checklist is maintained in
   an isolated worktree separate from the protected dirty development checkout.
 - [x] The checkout is source-only: ROMs, symbols, save states, screenshots,
