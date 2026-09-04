@@ -65,22 +65,44 @@ python scripts/production_gate.py \
 ```
 
 The corresponding native check uses the same command from the separately
-bootstrapped Cython environment with `--runtime-mode cython`. The gate also
-accepts `--runtime-mode both` (and `dual` as an alias), but that runs the
-selected tiers twice under one `--python` interpreter; it does not create or
-validate two installed environments. Keep source and Cython install and gate
-evidence separate for release sign-off.
+bootstrapped Cython environment with `--runtime-mode cython`. For a
+separate-interpreter dual gate, pass the source environment as `--python` and
+the Cython environment as `--cython-python`:
 
-These fresh isolated current-candidate checks passed separately for source and
-Cython: collection 750 in each runtime, unit 605/605, and timing 40/40 in each
-of five repetitions. Source reported `python-source`; Cython reported
-`cython/native-extension`. The clone contained no ROM, symbol, or save-state
-assets, so no ROM-backed tier ran and the check is not a production sign-off.
-Both uv-managed environments passed `uv pip check --python <interpreter>`, and
-native bootstrap verified the `pyboy` and `pokered-harness` owners. An earlier
-environment-specific 585/586 ownership result is superseded for these isolated
-environments. The host's bare `python3` still lacks `ensurepip`, so that
-alternate standard-library venv path remains open.
+```bash
+SOURCE_PYTHON="$PWD/.venv/bin/python"
+CYTHON_PYTHON="$PWD/.venv-cython/bin/python"
+EVIDENCE_DIR="$(mktemp -d)"
+"$SOURCE_PYTHON" scripts/production_gate.py \
+  --repo-root "$PWD" \
+  --python "$SOURCE_PYTHON" \
+  --cython-python "$CYTHON_PYTHON" \
+  --runtime-mode both \
+  --unit-only \
+  --repeat-timing 5 \
+  --evidence-dir "$EVIDENCE_DIR" \
+  --format text
+```
+
+`--runtime-mode both` (with `dual` as an alias) runs the selected tiers under
+both explicit runtimes. `--python` selects the source interpreter and
+`--cython-python` selects the Cython interpreter; if the latter is omitted it
+defaults to `--python`, and it is valid only with `--runtime-mode both`. The
+gate does not create either environment. Keep the two install records and
+their gate evidence separate for release sign-off.
+
+At the separate-interpreter dual-gate evidence point (`b1134c4`), before the
+later mapping-test additions, source (`--python`) and Cython (`--cython-python`)
+each collected 753 tests, passed unit 608/608, and
+passed timing 40/40 in each of five repetitions. Source reported
+`python-source`; Cython reported `cython/native-extension`. The clone
+contained no ROM, symbol, or save-state assets, so no ROM-backed tier ran and
+the check is not a production sign-off. Both uv-managed environments passed
+`uv pip check --python <interpreter>`, and native bootstrap verified the
+`pyboy` and `pokered-harness` owners. An earlier environment-specific 585/586
+ownership result is superseded for these isolated environments. The host's
+bare `python3` still lacks `ensurepip`, so that alternate standard-library venv
+path remains open.
 
 After the pinned fork is built with `scripts/bootstrap_pyboy.py --mode cython`,
 the optional native path can be checked explicitly. The current focused source
@@ -91,7 +113,11 @@ and failed, including exact party-record exchange, a party-record mismatch,
 and phase stalls, so native strict-trade reliability is unproven. The full
 current native battle matrix is not qualified. The source run's supervisor
 started before PR #35 was published, so it is useful current evidence but not a
-clean post-merge all-tier sign-off.
+clean post-merge all-tier sign-off. The latest acceptance lane exercised 3/9
+direct native remote battle rows under a bounded 155-second pair deadline:
+`Blue-color↔Blue-color` passed; `Red-color↔Yellow` and
+`Yellow↔Red-color` failed. No bypasses were used; six rows remain unrun, and
+the full 19-entrypoint battle set remains unqualified.
 
 Prior integrated source and Cython remote tiers pass 15/15, and the prior
 integrated Cython local/session tier passes 47/47. These are scoped follow-ups,
@@ -130,8 +156,8 @@ result is 18/19, but exact-row follow-ups have both passed and failed,
 including a party-record mismatch and phase stalls, so reliability remains
 unproven. Native battle remains unqualified.
 
-The fresh isolated asset-free source and Cython checks use managed Linux Python
-3.12.13 and Pytest 9.1.1: collection 750 in each mode, unit 605/605, and
+The separate-interpreter dual-gate evidence uses managed Linux Python 3.12.13
+and Pytest 9.1.1: collection 753 in each mode, unit 608/608, and
 timing 40/40 in each of five repetitions. The native probe/build and current
 focused 110/110 serial-link suite are separate scoped checks. These gates do
 not establish ROM-backed gameplay coverage.
@@ -154,7 +180,9 @@ and tracked battle-fixture generator are present, and the source trade gate
 recorded 19/19. The historical native strict-trade result is 18/19, but
 exact-row follow-ups have both passed and failed, including a party-record
 mismatch and phase stalls, so native reliability is unproven; native battle
-remains unqualified. Full sign-off still requires reproducible clean-install
+remains unqualified: the latest direct native remote battle lane exercised
+only 3/9 rows (one pass and two bounded failures), leaving six unrun and the
+full 19-entrypoint set open. Full sign-off still requires reproducible clean-install
 evidence for the documented source/native environments, reliable current
 native trade and battle matrices, a complete current source battle matrix, a
 completed broad suite, vanilla source provenance, full native-platform and
@@ -198,7 +226,10 @@ real-ROM load evidence, independent review, and secure cross-host networking.
   matrix. Its focused serial-link suite passes 110/110. The historical native
   strict-trade result is 18/19, but exact-row follow-ups have both passed and
   failed, including a party-record mismatch and phase stalls, so reliability
-  remains unproven; the full native battle matrix is open.
+  remains unproven. The latest direct native remote battle lane exercised 3/9
+  rows under a bounded 155-second pair deadline: one passed and two failed
+  without bypasses; six rows remain unrun and the full 19-entrypoint battle
+  matrix is open.
 - [ ] Full Cython trade/battle acceptance is complete; source mode remains the
   documented release default while strict acceptance is unqualified.
 
@@ -220,14 +251,14 @@ real-ROM load evidence, independent review, and secure cross-host networking.
 
 ## Test gates
 
-- [x] Both module and console-script collection paths complete; the fresh
-  isolated source and Cython asset-free gates each collected 750 tests with no
+- [x] Both module and console-script collection paths complete; the recorded
+  separate-interpreter source and Cython asset-free gates each collected 753 tests with no
   collection errors.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
-- [x] The fresh isolated current-candidate unit gate passes 605/605 in both
-  source and Cython modes, and timing passes 40/40 in each of five repetitions;
-  the asset-free run did not exercise ROM-backed gameplay.
+- [x] The recorded separate-interpreter dual gate passes 608/608 in both source
+  and Cython modes, and timing passes 40/40 in each of five repetitions; the
+  asset-free run did not exercise ROM-backed gameplay.
 - [ ] A fresh standard-library virtual environment and editable install have
   not been independently verified on this host; the system `python3` lacks
   `ensurepip`, while the passing gates used existing managed environments.
@@ -256,8 +287,10 @@ real-ROM load evidence, independent review, and secure cross-host networking.
   current source trade gate recorded 19/19; the historical native strict-trade
   result is 18/19, but exact-row follow-ups have both passed and failed,
   including a party-record mismatch and phase stalls, so reliability remains
-  unproven. The current full source battle rerun and native strict battle
-  matrix are not recorded.
+  unproven. The latest direct native remote battle lane exercised 3/9 rows
+  under a bounded 155-second pair deadline, with one pass and two failures;
+  six rows remain unrun, and the current full source battle rerun plus the
+  complete 19-entrypoint native strict battle matrix remain unqualified.
 - [x] The PR #19 bounded localhost concurrency/lifecycle probe passes 8/8 in
   each of five repetitions.
 - [ ] Real-ROM concurrent-load stability is complete on the merged runtime.
@@ -335,9 +368,10 @@ python scripts/production_gate.py \
 The production-gate command above is the source-runtime run. Repeat it after
 `scripts/bootstrap_pyboy.py --mode cython --check` in the native environment,
 changing `--runtime-mode source` to `--runtime-mode cython` and retaining a
-separate evidence directory. `--runtime-mode both` runs both explicit modes
-under the same selected interpreter; it is not a substitute for recording the
-two independently installed environments.
+separate evidence directory. To run the separate-interpreter dual gate, keep
+the source path in `--python` and add the native path with `--cython-python`,
+then select `--runtime-mode both`. If `--cython-python` is omitted, the gate
+falls back to the `--python` interpreter; it does not create an environment.
 
 The matrix command is collection-only and returns zero when its structural and
 strict declaration checks pass. The asset-free gate may return `PASS`
