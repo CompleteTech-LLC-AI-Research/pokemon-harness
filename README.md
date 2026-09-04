@@ -43,6 +43,16 @@ are scoped artifacts, not a current-head pass. Transport, LinkMenu, fixture,
 or MCP lifecycle results do not substitute for a complete current-head
 real-ROM trade/battle matrix.
 
+A current-head follow-up reproduction on `d8391102a01b2c75c6009a09b426606ca59bb5d9`
+also failed the Blue-color/Blue-color TCP trade path under the bounded
+source-runtime peer driver. Both peers reached `CableClub_DoBattleOrTrade`
+on map `0xEF`, but neither reached `TradeCenter_SelectMon` before the
+120-second peer deadline; the connector applied `5,673` inbound edges and
+recorded `709` serial IRQ callbacks, while the listener received `5,673`
+responses. Owner-edge errors and pending requests were zero at the terminal
+snapshot. This is diagnostic reproduction evidence, not a release gate or a
+passing result, and reinforces the `PARTIAL` status.
+
 The detailed records below are retained historical or scoped evidence; they do
 not supersede the current status above.
 
