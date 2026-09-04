@@ -9,6 +9,45 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
+**Status: `PARTIAL` — not production-ready.** This is the current audit status
+for the hardening branch (2026-09-04). The repository has packaging and
+focused lifecycle/transport hardening, but strict end-to-end remote trade/link
+readiness has not been proven.
+
+The latest verification supports:
+
+- **Wheel/install:** `uv build --wheel` succeeded. A fresh Python 3.12.13
+  environment installed the wheel, `uv pip check` passed, and the archive
+  contained no ROM, symbol, fixture, generated-native, or path-traversal
+  entries. The installed runtime identified PyBoy 2.7.0 at fork revision
+  `c565df66c3731fad2856169a90f6bbec99925915`.
+- **Launch:** with operator-supplied Red color ROM and symbol files matching
+  [`VERSIONS.md`](VERSIONS.md) (`e1deed63080bc24cad5fba18ecb3184f905d16d4`
+  and `03783c86a42588bd77f73bd7814cf8d70e590118`),
+  `python -m pokered_harness.mcp_server` reached clean EOF and exited
+  successfully. ROMs and symbols are not distributed in the wheel; without
+  the required paths, launch fails closed.
+- **Focused hardening:** the serial-link, network-backend, production-gate,
+  coordinator, session, and MCP regression suites passed `292` tests with one
+  SDL warning; Ruff and whitespace checks passed.
+- **ROM-free production gate:** the complete current unit tier passed `963/963`
+  (including the Cython serial translation-unit smoke) and five timing
+  repetitions passed `50/50`. The required ROM, symbol, and
+  derived-fixture inputs were explicitly reported missing in this checkout,
+  so the real-ROM tiers were not presented as green.
+
+Strict end-to-end remote trade/link readiness is **not proven**. The latest
+recorded full source strict-trade run was `FAIL` at `18/19`, and the retained
+native/Cython strict gate was `FAIL` at `16/19` trade and `17/19` battle. Those
+are scoped artifacts, not a current-head pass. Transport, LinkMenu, fixture,
+or MCP lifecycle results do not substitute for a complete current-head
+real-ROM trade/battle matrix.
+
+The detailed records below are retained historical or scoped evidence; they do
+not supersede the current status above.
+
+### Historical audit context
+
 This repository remains an audited production-readiness candidate, not a
 production release. The live target is `CompleteDotTech/pokemon`. The
 prior/pre-reconciliation public documentation baseline is exact commit

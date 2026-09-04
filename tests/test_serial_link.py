@@ -101,6 +101,47 @@ def test_in_process_exchange_round_trip():
     t.join(timeout=2.0)
 
 
+def test_in_process_rejects_payload_above_wire_limit():
+    a, b = InProcessSerialLink.pair("blue", "yellow")
+    try:
+        with pytest.raises(ValueError, match="exchange payload is too long"):
+            a.exchange("oversized", b"x" * (0xFFFF + 1), timeout_ms=50)
+        assert a.connected
+        assert b.connected
+    finally:
+        a.close()
+        b.close()
+
+
+def test_in_process_inbound_budget_fails_closed_and_drains_queues(monkeypatch):
+    monkeypatch.setattr(serial_link_module, "_MAX_INBOUND_BYTES", 3)
+    a, b = InProcessSerialLink.pair("blue", "yellow")
+    results: list[Exception] = []
+
+    def send(kind: str) -> None:
+        try:
+            b.exchange(kind, b"xx", timeout_ms=1000)
+        except SerialLinkError as exc:  # the first sender is woken by the second
+            results.append(exc)
+
+    threads = [threading.Thread(target=send, args=(kind,), daemon=True) for kind in ("one", "two")]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1.0)
+        assert all(not thread.is_alive() for thread in threads)
+        assert not a.connected
+        assert not b.connected
+        assert any(isinstance(exc, SerialLinkProtocolError) for exc in results)
+        assert a._inbound_budget.frame_count == 0
+        assert a._inbound_budget.byte_count == 0
+        assert all(q.empty() for q in a._in.values())
+    finally:
+        a.close()
+        b.close()
+
+
 def test_in_process_rom_versions_swap():
     a, b = InProcessSerialLink.pair("red", "yellow")
     assert a.peer_rom_version == "yellow"

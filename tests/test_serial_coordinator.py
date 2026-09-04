@@ -10,6 +10,8 @@ mid-session, attach/detach idempotency.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from pokered_harness.link.serial_coordinator import (
@@ -180,6 +182,73 @@ def test_detach_deactivates_stale_coordinated_backends():
     assert stale_backend.active is False
     assert stale_backend.on_edge(1, 1) == 1
     assert b._bits_remaining == 8
+
+
+def test_completion_callback_does_not_deadlock_detach():
+    """Detach and a re-entrant completion callback have bounded teardown."""
+    a = SerialCore()
+    b = SerialCore()
+    callback_started = threading.Event()
+    detach_entered_backend = threading.Event()
+    errors: list[BaseException] = []
+
+    coordinator: LockstepCoordinator
+
+    def on_complete() -> None:
+        callback_started.set()
+        if not detach_entered_backend.wait(timeout=2):
+            errors.append(TimeoutError("detach did not reach backend deactivation"))
+            return
+        try:
+            coordinator.detach()
+        except BaseException as exc:  # noqa: BLE001 - surface thread failures
+            errors.append(exc)
+
+    coordinator = LockstepCoordinator(
+        a,
+        b,
+        on_b_transfer_complete=on_complete,
+    )
+    backend = a.backend
+    assert isinstance(backend, CoordinatedBackend)
+    real_deactivate = backend.deactivate
+
+    def gated_deactivate() -> None:
+        detach_entered_backend.set()
+        real_deactivate()
+
+    backend.deactivate = gated_deactivate  # type: ignore[method-assign]
+    b.set_SB(0x00)
+    b.set_SC(0x80)
+
+    def drive_edges() -> None:
+        try:
+            for _ in range(8):
+                backend.on_edge(1, 1)
+        except BaseException as exc:  # noqa: BLE001 - surface thread failures
+            errors.append(exc)
+
+    def detach_coordinator() -> None:
+        try:
+            coordinator.detach()
+        except BaseException as exc:  # noqa: BLE001 - surface thread failures
+            errors.append(exc)
+
+    edge_thread = threading.Thread(target=drive_edges, daemon=True)
+    detach_thread = threading.Thread(target=detach_coordinator, daemon=True)
+    edge_thread.start()
+    assert callback_started.wait(timeout=2)
+    detach_thread.start()
+
+    assert detach_entered_backend.wait(timeout=2)
+    edge_thread.join(timeout=2)
+    detach_thread.join(timeout=2)
+
+    assert not edge_thread.is_alive()
+    assert not detach_thread.is_alive()
+    assert not errors
+    assert coordinator.attached is False
+    assert a.backend is not backend
 
 
 # ---------------------------------------------------------------------------

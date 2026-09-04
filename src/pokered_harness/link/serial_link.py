@@ -100,6 +100,7 @@ OP_BYE: int = 0xFE
 # queued frames and the number of queued payload bytes bounded independently
 # so a peer cannot exhaust memory by sending valid frames that nobody awaits.
 _MAX_FRAME_SIZE = 1 << 20
+_MAX_EXCHANGE_PAYLOAD_SIZE = 0xFFFF
 _MAX_INBOUND_KINDS = 256
 _MAX_INBOUND_FRAMES_PER_KIND = 32
 _MAX_INBOUND_FRAMES = 256
@@ -167,7 +168,12 @@ def _validate_exchange_kind(kind: str) -> str:
 def _coerce_exchange_payload(payload: bytes | bytearray | memoryview) -> bytes:
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         raise TypeError(f"exchange payload must be bytes-like, got {type(payload).__name__}")
-    return bytes(payload)
+    encoded = bytes(payload)
+    if len(encoded) > _MAX_EXCHANGE_PAYLOAD_SIZE:
+        raise ValueError(
+            f"exchange payload is too long for the wire protocol: {len(encoded)} bytes"
+        )
+    return encoded
 
 
 def _validate_timeout_ms(timeout_ms: int) -> int:
@@ -299,7 +305,7 @@ def _pack_lp_bytes(b: bytes) -> bytes:
     if not isinstance(b, (bytes, bytearray, memoryview)):
         raise TypeError(f"length-prefixed value must be bytes-like, got {type(b).__name__}")
     encoded = bytes(b)
-    if len(encoded) > 0xFFFF:
+    if len(encoded) > _MAX_EXCHANGE_PAYLOAD_SIZE:
         raise ValueError(f"blob too long for length-prefix: {len(encoded)}")
     return struct.pack(">H", len(encoded)) + encoded
 
@@ -961,6 +967,25 @@ class _InProcessState:
 
     def __init__(self) -> None:
         self.closed = threading.Event()
+        self.close_lock = threading.Lock()
+
+
+class _InProcessInboundBudget:
+    """Counters for one direction of an in-process cable.
+
+    The sender updates the same object that the receiver decrements while
+    holding the direction's queue lock.  Keeping the counters beside the
+    queue direction makes the in-process transport obey the same aggregate
+    bounds as its TCP counterpart.
+    """
+
+    def __init__(self) -> None:
+        self.frame_count = 0
+        self.byte_count = 0
+
+    def clear(self) -> None:
+        self.frame_count = 0
+        self.byte_count = 0
 
 
 class InProcessSerialLink:
@@ -981,6 +1006,8 @@ class InProcessSerialLink:
         incoming: dict[str, queue.Queue[bytes]],
         locks: tuple[threading.Lock, threading.Lock],
         state: _InProcessState | None = None,
+        inbound_budget: _InProcessInboundBudget | None = None,
+        outbound_budget: _InProcessInboundBudget | None = None,
     ) -> None:
         self._local_rom = validate_rom_version(local_rom_version)
         self._peer_rom = validate_rom_version(peer_rom_version)
@@ -988,6 +1015,12 @@ class InProcessSerialLink:
         self._in = incoming
         self._out_lock, self._in_lock = locks
         self._state = state if state is not None else _InProcessState()
+        self._inbound_budget = (
+            inbound_budget if inbound_budget is not None else _InProcessInboundBudget()
+        )
+        self._outbound_budget = (
+            outbound_budget if outbound_budget is not None else _InProcessInboundBudget()
+        )
         self._closed = False
         self._exchange_locks: dict[str, threading.Lock] = {}
         self._exchange_locks_lock = threading.Lock()
@@ -1004,6 +1037,8 @@ class InProcessSerialLink:
         a_lock = threading.Lock()
         b_lock = threading.Lock()
         state = _InProcessState()
+        a_inbound_budget = _InProcessInboundBudget()
+        b_inbound_budget = _InProcessInboundBudget()
         a = cls(
             a_rom_version,
             b_rom_version,
@@ -1011,6 +1046,8 @@ class InProcessSerialLink:
             b_to_a,
             (a_lock, b_lock),
             state,
+            a_inbound_budget,
+            b_inbound_budget,
         )
         b = cls(
             b_rom_version,
@@ -1019,6 +1056,8 @@ class InProcessSerialLink:
             a_to_b,
             (b_lock, a_lock),
             state,
+            b_inbound_budget,
+            a_inbound_budget,
         )
         return a, b
 
@@ -1056,16 +1095,30 @@ class InProcessSerialLink:
         request_sent = False
         try:
             _raise_if_cancelled(cancel_event)
+            send_error: SerialLinkProtocolError | None = None
             with self._out_lock:
                 if self._state.closed.is_set():
                     raise SerialLinkClosed("link is closed")
-                try:
-                    self._out[kind].put_nowait(payload)
-                except queue.Full as exc:
+                if self._outbound_budget.frame_count >= _MAX_INBOUND_FRAMES:
                     self._state.closed.set()
-                    raise SerialLinkProtocolError(
-                        f"inbound EXCHANGE queue is full for kind={kind!r}"
-                    ) from exc
+                    send_error = SerialLinkProtocolError("inbound EXCHANGE frame limit exceeded")
+                elif self._outbound_budget.byte_count + len(payload) > _MAX_INBOUND_BYTES:
+                    self._state.closed.set()
+                    send_error = SerialLinkProtocolError("inbound EXCHANGE byte limit exceeded")
+                else:
+                    try:
+                        self._out[kind].put_nowait(payload)
+                    except queue.Full:
+                        self._state.closed.set()
+                        send_error = SerialLinkProtocolError(
+                            f"inbound EXCHANGE queue is full for kind={kind!r}"
+                        )
+                    else:
+                        self._outbound_budget.frame_count += 1
+                        self._outbound_budget.byte_count += len(payload)
+            if send_error is not None:
+                self.close()
+                raise send_error
             request_sent = True
             with self._in_lock:
                 q = self._in[kind]
@@ -1080,13 +1133,19 @@ class InProcessSerialLink:
                     raise SerialLinkTimeout(
                         f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
                     )
-                try:
-                    return q.get_nowait()
-                except queue.Empty:
-                    if cancel_event is None:
-                        self._state.closed.wait(timeout=min(_IO_POLL_S, remaining))
+                with self._in_lock:
+                    try:
+                        payload = q.get_nowait()
+                    except queue.Empty:
+                        payload = None
                     else:
-                        cancel_event.wait(timeout=min(_IO_POLL_S, remaining))
+                        self._inbound_budget.frame_count -= 1
+                        self._inbound_budget.byte_count -= len(payload)
+                        return payload
+                if cancel_event is None:
+                    self._state.closed.wait(timeout=min(_IO_POLL_S, remaining))
+                else:
+                    cancel_event.wait(timeout=min(_IO_POLL_S, remaining))
         except SerialLinkTimeout:
             # EXCHANGE has no request identifier. A delayed response after a
             # timeout cannot safely be matched to a later call of this kind,
@@ -1109,8 +1168,28 @@ class InProcessSerialLink:
             return lock
 
     def close(self) -> None:
-        self._closed = True
-        self._state.closed.set()
+        with self._state.close_lock:
+            self._closed = True
+            self._state.closed.set()
+            locks = (self._out_lock, self._in_lock)
+            if locks[0] is locks[1]:
+                with locks[0]:
+                    self._drain_queues_locked()
+            else:
+                first, second = sorted(locks, key=id)
+                with first, second:
+                    self._drain_queues_locked()
+
+    def _drain_queues_locked(self) -> None:
+        for queues in (self._in, self._out):
+            for q in queues.values():
+                while True:
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
+        self._inbound_budget.clear()
+        self._outbound_budget.clear()
 
 
 __all__ = [

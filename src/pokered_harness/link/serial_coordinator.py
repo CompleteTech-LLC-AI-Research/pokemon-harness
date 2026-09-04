@@ -181,12 +181,21 @@ class CoordinatedBackend:
 
     def on_edge(self, our_bit: int, our_role: int) -> int:
         """Exchange one bit, or return the pulled-up line when inactive."""
+        completion_callback: Callable[[], None] | None = None
         with self._lifecycle_lock:
-            return self._on_edge_locked(our_bit, our_role)
+            received_bit, completed = self._on_edge_locked(our_bit, our_role)
+            if completed:
+                completion_callback = self._on_peer_transfer_complete
+        # A completion callback may re-enter the coordinator (or another
+        # lifecycle owner). Invoke it only after releasing the backend lock;
+        # detach holds the coordinator lock while deactivating backends.
+        if completion_callback is not None:
+            completion_callback()
+        return received_bit
 
-    def _on_edge_locked(self, our_bit: int, our_role: int) -> int:
+    def _on_edge_locked(self, our_bit: int, our_role: int) -> tuple[int, bool]:
         if not self._active:
-            return 1
+            return 1, False
         peer = self._peer
         self.edge_count += 1
         # Peer must be armed and in slave mode to accept a driven edge.
@@ -201,18 +210,13 @@ class CoordinatedBackend:
             self._prepare_peer_for_edge_locked()
         if not peer.transfer_enabled:
             self.peer_unarmed_edges += 1
-            return 1
+            return 1, False
         if peer.internal_clock:
             self.peer_master_edges += 1
-            return 1
+            return 1, False
         peer_bit = peer.peek_out_bit()
         completed = peer.apply_external_edge(our_bit & 1)
-        # Fire the peer-side IRQ if the 8th edge just completed the
-        # slave's transfer. Without this the halted slave CPU never
-        # wakes and Pokémon's tight serial-sync loops stall forever.
-        if completed and self._on_peer_transfer_complete is not None:
-            self._on_peer_transfer_complete()
-        return peer_bit
+        return peer_bit, completed
 
     @property
     def active(self) -> bool:
@@ -224,7 +228,7 @@ class CoordinatedBackend:
             self._active = True
 
     def deactivate(self) -> None:
-        """Stop future edge callbacks after any in-flight callback completes."""
+        """Stop future edge callbacks after the current edge operation."""
         with self._lifecycle_lock:
             self._active = False
 

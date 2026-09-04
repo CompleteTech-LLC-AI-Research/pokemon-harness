@@ -1233,7 +1233,15 @@ class NetworkBackend:
                         self._edge_queue.put_nowait(request)
                     except queue.Full as exc:
                         with self._edge_pending_condition:
-                            self._edge_pending -= 1
+                            # _mark_closed() can clear the admitted-work
+                            # count while this queue operation is racing
+                            # teardown.  Keep the live diagnostic invariant
+                            # non-negative on the queue-full path as well as
+                            # in worker finalizers.
+                            if self._edge_pending > 0:
+                                self._edge_pending -= 1
+                            else:
+                                self._edge_pending = 0
                             self._edge_pending_condition.notify_all()
                         raise NetworkBackendError("incoming EDGE_REQ queue is full") from exc
                 elif opcode == _OP_EDGE_RESP:

@@ -709,18 +709,31 @@ class Session:
         _validate_positive_int(count, "count")
         with self._lock:
             self._ensure_open()
-            # Increment BEFORE pyboy.tick so hooks firing mid-step read the
-            # post-step tick value. Roll it back if the emulator rejects the
-            # tick, so bookkeeping never claims frames that were not run.
-            old_tick = self._tick
-            self._tick += count
-            if render is None:
-                render = self._view
-            try:
-                self._pyboy.tick(count, render=render)
-            except Exception:
-                self._tick = old_tick
-                raise
+            self._step_locked(count, render=render)
+
+    def _step_locked(self, count: int, *, render: bool | None = None) -> None:
+        """Advance an operation that already owns and passed the session lock.
+
+        ``run_until_event`` is one compound operation: it admits the caller
+        once, then performs several bounded steps while retaining ``_lock``.
+        ``close()`` publishes ``_closed`` before waiting for that lock, so
+        routing each later chunk through public :meth:`step` would reject an
+        operation that was already in flight. Keep the admission check in
+        :meth:`step` and use this private primitive for the admitted compound
+        path.
+        """
+        # Increment BEFORE pyboy.tick so hooks firing mid-step read the
+        # post-step tick value. Roll it back if the emulator rejects the
+        # tick, so bookkeeping never claims frames that were not run.
+        old_tick = self._tick
+        self._tick += count
+        if render is None:
+            render = self._view
+        try:
+            self._pyboy.tick(count, render=render)
+        except Exception:
+            self._tick = old_tick
+            raise
 
     def press(self, button: str | Button, *, duration: int = 1) -> None:
         _validate_positive_int(duration, "duration")
@@ -827,7 +840,7 @@ class Session:
                         )
 
                 ticks_left = deadline - self._tick
-                self.step(min(chunk, ticks_left), render=render)
+                self._step_locked(min(chunk, ticks_left), render=render)
 
             # Final check after the last chunk.
             for name in wanted:

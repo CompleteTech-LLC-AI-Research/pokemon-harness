@@ -456,6 +456,45 @@ def test_exchange_queue_backpressure_fails_closed():
         b.stop()
 
 
+def test_edge_pending_stays_nonnegative_when_queue_full_races_close(monkeypatch):
+    """Queue rejection after close must not underflow live edge accounting."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(
+        local_core=None,
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    for _ in range(a._edge_queue.maxsize):
+        a._edge_queue.put_nowait(object())
+
+    put_entered = threading.Event()
+    release_put = threading.Event()
+    original_put_nowait = a._edge_queue.put_nowait
+
+    def delayed_put(item):
+        put_entered.set()
+        assert release_put.wait(timeout=1.0)
+        return original_put_nowait(item)
+
+    monkeypatch.setattr(a._edge_queue, "put_nowait", delayed_put)
+    closer = threading.Thread(target=a.stop, daemon=True)
+    try:
+        b._sock.sendall(struct.pack(">BB", _OP_EDGE_REQ, 1))
+        assert put_entered.wait(timeout=1.0)
+        closer.start()
+        assert a._closed_event.wait(timeout=1.0)
+        release_put.set()
+        closer.join(timeout=1.0)
+        assert not closer.is_alive()
+        assert a.debug_snapshot()["pending_edge_requests"] == 0
+    finally:
+        release_put.set()
+        if closer.is_alive():
+            closer.join(timeout=1.0)
+        a.stop()
+        b.stop()
+
+
 def test_cancelled_network_connect_returns_promptly():
     cancel = threading.Event()
     cancel.set()
