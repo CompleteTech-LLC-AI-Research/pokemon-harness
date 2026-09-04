@@ -5,6 +5,9 @@
 *.map
 *.sav
 *.state
+*.ram
+*.sqlite
+*.sqlite3
 rom/
 roms/
 pokered/
@@ -34,3 +37,5 @@ walkthrough_*/
 # Non-Cython PyBoy venv + vendor source (see test_pyboy_link_session_roms.py)
 .venv-noncython/
 vendor/
+vendor/pyboy-src/build/
+vendor/pyboy-src/pyboy.egg-info/
