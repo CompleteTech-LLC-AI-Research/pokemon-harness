@@ -20,11 +20,14 @@ integrated fix commit
 `7b4b5b72ad373d2293d51e3d11717314606ee442` (cherry-picked as `7b4b5b7`)
 moves stale `EDGE_RESP` closure outside `_edge_response_lock` and adds a
 bounded regression test. Its focused post-fix network suite passed 38/38, and
-Ruff and format checks were clean. The native strict gate and source-runtime
-strict-trade run documented below are pre-fix evidence from the `a8576b5`
-implementation / `f048870b` documentation snapshot; the source-trade result
-remains `PENDING` until a terminal artifact is supplied. The implementation
-baseline for that snapshot is
+Ruff and format checks were clean. The post-fix serialized source-runtime
+strict-trade production gate documented below is `FAIL` at 18/19, with one
+failed row. The retained native strict gate remains pre-fix evidence from the
+`a8576b5` implementation / `f048870b` documentation snapshot, with trade
+16/19 and battle 17/19. The source-runtime local strict battle result also
+remains pre-fix `PASS` at 9/9. These scoped results do not make the release
+production-ready; release status remains `PARTIAL`. The implementation baseline
+for that snapshot is
 `6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42); the prior merged
 implementation head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. The
 retained exact prior-candidate evidence below was collected at
@@ -55,10 +58,10 @@ passed in 13.11 seconds with one SDL warning, and 104 MCP dispatch tests
 passed. The source-runtime local strict battle matrix also passed all nine
 ordered canonical color pairs; the row-level snapshot is recorded below. The
 pre-fix source unit/timing gate also passed 954/954 unit tests and 50/50 timing cases in
-each of five repetitions. These are scoped source-runtime results, not current
-full trade acceptance, a passing native/Cython strict gate, secure cross-host
-operation, or MCP-driven starter/trade/battle gameplay; the release decision
-remains `PARTIAL`.
+each of five repetitions. These are scoped pre-fix source-runtime results, not
+the post-fix full trade result, a passing native/Cython strict gate, secure
+cross-host operation, or MCP-driven starter/trade/battle gameplay; the release
+decision remains `PARTIAL`.
 A valid pre-fix native/Cython strict gate for the implementation/runtime
 snapshot is retained in the operator-local artifact
 `/tmp/poke-harness-native-strict-evidence-a8576b5`. It used Python 3.12.13 and
@@ -92,9 +95,11 @@ assertion.
 | `blue-yellow` | `PASS` | 443.50s |
 | `yellow-blue` | `PASS` | 480.31s |
 
-This is source-local battle evidence only. It does not close current strict
-trade acceptance, the native/Cython strict gate (trade 16/19 and battle 17/19,
-with the terminal failures below), remote full-matrix qualification,
+This is pre-fix source-local battle evidence only. It does not change the
+post-fix source-runtime strict-trade result (`FAIL`, 18/19, with the sole
+failure detailed below), the retained pre-fix native/Cython strict gate (trade
+16/19 and battle 17/19, with the terminal failures below), remote full-matrix
+qualification,
 MCP-driven gameplay, vanilla fixture provenance, platform/concurrency gates, or
 secure cross-host TCP.
 
@@ -135,9 +140,39 @@ declared and executed all 19 entrypoints.
 
 No native owner/IRQ errors occurred. These five pre-fix failures are strict
 real-ROM results, not bypasses, so this is a valid native/Cython gate with a
-`FAIL` outcome rather than a passing production release result. The post-fix focused
-38/38 network result does not replace this native strict gate or qualify a
-post-fix full trade or battle result.
+`FAIL` outcome rather than a passing production release result. The post-fix
+serialized source-runtime strict-trade gate below is separate source evidence:
+it completed all 19 trade entrypoints but failed at 18/19, so it is not a
+passing full-trade release result and does not replace this retained native
+gate. The post-fix focused 38/38 network result is transport/regression
+evidence and does not qualify a post-fix battle matrix.
+
+### Post-fix source-runtime strict-trade gate
+
+The post-fix serialized source strict-trade production gate is retained at
+`/tmp/poke-harness-source-serial-acceptance-20260904/evidence`. It used source
+Python 3.12.13, PyBoy 2.7.0 fork
+`c565df66c3731fad2856169a90f6bbec99925915`, bit-accurate serial, and
+`matrix-workers=1`. The complete matrix audit collected `1107`; all 19 trade
+entrypoints were declared and executed. The overall result was `FAIL`: 18/19
+passed, 1/19 failed, 0 skipped, 0 errors, 0 xfail, and 0 xpass, with a
+duration of `2788.895s`.
+
+The sole failure was
+`tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_completes_trade_over_tcp[blue_color-listen-blue_color-connect]`
+at `721.4846s`: the trade-center warp rendezvous did not converge. Pre-close
+stats had 984 inbound/applied edges, 123 IRQ callbacks, zero owner-edge
+errors, and no pending edge requests. The evidence hashes are
+`gate-report.json`=`7de82390f52bdd4b8e3d569204ef8f3951113a8c1706f403e53a6f681e0db453`,
+`gate-report.txt`=`90e5b17706ba87a095a7fa32c317d84d957e2c76550a7d06f2a38720ab451a97`,
+and
+`evidence-manifest.json`=`c6f07eb29dbd272ead265b628bd2d2c41e287ec02ab1229db90716ff95dde45a`.
+
+This is post-fix source evidence after code fix `7b4b5b72` (cherry-picked as
+`7b4b5b7`). It is a complete failed source strict-trade result, not a
+production-ready result: the retained native/Cython strict gate remains
+pre-fix at `a8576b5` with trade 16/19 and battle 17/19, and the source-local
+strict battle remains pre-fix `PASS` at 9/9. Release status remains `PARTIAL`.
 
 The merged head includes the MCP lifecycle, runtime packaging, in-process
 serial/lifecycle, remote TCP follow-ups from PRs #12-#17, concurrency/lifecycle
@@ -236,8 +271,8 @@ At that prior candidate, the local asset tier passed source 47/47 in
 hashes, 3/3 symbol hashes, and 3/3 fixture hashes, and the 10-entry fixture
 manifest passed. These are scoped asset and transport/session results; the
 implementation-snapshot MCP integration/navigation evidence above does not establish
-starter acquisition, MCP-facing trade/battle, or the current strict full
-trade/battle rerun.
+starter acquisition, MCP-facing trade/battle, or the post-fix strict full
+trade/battle result.
 
 An earlier `python -m pytest -q -ra` run completed 604 passed,
 141 expected BYO-asset skips, and one SDL warning. It is a clean-checkout
@@ -264,22 +299,23 @@ open.
 The release status for public documentation head
 `f048870bdbd4837b5494006ae49fe40510832a89` remains `PARTIAL`; it records the
 last verified pre-fix implementation/runtime snapshot
-`a8576b5ecb8e7039eefe0e02865b0bfc031387a7`. The source-runtime local strict
-battle matrix is pre-fix `PASS` at 9/9, and the scoped MCP
-integration/navigation checks pass in their pre-fix implementation-snapshot
-boundary.
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7`. The post-fix serialized
+source-runtime strict-trade production gate completed all 19 declared and
+executed entrypoints and is `FAIL` at 18/19; its exact artifact boundary and
+sole failure are recorded above. The source-runtime local strict battle matrix
+is pre-fix `PASS` at 9/9, and the scoped MCP integration/navigation checks pass
+in their pre-fix implementation-snapshot boundary.
 The valid pre-fix native/Cython strict gate executed all 19 declared entrypoints
 in each trade and battle tier, but is `FAIL` at 16/19 trade and 17/19 battle;
 its strict real-ROM failures are detailed above. The focused post-fix network
-suite passed 38/38, with Ruff and format checks clean; that focused result does
-not qualify a post-fix strict trade or battle matrix. The clean current
-source-runtime strict-trade gate remains `PENDING` while it runs in another
-isolated worktree; no terminal result is claimed. Current remote full-matrix
-qualification, MCP-facing starter/trade/battle gameplay, fixture provenance,
-concurrent real-ROM load, cross-platform native qualification, standard-library
-clean-install verification, independent review, and authenticated/encrypted
-cross-host TCP also remain open. TCP remains loopback-only and
-unauthenticated/unencrypted.
+suite passed 38/38, with Ruff and format checks clean; that focused result is
+separate transport/regression evidence and does not qualify a post-fix battle
+matrix. The post-fix source-trade result is a complete failed acceptance result,
+not a production-ready pass. Current remote full battle-matrix qualification,
+MCP-facing starter/trade/battle gameplay, fixture provenance, concurrent
+real-ROM load, cross-platform native qualification, standard-library clean-install
+verification, independent review, and authenticated/encrypted cross-host TCP
+also remain open. TCP remains loopback-only and unauthenticated/unencrypted.
 
 The pre-PR #27 source-runtime asset-backed broad run is diagnostic and bounded,
 not a release sign-off: at the 5,400-second supervisor cutoff it had completed
@@ -370,10 +406,24 @@ The retained evidence set is:
   and executed in each trade and battle tier. Trade was 16/19 and battle was
   17/19; no native owner/IRQ errors occurred, and the five failures were strict
   real-ROM results rather than bypasses;
+- post-fix serialized source-runtime strict-trade production gate: `FAIL`,
+  terminal evidence `/tmp/poke-harness-source-serial-acceptance-20260904/evidence`;
+  source Python 3.12.13, PyBoy 2.7.0 fork
+  `c565df66c3731fad2856169a90f6bbec99925915`, bit-accurate serial,
+  `matrix-workers=1`, and complete matrix audit collection `1107`. All 19
+  trade entrypoints were declared and executed: 18/19 passed and 1/19 failed,
+  with 0 skipped, 0 errors, 0 xfail, and 0 xpass in `2788.895s`. The sole
+  failure was the `blue_color-listen-blue_color-connect` subprocess trade row,
+  which took `721.4846s` and did not converge at the trade-center warp
+  rendezvous; pre-close stats had 984 inbound/applied edges, 123 IRQ callbacks,
+  zero owner-edge errors, and no pending edge requests. Exact test identity,
+  artifact hashes, and the post-fix/pre-fix evidence boundary are recorded in
+  the dedicated section above;
 - post-fix integrated network deadlock fix `7b4b5b72ad373d2293d51e3d11717314606ee442`
   (cherry-picked as `7b4b5b7`): `PASS` for the focused 38/38 network suite,
-  with Ruff and format checks clean. This focused regression result does not
-  replace the pre-fix native strict gate or the pending source strict-trade run;
+  with Ruff and format checks clean. This focused regression result is separate
+  from the post-fix source strict-trade result; it does not replace the pre-fix
+  native strict gate or qualify a post-fix battle matrix;
 - historical Cython/native gameplay: `PARTIAL`; earlier representative Blue
   Color↔Yellow and Red Color↔Yellow trade/battle rows passed in scoped runs. A
   historical native remote battle lane exercised 3/9 direct strict rows with a
@@ -408,8 +458,8 @@ The historical full gate used native bit-level serial traffic, ordinary ROM
 input, exact party-record and battle-hook assertions, bounded deadlines, and
 clean teardown for every declared local and remote row. Retained prior-candidate
 evidence establishes the dual unit/timing gate and scoped local
-and remote asset tiers. It does not establish strict full trade acceptance,
-passing native or remote full battle acceptance for the current
+and remote asset tiers. It does not establish a passing post-fix strict-trade
+result (the complete source result is `FAIL` at 18/19), passing native or remote full battle acceptance for the current
 implementation/runtime snapshot
 `a8576b5ecb8e7039eefe0e02865b0bfc031387a7`, source broad-suite completion,
 vanilla fixture provenance, platform, real-ROM load, actual MCP live gameplay,
@@ -421,12 +471,12 @@ review, or network-security claims.
 | Runtime/package identity | `PASS` (retained source/native scope) | The retained prior-candidate gate selected and reported vendored source or installed Cython PyBoy 2.7.0, fork `c565df66c3731fad2856169a90f6bbec99925915`, the packaged entry point, and the bit-accurate serial contract. |
 | Canonical color Red/Blue/Yellow fixture evidence | `PASS` (prior-candidate asset and fixture scope; release remains `PARTIAL`) | The prior-candidate checks validated 5/5 ROM hashes, 3/3 symbol hashes, 3/3 fixture hashes, and the 10-entry fixture manifest. Six canonical fixtures have verified provenance; four vanilla-derived fixtures remain `PARTIAL`. Existing vanilla bytes validate, but vanilla ordinary capture provenance cannot be established or reproduced at the implementation/runtime snapshot. |
 | Single-session/MCP | `PASS` (pre-fix implementation-snapshot integration/navigation scope; release remains `PARTIAL`) | Six real MCP integration checks against the pre-fix implementation/runtime snapshot passed in 13.11s with one SDL warning, and 104 MCP dispatch tests passed. Ordinary MCP calls reached Red's bedroom (map 38, `(3,7)`), the house exit, Pallet Town (map 0, `(5,5)`), Oak's Lab (map 40), and lab movement. A bounded starter attempt ended at map 40, `(5,3)` with `party.count=0`; no memory/state bypass was used. MCP-facing starter acquisition and trade/battle remain unproven. |
-| In-process link acceptance | `PARTIAL` (pre-fix source-local battle 9/9; native strict trade 16/19 and battle 17/19; release remains `PARTIAL`) | The pre-fix implementation/runtime snapshot passed all nine ordered source-local battle rows. The valid pre-fix native/Cython strict gate executed all 19 declared entrypoints in each trade and battle tier, with trade 16/19 and battle 17/19; its five strict real-ROM failures are detailed above. The retained prior-candidate local asset tier passed source 47/47 in 531.3477s and native 47/47 in 38.2974s; those broader local/session results do not qualify current strict trade or remote battle acceptance. |
-| Remote TCP and MCP lifecycle | `PASS` (pre-fix implementation-snapshot scope plus post-fix focused regression; release remains `PARTIAL`) | The pre-fix source representative TCP Red/Yellow trade and battle passed. Six real MCP integration checks against the pre-fix implementation/runtime snapshot passed in 13.11s with one SDL warning and 104 MCP dispatch tests passed, including listen/connect and EOF cleanup. The post-fix focused network suite passed 38/38 with Ruff and format checks clean. These are scoped transport/MCP/regression results, not full current remote-matrix or MCP-facing trade/battle acceptance. TCP remains loopback-only, unauthenticated, and unencrypted. |
-| Strict full trade acceptance | `PENDING` | The clean source-runtime strict-trade gate associated with the `f048870b` documentation snapshot is still running in another isolated worktree; no terminal result is claimed. It is pre-fix evidence, and the pre-fix native/Cython gate failed at 16/19, but neither closes current strict trade acceptance. Historical 19/19 source rows, LinkMenu milestones, and transport/session results are not current post-fix trade acceptance. |
-| Strict full battle acceptance | `PARTIAL` (pre-fix source-local 9/9; native 17/19; release remains `PARTIAL`) | The pre-fix implementation/runtime snapshot passed all nine ordered source-local rows, each reaching Link Battle and the move/damage hooks. The valid pre-fix native/Cython strict gate executed all 19 battle entrypoints but failed at 17/19; its two strict real-ROM failures are detailed above. The post-fix focused 38/38 network result does not qualify a full battle matrix. Current remote full-matrix qualification remains open; historical rows and LinkMenu milestones do not substitute for it. |
+| In-process link acceptance | `PARTIAL` (post-fix source strict trade 18/19 `FAIL`; pre-fix source-local battle 9/9; pre-fix native strict trade 16/19 and battle 17/19; release remains `PARTIAL`) | The post-fix source strict-trade gate is a complete 19-row result with one failed trade-center warp row, as detailed above. The pre-fix implementation/runtime snapshot passed all nine ordered source-local battle rows. The valid pre-fix native/Cython strict gate executed all 19 declared entrypoints in each trade and battle tier, with trade 16/19 and battle 17/19; its five strict real-ROM failures are detailed above. The retained prior-candidate local asset tier passed source 47/47 in 531.3477s and native 47/47 in 38.2974s; those broader local/session results do not qualify a passing current strict trade or remote battle acceptance. |
+| Remote TCP and MCP lifecycle | `PASS` (pre-fix implementation-snapshot scope plus post-fix focused regression; release remains `PARTIAL`) | The pre-fix source representative TCP Red/Yellow trade and battle passed. Six real MCP integration checks against the pre-fix implementation/runtime snapshot passed in 13.11s with one SDL warning and 104 MCP dispatch tests passed, including listen/connect and EOF cleanup. The post-fix focused network suite passed 38/38 with Ruff and format checks clean. These are scoped transport/MCP/regression results, not a passing current remote battle matrix or MCP-facing trade/battle acceptance. TCP remains loopback-only, unauthenticated, and unencrypted. |
+| Strict full trade acceptance | `FAIL` (post-fix serialized source 18/19; release remains `PARTIAL`) | The terminal source gate at `/tmp/poke-harness-source-serial-acceptance-20260904/evidence` used source Python 3.12.13, PyBoy 2.7.0 fork `c565df66c3731fad2856169a90f6bbec99925915`, bit-accurate serial, `matrix-workers=1`, and complete matrix audit collection `1107`. All 19 trade entrypoints were declared and executed: 18/19 passed and 1/19 failed, with 0 skipped, 0 errors, 0 xfail, and 0 xpass over `2788.895s`. The sole failure was `tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_completes_trade_over_tcp[blue_color-listen-blue_color-connect]` at `721.4846s`; the trade-center warp rendezvous did not converge, with pre-close stats of 984 inbound/applied edges, 123 IRQ callbacks, zero owner-edge errors, and no pending edge requests. Exact hashes and the post-fix source versus retained pre-fix native/source-battle boundary are recorded above. |
+| Strict full battle acceptance | `PARTIAL` (pre-fix source-local 9/9; native 17/19; release remains `PARTIAL`) | The pre-fix implementation/runtime snapshot passed all nine ordered source-local rows, each reaching Link Battle and the move/damage hooks. The valid pre-fix native/Cython strict gate executed all 19 battle entrypoints but failed at 17/19; its two strict real-ROM failures are detailed above. The post-fix focused 38/38 network result does not qualify a full battle matrix. Current remote battle-matrix qualification remains open; historical rows and LinkMenu milestones do not substitute for it. |
 | Synthetic concurrency/lifecycle boundary | `PASS` (historical localhost probe scope) | Eight bounded probes passed in each of five repetitions, including concurrent exchange load, shutdown overlap, receiver races, terminal timeouts, resolver rechecks, BYE ordering, and raw-socket boundaries. Real-ROM load remains unverified. |
-| Cython/native serial runtime | `PARTIAL` (pre-fix strict gate plus post-fix focused regression and retained scoped tiers) | The valid pre-fix native/Cython strict gate used Python 3.12.13 and PyBoy 2.7.0 fork `c565df66c3731fad2856169a90f6bbec99925915`, executed all 19 declared entrypoints in each trade and battle tier, and failed at trade 16/19 and battle 17/19. No native owner/IRQ errors occurred; all five failures were strict real-ROM results rather than bypasses. The post-fix focused network suite passed 38/38 with Ruff and format checks clean. The retained prior-candidate native unit/timing and asset tiers remain scoped historical evidence. |
+| Cython/native serial runtime | `PARTIAL` (pre-fix strict gate plus post-fix focused regression and retained scoped tiers) | The valid pre-fix native/Cython strict gate used Python 3.12.13 and PyBoy 2.7.0 fork `c565df66c3731fad2856169a90f6bbec99925915`, executed all 19 declared entrypoints in each trade and battle tier, and failed at trade 16/19 and battle 17/19. No native owner/IRQ errors occurred; all five failures were strict real-ROM results rather than bypasses. The post-fix focused network suite passed 38/38 with Ruff and format checks clean. The post-fix source strict-trade result is separate source-runtime evidence and does not update this retained pre-fix native/Cython boundary. The retained prior-candidate native unit/timing and asset tiers remain scoped historical evidence. |
 | Windows native runtime | `PASS` (historical scoped) | A historical Windows environment passed install, dependency, source/Cython bootstrap, selected runtime/fixture, MCP stdio, and three-ROM lifecycle checks. Full native gameplay, concurrent-load, remote trade/battle, and macOS coverage remain open. |
 | Walkthroughs | Diagnostic only | Walkthrough scripts can use state writes or fallback paths and are not release acceptance. |
 
@@ -436,8 +486,10 @@ only. The retained product Ruff check is clean for the explicitly configured CI
 files; the broad legacy tree still reports pre-existing style violations and is
 not silently reformatted. The complete source-runtime gate is the PR #17
 baseline; PR #19's focused source-runtime and remote slices are historical
-evidence. Current strict full trade acceptance remains pending and strict
-battle acceptance remains partial. Vanilla fixture provenance, broad-suite and
+evidence. The post-fix source strict full-trade result is `FAIL` at 18/19, with
+the sole failure recorded above; the retained native/Cython strict gate remains
+pre-fix `FAIL` at 16/19 trade and 17/19 battle, and source-local strict battle
+remains pre-fix `PASS` at 9/9. Release status remains `PARTIAL`. Vanilla fixture provenance, broad-suite and
 full native-platform coverage, real-ROM load
 evidence, MCP live gameplay, independent review, and secure cross-host
 networking remain open. TCP is deliberately localhost-only because it has no
@@ -468,11 +520,15 @@ owner-boundary implementation, but it is historical trade-tier evidence rather
 than current full-runtime sign-off. The retained prior-candidate remote asset
 tier passed source 16/16 in 35.6044s and native 16/16 in 30.8627s; the local
 asset tier passed source 47/47 in 531.3477s and native 47/47 in 38.2974s.
-These are scoped transport/session results. The clean current source-runtime
-strict-trade gate remains pending while it runs in another isolated worktree;
-the valid native/Cython gate failed at 16/19 trade and 17/19 battle, as
-detailed above. Current full strict trade acceptance therefore remains
-`PENDING`, while strict battle acceptance remains `PARTIAL`.
+These are scoped transport/session results. The post-fix source-runtime
+strict-trade production gate at
+`/tmp/poke-harness-source-serial-acceptance-20260904/evidence` completed all 19
+trade entrypoints and is `FAIL` at 18/19; its sole trade-center warp failure
+and exact evidence hashes are recorded above. The valid pre-fix native/Cython
+gate failed at 16/19 trade and 17/19 battle, while source-local strict battle
+remains pre-fix `PASS` at 9/9. Current full strict trade acceptance is therefore
+`FAIL` for the source gate, and release status remains `PARTIAL`; strict battle
+acceptance remains `PARTIAL`.
 Stock-ROM link pairs remain outside the strict canonical matrix because their
 fixture provenance is partial.
 
@@ -765,7 +821,7 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Parameterized two-process LinkMenu smoke plus canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints | The retained prior-candidate remote asset tier passed source 16/16 in 35.6044s and native 16/16 in 30.8627s; MCP-facing starter/trade/battle gameplay and current strict full trade and battle remain unproven |
+| `tests/test_pyboy_link_session_subprocess.py` | Parameterized two-process LinkMenu smoke plus canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints | The post-fix source strict-trade gate completed all 19 trade entrypoints with 18/19 passed and one trade-center warp failure (details above); the retained prior-candidate remote asset tier passed source 16/16 in 35.6044s and native 16/16 in 30.8627s. MCP-facing starter/trade/battle gameplay and a passing current strict battle matrix remain unproven |
 | `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus parameterized canonical Red/Blue/Yellow local trade and battle acceptance entrypoints | Stock-variant coverage, or a release result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
@@ -780,12 +836,14 @@ records 19/19 after the owner-boundary change, but that is historical trade-tier
 evidence rather than current full-runtime sign-off. The retained prior-candidate
 remote asset tier passed source 16/16 in 35.6044s and native 16/16 in 30.8627s;
 the local asset tier passed source 47/47 in 531.3477s and native 47/47 in
-38.2974s. The clean pre-fix source-runtime strict-trade run remains `PENDING`
-while it runs in another isolated worktree; no terminal result is claimed. The
-valid native/Cython strict gate executed all 19 declared entrypoints in each
-trade and battle tier but failed at 16/19 trade and 17/19 battle, so current full
-strict trade acceptance remains `PENDING` and strict battle acceptance remains
-`PARTIAL`. Cython gameplay beyond that gate, vanilla fixture provenance,
+38.2974s. The post-fix source-runtime strict-trade production gate at
+`/tmp/poke-harness-source-serial-acceptance-20260904/evidence` completed all 19
+trade entrypoints and failed at 18/19; its sole trade-center warp failure and
+exact evidence hashes are recorded above. This is post-fix source evidence
+after `7b4b5b72` (cherry-picked as `7b4b5b7`), not a passing full-runtime sign-off.
+The valid native/Cython strict gate remains pre-fix and failed at 16/19 trade
+and 17/19 battle, while source-local strict battle remains pre-fix `PASS` at
+9/9. Cython gameplay beyond that gate, vanilla fixture provenance,
 current remote full-matrix coverage, broad-suite/platform/load/review coverage,
 MCP-facing starter/trade/battle gameplay, and secure cross-host networking
 remain outside the release result.
