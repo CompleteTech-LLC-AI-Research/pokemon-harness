@@ -35,6 +35,13 @@ source/Cython gate selection, bounded remote game-exchange pacing from PR #27,
 remote synchronization/teardown hardening, MCP endpoint cleanup, controlled
 gate accounting, and faster headless sessions.
 
+The production-followup also hardens serial cleanup ownership and retry,
+clean remote disconnect handling, transactional `LinkPair` setup, restoration
+of borrowed PyBoy callback state, bounded `NetworkBackend` partial-frame reads
+with fail-closed teardown, and bounded, isolated bootstrap checks. Focused
+link-pair, network, runtime, and fixture regression coverage exercises these
+boundaries; it adds no new gameplay acceptance.
+
 The latest complete all-tier source-runtime gate was collected on 2026-09-02
 from isolated source head `df0e7424c87c812a57f257286b0dc00e87c498f4`, whose
 implementation tree is merged as the PR #17 parent `b0b63c8`. It used Python
