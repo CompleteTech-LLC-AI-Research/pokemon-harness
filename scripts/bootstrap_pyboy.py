@@ -25,6 +25,8 @@ import importlib.machinery
 import importlib.metadata
 import os
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -38,6 +40,7 @@ CYTHON_REQUIREMENT = "cython==3.0.12"
 PROJECT_DISTRIBUTION = "pokered-harness"
 PIP_PROBE_TIMEOUT_SECONDS = 60
 INSTALL_TIMEOUT_SECONDS = 1800
+PROCESS_TERMINATION_GRACE_SECONDS = 5
 ISOLATION_ENVIRONMENT_KEYS = (
     "PYTHONHOME",
     "PYTHONPATH",
@@ -56,6 +59,138 @@ RUNTIME_MODULES = (
 CYTHON_MODULES = tuple(name for name in RUNTIME_MODULES if name != "pyboy")
 
 
+def _process_group_options() -> dict[str, object]:
+    """Return subprocess options that put a command in its own process tree.
+
+    POSIX children get a new session, making the process id a process-group id
+    that can be terminated together with descendants.  Windows has no
+    portable ``killpg`` equivalent; a new process group enables a graceful
+    Ctrl-Break fallback, while ``taskkill /T`` below provides the normal tree
+    termination path.
+    """
+    if os.name == "nt":
+        return {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        }
+    return {"start_new_session": True}
+
+
+def _terminate_process_tree(process: subprocess.Popen[object]) -> None:
+    """Best-effort terminate *process* and all descendants within a bound.
+
+    This function is used only after a timeout or an interrupt.  Cleanup must
+    not replace the original failure with a second exception, so every
+    platform-specific termination step is deliberately best effort.  On
+    POSIX, SIGTERM followed by SIGKILL is sent to the private process group.
+    On Windows, the built-in ``taskkill`` command can terminate a process tree
+    even when the child created further processes; if it is unavailable, the
+    private process group and direct-process fallbacks are used.
+    """
+    if os.name == "nt":
+        taskkill = shutil.which("taskkill")
+        if taskkill is not None:
+            try:
+                subprocess.run(
+                    [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=PROCESS_TERMINATION_GRACE_SECONDS,
+                )
+            except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
+                pass
+        else:
+            ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+            if ctrl_break is not None:
+                try:
+                    process.send_signal(ctrl_break)
+                except (OSError, ValueError):
+                    pass
+
+        try:
+            process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+        except (subprocess.TimeoutExpired, OSError, KeyboardInterrupt):
+            try:
+                process.terminate()
+            except (OSError, ValueError):
+                pass
+    else:
+        try:
+            # ``start_new_session=True`` makes ``process.pid`` the process
+            # group id.  Signal the group even if the direct child has already
+            # transitioned to a zombie; descendants may still be alive.
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            try:
+                process.terminate()
+            except (OSError, ValueError):
+                pass
+
+    try:
+        process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+    except (subprocess.TimeoutExpired, OSError, KeyboardInterrupt):
+        pass
+
+    if os.name == "nt":
+        try:
+            process.kill()
+        except (OSError, ValueError):
+            pass
+    else:
+        # Escalate the whole group even when the direct child honored SIGTERM
+        # and exited.  Descendants can ignore SIGTERM and otherwise survive
+        # while ``process.wait`` has already returned.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                process.kill()
+            except (OSError, ValueError):
+                pass
+    try:
+        process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+    except (subprocess.TimeoutExpired, OSError, KeyboardInterrupt):
+        # Returning keeps the original TimeoutExpired/KeyboardInterrupt
+        # visible to the caller.  There is no safe broader kill target.
+        pass
+
+
+def _run_bounded(
+    command: list[str],
+    *,
+    cwd: Path | str | None = None,
+    env: dict[str, str] | None = None,
+    timeout: float,
+    stdout: int | None = None,
+    stderr: int | None = None,
+) -> subprocess.CompletedProcess[object]:
+    """Run a command with a deadline and descendant-safe interruption.
+
+    ``subprocess.run(..., timeout=...)`` kills only its direct child.  Package
+    installers and build backends can create workers, so use ``Popen`` with a
+    private process group/session and explicitly tear down that group before
+    propagating the timeout or interrupt.
+    """
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=stdout,
+        stderr=stderr,
+        **_process_group_options(),
+    )
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        raise
+    except KeyboardInterrupt:
+        _terminate_process_tree(process)
+        raise
+    return subprocess.CompletedProcess(command, returncode)
+
+
 def _pip_command() -> list[str]:
     """Return a usable install-command prefix for the active interpreter.
 
@@ -66,20 +201,18 @@ def _pip_command() -> list[str]:
     """
     command = [sys.executable, "-m", "pip"]
     env = _isolated_environment()
-    probe = subprocess.run(
+    probe = _run_bounded(
         [*command, "--version"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        check=False,
         env=env,
         timeout=PIP_PROBE_TIMEOUT_SECONDS,
     )
     if probe.returncode == 0:
         return [*command, "install"]
 
-    bootstrap = subprocess.run(
+    bootstrap = _run_bounded(
         [sys.executable, "-m", "ensurepip", "--upgrade"],
-        check=False,
         env=env,
         timeout=PIP_PROBE_TIMEOUT_SECONDS,
     )
@@ -96,11 +229,10 @@ def _pip_command() -> list[str]:
             "active environment (or install uv) before running bootstrap_pyboy.py"
         )
 
-    verify = subprocess.run(
+    verify = _run_bounded(
         [*command, "--version"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        check=False,
         env=env,
         timeout=PIP_PROBE_TIMEOUT_SECONDS,
     )
@@ -128,7 +260,10 @@ def _isolated_environment() -> dict[str, str]:
 
 
 def _validate_source() -> None:
-    if not PYBOY_SOURCE.is_dir():
+    # The revision marker alone is not sufficient provenance: a symlink can
+    # point the bootstrap at an unrelated checkout while preserving the
+    # expected marker.  Keep the source boundary physical and fail closed.
+    if PYBOY_SOURCE.is_symlink() or not PYBOY_SOURCE.is_dir():
         raise SystemExit(f"vendored PyBoy source is missing: {PYBOY_SOURCE}")
     try:
         revision = REVISION_FILE.read_text(encoding="ascii").strip()
@@ -177,11 +312,18 @@ def _path_is_within(path: Path, root: Path) -> bool:
 
 
 def _runtime_roots() -> tuple[Path, ...]:
-    """Return checkout and installed-distribution roots allowed for PyBoy."""
+    """Return package-specific roots allowed for the pinned PyBoy modules.
+
+    A distribution's ``locate_file("")`` is normally the entire
+    ``site-packages`` directory.  Treating that as an allowed runtime root
+    would let an unrelated module shadow the pinned package while the
+    distribution metadata still names ``pokered-harness``.  Resolve only the
+    distribution's concrete ``pyboy`` package directory instead.
+    """
     roots = [PYBOY_SOURCE.resolve()]
     for distribution_name in (PROJECT_DISTRIBUTION, "pyboy"):
         try:
-            location = Path(importlib.metadata.distribution(distribution_name).locate_file(""))
+            location = Path(importlib.metadata.distribution(distribution_name).locate_file("pyboy"))
             roots.append(location.resolve())
         except (OSError, importlib.metadata.PackageNotFoundError):
             continue
@@ -195,11 +337,78 @@ def _new_serial_instance() -> object:
     return Serial(False)
 
 
-def _remove_generated_pyboy_metadata() -> None:
-    """Keep a native build's transient distribution metadata out of the source path."""
+def _metadata_was_present() -> bool:
+    """Return whether the native metadata entry existed before this run.
+
+    An unknown inspection result is treated as present.  The bootstrap must
+    be able to prove that it owns a cleanup target before recursively deleting
+    it; preserving an uninspectable entry is safer than guessing.
+    """
     metadata_dir = PYBOY_SOURCE / "pyboy.egg-info"
-    if metadata_dir.is_dir():
+    try:
+        metadata_dir.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _remove_generated_pyboy_metadata(*, was_present: bool) -> None:
+    """Safely remove only the native build metadata owned by this bootstrap.
+
+    ``Path.is_dir`` follows symlinks, which would make a replacement
+    ``pyboy.egg-info`` entry an unsafe recursive-delete target.  Refuse
+    symlinked roots and entries.  A pre-existing entry is never removed, and
+    cleanup races or permission problems do not mask the install/build result.
+    """
+    if was_present:
+        return
+
+    source_root = PYBOY_SOURCE
+    if source_root.is_symlink():
+        print(
+            f"refusing to remove generated metadata through symlinked source: {source_root}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        source_stat = source_root.stat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"could not inspect PyBoy source for metadata cleanup: {exc}", file=sys.stderr)
+        return
+    if not stat.S_ISDIR(source_stat.st_mode):
+        print(
+            f"refusing to remove generated metadata from non-directory source: {source_root}",
+            file=sys.stderr,
+        )
+        return
+
+    metadata_dir = source_root / "pyboy.egg-info"
+    try:
+        metadata_stat = metadata_dir.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"could not inspect generated PyBoy metadata: {exc}", file=sys.stderr)
+        return
+    if not stat.S_ISDIR(metadata_stat.st_mode) or stat.S_ISLNK(metadata_stat.st_mode):
+        print(
+            f"refusing to recursively remove non-directory generated metadata: {metadata_dir}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
         shutil.rmtree(metadata_dir)
+    except FileNotFoundError:
+        # Another cleanup process won the race; the desired end state holds.
+        pass
+    except OSError as exc:
+        print(f"could not remove generated PyBoy metadata {metadata_dir}: {exc}", file=sys.stderr)
 
 
 def _verify_runtime(mode: str) -> None:
@@ -309,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
         _verify_runtime(args.mode)
         return 0
 
+    metadata_was_present = _metadata_was_present()
+
     env = _isolated_environment()
     if args.mode == "source":
         env["PYBOY_NO_CYTHON"] = "1"
@@ -332,11 +543,10 @@ def main(argv: list[str] | None = None) -> int:
                 "-e",
                 str(ROOT),
             ]
-            project_result = subprocess.run(
+            project_result = _run_bounded(
                 project_command,
                 cwd=ROOT,
                 env=env,
-                check=False,
                 timeout=INSTALL_TIMEOUT_SECONDS,
             )
             if project_result.returncode:
@@ -349,11 +559,10 @@ def main(argv: list[str] | None = None) -> int:
             CYTHON_REQUIREMENT,
             str(install_target),
         ]
-        result = subprocess.run(
+        result = _run_bounded(
             command,
             cwd=ROOT,
             env=env,
-            check=False,
             timeout=INSTALL_TIMEOUT_SECONDS,
         )
         if result.returncode:
@@ -376,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
         print("bootstrap interrupted; transient metadata cleanup was attempted", file=sys.stderr)
         return 130
     finally:
-        _remove_generated_pyboy_metadata()
+        _remove_generated_pyboy_metadata(was_present=metadata_was_present)
 
 
 if __name__ == "__main__":
