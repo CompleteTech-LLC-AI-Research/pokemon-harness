@@ -334,7 +334,7 @@ def test_network_attach_does_not_seed_game_role_status(is_internal_clock):
     serial registers for the requested wire role, but it must never prefill
     this ROM-owned HRAM byte for either network role.
     """
-    backend, peer = _versioned_backend_pair("red", "blue")
+    backend, peer = _versioned_backend_pair("red", "red")
     serial = SerialCore()
     pyboy = _FakePyBoy(serial=serial)
     pyboy.memory = {0xFFAA: 0xFF}
@@ -363,7 +363,7 @@ def test_network_attach_arms_native_role_handshake(
     is_internal_clock, expected_sb, expected_sc_source
 ):
     """Configure FF01/FF02 without touching the ROM's role-status HRAM."""
-    backend, peer = _versioned_backend_pair("red", "blue")
+    backend, peer = _versioned_backend_pair("red", "red")
     serial = SerialCore()
     serial.set_SB(0x02)
     serial.set_SC(0x80)
@@ -396,13 +396,18 @@ def test_network_attach_arms_native_role_handshake(
         ("yellow", "blue", True, False),
         ("blue", "yellow", False, True),
         ("yellow", "yellow", True, True),
-        ("red", "blue", False, False),
+        ("red", "red", True, True),
+        ("red", "red", False, False),
+        ("red", "blue", False, True),
+        ("blue", "red", True, False),
+        ("blue", "blue", True, True),
+        ("blue", "blue", False, False),
     ],
 )
 def test_network_clock_negotiation_selects_compatible_native_role(
     local_version, peer_version, default_internal, expected_internal
 ):
-    """Cross-family startup role selection only changes native registers."""
+    """Startup role selection only changes native registers."""
     backend, peer = _versioned_backend_pair(local_version, peer_version)
     serial = SerialCore()
     pyboy = _FakePyBoy(serial=serial)
