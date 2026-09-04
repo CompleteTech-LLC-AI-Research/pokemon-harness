@@ -554,6 +554,58 @@ def test_strict_matrix_tier_runs_each_required_node_in_isolated_selector(tmp_pat
     )
 
 
+def test_strict_matrix_tier_rejects_a_process_observed_after_its_deadline(tmp_path, monkeypatch):
+    clock = [0.0]
+
+    class _LateMatrixPopen:
+        def __init__(self, command, *, env, **kwargs):
+            del kwargs
+            self.returncode = None
+            self.pid = 999999999
+            self.stdout = io.StringIO("")
+            nodeid = command[3]
+            Path(env["POKERED_GATE_REPORT"]).write_text(
+                json.dumps(_matrix_report(nodeid)), encoding="utf-8"
+            )
+
+        def poll(self):
+            if clock[0] >= 0.012:
+                self.returncode = 0
+            return self.returncode
+
+        def wait(self, timeout=None):
+            del timeout
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(gate.subprocess, "Popen", _LateMatrixPopen)
+    monkeypatch.setattr(gate.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        gate.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds + 0.002),
+    )
+
+    result = gate.run_tier(
+        name="trade",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=0.01,
+        report_directory=tmp_path,
+        required_nodeids=("tests/test_matrix.py::test_pair[red-blue]",),
+        matrix_workers=1,
+        matrix_timeout_override=1.0,
+    )
+
+    assert result.status == "FAIL"
+    assert result.case_results[0].status == "TIMEOUT"
+
+
 def test_strict_matrix_tier_rejects_a_skipped_required_row(tmp_path, monkeypatch):
     _FakeMatrixPopen.mode = "skipped"
     _FakeMatrixPopen.commands = []

@@ -2257,17 +2257,23 @@ def run_matrix_tier(
         )
 
     while pending or active:
-        now = time.monotonic()
         for nodeid, state in list(active.items()):
             process = state["process"]
-            if process.poll() is not None:
-                finish_case(nodeid, timed_out=False)
-            elif now >= state["deadline_at"]:
+            current = time.monotonic()
+            if current >= aggregate_deadline:
+                finish_case(
+                    nodeid,
+                    timed_out=True,
+                    reason=(f"matrix aggregate deadline exceeded after {aggregate_timeout:.1f}s"),
+                )
+            elif current >= state["deadline_at"]:
                 finish_case(
                     nodeid,
                     timed_out=True,
                     reason=f"matrix case timed out after {timeout:.1f}s",
                 )
+            elif process.poll() is not None:
+                finish_case(nodeid, timed_out=False)
 
         if time.monotonic() >= aggregate_deadline:
             for nodeid in list(active):
