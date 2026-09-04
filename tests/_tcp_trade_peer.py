@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -67,6 +68,14 @@ _TRADE_DIAG_SYMBOLS = (
 PARTY_MON_SIZE = 44
 PARTY_OT_SIZE = 11
 PARTY_NICK_SIZE = 11
+
+
+def _deadline_remaining(deadline: float, *, phase: str) -> float:
+    """Return setup time remaining, failing closed at the absolute cutoff."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"{phase} exceeded the process deadline")
+    return remaining
 
 
 def _hold_at_sync_boundary(
@@ -207,75 +216,87 @@ def main() -> int:
     ap.add_argument("--repo-root", type=Path, required=True)
     args = ap.parse_args()
 
-    sys.path.insert(0, str(args.repo_root / "src"))
-
-    from pokered_harness.config import load_versions
-    from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
-    from pokered_harness.session import Session
-
-    rom_root = Path(os.environ.get("POKERED_ROM_ROOT", args.repo_root / "rom"))
-    fixture_root = Path(
-        os.environ.get(
-            "POKERED_FIXTURE_ROOT", args.repo_root / "tests" / "fixtures" / "link"
-        )
-    )
-    assert rom_root.is_dir(), f"ROM root not found: {rom_root}"
-
-    rom_paths = {
-        "red_gb": (
-            rom_root / "red" / "pokemon-red.gb",
-            rom_root / "red" / "pokemon-red.sym",
-            "red",
-            "cable_club-vanilla.state",
-            "cable_club-battle-vanilla.state",
-        ),
-        "red_color": (
-            rom_root / "red" / "pokemon-red-color.gb",
-            rom_root / "red" / "pokemon-red.sym",
-            "red",
-            "cable_club.state",
-            "cable_club-battle.state",
-        ),
-        "blue_gb": (
-            rom_root / "blue" / "pokemon-blue.gb",
-            rom_root / "blue" / "pokemon-blue.sym",
-            "blue",
-            "cable_club-vanilla.state",
-            "cable_club-battle-vanilla.state",
-        ),
-        "blue_color": (
-            rom_root / "blue" / "pokemon-blue-color.gb",
-            rom_root / "blue" / "pokemon-blue.sym",
-            "blue",
-            "cable_club.state",
-            "cable_club-battle.state",
-        ),
-        "yellow": (
-            rom_root / "yellow" / "pokemon-yellow.gbc",
-            rom_root / "yellow" / "pokemon-yellow.sym",
-            "yellow",
-            "cable_club.state",
-            "cable_club-battle.state",
-        ),
-    }
-    rom, sym, fixture_version, trade_fixture_name, battle_fixture_name = rom_paths[args.version]
-    # The color Red/Blue Cable Club menu has three choices (0..2), while
-    # Yellow adds a fourth (0..3).  Keep the readiness predicate ROM-aware;
-    # a hard-coded bound can otherwise leave a valid peer spinning until the
-    # outer gameplay deadline without ever announcing the phase.
-    link_menu_max = 3 if fixture_version == "yellow" else 2
-    fixture_name = battle_fixture_name if args.goal == "battle" else trade_fixture_name
-    state = (
-        fixture_root / fixture_version / fixture_name
-    )
+    # Establish the one process-wide cutoff before any ROM, TCP, or handshake
+    # work. The existing gameplay code below continues to use this value.
+    deadline = time.monotonic() + args.deadline_seconds
+    drive_status = "error"
+    drive_error: str | None = None
+    deadline_exceeded = False
+    session = None
+    link = None
+    party_before: dict[str, object] = {}
+    party_after_trade: dict[str, object] | None = None
+    final_state: dict[str, int] = {}
+    final_cpu: dict[str, object] = {}
+    counters = {s: [0] for s in _TRADE_DIAG_SYMBOLS}
+    shots: list[str] = []
+    select_mon_announced = False
+    link_menu_announced = False
+    link_menu_quiet_announced = False
+    peer_link_menu_ready = False
+    peer_link_menu_quiet_ready = False
+    battle_turn_announced = False
+    peer_battle_turn_ready = False
+    link_menu_max = 0
 
     def log(msg):
         print(f"[peer {args.role}] {msg}", file=sys.stderr, flush=True)
 
-    if args.record_dir is not None:
-        args.record_dir.mkdir(parents=True, exist_ok=True)
+    def remaining(phase: str) -> float:
+        return _deadline_remaining(deadline, phase=phase)
 
-    shots: list[str] = []
+    def setup_error_text(exc: BaseException) -> str:
+        try:
+            message = f"{type(exc).__name__}: {exc}"
+        except BaseException:  # noqa: BLE001
+            message = type(exc).__name__
+        return message[:2048]
+
+    def backend_snapshot() -> dict[str, object]:
+        backend = getattr(link, "_network_backend", None) if link is not None else None
+        if backend is None:
+            return {}
+        try:
+            return backend.debug_snapshot()
+        except BaseException:  # noqa: BLE001
+            return {}
+
+    def emit_result(*, setup_failed: bool = False) -> None:
+        if setup_failed or session is None:
+            party_after: dict[str, object] = {}
+        elif party_after_trade is not None:
+            party_after = party_after_trade
+        else:
+            try:
+                party_after = _party_summary(session)
+            except BaseException:  # noqa: BLE001
+                party_after = {}
+        result = {s: counters[s][0] for s in _TRADE_DIAG_SYMBOLS}
+        result["_role"] = args.role
+        result["_version"] = args.version
+        result["party_before"] = {} if setup_failed else party_before
+        result["party_after"] = party_after
+        result["_final_state"] = final_state
+        result["_final_cpu"] = final_cpu
+        result["_shots"] = shots
+        result["_backend_stats"] = backend_snapshot()
+        result["_drive_status"] = drive_status
+        result["_drive_error"] = drive_error
+        result["_deadline_exceeded"] = deadline_exceeded
+        try:
+            encoded = json.dumps(result)
+        except (TypeError, ValueError):
+            result["party_before"] = {}
+            result["party_after"] = {}
+            result["_final_state"] = {}
+            result["_final_cpu"] = {}
+            result["_shots"] = []
+            result["_backend_stats"] = {}
+            encoded = json.dumps(result)
+        log(f"final counters: {result}")
+        # Sentinel-delimited JSON line so the parent can grep it out of
+        # the ROM-loading warning spam on stdout.
+        print(f"__TCP_TRADE_RESULT__ {encoded}")
 
     def shot(phase: str) -> None:
         if args.record_dir is None:
@@ -298,73 +319,189 @@ def main() -> int:
         shots.append(str(path))
         log(f"shot {phase}: {path}")
 
-    log(f"loading {args.version} ROM + state")
-    pins = load_versions(args.repo_root / "VERSIONS.md")
-    expected_sha = pins.sha1_for_path(rom)
-    if expected_sha is None:
-        raise RuntimeError(f"no VERSIONS.md SHA-1 pin for {rom}")
-    session = Session.from_files(
-        rom,
-        sym,
-        expected_rom_sha1=expected_sha,
-        expected_pyboy_version=pins.pyboy_version,
-    )
-    session.load_state(state.read_bytes())
-    party_before = _party_summary(session)
-    if args.goal == "battle":
-        log(f"battle fixture validated: {_validate_battle_party_fixture(session)}")
-    shot("00_loaded")
-    log("state loaded, installing hooks")
+    def setup() -> None:
+        nonlocal link, link_menu_max, party_before, session
 
-    counters = {s: [0] for s in _TRADE_DIAG_SYMBOLS}
-    for s in _TRADE_DIAG_SYMBOLS:
-        _install_hook(session, s, counters[s])
+        if not math.isfinite(args.deadline_seconds) or args.deadline_seconds <= 0:
+            raise ValueError("deadline-seconds must be finite and positive")
+        remaining("setup")
+        sys.path.insert(0, str(args.repo_root / "src"))
 
-    log(f"establishing TCP {args.role}")
-    link = None
-    if args.role == "listen":
-        link = PyBoyLinkSession.listen(
-            args.port, host=args.host, local_rom_version=fixture_version
+        from pokered_harness.config import load_versions
+        from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
+        from pokered_harness.session import Session
+
+        remaining("dependency setup")
+        rom_root = Path(os.environ.get("POKERED_ROM_ROOT", args.repo_root / "rom"))
+        fixture_root = Path(
+            os.environ.get("POKERED_FIXTURE_ROOT", args.repo_root / "tests" / "fixtures" / "link")
         )
-    else:
-        last_exc: Exception | None = None
-        for attempt in range(60):
-            try:
-                link = PyBoyLinkSession.connect(
-                    args.host, args.port, local_rom_version=fixture_version
-                )
-                break
-            except OSError as exc:
-                last_exc = exc
-                if attempt == 59:
-                    raise
-                time.sleep(0.25)
-        else:
-            raise RuntimeError(f"could not connect to listener: {last_exc}")
-    log("TCP established, attaching PyBoy")
-    link.attach(session._pyboy)
-    peer_version = link._network_backend.wait_for_hello(timeout=30.0)
-    selected_internal = link.negotiate_network_clock_role(peer_version)
-    log(
-        f"versioned handshake complete: local={fixture_version} "
-        f"peer={peer_version} native_internal_clock={selected_internal}"
-    )
-    log("attached; starting drive loop")
+        if not rom_root.is_dir():
+            raise RuntimeError(f"ROM root not found: {rom_root}")
 
-    deadline = time.monotonic() + args.deadline_seconds
+        rom_paths = {
+            "red_gb": (
+                rom_root / "red" / "pokemon-red.gb",
+                rom_root / "red" / "pokemon-red.sym",
+                "red",
+                "cable_club-vanilla.state",
+                "cable_club-battle-vanilla.state",
+            ),
+            "red_color": (
+                rom_root / "red" / "pokemon-red-color.gb",
+                rom_root / "red" / "pokemon-red.sym",
+                "red",
+                "cable_club.state",
+                "cable_club-battle.state",
+            ),
+            "blue_gb": (
+                rom_root / "blue" / "pokemon-blue.gb",
+                rom_root / "blue" / "pokemon-blue.sym",
+                "blue",
+                "cable_club-vanilla.state",
+                "cable_club-battle-vanilla.state",
+            ),
+            "blue_color": (
+                rom_root / "blue" / "pokemon-blue-color.gb",
+                rom_root / "blue" / "pokemon-blue.sym",
+                "blue",
+                "cable_club.state",
+                "cable_club-battle.state",
+            ),
+            "yellow": (
+                rom_root / "yellow" / "pokemon-yellow.gbc",
+                rom_root / "yellow" / "pokemon-yellow.sym",
+                "yellow",
+                "cable_club.state",
+                "cable_club-battle.state",
+            ),
+        }
+        rom, sym, fixture_version, trade_fixture_name, battle_fixture_name = rom_paths[args.version]
+        # The color Red/Blue Cable Club menu has three choices (0..2), while
+        # Yellow adds a fourth (0..3). Keep the readiness predicate ROM-aware;
+        # a hard-coded bound can otherwise leave a valid peer spinning until the
+        # outer gameplay deadline without ever announcing the phase.
+        link_menu_max = 3 if fixture_version == "yellow" else 2
+        fixture_name = battle_fixture_name if args.goal == "battle" else trade_fixture_name
+        state = fixture_root / fixture_version / fixture_name
+
+        if args.record_dir is not None:
+            remaining("record directory setup")
+            args.record_dir.mkdir(parents=True, exist_ok=True)
+            remaining("record directory setup")
+
+        log(f"loading {args.version} ROM + state")
+        remaining("version pin load")
+        pins = load_versions(args.repo_root / "VERSIONS.md")
+        expected_sha = pins.sha1_for_path(rom)
+        if expected_sha is None:
+            raise RuntimeError(f"no VERSIONS.md SHA-1 pin for {rom}")
+        remaining("ROM setup")
+        session = Session.from_files(
+            rom,
+            sym,
+            expected_rom_sha1=expected_sha,
+            expected_pyboy_version=pins.pyboy_version,
+        )
+        remaining("ROM setup")
+        session.load_state(state.read_bytes())
+        remaining("state setup")
+        party_before = _party_summary(session)
+        if args.goal == "battle":
+            log(f"battle fixture validated: {_validate_battle_party_fixture(session)}")
+        shot("00_loaded")
+        log("state loaded, installing hooks")
+
+        for symbol in _TRADE_DIAG_SYMBOLS:
+            remaining("hook setup")
+            _install_hook(session, symbol, counters[symbol])
+
+        log(f"establishing TCP {args.role}")
+        if args.role == "listen":
+            link = PyBoyLinkSession.listen(
+                args.port,
+                host=args.host,
+                local_rom_version=fixture_version,
+                accept_timeout_s=min(10.0, remaining("TCP listen")),
+            )
+        else:
+            last_exc: Exception | None = None
+            for attempt in range(60):
+                remaining("TCP connect")
+                try:
+                    link = PyBoyLinkSession.connect(
+                        args.host,
+                        args.port,
+                        local_rom_version=fixture_version,
+                        timeout_s=min(10.0, remaining("TCP connect")),
+                    )
+                    break
+                except OSError as exc:
+                    last_exc = exc
+                    if attempt == 59:
+                        raise
+                    time.sleep(min(0.25, remaining("TCP connect retry")))
+            else:
+                raise RuntimeError(f"could not connect to listener: {last_exc}")
+        remaining("TCP setup")
+        log("TCP established, attaching PyBoy")
+        link.attach(session._pyboy)
+        remaining("PyBoy attach")
+        backend = getattr(link, "_network_backend", None)
+        if backend is None:
+            raise RuntimeError("network backend missing after attach")
+        peer_version = backend.wait_for_hello(timeout=min(30.0, remaining("HELLO handshake")))
+        remaining("HELLO handshake")
+        selected_internal = link.negotiate_network_clock_role(peer_version)
+        remaining("network clock negotiation")
+        log(
+            f"versioned handshake complete: local={fixture_version} "
+            f"peer={peer_version} native_internal_clock={selected_internal}"
+        )
+        log("attached; starting drive loop")
+
+    setup_complete = False
+    try:
+        setup()
+        setup_complete = True
+    except BaseException as exc:  # noqa: BLE001
+        timed_out = isinstance(exc, TimeoutError)
+        if not timed_out:
+            try:
+                timed_out = (
+                    math.isfinite(deadline)
+                    and args.deadline_seconds > 0
+                    and time.monotonic() >= deadline
+                )
+            except (TypeError, ValueError):
+                timed_out = False
+        deadline_exceeded = timed_out
+        drive_status = "deadline" if timed_out else "error"
+        drive_error = setup_error_text(exc)
+        log(f"EXCEPTION in setup: {drive_error}")
+    finally:
+        if not setup_complete:
+            partial_backend = getattr(link, "_network_backend", None) if link is not None else None
+            try:
+                if link is not None:
+                    link.detach_all()
+            except BaseException as exc:  # noqa: BLE001
+                log(f"link cleanup raised {type(exc).__name__}: {exc}")
+            try:
+                if session is not None:
+                    session.close()
+            except BaseException as exc:  # noqa: BLE001
+                log(f"session cleanup raised {type(exc).__name__}: {exc}")
+            try:
+                if partial_backend is not None:
+                    partial_backend.stop()
+            except BaseException as exc:  # noqa: BLE001
+                log(f"backend cleanup raised {type(exc).__name__}: {exc}")
+            emit_result(setup_failed=True)
+    if not setup_complete:
+        return 1
+
     drive_status = "ok"
-    drive_error: str | None = None
-    deadline_exceeded = False
-    select_mon_announced = False
-    link_menu_announced = False
-    link_menu_quiet_announced = False
-    peer_link_menu_ready = False
-    peer_link_menu_quiet_ready = False
-    battle_turn_announced = False
-    peer_battle_turn_ready = False
-    party_after_trade: dict[str, object] | None = None
-    final_state: dict[str, int] = {}
-    final_cpu: dict[str, object] = {}
 
     def state_snapshot() -> dict[str, int]:
         snapshot = {
@@ -388,11 +525,6 @@ def main() -> int:
             except (AttributeError, KeyError, TypeError):
                 pass
         return snapshot
-
-    def backend_snapshot() -> dict[str, object]:
-        if link._network_backend is None:
-            return {}
-        return link._network_backend.debug_snapshot()
 
     def cpu_snapshot() -> dict[str, object]:
         """Capture bounded CPU/serial state for a stalled native run."""
@@ -1626,22 +1758,7 @@ def main() -> int:
             drive_error = f"{args.goal} did not complete before deadline"
             log(drive_error)
 
-    result = {s: counters[s][0] for s in _TRADE_DIAG_SYMBOLS}
-    result["_role"] = args.role
-    result["_version"] = args.version
-    result["party_before"] = party_before
-    result["party_after"] = party_after_trade or _party_summary(session)
-    result["_final_state"] = final_state
-    result["_final_cpu"] = final_cpu
-    result["_shots"] = shots
-    result["_backend_stats"] = backend_snapshot()
-    result["_drive_status"] = drive_status
-    result["_drive_error"] = drive_error
-    result["_deadline_exceeded"] = deadline_exceeded
-    log(f"final counters: {result}")
-    # Sentinel-delimited JSON line so the parent can grep it out of
-    # the ROM-loading warning spam on stdout.
-    print(f"__TCP_TRADE_RESULT__ {json.dumps(result)}")
+    emit_result()
     return 0 if drive_status == "ok" else 1
 
 
