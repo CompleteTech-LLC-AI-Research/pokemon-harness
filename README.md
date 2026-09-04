@@ -30,6 +30,17 @@ The merged head remains a `PARTIAL` publication candidate, not a
 `PRODUCTION-READY` release, until the remaining gates and review conditions
 are closed.
 
+The unmerged acceptance branch audited on 2026-09-04 adds bounded production-
+gate deadlines, runtime-provenance checks, fail-closed matrix accounting,
+preserved network-close diagnostics, and strict subprocess result validation.
+Its source-runtime representative checks passed: in-process Red-color/Yellow
+trade and battle, TCP Red-color/Yellow trade and battle, and the four-test real
+MCP stdio suite (including save/load and TCP EOF cleanup). The source
+unit/timing gate also passed 954/954 unit tests and 50/50 timing cases in each
+of five repetitions. These are candidate-branch results, not a full 19-row
+trade/battle matrix, native-runtime qualification, or MCP-driven
+starter/trade/battle gameplay; the release decision remains `PARTIAL`.
+
 The merged head includes the MCP lifecycle, runtime packaging, in-process
 serial/lifecycle, remote TCP follow-ups from PRs #12-#17, concurrency/lifecycle
 hardening from PR #19, bounded MCP shutdown and remote-generation hardening from

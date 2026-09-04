@@ -15,6 +15,16 @@ ownership and build-metadata cleanup, MCP teardown, gate-accounting, and
 partial-initialization cleanup changes. This is a `PARTIAL` publication
 candidate, not a `PRODUCTION-READY` release.
 
+The unmerged acceptance branch audited on 2026-09-04 adds bounded setup and
+matrix deadlines, runtime-provenance checks, fail-closed subprocess result
+validation, and network close diagnostics. Current source-runtime
+representative checks passed in-process and over TCP for Red-color/Yellow
+trade and battle, and the real MCP stdio suite passed 4/4. Its source
+unit/timing gate passed 954/954 unit tests and 50/50 timing cases in each of
+five repetitions. This is not a full 19-row matrix or native-runtime result;
+MCP-driven starter/trade/battle gameplay, vanilla fixture provenance, and the
+other open release conditions remain `PENDING` or `PARTIAL`.
+
 Evidence remains separated by layer. Historical prior-candidate
 static/build/runtime evidence at `3399407aa04f6e5e496df628442597c03e0adcc6`
 collected 1,094 tests in each source and native unit gate, with 949 unit passes

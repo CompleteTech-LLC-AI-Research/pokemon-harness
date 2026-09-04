@@ -36,6 +36,14 @@ The release decision for the current merged head remains `PARTIAL`, not
 - TCP remains loopback-only, unauthenticated, and unencrypted;
 - timing-altered diagnostics are not acceptance evidence.
 
+The unmerged acceptance branch audited on 2026-09-04 has current source-runtime
+representative evidence for in-process and TCP Red-color/Yellow trade and
+battle, plus 4/4 real MCP stdio tests. Its source unit/timing gate passed
+954/954 unit tests and 50/50 timing cases in each of five repetitions. These
+results validate scoped candidate behavior only; they do not close the full
+19-row trade/battle matrix, native-runtime, MCP gameplay, fixture-provenance,
+platform, or security gates.
+
 Historical prior exact-candidate evidence retained for context is:
 
 - a clean dual source/native `--unit-only --repeat-timing 5` gate collected

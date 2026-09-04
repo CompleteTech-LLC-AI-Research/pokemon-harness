@@ -59,6 +59,13 @@ and battle, vanilla fixture provenance, clean-install and broad-suite coverage,
 platform and real-ROM load coverage, actual MCP gameplay, independent review,
 and secure networking.
 
+The unmerged acceptance branch audited on 2026-09-04 passed current
+source-runtime representative in-process and TCP Red-color/Yellow trade and
+battle checks, the 4/4 real MCP stdio suite, 954/954 unit tests, and 50/50
+timing cases in each of five repetitions. This is scoped candidate evidence,
+not a full strict matrix or native-runtime sign-off, so it does not change the
+release decision.
+
 ## Change summary
 
 The state-validity, transport, and release-gate hardening at this merged head is
