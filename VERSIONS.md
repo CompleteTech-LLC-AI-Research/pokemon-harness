@@ -31,11 +31,12 @@ clean post-merge all-tier sign-off.
 
 The current-head verified candidate used the dual `--unit-only --repeat-timing
 5` gate on 2026-09-03 with separate source and Cython interpreters
-(`--python` plus `--cython-python`). It collected 756 tests in each mode. Both
-passed unit 611/611 and timing 40/40 in all five repetitions; source reported
+(`--python` plus `--cython-python`). It collected 771 tests in each mode. Both
+passed unit 626/626 and timing 50/50 in all five repetitions; source reported
 `python-source` and Cython reported `cython/native-extension`. The clone had no
 ROM, symbol, or save-state assets, so fixture schema and matrix declaration
-were checked but ROM gameplay was not run. An earlier environment-specific
+were checked but ROM gameplay was not run. Serial/link hardening did not add
+gameplay acceptance. An earlier environment-specific
 585/586 ownership result is superseded for these isolated environments. Fresh
 uv-managed source and native environments installed the candidate;
 `uv pip check` passed in both,
@@ -44,6 +45,13 @@ owners. The vendored source PyBoy runtime remains the documented release
 default; Cython is an optional diagnostic build. The host's bare `python3` still
 lacks `ensurepip`,
 so that alternate standard-library venv path remains open.
+
+The current post-hardening asset-backed gate is scoped to the pinned
+ROM/SYM/fixtures and separate source/native interpreters: source local 47/47 in
+758.1s and native local 47/47 in 38.1s; source remote 16/16 in 75.0s and
+native remote 16/16 in 28.8s. This scoped result leaves the release `PARTIAL`;
+the existing strict trade/battle, provenance, security, and platform blockers
+remain.
 
 Prior integrated source and Cython transport slices passed remote 15/15 and
 the Cython local/session slice passed 47/47. Those are scoped follow-up

@@ -92,8 +92,8 @@ gate does not create either environment. Keep the two install records and
 their gate evidence separate for release sign-off.
 
 At the current-head separate-interpreter dual-gate check, source (`--python`)
-and Cython (`--cython-python`) each collected 756 tests, passed unit 611/611, and
-passed timing 40/40 in each of five repetitions. Source reported
+and Cython (`--cython-python`) each collected 771 tests, passed unit 626/626, and
+passed timing 50/50 in each of five repetitions. Source reported
 `python-source`; Cython reported `cython/native-extension`. The clone
 contained no ROM, symbol, or save-state assets, so no ROM-backed tier ran and
 the check is not a production sign-off. Both uv-managed environments passed
@@ -105,7 +105,7 @@ path remains open.
 
 After the pinned fork is built with `scripts/bootstrap_pyboy.py --mode cython`,
 the optional native path can be checked explicitly. The current focused source
-and Cython transport/serial/PyBoy-link suite passes 110/110 in each runtime.
+and Cython serial-link+network scope passes 78/78 in each runtime.
 An asset-backed source trade gate recorded 19/19 ordered rows. The historical
 native strict-trade gate recorded 18/19; exact-row follow-ups have both passed
 and failed, including exact party-record exchange, a party-record mismatch,
@@ -156,10 +156,16 @@ including a party-record mismatch and phase stalls, so reliability remains
 unproven. Native battle remains unqualified.
 
 The current-head separate-interpreter dual-gate evidence uses managed Linux
-Python 3.12.13 and Pytest 9.1.1: collection 756 in each mode, unit 611/611, and
-timing 40/40 in each of five repetitions. The native probe/build and current
-focused 110/110 serial-link suite are separate scoped checks. These gates do
+Python 3.12.13 and Pytest 9.1.1: collection 771 in each mode, unit 626/626, and
+timing 50/50 in each of five repetitions. The native probe/build and current
+focused 78/78 serial-link+network scope are separate scoped checks. These gates do
 not establish ROM-backed gameplay coverage.
+
+The current post-hardening asset-backed evidence used pinned ROM/SYM/fixtures
+and separate source/native interpreters: local 47/47 source/native
+(758.1s/38.1s) and remote 16/16 source/native (75.0s/28.8s). This does not
+satisfy the strict trade/battle matrix, provenance, security, platform, or
+clean-checkout release items.
 
 The pre-PR #27 source broad diagnostic remains incomplete: 418/703 tests
 completed before a 5,400-second supervisor bound (386 passed, 20 skipped, 12
@@ -222,7 +228,7 @@ real-ROM load evidence, independent review, and secure cross-host networking.
   earlier scoped source/MCP checks passed with one unrelated WSL-worktree skip
   and MCP stdio 4/4.
 - [ ] The integrated Cython build passes the full real-ROM strict gameplay
-  matrix. Its focused serial-link suite passes 110/110. The historical native
+  matrix. Its focused serial-link+network scope passes 78/78. The historical native
   strict-trade result is 18/19, but exact-row follow-ups have both passed and
   failed, including a party-record mismatch and phase stalls, so reliability
   remains unproven. The latest direct native remote battle lane exercised 3/9
@@ -251,12 +257,12 @@ real-ROM load evidence, independent review, and secure cross-host networking.
 ## Test gates
 
 - [x] Both module and console-script collection paths complete; the recorded
-  separate-interpreter source and Cython asset-free gates each collected 756 tests with no
+  separate-interpreter source and Cython asset-free gates each collected 771 tests with no
   collection errors.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
-- [x] The recorded separate-interpreter dual gate passes 611/611 in both source
-  and Cython modes, and timing passes 40/40 in each of five repetitions; the
+- [x] The recorded separate-interpreter dual gate passes 626/626 in both source
+  and Cython modes, and timing passes 50/50 in each of five repetitions; the
   asset-free run did not exercise ROM-backed gameplay.
 - [ ] A fresh standard-library virtual environment and editable install have
   not been independently verified on this host; the system `python3` lacks

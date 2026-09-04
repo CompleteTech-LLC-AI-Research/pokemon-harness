@@ -106,6 +106,7 @@ _HELLO_TIMEOUT_SECONDS = 5.0
 # Socket I/O is non-blocking so closing a link cannot strand a writer behind a
 # full kernel buffer.  These short polls also let cancellation/close state be
 # observed without changing the public exchange timeout semantics.
+_FRAME_READ_TIMEOUT_SECONDS = 5.0
 _IO_POLL_S = 0.05
 _WRITE_TIMEOUT_S = 1.0
 _READER_JOIN_TIMEOUT_S = 1.0
@@ -236,6 +237,8 @@ class SerialLink(Protocol):
 
 def _pack_lp_str(s: str) -> bytes:
     """Length-prefixed UTF-8 string (1-byte length, up to 255 bytes)."""
+    if not isinstance(s, str):
+        raise TypeError(f"length-prefixed value must be a string, got {type(s).__name__}")
     enc = s.encode("utf-8")
     if len(enc) > 0xFF:
         raise ValueError(f"string too long for length-prefix: {len(enc)}")
@@ -244,29 +247,50 @@ def _pack_lp_str(s: str) -> bytes:
 
 def _pack_lp_bytes(b: bytes) -> bytes:
     """Length-prefixed byte blob (2-byte length, up to 65535 bytes)."""
-    if len(b) > 0xFFFF:
-        raise ValueError(f"blob too long for length-prefix: {len(b)}")
-    return struct.pack(">H", len(b)) + bytes(b)
+    if not isinstance(b, (bytes, bytearray, memoryview)):
+        raise TypeError(f"length-prefixed value must be bytes-like, got {type(b).__name__}")
+    encoded = bytes(b)
+    if len(encoded) > 0xFFFF:
+        raise ValueError(f"blob too long for length-prefix: {len(encoded)}")
+    return struct.pack(">H", len(encoded)) + encoded
 
 
-def _read_exactly(sock: socket.socket, n: int, *, allow_clean_eof: bool = False) -> bytes:
+def _read_exactly(
+    sock: socket.socket,
+    n: int,
+    *,
+    deadline: float | None = None,
+    allow_clean_eof: bool = False,
+) -> bytes:
     """Read exactly ``n`` bytes from a non-blocking socket.
 
     A clean EOF is only valid when no bytes of the next frame have arrived
-    yet.  EOF after a partial header or body is a malformed frame and must
-    fail closed as a protocol error.
+    yet. EOF after a partial header or body is a malformed frame and must
+    fail closed as a protocol error. When a deadline is supplied, it is an
+    absolute deadline shared by every partial read of the frame.
     """
+    if n < 0:
+        raise ValueError("read length must be non-negative")
     buf = bytearray()
     while len(buf) < n:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SerialLinkProtocolError(
+                    f"frame read deadline exceeded after {len(buf)}/{n} bytes"
+                )
+            poll_timeout = min(_IO_POLL_S, remaining)
+        else:
+            poll_timeout = _IO_POLL_S
+        try:
+            readable, _writable, exceptional = select.select([sock], [], [sock], poll_timeout)
+        except (OSError, ValueError) as exc:
+            raise SerialLinkClosed("socket closed while reading") from exc
+        if not readable and not exceptional:
+            continue
         try:
             chunk = sock.recv(n - len(buf))
         except (BlockingIOError, InterruptedError):
-            try:
-                readable, _writable, exceptional = select.select([sock], [], [sock], _IO_POLL_S)
-            except (OSError, ValueError) as exc:
-                raise SerialLinkClosed("socket closed while reading") from exc
-            if not readable and not exceptional:
-                continue
             continue
         except OSError as exc:
             raise SerialLinkClosed("socket closed while reading") from exc
@@ -276,6 +300,19 @@ def _read_exactly(sock: socket.socket, n: int, *, allow_clean_eof: bool = False)
             raise SerialLinkProtocolError("peer closed socket mid-frame")
         buf.extend(chunk)
     return bytes(buf)
+
+
+def _read_frame(sock: socket.socket) -> bytes:
+    """Read one frame with one absolute deadline after its first byte."""
+    first = _read_exactly(sock, 1, allow_clean_eof=True)
+    deadline = time.monotonic() + _FRAME_READ_TIMEOUT_SECONDS
+    header = first + _read_exactly(sock, 3, deadline=deadline)
+    (size,) = struct.unpack(">I", header)
+    if size == 0:
+        raise SerialLinkProtocolError("zero-length frame")
+    if size > _MAX_FRAME_SIZE:
+        raise SerialLinkProtocolError(f"frame too large: {size}")
+    return _read_exactly(sock, size, deadline=deadline)
 
 
 def _read_lp_str(data: memoryview, offset: int) -> tuple[str, int]:
@@ -600,13 +637,7 @@ class TcpSerialLink:
     def _reader_loop(self) -> None:
         try:
             while not self._is_closed():
-                header = _read_exactly(self._sock, 4, allow_clean_eof=True)
-                (size,) = struct.unpack(">I", header)
-                if size == 0:
-                    raise SerialLinkProtocolError("zero-length frame")
-                if size > _MAX_FRAME_SIZE:
-                    raise SerialLinkProtocolError(f"frame too large: {size}")
-                body = _read_exactly(self._sock, size)
+                body = _read_frame(self._sock)
                 self._dispatch(memoryview(body))
         except SerialLinkClosed:
             # Clean peer close; no error, just mark closed.
@@ -629,7 +660,10 @@ class TcpSerialLink:
             rom_version, offset = _read_lp_str(body, 1)
             if offset != len(body):
                 raise SerialLinkProtocolError("HELLO has trailing bytes")
-            rom_version = validate_rom_version(rom_version)
+            try:
+                rom_version = validate_rom_version(rom_version)
+            except (TypeError, ValueError) as exc:
+                raise SerialLinkProtocolError(f"invalid HELLO rom_version: {exc}") from exc
             with self._state_lock:
                 if self._peer_rom_version is not None:
                     raise SerialLinkProtocolError("duplicate HELLO")
@@ -645,6 +679,8 @@ class TcpSerialLink:
             if offset != len(body):
                 raise SerialLinkProtocolError("EXCHANGE has trailing bytes")
             with self._inbound_lock:
+                if self._closed_event.is_set():
+                    raise SerialLinkClosed("link is closed")
                 q = self._get_inbound_queue_locked(kind)
                 if self._inbound_frame_count >= _MAX_INBOUND_FRAMES:
                     raise SerialLinkProtocolError("inbound EXCHANGE frame limit exceeded")
@@ -684,6 +720,8 @@ class TcpSerialLink:
     def _mark_closed(self, error: Exception | None = None) -> None:
         with self._state_lock:
             if self._closed:
+                if error is not None and self._reader_exc is None:
+                    self._reader_exc = error
                 return
             if error is not None:
                 self._reader_exc = error
@@ -713,6 +751,9 @@ class TcpSerialLink:
             self._send_frame_locked(payload, deadline=deadline)
 
     def _send_frame_locked(self, payload: bytes, *, deadline: float | None = None) -> None:
+        payload = bytes(payload)
+        if not payload:
+            raise ValueError("frame payload must not be empty")
         if len(payload) > _MAX_FRAME_SIZE:
             raise ValueError(f"frame too large: {len(payload)}")
         header = struct.pack(">I", len(payload))

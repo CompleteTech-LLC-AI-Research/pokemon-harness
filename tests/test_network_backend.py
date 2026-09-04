@@ -223,7 +223,13 @@ def test_stop_applies_one_total_deadline_to_workers():
 
     release.set()
     sender.join(timeout=1.0)
-    edge_done.wait(timeout=1.0)
+    assert edge_done.wait(timeout=1.0)
+    # A bounded stop may return False while user-owned emulator work is
+    # still running, but callers must be able to retry and complete teardown
+    # after that work releases.  Keep this lifecycle guarantee explicit so a
+    # daemon worker cannot silently survive the test.
+    assert b.stop(timeout_s=1.0) is True
+    assert b._edge_worker is not None and not b._edge_worker.is_alive()
     a.stop()
 
 

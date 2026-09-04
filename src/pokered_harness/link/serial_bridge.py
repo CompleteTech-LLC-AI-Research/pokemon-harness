@@ -175,6 +175,10 @@ class SerialBridge:
         with self._lifecycle_lock:
             if self._installed:
                 raise RuntimeError("SerialBridge.install called twice")
+            if self._owned_serial_hooks or self._owned_raw_hooks:
+                raise RuntimeError(
+                    "SerialBridge.install cannot proceed while callback cleanup is pending"
+                )
             baselines = self._serial_hook_baselines()
             hook_baselines = self._physical_hook_baselines()
             try:
@@ -342,11 +346,17 @@ class SerialBridge:
         self._installed = False
         self._deactivate_serial_hooks(owned_serial_hooks)
         errors: list[Exception] = []
+        failed_raw_hooks: list[RawHookRegistration] = []
         for handle in reversed(owned_raw_hooks):
             try:
                 handle.close()
             except Exception as exc:  # noqa: BLE001 - cleanup continues
                 errors.append(exc)
+                # Keep failed ownership records for a later uninstall retry.
+                # Clearing these before close would make a transient physical
+                # deregistration failure permanently unrecoverable.
+                failed_raw_hooks.append(handle)
+        self._owned_raw_hooks = list(reversed(failed_raw_hooks))
         self._transport.reset()
         return errors
 

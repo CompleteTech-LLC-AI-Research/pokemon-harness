@@ -154,6 +154,11 @@ class PyBoyLinkSession:
         # observe or drive a half-paired session.
         self._lifecycle_lock = threading.RLock()
         self._original_ticks: dict[int, tuple[str, object]] = {}
+        # The native serial core may already have an owner-dispatch callback
+        # installed by another integration. Keep the exact callback and
+        # enabled state, plus our replacement callback, so detach restores
+        # only state still owned by this session.
+        self._previous_owner_dispatch: list[tuple[object | None, object, object] | None] = []
         self._network_is_internal_clock = network_is_internal_clock
         self._local_rom_version = local_rom_version
         # When True, per-frame stepping keeps the LCD renderer on and calls
@@ -298,6 +303,7 @@ class PyBoyLinkSession:
         self._cores.append(core)
         self._prev_backends.append(prev_backend)
         self._prev_serials.append(prev_serial)
+        self._previous_owner_dispatch.append(None)
 
         if self._network_backend is not None:
             # Network-mode: hook the local core up to the TCP backend
@@ -310,6 +316,7 @@ class PyBoyLinkSession:
             # only a register-level bootstrap; no emulator tick is allowed
             # until a versioned peer has selected the deterministic role.
             core.backend = self._network_backend
+            owner_dispatch_state: tuple[object | None, object, object] | None = None
             try:
                 with self._serial_gate:
                     self._initialize_network_clock_role(core)
@@ -337,10 +344,13 @@ class PyBoyLinkSession:
                     self.negotiate_network_clock_role(peer_version)
                 self._install_network_tick_owner(pyboy)
                 with self._serial_gate:
-                    self._enable_network_owner_pump(core, self._network_backend)
+                    owner_dispatch_state = self._enable_network_owner_pump(
+                        core, self._network_backend
+                    )
+                self._previous_owner_dispatch[-1] = owner_dispatch_state
             except BaseException:
                 with self._serial_gate:
-                    self._disable_network_owner_pump(core)
+                    self._disable_network_owner_pump(core, owner_dispatch_state)
                 self._restore_network_tick_owner(pyboy)
                 self._network_backend.stop()
                 try:
@@ -351,6 +361,7 @@ class PyBoyLinkSession:
                 self._cores.pop()
                 self._prev_backends.pop()
                 self._prev_serials.pop()
+                self._previous_owner_dispatch.pop()
                 raise
         elif len(self._cores) == 2:
             # Local-mode pair: wire the in-process coordinator with
@@ -370,7 +381,7 @@ class PyBoyLinkSession:
                 # Coordinator.attach() can fail after the new bookkeeping
                 # entries have been appended (for example, a native Serial
                 # rejects its backend assignment). Restore the second
-                # motherboard and remove all four entries transactionally.
+                # motherboard and remove all bookkeeping entries transactionally.
                 try:
                     if prev_serial is not None:
                         mb.serial = prev_serial
@@ -383,6 +394,7 @@ class PyBoyLinkSession:
                     self._cores.pop()
                     self._prev_backends.pop()
                     self._prev_serials.pop()
+                    self._previous_owner_dispatch.pop()
                 raise
 
         return core
@@ -516,7 +528,9 @@ class PyBoyLinkSession:
         return _pump
 
     @staticmethod
-    def _enable_network_owner_pump(core: object, backend: NetworkBackend) -> None:
+    def _enable_network_owner_pump(
+        core: object, backend: NetworkBackend
+    ) -> tuple[object | None, object, object] | None:
         """Install the serial-tick owner pump when the native core supports it."""
         if not hasattr(core, "owner_dispatch_callback") or not hasattr(
             core, "owner_dispatch_enabled"
@@ -525,17 +539,42 @@ class PyBoyLinkSession:
             # pump. The per-frame owner wrapper remains the safe fallback for
             # those integrations; the bundled patched PyBoy core always has
             # the fields and therefore gets the higher-throughput path.
-            return
-        core.owner_dispatch_callback = PyBoyLinkSession._make_network_owner_pump(backend)
-        core.owner_dispatch_enabled = True
+            return None
+        previous_callback = core.owner_dispatch_callback
+        previous_enabled = core.owner_dispatch_enabled
+        owner_pump = PyBoyLinkSession._make_network_owner_pump(backend)
+        try:
+            core.owner_dispatch_callback = owner_pump
+            core.owner_dispatch_enabled = True
+        except BaseException as exc:
+            # If a native setter rejects the replacement, make the partial
+            # install transactional before propagating the original error.
+            try:
+                core.owner_dispatch_enabled = previous_enabled
+                core.owner_dispatch_callback = previous_callback
+            except BaseException as rollback_error:  # noqa: BLE001
+                exc.add_note(f"owner-dispatch callback rollback also failed: {rollback_error!r}")
+            raise
+        return previous_callback, previous_enabled, owner_pump
 
     @staticmethod
-    def _disable_network_owner_pump(core: object) -> None:
-        """Disable owner pumping before a network core is restored or detached."""
-        if hasattr(core, "owner_dispatch_enabled"):
-            core.owner_dispatch_enabled = False
-        if hasattr(core, "owner_dispatch_callback"):
-            core.owner_dispatch_callback = None
+    def _disable_network_owner_pump(
+        core: object,
+        state: tuple[object | None, object, object] | None,
+    ) -> None:
+        """Restore a session-owned owner pump before detaching a core.
+
+        If another integration replaced our callback while the session was
+        attached, leave that replacement untouched rather than clobbering a
+        newer owner during teardown.
+        """
+        if state is None or not hasattr(core, "owner_dispatch_callback"):
+            return
+        previous_callback, previous_enabled, installed_callback = state
+        if core.owner_dispatch_callback is not installed_callback:
+            return
+        core.owner_dispatch_enabled = previous_enabled
+        core.owner_dispatch_callback = previous_callback
 
     def _restore_network_tick_owner(self, pyboy: _PyBoyLike) -> None:
         """Restore a PyBoy tick method installed by :meth:`attach`."""
@@ -706,13 +745,14 @@ class PyBoyLinkSession:
         idx = self._pyboys.index(pyboy)
         prev_backend = self._prev_backends[idx]
         prev_serial = self._prev_serials[idx]
+        previous_owner_dispatch = self._previous_owner_dispatch[idx]
         core = self._cores[idx]
         if self._network_backend is not None:
             # Wait for an in-progress owner tick before restoring the serial
             # backend. The response worker never touches the core, so after
             # this point no background thread retains an emulator reference.
             with self._serial_gate:
-                self._disable_network_owner_pump(core)
+                self._disable_network_owner_pump(core, previous_owner_dispatch)
             self._restore_network_tick_owner(pyboy)
         if prev_serial is not None:
             pyboy.mb.serial = prev_serial
@@ -729,6 +769,7 @@ class PyBoyLinkSession:
         self._cores.pop(idx)
         self._prev_backends.pop(idx)
         self._prev_serials.pop(idx)
+        self._previous_owner_dispatch.pop(idx)
 
     def detach_all(self) -> None:
         """Detach every attached PyBoy and close the session transport.

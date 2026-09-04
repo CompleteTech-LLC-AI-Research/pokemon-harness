@@ -18,6 +18,80 @@ _SOURCE_DIGEST_RE = re.compile(
     r"SHA-1 (?P<sha1>[0-9a-f]{40}); SHA-256 (?P<sha256>[0-9a-f]{64})",
     re.IGNORECASE,
 )
+_EXPECTED_FIXTURE_ROWS = {
+    "red-color-ordinary": ("red/cable_club.state", "red", "color", "ordinary"),
+    "red-vanilla-ordinary": (
+        "red/cable_club-vanilla.state",
+        "red",
+        "vanilla",
+        "ordinary",
+    ),
+    "red-color-battle": ("red/cable_club-battle.state", "red", "color", "battle"),
+    "red-vanilla-battle": (
+        "red/cable_club-battle-vanilla.state",
+        "red",
+        "vanilla",
+        "battle",
+    ),
+    "blue-color-ordinary": ("blue/cable_club.state", "blue", "color", "ordinary"),
+    "blue-vanilla-ordinary": (
+        "blue/cable_club-vanilla.state",
+        "blue",
+        "vanilla",
+        "ordinary",
+    ),
+    "blue-color-battle": ("blue/cable_club-battle.state", "blue", "color", "battle"),
+    "blue-vanilla-battle": (
+        "blue/cable_club-battle-vanilla.state",
+        "blue",
+        "vanilla",
+        "battle",
+    ),
+    "yellow-cgb-ordinary": ("yellow/cable_club.state", "yellow", "cgb", "ordinary"),
+    "yellow-cgb-battle": ("yellow/cable_club-battle.state", "yellow", "cgb", "battle"),
+}
+_BATTLE_RECIPES = {
+    "red-color-battle": "red_color",
+    "red-vanilla-battle": "red_gb",
+    "blue-color-battle": "blue_color",
+    "blue-vanilla-battle": "blue_gb",
+    "yellow-cgb-battle": "yellow",
+}
+_ORDINARY_SOURCE_PREFIXES = {
+    "red": "external walkthrough_red/milestones/cerulean_pc.state;",
+    "blue": "external walkthrough_blue/milestones/cerulean_pc.state;",
+    "yellow": "external walkthrough_yellow/milestones/cerulean_pc.state;",
+}
+_VERIFIED_FIXTURE_IDS = frozenset(
+    {
+        "red-color-ordinary",
+        "red-color-battle",
+        "blue-color-ordinary",
+        "blue-color-battle",
+        "yellow-cgb-ordinary",
+        "yellow-cgb-battle",
+    }
+)
+_VANILLA_FIXTURE_IDS = frozenset(
+    {
+        "red-vanilla-ordinary",
+        "red-vanilla-battle",
+        "blue-vanilla-ordinary",
+        "blue-vanilla-battle",
+    }
+)
+
+
+def _load_manifest() -> dict:
+    return json.loads(
+        (ROOT / "release-evidence" / "fixture-manifest.json").read_text(encoding="utf-8")
+    )
+
+
+def _source_digests(source_state: str) -> tuple[str, str]:
+    match = _SOURCE_DIGEST_RE.search(source_state)
+    assert match is not None, source_state
+    return match.group("sha1").lower(), match.group("sha256").lower()
 
 
 def test_battle_fixture_generator_covers_each_supported_rom_variant() -> None:
@@ -29,13 +103,98 @@ def test_battle_fixture_generator_covers_each_supported_rom_variant() -> None:
 
 
 def test_release_manifest_records_all_external_fixture_bytes_and_provenance() -> None:
-    manifest_path = ROOT / "release-evidence" / "fixture-manifest.json"
-    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document = _load_manifest()
     fixtures = document["fixtures"]
     assert len(fixtures) == 10
     assert all(fixture["repository_distributed"] is False for fixture in fixtures)
     assert all("provenance" in fixture for fixture in fixtures)
     assert all("source_state" in fixture["provenance"] for fixture in fixtures)
+
+
+def test_manifest_has_exact_supported_fixture_matrix_and_status_boundary() -> None:
+    document = _load_manifest()
+    fixtures = fixture_manifest._validate_schema(document)
+
+    actual_rows = {
+        fixture["id"]: (
+            fixture["path"],
+            fixture["version"],
+            fixture["variant"],
+            fixture["kind"],
+        )
+        for fixture in fixtures
+    }
+    assert actual_rows == _EXPECTED_FIXTURE_ROWS
+    assert {
+        fixture["id"] for fixture in fixtures if fixture["provenance"]["status"] == "verified"
+    } == _VERIFIED_FIXTURE_IDS
+    assert {
+        fixture["id"] for fixture in fixtures if fixture["provenance"]["status"] == "partial"
+    } == _VANILLA_FIXTURE_IDS
+    assert {fixture["id"] for fixture in fixtures if fixture["kind"] == "battle"} == set(
+        _BATTLE_RECIPES
+    )
+
+
+def test_ordinary_provenance_uses_matching_recipe_and_external_source() -> None:
+    document = _load_manifest()
+
+    for fixture in document["fixtures"]:
+        if fixture["kind"] != "ordinary":
+            continue
+
+        recipe = producer._VERSIONS[(fixture["version"], fixture["variant"])]
+        provenance = fixture["provenance"]
+        assert provenance["producer"] == "scripts/produce_cable_club_fixture.py"
+        assert provenance["source_state"].startswith(_ORDINARY_SOURCE_PREFIXES[fixture["version"]])
+        assert str(recipe["rom"]) == fixture["expected_rom"]["path"].removeprefix("rom/")
+        assert str(recipe["sym"]) == fixture["expected_symbols"]["path"].removeprefix("rom/")
+        assert recipe["out_name"] == Path(fixture["path"]).name
+
+
+def test_battle_provenance_binds_each_derived_state_to_ordinary_input() -> None:
+    document = _load_manifest()
+    by_id = {fixture["id"]: fixture for fixture in document["fixtures"]}
+
+    for battle_id, recipe_key in _BATTLE_RECIPES.items():
+        battle = by_id[battle_id]
+        ordinary_id = battle_id.replace("-battle", "-ordinary")
+        ordinary = by_id[ordinary_id]
+        battle_provenance = battle["provenance"]
+        recipe = VARIANTS[recipe_key]
+
+        assert battle_provenance["producer"] == ("scripts/prepare_battle_cable_club_fixtures.py")
+        assert _source_digests(battle_provenance["source_state"]) == (
+            ordinary["sha1"],
+            ordinary["sha256"],
+        )
+        assert f"external {ordinary['path']};" in battle_provenance["source_state"]
+        assert recipe["fixture_version"] == battle["version"]
+        assert recipe["source"] == Path(ordinary["path"]).name
+        assert recipe["output"] == Path(battle["path"]).name
+        assert str(recipe["rom"]) == battle["expected_rom"]["path"].removeprefix("rom/")
+        assert str(recipe["symbols"]) == battle["expected_symbols"]["path"].removeprefix("rom/")
+        assert f"--variants {recipe_key}" in battle_provenance["capture_command_template"]
+
+
+def test_vanilla_provenance_remains_fail_closed_through_derived_states() -> None:
+    document = _load_manifest()
+    by_id = {fixture["id"]: fixture for fixture in document["fixtures"]}
+
+    for version in ("red", "blue"):
+        ordinary = by_id[f"{version}-vanilla-ordinary"]
+        battle = by_id[f"{version}-vanilla-battle"]
+        ordinary_provenance = ordinary["provenance"]
+        battle_provenance = battle["provenance"]
+
+        assert ordinary_provenance["status"] == "partial"
+        assert battle_provenance["status"] == "partial"
+        assert all(
+            ordinary_provenance[field] is None
+            for field in ("runtime_identity", "captured_at_utc", "verification_method")
+        )
+        assert "not proven to be vanilla-ROM captured" in ordinary_provenance["source_state"]
+        assert "ordinary source provenance is partial" in battle_provenance["source_state"]
 
 
 def test_manifest_validator_requires_complete_verified_provenance() -> None:
