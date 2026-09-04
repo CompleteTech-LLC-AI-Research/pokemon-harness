@@ -34,6 +34,7 @@ from typing import Any
 import mcp.types as mcp_types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.shared.exceptions import McpError
 
 from pokered_harness.config import SUPPORTED_ROM_VERSIONS
 from pokered_harness.events.hooks import GameEvent
@@ -522,9 +523,9 @@ def _text_reply(payload: Any) -> mcp_types.CallToolResult:
     )
 
 
-def _error_reply(exc: Exception) -> mcp_types.CallToolResult:
-    """Convert an internal exception into a stable MCP error envelope."""
-    payload = {
+def _error_payload(exc: Exception) -> dict[str, Any]:
+    """Build the stable error data shared by tool and resource failures."""
+    return {
         "ok": False,
         "error": {
             "code": _error_code(exc),
@@ -532,6 +533,11 @@ def _error_reply(exc: Exception) -> mcp_types.CallToolResult:
             "type": type(exc).__name__,
         },
     }
+
+
+def _error_reply(exc: Exception) -> mcp_types.CallToolResult:
+    """Convert an internal exception into a stable MCP error envelope."""
+    payload = _error_payload(exc)
     return mcp_types.CallToolResult(
         content=[mcp_types.TextContent(type="text", text=json.dumps(payload))],
         structuredContent=payload,
@@ -2452,7 +2458,7 @@ def read_resource(
         if link is None:
             link = LinkState()
         return json.dumps(dispatch_tool(session, "link_status", {}, link=link))
-    raise ValueError(f"unknown resource: {uri!r}")
+    raise McpHarnessError("invalid_resource", f"unknown resource: {uri!r}")
 
 
 def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
@@ -2685,14 +2691,28 @@ def build_server(
         worker = request_tasks.start(
             lambda: read_resource(session, resource_uri, link)
         )
-        return await _await_blocking_task(
-            worker,
-            task_registry=request_tasks,
-            # A resource read may be waiting on a remote endpoint or a
-            # session lock.  The same cancellation wake-up used by tools is
-            # required so EOF cannot strand a thread outside server cleanup.
-            cancel_cleanup=lambda: _disconnect_remote(link, session),
-        )
+        try:
+            return await _await_blocking_task(
+                worker,
+                task_registry=request_tasks,
+                # A resource read may be waiting on a remote endpoint or a
+                # session lock.  The same cancellation wake-up used by tools
+                # is required so EOF cannot strand a thread outside server
+                # cleanup.
+                cancel_cleanup=lambda: _disconnect_remote(link, session),
+            )
+        except Exception as exc:
+            # The low-level MCP server turns McpError into a protocol
+            # ErrorData response. Without this boundary, a resource failure
+            # becomes an untyped JSON-RPC error even though tool failures
+            # already expose a stable machine-readable envelope.
+            raise McpError(
+                mcp_types.ErrorData(
+                    code=0,
+                    message=str(exc) or type(exc).__name__,
+                    data=_error_payload(exc),
+                )
+            ) from exc
 
     return server
 

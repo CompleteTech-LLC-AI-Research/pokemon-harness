@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 
 import pytest
+from mcp.shared.exceptions import McpError
 
 from pokered_harness.events import EventBus
 from pokered_harness.link.network_backend import NetworkBackend, NetworkBackendError
@@ -334,8 +335,9 @@ def test_read_resource_event_log_starts_empty_and_grows():
 
 def test_read_resource_unknown_uri_raises():
     s, _, _ = _session()
-    with pytest.raises(ValueError):
+    with pytest.raises(McpHarnessError) as exc_info:
         read_resource(s, "pokered://nope")
+    assert exc_info.value.code == "invalid_resource"
 
 
 # -- default hook registration --------------------------------------------
@@ -1704,6 +1706,43 @@ def test_mcp_handler_returns_structured_client_error():
     assert response.root.isError is True
     assert payload is not None
     assert payload["error"]["code"] == "peer_not_configured"
+
+
+@pytest.mark.parametrize(
+    ("uri", "code"),
+    [
+        ("pokered://nope", "invalid_resource"),
+        ("pokered://peer-game-state", "peer_not_configured"),
+    ],
+)
+def test_mcp_resource_handler_returns_structured_client_error(uri, code):
+    """Resource failures use MCP ErrorData with the stable harness code."""
+    import mcp.types as mcp_types
+
+    s, _ = _endpoint_session()
+    server = build_server(s)
+    handler = server.request_handlers[mcp_types.ReadResourceRequest]
+    request = mcp_types.ReadResourceRequest(
+        params=mcp_types.ReadResourceRequestParams(uri=uri)
+    )
+
+    with pytest.raises(McpError) as exc_info:
+        asyncio.run(handler(request))
+
+    error = exc_info.value.error
+    assert error.code == 0
+    assert error.data == {
+        "ok": False,
+        "error": {
+            "code": code,
+            "message": (
+                "unknown resource: 'pokered://nope'"
+                if code == "invalid_resource"
+                else "peer session not configured"
+            ),
+            "type": "McpHarnessError",
+        },
+    }
 
 
 def test_link_status_resource_returns_same_shape_as_tool():

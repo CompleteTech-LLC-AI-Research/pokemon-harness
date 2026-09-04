@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 
 import pytest
 
@@ -9,6 +10,7 @@ from pokered_harness.input import Button
 from pokered_harness.session import (
     Session,
     SessionClosedError,
+    SessionCloseTimeout,
     SessionConfigurationError,
     VersionMismatch,
     _default_pyboy_factory,
@@ -487,6 +489,57 @@ def test_close_is_idempotent_and_rejects_new_actions():
     assert pb.stopped is True
     with pytest.raises(SessionClosedError, match="session is closed"):
         s.step()
+
+
+def test_close_does_not_cancel_an_admitted_run_until_event():
+    s, pb, _ = _session()
+    first_tick_entered = threading.Event()
+    release_first_tick = threading.Event()
+    original_tick = pb.tick
+    tick_count = 0
+
+    def blocking_tick(count: int = 1, render: bool = False) -> bool:
+        nonlocal tick_count
+        tick_count += 1
+        result = original_tick(count, render=render)
+        if tick_count == 1:
+            first_tick_entered.set()
+            assert release_first_tick.wait(timeout=1.0)
+        return result
+
+    pb.tick = blocking_tick  # type: ignore[assignment]
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def run_until() -> None:
+        try:
+            results.append(s.run_until_event("never", max_ticks=2, chunk=1))
+        except BaseException as exc:  # noqa: BLE001 - capture thread failure
+            errors.append(exc)
+
+    runner = threading.Thread(target=run_until, name="test-run-until-event")
+    runner.start()
+    assert first_tick_entered.wait(timeout=1.0)
+
+    # close() is bounded while the admitted compound operation still owns
+    # the emulator; it must not turn that operation into SessionClosedError.
+    with pytest.raises(SessionCloseTimeout):
+        s.close(timeout_s=0.05)
+
+    release_first_tick.set()
+    runner.join(timeout=1.0)
+    assert not runner.is_alive()
+    assert errors == []
+    assert len(results) == 1
+    result = results[0]
+    assert result.reached is False  # type: ignore[union-attr]
+    assert result.ticks_spent == 2  # type: ignore[union-attr]
+    assert pb.tick_calls == [(1, False), (1, False)]
+
+    # The first close timed out before acquiring the lock; a retry completes
+    # shutdown after the admitted operation has finished.
+    s.close(timeout_s=1.0)
+    assert pb.stopped is True
 
 
 def test_step_rolls_back_tick_when_pyboy_fails():
