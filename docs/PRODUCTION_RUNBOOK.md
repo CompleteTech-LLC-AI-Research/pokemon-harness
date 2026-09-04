@@ -17,8 +17,8 @@ native instruction-batch boundary.
 The release decision for this candidate is `PARTIAL`, not `PRODUCTION-READY`.
 Current controlled evidence is:
 
-- the focused source and Cython transport/serial/PyBoy-link suite passes
-  110/110 in each runtime;
+- the current focused source and Cython serial-link+network suite passes
+  78/78 in each runtime;
 - an asset-backed source trade gate recorded 19/19 ordered local and remote
   party-swap rows. Its supervisor started before PR #35 was published, so this
   is recorded trade-tier evidence, not a clean post-merge all-tier sign-off;
@@ -37,8 +37,8 @@ Current controlled evidence is:
   runtime, including native bootstrap ownership and transient metadata cleanup.
 
 A current-head dual source and Cython `--unit-only --repeat-timing 5` gate on
-2026-09-03, using separate source and Cython interpreters, collected 756 tests
-in each runtime. Both passed unit 611/611 and timing 40/40 in all five
+2026-09-03, using separate source and Cython interpreters, collected 771 tests
+in each runtime. Both passed unit 626/626 and timing 50/50 in all five
 repetitions; source reported `python-source` and
 Cython reported `cython/native-extension`. The clone had no ROM, symbol, or
 save-state assets, so fixture schema and matrix declaration were checked but
@@ -80,7 +80,7 @@ Status semantics:
 | Capability | Current status | Evidence boundary |
 |---|---|---|
 | Single session and MCP | Scoped `PASS`; release remains `PARTIAL` | Historical asset-backed local/session 47/47 and Windows MCP stdio 4/4 cover the tested inputs. They do not establish link gameplay or every platform. |
-| In-process paired link | Scoped `PASS`; release remains `PARTIAL` | Prior source/Cython local/session evidence and current focused 110/110 cover controlled attach/serial/lifecycle behavior. Current full native battle coverage is not recorded. |
+| In-process paired link | Scoped `PASS`; release remains `PARTIAL` | Prior source/Cython local/session evidence and the current focused 78/78 serial-link+network scope cover controlled attach/serial/lifecycle behavior. Current full native battle coverage is not recorded. |
 | Remote TCP transport | Scoped `PASS` | Prior source/Cython remote transport/MCP slice passed 15/15 with bounded lifecycle. TCP is loopback-only and has no authentication or encryption. |
 | Remote trade | Source `19/19` recorded; native historical `18/19` | Exact-row native follow-ups have both passed and failed, including a party-record mismatch and phase stalls, so reliability is unproven. Representative rows do not close the matrix. |
 | Remote battle | Native direct strict lane: 1/3 `PASS`, 2/3 `FAIL`; six of 9 unrun; full 19-entrypoint set unqualified | The latest lane used a bounded 155-second per-pair deadline with no bypasses: `Blue-color↔Blue-color` passed, while `Red-color↔Yellow` and `Yellow↔Red-color` failed. The historical source baseline passed its 19/19 strict battle matrix; it is not current native qualification. |
@@ -150,7 +150,7 @@ python scripts/bootstrap_pyboy.py --mode source --check
 The pinned fork has an optional Cython mode. Its semantic serial-contract probe
 and three canonical real-ROM attach/step/close smokes pass, but it is not the
 documented release default. The current focused source and Cython
-transport/serial/PyBoy-link suite passes 110/110 in each runtime. The
+serial-link+network suite passes 78/78 in each runtime. The
 historical native strict-trade gate recorded 18/19; exact-row follow-ups have
 both passed and failed, including a party-record mismatch and phase stalls, so
 reliability is unproven. The full current native battle matrix is not
@@ -302,8 +302,8 @@ python scripts/production_gate.py \
   --format text
 ```
 
-The latest current-head dual `--unit-only --repeat-timing 5` check collected 756
-tests in each runtime, passed unit 611/611, and passed timing 40/40 in all five
+The latest current-head dual `--unit-only --repeat-timing 5` check collected 771
+tests in each runtime, passed unit 626/626, and passed timing 50/50 in all five
 repetitions. Source reported `python-source`; Cython reported
 `cython/native-extension`. The gate also performs schema-only validation of the
 ten-entry fixture manifest. Because the isolated clone had no ROM, symbol, or
@@ -356,8 +356,8 @@ EVIDENCE_DIR="$(mktemp -d)"
 the Cython interpreter. The latter is accepted only with
 `--runtime-mode both`; omitting it makes both modes reuse `--python`. The gate
 runs the selected tiers under each explicit runtime and retains both results in
-the dual report. The latest current-head post-gate run collected 756 tests per
-runtime, passed unit 611/611 in each runtime, and passed timing 40/40 in each of five
+the dual report. The latest current-head post-gate run collected 771 tests per
+runtime, passed unit 626/626 in each runtime, and passed timing 50/50 in each of five
 repetitions. This is asset-free runtime evidence, not ROM gameplay or release
 sign-off; the release decision remains `PARTIAL`.
 
@@ -738,7 +738,7 @@ The candidate remains `PARTIAL`, not `PRODUCTION-READY`. The observed blockers
 are:
 
 1. The latest current-head dual source and Cython unit/timing gates each
-   collected 756 tests, passed unit 611/611, and passed timing 40/40 in five
+   collected 771 tests, passed unit 626/626, and passed timing 50/50 in five
    repetitions.
    They were asset-free and therefore do not close ROM-backed gameplay,
    platform, or release-sign-off requirements. The explicit dual invocation
