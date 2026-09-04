@@ -36,6 +36,11 @@ class Badge(IntEnum):
 
 ALL_BADGES: tuple[Badge, ...] = tuple(Badge)
 
+# ``NUM_EVENTS`` in pret/pokered and pret/pokeyellow.  The event array is
+# 0xA00 bits (320 bytes); the following WRAM union must never be interpreted
+# as an event flag just because a caller supplied a large index.
+NUM_EVENT_FLAGS = 0xA00
+
 
 @dataclass(frozen=True, slots=True)
 class ProgressState:
@@ -46,6 +51,9 @@ class ProgressState:
     play_time_minutes: int | None
     play_time_seconds: int | None
     play_time_maxed: bool
+    # Kept separate from the legacy boolean above so a missing optional
+    # symbol is observable rather than indistinguishable from a real zero.
+    play_time_maxed_raw: int | None = None
 
     def has_badge(self, badge: Badge) -> bool:
         return bool((self.badges_raw >> badge.value) & 1)
@@ -57,6 +65,30 @@ class ProgressState:
     @property
     def badge_count(self) -> int:
         return (self.badges_raw & 0xFF).bit_count()
+
+    @property
+    def play_time_maxed_known(self) -> bool:
+        """Whether ``wPlayTimeMaxed`` was present in the symbol table."""
+        return self.play_time_maxed_raw is not None
+
+    @property
+    def play_time_maxed_value(self) -> bool | None:
+        """Return the maxed flag, or ``None`` when its symbol was absent.
+
+        ``play_time_maxed`` remains a boolean for compatibility with older
+        callers; use this property when unknown and false must be distinct.
+        """
+        return self.play_time_maxed if self.play_time_maxed_known else None
+
+    @property
+    def play_time_known(self) -> bool:
+        """Whether all exposed play-time components are symbol-backed and valid."""
+        return (
+            self.play_time_maxed_known
+            and self.play_time_hours is not None
+            and self.play_time_minutes is not None
+            and self.play_time_seconds is not None
+        )
 
 
 def parse_progress(memory: MemoryLike, symbols: SymbolTable) -> ProgressState:
@@ -71,12 +103,13 @@ def parse_progress(memory: MemoryLike, symbols: SymbolTable) -> ProgressState:
         money = _read_bcd3(memory, symbols.addr_of("wPlayerMoney"))
 
     hours = _opt_u8(memory, symbols, "wPlayTimeHours")
-    minutes = _opt_u8(memory, symbols, "wPlayTimeMinutes")
-    seconds = _opt_u8(memory, symbols, "wPlayTimeSeconds")
+    minutes = _opt_u8_range(memory, symbols, "wPlayTimeMinutes", 59)
+    seconds = _opt_u8_range(memory, symbols, "wPlayTimeSeconds", 59)
 
-    play_time_maxed = False
-    if "wPlayTimeMaxed" in symbols:
-        play_time_maxed = symbols.read_u8(memory, "wPlayTimeMaxed") != 0
+    play_time_maxed_raw = _opt_u8(memory, symbols, "wPlayTimeMaxed")
+    # Preserve the historical bool field while retaining explicit unknown
+    # semantics in play_time_maxed_raw/play_time_maxed_value.
+    play_time_maxed = play_time_maxed_raw is not None and play_time_maxed_raw != 0
 
     return ProgressState(
         badges_raw=badges_raw,
@@ -86,6 +119,7 @@ def parse_progress(memory: MemoryLike, symbols: SymbolTable) -> ProgressState:
         play_time_minutes=minutes,
         play_time_seconds=seconds,
         play_time_maxed=play_time_maxed,
+        play_time_maxed_raw=play_time_maxed_raw,
     )
 
 
@@ -100,8 +134,14 @@ def read_event_flag(
     the bit at position ``bit_index & 7`` (low-bit first). Bit indices are
     the values of ``EVENT_*`` constants in pokered, not byte offsets.
     """
-    if bit_index < 0:
-        raise ValueError(f"bit_index must be non-negative, got {bit_index}")
+    if (
+        not isinstance(bit_index, int)
+        or isinstance(bit_index, bool)
+        or not 0 <= bit_index < NUM_EVENT_FLAGS
+    ):
+        raise ValueError(
+            f"bit_index must be an integer in 0..{NUM_EVENT_FLAGS - 1}, got {bit_index!r}"
+        )
     base = symbols.addr_of("wEventFlags")
     byte_offset, bit = divmod(bit_index, 8)
     value = int(memory[base + byte_offset]) & 0xFF
@@ -115,19 +155,28 @@ def _opt_u8(memory: MemoryLike, symbols: SymbolTable, name: str) -> int | None:
     return symbols.read_u8(memory, name) if name in symbols else None
 
 
-def _read_bcd3(memory: MemoryLike, addr: int) -> int:
+def _opt_u8_range(
+    memory: MemoryLike,
+    symbols: SymbolTable,
+    name: str,
+    maximum: int,
+) -> int | None:
+    value = _opt_u8(memory, symbols, name)
+    return value if value is None or value <= maximum else None
+
+
+def _read_bcd3(memory: MemoryLike, addr: int) -> int | None:
     """Decode 3 bytes of packed binary-coded decimal.
 
-    Pokémon Red stores money as 6 decimal digits in 3 bytes, most
-    significant first. Each nibble is one decimal digit; e.g.
-    ``[0x01, 0x23, 0x45]`` means 12345(5), i.e. 123,455? No — it is six
-    digits read left-to-right: ``123_456`` if the bytes are
-    ``[0x12, 0x34, 0x56]``. The implementation below matches that
-    digit-pair-per-byte encoding directly.
+    Pokémon Red/Blue/Yellow store money as 6 decimal digits in 3 bytes,
+    most significant first. Each nibble must be a decimal digit; malformed
+    RAM is unknown rather than being converted into a guessed integer.
     """
     result = 0
     for i in range(3):
         b = int(memory[addr + i]) & 0xFF
         hi, lo = (b >> 4) & 0xF, b & 0xF
+        if hi > 9 or lo > 9:
+            return None
         result = result * 100 + hi * 10 + lo
     return result
