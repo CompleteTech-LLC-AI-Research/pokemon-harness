@@ -715,12 +715,8 @@ class LinkPair:
 
         handles: list[HookRegistration] = []
         try:
-            handles.append(
-                self._register_owned_address_hook(pa, bank_a, addr_a, force_trade_a)
-            )
-            handles.append(
-                self._register_owned_address_hook(pb, bank_b, addr_b, force_trade_b)
-            )
+            handles.append(self._register_owned_address_hook(pa, bank_a, addr_a, force_trade_a))
+            handles.append(self._register_owned_address_hook(pb, bank_b, addr_b, force_trade_b))
         except BaseException as exc:
             # A forced menu choice is a protocol-wide phase decision. Leaving
             # only one side installed would make the pair look usable while
@@ -729,9 +725,7 @@ class LinkPair:
             # retry cleanup even if a local close fails.
             owned_hooks.extend(handles)
             cleanup_errors = self._close_owned_hooks(handles)
-            exc.add_note(
-                "symmetric TRADE LinkMenu hooks are required; pair installation aborted"
-            )
+            exc.add_note("symmetric TRADE LinkMenu hooks are required; pair installation aborted")
             for cleanup_error in cleanup_errors:
                 exc.add_note(f"LinkMenu hook rollback cleanup failed: {cleanup_error!r}")
             raise
