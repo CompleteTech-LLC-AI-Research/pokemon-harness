@@ -158,21 +158,99 @@ def test_master_transfer_does_not_complete_early():
     assert s.transfer_enabled == 0
 
 
-def test_cgb_double_speed_keeps_normal_serial_edge_rate():
-    """Normal CGB serial speed is measured in hardware, not CPU cycles."""
-    s = SerialCore(backend=NullBackend())
+def test_cgb_double_speed_keeps_existing_normal_serial_edge_rate():
+    """Preserve the existing normal-rate raw-cycle scheduling model."""
+    s = SerialCore(cgb_mode=True, backend=NullBackend())
     s.cpu_speed_shift = 1
     s.set_SB(0xAA)
     s.set_SC(0x81)
 
-    # A double-speed CPU needs twice as many raw CPU cycles per normal-rate
-    # serial edge. The SC fast-clock bit is a separate feature and is not
-    # being enabled by this transfer.
+    # The existing normal-rate path keeps the serial clock in its hardware
+    # time domain, so a double-speed CPU gets twice the raw-cycle deadline.
+    # The CGB fast clock is different: its hardware rate also doubles.
     assert s.tick((CYCLES_PER_EDGE_DMG * 2) - 1) is False
     assert s.transfer_enabled == 1
     assert s.tick(CYCLES_PER_EDGE_DMG * 2) is False
     assert s.transfer_enabled == 1
     assert s.tick(CYCLES_PER_BYTE_DMG * 2) is True
+    assert s.transfer_enabled == 0
+
+
+def test_cgb_normal_serial_rate_matches_dmg_rate():
+    """CGB SC bit 1 clear keeps the normal 8192 Hz serial cadence."""
+    s = SerialCore(cgb_mode=True, backend=NullBackend())
+    s.set_SB(0xAA)
+    s.set_SC(0x81)
+
+    assert s.clock_target == CYCLES_PER_EDGE_DMG
+    assert s.tick(CYCLES_PER_BYTE_DMG - 1) is False
+    assert s.transfer_enabled == 1
+    assert s.tick(CYCLES_PER_BYTE_DMG) is True
+    assert s.transfer_enabled == 0
+
+
+@pytest.mark.parametrize("cpu_speed_shift", [0, 1])
+def test_cgb_fast_serial_rate_is_32_times_normal(cpu_speed_shift):
+    """CGB SC=0x83 uses four raw cycles per edge at either CPU speed."""
+    s = SerialCore(cgb_mode=True, backend=NullBackend())
+    s.cpu_speed_shift = cpu_speed_shift
+    s.set_SB(0xAA)
+    s.set_SC(0x83)
+
+    fast_edge_cycles = CYCLES_PER_EDGE_DMG // 32
+    fast_byte_cycles = CYCLES_PER_BYTE_DMG // 32
+    assert fast_edge_cycles == 4
+    assert fast_byte_cycles == 32
+    # At cpu_speed_shift=1 both the CPU and fast serial clocks double, so
+    # the raw-cycle period stays 4; using 2 would double the rate twice.
+    assert s.clock_target == fast_edge_cycles
+
+    assert s.tick(fast_byte_cycles - 1) is False
+    assert s.transfer_enabled == 1
+    assert s.tick(fast_byte_cycles) is True
+    assert s.transfer_enabled == 0
+
+
+def test_dmg_ignores_cgb_fast_serial_bit():
+    """DMG SC=0x83 retains the fixed normal serial timing and mode."""
+    s = SerialCore(cgb_mode=False, backend=NullBackend())
+    s.set_SB(0xAA)
+    s.set_SC(0x83)
+
+    assert s.double_speed == 0
+    assert s.clock_target == CYCLES_PER_EDGE_DMG
+    assert s.tick(CYCLES_PER_BYTE_DMG - 1) is False
+    assert s.transfer_enabled == 1
+    assert s.tick(CYCLES_PER_BYTE_DMG) is True
+    assert s.transfer_enabled == 0
+
+
+@pytest.mark.parametrize("initial_sc, next_sc", [(0x81, 0x83), (0x83, 0x81)])
+def test_cgb_fast_serial_bit_change_preserves_armed_transfer(initial_sc, next_sc):
+    """Changing only SC bit 1 does not restart an in-flight transfer."""
+    s = SerialCore(cgb_mode=True, backend=NullBackend())
+    s.set_SB(0xA5)
+    s.set_SC(initial_sc)
+
+    initial_edge_cycles = CYCLES_PER_EDGE_DMG // (32 if initial_sc & 0x02 else 1)
+    s.tick(initial_edge_cycles)
+    shift_before = s._shift_register
+    bits_before = s._bits_remaining
+    deadline_before = s.clock_target
+
+    s.set_SC(next_sc)
+
+    assert s._shift_register == shift_before
+    assert s._bits_remaining == bits_before
+    next_edge_cycles = CYCLES_PER_EDGE_DMG // (32 if next_sc & 0x02 else 1)
+    assert s.clock_target != deadline_before
+    assert s.clock_target == s.clock + next_edge_cycles
+    assert s.transfer_enabled == 1
+    assert s.double_speed == bool(next_sc & 0x02)
+
+    # The remaining bits use the newly selected rate; the transfer was not
+    # re-armed because the shift snapshot and remaining count were retained.
+    assert s.tick(s.clock + next_edge_cycles * bits_before) is True
     assert s.transfer_enabled == 0
 
 

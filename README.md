@@ -9,8 +9,9 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-**Status: `PARTIAL` — not production-ready.** This is the current audit status
-for the hardening branch (2026-09-04). The repository has packaging and
+**Status: `PARTIAL` — not production-ready.** This is the 2026-09-04 audit
+status for the candidate based on merged head
+`6c6984780d2299f6c1c8941743449f4e1723d8e1`. The repository has packaging and
 focused lifecycle/transport hardening, but strict end-to-end remote trade/link
 readiness has not been proven.
 
@@ -27,21 +28,32 @@ The latest verification supports:
   `python -m pokered_harness.mcp_server` reached clean EOF and exited
   successfully. ROMs and symbols are not distributed in the wheel; without
   the required paths, launch fails closed.
-- **Focused hardening:** the serial-link, network-backend, production-gate,
-  coordinator, session, and MCP regression suites passed `292` tests with one
-  SDL warning; Ruff and whitespace checks passed.
-- **ROM-free production gate:** the complete current unit tier passed `963/963`
-  (including the Cython serial translation-unit smoke) and five timing
-  repetitions passed `50/50`. The required ROM, symbol, and
-  derived-fixture inputs were explicitly reported missing in this checkout,
-  so the real-ROM tiers were not presented as green.
+- **Runtime matrix:** clean source and compiled-Cython environments each passed
+  the current unit tier `970/970` and five timing repetitions (`55/55` total),
+  with both collection paths and the bit-accurate serial contract passing.
+  The CGB fast-serial regression slice passed `61/61` in both runtimes.
+- **Collection/matrix audit:** the current candidate collected `1,122` tests;
+  all declared local, remote-role, reversed-role, variant, strict-trade, and
+  strict-battle entrypoint sets were present (`9/9`, `9/9`, `6/6`, `9/9`,
+  `19/19`, and `19/19` respectively).
+- **Asset-backed scoped checks:** with the operator-supplied ROMs, symbols, and
+  states, the source local tier passed `47/47` in `530.0s`, the remote
+  transport/MCP tier passed `23/23` in `39.1s`, and the ten-entry fixture
+  manifest passed byte validation. These tiers cover LinkMenu, transport, and
+  lifecycle behavior; they are not strict trade or battle acceptance.
+- **MCP EOF reliability:** the real stdio remote-lifecycle test passed five
+  consecutive isolated runs after the full local-tier rerun passed. The
+  earlier `46/47` ordered-suite result was a non-reproducing failure and is not
+  treated as a passing release gate.
 
-Strict end-to-end remote trade/link readiness is **not proven**. The latest
-recorded full source strict-trade run was `FAIL` at `18/19`, and the retained
-native/Cython strict gate was `FAIL` at `16/19` trade and `17/19` battle. Those
-are scoped artifacts, not a current-head pass. Transport, LinkMenu, fixture,
-or MCP lifecycle results do not substitute for a complete current-head
-real-ROM trade/battle matrix.
+Strict end-to-end remote trade/link readiness is **not proven**. On this
+candidate, the bounded source strict-trade gate was `FAIL`: eight started rows
+passed, then the `yellow-yellow` local row consumed the 900-second aggregate
+deadline and the remaining ten rows were not started. The earlier recorded
+source result was `FAIL` at `18/19`, and the retained native/Cython strict gate
+was `FAIL` at `16/19` trade and `17/19` battle. These are scoped artifacts, not
+a current-head pass. Transport, LinkMenu, fixture, or MCP lifecycle results do
+not substitute for a complete current-head real-ROM trade/battle matrix.
 
 A current-head follow-up reproduction on `d8391102a01b2c75c6009a09b426606ca59bb5d9`
 also failed the Blue-color/Blue-color TCP trade path under the bounded
