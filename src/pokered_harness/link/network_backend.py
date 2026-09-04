@@ -49,6 +49,7 @@ same socket.
 from __future__ import annotations
 
 import queue
+import select
 import socket
 import struct
 import threading
@@ -81,6 +82,8 @@ _ROM_VERSION_NAMES: dict[int, str] = {
 
 _FRAME = struct.Struct(">BB")  # opcode, payload (1-byte id for SYNC)
 _LEN = struct.Struct(">H")
+_FRAME_READ_TIMEOUT_SECONDS = 10.0
+_READ_POLL_SECONDS = 0.05
 _REARM_WAIT_SECONDS = 0.100
 _POST_BYTE_REARM_GRACE_SECONDS = 1.500
 _ACTIVE_EXCHANGE_GRACE_SECONDS = 1.000
@@ -129,6 +132,7 @@ class NetworkBackend:
         self._exchange_queues: dict[int, queue.Queue[bytes]] = {}
         self._sync_lock = threading.Lock()
         self._exchange_lock = threading.Lock()
+        self._close_lock = threading.Lock()
         self._closed = False
         self._closed_event = threading.Event()
         self._reader_exc: Exception | None = None
@@ -329,9 +333,9 @@ class NetworkBackend:
                     raise NetworkBackendError("backend closed")
                 self._sock.sendall(frame_out)
         except OSError as exc:
-            raise NetworkBackendError(
-                f"failed to send EDGE_REQ: {exc}"
-            ) from exc
+            error = NetworkBackendError(f"failed to send EDGE_REQ: {exc}")
+            self._mark_closed(error)
+            raise error from exc
         bit = self._queue_get(
             self._resp_queue,
             timeout=10.0,
@@ -411,9 +415,11 @@ class NetworkBackend:
                     raise NetworkBackendError("backend closed")
                 self._sock.sendall(frame)
         except OSError as exc:
-            raise NetworkBackendError(
+            error = NetworkBackendError(
                 f"failed to send OP_EXCHANGE({kind_id}): {exc}"
-            ) from exc
+            )
+            self._mark_closed(error)
+            raise error from exc
         return self._queue_get(
             q,
             timeout=timeout,
@@ -455,9 +461,9 @@ class NetworkBackend:
                     raise NetworkBackendError("backend closed")
                 self._sock.sendall(_FRAME.pack(_OP_SYNC, sync_id))
         except OSError as exc:
-            raise NetworkBackendError(
-                f"failed to send OP_SYNC({sync_id}): {exc}"
-            ) from exc
+            error = NetworkBackendError(f"failed to send OP_SYNC({sync_id}): {exc}")
+            self._mark_closed(error)
+            raise error from exc
 
     def _send_hello(self, rom_version: str) -> None:
         payload = (_PROTOCOL_VERSION << 4) | _ROM_VERSION_CODES[rom_version]
@@ -467,9 +473,9 @@ class NetworkBackend:
                     raise NetworkBackendError("backend closed")
                 self._sock.sendall(_FRAME.pack(_OP_HELLO, payload))
         except OSError as exc:
-            self._closed = True
-            self._closed_event.set()
-            raise NetworkBackendError(f"failed to send HELLO: {exc}") from exc
+            error = NetworkBackendError(f"failed to send HELLO: {exc}")
+            self._mark_closed(error)
+            raise error from exc
 
     # --- lifecycle ----------------------------------------------------
 
@@ -477,24 +483,7 @@ class NetworkBackend:
         self.stop()
 
     def stop(self) -> None:
-        self._closed = True
-        self._closed_event.set()
-        self._hello_received.set()
-        try:
-            self._edge_queue.put_nowait(None)
-        except queue.Full:
-            # The closed flag is authoritative; the worker will observe it
-            # on its next bounded queue wait even if the sentinel cannot be
-            # inserted during an overload condition.
-            pass
-        try:
-            self._sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        self._mark_closed()
         edge_worker = self._edge_worker
         if (
             isinstance(edge_worker, threading.Thread)
@@ -568,27 +557,15 @@ class NetworkBackend:
         except NetworkBackendError as exc:
             # Peer closed or malformed frame. Surface via closed flag;
             # any pending on_edge waiter will time out.
-            self._reader_exc = exc
-            self._closed = True
-            self._closed_event.set()
-            self._hello_received.set()
-            self._signal_edge_worker_stop()
+            self._mark_closed(exc)
         except OSError as exc:
-            self._reader_exc = exc
-            self._closed = True
-            self._closed_event.set()
-            self._hello_received.set()
-            self._signal_edge_worker_stop()
+            self._mark_closed(exc)
         except Exception as exc:  # noqa: BLE001
             # Core/backend failures must reach blocked callers through the
             # same bounded error path as socket failures.  A bare reader
             # thread exception otherwise leaves the emulator waiting until a
             # long exchange timeout expires.
-            self._reader_exc = exc
-            self._closed = True
-            self._closed_event.set()
-            self._hello_received.set()
-            self._signal_edge_worker_stop()
+            self._mark_closed(exc)
 
     def _edge_worker_loop(self) -> None:
         """Apply incoming edges in wire order without blocking the reader."""
@@ -602,11 +579,7 @@ class NetworkBackend:
             try:
                 self._handle_edge_req(peer_bit)
             except Exception as exc:  # noqa: BLE001
-                self._reader_exc = exc
-                self._closed = True
-                self._closed_event.set()
-                self._hello_received.set()
-                self._signal_edge_worker_stop()
+                self._mark_closed(exc)
                 return
 
     def _signal_edge_worker_stop(self) -> None:
@@ -753,9 +726,8 @@ class NetworkBackend:
                     self._stats["edge_resp_sent"] = (
                         int(self._stats["edge_resp_sent"]) + 1
                     )
-        except OSError:
-            self._closed = True
-            self._closed_event.set()
+        except OSError as exc:
+            self._mark_closed(exc)
             return
         if completed and self._irq_callback is not None:
             try:
@@ -788,13 +760,87 @@ class NetworkBackend:
                 snap[attr] = value
         return snap
 
+    def _mark_closed(self, error: Exception | None = None) -> None:
+        """Fail closed and interrupt every local socket waiter.
+
+        A reader or edge-worker exception must close the transport itself,
+        not merely set a flag. Otherwise the peer can remain blocked in its
+        own ``on_edge`` call until the longer operation timeout expires.
+        Explicit ``stop()`` wins over a concurrent, expected socket error so
+        orderly teardown does not manufacture a diagnostic exception.
+        """
+        with self._close_lock:
+            already_closed = self._closed
+            if error is not None and not already_closed:
+                self._reader_exc = error
+            self._closed = True
+            self._closed_event.set()
+            self._hello_received.set()
+            try:
+                self._edge_queue.put_nowait(None)
+            except queue.Full:
+                # The closed flag is authoritative; the worker will observe
+                # it on its next bounded queue wait if the sentinel cannot
+                # be inserted during an overload condition.
+                pass
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+
     def _recv_exactly(self, n: int) -> bytes:
+        """Read one frame fragment with an idle-aware partial-frame deadline.
+
+        An idle link is valid, so the first byte has no protocol timeout. As
+        soon as a fragment arrives, the remaining bytes must arrive within a
+        bounded interval. Short select polls also let ``stop()`` interrupt a
+        reader that is waiting for the first byte.
+        """
+        if n < 0:
+            raise ValueError(f"read length must be non-negative, got {n}")
         buf = bytearray()
+        partial_deadline: float | None = None
         while len(buf) < n:
-            chunk = self._sock.recv(n - len(buf))
+            if self._closed_event.is_set():
+                raise NetworkBackendError("backend closed")
+            if partial_deadline is None:
+                wait_timeout = _READ_POLL_SECONDS
+            else:
+                remaining = partial_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise NetworkBackendError(
+                        "peer frame timed out while waiting for remaining bytes"
+                    )
+                wait_timeout = min(_READ_POLL_SECONDS, remaining)
+            try:
+                readable, _writable, exceptional = select.select(
+                    [self._sock], [], [self._sock], wait_timeout
+                )
+            except (OSError, ValueError) as exc:
+                if self._closed_event.is_set():
+                    raise NetworkBackendError("backend closed") from exc
+                raise NetworkBackendError(
+                    f"failed to poll socket while reading frame: {exc}"
+                ) from exc
+            if exceptional and not readable:
+                raise NetworkBackendError("socket became exceptional while reading frame")
+            if not readable:
+                continue
+            try:
+                chunk = self._sock.recv(n - len(buf))
+            except (BlockingIOError, InterruptedError, socket.timeout):
+                continue
             if not chunk:
-                raise NetworkBackendError("peer closed socket mid-frame")
+                if buf:
+                    raise NetworkBackendError("peer closed socket mid-frame")
+                raise NetworkBackendError("peer closed socket")
             buf.extend(chunk)
+            if partial_deadline is None:
+                partial_deadline = time.monotonic() + _FRAME_READ_TIMEOUT_SECONDS
         return bytes(buf)
 
     def _queue_get(
