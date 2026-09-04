@@ -11,8 +11,9 @@ symbol files, save states, or other ROM-derived artifacts.
 
 This repository remains an audited production-readiness candidate, not a
 production release. The live target is `CompleteDotTech/pokemon`. The current
-merged head is exact commit
-`71ca834d673c52eb74044089e92b09e7e3ae00a0` (2026-09-04). The retained exact
+merged implementation head is exact commit
+`6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04). The prior
+merged head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. The retained exact
 prior-candidate evidence below was collected at
 `3399407aa04f6e5e496df628442597c03e0adcc6` (2026-09-04); it is not a
 current-head full acceptance result.
@@ -26,11 +27,11 @@ PR #35 moves remote serial-edge dispatch to an explicit native
 instruction-batch boundary, outside serial register access. This removes the
 reentrant callback path that had made source and compiled PyBoy behavior
 diverge during remote linking.
-The merged head remains a `PARTIAL` publication candidate, not a
+The merged implementation head remains a `PARTIAL` publication candidate, not a
 `PRODUCTION-READY` release, until the remaining gates and review conditions
 are closed.
 
-The unmerged acceptance branch audited on 2026-09-04 adds bounded production-
+The acceptance update merged in PR #42 adds bounded production-
 gate deadlines, runtime-provenance checks, fail-closed matrix accounting,
 preserved network-close diagnostics, and strict subprocess result validation.
 Its source-runtime representative checks passed: in-process Red-color/Yellow
@@ -155,7 +156,8 @@ evidence, not full native qualification: strict Cython gameplay, real-ROM
 concurrent load, the remote trade/battle matrix, and macOS coverage remain
 open.
 
-The release status for merged head `71ca834d673c52eb74044089e92b09e7e3ae00a0`
+The release status for merged implementation head
+`6d541b7867e82fa548c456008e6acd7fb1071586`
 remains `PARTIAL`. The retained prior-candidate unit/timing gate and both local
 and remote asset tiers pass in source and native within their scoped
 boundaries, but the current strict full trade and battle rerun remains pending.
@@ -274,7 +276,7 @@ input, exact party-record and battle-hook assertions, bounded deadlines, and
 clean teardown for every declared local and remote row. Retained prior-candidate
 evidence establishes the dual unit/timing gate and scoped local
 and remote asset tiers. It does not establish strict full trade or battle
-acceptance for merged head `71ca834d673c52eb74044089e92b09e7e3ae00a0`, source
+acceptance for the prior merged head `71ca834d673c52eb74044089e92b09e7e3ae00a0`, source
 broad-suite completion, vanilla fixture provenance, platform, real-ROM load,
 actual MCP live gameplay, review, or network-security claims.
 
