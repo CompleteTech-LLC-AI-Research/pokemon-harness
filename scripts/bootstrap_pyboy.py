@@ -36,6 +36,16 @@ EXPECTED_PYBOY_VERSION = "2.7.0"
 EXPECTED_REVISION = "c565df66c3731fad2856169a90f6bbec99925915"
 CYTHON_REQUIREMENT = "cython==3.0.12"
 PROJECT_DISTRIBUTION = "pokered-harness"
+PIP_PROBE_TIMEOUT_SECONDS = 60
+INSTALL_TIMEOUT_SECONDS = 1800
+ISOLATION_ENVIRONMENT_KEYS = (
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "PIP_PREFIX",
+    "PIP_TARGET",
+    "PIP_USER",
+)
 RUNTIME_MODULES = (
     "pyboy",
     "pyboy.pyboy",
@@ -55,11 +65,14 @@ def _pip_command() -> list[str]:
     ``python -m pip`` is already available.
     """
     command = [sys.executable, "-m", "pip"]
+    env = _isolated_environment()
     probe = subprocess.run(
         [*command, "--version"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
+        env=env,
+        timeout=PIP_PROBE_TIMEOUT_SECONDS,
     )
     if probe.returncode == 0:
         return [*command, "install"]
@@ -67,6 +80,8 @@ def _pip_command() -> list[str]:
     bootstrap = subprocess.run(
         [sys.executable, "-m", "ensurepip", "--upgrade"],
         check=False,
+        env=env,
+        timeout=PIP_PROBE_TIMEOUT_SECONDS,
     )
     if bootstrap.returncode != 0:
         # ``uv venv`` deliberately omits pip unless seeded, and distro Python
@@ -86,12 +101,30 @@ def _pip_command() -> list[str]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
+        env=env,
+        timeout=PIP_PROBE_TIMEOUT_SECONDS,
     )
     if verify.returncode != 0:
         raise SystemExit(
             "ensurepip completed but the active interpreter still cannot run python -m pip"
         )
     return [*command, "install"]
+
+
+def _isolated_environment() -> dict[str, str]:
+    """Return an install environment tied to the active interpreter.
+
+    Pip is invoked as ``sys.executable -m pip`` (or with uv's explicit
+    ``--python`` fallback), but path and target-selection variables can still
+    redirect imports or installation outside that interpreter.  Keep index
+    and proxy configuration intact while removing only those redirection
+    controls.
+    """
+    environment = os.environ.copy()
+    for key in ISOLATION_ENVIRONMENT_KEYS:
+        environment.pop(key, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    return environment
 
 
 def _validate_source() -> None:
@@ -133,6 +166,26 @@ def _package_distributions(package: str) -> set[str]:
         _normalise_distribution_name(name)
         for name in importlib.metadata.packages_distributions().get(package, ())
     }
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _runtime_roots() -> tuple[Path, ...]:
+    """Return checkout and installed-distribution roots allowed for PyBoy."""
+    roots = [PYBOY_SOURCE.resolve()]
+    for distribution_name in (PROJECT_DISTRIBUTION, "pyboy"):
+        try:
+            location = Path(importlib.metadata.distribution(distribution_name).locate_file(""))
+            roots.append(location.resolve())
+        except (OSError, importlib.metadata.PackageNotFoundError):
+            continue
+    return tuple(dict.fromkeys(roots))
 
 
 def _new_serial_instance() -> object:
@@ -181,6 +234,17 @@ def _verify_runtime(mode: str) -> None:
         actual_kind = _module_kind(modules[name])
         if actual_kind != expected_kind:
             problems.append(f"{name} is {actual_kind}, expected {expected_kind}")
+
+    allowed_roots = _runtime_roots()
+    for name, module in modules.items():
+        filename = str(getattr(module, "__file__", "") or "")
+        module_path = Path(filename).resolve() if filename else None
+        if module_path is None or not any(
+            _path_is_within(module_path, root) for root in allowed_roots
+        ):
+            problems.append(
+                f"{name} loaded outside the pinned runtime roots: {filename or '<none>'}"
+            )
 
     owners = _package_distributions("pyboy")
     if PROJECT_DISTRIBUTION not in owners:
@@ -245,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         _verify_runtime(args.mode)
         return 0
 
-    env = os.environ.copy()
+    env = _isolated_environment()
     if args.mode == "source":
         env["PYBOY_NO_CYTHON"] = "1"
         install_target = ROOT
@@ -253,43 +317,66 @@ def main(argv: list[str] | None = None) -> int:
         env.pop("PYBOY_NO_CYTHON", None)
         install_target = PYBOY_SOURCE
 
-    pip_install = _pip_command()
-    if args.mode == "cython":
-        # Keep the harness distribution installed in native environments too.
-        # The vendored fork has its own ``pyboy`` distribution metadata, but
-        # that package alone cannot provide the MCP entry point or harness
-        # modules. Install the checkout first so the native fork can overlay
-        # its extension-backed PyBoy modules without losing project ownership.
-        project_command = [
+    try:
+        pip_install = _pip_command()
+        if args.mode == "cython":
+            # Keep the harness distribution installed in native environments too.
+            # The vendored fork has its own ``pyboy`` distribution metadata, but
+            # that package alone cannot provide the MCP entry point or harness
+            # modules. Install the checkout first so the native fork can overlay
+            # its extension-backed PyBoy modules without losing project ownership.
+            project_command = [
+                *pip_install,
+                "--force-reinstall",
+                "--no-deps",
+                "-e",
+                str(ROOT),
+            ]
+            project_result = subprocess.run(
+                project_command,
+                cwd=ROOT,
+                env=env,
+                check=False,
+                timeout=INSTALL_TIMEOUT_SECONDS,
+            )
+            if project_result.returncode:
+                return project_result.returncode
+
+        command = [
             *pip_install,
             "--force-reinstall",
             "--no-deps",
-            "-e",
-            str(ROOT),
+            CYTHON_REQUIREMENT,
+            str(install_target),
         ]
-        project_result = subprocess.run(project_command, cwd=ROOT, env=env, check=False)
-        if project_result.returncode:
-            return project_result.returncode
-
-    command = [
-        *pip_install,
-        "--force-reinstall",
-        "--no-deps",
-        CYTHON_REQUIREMENT,
-        str(install_target),
-    ]
-    result = subprocess.run(command, cwd=ROOT, env=env, check=False)
-    _remove_generated_pyboy_metadata()
-    if result.returncode:
-        if args.mode == "cython":
-            print(
-                "Cython runtime build failed for the pinned PyBoy source; "
-                "the supported production runtime remains --mode source.",
-                file=sys.stderr,
-            )
-        return result.returncode
-    _verify_runtime(args.mode)
-    return 0
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=env,
+            check=False,
+            timeout=INSTALL_TIMEOUT_SECONDS,
+        )
+        if result.returncode:
+            if args.mode == "cython":
+                print(
+                    "Cython runtime build failed for the pinned PyBoy source; "
+                    "the supported production runtime remains --mode source.",
+                    file=sys.stderr,
+                )
+            return result.returncode
+        _verify_runtime(args.mode)
+        return 0
+    except subprocess.TimeoutExpired as exc:
+        print(
+            f"bootstrap command timed out after {exc.timeout} seconds: {exc.cmd}",
+            file=sys.stderr,
+        )
+        return 124
+    except KeyboardInterrupt:
+        print("bootstrap interrupted; transient metadata cleanup was attempted", file=sys.stderr)
+        return 130
+    finally:
+        _remove_generated_pyboy_metadata()
 
 
 if __name__ == "__main__":
