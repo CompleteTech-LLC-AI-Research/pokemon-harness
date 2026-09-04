@@ -48,8 +48,9 @@ mismatch, and phase stalls. Native strict-trade reliability is therefore
 unproven. Timing-altered diagnostics are not acceptance evidence, and the full
 current native battle matrix is unqualified. Fresh isolated uv-managed source
 and Cython unit/timing gates collected 745 tests in each mode, passed unit
-600/600, and passed timing 40/40 in five repetitions; both installs passed
-`pip check`, and native bootstrap verified the `pyboy` and `pokered-harness`
+600/600, and passed timing 40/40 in five repetitions; both uv-managed
+environments passed `uv pip check`, and native bootstrap verified the `pyboy`
+and `pokered-harness`
 owners. The asset-free run did not exercise ROM-backed gameplay. An earlier
 environment-specific 585/586 ownership result is superseded for these isolated
 environments. The host's bare `python3` still lacks `ensurepip`, so that
