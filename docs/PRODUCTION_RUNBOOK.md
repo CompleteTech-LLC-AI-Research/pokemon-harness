@@ -24,12 +24,23 @@ objects. Earlier PR #35 introduced remote serial-edge dispatch at an explicit
 native instruction-batch boundary. These implementation notes are historical
 context and do not establish current-head runtime or end-to-end behavior.
 
+A targeted post-snapshot code fix is integrated as
+`7b4b5b72ad373d2293d51e3d11717314606ee442` (cherry-picked as `7b4b5b7`). It
+moves stale `EDGE_RESP` closure outside `_edge_response_lock` and adds a
+bounded regression test. The focused post-fix network suite passed `38/38`, and
+Ruff/format checks were clean. This is targeted network/regression and
+static evidence only; it does not requalify the strict real-ROM matrices, MCP
+gameplay, or release readiness. The native strict gate and source strict-trade
+run remain pre-fix evidence at `a8576b5ecb8e7039eefe0e02865b0bfc031387a7` and
+`f048870bdbd4837b5494006ae49fe40510832a89`, respectively. The source
+strict-trade result remains `PENDING` until a terminal artifact is supplied.
+
 The release decision for the audited implementation/runtime snapshot remains
 `PARTIAL`, not `PRODUCTION-READY`. Current open-gate status is:
 
 - current strict trade remains `PENDING` until the clean source strict-trade
   gate in another isolated worktree supplies a terminal artifact. The valid
-  native/Cython strict gate at
+  pre-fix native/Cython strict gate at
   `/tmp/poke-harness-native-strict-evidence-a8576b5` executed all 19 declared
   rows in both its trade and battle tiers, with trade at `16/19` and battle at
   `17/19`; neither result is a full passing strict-matrix sign-off;
@@ -54,7 +65,7 @@ The release decision for the audited implementation/runtime snapshot remains
   cross-host TCP qualification;
 - timing-altered diagnostics are not acceptance evidence.
 
-At the last verified implementation/runtime snapshot
+At the last verified pre-fix implementation/runtime snapshot
 `a8576b5ecb8e7039eefe0e02865b0bfc031387a7`, source-local strict battle
 acceptance passed all 9/9 ordered canonical pairs. Three fresh rows were
 `Yellow↔Red` in 182.89 seconds,
@@ -64,7 +75,7 @@ Battle and the required move and damage hooks. This is source-local evidence
 from the audited implementation/runtime snapshot only; it does not qualify
 remote or native battle, or the full strict trade gate.
 
-The valid native/Cython strict gate for the same implementation/runtime snapshot
+The valid pre-fix native/Cython strict gate for the same implementation/runtime snapshot
 is recorded at `/tmp/poke-harness-native-strict-evidence-a8576b5`. It used
 Python `3.12.13` and PyBoy `2.7.0`, fork revision
 `c565df66c3731fad2856169a90f6bbec99925915`. Trade and battle each had 19/19
@@ -173,8 +184,8 @@ not live MCP gameplay evidence.
 | Capability | Current status | Evidence boundary |
 |---|---|---|
 | Single session and MCP | `PARTIAL` for scoped live MCP navigation; release remains `PARTIAL` | Six real MCP integration checks passed in 13.11 seconds with one SDL warning, and 104 dispatch tests passed. Ordinary real-ROM navigation reached Red's bedroom, the house exit, Pallet Town, Oak's Lab, and lab movement; the bounded starter attempt ended at map 40, position `(5,3)`, with `party.count=0`. MCP starter/trade/battle remains unproven. Historical Windows MCP stdio separately passed 4/4. |
-| In-process paired link | `PASS` for source-local strict battle at `a8576b5`; trade remains `PENDING`; release remains `PARTIAL` | Source-local strict battle passed 9/9 ordered canonical pairs at the audited implementation/runtime snapshot. The historical prior-candidate local asset tier passed 47/47 in source in 531.3477 seconds and 47/47 in native in 38.2974 seconds. This does not establish native or remote parity, or a passing strict trade result. |
-| Remote TCP transport | `PASS` for scoped historical transport evidence; live gameplay remains `PENDING`; release remains `PARTIAL` | The historical prior-candidate remote asset tier passed 16/16 in source in 35.6044 seconds and 16/16 in native in 30.8627 seconds. TCP is loopback-only and has no authentication or encryption. |
+| In-process paired link | `PASS` for pre-fix source-local strict battle at `a8576b5`; trade remains `PENDING`; release remains `PARTIAL` | Source-local strict battle passed 9/9 ordered canonical pairs at the audited pre-fix implementation/runtime snapshot. The historical prior-candidate local asset tier passed 47/47 in source in 531.3477 seconds and 47/47 in native in 38.2974 seconds. This does not establish native or remote parity, or a passing strict trade result. |
+| Remote TCP transport | `PASS` for scoped post-fix network regression; live gameplay remains `PENDING`; release remains `PARTIAL` | The focused post-fix network suite at `7b4b5b7` passed 38/38, with Ruff/format clean. This is targeted network/regression and static evidence only. The historical prior-candidate remote asset tier passed 16/16 in source in 35.6044 seconds and 16/16 in native in 30.8627 seconds. TCP is loopback-only and has no authentication or encryption. |
 | Remote trade | `PENDING` | The clean source strict-trade gate is still running in another isolated worktree. The native/Cython strict gate executed all 19 declared rows but passed 16/19; its three strict real-ROM failures are recorded above. Historical source `19/19` and native `18/19` rows are not current full-runtime sign-off. |
 | Remote battle | `PARTIAL` for native/Cython strict evidence; release remains `PARTIAL` | Source-local strict battle passed 9/9, but that is not remote evidence. The native/Cython strict gate executed all 19 declared rows and passed 17/19; its two strict real-ROM failures are recorded above. No current full remote-matrix pass is established. Historical source/native rows and LinkMenu milestones are not current live battle proof. |
 | Manual fixtures | `PASS` for supplied-byte identity; `PARTIAL` for provenance | Historical prior-candidate preflight verified the pinned ROM/SYM and existing fixture bytes. Six canonical manifest entries have verified provenance; four vanilla-derived entries remain `PARTIAL` because vanilla ordinary capture provenance cannot be established. The historical producer revision `25e231c` and failed 64-step replay do not support reproducibility from the audited implementation/runtime snapshot. |
@@ -560,7 +571,7 @@ verified clean installation, `pip check`, and bundled runtime identity; it did
 not run this real-ROM stdio tier on Linux. The historical fresh Windows
 validation separately passed
 the selected MCP stdio integration (4/4), but did not replace the full
-real-ROM tier. At the last verified implementation/runtime snapshot
+real-ROM tier. At the last verified pre-fix implementation/runtime snapshot
 `a8576b5`, six real MCP integration checks passed in 13.11 seconds with one SDL
 warning; the accompanying dispatch
 suite passed 104 tests. Public MCP tools reached Red's bedroom, the house exit,
