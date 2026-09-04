@@ -465,8 +465,13 @@ def probe_bye_ordering() -> None:
         peer.sendall(struct.pack(">I", len(peer_hello)) + peer_hello)
         require(link._hello_received.wait(timeout=1.0), "peer HELLO was not consumed")
 
-        def hold_after_bye(payload: bytes, *, deadline: float | None = None) -> None:
-            original_send_locked(payload, deadline=deadline)
+        def hold_after_bye(
+            payload: bytes,
+            *,
+            deadline: float | None = None,
+            cancel_event: threading.Event | None = None,
+        ) -> None:
+            original_send_locked(payload, deadline=deadline, cancel_event=cancel_event)
             if payload == bytes([OP_BYE]):
                 bye_sent.set()
                 release_bye.wait(timeout=2.0)
