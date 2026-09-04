@@ -25,16 +25,20 @@ The current dual source/native unit gate reports pass counts of `1,094/949`
 runtimes. This is asset-independent unit/timing evidence only; it is not a
 ROM-backed gameplay sign-off.
 
-The current asset preflight passes hashes for five ROMs, three symbol files,
-and three Cable Club fixtures. These remain external BYO assets; matching
-hashes do not establish fixture provenance or gameplay success.
+The current exact-head asset checks pass: `5/5` ROM hashes, `3/3` symbol
+hashes, `3/3` fixture hashes, and the 10-entry fixture manifest. These remain
+external BYO assets; matching hashes do not establish fixture provenance or
+gameplay success.
 
-The current remote real-ROM tier is asymmetric: native passes `16/16`, while
-source is `15/16` and fails at
-`tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_reaches_link_menu_over_tcp`.
-The current local real-ROM tier remains pending because no complete exact-head
-local report is available for this checklist. Earlier local results are
-historical and are not relabeled as current evidence.
+The current exact-head local real-ROM tier passes source `47/47` in
+`531.3477s` and native `47/47` in `38.2974s`. The current exact-head remote
+real-ROM tier passes source `16/16` in `35.6044s` and native `16/16` in
+`30.8627s`. The earlier source `15/16` result came from a dirty shared
+vendored runtime and is invalid; it is not an exact-head failure.
+
+Fixture provenance remains partial: six canonical entries are verified, while
+four vanilla-derived entries remain `PARTIAL` because their vanilla source
+provenance is not established.
 
 Current strict trade and battle acceptance remains unresolved. A LinkMenu or
 transport milestone is not a completed trade or battle. Actual MCP-driven
@@ -85,8 +89,8 @@ gameplay, trade, battle, or release readiness.
   earlier scoped source/MCP checks passed with one unrelated WSL-worktree skip
   and MCP stdio 4/4.
 - [ ] The current Cython/native build passes the full real-ROM strict gameplay
-  matrix. Current strict trade and battle acceptance remain unresolved, and
-  the local real-ROM tier is pending.
+  matrix. Current strict trade and battle acceptance remain unresolved even
+  though the local and remote real-ROM tiers pass.
 - [ ] Full source/native trade and battle acceptance is complete; unit, timing,
   transport, and LinkMenu results do not substitute for gameplay acceptance.
 
@@ -98,9 +102,9 @@ gameplay, trade, battle, or release readiness.
   obtained and matches the documented pin.
 - [x] Release commands require explicit `POKERED_ROM_SHA1` and do not use
   `POKERED_SKIP_SHA1=1`.
-- [x] The current exact-head asset preflight matches hashes for five ROMs,
-  three symbol files, and three Cable Club fixtures. The ten-entry fixture
-  manifest is validated separately and does not certify gameplay.
+- [x] The current exact-head asset checks pass `5/5` ROM hashes, `3/3` symbol
+  hashes, `3/3` fixture hashes, and the 10-entry fixture manifest; these checks
+  do not certify gameplay.
 - [x] The historical PR #17 full gate with those assets recorded exact hashes,
   sizes, deadlines, skips, xfails, failures, errors, and bounded diagnostics in
   a sanitized external evidence bundle; this does not certify the current head.
@@ -134,12 +138,12 @@ gameplay, trade, battle, or release readiness.
   dedicated Red/Yellow assertions passed for each operation.
 - [x] The PR #19 post-change remote transport/MCP slice passes 15/15; the PR
   #17 baseline strict trade and battle remote rows passed 9/9 each.
-- [x] The current exact-head native remote tier passes `16/16`.
-- [ ] The current exact-head source remote tier is complete; it records `15/16`
-  and fails at
-  `tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_reaches_link_menu_over_tcp`.
-- [ ] The current exact-head local tier is complete; it remains pending because
-  no complete exact-head local report is available for this checklist.
+- [x] The current exact-head local real-ROM tier passes source `47/47` in
+  `531.3477s` and native `47/47` in `38.2974s`.
+- [x] The current exact-head remote real-ROM tier passes source `16/16` in
+  `35.6044s` and native `16/16` in `30.8627s`. The earlier source `15/16`
+  result came from a dirty shared vendored runtime and is invalid, not an
+  exact-head failure.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
   ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
   IDs).
@@ -169,9 +173,10 @@ gameplay, trade, battle, or release readiness.
 - [x] `scripts/prepare_battle_cable_club_fixtures.py` is tracked and produces
   immutable derived battle fixtures; acceptance does not prepare party state
   in emulator RAM.
-- [ ] Vanilla ordinary source provenance is verified. The retained Red/Blue
-  vanilla source states are not proven to match the vanilla ROM, so vanilla
-  ordinary and derived battle rows remain `PARTIAL`.
+- [x] Provenance is verified for six canonical fixture entries.
+- [ ] Provenance for the four vanilla-derived entries is verified. Their
+  vanilla source states are not proven to match the vanilla ROM, so those rows
+  remain `PARTIAL`.
 - [ ] The operator validates all ten manifest entries with
   `python scripts/validate_fixture_manifest.py --fixture-root ...` and keeps
   the external fixture root available to the release runner.
