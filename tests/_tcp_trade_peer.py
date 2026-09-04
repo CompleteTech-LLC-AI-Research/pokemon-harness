@@ -108,9 +108,7 @@ def _hold_at_sync_boundary(
                 return
             remaining = deadline - monotonic()
             if remaining <= 0:
-                raise RuntimeError(
-                    f"sync boundary {phase} did not converge: marker={marker}"
-                )
+                raise RuntimeError(f"sync boundary {phase} did not converge: marker={marker}")
             if progress_callback is None:
                 service_pending_edges()
             else:
@@ -149,13 +147,10 @@ def _party_summary(session) -> dict[str, object]:
     return {
         "count": count,
         "species": [int(memory[species_addr + i]) for i in range(count + 1)],
-        "mon_species": [
-            int(memory[mons_addr + i * PARTY_MON_SIZE]) for i in range(count)
-        ],
+        "mon_species": [int(memory[mons_addr + i * PARTY_MON_SIZE]) for i in range(count)],
         "mon_records": [
             bytes(
-                memory[mons_addr + i * PARTY_MON_SIZE + offset]
-                for offset in range(PARTY_MON_SIZE)
+                memory[mons_addr + i * PARTY_MON_SIZE + offset] for offset in range(PARTY_MON_SIZE)
             ).hex()
             for i in range(count)
         ],
@@ -192,9 +187,7 @@ def _validate_battle_party_fixture(session) -> str:
             move_id = pb.memory[mon_addr + 8 + move_idx]
             pp = pb.memory[mon_addr + 29 + move_idx] & 0x3F
             if move_id != 0 and pp <= 0:
-                raise RuntimeError(
-                    f"battle fixture party slot {slot} move {move_idx} has zero PP"
-                )
+                raise RuntimeError(f"battle fixture party slot {slot} move {move_idx} has zero PP")
         species.append(int(slot_species))
     return f"party_count={int(count)} species={species}"
 
@@ -509,9 +502,7 @@ def main() -> int:
             "hSerialConnectionStatus": session._pyboy.memory[
                 session.symbols.addr_of("hSerialConnectionStatus")
             ],
-            "wLinkState": session._pyboy.memory[
-                session.symbols.addr_of("wLinkState")
-            ],
+            "wLinkState": session._pyboy.memory[session.symbols.addr_of("wLinkState")],
         }
         for name in (
             "wIsInBattle",
@@ -564,9 +555,7 @@ def main() -> int:
                 result[f"serial.{name}"] = getattr(serial, name)
         return result
 
-    def cooperative_sync(
-        sync_id: int, *, timeout: float = 60.0, step_frames: int = 4
-    ) -> None:
+    def cooperative_sync(sync_id: int, *, timeout: float = 60.0, step_frames: int = 4) -> None:
         """Rendezvous without freezing the local emulator thread.
 
         A blocking barrier is safe only when neither ROM can be servicing
@@ -618,8 +607,7 @@ def main() -> int:
                 link._network_backend.service_pending_edges(max_edges=1)
                 time.sleep(0.001)
             raise RuntimeError(
-                f"peer shutdown sync {sync_id} did not converge: "
-                f"backend={backend_snapshot()}"
+                f"peer shutdown sync {sync_id} did not converge: backend={backend_snapshot()}"
             )
 
         cooperative_sync(sync_id=ready_sync_id, timeout=timeout, step_frames=1)
@@ -632,9 +620,7 @@ def main() -> int:
         wait_for_peer_marker(release_sync_id)
         link._network_backend.wait_for_wire_idle(
             timeout=timeout,
-            progress_callback=lambda: link._network_backend.service_pending_edges(
-                max_edges=1
-            ),
+            progress_callback=lambda: link._network_backend.service_pending_edges(max_edges=1),
             stable_checks=4,
         )
         # The release marker can be consumed while the peer is still
@@ -645,9 +631,7 @@ def main() -> int:
         wait_for_peer_marker(final_sync_id)
         link._network_backend.wait_for_wire_idle(
             timeout=timeout,
-            progress_callback=lambda: link._network_backend.service_pending_edges(
-                max_edges=1
-            ),
+            progress_callback=lambda: link._network_backend.service_pending_edges(max_edges=1),
             stable_checks=4,
         )
         # Do not detach as soon as the peer sees the final marker: the peer
@@ -795,20 +779,14 @@ def main() -> int:
         active_moves = read_active_battle_moves()
         move_count = ready.get("wMaxMenuItem", 0) - 1
         if not 1 <= move_count <= len(active_moves):
-            raise RuntimeError(
-                "ROM move-menu count is invalid: "
-                f"menu={ready} moves={active_moves}"
-            )
+            raise RuntimeError(f"ROM move-menu count is invalid: menu={ready} moves={active_moves}")
         usable_slots = [
             index
             for index, (move_id, pp) in enumerate(active_moves[:move_count])
             if move_id != 0 and pp > 0
         ]
         if not usable_slots:
-            raise RuntimeError(
-                "active battle mon has no usable move: "
-                f"moves={active_moves}"
-            )
+            raise RuntimeError(f"active battle mon has no usable move: moves={active_moves}")
         # Move-menu cursors are one-based. Let the ROM install the cursor
         # before reading it; no RAM write or test-only selection hook is used.
         target = usable_slots[0]
@@ -879,9 +857,7 @@ def main() -> int:
             # ROM-level "serial idle" state.
             if link_menu_announced:
                 if not peer_link_menu_ready:
-                    peer_link_menu_ready = (
-                        link._network_backend.poll_peer_sync(sync_id=121)
-                    )
+                    peer_link_menu_ready = link._network_backend.poll_peer_sync(sync_id=121)
                 if peer_link_menu_ready:
                     if not link_menu_quiet_announced:
                         link._network_backend.wait_for_wire_idle(
@@ -892,8 +868,8 @@ def main() -> int:
                         link_menu_quiet_announced = True
                         log("phase 1 wire-idle acknowledgement sent")
                     if link_menu_quiet_announced and not peer_link_menu_quiet_ready:
-                        peer_link_menu_quiet_ready = (
-                            link._network_backend.poll_peer_sync(sync_id=122)
+                        peer_link_menu_quiet_ready = link._network_backend.poll_peer_sync(
+                            sync_id=122
                         )
                 if peer_link_menu_quiet_ready:
                     link._network_backend.wait_for_wire_idle(
@@ -925,8 +901,7 @@ def main() -> int:
                     time.sleep(0.001)
                 continue
             in_serial_phase = (
-                counters["SaveGameData"][0] > 0
-                or counters["Serial_SyncAndExchangeNybble"][0] > 0
+                counters["SaveGameData"][0] > 0 or counters["Serial_SyncAndExchangeNybble"][0] > 0
             )
             if in_serial_phase:
                 # Do not block on a phase barrier while either emulator is
@@ -1085,16 +1060,10 @@ def main() -> int:
             shot("03_post_warp_sync")
 
             # Walk onto hidden-event trigger tile.
-            conn_status = session._pyboy.memory[
-                session.symbols.addr_of("hSerialConnectionStatus")
-            ]
+            conn_status = session._pyboy.memory[session.symbols.addr_of("hSerialConnectionStatus")]
             walk_dir = "right" if conn_status == 0x02 else "left"
             for _ in range(6):
-                if (
-                    counters["CableClubLeftGameboy"][0]
-                    + counters["CableClubRightGameboy"][0]
-                    > 0
-                ):
+                if counters["CableClubLeftGameboy"][0] + counters["CableClubRightGameboy"][0] > 0:
                     break
                 session.press(walk_dir, duration=8)
                 session.step(30)
@@ -1203,10 +1172,7 @@ def main() -> int:
             tct_key = "TradeCenter_Trade"
             prev = {k: counters[k][0] for k in (stats_key, trade_key, menu_key, tct_key)}
             right_pending = 0
-            while (
-                time.monotonic() < deadline
-                and counters["_AddEnemyMonToPlayerParty"][0] == 0
-            ):
+            while time.monotonic() < deadline and counters["_AddEnemyMonToPlayerParty"][0] == 0:
                 session.step(40)
                 if time.monotonic() - last_log > 15.0:
                     snap = {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS}
@@ -1348,10 +1314,7 @@ def main() -> int:
                 if not battle_warp_announced:
                     link._network_backend.announce_sync(sync_id=112)
                     battle_warp_announced = True
-                    log(
-                        "battle Colosseum warp verified; readiness sent "
-                        f"{state_snapshot()}"
-                    )
+                    log(f"battle Colosseum warp verified; readiness sent {state_snapshot()}")
                 if link._network_backend.poll_peer_sync(sync_id=112):
                     peer_battle_warp_ready = True
                     break
@@ -1365,9 +1328,7 @@ def main() -> int:
             shot("03_colosseum")
             session.step(120)
 
-            conn_status = session._pyboy.memory[
-                session.symbols.addr_of("hSerialConnectionStatus")
-            ]
+            conn_status = session._pyboy.memory[session.symbols.addr_of("hSerialConnectionStatus")]
             walk_dir = "right" if conn_status == 0x02 else "left"
             for _ in range(6):
                 if counters["CableClub_DoBattleOrTrade"][0] > 0:
@@ -1472,16 +1433,10 @@ def main() -> int:
             log("battle transition hold barrier complete; entering menu")
             menu_deadline = min(deadline, time.monotonic() + 180.0)
             while time.monotonic() < menu_deadline:
-                if (
-                    counters["MainInBattleLoop"][0] > 0
-                    and counters["DisplayBattleMenu"][0] > 0
-                ):
+                if counters["MainInBattleLoop"][0] > 0 and counters["DisplayBattleMenu"][0] > 0:
                     break
                 session.step(1)
-            if not (
-                counters["MainInBattleLoop"][0] > 0
-                and counters["DisplayBattleMenu"][0] > 0
-            ):
+            if not (counters["MainInBattleLoop"][0] > 0 and counters["DisplayBattleMenu"][0] > 0):
                 raise RuntimeError(
                     "battle menu did not open after intro: "
                     f"counters={counters} state={state_snapshot()} "
@@ -1559,13 +1514,10 @@ def main() -> int:
             move_menu_deadline = min(deadline, time.monotonic() + 120.0)
             next_fight_input_tick = -1
             fight_input_attempts = 0
-            while (
-                time.monotonic() < move_menu_deadline
-                and (
-                    counters["MoveSelectionMenu"][0] == 0
-                    or counters["MoveSelectionMenu.menuset"][0] == 0
-                    or not menu_fields_ready(min_item=1, max_item=4)
-                )
+            while time.monotonic() < move_menu_deadline and (
+                counters["MoveSelectionMenu"][0] == 0
+                or counters["MoveSelectionMenu.menuset"][0] == 0
+                or not menu_fields_ready(min_item=1, max_item=4)
             ):
                 # A peer can still be returning from the rendezvous while
                 # this ROM is waiting in HandleMenuInput.  If the first
@@ -1630,13 +1582,8 @@ def main() -> int:
             while time.monotonic() < deadline:
                 if counters["EndOfBattle"][0] > 0:
                     break
-                battle_turn_complete = (
-                    counters["LinkBattleExchangeData"][0] > 0
-                    and (
-                        counters["ExecutePlayerMove"][0]
-                        + counters["ExecuteEnemyMove"][0]
-                        > 0
-                    )
+                battle_turn_complete = counters["LinkBattleExchangeData"][0] > 0 and (
+                    counters["ExecutePlayerMove"][0] + counters["ExecuteEnemyMove"][0] > 0
                 )
                 if battle_turn_complete and not battle_turn_announced:
                     link._network_backend.announce_sync(sync_id=14)
@@ -1746,11 +1693,7 @@ def main() -> int:
                 battle_turn_announced
                 and peer_battle_turn_ready
                 and all(counters[name][0] > 0 for name in required_battle_hooks)
-                and (
-                    counters["ExecutePlayerMove"][0]
-                    + counters["ExecuteEnemyMove"][0]
-                    > 0
-                )
+                and (counters["ExecutePlayerMove"][0] + counters["ExecuteEnemyMove"][0] > 0)
             )
         if not goal_complete:
             drive_status = "deadline"
