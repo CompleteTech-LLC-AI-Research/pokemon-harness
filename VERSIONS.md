@@ -5,8 +5,8 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` at public docs head
-`f048870bdbd4837b5494006ae49fe40510832a89` (current public docs head,
+Status: `PARTIAL` at the pre-reconciliation public documentation baseline
+`f048870bdbd4837b5494006ae49fe40510832a89` (prior/pre-reconciliation public documentation baseline,
 2026-09-04), with the last verified pre-fix implementation/runtime snapshot
 `a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (code snapshot, 2026-09-04).
 Public changes after that snapshot include documentation and the targeted
@@ -331,7 +331,7 @@ distinct from the default Cable Club fixtures. The acceptance matrix defines
 the color Red, color Blue, and Yellow ordinary/battle rows below. The pre-fix
 source-runtime local strict battle result and native/Cython strict-gate result
 are recorded below against the last verified implementation/runtime snapshot
-`a8576b5ecb8e7039eefe0e02865b0bfc031387a7`, not the current public docs head.
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7`, not the prior/pre-reconciliation public documentation baseline.
 The post-fix serialized source strict-trade production gate is recorded below
 as overall `FAIL` at `18/19` after 19/19 declared and executed entries; pre-fix
 native/Cython strict trade and battle remain incomplete at `16/19` and `17/19`,
@@ -391,7 +391,7 @@ failure below is a strict real-ROM failure, not a test-only bypass.
 ### Last verified source-runtime local strict battle snapshot
 
 At last verified implementation/runtime snapshot
-`a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (before current public docs head
+`a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (before the prior/pre-reconciliation public documentation baseline
 `f048870bdbd4837b5494006ae49fe40510832a89`), the source-runtime strict local
 battle matrix completed 9/9 ordered canonical color pairs. The first six rows
 below are existing same-campaign records; the final three are fresh rows.
