@@ -27,91 +27,117 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 ## Runtime and asset contract
 
-The current merged head for this candidate is
-`daa1d72f2cc559a6424067a9088dfae1b7b5f7bb`. This remains an audited
-`PARTIAL` publication candidate, not a production release. Earlier PR #35
-introduced remote serial-edge dispatch at an explicit native
-instruction-batch boundary. The candidate also includes serial save-state
-restoration, native bootstrap ownership and build-metadata cleanup, bounded MCP
-teardown, fail-closed gate accounting, and partial-initialization cleanup. The
-release runtime is the bundled PyBoy source snapshot pinned in `VERSIONS.md`
-(`2.7.0`, harness revision
-`c565df66c3731fad2856169a90f6bbec99925915`) with `mcp==1.29.1`. Source mode is
-the documented release default; Cython is an optional diagnostic build.
+The documented release runtime is the bundled PyBoy source snapshot: PyBoy
+`2.7.0`, harness fork revision
+`c565df66c3731fad2856169a90f6bbec99925915`, with `mcp==1.29.1`. Source mode
+is the default. Cython/native mode is an explicitly selected optional
+diagnostic/runtime path and must prove that the required modules are installed
+extensions rather than silently resolving to vendored source. Do not allow an
+unmarked standalone PyBoy installation to shadow the bundled runtime.
 
-Current controlled evidence: the focused source and Cython
-transport/serial/PyBoy-link suite passes 110/110 in each runtime; an
-asset-backed source trade gate recorded 19/19 ordered rows. The historical
-native Cython strict-trade gate recorded 18/19; exact-row follow-ups have both
-passed and failed, including exact party-record exchange, a party-record
-mismatch, and phase stalls. Native strict-trade reliability is therefore
-unproven. Timing-altered diagnostics are not acceptance evidence, and the full
-current native battle matrix is unqualified. The current dual gate, run with
-separate source and Cython interpreters (`--python` plus `--cython-python`),
-collected 756 tests in each mode, passed unit 611/611, and passed timing 40/40
-in each of five repetitions for each runtime. Both uv-managed environments
-passed `uv pip check`, and native bootstrap verified the `pyboy` and
-`pokered-harness` owners. The asset-free run did not exercise ROM-backed
-gameplay. An earlier
-environment-specific 585/586 ownership result is superseded for these isolated
-environments. The host's bare `python3` still lacks `ensurepip`, so that
-alternate standard-library venv path remains open. Use explicit ROM, symbol,
-and SHA-1 values; never use
-`POKERED_SKIP_SHA1=1` for release evidence.
+Use explicit ROM, symbol, and SHA-1 values. Never use
+`POKERED_SKIP_SHA1=1` for release evidence. The portable `.mcp.json` contract
+uses the installed environment's `python` and workspace-relative `${PWD}`
+asset paths; it must not depend on a machine-local `PYTHONPATH` or absolute
+path.
 
-The source trade run was a trade-tier run whose supervisor started before PR
-#35 was published. Its child runs loaded the current implementation, but the
-result is not a clean post-merge all-tier sign-off.
+## Evidence snapshot
 
-The complete all-tier source-runtime gate was collected before PR #19 at the
-PR #17 parent `b0b63c8` (698 tests: unit 554/554, local real-ROM 47/47,
-remote transport/MCP 15/15, strict trade 19/19, strict battle 19/19, and
-timing 40/40 in each of five repetitions, with no skips, xfails, failures,
-errors, or timeouts). Post-PR #19 verification is intentionally reported as
-separate historical slices: 699 collected, ROM-free unit 555/555, timing
-40/40 in each of five repetitions, focused transport/MCP 167/167, localhost
-concurrency probe 8/8 in each of five repetitions, and real-ROM remote
-transport 15/15.
+The following claims are deliberately scoped to their named run and do not
+change the `PARTIAL` release decision.
+
+### Current source-runtime candidate evidence
+
+- The source unit/timing gate passed `954/954` unit tests and `50/50` timing
+  cases in each of five repetitions.
+- Current source representative asset-backed checks passed in-process and over
+  TCP for Red-color/Yellow trade and battle. These are representative rows,
+  not the complete strict matrix.
+- The real MCP stdio suite passed `4/4`, including protocol/tool/resource
+  discovery, state observation, save/load round-trip, and a two-process remote
+  listen/connect EOF-cleanup lifecycle. It does not prove MCP-driven starter,
+  trade, or battle gameplay; the bounded MCP gameplay attempt did not acquire
+  a starter within its input bound.
+- The supplied asset checks validate the pinned ROM/SYM and fixture bytes in
+  the recorded evidence. Six canonical color-Red, color-Blue, and Yellow
+  fixture entries have verified provenance. Four vanilla-derived entries remain
+  `PARTIAL`; matching bytes are not proof of vanilla capture provenance.
+
+### Isolated subagent matrix diagnostics
+
+Subagents ran these rows on exact pre-PR #42 head
+`71ca834d673c52eb74044089e92b09e7e3ae00a0`. They are useful diagnostic
+evidence for the source runtime, but are not a clean current-head full-gate
+sign-off for implementation head
+`6d541b7867e82fa548c456008e6acd7fb1071586` or documentation sync
+`cbed7ef9cd1e5b645b15724c6655ef6faf7fa2b9`:
+
+- Source local trade: `9/9` ordered rows passed, with actual party-record
+  swaps and trade hooks observed.
+- Source remote TCP trade: `9/9` ordered rows passed.
+- Source remote TCP battle: `9/9` ordered rows passed, with native edge
+  traffic and clean peer teardown recorded.
+- Source local battle: `6/9` completed rows passed. The remaining local rows
+  `yellow-red`, `blue-yellow`, and `yellow-blue` were not completed in that
+  run (`yellow-red` was paused; the other two were not started).
+
+Because these diagnostics predate the current merged implementation and do not
+cover every required tier in one reproducible run, do not relabel them as a
+current strict acceptance matrix. Re-run the complete matrix with the exact
+current commit, runtime identity, assets, roles, deadlines, and teardown
+records before changing any status.
+
+### Historical evidence that must remain labeled historical
+
+- The retained prior-candidate dual source/native unit-and-timing gate
+  collected `1,094` tests in each runtime, passed `949` unit tests in each,
+  and passed `50/50` timing cases in each of five repetitions. It did not run
+  ROM-backed gameplay.
+- Its scoped asset tier passed source/native local `47/47` and remote `16/16`,
+  with `5/5` ROM hashes, `3/3` symbol hashes, `3/3` fixture hashes, and the
+  ten-entry manifest validated. This is not current-head strict gameplay
+  acceptance.
+- The historical PR #17 source baseline passed strict trade and battle `19/19`
+  in its own all-tier run. The historical native strict-trade result was
+  `18/19`, with mixed exact-row follow-ups including a party mismatch and
+  phase stalls. A separate historical native remote battle lane covered only
+  `3/9` direct rows (one pass, two failures, six unrun). None qualifies the
+  current native matrix.
+- The last broad source diagnostic is not a full-suite pass: it stopped at its
+  supervisor bound after `418/703` tests (`386` passed, `20` skipped, `12`
+  failed, and `285` not started). Do not describe unit/timing or focused gates
+  as a clean repository-wide suite.
 
 ## Supported-scope boundary
 
-- Canonical color-Red, color-Blue, and Yellow ordinary and derived battle
-  fixture bytes have recorded reproduction evidence; the external states are
-  never committed and their hashes do not prove gameplay compatibility.
-- Prior integrated source and Cython remote transport/MCP tiers pass 15/15,
-  and the prior integrated Cython local/session tier passes 47/47. These are
-  scoped follow-ups, not current full native trade/battle acceptance. The
-  current source trade gate recorded 19/19. The native strict-trade result is
-  historically 18/19, but mixed exact-row follow-ups leave its reliability
-  unproven; the current native battle matrix is unqualified.
-- The current tree declares all canonical Red/Blue/Yellow listener and
-  connector orderings over localhost TCP. The PR #19 synthetic concurrency
-  probe passes, while real-ROM concurrent-load stability remains open.
-- The strict acceptance declaration has a dedicated entry point for every
-  canonical ordered local and remote pair (19 trade and 19 battle nodes).
-  Collection is declaration evidence only; a LinkMenu milestone is not a
-  gameplay acceptance. Complete 19/19 trade and battle results exist for the
-  pre-PR #19 source-runtime baseline. The current source trade gate recorded
-  19/19, while mixed exact-row native trade follow-ups leave native strict-trade
-  reliability unproven; the current full source battle rerun and native battle
-  matrix remain unqualified. The
-  historical native trade qualification of `FAIL` at 16/19 is not current
-  evidence.
-- Vanilla ordinary and derived fixture rows are `PARTIAL` because their
-  source-state provenance is not proven against the vanilla ROM. Stock link
-  pairs, other version pairs, and unlisted variants are unsupported or
-  unverified until separately gated.
-- TCP has no authentication or encryption and is enforced as loopback-only;
-  never expose it to a LAN, WAN, or public address.
+The strict declaration contains `19` local/remote entry points per operation:
+the nine ordered Red/Blue/Yellow local pairs, nine ordered listener/connector
+TCP pairs, and the dedicated Red/Yellow assertion. Collection and declaration
+audits prove shape only.
 
-The release decision remains `PARTIAL`, not `PRODUCTION-READY`. Known open
-items include reproducible clean-install verification, a clean full strict gate
-at the documented conservative worker count, native serial handling under the
-full matrix, a completed broad-suite release run, vanilla fixture provenance,
-full native-platform gameplay/load coverage, independent review, and
-authenticated/encrypted cross-host transport. Fresh Windows install,
-bootstrap, MCP stdio, and three-ROM lifecycle checks are now scoped evidence,
-not full native qualification.
+The following remain open at the current merged head:
+
+- A clean current-head full source and native strict trade matrix.
+- A clean current-head full source and native strict battle matrix, including
+  the three remaining local source battle rows listed above. The full native
+  trade/battle matrix is unqualified.
+- Independently verified live MCP gameplay, including bounded boot/state
+  progression and MCP-driven starter/trade/battle behavior.
+- Provenance-complete vanilla ordinary fixtures and their derived rows. The
+  retained replay failed at the `64`-movement-step bound, and ordinary-fixture
+  producer revision `25e231c` is historical; no current-head reproducibility
+  claim may be made.
+- A clean, reproducible standard-library install on a host where `venv` has
+  `ensurepip`, a complete current broad-suite run, real-ROM concurrent-load
+  evidence, full native platform coverage, and independent release review.
+- Secure cross-host networking. TCP is intentionally restricted to loopback
+  addresses and currently has no authentication or encryption; never expose it
+  to a LAN, WAN, or public address.
+
+The current implementation hardens deadlines, runtime provenance, subprocess
+result validation, serial/link lifecycle, MCP teardown, and network-close
+diagnostics. Those changes improve safety and observability but do not by
+themselves prove gameplay or eliminate the open gates above.
 
 ## Verification and handoff
 
