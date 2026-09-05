@@ -1,5 +1,6 @@
-"""Deterministic public-MB contract tests; no emulator or ROM is loaded."""
+"""Fake-board and source-MB seam tests; no ROM or native counter proof."""
 
+from dataclasses import replace
 from inspect import signature
 from types import SimpleNamespace
 
@@ -7,6 +8,8 @@ import pytest
 
 from pokered_harness.link.emulated_time import EmulatedTimeCoordinator, EmulatedTimeError, Permit
 from pokered_harness.link.execution_adapter import ExecutionGovernorAdapter
+from tests.test_native_execution_governor import board as source_board  # noqa: F401
+from tests.test_native_execution_governor import source_mb  # noqa: F401
 
 
 class FakeBoard:
@@ -548,3 +551,257 @@ def test_wait_coordinator_rate_mutation_rejected_before_cpu_grant():
     assert board.double_speed is True
     assert c.snapshot().closed and not c.snapshot().pending_permit
     assert c.snapshot().local_half_cycles == 0
+
+
+@pytest.fixture
+def guarded_source(source_board):  # noqa: F811 - Imported pytest fixture dependency.
+    """Real source tick/_execution_step, fake CPU and explicit test counter."""
+    board = source_board
+    count = SimpleNamespace(value=0)
+    c = EmulatedTimeCoordinator(
+        epoch="source-owner",
+        raw_cpu_clock=board.cpu.cycles,
+        rearm_budget=256,
+        max_edge_lateness=0,
+    )
+    c.record_peer_progress(epoch="source-owner", sequence=1, committed_half_cycles=0)
+
+    def execute():
+        board.cpu.cycles += 4
+        count.value += 1
+
+    board.cpu.action = execute
+    adapter = ExecutionGovernorAdapter(
+        c,
+        instruction_counter=lambda: count.value,
+        wait_for_progress=lambda timeout: pytest.fail("unexpected source-seam wait"),
+    )
+    adapter.attach(board)
+    return board, c, adapter, count
+
+
+def test_guarded_source_cpu_error_commits_open_then_cleans_after_pair(guarded_source, monkeypatch):
+    board, c, adapter, count = guarded_source
+    original = RuntimeError("CPU propagated failure")
+    commits, detach_states = [], []
+    commit, setter = c.commit, board.set_execution_governor
+
+    def observe_commit(*args, **kwargs):
+        result = commit(*args, **kwargs)
+        commits.append(result)
+        return result
+
+    def observe_setter(before, after):
+        detach_states.append(board._execution_governor_active)
+        setter(before, after)
+
+    def execute():
+        board.cpu.cycles += 4
+        count.value += 1
+        raise original
+
+    monkeypatch.setattr(c, "commit", observe_commit)
+    monkeypatch.setattr(board, "set_execution_governor", observe_setter)
+    board.cpu.action = execute
+    with pytest.raises(RuntimeError) as caught:
+        adapter.guarded_tick()
+    assert caught.value is original
+    assert len(commits) == 1 and not commits[0].closed
+    assert (commits[0].raw_cpu_clock, commits[0].local_half_cycles) == (104, 8)
+    assert detach_states == [False]
+    assert c.snapshot().closed and not c.snapshot().pending_permit
+    assert board.execution_before is board.execution_after is None
+    assert board.events == [("cpu", 4)]
+
+
+@pytest.mark.parametrize("phase", ["before", "after"])
+def test_guarded_source_counter_error_preserves_identity_and_actual(
+    guarded_source, monkeypatch, phase
+):
+    board, c, adapter, count = guarded_source
+    original = RuntimeError(f"{phase} counter failure")
+
+    def counter():
+        if phase == "before" or count.value:
+            raise original
+        return count.value
+
+    monkeypatch.setattr(adapter, "_counter", counter)
+    with pytest.raises(RuntimeError) as caught:
+        adapter.guarded_tick()
+    assert caught.value is original
+    executed = phase == "after"
+    assert count.value == int(executed)
+    assert board.events == ([("cpu", 4)] if executed else [])
+    s = c.snapshot()
+    assert (s.raw_cpu_clock, s.local_half_cycles) == ((104, 8) if executed else (100, 0))
+    assert s.closed and not s.pending_permit
+    assert board.execution_before is board.execution_after is None
+
+
+def test_guarded_source_cleanup_refusal_keeps_hooks_until_explicit_retry(
+    guarded_source, monkeypatch
+):
+    board, c, adapter, count = guarded_source
+    original = RuntimeError("CPU original")
+    hooks = board.execution_before, board.execution_after
+    setter = board.set_execution_governor
+    attempts = []
+
+    def refuse(before, after):
+        attempts.append(board._execution_governor_active)
+        raise RuntimeError("cleanup setter refused")
+
+    def execute():
+        board.cpu.cycles += 4
+        count.value += 1
+        raise original
+
+    board.cpu.action = execute
+    monkeypatch.setattr(board, "set_execution_governor", refuse)
+    with pytest.raises(RuntimeError) as caught:
+        adapter.guarded_tick()
+    assert caught.value is original
+    assert attempts == [False]
+    assert board.execution_before is hooks[0] and board.execution_after is hooks[1]
+    assert c.snapshot().closed and c.snapshot().local_half_cycles == 8
+    events = list(board.events)
+    with pytest.raises(EmulatedTimeError):
+        adapter.guarded_tick()
+    assert board.events == events and count.value == 1
+    monkeypatch.setattr(board, "set_execution_governor", setter)
+    adapter.detach()
+    assert board.execution_before is board.execution_after is None
+    with pytest.raises(EmulatedTimeError):
+        adapter.guarded_tick()
+    assert board.events == events
+
+
+@pytest.mark.parametrize("phase", ["before", "cpu", "dispatch"])
+def test_guarded_source_recursion_never_detaches_inside_outer_tick(
+    guarded_source, monkeypatch, phase
+):
+    board, c, adapter, count = guarded_source
+    hooks = board.execution_before, board.execution_after
+    rejections = []
+
+    def recurse():
+        with pytest.raises(EmulatedTimeError) as caught:
+            adapter.guarded_tick()
+        rejections.append(caught.value)
+        assert board.execution_before is hooks[0] and board.execution_after is hooks[1]
+        assert board._execution_governor_active is (phase != "dispatch")
+        raise caught.value
+
+    def execute():
+        board.cpu.cycles += 4
+        count.value += 1
+        if phase == "cpu":
+            recurse()
+
+    board.cpu.action = execute
+    if phase == "before":
+        monkeypatch.setattr(adapter, "_counter", recurse)
+    elif phase == "dispatch":
+        monkeypatch.setattr(board.serial, "dispatch_owner", recurse)
+    with pytest.raises(EmulatedTimeError) as caught:
+        adapter.guarded_tick()
+    assert rejections and caught.value is rejections[0]
+    assert count.value == (0 if phase == "before" else 1)
+    assert c.snapshot().local_half_cycles == (0 if phase == "before" else 8)
+    assert c.snapshot().closed and not c.snapshot().pending_permit
+    assert board.execution_before is board.execution_after is None
+
+
+@pytest.mark.parametrize("breakpoint", [False, True])
+def test_guarded_source_normal_return_parity(guarded_source, breakpoint):
+    board, c, adapter, count = guarded_source
+    board.breakpoint_singlestep = breakpoint
+    assert adapter.guarded_tick() is breakpoint
+    assert not c.snapshot().closed and c.snapshot().local_half_cycles == 8
+    assert count.value == 1
+    assert board.events == [
+        ("cpu", 4),
+        ("dispatch",),
+        ("sound", 104),
+        ("serial", 104),
+        ("timer", 104),
+        ("lcd", 104),
+    ]
+    board.lcd.frame_done = False
+    assert board.tick() is breakpoint
+    assert c.snapshot().local_half_cycles == 16 and count.value == 2
+
+
+@pytest.mark.parametrize("state", ["detached", "closed", "retired"])
+def test_guarded_source_unavailable_owner_cannot_run_cpu(guarded_source, state):
+    board, c, adapter, count = guarded_source
+    if state == "closed":
+        c.close()
+    elif state == "retired":
+        adapter.detach()
+    else:
+        adapter.detach()
+        adapter = ExecutionGovernorAdapter(
+            c,
+            instruction_counter=lambda: count.value,
+            wait_for_progress=lambda t: None,
+        )
+    with pytest.raises(EmulatedTimeError):
+        adapter.guarded_tick()
+    assert board.events == [] and count.value == 0 and board.cpu.cycles == 100
+
+
+def test_guarded_source_post_after_dispatch_detach_rejected_until_unwind(
+    guarded_source, monkeypatch
+):
+    board, c, adapter, count = guarded_source
+    hooks = board.execution_before, board.execution_after
+    dispatches = []
+
+    def dispatch():
+        assert not board._execution_governor_active
+        assert not c.snapshot().pending_permit and c.snapshot().local_half_cycles == 8
+        with pytest.raises(EmulatedTimeError):
+            adapter.detach()
+        assert board.execution_before is hooks[0] and board.execution_after is hooks[1]
+        assert not c.snapshot().closed
+        dispatches.append(True)
+
+    monkeypatch.setattr(board.serial, "dispatch_owner", dispatch)
+    assert adapter.guarded_tick() is False
+    assert dispatches == [True] and count.value == 1
+    adapter.detach()
+    assert c.snapshot().closed
+    assert board.execution_before is board.execution_after is None
+
+
+@pytest.mark.parametrize("phase", ["before", "during"])
+def test_guarded_source_cancelled_flag_alone_blocks_zero_work_return(
+    guarded_source, monkeypatch, phase
+):
+    board, c, adapter, count = guarded_source
+    snapshot, tick = c.snapshot, board.tick
+    cancelled = [phase == "before"]
+    calls = []
+    board.lcd.frame_done = True
+
+    def observe():
+        state = snapshot()
+        return replace(state, cancelled=True) if cancelled[0] else state
+
+    def zero_work_tick():
+        calls.append(True)
+        cancelled[0] = True
+        assert not snapshot().closed
+        return tick()
+
+    monkeypatch.setattr(c, "snapshot", observe)
+    monkeypatch.setattr(board, "tick", zero_work_tick)
+    with pytest.raises(EmulatedTimeError):
+        adapter.guarded_tick()
+    assert calls == ([] if phase == "before" else [True])
+    assert board.events == [] and count.value == 0
+    assert snapshot().closed and not snapshot().pending_permit
+    if phase == "during":
+        assert board.execution_before is board.execution_after is None

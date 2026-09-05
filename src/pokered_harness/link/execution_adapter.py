@@ -10,9 +10,10 @@ A real native counter provider remains incomplete and is not supplied here.
 Fake-board/unit evidence does not establish native runtime integration.
 
 The motherboard after hook carries no execution-exception flag. It can report
-valid actuals even when execution then propagates an error. The owner must
-catch propagated motherboard errors, close the coordinator, and explicitly
-detach after the callback pair has unwound, before resuming or loading state.
+valid actuals even when execution then propagates an error. Explicit
+guarded_tick handles this boundary by closing and retiring the adapter, then
+attempting detach after the motherboard unwinds. Direct motherboard callers
+must perform that cleanup themselves before resuming or loading state.
 
 Deadline or attempt exhaustion raises TimeoutError. Injected callback exceptions
 propagate unchanged after best-effort accounting cleanup. Metadata and contract
@@ -59,6 +60,7 @@ class ExecutionGovernorAdapter:
         self._board = None
         self._retired = False
         self._depth = 0
+        self._owner_active = False
         self._permit = None
         self._start = None
         self._last_counter = None
@@ -146,7 +148,7 @@ class ExecutionGovernorAdapter:
 
     def detach(self) -> None:
         """Remove hooks only outside a pair; setter rejection preserves state."""
-        if self._depth or self._permit is not None:
+        if self._owner_active or self._depth or self._permit is not None:
             raise EmulatedTimeError("cannot detach during an execution callback pair")
         if self._board is not None:
             if not self._registered():
@@ -157,6 +159,50 @@ class ExecutionGovernorAdapter:
         self._board = None
         self._retired = True
         self.coordinator.close()
+
+    def guarded_tick(self) -> bool:
+        """Return board.tick's exact result, retiring on any propagated failure.
+
+        The owner guard covers device dispatch after the after hook as well as
+        the callback pair. Recursive entry closes accounting but never detaches
+        inside the outer tick. Cleanup failures cannot replace the original
+        exception; failed detach leaves the closed hooks for explicit retry.
+        """
+        if self._owner_active or self._depth or self._permit is not None:
+            self._fail("recursive or active execution in guarded_tick")
+        if self._board is None or self._retired:
+            self._fail("guarded_tick requires an attached, nonretired adapter")
+        if not self._registered():
+            self._fail("execution callback registration changed")
+        snapshot = self.coordinator.snapshot()
+        if snapshot.closed or snapshot.cancelled:
+            self._fail("guarded_tick requires an open coordinator")
+        try:
+            self._owner_active = True
+            try:
+                result = self._board.tick()
+                snapshot = self.coordinator.snapshot()
+                if not self._registered() or snapshot.closed or snapshot.cancelled:
+                    self._fail("governor registration or accounting failed during tick")
+                if self._permit is not None:
+                    self._fail("motherboard tick returned with pending execution accounting")
+                return result
+            finally:
+                # Only the outer owner reaches cleanup, after board.tick exits.
+                self._owner_active = False
+        except BaseException:
+            self._retired = True
+            try:
+                self._recover()
+            except BaseException:
+                pass
+            try:
+                self.detach()
+            except BaseException:
+                # Keep registration ownership and pending accounting intact.
+                # Explicit detach may be retried; guarded_tick/attach may not.
+                pass
+            raise
 
     def _transition(self, observed, count, clock, speed):
         start_raw, start_speed = self._start[:2]
