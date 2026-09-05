@@ -42,6 +42,7 @@ REAL_ROM_MODULES = frozenset(
         "test_mcp_stdio_integration.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_subprocess.py",
+        "test_rom_boot.py",
     }
 )
 
@@ -247,9 +248,15 @@ LOCAL_VARIANT_NODEIDS = _MATRIX["LOCAL_VARIANT_NODEIDS"]
 # A positive aggregate count is not enough to prove matrix coverage: pytest
 # deselection or a removed parametrization can still leave one passing case.
 # Keep these exact node IDs separate from the broader diagnostic marker sets.
+CANONICAL_ROM_BOOT_NODEIDS = frozenset(
+    f"tests/test_rom_boot.py::test_canonical_rom_boot_state_roundtrip[{variant}]"
+    for variant in ("red-color", "blue-color", "yellow")
+)
+
 TIER_REQUIRED_NODEIDS = {
     **_MATRIX["required_matrix_nodeids"](),
 }
+TIER_REQUIRED_NODEIDS["local"] |= CANONICAL_ROM_BOOT_NODEIDS
 
 # The gate uses these keys to prove that each strict acceptance tier still
 # contains every required end-to-end assertion.  A positive aggregate count is
@@ -334,6 +341,7 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
 __all__ = [
     "BATTLE_ACCEPTANCE_TESTS",
     "BATTLE_TESTS",
+    "CANONICAL_ROM_BOOT_NODEIDS",
     "KNOWN_TEST_MODULES",
     "LOCAL_LINK_MODULES",
     "LOCAL_VARIANT_NODEIDS",
