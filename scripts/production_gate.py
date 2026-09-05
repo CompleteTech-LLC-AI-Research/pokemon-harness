@@ -159,10 +159,12 @@ _PYBOY_RE = re.compile(
 _CREDENTIAL_TEXT_RE = re.compile(
     r"(?i)\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|"
     r"credential|password|passwd|private[_-]?key|secret|token)\b"
-    r"\s*(?:[:=]\s*|\s+)(?:bearer\s+)?[^\s,;]+"
+    r"(?:\s*[:=]\s*|\s+)(?:bearer\s+)?[^\s,;]+"
 )
 _URI_CREDENTIAL_RE = re.compile(r"(?i)(https?://[^/\s:@]+):[^@\s]+@")
-_BYTE_LITERAL_RE = re.compile(r"(?is)\bb(?:'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\")")
+_BYTE_LITERAL_RE = re.compile(
+    r"(?is)\bb(?:'(?:\\.|[^'\\])*(?:'|\\?\Z)|\"(?:\\.|[^\"\\])*(?:\"|\\?\Z))"
+)
 _LONG_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{128,}(?![A-Za-z0-9])")
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9>])(?:[A-Za-z]:[\\/]|/)[^\s,;()]+")
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(
@@ -3334,13 +3336,11 @@ def _portable_path(
     return "<external-path>"
 
 
-def _safe_diagnostic(
-    value: Any,
+def _prepare_root_replacements(
     roots: tuple[tuple[str, Path], ...],
-    *,
-    limit: int = 8000,
-) -> str:
-    text = "" if value is None else str(value)
+) -> tuple[tuple[str, str], ...]:
+    """Resolve root variants once for one evidence payload, without a global cache."""
+
     replacements: dict[str, str] = {}
     for label, root in roots:
         for raw in (str(root), str(root.expanduser())):
@@ -3350,7 +3350,20 @@ def _safe_diagnostic(
             replacements[str(root.expanduser().resolve(strict=False))] = f"<{label}>"
         except (OSError, RuntimeError):
             pass
-    for raw, replacement in sorted(replacements.items(), key=lambda item: -len(item[0])):
+    return tuple(sorted(replacements.items(), key=lambda item: -len(item[0])))
+
+
+def _safe_diagnostic(
+    value: Any,
+    roots: tuple[tuple[str, Path], ...],
+    *,
+    limit: int = 8000,
+    replacements: tuple[tuple[str, str], ...] | None = None,
+) -> str:
+    text = "" if value is None else str(value)
+    if replacements is None:
+        replacements = _prepare_root_replacements(roots)
+    for raw, replacement in replacements:
         text = text.replace(raw, replacement)
     return _safe_text(text, limit=limit)
 
@@ -3358,6 +3371,8 @@ def _safe_diagnostic(
 def _safe_command(
     command: list[str] | None,
     roots: tuple[tuple[str, Path], ...],
+    *,
+    replacements: tuple[tuple[str, str], ...] | None = None,
 ) -> list[str] | None:
     if command is None:
         return None
@@ -3371,13 +3386,15 @@ def _safe_command(
         if is_absolute:
             result.append(_portable_path(argument, roots))
         else:
-            result.append(_safe_diagnostic(argument, roots, limit=1000))
+            result.append(_safe_diagnostic(argument, roots, replacements=replacements, limit=1000))
     return result
 
 
 def _safe_runtime(
     runtime: dict[str, Any],
     roots: tuple[tuple[str, Path], ...],
+    *,
+    replacements: tuple[tuple[str, str], ...] | None = None,
 ) -> dict[str, Any]:
     path_keys = frozenset({"python_executable", "pyboy_module", "serial_module", "harness_module"})
     result: dict[str, Any] = {}
@@ -3387,7 +3404,7 @@ def _safe_runtime(
         elif key in path_keys:
             result[key] = _portable_path(str(value), roots)
         else:
-            result[key] = _safe_diagnostic(value, roots)
+            result[key] = _safe_diagnostic(value, roots, replacements=replacements)
     return result
 
 
@@ -3403,12 +3420,19 @@ def _safe_asset(
 def _safe_collection(
     collection: CollectionResult,
     roots: tuple[tuple[str, Path], ...],
+    *,
+    replacements: tuple[tuple[str, str], ...] | None = None,
 ) -> dict[str, Any]:
     data = asdict(collection)
-    data["command"] = _safe_command(collection.command, roots) or []
-    data["nodeids"] = [_safe_diagnostic(nodeid, roots, limit=1000) for nodeid in collection.nodeids]
-    data["output_tail"] = _safe_diagnostic(collection.output_tail, roots)
-    data["reason"] = _safe_diagnostic(collection.reason, roots, limit=2000)
+    data["command"] = _safe_command(collection.command, roots, replacements=replacements) or []
+    data["nodeids"] = [
+        _safe_diagnostic(nodeid, roots, replacements=replacements, limit=1000)
+        for nodeid in collection.nodeids
+    ]
+    data["output_tail"] = _safe_diagnostic(collection.output_tail, roots, replacements=replacements)
+    data["reason"] = _safe_diagnostic(
+        collection.reason, roots, replacements=replacements, limit=2000
+    )
     return data
 
 
@@ -3492,27 +3516,37 @@ def _safe_matrix_audit(result: dict[str, Any]) -> dict[str, Any]:
 def _safe_tier(
     tier: TierResult,
     roots: tuple[tuple[str, Path], ...],
+    *,
+    replacements: tuple[tuple[str, str], ...] | None = None,
 ) -> dict[str, Any]:
     data = _jsonable_tier(tier)
-    data["command"] = _safe_command(tier.command, roots)
-    data["output_tail"] = _safe_diagnostic(tier.output_tail, roots)
-    data["reason"] = _safe_diagnostic(tier.reason, roots, limit=2000)
+    data["command"] = _safe_command(tier.command, roots, replacements=replacements)
+    data["output_tail"] = _safe_diagnostic(tier.output_tail, roots, replacements=replacements)
+    data["reason"] = _safe_diagnostic(tier.reason, roots, replacements=replacements, limit=2000)
     data["iteration_failures"] = [
-        _safe_diagnostic(failure, roots, limit=2000) for failure in tier.iteration_failures
+        _safe_diagnostic(failure, roots, replacements=replacements, limit=2000)
+        for failure in tier.iteration_failures
     ]
     data["selected_nodeids"] = [
-        _safe_diagnostic(nodeid, roots, limit=1000) for nodeid in tier.selected_nodeids
+        _safe_diagnostic(nodeid, roots, replacements=replacements, limit=1000)
+        for nodeid in tier.selected_nodeids
     ]
     data["skip_reasons"] = {
-        _safe_diagnostic(reason, roots, limit=2000): count
+        _safe_diagnostic(reason, roots, replacements=replacements, limit=2000): count
         for reason, count in tier.skip_reasons.items()
     }
     data["case_results"] = []
     for case in tier.case_results:
         safe_case = asdict(case)
-        safe_case["nodeid"] = _safe_diagnostic(case.nodeid, roots, limit=1000)
-        safe_case["reason"] = _safe_diagnostic(case.reason, roots, limit=2000)
-        safe_case["output_tail"] = _safe_diagnostic(case.output_tail, roots)
+        safe_case["nodeid"] = _safe_diagnostic(
+            case.nodeid, roots, replacements=replacements, limit=1000
+        )
+        safe_case["reason"] = _safe_diagnostic(
+            case.reason, roots, replacements=replacements, limit=2000
+        )
+        safe_case["output_tail"] = _safe_diagnostic(
+            case.output_tail, roots, replacements=replacements
+        )
         data["case_results"].append(safe_case)
     return data
 
@@ -3542,18 +3576,22 @@ def build_evidence_payload(
     """
 
     roots = _evidence_roots(project_root, rom_root, fixture_root)
+    replacements = _prepare_root_replacements(roots)
     payload: dict[str, Any] = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "generated_at": generated_at or datetime.now(UTC).isoformat(),
         "project_root": "<project-root>",
         "rom_root": "<rom-root>",
         "fixture_root": "<fixture-root>",
-        "runtime": _safe_runtime(runtime, roots),
-        "collections": [_safe_collection(item, roots) for item in collections],
+        "runtime": _safe_runtime(runtime, roots, replacements=replacements),
+        "collections": [
+            _safe_collection(item, roots, replacements=replacements) for item in collections
+        ],
         "assets": [_safe_asset(item, roots) for item in assets],
-        "tiers": [_safe_tier(item, roots) for item in tiers],
+        "tiers": [_safe_tier(item, roots, replacements=replacements) for item in tiers],
         "gate_problems": [
-            _safe_diagnostic(problem, roots, limit=2000) for problem in gate_problems
+            _safe_diagnostic(problem, roots, replacements=replacements, limit=2000)
+            for problem in gate_problems
         ],
         "overall": overall,
         "safety": {
@@ -3567,7 +3605,9 @@ def build_evidence_payload(
     if matrix_audit is not None:
         payload["matrix_audit"] = _safe_matrix_audit(matrix_audit)
     if evidence_error:
-        payload["evidence_error"] = _safe_diagnostic(evidence_error, roots, limit=2000)
+        payload["evidence_error"] = _safe_diagnostic(
+            evidence_error, roots, replacements=replacements, limit=2000
+        )
     return payload
 
 
@@ -3586,20 +3626,25 @@ def build_dual_evidence_payload(
     """Build a sanitized evidence bundle containing both runtime executions."""
 
     roots = _evidence_roots(project_root, rom_root, fixture_root)
+    replacements = _prepare_root_replacements(roots)
     runtimes: list[dict[str, Any]] = []
     for result in runtime_results:
         runtimes.append(
             {
                 "mode": result.mode,
-                "runtime": _safe_runtime(result.runtime, roots),
+                "runtime": _safe_runtime(result.runtime, roots, replacements=replacements),
                 "collections": [
-                    _safe_collection(collection, roots) for collection in result.collections
+                    _safe_collection(collection, roots, replacements=replacements)
+                    for collection in result.collections
                 ],
                 "fixture_manifest": _safe_fixture_manifest(result.fixture_manifest),
                 "matrix_audit": _safe_matrix_audit(result.matrix_audit),
-                "tiers": [_safe_tier(tier, roots) for tier in result.tiers],
+                "tiers": [
+                    _safe_tier(tier, roots, replacements=replacements) for tier in result.tiers
+                ],
                 "gate_problems": [
-                    _safe_diagnostic(problem, roots, limit=2000) for problem in result.gate_problems
+                    _safe_diagnostic(problem, roots, replacements=replacements, limit=2000)
+                    for problem in result.gate_problems
                 ],
                 "overall": "PASS" if runtime_gate_passes(result) else "FAIL",
             }
@@ -3622,7 +3667,9 @@ def build_dual_evidence_payload(
         },
     }
     if evidence_error:
-        payload["evidence_error"] = _safe_diagnostic(evidence_error, roots, limit=2000)
+        payload["evidence_error"] = _safe_diagnostic(
+            evidence_error, roots, replacements=replacements, limit=2000
+        )
     return payload
 
 
