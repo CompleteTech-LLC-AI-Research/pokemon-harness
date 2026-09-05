@@ -9,12 +9,57 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-**Status: `PARTIAL` — not production-ready.** This is the 2026-09-04 audit
-status for the implementation head delivered by merged PR #52:
-`7b9bfa3bfff7f4b5ef980ed48b7d3c0a7bbe49dc`. This documentation refresh is
-docs-only; it does not change the implementation head. PR #52 adds the
-Red/Blue startup-role policy and test-driver pre-drive coordination. Strict
-end-to-end remote trade/link readiness has not been proven.
+**Status: `PARTIAL` — not production-ready.** This is the current
+2026-09-04 candidate audit on branch `codex/production-next-20260904`, based on
+the public `master` head `51d60a056178fc922ffaac49291365ce409d4221`. The
+implementation hardens bit-accurate serial timing, save-state migration,
+native callback error propagation, session close races, and the real-ROM
+battle driver. Current battle acceptance passes; the complete current trade
+matrix still has one mixed-version TCP failure.
+
+Current evidence, using the operator-supplied assets pinned in
+[`VERSIONS.md`](VERSIONS.md):
+
+- **Source unit/timing gate:** `980/980` unit tests and `55/55` timing cases
+  passed across five timing repetitions. Collection found `1,132` tests, all
+  `19/19` strict trade and `19/19` strict battle entrypoints, and the fixture
+  manifest passed schema validation. The focused serial, network, session,
+  lifecycle, and packaging regression set passed `155/155`.
+- **Native build:** the vendored PyBoy 2.7.0 fork
+  (`c565df66c3731fad2856169a90f6bbec99925915`) built a CPython 3.12 Linux
+  wheel successfully in an isolated temporary copy. A complete strict
+  gameplay run using that compiled wheel is not claimed here; the current
+  acceptance results below use the bundled source runtime.
+- **Strict battle acceptance:** the source-runtime gate passed `19/19` local
+  and TCP real-ROM entrypoints in `1,237.8s`, with no skips, errors, or
+  test-only protocol bypasses. All five ROM hashes, three symbol hashes, and
+  ten fixture entries were validated in the same gate.
+- **Strict trade acceptance:** the source-runtime gate is `FAIL` at `18/19`
+  after `1,093.9s`. The sole failure is
+  `red_color-listen-blue_color-connect`, which timed out at `722.6s` during
+  Trade Center warp. Its final transport snapshot had `1,080` applied owner
+  edges, `9/10` sync counters, zero owner-edge errors, zero IRQ callback
+  errors, and no pending requests; this is an unresolved protocol/ROM
+  rendezvous failure, not a backend crash. The other 18 rows passed.
+- **Quality checks:** Ruff lint passes, and the release-hygiene formatter check
+  passes for the touched packaging test. The repository-wide formatter check
+  still reports unrelated legacy files and was not used to rewrite them.
+
+The current serial timing and battle-input work was checked against the
+[`pret` Pokémon Yellow serial disassembly](https://raw.githubusercontent.com/pret/pokeyellow/master/home/serial.asm)
+and the
+[`pret` battle-core disassembly](https://raw.githubusercontent.com/pret/pokeyellow/master/engine/battle/core.asm).
+Those sources confirmed the hardware-cycle timing and the one-based move-menu
+cursor/input contract; they do not replace real-ROM acceptance evidence.
+
+Release status remains `PARTIAL` because the current full trade matrix is
+failing, the compiled-runtime strict gameplay matrix has not been rerun, the
+vanilla-derived fixture provenance is incomplete, and remote TCP remains
+loopback-only, unauthenticated, and unencrypted. MCP-facing starter, trade,
+and battle gameplay, broad platform/concurrency qualification, and secure
+cross-host operation remain outside the evidence above.
+
+### Historical evidence retained below
 
 The retained pre-PR #52 build and unit verification supports:
 
@@ -428,6 +473,16 @@ unknown-field, and invalid-field metadata. Legacy component fields remain
 available; callers can identify missing symbols and unrecognized values as
 unknown instead of treating legacy zero or `False` values as authoritative.
 This is state-observation evidence, not live MCP gameplay evidence.
+
+### Current candidate matrix
+
+| Capability | Current result | Evidence boundary |
+|---|---|---|
+| Source unit/timing | `PASS` — 980/980 unit and 55/55 timing cases | Current source runtime, Python 3.12.13, PyBoy 2.7.0 fork `c565df66c3731fad2856169a90f6bbec99925915`; 1,132 tests collected and all five ROM/SYM pins validated. |
+| Strict trade | `FAIL` — 18/19 | Current source runtime; all 19 rows declared and executed. The sole failure is `red_color-listen-blue_color-connect` at the Trade Center warp after 722.6s; 18 other real-ROM local/TCP rows passed. |
+| Strict battle | `PASS` — 19/19 | Current source runtime; all 19 local/TCP real-ROM rows passed in 1,237.8s with no skips, errors, or test-only protocol bypasses. |
+| Native/Cython build | `PASS` — wheel built | Vendored PyBoy native wheel build passed in an isolated temporary copy. No strict gameplay run using the compiled wheel is claimed. |
+| Release readiness | `PARTIAL` | Trade reliability, compiled-runtime gameplay parity, vanilla fixture provenance, MCP-facing gameplay, broad platform/concurrency coverage, and secure cross-host TCP remain open. |
 
 The retained evidence set is:
 

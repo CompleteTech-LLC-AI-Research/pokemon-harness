@@ -14,6 +14,7 @@ import pytest
 
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
+    CYCLES_PER_EDGE_CGB_FAST,
     CYCLES_PER_EDGE_DMG,
     MAX_CYCLES,
     LocalBackend,
@@ -159,20 +160,22 @@ def test_master_transfer_does_not_complete_early():
 
 
 def test_cgb_double_speed_keeps_existing_normal_serial_edge_rate():
-    """Preserve the existing normal-rate raw-cycle scheduling model."""
+    """CGB double speed keeps normal serial edges at 512 CPU cycles."""
     s = SerialCore(cgb_mode=True, backend=NullBackend())
     s.cpu_speed_shift = 1
     s.set_SB(0xAA)
     s.set_SC(0x81)
 
-    # The existing normal-rate path keeps the serial clock in its hardware
-    # time domain, so a double-speed CPU gets twice the raw-cycle deadline.
-    # The CGB fast clock is different: its hardware rate also doubles.
-    assert s.tick((CYCLES_PER_EDGE_DMG * 2) - 1) is False
+    # The normal serial clock and the double-speed CPU use the same
+    # oscillator-cycle time domain, so the edge period remains 512.
+    assert s.clock_target == CYCLES_PER_EDGE_DMG
+    assert s.tick(CYCLES_PER_EDGE_DMG - 1) is False
     assert s.transfer_enabled == 1
-    assert s.tick(CYCLES_PER_EDGE_DMG * 2) is False
+    assert s.tick(CYCLES_PER_EDGE_DMG) is False
     assert s.transfer_enabled == 1
-    assert s.tick(CYCLES_PER_BYTE_DMG * 2) is True
+    assert s.tick(CYCLES_PER_BYTE_DMG - 1) is False
+    assert s.transfer_enabled == 1
+    assert s.tick(CYCLES_PER_BYTE_DMG) is True
     assert s.transfer_enabled == 0
 
 
@@ -191,18 +194,19 @@ def test_cgb_normal_serial_rate_matches_dmg_rate():
 
 @pytest.mark.parametrize("cpu_speed_shift", [0, 1])
 def test_cgb_fast_serial_rate_is_32_times_normal(cpu_speed_shift):
-    """CGB SC=0x83 uses four raw cycles per edge at either CPU speed."""
+    """CGB SC=0x83 uses 16 CPU cycles per edge at either CPU speed."""
     s = SerialCore(cgb_mode=True, backend=NullBackend())
     s.cpu_speed_shift = cpu_speed_shift
     s.set_SB(0xAA)
     s.set_SC(0x83)
 
-    fast_edge_cycles = CYCLES_PER_EDGE_DMG // 32
-    fast_byte_cycles = CYCLES_PER_BYTE_DMG // 32
-    assert fast_edge_cycles == 4
-    assert fast_byte_cycles == 32
+    fast_edge_cycles = CYCLES_PER_EDGE_CGB_FAST
+    fast_byte_cycles = 8 * fast_edge_cycles
+    assert fast_edge_cycles == 16
+    assert fast_byte_cycles == 128
     # At cpu_speed_shift=1 both the CPU and fast serial clocks double, so
-    # the raw-cycle period stays 4; using 2 would double the rate twice.
+    # the oscillator-cycle period stays 16; using 8 would double the rate
+    # twice.
     assert s.clock_target == fast_edge_cycles
 
     assert s.tick(fast_byte_cycles - 1) is False
@@ -232,7 +236,11 @@ def test_cgb_fast_serial_bit_change_preserves_armed_transfer(initial_sc, next_sc
     s.set_SB(0xA5)
     s.set_SC(initial_sc)
 
-    initial_edge_cycles = CYCLES_PER_EDGE_DMG // (32 if initial_sc & 0x02 else 1)
+    initial_edge_cycles = (
+        CYCLES_PER_EDGE_CGB_FAST
+        if initial_sc & 0x02
+        else CYCLES_PER_EDGE_DMG
+    )
     s.tick(initial_edge_cycles)
     shift_before = s._shift_register
     bits_before = s._bits_remaining
@@ -242,7 +250,11 @@ def test_cgb_fast_serial_bit_change_preserves_armed_transfer(initial_sc, next_sc
 
     assert s._shift_register == shift_before
     assert s._bits_remaining == bits_before
-    next_edge_cycles = CYCLES_PER_EDGE_DMG // (32 if next_sc & 0x02 else 1)
+    next_edge_cycles = (
+        CYCLES_PER_EDGE_CGB_FAST
+        if next_sc & 0x02
+        else CYCLES_PER_EDGE_DMG
+    )
     assert s.clock_target != deadline_before
     assert s.clock_target == s.clock + next_edge_cycles
     assert s.transfer_enabled == 1
@@ -259,7 +271,7 @@ def test_master_edge_by_edge_progresses_one_bit_per_period():
     s.set_SB(0xAA)
     s.set_SC(0x81)
 
-    # After each 128-cycle edge, one more bit has been shifted.
+    # After each 512-cycle edge, one more bit has been shifted.
     for edge in range(1, 8):
         cycles = CYCLES_PER_EDGE_DMG * edge
         irq = s.tick(cycles)
@@ -590,6 +602,48 @@ def test_loading_legacy_state_drops_in_flight_transfer():
     assert restored._shift_register == restored.SB
     assert restored.clock_target == (1 << 31)
     assert restored._cycles_to_interrupt == (1 << 31)
+
+
+def test_loading_pre_timing_extension_retimes_in_flight_transfer():
+    """The old ten-field harness state is migrated to 512/16-cycle timing."""
+    original = SerialCore(cgb_mode=False, backend=NullBackend())
+    original.set_SB(0x42)
+    original.set_SC(0x81)
+    original.tick(64)  # old scheduler: halfway to the first 128-cycle edge
+
+    stream = _FakeStream()
+    original.save_state(stream)
+    # Drop the new marker/version, retaining the pre-correction extension.
+    stream._buf = stream._buf[:10]
+    # Simulate the old scheduler's first-edge deadline (the current stream
+    # was produced by the corrected implementation above).
+    stream._buf[7] = ("u64", 128)
+
+    restored = SerialCore(cgb_mode=False, backend=NullBackend())
+    restored.load_state(stream, SerialCore.STATE_VERSION)
+
+    assert restored.transfer_enabled == 1
+    assert restored._bits_remaining == 8
+    assert restored.clock == 64
+    # 64 old cycles remaining represents 256 cycles in the corrected domain.
+    assert restored.clock_target == 320
+    assert restored._cycles_to_interrupt == 256
+
+
+def test_loading_current_timing_extension_preserves_deadline():
+    original = SerialCore(cgb_mode=True, backend=NullBackend())
+    original.set_SB(0x42)
+    original.set_SC(0x83)
+    original.tick(3 * CYCLES_PER_EDGE_CGB_FAST)
+
+    stream = _FakeStream()
+    original.save_state(stream)
+
+    restored = SerialCore(cgb_mode=True, backend=NullBackend())
+    restored.load_state(stream, SerialCore.STATE_VERSION)
+
+    assert restored.clock_target == original.clock_target
+    assert restored._bits_remaining == original._bits_remaining
 
 
 def test_state_round_trip_restores_cgb_fast_clock_flag():

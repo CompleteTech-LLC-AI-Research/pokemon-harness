@@ -762,6 +762,100 @@ class _BlockingSlaveCore:
         return False
 
 
+def test_owner_dispatch_close_waits_for_inflight_native_edge():
+    """Terminal close cannot race an owner-thread native edge application."""
+    a, b = NetworkBackend.pair()
+
+    class _CloseRaceCore(_BlockingSlaveCore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backend: NetworkBackend | None = None
+            self.closed_during_apply: bool | None = None
+
+        def apply_external_edge(self, peer_bit: int) -> bool:
+            self.edge_started.set()
+            if not self.release_edge.wait(timeout=2.0):
+                raise RuntimeError("test edge release timed out")
+            assert self.backend is not None
+            self.closed_during_apply = self.backend._closed
+            self.SB = peer_bit & 1
+            return False
+
+    core = _CloseRaceCore()
+    core.backend = b
+    a.start_receiver(local_core=None)
+    b.start_receiver(
+        local_core=core,
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    sender_errors: list[Exception] = []
+    dispatch_errors: list[Exception] = []
+    dispatch_done = threading.Event()
+    stop_started = threading.Event()
+    stop_done = threading.Event()
+    stop_results: list[bool] = []
+
+    def send_edge() -> None:
+        try:
+            a.on_edge(our_bit=1, our_role=1)
+        except Exception as exc:  # noqa: BLE001 - close may win the response race
+            sender_errors.append(exc)
+
+    def dispatch_edge() -> None:
+        try:
+            assert b.service_pending_edges(max_edges=1) == 1
+        except Exception as exc:  # noqa: BLE001 - surface worker failures below
+            dispatch_errors.append(exc)
+        finally:
+            dispatch_done.set()
+
+    def stop_backend() -> None:
+        stop_started.set()
+        stop_results.append(b.stop(timeout_s=1.0))
+        stop_done.set()
+
+    sender = threading.Thread(target=send_edge, daemon=True)
+    dispatcher = threading.Thread(target=dispatch_edge, daemon=True)
+    stopper = threading.Thread(target=stop_backend, daemon=True)
+    try:
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and b.debug_snapshot()["pending_edge_requests"] == 0:
+            time.sleep(0.005)
+        assert b.debug_snapshot()["pending_edge_requests"] == 1
+
+        dispatcher.start()
+        assert core.edge_started.wait(timeout=1.0)
+        stopper.start()
+        assert stop_started.wait(timeout=1.0)
+        # stop() is serialized behind the owner operation and therefore must
+        # remain pending until the native edge returns.
+        time.sleep(0.02)
+        assert not stop_done.is_set()
+
+        core.release_edge.set()
+        assert dispatch_done.wait(timeout=1.0)
+        assert stop_done.wait(timeout=1.0)
+        dispatcher.join(timeout=1.0)
+        stopper.join(timeout=1.0)
+        sender.join(timeout=1.0)
+        assert not dispatcher.is_alive()
+        assert not stopper.is_alive()
+        assert not sender.is_alive()
+        assert dispatch_errors == []
+        assert stop_results == [True]
+        assert core.closed_during_apply is False
+        assert b.debug_snapshot()["closed"] is True
+    finally:
+        core.release_edge.set()
+        sender.join(timeout=1.0)
+        dispatcher.join(timeout=1.0)
+        stopper.join(timeout=1.0)
+        a.stop()
+        b.stop()
+
+
 def test_stop_releases_owner_queued_edge_accounting():
     """Closing a queued owner-dispatch backend cannot strand pending work."""
     a, b = NetworkBackend.pair()
@@ -911,6 +1005,55 @@ def test_owner_dispatch_uses_no_data_during_clock_role_transition():
         snapshot = b.debug_snapshot()
         assert snapshot["keepalive_bits_sent"] == 1
         assert snapshot["owner_edge_applied"] == 1
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_owner_real_edge_resets_keepalive_byte_boundary():
+    """A real owner edge restarts the next transient keep-alive byte."""
+    a, b = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    core.internal_clock = 1
+    a.start_receiver(local_core=None)
+    b.start_receiver(
+        local_core=core,
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+
+    def request_and_service() -> int:
+        result: list[int] = []
+        sender = threading.Thread(
+            target=lambda: result.append(a.on_edge(our_bit=1, our_role=1)),
+            daemon=True,
+        )
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while (
+            time.monotonic() < deadline
+            and b.debug_snapshot()["pending_edge_requests"] == 0
+        ):
+            time.sleep(0.005)
+        assert b.debug_snapshot()["pending_edge_requests"] == 1
+        assert b.service_pending_edges(max_edges=1) == 1
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        return result[0]
+
+    try:
+        assert request_and_service() == 1
+
+        # A genuine slave edge must clear the keep-alive stream state.
+        core.internal_clock = 0
+        core.transfer_enabled = 1
+        assert request_and_service() == 0
+
+        # Seven subsequent transient responses are the first seven bits of
+        # 0xFE. Without the reset above, the seventh response would be 0.
+        core.internal_clock = 1
+        core.transfer_enabled = 1
+        assert [request_and_service() for _ in range(7)] == [1] * 7
     finally:
         a.stop()
         b.stop()

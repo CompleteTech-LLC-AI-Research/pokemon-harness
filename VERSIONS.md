@@ -5,7 +5,25 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` at the pre-reconciliation public documentation baseline
+Current candidate status: `PARTIAL` — not production-ready. The 2026-09-04
+candidate is branch `codex/production-next-20260904`, based on public `master`
+head `51d60a056178fc922ffaac49291365ce409d4221`. With the BYO assets pinned
+below, the source-runtime gate collected `1,132` tests and passed `980/980`
+unit tests plus `55/55` timing cases across five repetitions. The current
+strict battle matrix passed `19/19` local and TCP real-ROM entrypoints. The
+current strict trade matrix passed `18/19`; its only failure was
+`red_color-listen-blue_color-connect`, which timed out at Trade Center warp
+after `722.6s` despite `1,080` applied owner edges, `9/10` sync counters, no
+owner-edge or IRQ callback errors, and no pending requests. The vendored PyBoy
+2.7.0 fork (`c565df66c3731fad2856169a90f6bbec99925915`) also built a CPython
+3.12 Linux wheel in an isolated temporary copy, but a complete strict
+gameplay run using that compiled wheel has not been claimed. Vanilla fixture
+provenance, MCP-facing gameplay, secure cross-host TCP, and broad platform/
+concurrency qualification remain open.
+
+## Historical audit record
+
+Historical status: `PARTIAL` at the pre-reconciliation public documentation baseline
 `f048870bdbd4837b5494006ae49fe40510832a89` (prior/pre-reconciliation public documentation baseline,
 2026-09-04), with the last verified pre-fix implementation/runtime snapshot
 `a8576b5ecb8e7039eefe0e02865b0bfc031387a7` (code snapshot, 2026-09-04).

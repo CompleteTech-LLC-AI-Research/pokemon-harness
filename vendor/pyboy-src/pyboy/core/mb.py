@@ -322,8 +322,10 @@ class Motherboard:
         self.cartridge.load_state(f, state_version)
         self.interaction.load_state(f, state_version)
         if state_version >= 15:
+            # Serial state migration needs the motherboard's CPU-speed
+            # domain before it retimes a legacy in-flight transfer.
+            self.serial.cpu_speed_shift = 1 if self.double_speed else 0
             self.serial.load_state(f, state_version)
-        self.serial.cpu_speed_shift = 1 if self.double_speed else 0
         f.flush()
         logger.debug("State loaded.")
 

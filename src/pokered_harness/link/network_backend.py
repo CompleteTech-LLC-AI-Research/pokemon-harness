@@ -387,6 +387,13 @@ class NetworkBackend:
         # either path while preserving one ordering point for duplicate checks.
         self._sync_lock = threading.RLock()
         self._exchange_lock = threading.Lock()
+        # Serialise owner-side edge admission with the terminal transition.
+        # The owner may be between its closed check and native edge apply
+        # while a reader or lifecycle caller is closing the transport. A
+        # re-entrant lock lets the owner fail-closed path call _mark_closed()
+        # without self-deadlocking; _mark_closed acquires this lock before
+        # _close_lock, which is the only lock-order rule callers need follow.
+        self._owner_dispatch_lock = threading.RLock()
         self._close_lock = threading.Lock()
         self._closed = False
         self._closed_event = threading.Event()
@@ -1113,6 +1120,10 @@ class NetworkBackend:
     # --- lifecycle ----------------------------------------------------
 
     def _mark_closed(self, error: Exception | None = None) -> None:
+        with self._owner_dispatch_lock:
+            self._mark_closed_locked(error)
+
+    def _mark_closed_locked(self, error: Exception | None = None) -> None:
         """Fail closed and wake all waiters after a transport error.
 
         ``on_edge`` can discover a stale response or a peer timeout while the
@@ -1382,36 +1393,41 @@ class NetworkBackend:
                 # mode. Treating it as terminal here makes a late owner poll
                 # harmless without altering the pending count.
                 break
-            if self._closed:
-                self._decrement_edge_pending()
-                break
-            try:
-                ready = self._apply_owner_edge_if_ready(request)
-            except Exception as exc:  # noqa: BLE001 - fail the link closed
-                request.error = exc
-                self._stats["owner_edge_errors"] = int(self._stats["owner_edge_errors"]) + 1
-                self._mark_closed(
-                    NetworkBackendError(f"owner failed to apply incoming EDGE_REQ: {exc}")
-                )
-                self._decrement_edge_pending()
-                break
-            if not ready:
-                # There is at most one in-flight master edge per peer, but
-                # preserving FIFO here also makes malformed/busy callers
-                # deterministic. The queue has a free slot immediately after
-                # this get, so this put cannot block.
-                request.deferred = True
-                self._stats["owner_edge_deferred"] = int(self._stats["owner_edge_deferred"]) + 1
-                self._edge_queue.put_nowait(request)
-                break
-            self._stats["owner_edge_applied"] = int(self._stats["owner_edge_applied"]) + 1
-            try:
-                self._completed_edge_queue.put_nowait(request)
-            except queue.Full as exc:
-                self._mark_closed(NetworkBackendError("completed EDGE_REQ response queue is full"))
-                self._decrement_edge_pending()
-                raise NetworkBackendError("completed EDGE_REQ response queue is full") from exc
-            applied += 1
+            # Admission and native application share the lifecycle lock with
+            # _mark_closed(). If close wins, this request is discarded; if
+            # owner admission wins, close waits until the native operation
+            # has returned before publishing the terminal state.
+            with self._owner_dispatch_lock:
+                if self._closed:
+                    self._decrement_edge_pending()
+                    break
+                try:
+                    ready = self._apply_owner_edge_if_ready(request)
+                except Exception as exc:  # noqa: BLE001 - fail the link closed
+                    request.error = exc
+                    self._stats["owner_edge_errors"] = int(self._stats["owner_edge_errors"]) + 1
+                    self._mark_closed(
+                        NetworkBackendError(f"owner failed to apply incoming EDGE_REQ: {exc}")
+                    )
+                    self._decrement_edge_pending()
+                    break
+                if not ready:
+                    # There is at most one in-flight master edge per peer, but
+                    # preserving FIFO here also makes malformed/busy callers
+                    # deterministic. The queue has a free slot immediately after
+                    # this get, so this put cannot block.
+                    request.deferred = True
+                    self._stats["owner_edge_deferred"] = int(self._stats["owner_edge_deferred"]) + 1
+                    self._edge_queue.put_nowait(request)
+                    break
+                self._stats["owner_edge_applied"] = int(self._stats["owner_edge_applied"]) + 1
+                try:
+                    self._completed_edge_queue.put_nowait(request)
+                except queue.Full as exc:
+                    self._mark_closed(NetworkBackendError("completed EDGE_REQ response queue is full"))
+                    self._decrement_edge_pending()
+                    raise NetworkBackendError("completed EDGE_REQ response queue is full") from exc
+                applied += 1
         return applied
 
     def _apply_owner_edge_if_ready(self, request: _InboundEdge) -> bool:
@@ -1471,6 +1487,10 @@ class NetworkBackend:
         completed = bool(core.apply_external_edge(request.peer_bit & 1))
         request.response_bit = our_bit
         request.completed = completed
+        # A real external edge ends any transient 0xFE keep-alive stream.
+        # The next internal-clock transition must restart at the first bit of
+        # SERIAL_NO_DATA_BYTE rather than continuing from the old byte index.
+        self._keepalive_bit_idx = 0
         self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
         self._stats["slave_armed_edges"] = int(self._stats["slave_armed_edges"]) + 1
         if completed:

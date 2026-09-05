@@ -491,6 +491,60 @@ def test_close_is_idempotent_and_rejects_new_actions():
         s.step()
 
 
+def test_late_operation_during_close_never_touches_emulator():
+    """A call arriving after close publishes must fail before lock admission."""
+    s, pb, _ = _session()
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    close_errors: list[BaseException] = []
+    late_errors: list[BaseException] = []
+
+    def hold_session_lock() -> None:
+        with s.locked():
+            lock_held.set()
+            assert release_lock.wait(timeout=1.0)
+
+    def close_session() -> None:
+        try:
+            s.close(timeout_s=1.0)
+        except BaseException as exc:  # noqa: BLE001 - capture thread failure
+            close_errors.append(exc)
+
+    def late_press() -> None:
+        try:
+            s.press("a")
+        except BaseException as exc:  # noqa: BLE001 - capture thread failure
+            late_errors.append(exc)
+
+    holder = threading.Thread(target=hold_session_lock, name="test-session-holder")
+    holder.start()
+    assert lock_held.wait(timeout=1.0)
+
+    closer = threading.Thread(target=close_session, name="test-session-close")
+    closer.start()
+    for _ in range(100):
+        if s.closed:
+            break
+        threading.Event().wait(0.01)
+    assert s.closed is True
+
+    late = threading.Thread(target=late_press, name="test-late-session-press")
+    late.start()
+    late.join(timeout=0.25)
+    assert not late.is_alive()
+    assert len(late_errors) == 1
+    assert isinstance(late_errors[0], SessionClosedError)
+    assert pb.button_calls == []
+
+    release_lock.set()
+    holder.join(timeout=1.0)
+    closer.join(timeout=1.0)
+    assert not holder.is_alive()
+    assert not closer.is_alive()
+    assert close_errors == []
+    assert pb.stopped is True
+
+
 def test_close_does_not_cancel_an_admitted_run_until_event():
     s, pb, _ = _session()
     first_tick_entered = threading.Event()

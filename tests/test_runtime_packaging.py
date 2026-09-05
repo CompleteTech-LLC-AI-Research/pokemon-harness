@@ -80,11 +80,16 @@ def test_cython_build_pins_the_compiler_and_preserves_serial_widths() -> None:
         encoding="utf-8"
     )
     pyboy_pxd = (ROOT / "vendor" / "pyboy-src" / "pyboy" / "pyboy.pxd").read_text(encoding="utf-8")
-    assert "cpdef bint tick(self, unsigned long long) noexcept nogil" in serial_pxd
+    assert "cpdef bint tick(self, unsigned long long) except * nogil" in serial_pxd
     assert "cdef public uint64_t last_cycles, clock, clock_target" in serial_pxd
     assert "cdef public uint8_t _shift_register" in serial_pxd
     assert "cdef public uint8_t _bits_remaining" in serial_pxd
     assert "cdef dict __dict__" in pyboy_pxd
+
+    vendor_root = ROOT / "vendor" / "pyboy-src"
+    mb_pxd = (vendor_root / "pyboy" / "core" / "mb.pxd").read_text(encoding="utf-8")
+    assert "cpdef bint tick(self) except * with gil" in mb_pxd
+    assert "cdef uint8_t getitem_io_ports(self, uint16_t) except * nogil" in mb_pxd
 
 
 def test_source_and_native_runtime_expose_lockstep_timing_attributes() -> None:
@@ -224,6 +229,7 @@ def test_runtime_build_files_have_no_machine_specific_absolute_paths() -> None:
         ROOT / "vendor" / "pyboy-src" / "setup.py",
         ROOT / "vendor" / "pyboy-src" / "pyboy" / "core" / "serial.py",
         ROOT / "vendor" / "pyboy-src" / "pyboy" / "core" / "serial.pxd",
+        ROOT / "vendor" / "pyboy-src" / "pyboy" / "core" / "mb.pxd",
     )
     forbidden_fragments = ("/mnt/", "/home/", "/Users/", "C:\\Users\\", "C:/Users/")
     for path in files:
