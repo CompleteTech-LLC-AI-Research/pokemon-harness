@@ -17,7 +17,7 @@ import struct
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TypeAlias
 
 
@@ -402,6 +402,27 @@ class TimedWireChannel:
     ) -> None:
         self._send(message, deadline, cancel_event)
 
+    def send_complete_progress(
+        self,
+        complete: EmissionComplete,
+        progress: Progress,
+        *,
+        deadline: float,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        """Admit a validated fixed pair and send EC then Progress without interleaving.
+
+        Both frames publish the same frontier and share one absolute deadline
+        and one send lock. Invalid
+        local pairs leave state and bytes untouched; any failure after admission
+        closes the channel because delivery may be partial and cannot be retried.
+        """
+        if type(complete) is not EmissionComplete or type(progress) is not Progress:
+            raise ProtocolError("expected EmissionComplete then Progress")
+        if complete.through_half_cycle != progress.settled_half_cycles:
+            raise ProtocolError("completion and progress must publish the same frontier")
+        self._send(progress, deadline, cancel_event, complete=complete)
+
     def _send(
         self,
         message: Message,
@@ -409,8 +430,11 @@ class TimedWireChannel:
         cancel_event: threading.Event | None,
         *,
         hello_once: bool = False,
+        complete: EmissionComplete | None = None,
     ) -> Frame:
         _deadline(deadline)
+        if complete is not None:
+            _payload(complete, self.revision)
         _payload(message, self.revision)
         while True:
             with self._condition:
@@ -424,9 +448,26 @@ class TimedWireChannel:
                 _remaining(deadline, cancel_event)
                 if hello_once and self._outgoing.hello:
                     return Frame(self.epoch, 1, message, self.revision)
-                frame = Frame(self.epoch, self._outgoing.sequence + 1, message, self.revision)
-                data = encode_frame(frame)
-                self._accept(frame, self._outgoing, self._incoming)
+                if complete is None:
+                    frame = Frame(self.epoch, self._outgoing.sequence + 1, message, self.revision)
+                    data = encode_frame(frame)
+                    self._accept(frame, self._outgoing, self._incoming)
+                else:
+                    # The fixed EC/Progress pair only changes outgoing scalar
+                    # state. Copy bounded collections too so validation remains
+                    # isolated from live state until both frames are accepted.
+                    outgoing = replace(
+                        self._outgoing,
+                        pending=set(self._outgoing.pending),
+                        pending_fences=dict(self._outgoing.pending_fences),
+                    )
+                    prefix = Frame(self.epoch, outgoing.sequence + 1, complete, self.revision)
+                    frame = Frame(self.epoch, outgoing.sequence + 2, message, self.revision)
+                    data = encode_frame(prefix) + encode_frame(frame)
+                    self._accept(prefix, outgoing, self._incoming)
+                    self._accept(frame, outgoing, self._incoming)
+                    _remaining(deadline, cancel_event)
+                    self._outgoing = outgoing
                 admitted = True
                 self._condition.notify_all()
             # Admission precedes the first byte: the reader can correlate a

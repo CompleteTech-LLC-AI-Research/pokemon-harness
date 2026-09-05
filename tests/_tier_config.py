@@ -107,6 +107,7 @@ UNIT_MODULES = frozenset(
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
         "test_timed_wire.py",
+        "test_timed_wire_batch.py",
         "test_timed_trade_probe.py",
     }
 )
@@ -304,6 +305,26 @@ TIER_REQUIRED_TESTS = {
 # lane, whose exact name is owned by that lane.
 TIMING_SENSITIVE_TESTS = frozenset(
     {
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_lock_contention_failure_is_nonterminal",
+        ),
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_writer_barrier_excludes_interleaving",
+        ),
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_real_receive_order_and_sequence",
+        ),
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_real_receiver_rejects_sequence_replay",
+        ),
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_real_receiver_preserves_queue_bound",
+        ),
         (
             "test_timed_menu_milestones.py",
             "test_authored_cartridge_actual_helper_is_non_mutating",
@@ -510,6 +531,14 @@ TIMING_SENSITIVE_TESTS = frozenset(
         (
             "test_timed_link_session.py",
             "test_real_pair_repeated_public_frames_bounded_wire_volume",
+        ),
+        (
+            "test_timed_link_session.py",
+            "test_real_v3_complete_progress_equal_watermark_accepts_current_prefix",
+        ),
+        (
+            "test_timed_link_session.py",
+            "test_real_v3_partial_complete_progress_write_preserves_sent_frontiers",
         ),
         (
             "test_timed_link_session.py",

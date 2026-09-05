@@ -534,14 +534,21 @@ class TimedLinkSession:
             force or local - self._sent_progress >= self._threshold
         )
         # Publish the proven emission prefix before granting peer CPU credit.
-        if local > self._sent_watermark and (
-            force or progress_due or local - self._sent_watermark >= self._threshold
+        if progress_due:
+            self._check()
+            self.channel.send_complete_progress(
+                EmissionComplete(local, self._out_edge),
+                Progress(local),
+                deadline=self._deadline(),
+                cancel_event=self._cancel_view,
+            )
+            self._sent_watermark, self._sent_prefix = local, self._out_edge
+            self._sent_progress = local
+        elif local > self._sent_watermark and (
+            force or local - self._sent_watermark >= self._threshold
         ):
             self._send(EmissionComplete(local, self._out_edge))
             self._sent_watermark, self._sent_prefix = local, self._out_edge
-        if progress_due:
-            self._send(Progress(local))
-            self._sent_progress = local
 
     def _start_hold(self, scheduled, deadline):
         if self._held_deadline is None:

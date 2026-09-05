@@ -418,13 +418,33 @@ def test_cancel_reaches_active_real_credit_wait_without_session_lock(attached_pa
     receiving = threading.Event()
     cancelled = threading.Event()
     original_receive = type(endpoint.channel).receive
+    original_wait = endpoint.session._adapter._wait
+    owner = threading.get_ident()
+    credit_wait = False
+
+    def observe_credit_wait(remaining):
+        nonlocal credit_wait
+        assert threading.get_ident() == owner
+        credit_wait = True
+        try:
+            return original_wait(remaining)
+        finally:
+            credit_wait = False
 
     def observe_receive(channel, *, deadline, cancel_event=None):
         if channel is endpoint.channel:
-            receiving.set()
-            assert cancelled.wait(BOUND)
+            assert threading.get_ident() == owner
+            # Startup Progress(0) can require a receive before any instruction.
+            # Let real controls establish credit before selecting a partial wait.
+            if game.mb.cpu.cycles > before[2] and game.mb.cpu.retired_instructions > before[3]:
+                assert credit_wait
+                assert session._timed_executing and endpoint.session._active
+                assert not endpoint.session._in_edge
+                receiving.set()
+                assert cancelled.wait(BOUND)
         return original_receive(channel, deadline=deadline, cancel_event=cancel_event)
 
+    monkeypatch.setattr(endpoint.session._adapter, "_wait", observe_credit_wait)
     monkeypatch.setattr(type(endpoint.channel), "receive", observe_receive)
 
     def cancel_during_receive():
@@ -457,19 +477,27 @@ def test_cancel_during_real_progress_send_preserves_cancelled(attached_pair, mon
     session.bind_timed_execution(endpoint)
     before = observed(session, game)
     sending, cancelled = threading.Event(), threading.Event()
-    original_send = type(endpoint.channel).send
+    original_send = type(endpoint.channel).send_complete_progress
+    owner = threading.get_ident()
 
-    def observe_send(channel, message, *, deadline, cancel_event=None):
+    def observe_send(channel, complete, message, *, deadline, cancel_event=None):
         if (
             channel is endpoint.channel
             and isinstance(message, Progress)
             and message.settled_half_cycles > 0
         ):
+            assert threading.get_ident() == owner
+            assert complete.through_half_cycle == message.settled_half_cycles
+            assert game.mb.cpu.cycles > before[2]
+            assert game.mb.cpu.retired_instructions > before[3]
+            assert session._timed_executing and endpoint.session._active
             sending.set()
             assert cancelled.wait(BOUND)
-        return original_send(channel, message, deadline=deadline, cancel_event=cancel_event)
+        return original_send(
+            channel, complete, message, deadline=deadline, cancel_event=cancel_event
+        )
 
-    monkeypatch.setattr(type(endpoint.channel), "send", observe_send)
+    monkeypatch.setattr(type(endpoint.channel), "send_complete_progress", observe_send)
 
     def cancel_during_send():
         assert sending.wait(BOUND)
