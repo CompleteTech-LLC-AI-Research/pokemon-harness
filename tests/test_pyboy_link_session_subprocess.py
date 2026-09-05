@@ -20,12 +20,14 @@ NetworkBackend's REQ/RESP chatter in balance.
 
 from __future__ import annotations
 
+import codecs
 import io
 import json
 import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -273,6 +275,22 @@ def _drain_stream(stream, chunks: list[str]) -> None:
     hard cutoff.
     """
     try:
+        read1 = getattr(getattr(stream, "buffer", None), "read1", None)
+        if callable(read1):
+            # These fresh pipes have no prior text reads. Publish available
+            # bytes without waiting to fill a text read or reach EOF.
+            decoder = io.IncrementalNewlineDecoder(
+                codecs.getincrementaldecoder(stream.encoding)(errors=stream.errors),
+                translate=True,
+            )
+            while True:
+                raw = read1(8192)
+                chunk = decoder.decode(raw, final=not raw)
+                if chunk:
+                    chunks.append(chunk)
+                if not raw:
+                    return
+        # StringIO and other text-only process doubles have no binary buffer.
         while True:
             chunk = stream.read(8192)
             if not chunk:
@@ -1179,6 +1197,262 @@ def test_link_menu_history_rejects_post_call_outside_bank(bank, address):
     assert memory.writes == []
 
 
+@pytest.mark.parametrize(
+    "watchdog_case",
+    [
+        "invalid-optin", "destinations", "wrapper", "real-output",
+        "lifecycle", "arm-error", "cancel-error", "close-error",
+    ],
+)
+def test_peer_trace_watchdog(watchdog_case, monkeypatch):
+    """Opt-in peer stack diagnostics remain bounded and preserve peer outcomes."""
+    from tests import _tcp_trade_peer as peer
+
+    delay_env = "POKERED_PEER_TRACE_AFTER_SECONDS"
+    dir_env = "POKERED_PEER_TRACE_DIR"
+    monkeypatch.delenv(dir_env, raising=False)
+    if watchdog_case == "invalid-optin":
+        def unexpected(*args, **kwargs):
+            pytest.fail("disabled watchdog must not open files or arm diagnostics")
+
+        monkeypatch.setattr(peer.faulthandler, "dump_traceback_later", unexpected)
+        monkeypatch.setattr(peer.tempfile, "mkstemp", unexpected)
+        for value in (None, "", "garbage", "0", "-1", "nan", "inf", "-inf"):
+            if value is None:
+                monkeypatch.delenv(delay_env, raising=False)
+            else:
+                monkeypatch.setenv(delay_env, value)
+            assert peer._PeerTraceWatchdog.from_env() is None
+        return
+
+    if watchdog_case == "destinations":
+        monkeypatch.setenv(delay_env, "0.05")
+        trace = peer._PeerTraceWatchdog.from_env()
+        assert trace.destination is peer.sys.stderr
+        assert not trace.owned
+        trace.close()
+        with tempfile.TemporaryDirectory(prefix="peer-watchdog-paths-") as directory:
+            root = Path(directory)
+            missing = root / "missing"
+            for configured in ("", str(missing), __file__):
+                monkeypatch.setenv(dir_env, configured)
+                trace = peer._PeerTraceWatchdog.from_env()
+                assert trace.destination is peer.sys.stderr
+                assert not trace.owned
+                trace.close()
+            assert not missing.exists()
+            assert list(root.iterdir()) == []
+            monkeypatch.setenv(dir_env, directory)
+            first = peer._PeerTraceWatchdog.from_env()
+            try:
+                first_path, = root.iterdir()
+                os.write(first.destination, b"preserve existing artifact")
+                second = peer._PeerTraceWatchdog.from_env()
+                try:
+                    paths = list(root.iterdir())
+                    assert len(paths) == 2
+                    assert all(path.name.startswith(f"peer-trace-{os.getpid()}-") for path in paths)
+                    assert first_path.read_bytes() == b"preserve existing artifact"
+                    if os.name == "posix":
+                        assert all(path.stat().st_mode & 0o777 == 0o600 for path in paths)
+                finally:
+                    second.close()
+            finally:
+                first.close()
+
+            def fail_open(**kwargs):
+                raise OSError("diagnostic artifact open failed")
+
+            monkeypatch.setattr(peer.tempfile, "mkstemp", fail_open)
+            trace = peer._PeerTraceWatchdog.from_env()
+            assert trace.destination is peer.sys.stderr
+            assert not trace.owned
+            trace.close()
+        return
+
+    if watchdog_case == "wrapper":
+        events = []
+
+        class Trace:
+            def start(self):
+                events.append("start")
+
+            def close(self):
+                events.append("close")
+
+        trace = Trace()
+        monkeypatch.setattr(peer._PeerTraceWatchdog, "from_env", lambda: trace)
+        failure = RuntimeError("original peer failure")
+        for outcome in (17, failure):
+            events.clear()
+
+            def run_peer(*, trace, outcome=outcome):
+                assert trace is not None
+                events.extend(("cleanup", "emit_result"))
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+            monkeypatch.setattr(peer, "_run_peer", run_peer)
+            if isinstance(outcome, Exception):
+                with pytest.raises(RuntimeError) as raised:
+                    peer.main()
+                assert raised.value is failure
+            else:
+                assert peer.main() == outcome
+            assert events == ["start", "cleanup", "emit_result", "close"]
+        monkeypatch.setattr(peer._PeerTraceWatchdog, "from_env", lambda: None)
+        monkeypatch.setattr(peer, "_run_peer", lambda *, trace: 23 if trace is None else 99)
+        assert peer.main() == 23
+
+        def disabled_failure(*, trace):
+            assert trace is None
+            raise failure
+
+        monkeypatch.setattr(peer, "_run_peer", disabled_failure)
+        with pytest.raises(RuntimeError) as raised:
+            peer.main()
+        assert raised.value is failure
+        return
+
+    if watchdog_case == "real-output":
+        # Real faulthandler runs only in this disposable Python child. No ROM
+        # imports/loads, emulator, TCP connection, or repository artifacts.
+        script = """
+import json, os, sys, time
+from pathlib import Path
+from tests import _tcp_trade_peer as peer
+
+directory = Path(sys.argv[1])
+os.environ['POKERED_PEER_TRACE_AFTER_SECONDS'] = '0.05'
+os.environ['POKERED_PEER_TRACE_DIR'] = str(directory)
+trace = peer._PeerTraceWatchdog.from_env()
+assert trace is not None
+try:
+    trace.start()
+    files = list(directory.iterdir())
+    assert len(files) == 1, files
+    path = files[0]
+    assert path.name.startswith(f'peer-trace-{os.getpid()}-')
+    def wait_for_dumps(count):
+        cutoff = time.monotonic() + 5.0
+        while time.monotonic() < cutoff:
+            data = path.read_text(errors='replace')
+            if data.count('Timeout (') >= count:
+                return data
+            time.sleep(0.01)
+        raise AssertionError('watchdog did not emit expected dump: ' + data)
+    first = wait_for_dumps(1)
+    trace.cleanup(time.monotonic() + 5.0)
+    second = wait_for_dumps(2)
+    assert 'File "<string>"' in first
+    assert second.count('Timeout (') == 2
+finally:
+    trace.close()
+# Cancel a fresh pending timer, then stay alive past its deadline. Inspecting
+# the artifact after child exit alone could hide an uncancelled timer.
+os.environ['POKERED_PEER_TRACE_AFTER_SECONDS'] = '0.1'
+cancelled = peer._PeerTraceWatchdog.from_env()
+cancelled_path, = set(directory.iterdir()) - {path}
+try:
+    cancelled.start()
+finally:
+    cancelled.close()
+before = cancelled_path.read_bytes()
+assert before == b''
+time.sleep(0.25)
+assert cancelled_path.read_bytes() == before
+assert path.read_text(errors='replace').count('Timeout (') == 2
+print(json.dumps({'pid': os.getpid(), 'name': path.name, 'dumps': 2,
+                  'cancelled_empty': True}), flush=True)
+"""
+        with tempfile.TemporaryDirectory(prefix="peer-watchdog-test-") as directory:
+            completed = subprocess.run(
+                [sys.executable, "-c", script, directory],
+                capture_output=True,
+                text=True,
+                timeout=15.0,
+                check=False,
+            )
+            assert completed.returncode == 0, completed.stderr
+            result = json.loads(completed.stdout)
+            assert result["dumps"] == 2
+            assert result["cancelled_empty"] is True
+            assert result["name"].startswith(f"peer-trace-{result['pid']}-")
+            assert len(list(Path(directory).iterdir())) == 2
+        return
+
+    events = []
+    clock = [100.0]
+    monkeypatch.setattr(peer.time, "monotonic", lambda: clock[0])
+
+    destination = 987654
+    closed = []
+    arms = []
+
+    def arm(delay, **kwargs):
+        events.append("arm")
+        arms.append((delay, kwargs))
+        assert not closed
+        if watchdog_case == "arm-error":
+            raise OSError("diagnostic arm failed")
+
+    def cancel():
+        events.append("cancel")
+        assert not closed
+        if watchdog_case == "cancel-error":
+            raise OSError("diagnostic cancellation failed")
+
+    monkeypatch.setattr(peer.faulthandler, "dump_traceback_later", arm)
+    monkeypatch.setattr(peer.faulthandler, "cancel_dump_traceback_later", cancel)
+    original_close = os.close
+
+    def close(fd):
+        if fd != destination:
+            return original_close(fd)
+        events.append("close")
+        closed.append(fd)
+        if watchdog_case == "close-error":
+            raise OSError("diagnostic close failed")
+
+    monkeypatch.setattr(peer.os, "close", close)
+    trace = peer._PeerTraceWatchdog(10.0, destination, owned=True)
+    failure = RuntimeError("original peer failure")
+
+    def run_peer(*, trace):
+        # Cleanup before initial due must not replace/postpone its timer.
+        clock[0] = 105.0
+        trace.cleanup(130.0)
+        assert len(arms) == 1
+        clock[0] = 111.0
+        trace.cleanup(113.0)
+        trace.cleanup(140.0)
+        assert len(arms) == 2
+        assert arms[1][0] == 2.0
+        events.append("emit_result")
+        assert not closed
+        raise failure
+
+    monkeypatch.setattr(peer._PeerTraceWatchdog, "from_env", lambda: trace)
+    monkeypatch.setattr(peer, "_run_peer", run_peer)
+    with pytest.raises(RuntimeError) as raised:
+        peer.main()
+    assert raised.value is failure
+    assert arms[0][0] == 10.0
+    for _delay, kwargs in arms:
+        assert kwargs["file"] == destination
+        assert kwargs.get("repeat", False) is False
+        assert kwargs.get("exit", False) is False
+    assert events.index("emit_result") < events.index("cancel")
+    if watchdog_case == "cancel-error":
+        assert not closed
+    else:
+        assert closed == [destination]
+        assert events.index("cancel") < events.index("close")
+        trace.close()
+        assert closed == [destination]
+
+
 def test_setup_handshake_failure_returns_bounded_non_success_sentinels():
     """A pre-result child failure is fail-closed without waiting for its peer."""
     failure_command = [
@@ -1641,25 +1915,86 @@ def _collect_pair(listener, connector, *, deadline_at: float) -> tuple[dict, dic
     return results
 
 
-def test_collect_pair_enforces_hard_deadline_without_waiting_for_peers():
-    """A blocked child cannot extend the supervisor's absolute deadline."""
-    command = [sys.executable, "-c", "import time; time.sleep(30)"]
-    listener = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    connector = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    started = time.monotonic()
+@pytest.mark.parametrize(
+    ("encoding", "errors", "fragments", "expected"),
+    [
+        ("utf-8", "strict", [b"\xe2", b"\x82", b"\xac\r", b"\nend\r"], "€\nend\n"),
+        ("utf-8", "replace", [b"prefix", b"\xe2"], "prefix�"),
+        ("latin-1", "strict", [b"\xe9\r", b"\n"], "é\n"),
+    ],
+)
+def test_collect_pair_enforces_hard_deadline_without_waiting_for_peers(
+    monkeypatch, encoding, errors, fragments, expected
+):
+    """Capture live partial output without extending the pair deadline."""
+    pending = iter([*fragments, b""])
+    stream = SimpleNamespace(
+        buffer=SimpleNamespace(read1=lambda size: next(pending)),
+        encoding=encoding,
+        errors=errors,
+        close=lambda: None,
+    )
+    chunks = []
+    _drain_stream(stream, chunks)
+    assert "".join(chunks) == expected
+    chunks = []
+    _drain_stream(io.StringIO(expected), chunks)
+    assert "".join(chunks) == expected
+
+    markers = {"stdout": "short-live-stdout", "stderr": "short-live-stderr"}
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import sys, time; "
+            "print('short-live-stdout', end='', flush=True); "
+            "print('short-live-stderr', end='', file=sys.stderr, flush=True); "
+            "time.sleep(30)"
+        ),
+    ]
+    procs = []
     try:
-        with pytest.raises(_PairDeadlineExceeded, match="hard deadline"):
+        readiness_deadline = time.monotonic() + 5.0
+        for _ in range(2):
+            procs.append(
+                subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            )
+        listener, connector = procs
+        drainers = {proc: _start_pipe_drainers(proc) for proc in procs}
+        while time.monotonic() < readiness_deadline:
+            if all(
+                _captured_text(captured, name) == marker
+                for captured, _readers in drainers.values()
+                for name, marker in markers.items()
+            ):
+                break
+            time.sleep(0.001)
+        # Assert before any collector kill/EOF, using the very same captures
+        # returned to the collector. A kill-triggered drain cannot pass this.
+        for proc, (captured, readers) in drainers.items():
+            assert proc.poll() is None
+            assert all(reader.is_alive() for reader in readers)
+            for name, marker in markers.items():
+                assert _captured_text(captured, name) == marker
+        monkeypatch.setattr(
+            sys.modules[__name__], "_start_pipe_drainers", lambda proc: drainers[proc]
+        )
+        started = time.monotonic()
+        deadline_at = started + 0.25
+        with pytest.raises(_PairDeadlineExceeded, match="hard deadline") as raised:
             _collect_pair(
                 listener,
                 connector,
-                deadline_at=started + 0.25,
+                deadline_at=deadline_at,
             )
         elapsed = time.monotonic() - started
         assert elapsed < 2.0
+        for marker in markers.values():
+            assert str(raised.value).count(marker) == 2
     finally:
-        _kill_without_waiting((listener, connector))
-        listener.wait(timeout=2.0)
-        connector.wait(timeout=2.0)
+        _kill_without_waiting(procs)
+        for proc in procs:
+            proc.wait(timeout=2.0)
     assert listener.returncode is not None
     assert connector.returncode is not None
 

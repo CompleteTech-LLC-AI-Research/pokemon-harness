@@ -17,9 +17,11 @@ import socket as _socket
 import struct
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
+from pokered_harness.link import network_backend as network_module
 from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
@@ -31,6 +33,229 @@ _OP_EDGE_REQ = 0x10
 _OP_EDGE_RESP = 0x11
 _OP_SYNC = 0x20
 _OP_EXCHANGE = 0x30
+
+
+def test_external_service_does_not_hold_dispatch_while_waiting_for_serial_gate():
+    """Tick A must still dispatch after external service B waits for its gate."""
+    a, b = NetworkBackend.pair()
+    waiting = threading.Event()
+    errors = []
+    results = []
+
+    class ObservedGate(SerialOperationGate):
+        def __enter__(self):
+            if threading.current_thread() is worker:
+                waiting.set()
+            return super().__enter__()
+
+    gate = ObservedGate()
+    b._serial_gate = gate
+    b._dispatch_to_owner = True
+    b._local_core = _CompletingSlaveCore()
+    # Both queued edges are real owner-dispatch requests. No receiver is
+    # needed: keeping completed responses queued makes accounting deterministic.
+    first = network_module._InboundEdge(1)
+    second = network_module._InboundEdge(0)
+    b._edge_queue.put_nowait(first)
+    b._edge_queue.put_nowait(second)
+    b._edge_pending = 2
+
+    def external_service():
+        try:
+            results.append(b.service_pending_edges(max_edges=1))
+        except BaseException as exc:  # noqa: BLE001 - propagate worker failures below
+            errors.append(exc)
+
+    worker = threading.Thread(target=external_service, daemon=True)
+    try:
+        with gate:
+            worker.start()
+            assert waiting.wait(timeout=1.0)
+            # B has reached gate admission. With the old
+            # ordering it already holds dispatch, creating the exact inversion.
+            # Probe nonblocking so a regression fails without wedging pytest.
+            acquired = b._owner_dispatch_lock.acquire(blocking=False)
+            assert acquired, "external service holds dispatch while waiting for serial gate"
+            b._owner_dispatch_lock.release()
+            assert b.service_pending_edges(max_edges=1) == 1
+            # A waiter must not reserve the first edge before owning the gate:
+            # the tick owner must apply that first edge, preserving wire FIFO.
+            assert b._completed_edge_queue.get_nowait() is first
+            assert b._local_core.SB == 1
+            b._local_core.transfer_enabled = 1
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert errors == []
+        assert results == [1]
+        assert b._completed_edge_queue.get_nowait() is second
+        assert b._local_core.SB == 0
+        assert b._stats["owner_edge_applied"] == 2
+    finally:
+        worker.join(timeout=1.0)
+        a.stop()
+        b.stop()
+
+
+@pytest.mark.parametrize("lock_name", ["_edge_call_lock", "_edge_response_lock"])
+@pytest.mark.parametrize("acquired", [False, True], ids=["timeout", "scheduler-overshoot"])
+def test_edge_admission_expiry_preserves_active_response(monkeypatch, lock_name, acquired):
+    """An unadmitted caller cannot close or consume the active transaction."""
+    a, b = NetworkBackend.pair()
+    now = [100.0]
+    waits = []
+    releases = []
+
+    class ExpiringLock:
+        def acquire(self, *, timeout):
+            waits.append(timeout)
+            # Model scheduler delay through the absolute deadline, including
+            # a lock that becomes available just as its caller resumes.
+            now[0] = 110.0 if acquired else round(now[0] + timeout, 12)
+            return acquired
+
+        def release(self):
+            releases.append(True)
+
+    def forbidden_close(*args, **kwargs):
+        pytest.fail("admission timeout called terminal cleanup")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(network_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+            patch.setattr(a, lock_name, ExpiringLock())
+            patch.setattr(a, "_mark_closed", forbidden_close)
+            a._edge_inflight = True
+            a._resp_queue.put_nowait(1)
+            before = dict(a._stats)
+            with pytest.raises(NetworkBackendError, match="admission timed out"):
+                a.on_edge(our_bit=0, our_role=1)
+            assert waits
+            assert all(0 < timeout <= network_module._SEND_POLL_SECONDS for timeout in waits)
+            if acquired:
+                assert waits == [network_module._SEND_POLL_SECONDS]
+            else:
+                assert len(waits) == round(10.0 / network_module._SEND_POLL_SECONDS)
+                assert sum(waits) == pytest.approx(10.0)
+            assert releases == ([True] if acquired else [])
+            assert a.connected
+            assert not a._closed_event.is_set()
+            assert a._reader_exc is None
+            assert a._edge_inflight is True
+            assert a._resp_queue.get_nowait() == 1
+            assert a._resp_queue.empty()
+            assert a._stats == before
+            with pytest.raises(BlockingIOError):
+                b._sock.recv(1)
+            # The successfully acquired outer lock must also be released
+            # when response-lock admission expires.
+            if lock_name == "_edge_response_lock":
+                assert a._edge_call_lock.acquire(blocking=False)
+                a._edge_call_lock.release()
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_edge_admission_and_write_waits_reduce_original_response_budget(monkeypatch):
+    """Every phase spends the original ten seconds, including both admissions."""
+    a, b = NetworkBackend.pair()
+    now = [100.0]
+    waits = []
+
+    class SpendingLock:
+        def __init__(self, name, elapsed):
+            self.name = name
+            self.elapsed = elapsed
+
+        def acquire(self, *, timeout):
+            waits.append((self.name, timeout))
+            # Successful acquisition may resume late after a scheduler stall;
+            # subsequent phases must still use the original absolute deadline.
+            now[0] += self.elapsed
+            return True
+
+        def release(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    def send(frame, *, timeout, operation):
+        assert frame == struct.pack(">BB", _OP_EDGE_REQ, 1)
+        assert operation == "EDGE_REQ"
+        waits.append(("send", timeout))
+        now[0] += 0.003
+
+    def receive(q, *, timeout, timeout_message):
+        assert q is a._resp_queue
+        assert "10s" in timeout_message
+        waits.append(("response", timeout))
+        return 0
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(network_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+            patch.setattr(a, "_edge_call_lock", SpendingLock("call", 9.98))
+            patch.setattr(a, "_edge_response_lock", SpendingLock("admission-response", 0.01))
+            patch.setattr(a, "_write_lock", SpendingLock("write", 0.004))
+            patch.setattr(a, "_send_frame", send)
+            patch.setattr(a, "_queue_get", receive)
+            assert a.on_edge(our_bit=1, our_role=1) == 0
+            assert [name for name, _ in waits] == [
+                "call", "admission-response", "write", "send", "response"
+            ]
+            assert [timeout for _, timeout in waits] == pytest.approx(
+                [network_module._SEND_POLL_SECONDS, 0.02, 0.01, 0.006, 0.003]
+            )
+            assert a._edge_inflight is False
+            assert a._stats["edge_req_sent"] == 1
+            assert a._stats["edge_resp_received"] == 1
+    finally:
+        a.stop()
+        b.stop()
+
+
+@pytest.mark.parametrize("acquired", [False, True], ids=["waiting", "just-acquired"])
+def test_edge_admission_observes_close_without_waiting_full_budget(monkeypatch, acquired):
+    a, b = NetworkBackend.pair()
+    waits = []
+    releases = []
+
+    class ClosingLock:
+        def acquire(self, *, timeout):
+            waits.append(timeout)
+            assert len(waits) == 1, "admission retried after terminal close"
+            a._closed = True
+            a._closed_event.set()
+            return acquired
+
+        def release(self):
+            releases.append(True)
+
+    def forbidden_close(*args, **kwargs):
+        pytest.fail("unadmitted caller attempted terminal cleanup")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(network_module, "time", SimpleNamespace(monotonic=lambda: 100.0))
+            patch.setattr(a, "_edge_call_lock", ClosingLock())
+            patch.setattr(a, "_mark_closed", forbidden_close)
+            with pytest.raises(NetworkBackendError, match="closed"):
+                a.on_edge(our_bit=1, our_role=1)
+            assert waits == [network_module._SEND_POLL_SECONDS]
+            assert releases == ([True] if acquired else [])
+            assert a._edge_inflight is False
+            assert a._stats["edge_req_sent"] == 0
+            with pytest.raises(BlockingIOError):
+                b._sock.recv(1)
+    finally:
+        # This test models the terminal flag transition without closing the
+        # socket, so release that owned descriptor explicitly.
+        a._sock.close()
+        b.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -545,8 +770,8 @@ def test_two_serialcores_exchange_byte_via_network_backend():
         irq = master.tick(CYCLES_PER_BYTE_DMG)
         assert irq is True, "master didn't complete transfer"
 
-        # Give bb's reader a moment to finish its final edge send.
-        time.sleep(0.1)
+        # A response can arrive before the worker accounts for it and fires IRQ.
+        bb.wait_for_wire_idle(timeout=1.0)
         assert master.SB == 0x55, f"master got 0x{master.SB:02x}"
         assert slave.SB == 0xAA, f"slave got 0x{slave.SB:02x}"
         assert slave_irqs == [1], "slave IRQ callback should fire once"
@@ -578,7 +803,7 @@ def test_multiple_bytes_exchange():
             master.set_SC(0x81)
             slave.set_SC(0x80)
             master.tick(master.last_cycles + CYCLES_PER_BYTE_DMG)
-            time.sleep(0.05)
+            bb.wait_for_wire_idle(timeout=1.0)
             assert master.SB == slave_byte, (
                 f"master expected 0x{slave_byte:02x}, got 0x{master.SB:02x}"
             )
@@ -1075,28 +1300,29 @@ def test_wait_for_wire_idle_can_accept_orderly_peer_close():
         b.stop()
 
 
-def test_post_byte_fallback_is_visible_in_debug_snapshot():
-    """A keep-alive immediately after a completed byte is tagged separately."""
-    a, b = NetworkBackend.pair()
-    core = _CompletingSlaveCore()
-    a.start_receiver(local_core=None)
-    b.start_receiver(local_core=core)
-    try:
-        first_reply = a.on_edge(our_bit=1, our_role=1)
-        assert first_reply == 0
-        second_reply = a.on_edge(our_bit=0, our_role=1)
-        assert second_reply == 1
-        deadline = time.monotonic() + 1.0
-        snap = b.debug_snapshot()
-        while time.monotonic() < deadline and snap["keepalive_after_post_byte_waits"] == 0:
-            time.sleep(0.01)
-            snap = b.debug_snapshot()
-        assert snap["slave_post_byte_rearm_waits"] >= 1
-        assert snap["keepalive_after_post_byte_waits"] >= 1
-        assert snap["last_slave_byte_complete_at"] is not None
-    finally:
-        a.stop()
-        b.stop()
+def test_post_byte_fallback_is_visible_in_debug_snapshot(_post_byte_rearm):
+    """A CPU-starved slave stays unarmed through grace and sends keep-alive."""
+    schedule = _post_byte_rearm
+    # Model the peer getting no CPU through the actual grace deadline. This
+    # remains a valid fallback case even though caller timing was misleading.
+    schedule.now = schedule.backend._post_byte_rearm_until + 0.001
+    assert schedule.core.transfer_enabled == 0
+    schedule.release.set()
+    assert schedule.finish() == 1
+    snap = schedule.backend.debug_snapshot()
+    assert snap["slave_post_byte_rearm_waits"] >= 1
+    assert snap["slave_post_byte_rearm_successes"] == 0
+    assert snap["keepalive_after_post_byte_waits"] == 1
+    assert snap["keepalive_bits_sent"] == 1
+    assert snap["last_slave_byte_complete_at"] is not None
+    assert schedule.core._byte_index == 1  # fallback did not apply a real edge
+
+    # Once the starved peer runs again, the next request must use real data.
+    schedule.core.rearm(next_out_bit=0)
+    assert schedule.master.on_edge(our_bit=0, our_role=1) == 0
+    schedule.backend.wait_for_wire_idle(timeout=1.0)
+    assert schedule.core._byte_index == 2
+    assert schedule.backend.debug_snapshot()["keepalive_bits_sent"] == 1
 
 
 class _LateRearmingSlaveCore:
@@ -1120,13 +1346,97 @@ class _LateRearmingSlaveCore:
         self._byte_index += 1
         return False
 
-    def rearm_after(self, delay_s: float, *, next_out_bit: int) -> None:
-        def _rearm() -> None:
-            time.sleep(delay_s)
-            self._next_out_bit = next_out_bit & 1
-            self.transfer_enabled = 1
+    def rearm(self, *, next_out_bit: int) -> None:
+        self._next_out_bit = next_out_bit & 1
+        self.transfer_enabled = 1
 
-        threading.Thread(target=_rearm, daemon=True).start()
+
+class _RearmSchedule:
+    """Freeze only the slave worker's clock at an acknowledged rearm poll."""
+
+    def __init__(self, master, backend, core):
+        self.master = master
+        self.backend = backend
+        self.core = core
+        self.now = time.monotonic()
+        self.wait_entered = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+        self.replies = []
+        self.errors = []
+
+    def monotonic(self):
+        if threading.current_thread() is self.backend._edge_worker:
+            return self.now
+        return time.monotonic()
+
+    def request(self):
+        try:
+            self.replies.append(self.master.on_edge(our_bit=0, our_role=1))
+        except BaseException as exc:  # noqa: BLE001 - surface worker failures
+            self.errors.append(exc)
+        finally:
+            self.finished.set()
+
+    def finish(self):
+        assert self.finished.wait(timeout=2.0), "second edge did not finish"
+        assert self.errors == []
+        assert len(self.replies) == 1
+        # _edge_pending is decremented/notified in the worker's finally block,
+        # after response accounting and IRQ callbacks, not just socket delivery.
+        self.backend.wait_for_wire_idle(timeout=1.0)
+        return self.replies[0]
+
+
+@pytest.fixture
+def _post_byte_rearm(monkeypatch):
+    a, b = NetworkBackend.pair()
+    core = _LateRearmingSlaveCore()
+    schedule = _RearmSchedule(a, b, core)
+    sender = threading.Thread(target=schedule.request, daemon=True)
+    original_wait = b._closed_event.wait
+
+    def rearm_poll(timeout=None):
+        if threading.current_thread() is b._edge_worker:
+            # This is the actual unarmed rearm-loop poll, after its deadline
+            # and phase have been chosen. Never hold the serial operation gate.
+            assert timeout is not None and 0 < timeout <= 0.0005
+            schedule.wait_entered.set()
+            assert schedule.release.wait(timeout=2.0), "rearm poll was not released"
+            return original_wait(timeout=0)
+        return original_wait(timeout=timeout)
+
+    with monkeypatch.context() as patch:
+        # Do not patch the process-wide time module: Event/Condition watchdogs
+        # and every thread except this slave worker retain real monotonic time.
+        patch.setattr(network_module, "time", SimpleNamespace(monotonic=schedule.monotonic))
+        patch.setattr(b._closed_event, "wait", rearm_poll)
+        try:
+            a.start_receiver(local_core=None)
+            b.start_receiver(local_core=core)
+            assert a.on_edge(our_bit=1, our_role=1) == 0
+            b.wait_for_wire_idle(timeout=1.0)
+            assert core.transfer_enabled == 0
+            sender.start()
+            assert schedule.wait_entered.wait(timeout=2.0), "slave never entered rearm wait"
+            assert not schedule.finished.is_set()
+            assert b.debug_snapshot()["slave_post_byte_rearm_waits"] == 1
+            yield schedule
+        finally:
+            # Restore real time before shutdown, including on a failed barrier,
+            # so neither transport cleanup nor a join can inherit a frozen clock.
+            patch.undo()
+            schedule.release.set()
+            try:
+                a.stop()
+            finally:
+                b.stop()
+                if sender.ident is not None:
+                    sender.join(timeout=2.0)
+                    assert not sender.is_alive()
+                for backend in (a, b):
+                    for worker in (backend._reader, backend._edge_worker):
+                        assert worker is None or not worker.is_alive()
 
 
 class _DisarmingSlaveCore:
@@ -1152,6 +1462,7 @@ def test_rearm_race_falls_back_to_keepalive_without_worker_crash():
     b.start_receiver(local_core=core)
     try:
         assert a.on_edge(our_bit=1, our_role=1) == 1
+        b.wait_for_wire_idle(timeout=1.0)
         assert b.connected
         snapshot = b.debug_snapshot()
         assert snapshot["keepalive_bits_sent"] == 1
@@ -1161,33 +1472,27 @@ def test_rearm_race_falls_back_to_keepalive_without_worker_crash():
         b.stop()
 
 
-def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive():
+def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive(_post_byte_rearm):
     """A slave that rearms after the default wait but within the post-byte
     grace window should send its real next byte, not 0xFE keep-alive."""
-    a, b = NetworkBackend.pair()
-    core = _LateRearmingSlaveCore()
-    a.start_receiver(local_core=None)
-    b.start_receiver(local_core=core)
-    try:
-        first_reply = a.on_edge(our_bit=1, our_role=1)
-        assert first_reply == 0
+    schedule = _post_byte_rearm
+    # Entry is already acknowledged. Unlike timing the caller after starting
+    # a rearm thread, this interval belongs to the worker's actual wait.
+    started = schedule.now
+    schedule.now += 0.150
+    assert schedule.now - started > network_module._REARM_WAIT_SECONDS
+    assert schedule.now < schedule.backend._post_byte_rearm_until
+    assert not schedule.finished.is_set()
+    schedule.core.rearm(next_out_bit=0)
+    schedule.release.set()
+    assert schedule.finish() == 0
 
-        core.rearm_after(0.150, next_out_bit=0)
-        started = time.monotonic()
-        second_reply = a.on_edge(our_bit=0, our_role=1)
-        elapsed = time.monotonic() - started
-
-        assert second_reply == 0
-        assert elapsed >= 0.140
-
-        snap = b.debug_snapshot()
-        assert snap["slave_post_byte_rearm_waits"] >= 1
-        assert snap["slave_post_byte_rearm_successes"] >= 1
-        assert snap["keepalive_after_post_byte_waits"] == 0
-        assert snap["keepalive_bits_sent"] == 0
-    finally:
-        a.stop()
-        b.stop()
+    snap = schedule.backend.debug_snapshot()
+    assert snap["slave_post_byte_rearm_waits"] >= 1
+    assert snap["slave_post_byte_rearm_successes"] >= 1
+    assert snap["keepalive_after_post_byte_waits"] == 0
+    assert snap["keepalive_bits_sent"] == 0
+    assert schedule.core._byte_index == 2
 
 
 def test_listen_and_connect_over_loopback_exchange_byte():
@@ -1220,6 +1525,8 @@ def test_listen_and_connect_over_loopback_exchange_byte():
         backend.start_receiver(local_core=core)
         server_holder["core"] = core
         ready.set()
+        # Keep the real owner-thread stall: the receiver must exchange the
+        # armed byte while its setup/owner thread is not progressing.
         time.sleep(2.0)
 
     t = threading.Thread(target=server, daemon=True)
@@ -1233,7 +1540,7 @@ def test_listen_and_connect_over_loopback_exchange_byte():
     client_backend.start_receiver(local_core=client_core)
     try:
         client_core.tick(CYCLES_PER_BYTE_DMG)
-        time.sleep(0.2)
+        server_holder["backend"].wait_for_wire_idle(timeout=1.0)
         assert client_core.SB == 0x33
         assert server_holder["core"].SB == 0xCC
     finally:
@@ -1245,6 +1552,7 @@ def test_listen_and_connect_over_loopback_exchange_byte():
             listener.close()
         except OSError:
             pass
+        assert not t.is_alive()
 
 
 def _wait_bound(port: int, timeout: float = 2.0) -> bool:

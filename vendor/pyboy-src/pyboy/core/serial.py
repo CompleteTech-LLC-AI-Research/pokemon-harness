@@ -297,7 +297,11 @@ class Serial:
             # There is no local timebase to reschedule.
             pass
 
-        if self.clock_target > self.clock:
+        if not self.transfer_enabled or not self.internal_clock:
+            # No local deadline: MAX_CYCLES is a scheduling sentinel, not
+            # an absolute clock target. Literal keeps this nogil-safe.
+            self._cycles_to_interrupt = (1 << 31)
+        elif self.clock_target > self.clock:
             self._cycles_to_interrupt = self.clock_target - self.clock
         else:
             self._cycles_to_interrupt = 0
@@ -335,6 +339,9 @@ class Serial:
         progress a transfer; slave mode waits for
         :meth:`apply_external_edge`.
         """
+        if not self.transfer_enabled or not self.internal_clock:
+            # Normalize even when no cycles elapsed (including old hints).
+            self._cycles_to_interrupt = (1 << 31)
         delta = _cycles - self.last_cycles
         if delta == 0:
             return False
@@ -374,7 +381,10 @@ class Serial:
                                 16 if self.double_speed else 512
                             )
 
-        if self.clock_target > self.clock:
+        if not self.transfer_enabled or not self.internal_clock:
+            # Includes a master transfer that completed during this tick.
+            self._cycles_to_interrupt = (1 << 31)
+        elif self.clock_target > self.clock:
             self._cycles_to_interrupt = self.clock_target - self.clock
         else:
             self._cycles_to_interrupt = 0
@@ -491,6 +501,11 @@ class Serial:
         self.clock = f.read_64bit()
         self.clock_target = f.read_64bit()
         self.double_speed = 1 if self.cgb_mode and (self.SC & 0x02) else 0
+        if not self.transfer_enabled or not self.internal_clock:
+            # Old saves may contain a countdown to the idle clock sentinel.
+            # Normalize before either legacy or tagged extension returns;
+            # active internal timing and the serialized layout stay intact.
+            self._cycles_to_interrupt = (1 << 31)
         # Attempt to restore extended fields. Older states (and upstream
         # PyBoy saves) don't have them, so recover conservatively: assume no
         # in-flight transfer. The prior harness format had the two extension

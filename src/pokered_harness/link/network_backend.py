@@ -706,11 +706,17 @@ class NetworkBackend:
         :class:`NetworkBackendError`. If the reader on our own side
         isn't running yet, incoming responses will be lost — callers
         must call :meth:`start_receiver` before master-mode transfers.
+
+        Admission, send, and response waits share one deadline. Terminal
+        cleanup still waits for an admitted owner operation to finish, so
+        this is not an end-to-end bound on error return or shutdown.
         """
         del our_role  # the wire role is carried by the ROM's SC register
-        with self._edge_call_lock:
+        deadline = time.monotonic() + _EDGE_RESPONSE_TIMEOUT_SECONDS
+        # Admission failure must not close or mutate another caller's exchange.
+        with self._edge_admission_guard(self._edge_call_lock, deadline):
             stale_error: NetworkBackendError | None = None
-            with self._edge_response_lock:
+            with self._edge_admission_guard(self._edge_response_lock, deadline):
                 if self._closed:
                     raise NetworkBackendError("backend closed")
                 if self._edge_inflight:
@@ -727,11 +733,8 @@ class NetworkBackend:
             frame_out = _FRAME.pack(_OP_EDGE_REQ, our_bit & 1)
             self._stats["edge_req_sent"] = int(self._stats["edge_req_sent"]) + 1
             # EDGE_RESP has no request id, so a late response cannot be
-            # retried or matched to a later transfer. Bound the complete
-            # request/response operation with one deadline; separately
-            # granting the send and receive phases the full timeout could
-            # retain the emulator owner for twice the advertised limit.
-            deadline = time.monotonic() + _EDGE_RESPONSE_TIMEOUT_SECONDS
+            # retried or matched to a later transfer. Reuse the admission
+            # deadline rather than granting send and receive fresh budgets.
             try:
                 with self._write_guard(
                     deadline=deadline,
@@ -768,6 +771,27 @@ class NetworkBackend:
                     self._edge_inflight = False
                 with self._edge_pending_condition:
                     self._edge_pending_condition.notify_all()
+
+    @contextmanager
+    def _edge_admission_guard(self, lock: Any, deadline: float) -> Iterator[None]:
+        """Acquire before publishing an edge, without terminal side effects."""
+        while True:
+            if self._closed_event.is_set() or self._closed:
+                raise NetworkBackendError("backend closed")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise NetworkBackendError("EDGE_REQ admission timed out")
+            if lock.acquire(timeout=min(_SEND_POLL_SECONDS, remaining)):
+                break
+        try:
+            if self._closed_event.is_set() or self._closed:
+                raise NetworkBackendError("backend closed")
+            # Acquisition may finish at the deadline after scheduler delay.
+            if time.monotonic() >= deadline:
+                raise NetworkBackendError("EDGE_REQ admission timed out")
+            yield
+        finally:
+            lock.release()
 
     # --- out-of-band rendezvous ---------------------------------------
 
@@ -1363,8 +1387,9 @@ class NetworkBackend:
         """Apply queued peer edges on the caller's emulator-owner thread.
 
         The method is only valid after ``start_receiver(...,
-        dispatch_to_owner=True)``. It is intentionally non-blocking: an
-        unarmed slave request is put back on the FIFO and the caller returns
+        dispatch_to_owner=True)``. It can wait for the serial gate and
+        lifecycle lock, but does not wait for slave rearming: an
+        unarmed slave request is put back on the queue and the caller returns
         to its PyBoy tick so the ROM can execute its normal SB/SC re-arm
         sequence. A later owner boundary retries the same request. If the
         owner never services it, the master's existing bounded EDGE_RESP
@@ -1382,6 +1407,14 @@ class NetworkBackend:
             if max_edges <= 0:
                 raise ValueError("max_edges must be a positive integer or None")
 
+        # Serialize dequeue as well as application: a competing dispatcher
+        # must not take an older request and then wait while the tick owner
+        # applies a later one. This matches the tick wrapper's lock order.
+        with self._serial_gate:
+            return self._service_pending_edges_locked(max_edges=max_edges)
+
+    def _service_pending_edges_locked(self, *, max_edges: int | None) -> int:
+        """Drain ready requests while the caller holds the serial gate."""
         applied = 0
         while max_edges is None or applied < max_edges:
             try:
@@ -1397,6 +1430,8 @@ class NetworkBackend:
             # _mark_closed(). If close wins, this request is discarded; if
             # owner admission wins, close waits until the native operation
             # has returned before publishing the terminal state.
+            # The caller already holds the serial gate. Close never acquires
+            # that gate, and owner dispatch is held only for this request.
             with self._owner_dispatch_lock:
                 if self._closed:
                     self._decrement_edge_pending()

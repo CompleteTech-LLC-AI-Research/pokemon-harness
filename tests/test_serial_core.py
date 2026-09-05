@@ -516,7 +516,104 @@ def test_cycles_to_interrupt_is_max_for_slave():
     s = SerialCore()
     s.set_SB(0xAA)
     s.set_SC(0x80)
-    assert s._cycles_to_interrupt >= MAX_CYCLES - CYCLES_PER_BYTE_DMG
+    assert s._cycles_to_interrupt == MAX_CYCLES
+
+
+@pytest.mark.parametrize("sc", [0x00, 0x01, 0x80])
+def test_unscheduled_hint_stays_max_across_large_cycle_boundaries(sc):
+    s = SerialCore()
+    s.set_SC(sc)
+    for cycles in (1, (1 << 31) - 1, (1 << 31) + 1, (1 << 32) + 1):
+        assert s.tick(cycles) is False
+        assert s.clock == cycles
+        assert s.last_cycles == cycles
+        assert s._cycles_to_interrupt == MAX_CYCLES
+        assert s.tick(cycles) is False  # repeated timestamp
+        assert s._cycles_to_interrupt == MAX_CYCLES
+        s.set_SC(sc)
+        assert s._cycles_to_interrupt == MAX_CYCLES
+        assert s._bits_remaining == (8 if sc & 0x80 else 0)
+
+
+@pytest.mark.parametrize("cycles", [(1 << 31) + 17, (1 << 32) + 17])
+@pytest.mark.parametrize("sc", [0x00, 0x80])
+@pytest.mark.parametrize("stale_hint", [0, 23])
+def test_zero_delta_tick_repairs_unscheduled_hint(cycles, sc, stale_hint):
+    s = SerialCore()
+    s.tick(cycles)
+    s.set_SC(sc)
+    s._cycles_to_interrupt = stale_hint
+    assert s.tick(cycles) is False
+    assert s._cycles_to_interrupt == MAX_CYCLES
+    assert s.clock == cycles
+    assert s._bits_remaining == (8 if sc & 0x80 else 0)
+
+
+@pytest.mark.parametrize("cycles", [(1 << 31) + 17, (1 << 32) + 17])
+def test_external_partial_rearm_abort_and_completion_keep_max_hint(cycles):
+    s = SerialCore()
+    s.tick(cycles)
+    s.set_SB(0xA5)
+    s.set_SC(0x80)
+    assert s._cycles_to_interrupt == MAX_CYCLES
+    for bit in (1, 0, 1):
+        assert s.apply_external_edge(bit) is False
+        assert s._cycles_to_interrupt == MAX_CYCLES
+    partial = s._shift_register
+    assert s._bits_remaining == 5
+    s.set_SB(0x3C)
+    s.set_SC(0x80)
+    assert s._shift_register == partial
+    assert s._bits_remaining == 5
+    assert s._cycles_to_interrupt == MAX_CYCLES
+    assert s.tick(cycles + 4096) is False
+    assert s._shift_register == partial
+    assert s._bits_remaining == 5
+    assert s._cycles_to_interrupt == MAX_CYCLES
+
+    s.set_SC(0x00)
+    assert s.transfer_enabled == 0
+    assert s._bits_remaining == 0
+    assert s._cycles_to_interrupt == MAX_CYCLES
+    with pytest.raises(RuntimeError, match="no transfer armed"):
+        s.apply_external_edge(1)
+    s.set_SC(0x80)
+    assert s._shift_register == 0x3C
+    assert s._bits_remaining == 8
+    assert s._cycles_to_interrupt == MAX_CYCLES
+    for index, bit in enumerate((1, 0, 1, 1, 0, 0, 1, 0)):
+        assert s.apply_external_edge(bit) is (index == 7)
+        assert s._cycles_to_interrupt == MAX_CYCLES
+    assert s.SB == 0xB2
+    assert s.SC & 0x80 == 0
+    assert s.transfer_enabled == 0
+    assert s.tick(cycles + 4097) is False
+    assert s._cycles_to_interrupt == MAX_CYCLES
+
+
+@pytest.mark.parametrize("cycles", [(1 << 31) + 17, (1 << 32) + 17])
+@pytest.mark.parametrize("sc, period", [(0x81, 512), (0x83, 16)])
+@pytest.mark.parametrize("cpu_speed_shift", [0, 1])
+def test_internal_cadence_at_large_clocks(cycles, sc, period, cpu_speed_shift):
+    s = SerialCore(cgb_mode=True, backend=NullBackend())
+    s.cpu_speed_shift = cpu_speed_shift
+    s.tick(cycles)
+    s.set_SB(0)
+    s.set_SC(sc)
+    for edge in range(1, 9):
+        deadline = cycles + edge * period
+        assert s.clock_target == deadline
+        assert s._cycles_to_interrupt == period
+        assert s.tick(deadline - 1) is False
+        assert s._bits_remaining == 9 - edge
+        assert s._cycles_to_interrupt == 1
+        assert s.tick(deadline) is (edge == 8)
+        assert s._bits_remaining == 8 - edge
+    assert s.SB == 0xFF
+    assert s.transfer_enabled == 0
+    assert s._cycles_to_interrupt == MAX_CYCLES
+    assert s.tick(deadline + 1) is False
+    assert s._cycles_to_interrupt == MAX_CYCLES
 
 
 # ---------------------------------------------------------------------------
@@ -659,3 +756,95 @@ def test_state_round_trip_restores_cgb_fast_clock_flag():
     restored.load_state(stream, SerialCore.STATE_VERSION)
 
     assert restored.double_speed == 1
+
+
+@pytest.mark.parametrize("cycles", [(1 << 31) + 17, (1 << 32) + 17])
+@pytest.mark.parametrize("field_count", [8, 10, 12], ids=["legacy", "unmarked", "current"])
+@pytest.mark.parametrize("sc", [0x00, 0x01, 0x80])
+@pytest.mark.parametrize("saved_hint", [0, 23])
+def test_loading_unscheduled_large_clock_state_repairs_hint(
+    cycles, field_count, sc, saved_hint
+):
+    original = SerialCore()
+    original.tick(cycles)
+    original.set_SB(0xA5)
+    original.set_SC(sc)
+    if sc & 0x80:
+        original.apply_external_edge(1)
+        original.apply_external_edge(0)
+    stream = _FakeStream()
+    original.save_state(stream)
+    stream._buf = stream._buf[:field_count]
+    # Older writers cached zero or a finite countdown for an unscheduled
+    # core. Loading must recover the scheduling invariant in either case.
+    stream._buf[5] = ("u64", saved_hint)
+
+    restored = SerialCore()
+    restored.load_state(stream, SerialCore.STATE_VERSION)
+    assert restored.clock == cycles
+    assert restored.last_cycles == cycles
+    assert restored._cycles_to_interrupt == MAX_CYCLES
+    assert restored.tick(cycles) is False
+    assert restored._cycles_to_interrupt == MAX_CYCLES
+    assert restored.tick(cycles + 1) is False
+    assert restored._cycles_to_interrupt == MAX_CYCLES
+    if field_count == 8:
+        assert restored.transfer_enabled == 0
+        assert restored.SC & 0x80 == 0
+        assert restored._bits_remaining == 0
+        assert restored._shift_register == restored.SB
+    elif sc & 0x80:
+        assert restored._bits_remaining == 6
+        assert restored._shift_register == original._shift_register
+        for index, bit in enumerate((1, 1, 0, 0, 1, 0)):
+            assert restored.apply_external_edge(bit) is (index == 5)
+            assert restored._cycles_to_interrupt == MAX_CYCLES
+        assert restored.SB == 0xB2
+    else:
+        assert restored.transfer_enabled == 0
+
+
+@pytest.mark.parametrize("cycles", [(1 << 31) + 17, (1 << 32) + 17])
+@pytest.mark.parametrize("legacy", [False, True], ids=["current", "unmarked"])
+@pytest.mark.parametrize("sc, period", [(0x81, 512), (0x83, 16)])
+@pytest.mark.parametrize("cpu_speed_shift", [0, 1])
+def test_restored_internal_large_clock_transfer_keeps_cadence(
+    cycles, legacy, sc, period, cpu_speed_shift
+):
+    original = SerialCore(cgb_mode=True)
+    original.cpu_speed_shift = cpu_speed_shift
+    original.tick(cycles)
+    original.set_SB(0)
+    original.set_SC(sc)
+    original.tick(cycles + 3 * period + period // 2)
+    stream = _FakeStream()
+    original.save_state(stream)
+    if legacy:
+        stream._buf = stream._buf[:10]
+        old_period = 4 if sc == 0x83 else 128 << cpu_speed_shift
+        stream._buf[5] = ("u64", old_period // 2)
+        stream._buf[7] = ("u64", original.clock + old_period // 2)
+
+    restored = SerialCore(cgb_mode=True)
+    # CPU speed belongs to the motherboard, not the serial state stream.
+    restored.cpu_speed_shift = cpu_speed_shift
+    restored.load_state(stream, SerialCore.STATE_VERSION)
+    assert restored.clock == original.clock
+    assert restored.last_cycles == original.last_cycles
+    assert restored._bits_remaining == 5
+    assert restored._shift_register == 7
+    assert restored.clock_target == original.clock + period // 2
+    assert restored._cycles_to_interrupt == period // 2
+    for edge in range(5):
+        deadline = original.clock + period // 2 + edge * period
+        assert restored.clock_target == deadline
+        assert restored.tick(deadline - 1) is False
+        assert restored._bits_remaining == 5 - edge
+        assert restored._cycles_to_interrupt == 1
+        assert restored.tick(deadline) is (edge == 4)
+        assert restored._bits_remaining == 4 - edge
+        assert restored._cycles_to_interrupt == (MAX_CYCLES if edge == 4 else period)
+    assert restored.SB == 0xFF
+    assert restored.transfer_enabled == 0
+    assert restored.tick(deadline + 1) is False
+    assert restored._cycles_to_interrupt == MAX_CYCLES
