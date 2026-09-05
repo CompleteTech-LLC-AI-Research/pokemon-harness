@@ -71,7 +71,9 @@ UNIT_MODULES = frozenset(
         "test_link_transport.py",
         "test_mcp_server.py",
         "test_native_execution_governor.py",
+        "test_native_hook_exceptions.py",
         "test_network_backend.py",
+        "test_probe_timed_rom_pair.py",
         "test_production_gate.py",
         "test_pyboy_link_session.py",
         "test_remote_endpoint.py",
@@ -81,6 +83,8 @@ UNIT_MODULES = frozenset(
         "test_serial_link.py",
         "test_serial_ownership.py",
         "test_session.py",
+        "test_session_timed_execution.py",
+        "test_speed_state_restore.py",
         "test_state_bag.py",
         "test_state_battle.py",
         "test_state_menu.py",
@@ -282,6 +286,52 @@ TIER_REQUIRED_TESTS = {
 # lane, whose exact name is owned by that lane.
 TIMING_SENSITIVE_TESTS = frozenset(
     {
+        ("test_session_timed_execution.py", "test_binding_lock_wait_is_bounded"),
+        (
+            "test_session_timed_execution.py",
+            "test_cancel_reaches_active_real_credit_wait_without_session_lock",
+        ),
+        (
+            "test_session_timed_execution.py",
+            "test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_events",
+        ),
+        (
+            "test_session_timed_execution.py",
+            "test_real_partial_public_tick_failure_counts_only_completed_frames",
+        ),
+        # Synthetic owners still exercise real supervisor/thread waits.
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_supervisor_cancels_both_and_owner_detaches_before_stop",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_interrupted_multiframe_call_records_actual_partial_progress",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_detach_failure_never_stops_session_with_live_binding",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_unpublished_factory_failure_cancels_peer_original_event",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_no_progress_return_is_explicit_and_does_not_count_requested_frames",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_first_supervisor_cancel_exception_does_not_skip_second_endpoint",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_live_owners_report_incomplete_cleanup_without_mutating_returned_report",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_attach_failure_retains_loaded_native_evidence_without_binding",
+        ),
         ("test_network_backend.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
         (
             "test_network_backend.py",

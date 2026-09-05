@@ -16,7 +16,7 @@ import time
 from collections import deque
 from contextlib import contextmanager
 
-from .emulated_time import EmulatedTimeCoordinator, EmulatedTimeError
+from .emulated_time import CoordinatorClosed, EmulatedTimeCoordinator, EmulatedTimeError
 from .execution_adapter import ExecutionGovernorAdapter
 from .timed_wire import (
     Cancelled,
@@ -72,7 +72,10 @@ class _TimedAdapter(ExecutionGovernorAdapter):
         except BaseException as exc:
             # Direct PyBoy.tick has no outer session guard. Close its epoch
             # before propagating, but never detach inside this native callback.
-            self.session._fail(exc)
+            failure = self.session._normalize_failure(exc)
+            self.session._fail(failure)
+            if failure is not exc:
+                raise failure from exc
             raise
 
     def after(self, *args):
@@ -200,6 +203,10 @@ class TimedLinkSession:
 
     def _check(self):
         if self._cancel_view.is_set():
+            # The wire retains its first error; cancellation must not hide a
+            # protocol violation already detected by its reader.
+            if isinstance(self.channel.error, ProtocolError):
+                raise self.channel.error
             raise Cancelled("timed session cancelled")
         if self._terminal.is_set():
             raise ChannelClosed("timed session is terminal")
@@ -334,8 +341,11 @@ class TimedLinkSession:
             self._send(Progress(0), deadline)
             self._sent_progress = 0
         except BaseException as exc:
-            self._fail(exc)
-            self._cleanup(preserve=exc)
+            failure = self._normalize_failure(exc)
+            self._fail(failure)
+            self._cleanup(preserve=failure)
+            if failure is not exc:
+                raise failure from exc
             raise
         finally:
             self._attaching = False
@@ -447,10 +457,8 @@ class TimedLinkSession:
                 raise DeadlineExceeded("owner pump deadline expired")
             try:
                 message = self.channel.poll()
-            except ChannelClosed:
-                if self._cancel_view.is_set():
-                    raise Cancelled("timed session cancelled") from None
-                raise
+            except ChannelClosed as exc:
+                raise self._normalize_failure(exc)
             if message is None:
                 break
             self._stage(message)
@@ -711,7 +719,8 @@ class TimedLinkSession:
                     raise DeadlineExceeded("control deadline expired")
             self._verify_registration()
         except BaseException as exc:
-            self._fail(exc)
+            failure = self._normalize_failure(exc)
+            self._fail(failure)
             # A rejected idle-owner call has no outer operation to detach it.
             # Foreign or recursive callers must leave cleanup to that owner.
             if threading.get_ident() == self._owner and not (
@@ -721,7 +730,9 @@ class TimedLinkSession:
                 or self._pumping
                 or self._control_active
             ):
-                self._cleanup(preserve=exc)
+                self._cleanup(preserve=failure)
+            if failure is not exc:
+                raise failure from exc
             raise
         self._control_active = True
         self._control_deadline = deadline
@@ -731,11 +742,14 @@ class TimedLinkSession:
             if deadline is not None and time.monotonic() >= deadline:
                 raise DeadlineExceeded("control deadline expired")
         except BaseException as exc:
-            self._fail(exc)
+            failure = self._normalize_failure(exc)
+            self._fail(failure)
             # The yielded operation has unwound. Reentrant close while it
             # was active could signal termination, but could not detach it.
             self._control_active = False
-            self._cleanup(preserve=exc)
+            self._cleanup(preserve=failure)
+            if failure is not exc:
+                raise failure from exc
             raise
         finally:
             self._control_active = False
@@ -884,12 +898,31 @@ class TimedLinkSession:
             self._safe_pump(rearm=False, force=True)
             return result
         except BaseException as exc:
-            self._fail(exc)
+            failure = self._normalize_failure(exc)
+            self._fail(failure)
             self._active = False
-            self._cleanup(preserve=exc)
+            self._cleanup(preserve=failure)
+            if failure is not exc:
+                raise failure from exc
             raise
         finally:
             self._active = False
+
+    def _normalize_failure(self, exc):
+        """Expose cancellation consistently across wire/governor close races.
+
+        Do this before recording failure or cleanup: both close the channel.
+        Unrelated native/caller failures keep their original exception object.
+        """
+        if self._cancel_view.is_set() and isinstance(
+            exc, (Cancelled, ChannelClosed, DeadlineExceeded, CoordinatorClosed)
+        ):
+            first_wire_error = self.channel.error
+            if isinstance(first_wire_error, ProtocolError):
+                return first_wire_error
+            if not isinstance(exc, Cancelled):
+                return Cancelled("timed session cancelled")
+        return exc
 
     def _fail(self, exc):
         if self._terminal_error is None:

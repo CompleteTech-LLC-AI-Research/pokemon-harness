@@ -291,7 +291,7 @@ class Motherboard:
             if state_version >= 16:
                 self.key0 = f.read()
             self.key1 = f.read()
-            self.double_speed = f.read()
+            self.double_speed = bool(f.read())
             _cgb = f.read()
             if self.cgb and not _cgb:
                 raise PyBoyException("Loading state which *is not* CGB-mode, but PyBoy *is* in CGB mode!")
