@@ -90,6 +90,7 @@ UNIT_MODULES = frozenset(
         "test_state_status.py",
         "test_state_text.py",
         "test_symbol_loader.py",
+        "test_timed_link_session.py",
         "test_timed_wire.py",
     }
 )
@@ -291,6 +292,28 @@ TIMING_SENSITIVE_TESTS = frozenset(
             "test_listen_and_connect_over_loopback_exchange_byte",
         ),
         ("test_network_backend.py", "test_sync_with_peer_rendezvous"),
+        (
+            "test_timed_wire.py",
+            "test_bidirectional_concurrent_requests_and_responses",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_fast_response_before_writer_return_and_before_request_consumption",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_waiting_writer_admission_is_bounded_and_does_not_skip_sequence",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_peer_application_waits_for_local_hello_send_publication",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_one_absolute_deadline_covers_admission_and_partial_write",
+        ),
+        ("test_timed_wire.py", "test_close_wakes_receive"),
+        ("test_timed_wire.py", "test_close_wakes_partial_frame_reader"),
     }
 )
 
