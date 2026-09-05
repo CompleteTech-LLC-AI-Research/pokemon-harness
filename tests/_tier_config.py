@@ -78,6 +78,7 @@ UNIT_MODULES = frozenset(
         "test_native_hook_exceptions.py",
         "test_network_backend.py",
         "test_probe_timed_rom_pair.py",
+        "test_probe_owner_phases.py",
         "test_probe_timed_trade_pair.py",
         "test_production_gate.py",
         "test_pyboy_link_imports.py",
@@ -305,6 +306,10 @@ TIER_REQUIRED_TESTS = {
 # lane, whose exact name is owned by that lane.
 TIMING_SENSITIVE_TESTS = frozenset(
     {
+        (
+            "test_probe_owner_phases.py",
+            "test_spawn_serializes_and_reports_exact_owner_phase_schema",
+        ),
         (
             "test_timed_wire_batch.py",
             "test_batch_lock_contention_failure_is_nonterminal",
