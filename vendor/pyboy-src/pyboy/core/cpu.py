@@ -137,9 +137,13 @@ class CPU:
 
         self.bail = False
         while self.cycles < _target:
+            _dispatch_cycles = self.cycles
             self.fetch_and_execute()
             if self.bail:  # Possible cycles-target changes
                 break
+            # Prevent dispatch without forward cycle progress from repeating indefinitely.
+            if self.cycles <= _dispatch_cycles:
+                raise RuntimeError("CPU dispatch made no cycle progress")
 
     def check_interrupts(self):
         if self.interrupt_queued:

@@ -43,7 +43,7 @@ cdef class CPU:
 
     @cython.locals(pc1=uint16_t,pc2=uint16_t,pc3=uint16_t, opcode=uint16_t, v=cython.int, a=cython.int, b=cython.int, result=uint8_t, retired_instructions_max=uint64_t)
     cdef inline uint8_t fetch_and_execute(self) except * nogil
-    @cython.locals(_cycles0=int64_t)
+    @cython.locals(_cycles0=int64_t, _dispatch_cycles=int64_t)
     cdef int tick(self, int64_t) except * nogil
     cdef int save_state(self, IntIOInterface) except -1
     cdef int load_state(self, IntIOInterface, int) except -1

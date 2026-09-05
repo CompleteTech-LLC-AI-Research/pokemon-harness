@@ -4,8 +4,9 @@ Source cases use a memory seam, never a replacement CPU or retirement count.
 Native cases author their own cartridge and require compiled runtime types.
 Pytest collects only source cases and opens no cartridge. Run native cases with
 ``python tests/test_cpu_instruction_counter.py --native-probe`` after a build.
-Native illegal opcodes and overflow remain unverified: private fetch/counter
-access needs a typed probe, and ticking an illegal opcode can loop forever.
+Native illegal cases run in children with 10-second deadlines, so old runtimes
+without the progress guard fail rather than hang the parent. Native overflow
+remains unverified because the counter is read-only.
 """
 
 import argparse
@@ -15,6 +16,8 @@ import importlib.util
 import io
 import logging
 import re
+import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -23,6 +26,8 @@ import pytest
 
 CORE = Path(__file__).resolve().parents[1] / "vendor/pyboy-src/pyboy/core"
 UINT64_MAX = (1 << 64) - 1
+ILLEGAL_OPCODES = (0xD3, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD)
+NO_PROGRESS = "CPU dispatch made no cycle progress"
 
 
 def _source(name):
@@ -115,8 +120,56 @@ def test_source_break_and_illegal_fetch_does_not_retire(cpu, opcode):
     cpu.fetch_and_execute()  # Establish a real prior retirement.
     _program(cpu, [opcode])
     before = (cpu.retired_instructions, cpu.cycles, cpu.PC)
-    assert cpu.fetch_and_execute() == 0  # Never tick: illegal opcodes consume no cycles.
+    assert cpu.fetch_and_execute() == 0  # Direct dispatch still consumes no cycles.
     assert (cpu.retired_instructions, cpu.cycles, cpu.PC) == before
+
+
+@pytest.mark.parametrize("opcode", ILLEGAL_OPCODES)
+@pytest.mark.parametrize("prior_nop", [False, True])
+def test_source_illegal_tick_preserves_state(cpu, opcode, prior_nop):
+    if prior_nop:
+        cpu.tick(4)
+    _program(cpu, [opcode])
+    before = (cpu.retired_instructions, cpu.cycles, cpu.PC)
+    with pytest.raises(RuntimeError, match=f"^{NO_PROGRESS}$"):
+        cpu.tick(4)
+    assert (cpu.retired_instructions, cpu.cycles, cpu.PC) == before
+
+
+@pytest.mark.parametrize("opcode", ILLEGAL_OPCODES)
+def test_source_illegal_after_nop_in_same_tick_preserves_progress(cpu, opcode):
+    _program(cpu, [0x00, opcode])
+    with pytest.raises(RuntimeError, match=f"^{NO_PROGRESS}$"):
+        cpu.tick(8)
+    assert (cpu.retired_instructions, cpu.cycles, cpu.PC) == (1, 4, 0xC001)
+
+
+def test_source_break_tick_bails_without_progress_error(cpu):
+    cpu.tick(4)
+    _program(cpu, [0xDB])
+    before = (cpu.retired_instructions, cpu.cycles, cpu.PC)
+    assert cpu.tick(4) in (None, 0)
+    assert cpu.bail
+    assert (cpu.retired_instructions, cpu.cycles, cpu.PC) == before
+
+
+def test_source_injected_dispatch_clock_rollback_is_preserved(cpu, monkeypatch):
+    """Injected dispatch regression, not a claim about any legal opcode."""
+    cpu.tick(4)
+    count, clock, pc = cpu.retired_instructions, cpu.cycles, cpu.PC
+    calls = []
+
+    def decreasing_dispatch():
+        calls.append(cpu.cycles)
+        assert len(calls) == 1, "rollback must fail after the first dispatch"
+        cpu.cycles -= 1
+
+    monkeypatch.setattr(cpu, "fetch_and_execute", decreasing_dispatch)
+    with pytest.raises(RuntimeError, match=f"^{NO_PROGRESS}$"):
+        cpu.tick(4)
+    assert calls == [clock]
+    assert not cpu.bail
+    assert (cpu.retired_instructions, cpu.cycles, cpu.PC) == (count, clock - 1, pc)
 
 
 @pytest.mark.parametrize("failure", ["fetch", "handler", "register_callback"])
@@ -351,6 +404,27 @@ def probe_native_serial_callback_failure_preserves_partial_clock(native_game):
     assert game.register_file.PC == 0xC001
 
 
+def probe_native_illegal_tick(game, opcode, prior_nop):
+    # Single-step MB requests four clocks: prior NOP needs its own MB call.
+    if prior_nop:
+        game.mb.tick()
+    game.memory[game.register_file.PC] = opcode
+    before = (game.mb.cpu.retired_instructions, game.mb.cpu.cycles, game.register_file.PC)
+    assert before[0] == int(prior_nop)
+    with pytest.raises(RuntimeError, match=f"^{NO_PROGRESS}$"):
+        game.mb.tick()
+    assert (game.mb.cpu.retired_instructions, game.mb.cpu.cycles, game.register_file.PC) == before
+
+
+def _run_native_illegal_child(case):
+    opcode, prior_nop = (int(value) for value in case.split(":"))
+    with (
+        TemporaryDirectory(prefix="cpu-counter-illegal-") as directory,
+        native_game(Path(directory)) as game,
+    ):
+        probe_native_illegal_tick(game, opcode, bool(prior_nop))
+
+
 def _run_native_probe():
     cases = [
         ("NOP", probe_native_real_opcode_retirement, ([0], 1, 4)),
@@ -369,11 +443,31 @@ def _run_native_probe():
         ):
             probe(game, *args)
         print(f"PASS {name}")
-    print(f"Native counter probe: {len(cases)} passed")
+    for opcode in ILLEGAL_OPCODES:
+        for prior_nop in (0, 1):
+            case = f"{opcode}:{prior_nop}"
+            # subprocess.run kills and reaps a timed-out child; never execute
+            # unknown-runtime illegal instructions in this parent process.
+            subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--native-illegal-case", case],
+                check=True,
+                timeout=10,
+            )
+            print(f"PASS illegal 0x{opcode:02X}, prior NOP={prior_nop}")
+    print(f"Native counter probe: {len(cases) + 2 * len(ILLEGAL_OPCODES)} passed")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--native-probe", action="store_true", required=True)
-    parser.parse_args()
-    _run_native_probe()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--native-probe", action="store_true")
+    mode.add_argument(
+        "--native-illegal-case",
+        choices=[f"{opcode}:{prior}" for opcode in ILLEGAL_OPCODES for prior in (0, 1)],
+        help=argparse.SUPPRESS,
+    )
+    args = parser.parse_args()
+    if args.native_probe:
+        _run_native_probe()
+    else:
+        _run_native_illegal_child(args.native_illegal_case)
