@@ -244,6 +244,7 @@ class GateReport:
     collection_skips: tuple[dict[str, str], ...] = ()
     collection_only: bool = False
     error: str = ""
+    failed_records: tuple[dict[str, str], ...] = ()
 
 
 @dataclass
@@ -1244,6 +1245,17 @@ def _load_gate_report(
         collection_errors=tuple(collection_errors),
         collection_skips=tuple(collection_skips),
         collection_only=collection_only,
+        failed_records=tuple(
+            {
+                "nodeid": record["nodeid"],
+                "outcome": ("xfailed" if record["outcome"] == "skipped" else "xpassed")
+                if record["was_xfail"] and record["outcome"] in {"skipped", "passed"}
+                else record["outcome"],
+                "reason": record["reason"],
+            }
+            for record in records
+            if record["outcome"] != "passed" or record["was_xfail"]
+        ),
     )
 
 
@@ -1910,13 +1922,19 @@ def run_pytest_once(
             nodeids=report.nodeids,
             collection_errors=report.collection_errors,
             collection_skips=report.collection_skips,
+            failed_records=report.failed_records,
             error=(f"{timeout_reason}; {report.error}" if report.error else timeout_reason),
         )
     if report.error:
         output = f"{output}\n{report.error}"
     # Keep the command and enough output to diagnose a failed gate without
     # flooding the orchestrator with every emulator trace.
-    return returncode, report, output[-8000:], command
+    return (
+        returncode,
+        report,
+        _bounded_failure_text(output, MAX_FAILED_OUTPUT_CHARS, tail=True),
+        command,
+    )
 
 
 def synthetic_optional_skip(
@@ -2582,6 +2600,23 @@ def run_matrix_tier(
     )
 
 
+MAX_ITERATION_FAILURES = 32
+MAX_ITERATION_FAILURE_CHARS = 2000
+MAX_FAILED_OUTPUT_CHARS = 8000
+_EVIDENCE_OMITTED = "\n[...additional failure evidence omitted...]"
+
+
+def _bounded_failure_text(value: str, limit: int, *, tail: bool = False) -> str:
+    # Redact the whole string before any slice can detach a sensitive suffix
+    # from its credential/path prefix. Keep node IDs at the start of entries.
+    safe = _safe_text(value, limit=sys.maxsize)
+    if len(safe) <= limit:
+        return safe
+    marker = "[...truncated...]"
+    available = limit - len(marker)
+    return marker + safe[-available:] if tail else safe[:available] + marker
+
+
 def run_tier(
     *,
     name: str,
@@ -2636,6 +2671,9 @@ def run_tier(
     output_tail = ""
     command: list[str] | None = None
     iteration_failures: list[str] = []
+    omitted_failures = 0
+    failed_output = ""
+    output_omitted = False
     baseline_nodeids: set[str] | None = None
     selected_nodeids: list[str] = []
     started = time.monotonic()
@@ -2660,7 +2698,7 @@ def run_tier(
         aggregate_reasons.update(report.skip_reasons)
         returncodes.append(returncode)
         if output.strip():
-            output_tail = output
+            output_tail = _bounded_failure_text(output, MAX_FAILED_OUTPUT_CHARS, tail=True)
 
         problems: list[str] = []
         if report.error:
@@ -2697,7 +2735,44 @@ def run_tier(
                 f"baseline={len(baseline_nodeids)} current={len(current_nodeids)}"
             )
         if problems:
-            iteration_failures.extend(f"iteration {iteration}: {problem}" for problem in problems)
+            # Put actionable case evidence before generic accounting summaries.
+            details = (
+                f"{_bounded_failure_text(record['nodeid'], 500)}: {record['outcome']}: "
+                f"{_bounded_failure_text(record['reason'], 1300, tail=True)}"
+                for record in report.failed_records
+            )
+            collection_details = (
+                f"{_bounded_failure_text(record['nodeid'], 500)}: collection: "
+                f"{_bounded_failure_text(record['reason'], 1300, tail=True)}"
+                for record in (*report.collection_errors, *report.collection_skips)
+            )
+            for detail_group in (details, collection_details, problems):
+                for detail in detail_group:
+                    if len(iteration_failures) < MAX_ITERATION_FAILURES:
+                        iteration_failures.append(
+                            _bounded_failure_text(
+                                f"iteration {iteration}: {detail}", MAX_ITERATION_FAILURE_CHARS
+                            )
+                        )
+                    else:
+                        omitted_failures += 1
+            if not output_omitted:
+                excerpt = f"iteration {iteration}:\n" + _bounded_failure_text(
+                    output if output.strip() else "[no subprocess output]", 3900, tail=True
+                )
+                candidate = failed_output + ("\n\n" if failed_output else "") + excerpt
+                budget = MAX_FAILED_OUTPUT_CHARS - len(_EVIDENCE_OMITTED)
+                if len(candidate) > budget:
+                    # Never evict the first failure to make room for later runs.
+                    failed_output += _EVIDENCE_OMITTED
+                    output_omitted = True
+                else:
+                    failed_output = candidate
+
+    if omitted_failures:
+        iteration_failures.append(f"[...{omitted_failures} additional failure entries omitted...]")
+    if failed_output:
+        output_tail = failed_output
 
     duration = time.monotonic() - started
     unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
