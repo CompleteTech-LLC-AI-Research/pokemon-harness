@@ -17,6 +17,7 @@ import math
 import multiprocessing
 import os
 import socket
+import stat
 import sys
 import tempfile
 import threading
@@ -37,6 +38,115 @@ QUANTUM_CYCLES = 256
 MAX_REPORT_BYTES = 1_048_576
 STDERR_LIMIT = 65_536
 MENU_TERMINAL_RESERVE = 131_072
+CALL_LOG_BYTE_LIMIT = 16 * 1024 * 1024
+INLINE_CALL_WINDOW = 4
+MILESTONE_EVENT_LIMIT = 32
+
+
+class CallEvidenceLog:
+    """Owner-only log; complete means all attempted calls have terminal evidence.
+
+    It does not mean their CPU calls succeeded or teardown was graceful.
+    Incomplete writes/cap exhaustion are sticky failures.
+    """
+
+    def __init__(self, path, byte_limit=CALL_LOG_BYTE_LIMIT):
+        if type(byte_limit) is not int or byte_limit <= 0:
+            raise ValueError("call log byte limit must be positive")
+        self.path = Path(path)
+        self.byte_limit = byte_limit
+        self._stream = self.path.open("xb", buffering=0)
+        self._hash = hashlib.sha256()
+        self.bytes = self.record_count = 0
+        self.error = None
+        self.complete = False
+
+    def append(self, call):
+        if self.error is not None or self._stream.closed:
+            raise RuntimeError(self.error or "call log is closed")
+        try:
+            payload = (json.dumps(_jsonable(call), separators=(",", ":")) + "\n").encode()
+            if self.bytes + len(payload) > self.byte_limit:
+                raise RuntimeError("call log byte cap exceeded")
+            remaining = memoryview(payload)
+            while remaining:
+                written = self._stream.write(remaining)
+                if not written:
+                    raise OSError("call log write made no progress")
+                self._hash.update(remaining[:written])
+                self.bytes += written
+                remaining = remaining[written:]
+            self._stream.flush()
+            self.record_count += 1
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+            raise
+
+    def snapshot(self):
+        return {
+            "path": str(self.path),
+            "bytes": self.bytes,
+            "record_count": self.record_count,
+            "sha256": self._hash.hexdigest(),
+            "complete": self.complete,
+            "error": self.error,
+        }
+
+    def close(self, complete=True):
+        try:
+            if not self._stream.closed:
+                try:
+                    self._stream.flush()
+                finally:
+                    self._stream.close()
+            self.complete = bool(complete and self.error is None)
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+            self.complete = False
+            raise
+
+
+def validate_call_artifact(owner):
+    """Qualify complete stream evidence with a bounded read; inline is unchanged."""
+    manifest = owner.get("call_log")
+    if manifest is None:
+        if "call_counts" in owner:
+            raise ValueError("streamed call artifact manifest is missing")
+        return
+    if not manifest.get("complete") or manifest.get("error"):
+        raise ValueError("call artifact is incomplete")
+    expected_bytes = manifest.get("bytes")
+    expected_records = manifest.get("record_count")
+    if (
+        type(expected_bytes) is not int
+        or not 0 <= expected_bytes <= CALL_LOG_BYTE_LIMIT
+        or type(expected_records) is not int
+        or expected_records < 0
+        or expected_records != owner.get("call_counts", {}).get("total")
+    ):
+        raise ValueError("call artifact manifest/count mismatch")
+    fd = os.open(manifest["path"], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    digest = hashlib.sha256()
+    size = lines = 0
+    last = b""
+    with os.fdopen(fd, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > CALL_LOG_BYTE_LIMIT:
+            raise ValueError("call artifact must be a bounded regular file")
+        while block := stream.read(min(65_536, CALL_LOG_BYTE_LIMIT + 1 - size)):
+            size += len(block)
+            digest.update(block)
+            lines += block.count(b"\n")
+            last = block[-1:]
+            if size > CALL_LOG_BYTE_LIMIT:
+                raise ValueError("call artifact exceeds byte cap")
+    if (
+        size != expected_bytes
+        or digest.hexdigest() != manifest.get("sha256")
+        or lines != expected_records
+        or (size and last != b"\n")
+    ):
+        raise ValueError("call artifact bytes/hash/record count mismatch")
 
 
 def validate_input_profile(args):
@@ -45,6 +155,11 @@ def validate_input_profile(args):
         raise ValueError("unknown input profile")
     if profile == "menu" and (args.listener_chunk != 1 or args.connector_chunk != 1):
         raise ValueError("menu input requires listener_chunk=connector_chunk=1")
+    retention = getattr(args, "call_retention", "inline")
+    if retention not in ("inline", "stream"):
+        raise ValueError("unknown call retention")
+    if profile != "menu" and (getattr(args, "rom_milestones", False) or retention == "stream"):
+        raise ValueError("ROM milestones and streamed calls require menu input profile")
     return profile
 
 
@@ -69,6 +184,8 @@ def parse_args(argv=None):
     parser.add_argument("--both-orientations", action="store_true")
     parser.add_argument("--owner-mode", choices=("thread", "process"), default="thread")
     parser.add_argument("--input-profile", choices=("none", "menu"), default="none")
+    parser.add_argument("--rom-milestones", action="store_true")
+    parser.add_argument("--call-retention", choices=("inline", "stream"), default="inline")
     parser.add_argument("--listener-chunk", type=positive_int, default=1)
     parser.add_argument("--connector-chunk", type=positive_int, default=2)
     parser.add_argument("--frame-limit", type=positive_int, default=6)
@@ -228,6 +345,7 @@ def _run_owner(
     endpoint_factory,
     asset_resolver,
     checkpoint=None,
+    evidence_path=None,
 ):
     record = records[index]
     session = endpoint = None
@@ -237,6 +355,48 @@ def _run_owner(
     record.update(version=version, owner_thread=threading.get_ident(), pid=os.getpid())
     profile = validate_input_profile(args)
     scheduled_offsets = set()
+    log = observer = milestone_context = None
+    seen_events = 0
+    call_index = 0
+    first_calls, last_calls, milestone_calls = [], [], []
+
+    def finish_call(call):
+        nonlocal seen_events
+        if log is not None:
+            counts = record["call_counts"]
+            counts["total"] += 1
+            status = call.get("status", "interrupted")
+            counts[status] = counts.get(status, 0) + 1
+            counts["noncompleted"] += status != "completed"
+            counts["requested_frames"] += call["requested_frames"]
+            if "actual_completed_frames" in call:
+                counts["actual_completed_frames"] += call["actual_completed_frames"]
+            else:
+                counts["unknown_actual_calls"] += 1
+        if observer is not None:
+            state = observer.snapshot()
+            record["milestones"] = state
+            call["milestones"] = state["events"][seen_events:]
+            seen_events = len(state["events"])
+        if log is None:
+            return
+        try:
+            log.append(call)
+        except Exception as exc:
+            record["unspooled_call"] = call
+            record["errors"].append(f"call evidence: {type(exc).__name__}: {exc}")
+            raise
+        finally:
+            record["call_log"] = log.snapshot()
+        if len(first_calls) < INLINE_CALL_WINDOW:
+            first_calls.append(call)
+        last_calls.append(call)
+        del last_calls[:-INLINE_CALL_WINDOW]
+        if call.get("milestones") and len(milestone_calls) < MILESTONE_EVENT_LIMIT:
+            milestone_calls.append(call)
+        retained = {item["call_index"]: item for item in first_calls + last_calls + milestone_calls}
+        record["calls"] = [retained[key] for key in sorted(retained)]
+        record.pop("in_flight", None)
 
     def observed():
         record.pop("last_native_observation", None)
@@ -272,6 +432,22 @@ def _run_owner(
                     record["errors"].append(f"checkpoint: {record['checkpoint_error']}")
 
     try:
+        if getattr(args, "call_retention", "inline") == "stream":
+            if evidence_path is None:
+                evidence_path = Path(tempfile.mkdtemp(prefix="poke-timed-calls-")) / "calls.jsonl"
+            log = CallEvidenceLog(evidence_path)
+            record["call_log"] = log.snapshot()
+            record["call_counts"] = {
+                "total": 0,
+                "completed": 0,
+                "interrupted": 0,
+                "completed_no_progress": 0,
+                "completed_partial": 0,
+                "noncompleted": 0,
+                "requested_frames": 0,
+                "actual_completed_frames": 0,
+                "unknown_actual_calls": 0,
+            }
         publish("asset_validation")
         record["tcp_nodelay"] = sockets[index].getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
         assets = asset_resolver(version, args.repo_root)
@@ -282,6 +458,22 @@ def _run_owner(
         session.load_state(assets["state"])
         record["loaded"] = observed()
         publish("loaded")
+        if getattr(args, "rom_milestones", False):
+            from scripts._timed_menu_probe import observe_rom_milestones
+
+            milestone_context = observe_rom_milestones(
+                symbols=session.symbols,
+                memory=session._pyboy.memory,
+                register_file=session._pyboy.register_file,
+                frame_count=lambda: session._pyboy.frame_count,
+                hook_register=session._pyboy.hook_register,
+                hook_deregister=session._pyboy.hook_deregister,
+                owner_thread_id=record["owner_thread"],
+                enabled=True,
+                max_events=MILESTONE_EVENT_LIMIT,
+            )
+            observer = milestone_context.__enter__()
+            record["milestones"] = observer.snapshot()
         endpoint = endpoint_factory(
             sockets[index],
             side=record["side"],
@@ -320,14 +512,20 @@ def _run_owner(
             ):
                 raise RuntimeError("menu report capacity reached; no further input or tick")
             call = {
+                "call_index": call_index,
                 "frame_offset": offset,
                 "started_monotonic": time.monotonic(),
                 "requested_frames": min(chunk, remaining),
                 "before": observed(),
             }
+            call_index += 1
             record["calls"].append(call)
+            if log is not None:
+                record["in_flight"] = call
             publish("public_tick")
             try:
+                if observer is not None:
+                    observer.check()
                 if profile == "menu" and offset not in scheduled_offsets:
                     from scripts._timed_menu_probe import menu_input_at
 
@@ -346,6 +544,8 @@ def _run_owner(
                         publish("input_queued_before_public_tick")
                 session.step(call["requested_frames"], render=False)
                 call["status"] = "completed"
+                if observer is not None:
+                    observer.check()
             except BaseException as exc:
                 call["status"] = "interrupted"
                 call["error"] = f"{type(exc).__name__}: {exc}"
@@ -357,7 +557,6 @@ def _run_owner(
                     call["actual_completed_frames"] = (
                         call["after"]["frame_count"] - call["before"]["frame_count"]
                     )
-                    publish("public_tick_returned")
                 except BaseException as exc:
                     if "last_native_observation" in record:
                         call["after"] = record["last_native_observation"]
@@ -366,7 +565,28 @@ def _run_owner(
                         )
                     call["observation_error"] = f"{type(exc).__name__}: {exc}"
                     if "error" not in call:
+                        call["status"] = "interrupted"
+                        call["error"] = call["observation_error"]
                         raise
+                finally:
+                    if call.get("status") == "completed":
+                        actual = call.get("actual_completed_frames")
+                        if actual == 0:
+                            call["status"] = "completed_no_progress"
+                        elif actual != call["requested_frames"]:
+                            call["status"] = "completed_partial"
+                    try:
+                        finish_call(call)
+                    except Exception as exc:
+                        if log is not None:
+                            record["unspooled_call"] = call
+                            record["errors"].append(
+                                f"call finalization: {type(exc).__name__}: {exc}"
+                            )
+                        if "error" not in call:
+                            raise
+                    finally:
+                        publish("public_tick_returned")
             if call["actual_completed_frames"] == 0:
                 call["status"] = "completed_no_progress"
                 record["termination"] = "no_progress"
@@ -400,12 +620,38 @@ def _run_owner(
                     endpoint.close()
                 detached = True
                 record["cleanup"].append("endpoint_detached")
-            if session is not None and detached:
-                session.close(save=False, timeout_s=max(0.001, overall - time.monotonic()))
-                record["cleanup"].append("session_closed_without_save")
         except BaseException as exc:
             record["errors"].append(f"cleanup: {type(exc).__name__}: {exc}")
         finally:
+            if observer is not None:
+                try:
+                    record["milestones"] = observer.snapshot()
+                except Exception as exc:
+                    record["errors"].append(f"milestone snapshot: {type(exc).__name__}: {exc}")
+                try:
+                    milestone_context.__exit__(None, None, None)
+                    record["cleanup"].append("milestone_hooks_removed")
+                except BaseException as exc:
+                    record["errors"].append(f"milestone cleanup: {type(exc).__name__}: {exc}")
+                finally:
+                    try:
+                        record["milestones"] = observer.snapshot()
+                    except Exception as exc:
+                        record["errors"].append(f"milestone snapshot: {type(exc).__name__}: {exc}")
+            if session is not None and detached:
+                try:
+                    session.close(save=False, timeout_s=max(0.001, overall - time.monotonic()))
+                    record["cleanup"].append("session_closed_without_save")
+                except BaseException as exc:
+                    record["errors"].append(f"cleanup: {type(exc).__name__}: {exc}")
+            if log is not None:
+                try:
+                    log.close(
+                        complete=("unspooled_call" not in record and "in_flight" not in record)
+                    )
+                except Exception as exc:
+                    record["errors"].append(f"call log close: {type(exc).__name__}: {exc}")
+                record["call_log"] = log.snapshot()
             sockets[index].close()
             publish("cleanup_finished")
 
@@ -917,6 +1163,17 @@ def main(argv=None):
         report = run_probe(args)
     except Exception as exc:
         report = {"label": "cancellation_diagnostic", "error": f"{type(exc).__name__}: {exc}"}
+    for pair in report.get("pairs", []):
+        for owner in pair.get("owners", []):
+            try:
+                if (
+                    getattr(args, "call_retention", "inline") == "stream"
+                    and "call_log" not in owner
+                ):
+                    raise ValueError("streamed call artifact manifest is missing")
+                validate_call_artifact(owner)
+            except Exception as exc:
+                owner.setdefault("errors", []).append(f"call artifact: {type(exc).__name__}: {exc}")
     # Exclusive creation prevents overwriting any existing evidence/assets.
     with args.output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, default=str)
@@ -943,7 +1200,14 @@ def main(argv=None):
                 or owner.get("stderr", {}).get("error")
                 or owner.get("stdout", {}).get("drainer_alive")
                 or owner.get("stdout", {}).get("error")
-                or any(call.get("status") != "completed" for call in owner.get("calls", []))
+                or owner.get("call_counts", {}).get("noncompleted", 0)
+                or owner.get("call_log", {}).get("error")
+                or ("call_log" in owner and not owner["call_log"]["complete"])
+                or owner.get("milestones", {}).get("error")
+                or (
+                    "call_counts" not in owner
+                    and any(call.get("status") != "completed" for call in owner.get("calls", []))
+                )
                 for owner in pair["owners"]
             )
             for pair in report.get("pairs", [])

@@ -40,6 +40,7 @@ REAL_ROM_MODULES = frozenset(
         "test_mcp_real_link.py",
         "test_link_symbols_real_roms.py",
         "test_mcp_stdio_integration.py",
+        "test_mcp_timed_rom.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
@@ -100,6 +101,8 @@ UNIT_MODULES = frozenset(
         "test_timed_link_session.py",
         "test_timed_input_observation.py",
         "test_timed_menu_probe.py",
+        "test_timed_mcp_matrix.py",
+        "test_timed_menu_milestones.py",
         "test_timed_remote.py",
         "test_timed_wire.py",
     }
@@ -139,6 +142,12 @@ ROM_FREE_TESTS = frozenset(
             "test_partial_peer_sentinel_is_fatal_before_gameplay_assertions",
         )
     }
+    | {
+        (
+            "test_mcp_timed_rom.py",
+            "test_rom_client_load_state_timeout_redacts_data",
+        ),
+    }
 )
 
 LOCAL_LINK_MODULES = frozenset(
@@ -152,11 +161,12 @@ REMOTE_LINK_MODULES = frozenset(
     {
         "test_link_integration_remote.py",
         "test_mcp_real_link.py",
+        "test_mcp_timed_rom.py",
         "test_pyboy_link_session_subprocess.py",
     }
 )
 
-MCP_STDIO_MODULES = frozenset({"test_mcp_stdio_integration.py"})
+MCP_STDIO_MODULES = frozenset({"test_mcp_stdio_integration.py", "test_mcp_timed_rom.py"})
 
 # The broad trade set keeps ROM milestones visible in diagnostics. The strict
 # acceptance set below is deliberately narrower and is what the production
@@ -291,6 +301,10 @@ TIER_REQUIRED_TESTS = {
 # lane, whose exact name is owned by that lane.
 TIMING_SENSITIVE_TESTS = frozenset(
     {
+        (
+            "test_timed_menu_milestones.py",
+            "test_authored_cartridge_actual_helper_is_non_mutating",
+        ),
         (
             "test_mcp_timed_stdio.py",
             "test_authored_timed_stdio_pair_frames_and_cleanup",

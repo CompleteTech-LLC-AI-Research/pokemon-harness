@@ -466,7 +466,29 @@ def test_canonical_boot_nodes_are_required_and_classified_local():
 
 def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert SUPPORTED_VERSIONS == ("red", "blue", "yellow")
-    assert len(TIER_REQUIRED_NODEIDS["remote"]) == 11
+    legacy_remote = {
+        "tests/test_link_integration_remote.py::"
+        f"test_remote_handshake_writes_status_on_both_sides[{left}-{right}]"
+        for left in ("red", "blue", "yellow")
+        for right in ("red", "blue", "yellow")
+    } | {
+        "tests/test_mcp_real_link.py::test_mcp_remote_link_attaches_native_serial_backend",
+        (
+            "tests/test_pyboy_link_session_subprocess.py::"
+            "test_subprocess_pair_reaches_link_menu_over_tcp"
+        ),
+    }
+    timed_remote = {
+        "tests/test_mcp_timed_rom.py::"
+        f"test_timed_rom_stdio_pair[{listener}-listen-{connector}-connect]"
+        for listener in ("red_color", "blue_color", "yellow")
+        for connector in ("red_color", "blue_color", "yellow")
+    }
+    assert len(legacy_remote) == 11
+    assert len(timed_remote) == 9
+    assert legacy_remote.isdisjoint(timed_remote)
+    assert matrix.TIMED_MCP_SMOKE_NODEIDS == timed_remote
+    assert TIER_REQUIRED_NODEIDS["remote"] == legacy_remote | timed_remote
     assert len(TIER_REQUIRED_NODEIDS["local"]) == 21
     expected = required_matrix_nodeids()
     expected["local"] = expected["local"] | _CANONICAL_BOOT_NODEIDS
