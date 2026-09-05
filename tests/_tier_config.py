@@ -56,6 +56,7 @@ UNIT_MODULES = frozenset(
         "test_config.py",
         "test_cpu_instruction_counter.py",
         "test_emulated_time.py",
+        "test_emulated_time_held_delivery.py",
         "test_emulated_time_segments.py",
         "test_events.py",
         "test_execution_adapter.py",
@@ -89,6 +90,7 @@ UNIT_MODULES = frozenset(
         "test_state_status.py",
         "test_state_text.py",
         "test_symbol_loader.py",
+        "test_timed_wire.py",
     }
 )
 

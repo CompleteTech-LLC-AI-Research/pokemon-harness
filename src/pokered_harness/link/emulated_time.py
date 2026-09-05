@@ -24,7 +24,8 @@ ALL edges at or before its time. This class checks epoch and receipt sequence,
 not network origin. Edges may arrive late within an explicit full-cycle bound;
 watermark contradictions always terminate independently of that bound. Observed
 execution is never rolled back in terminal diagnostics. Delivered metadata must
-be acknowledged before further permits; acknowledgement is a caller assertion,
+be acknowledged before ordinary permits; a batch may explicitly hold one bounded
+rearm episode within its original lateness deadline. Acknowledgement is a caller assertion,
 not evidence that this module applied an edge to hardware or an emulator.
 
 Request IDs increase lexicographically (use fixed-width numeric strings).
@@ -160,6 +161,9 @@ class EmulatedTimeCoordinator:
         self._watermark = -1
         self._watermark_sequence = 0
         self._pending_delivery: int | None = None
+        self._held_delivery: tuple[EdgeDelivery, ...] = ()
+        self._held_deadline: int | None = None
+        self._delivery_episode: tuple[str, int, int] | None = None
 
     def _fail(self, message: str) -> NoReturn:
         if self._terminal_reason is None:
@@ -238,12 +242,49 @@ class EmulatedTimeCoordinator:
                     return
                 if request_id <= self._episode[0]:
                     self._fail("request IDs must increase; conflicting replay")
+            if self._delivery_episode is not None:
+                self._fail("cannot replace held delivery episode before acknowledgement")
             if self._pending or self._debt() or self._active_episode():
                 self._fail("cannot replace pending, indebted, or active episode")
             self._episode = episode
             self._episode_open = True
             self._episode_end = self._local + cycle_budget * 2
             self._instructions = instruction_cap
+            self._condition.notify_all()
+
+    def begin_delivery_rearm(
+        self, batch_token: int, request_id: str, *, cycle_budget: int, instruction_cap: int
+    ) -> None:
+        """Associate one bounded episode with an unacknowledged delivery.
+
+        The batch's original earliest edge fixes the emulated lateness deadline.
+        Identical retries never refill or reopen allowance, even after finish.
+        The owner separately bounds wall-clock waiting with wait_for_permit.
+        """
+        with self._condition:
+            self._open()
+            self._integer(batch_token, "batch_token", 1)
+            self._name(request_id, "request_id")
+            self._integer(cycle_budget, "cycle_budget", 1)
+            self._integer(instruction_cap, "instruction_cap", 1)
+            if cycle_budget * 2 > self._rearm:
+                self._fail("episode exceeds explicit rearm_budget")
+            if batch_token != self._pending_delivery:
+                self._fail("rearm requires a pending delivered batch")
+            if self._pending is not None:
+                self._fail("delivery rearm requires no outstanding permit")
+            episode = (request_id, cycle_budget, instruction_cap)
+            if self._delivery_episode is not None:
+                if episode == self._delivery_episode:
+                    return
+                self._fail("delivery batch already has a rearm allowance")
+            # A replay of an ordinary episode cannot acquire a new association.
+            if self._episode is not None and request_id <= self._episode[0]:
+                self._fail("request IDs must increase; conflicting replay")
+            self.begin_episode(
+                request_id, cycle_budget=cycle_budget, instruction_cap=instruction_cap
+            )
+            self._delivery_episode = self._episode
             self._condition.notify_all()
 
     def finish_episode(self, request_id: str) -> None:
@@ -268,7 +309,14 @@ class EmulatedTimeCoordinator:
     def _reserve(self, max_cpu_cycles: int) -> Permit | None:
         if (
             self._pending is not None
-            or self._pending_delivery is not None
+            or (
+                self._pending_delivery is not None
+                and not (
+                    self._delivery_episode is not None
+                    and self._episode == self._delivery_episode
+                    and self._active_episode()
+                )
+            )
             or not self._progress_sequence
         ):
             return None
@@ -278,6 +326,10 @@ class EmulatedTimeCoordinator:
             if not self._instructions:
                 return None
             ceiling = min(ceiling + self._rearm, self._episode_end)
+        if self._held_deadline is not None:
+            if self._local > self._held_deadline:
+                self._fail("held delivery lateness exceeds bound")
+            ceiling = min(ceiling, self._held_deadline)
         if self._edges:
             scheduled = self._edges[0][0]
             distance = scheduled - self._local
@@ -368,6 +420,8 @@ class EmulatedTimeCoordinator:
                 self._fail("half-cycle permit overrun; actual elapsed recorded")
             if instructions > permit.instruction_cap:
                 self._fail("instruction cap exceeded; actual elapsed recorded")
+            if self._held_deadline is not None and self._local > self._held_deadline:
+                self._fail("held delivery lateness exceeds bound; actual elapsed recorded")
             if self._edges and self._local - self._edges[0][0] > self._max_lateness:
                 self._fail("edge lateness exceeds bound; actual elapsed recorded")
             return self.snapshot()
@@ -495,7 +549,7 @@ class EmulatedTimeCoordinator:
     def pop_ready_edges(self) -> tuple[EdgeDelivery, ...]:
         """Release ordered metadata at current committed time, never while executing.
 
-        A nonempty batch blocks further execution until acknowledge_delivery.
+        A nonempty batch blocks execution except its associated delivery rearm.
         Neither release nor acknowledgement proves native edge application.
         """
         with self._condition:
@@ -523,6 +577,8 @@ class EmulatedTimeCoordinator:
                 )
             if ready:
                 self._pending_delivery = batch_token
+                self._held_delivery = tuple(ready)
+                self._held_deadline = ready[0].at_half_cycle + self._max_lateness
                 self._condition.notify_all()
             return tuple(ready)
 
@@ -536,7 +592,16 @@ class EmulatedTimeCoordinator:
             self._integer(batch_token, "batch_token", 1)
             if batch_token != self._pending_delivery:
                 self._fail("invalid or already acknowledged delivery batch")
+            if self._pending is not None:
+                self._fail("acknowledgement requires no outstanding permit")
+            if self._delivery_episode is not None:
+                self._episode_open = False
+                self._episode_end = self._local
+                self._instructions = 0
             self._pending_delivery = None
+            self._held_delivery = ()
+            self._held_deadline = None
+            self._delivery_episode = None
             self._condition.notify_all()
 
     def wait_for_permit(self, max_cpu_cycles: int, *, deadline: float) -> Permit | None:
