@@ -10,8 +10,8 @@ symbol files, save states, or other ROM-derived artifacts.
 ## Release status
 
 **Status: `PARTIAL` — not production-ready.** This is the current
-2026-09-04 candidate audit on branch `codex/production-next-20260904`, based on
-the public `master` head `51d60a056178fc922ffaac49291365ce409d4221`. The
+2026-09-04 candidate audit on branch `codex/trade-reliability-20260905`, based on
+the public `master` head `efa3da8c7d356a6a896c76e8b18e72397b0585b7`. The
 implementation hardens bit-accurate serial timing, save-state migration,
 native callback error propagation, session close races, and the real-ROM
 battle driver. Current battle acceptance passes; the complete current trade
@@ -40,7 +40,11 @@ Current evidence, using the operator-supplied assets pinned in
   Trade Center warp. Its final transport snapshot had `1,080` applied owner
   edges, `9/10` sync counters, zero owner-edge errors, zero IRQ callback
   errors, and no pending requests; this is an unresolved protocol/ROM
-  rendezvous failure, not a backend crash. The other 18 rows passed.
+  rendezvous failure, not a backend crash. The other 18 rows passed. A
+  targeted rerun of that exact row passed once, and a four-worker stress replay
+  passed `4/4`; those are diagnostic replays and do not change the failed
+  serialized matrix result. The subprocess peer now also reports the ROM-owned
+  LinkMenu selection buffers and warp-transition counters on future failures.
 - **Quality checks:** Ruff lint passes, and the release-hygiene formatter check
   passes for the touched packaging test. The repository-wide formatter check
   still reports unrelated legacy files and was not used to rewrite them.

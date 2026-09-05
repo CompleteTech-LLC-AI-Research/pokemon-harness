@@ -31,6 +31,11 @@ _TRADE_DIAG_SYMBOLS = (
     "Serial_SyncAndExchangeNybble",
     "LinkMenu",
     "LinkMenu.waitForInputLoop",
+    "LinkMenu.doneChoosingMenuSelection",
+    "LinkMenu.choseCancel",
+    "CloseLinkConnection",
+    "PrepareForSpecialWarp",
+    "SpecialEnterMap",
     "CableClubLeftGameboy",
     "CableClubRightGameboy",
     "CableClub_DoBattleOrTrade",
@@ -221,6 +226,7 @@ def main() -> int:
     party_after_trade: dict[str, object] | None = None
     final_state: dict[str, int] = {}
     final_cpu: dict[str, object] = {}
+    link_menu_state: dict[str, object] = {}
     counters = {s: [0] for s in _TRADE_DIAG_SYMBOLS}
     shots: list[str] = []
     select_mon_announced = False
@@ -254,6 +260,44 @@ def main() -> int:
         except BaseException:  # noqa: BLE001
             return {}
 
+    def link_menu_snapshot() -> dict[str, object]:
+        """Capture ROM-owned LinkMenu selection fields for failed runs.
+
+        These are observations only.  In particular, this helper never
+        writes the send/receive buffers or any connection/warp state.  The
+        values distinguish a malformed menu-selection exchange from a valid
+        ``0xD4`` trade vote that failed to reach ``SpecialEnterMap``.
+        """
+        if session is None:
+            return {}
+        memory = session._pyboy.memory
+        snapshot: dict[str, object] = {}
+
+        def read_byte(symbol: str, offset: int = 0) -> int | None:
+            try:
+                return int(memory[session.symbols.addr_of(symbol) + offset])
+            except (AttributeError, KeyError, TypeError, IndexError):
+                return None
+
+        for symbol in (
+            "wCurrentMenuItem",
+            "wMaxMenuItem",
+            "wCableClubDestinationMap",
+            "wLinkState",
+            "hSerialConnectionStatus",
+        ):
+            value = read_byte(symbol)
+            if value is not None:
+                snapshot[symbol] = value
+        for symbol in (
+            "wLinkMenuSelectionSendBuffer",
+            "wLinkMenuSelectionReceiveBuffer",
+        ):
+            values = [read_byte(symbol, offset) for offset in (0, 1)]
+            if all(value is not None for value in values):
+                snapshot[symbol] = values
+        return snapshot
+
     def emit_result(*, setup_failed: bool = False) -> None:
         if setup_failed or session is None:
             party_after: dict[str, object] = {}
@@ -271,6 +315,7 @@ def main() -> int:
         result["party_after"] = party_after
         result["_final_state"] = final_state
         result["_final_cpu"] = final_cpu
+        result["_link_menu_state"] = {} if setup_failed else link_menu_state
         result["_shots"] = shots
         result["_backend_stats"] = backend_snapshot()
         result["_drive_status"] = drive_status
@@ -1691,6 +1736,7 @@ def main() -> int:
         try:
             final_state = state_snapshot()
             final_cpu = cpu_snapshot()
+            link_menu_state = link_menu_snapshot()
         except Exception as exc:  # noqa: BLE001
             log(f"final state snapshot raised {type(exc).__name__}: {exc}")
         try:
