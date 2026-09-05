@@ -9,19 +9,48 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-**Status: `PARTIAL` — not production-ready.** The recorded source battle
+**Status: `PARTIAL` — experimental branch, not production-ready.**
+
+At harness commit `e8db87e`, the dual-runtime `--unit-only` gate collected
+`2,512` tests per runtime. Source and native each passed `2,368` unit tests
+and `785` timing checks (`157` cases in each of five repetitions), with zero
+failures, errors, skips, xfails, or xpasses. The retained evidence bundle is
+`pokemon-routing-dual-e8db87e-20260905` (`gate-report.json`), local and
+unpublished. This is unit/timing evidence only, not real-ROM gameplay
+or a full release gate.
+
+The native runtime in that gate was built from the vendored code at `013b386`;
+the source runtime at `e8db87e` includes the subsequent boolean save-state
+restore correction. This combination is tested evidence, not an exact combined
+native release build of `e8db87e`.
+
+Timed execution remains explicitly opt-in and default-off through
+`TimedRemoteEndpoint` and `Session.bind_timed_execution`; it is not fully
+adopted by the MCP link workflow. Threaded Blue-color/Yellow diagnostics
+advanced only five to six frames before bounded cancellation. They do not
+prove trade, battle, rendezvous liveness, or graceful shutdown. The intended
+two-process diagnostic, completion of whole calls in that diagnostic, and
+full gameplay remain unverified. Earlier full
+real-ROM gates remain failed; the scoped passes below do not supersede them.
+
+### Historical source candidate evidence
+
+The historically recorded source battle
 matrix passed `19/19`; the recorded four-worker source trade matrix failed
-at `18/19`. The ongoing full source gate at
-`2eb21a5b45e67f47bb89697daeed76509adf4b13` has passed unit `980/980` and
+at `18/19`. The historical full source gate at
+`2eb21a5b45e67f47bb89697daeed76509adf4b13` passed unit `980/980` and
 local `47/47`, but its remote tier failed at `22/23`: the Yellow/Yellow TCP
 LinkMenu test reached the listener's menu and then reported
-`NetworkBackendError: backend closed`. Strict matrices are still running;
-this gate cannot qualify the release even if its remaining tiers pass.
+`NetworkBackendError: backend closed`. Its terminal report is `FAIL`: trade
+passed `18/19`, battle `19/19`, and timing `55/55`. The separate full native
+gate at `f4fddfc` also ended `FAIL`: unit `1,060/1,060`, local `47/47`, remote
+`11/12`, trade `14/19`, battle `15/19`, and timing `55/55`. Both terminal
+reports recorded zero skips; neither qualifies the release.
 The follow-up LinkMenu-only shutdown change passed five consecutive
 Yellow/Yellow real-ROM replays (`24.48s`, `22.20s`, `22.67s`, `23.08s`,
 `21.41s`). These targeted checks do not replace a full gate on the new candidate.
 
-Recorded evidence, using the operator-supplied assets pinned in
+Historical recorded evidence, using the operator-supplied assets pinned in
 [`VERSIONS.md`](VERSIONS.md):
 
 - **Clean editable install:** an exact-commit archive of `2eb21a5` passed
@@ -41,9 +70,9 @@ Recorded evidence, using the operator-supplied assets pinned in
   lifecycle, and packaging regression set passed `155/155`.
 - **Native build:** the vendored PyBoy 2.7.0 fork
   (`c565df66c3731fad2856169a90f6bbec99925915`) built a CPython 3.12 Linux
-  wheel successfully in an isolated temporary copy. A complete strict
-  gameplay run using that compiled wheel is not claimed here; the recorded
-  acceptance results below use the bundled source runtime.
+  wheel successfully in an isolated temporary copy. That build alone does
+  not qualify gameplay. The separate historical full native gate at `f4fddfc`
+  failed as recorded above; the acceptance results below use source mode.
 - **Strict battle acceptance:** the source-runtime gate passed `19/19` local
   and TCP real-ROM entrypoints in `1,237.8s`, with no skips, errors, or
   test-only protocol bypasses. All five ROM hashes, three symbol hashes, and
@@ -106,12 +135,15 @@ This is state-observation evidence, not live MCP gameplay evidence.
 
 ### Recorded candidate matrix
 
+The following matrix retains historical results; it is not the `e8db87e`
+unit/timing snapshot above or current experimental gameplay acceptance.
+
 | Capability | Recorded result | Evidence boundary |
 |---|---|---|
 | Source unit/timing | `PASS` — 980/980 unit and 55/55 timing cases | Recorded source runtime, Python 3.12.13, PyBoy 2.7.0 fork `c565df66c3731fad2856169a90f6bbec99925915`; 1,132 tests collected and all five ROM/SYM pins validated. |
 | Strict trade | `FAIL` — 18/19 | Recorded source runtime; all 19 rows declared and executed with `workers=4`. The sole failure is `red_color-listen-blue_color-connect` at the Trade Center warp after 722.6s; 18 other real-ROM local/TCP rows passed. |
 | Strict battle | `PASS` — 19/19 | Recorded source runtime; all 19 local/TCP real-ROM rows passed in 1,237.8s with no skips, errors, or test-only protocol bypasses. |
-| Native/Cython build | `PASS` — wheel built | Vendored PyBoy native wheel build passed in an isolated temporary copy. No strict gameplay run using the compiled wheel is claimed. |
+| Native/Cython build | `PASS` — wheel built | Build evidence only. The separate full native gate at `f4fddfc` failed remote, trade, and battle; compiled gameplay remains unqualified. |
 | Release readiness | `PARTIAL` | Source gate failed; compiled-runtime gameplay qualification remains open. Clean install and MCP startup/state/action/lifecycle must be verified for the declared scope. Unadvertised extensions remain separate coverage limits. |
 
 ### Historical evidence boundary
