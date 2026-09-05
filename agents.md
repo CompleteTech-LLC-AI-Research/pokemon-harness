@@ -46,14 +46,19 @@ path.
 The following claims are deliberately scoped to their named run and do not
 change the `PARTIAL` release decision.
 
-### Current source-runtime candidate evidence
+### Latest completed source-runtime evidence
 
-- The source unit/timing gate passed `954/954` unit tests and `50/50` timing
-  cases in each of five repetitions.
-- Current source representative asset-backed checks passed in-process and over
-  TCP for Red-color/Yellow trade and battle. These are representative rows,
-  not the complete strict matrix.
-- The real MCP stdio suite passed `4/4`, including protocol/tool/resource
+- The ongoing full gate at `2eb21a5` passed unit `980/980` and local `47/47`,
+  but remote failed `22/23` with a Yellow/Yellow LinkMenu backend-close error.
+  The follow-up shutdown change passed five consecutive targeted real-ROM
+  replays; a full candidate gate is still required.
+- The recorded source strict battle gate passed `19/19` local and TCP real-ROM
+  entrypoints in `1,237.8s`, with no skips, errors, or test-only protocol
+  bypasses. This is battle-tier acceptance, not full candidate acceptance.
+- The older source strict trade gate failed at `18/19` with `workers=4`;
+  `red_color-listen-blue_color-connect` timed out during Trade Center warp.
+  Targeted passing replays do not replace a complete passing trade matrix.
+- The historical real MCP stdio suite passed `4/4`, including protocol/tool/resource
   discovery, state observation, save/load round-trip, and a two-process remote
   listen/connect EOF-cleanup lifecycle. It does not prove MCP-driven starter,
   trade, or battle gameplay; the bounded MCP gameplay attempt did not acquire
@@ -63,7 +68,7 @@ change the `PARTIAL` release decision.
   fixture entries have verified provenance. Four vanilla-derived entries remain
   `PARTIAL`; matching bytes are not proof of vanilla capture provenance.
 
-### Isolated subagent matrix diagnostics
+### Historical isolated subagent matrix diagnostics
 
 Subagents ran these rows on exact pre-PR #42 head
 `71ca834d673c52eb74044089e92b09e7e3ae00a0`. They are useful diagnostic
@@ -115,22 +120,31 @@ the nine ordered Red/Blue/Yellow local pairs, nine ordered listener/connector
 TCP pairs, and the dedicated Red/Yellow assertion. Collection and declaration
 audits prove shape only.
 
-The following remain open at the current merged head:
+The following remain open for release qualification:
 
-- A clean current-head full source and native strict trade matrix.
-- A clean current-head full source and native strict battle matrix, including
-  the three remaining local source battle rows listed above. The full native
-  trade/battle matrix is unqualified.
-- Independently verified live MCP gameplay, including bounded boot/state
-  progression and MCP-driven starter/trade/battle behavior.
-- Provenance-complete vanilla ordinary fixtures and their derived rows. The
+- A clean current-head full source gate, including a passing strict trade
+  matrix. The recorded source battle `19/19` pass does not establish full
+  acceptance of a later candidate.
+- A passing full native strict trade/battle matrix; source-runtime acceptance
+  does not qualify the compiled runtime.
+- Current-candidate MCP startup/state/action/lifecycle verification, required
+  concurrency and cleanup regressions, and independent release review.
+- Clean-install and launch evidence for the candidate being qualified. The
+  standard-library editable-install path passed at `2eb21a5` on Python 3.12.13,
+  including pip dependency checks and source bootstrap identity. A separate
+  fresh wheel install passed dependency checks, ten public imports, and
+  pinned Red-color MCP startup/EOF cleanup outside the checkout. No MCP
+  requests or gameplay were exercised by that installation check.
+
+Separate coverage limits outside the declared canonical loopback scope:
+
+- MCP-driven starter/trade/battle workflows remain unproven.
+- Vanilla ordinary fixtures and their derived rows lack complete provenance. The
   retained replay failed at the `64`-movement-step bound, and ordinary-fixture
   producer revision `25e231c` is historical; no current-head reproducibility
   claim may be made.
-- A clean, reproducible standard-library install on a host where `venv` has
-  `ensurepip`, a complete current broad-suite run, real-ROM concurrent-load
-  evidence, full native platform coverage, and independent release review.
-- Secure cross-host networking. TCP is intentionally restricted to loopback
+- Additional native platforms and real-ROM concurrent-load qualification.
+- Cross-host networking. TCP is intentionally restricted to loopback
   addresses and currently has no authentication or encryption; never expose it
   to a LAN, WAN, or public address.
 

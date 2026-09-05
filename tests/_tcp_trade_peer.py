@@ -22,7 +22,9 @@ import math
 import os
 import sys
 import time
+from collections import deque
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 
 _TRADE_DIAG_SYMBOLS = (
@@ -128,18 +130,299 @@ def _hold_at_sync_boundary(
     wait_for_peer(release_sync_id, phase="release")
 
 
-def _install_hook(session, symbol, bucket):
-    if symbol not in session.symbols:
-        return
-    bank, addr = session.symbols.bank_addr(symbol)
+_LINK_MENU_HISTORY_EVENTS = (
+    "LinkMenu",
+    "LinkMenu.waitForInputLoop",
+    "LinkMenu.doneChoosingMenuSelection",
+    "LinkMenu.choseCancel",
+    "CloseLinkConnection",
+    "PrepareForSpecialWarp",
+    "SpecialEnterMap",
+    "LinkMenu.afterExchange",
+)
 
-    def _cb(_ctx):
-        bucket[0] += 1
 
-    try:
-        session._pyboy.hook_register(bank, addr, _cb, None)
-    except ValueError:
-        pass
+def _link_menu_post_call_address(session):
+    """Validate a direct CALL in banked ROM before observing its return site."""
+    bank, addr = session.symbols.bank_addr("LinkMenu.exchangeMenuSelectionLoop")
+    target_bank, target = session.symbols.bank_addr("Serial_ExchangeLinkMenuSelection")
+    if not ((bank == 0 and 0 <= addr <= 0x3FFC) or (bank > 0 and 0x4000 <= addr <= 0x7FFC)):
+        raise ValueError("CALL site is outside its ROM bank")
+    compatible = (target_bank == 0 and 0 <= target < 0x4000) or (
+        target_bank == bank and bank > 0 and 0x4000 <= target < 0x8000
+    )
+    memory = session._pyboy.memory
+    opcode, lo, hi = (int(memory[bank, addr + offset]) for offset in range(3))
+    if opcode != 0xCD or (lo | hi << 8) != target or not compatible:
+        raise ValueError("CALL opcode, target, or target bank mismatch")
+    return bank, addr + 3
+
+
+def _link_menu_receive_candidate(values):
+    """Select the first valid tag, not the first decisive vote (ROM order)."""
+    for index, value in enumerate(values[:2]):
+        if (value & 0xF0) == 0xD0:
+            return {"index": index, "value": value}
+    return None
+
+
+def _read_link_menu_fields(session, *, include_map=False, on_error=None):
+    """Read selection state without writes; optionally report bounded errors."""
+    snapshot = {}
+    fields = (
+        ("wCurrentMenuItem", 1),
+        ("wMaxMenuItem", 1),
+        ("wCableClubDestinationMap", 1),
+        ("wLinkState", 1),
+        ("hSerialConnectionStatus", 1),
+        ("wLinkMenuSelectionSendBuffer", 2),
+        ("wLinkMenuSelectionReceiveBuffer", 2),
+    )
+    if include_map:
+        fields += (("wCurMap", 1),)
+    for symbol, size in fields:
+        try:
+            addr = session.symbols.addr_of(symbol)
+            values = [int(session._pyboy.memory[addr + i]) for i in range(size)]
+            snapshot[symbol] = values[0] if size == 1 else values
+        except BaseException as exc:  # noqa: BLE001
+            if on_error is not None:
+                on_error(symbol, exc)
+    return snapshot
+
+
+class _LinkMenuHistory:
+    """Bounded, read-only observations; first milestones survive buffer reuse.
+
+    ``install`` replaces the caller's milestone installation loop so counters
+    and observations share a callback. Repeated installation is a no-op.
+    ``first`` retains one sample per event, independently of ``recent``.
+    """
+
+    def __init__(self, session, *, role, version, limit=8):
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        self.session = session
+        self.role = role
+        self.version = version
+        self.limit = limit
+        self.total = 0
+        self.counts = dict.fromkeys(_LINK_MENU_HISTORY_EVENTS, 0)
+        self.first = {}
+        self.first_decisive = {}
+        self.recent = deque(maxlen=limit)
+        self.hooks = {}
+        self.error_count = 0
+        self.errors = deque(maxlen=limit)
+        self._installed = False
+
+    def _error(self, event, stage, exc):
+        self.error_count += 1
+        try:
+            message = f"{type(exc).__name__}: {exc}"[:256]
+        except BaseException:  # noqa: BLE001
+            message = type(exc).__name__[:256]
+        self.errors.append({"event": event, "stage": stage, "error": message})
+
+    def _observe(self, event):
+        self.total += 1
+        self.counts[event] += 1
+        sample = {
+            "event": event,
+            "role": self.role,
+            "version": self.version,
+            "tick": None,
+            "seq": self.total,
+        }
+        try:
+            sample["tick"] = int(self.session.current_tick())
+        except BaseException as exc:  # noqa: BLE001
+            self._error(event, "tick", exc)
+        sample.update(
+            _read_link_menu_fields(
+                self.session,
+                include_map=True,
+                on_error=lambda symbol, exc: self._error(event, symbol, exc),
+            )
+        )
+        # This predicts the next selection read from observed buffers. Even
+        # afterExchange precedes the ROM branch; it is not acceptance proof.
+        sample["recv_candidate"] = _link_menu_receive_candidate(
+            sample.get("wLinkMenuSelectionReceiveBuffer", [])
+        )
+        self.first.setdefault(event, sample)
+        # Idle exchanges can precede the first A/B vote by many frames.
+        # Retain that vote separately even after the recent ring rolls over.
+        # Receive selection prefers the first D0-tagged byte, falling back
+        # to byte one when byte zero is invalid. A valid idle first byte
+        # must not be displaced by a decisive second byte.
+        for symbol, direction in (
+            ("wLinkMenuSelectionSendBuffer", "sent"),
+            ("wLinkMenuSelectionReceiveBuffer", "received"),
+        ):
+            values = sample.get(symbol, [])
+            candidate = (
+                sample["recv_candidate"]
+                if direction == "received"
+                else _link_menu_receive_candidate(values[:1])
+            )
+            if (
+                event == "LinkMenu.afterExchange"
+                and candidate is not None
+                and (candidate["value"] & 0x0C) != 0
+            ):
+                self.first_decisive.setdefault(direction, sample)
+        self.recent.append(sample)
+
+    def install(self, buckets):
+        if self._installed:
+            return
+        self._installed = True
+        # Resolve every address before instrumentation changes any ROM opcode.
+        addresses = {}
+        for event in dict.fromkeys((*_TRADE_DIAG_SYMBOLS, *_LINK_MENU_HISTORY_EVENTS)):
+            if event not in buckets and event not in self.counts:
+                continue
+            try:
+                addresses[event] = (
+                    _link_menu_post_call_address(self.session)
+                    if event == "LinkMenu.afterExchange"
+                    else self.session.symbols.bank_addr(event)
+                )
+                self.hooks[event] = {"available": False}
+            except BaseException as exc:  # noqa: BLE001
+                self._error(event, "resolve", exc)
+                self.hooks[event] = {"available": False, "reason": self.errors[-1]["error"]}
+        grouped = {}
+        for event, address in addresses.items():
+            grouped.setdefault(address, []).append(event)
+        for (bank, addr), events in grouped.items():
+
+            def callback(_ctx, events=tuple(events)):
+                for event in events:
+                    try:
+                        if event in buckets:
+                            buckets[event][0] += 1
+                    except BaseException as exc:  # noqa: BLE001
+                        self._error(event, "counter", exc)
+                    try:
+                        if event in self.counts:
+                            self._observe(event)
+                    except BaseException as exc:  # noqa: BLE001
+                        self._error(event, "callback", exc)
+
+            try:
+                self.session._pyboy.hook_register(bank, addr, callback, None)
+                for event in events:
+                    self.hooks[event] = {"available": True, "bank": bank, "address": addr}
+            except BaseException as exc:  # noqa: BLE001
+                for event in events:
+                    self._error(event, "register", exc)
+                    self.hooks[event] = {"available": False, "reason": self.errors[-1]["error"]}
+
+    def snapshot(self):
+        return deepcopy(
+            {
+                "role": self.role,
+                "version": self.version,
+                "limit": self.limit,
+                "total": self.total,
+                "counts": self.counts,
+                "first": self.first,
+                "first_decisive": self.first_decisive,
+                "recent": list(self.recent),
+                "recent_dropped": max(0, self.total - len(self.recent)),
+                "recent_truncated": self.total > len(self.recent),
+                "hooks": self.hooks,
+                "error_count": self.error_count,
+                "errors": list(self.errors),
+                "errors_dropped": self.error_count - len(self.errors),
+                "errors_truncated": self.error_count > len(self.errors),
+            }
+        )
+
+
+def _peer_shutdown_sync(
+    backend,
+    *,
+    cooperative_sync,
+    step,
+    backend_snapshot,
+    ready_sync_id: int,
+    release_sync_id: int,
+    timeout: float = 120.0,
+    monotonic=time.monotonic,
+    sleep=time.sleep,
+) -> None:
+    """Close a successful pair only after both peers have gone quiet.
+
+    Reaching the same game milestone is not sufficient for teardown:
+    either ROM may still have an armed native serial transfer.  The first
+    marker lets both owners finish their local post-milestone drain; the
+    second marker is an acknowledgement that the resulting wire-idle
+    window was observed by both peers.  The ready barrier continues
+    stepping the owner emulator; the final acknowledgements service only
+    already-admitted edges so a faster peer cannot reopen a transfer while
+    the other side is finishing its drain.
+    """
+
+    def wait_for_peer_marker(sync_id: int) -> None:
+        deadline_at = monotonic() + timeout
+        while monotonic() < deadline_at:
+            if backend.poll_peer_sync(sync_id=sync_id):
+                return
+            # After a local wire-idle observation no new master edge can
+            # be created without ticking the emulator.  Service only
+            # already-admitted slave work while waiting for the peer's
+            # marker; this keeps the final handshake symmetric without
+            # reopening a native transfer on the faster side.
+            backend.service_pending_edges(max_edges=1)
+            sleep(0.001)
+        raise RuntimeError(
+            f"peer shutdown sync {sync_id} did not converge: backend={backend_snapshot()}"
+        )
+
+    cooperative_sync(sync_id=ready_sync_id, timeout=timeout, step_frames=1)
+    backend.wait_for_wire_idle(
+        timeout=timeout,
+        progress_callback=lambda: step(1),
+        stable_checks=4,
+    )
+    backend.announce_sync(sync_id=release_sync_id)
+    wait_for_peer_marker(release_sync_id)
+    backend.wait_for_wire_idle(
+        timeout=timeout,
+        progress_callback=lambda: backend.service_pending_edges(max_edges=1),
+        stable_checks=4,
+    )
+    # The release marker can be consumed while the peer is still
+    # finishing its own idle wait.  A final passive acknowledgement makes
+    # both sides observe that second drain before either detaches.
+    final_sync_id = release_sync_id + 1
+    backend.announce_sync(sync_id=final_sync_id)
+    wait_for_peer_marker(final_sync_id)
+    backend.wait_for_wire_idle(
+        timeout=timeout,
+        progress_callback=lambda: backend.service_pending_edges(max_edges=1),
+        stable_checks=4,
+    )
+    # Do not detach as soon as the peer sees the final marker: the peer
+    # may still be returning from its own final idle drain.  Advertise a
+    # completion marker only after that drain and wait passively for the
+    # matching completion marker.  No emulator tick occurs in this last
+    # exchange, so it cannot create a new master transfer between the
+    # marker and teardown.
+    done_sync_id = final_sync_id + 1
+    backend.announce_sync(sync_id=done_sync_id)
+    wait_for_peer_marker(done_sync_id)
+
+
+def _finish_link_menu_phase(goal, *, cooperative_sync, peer_shutdown_sync):
+    """Use passive shutdown only when no further gameplay is requested."""
+    if goal == "link_menu":
+        peer_shutdown_sync(ready_sync_id=123, release_sync_id=124, timeout=10.0)
+    else:
+        cooperative_sync(sync_id=123, timeout=10.0, step_frames=1)
 
 
 def _party_summary(session) -> dict[str, object]:
@@ -227,6 +510,7 @@ def main() -> int:
     final_state: dict[str, int] = {}
     final_cpu: dict[str, object] = {}
     link_menu_state: dict[str, object] = {}
+    link_menu_history = _LinkMenuHistory(None, role=args.role, version=args.version)
     counters = {s: [0] for s in _TRADE_DIAG_SYMBOLS}
     shots: list[str] = []
     select_mon_announced = False
@@ -265,38 +549,13 @@ def main() -> int:
 
         These are observations only.  In particular, this helper never
         writes the send/receive buffers or any connection/warp state.  The
-        values distinguish a malformed menu-selection exchange from a valid
-        ``0xD4`` trade vote that failed to reach ``SpecialEnterMap``.
+        final values may have been reused after selection and cannot alone
+        distinguish a malformed exchange from a valid vote followed by a
+        failed warp. The bounded history preserves earlier observations.
         """
         if session is None:
             return {}
-        memory = session._pyboy.memory
-        snapshot: dict[str, object] = {}
-
-        def read_byte(symbol: str, offset: int = 0) -> int | None:
-            try:
-                return int(memory[session.symbols.addr_of(symbol) + offset])
-            except (AttributeError, KeyError, TypeError, IndexError):
-                return None
-
-        for symbol in (
-            "wCurrentMenuItem",
-            "wMaxMenuItem",
-            "wCableClubDestinationMap",
-            "wLinkState",
-            "hSerialConnectionStatus",
-        ):
-            value = read_byte(symbol)
-            if value is not None:
-                snapshot[symbol] = value
-        for symbol in (
-            "wLinkMenuSelectionSendBuffer",
-            "wLinkMenuSelectionReceiveBuffer",
-        ):
-            values = [read_byte(symbol, offset) for offset in (0, 1)]
-            if all(value is not None for value in values):
-                snapshot[symbol] = values
-        return snapshot
+        return _read_link_menu_fields(session)
 
     def emit_result(*, setup_failed: bool = False) -> None:
         if setup_failed or session is None:
@@ -316,6 +575,7 @@ def main() -> int:
         result["_final_state"] = final_state
         result["_final_cpu"] = final_cpu
         result["_link_menu_state"] = {} if setup_failed else link_menu_state
+        result["_link_menu_history"] = link_menu_history.snapshot()
         result["_shots"] = shots
         result["_backend_stats"] = backend_snapshot()
         result["_drive_status"] = drive_status
@@ -450,9 +710,9 @@ def main() -> int:
         shot("00_loaded")
         log("state loaded, installing hooks")
 
-        for symbol in _TRADE_DIAG_SYMBOLS:
-            remaining("hook setup")
-            _install_hook(session, symbol, counters[symbol])
+        remaining("hook setup")
+        link_menu_history.session = session
+        link_menu_history.install(counters)
 
         log(f"establishing TCP {args.role}")
         if args.role == "listen":
@@ -624,9 +884,7 @@ def main() -> int:
             f"local={state_snapshot()} backend={backend_snapshot()}"
         )
 
-    def passive_sync(
-        *, ready_sync_id: int, release_sync_id: int, timeout: float = 60.0
-    ) -> None:
+    def passive_sync(*, ready_sync_id: int, release_sync_id: int, timeout: float = 60.0) -> None:
         """Rendezvous without advancing the restored game state.
 
         This is used only before the first gameplay input. Both peers have
@@ -657,67 +915,15 @@ def main() -> int:
     def peer_shutdown_sync(
         *, ready_sync_id: int, release_sync_id: int, timeout: float = 120.0
     ) -> None:
-        """Close a successful pair only after both peers have gone quiet.
-
-        Reaching the same game milestone is not sufficient for teardown:
-        either ROM may still have an armed native serial transfer.  The first
-        marker lets both owners finish their local post-milestone drain; the
-        second marker is an acknowledgement that the resulting wire-idle
-        window was observed by both peers.  The ready barrier continues
-        stepping the owner emulator; the final acknowledgements service only
-        already-admitted edges so a faster peer cannot reopen a transfer while
-        the other side is finishing its drain.
-        """
-
-        def wait_for_peer_marker(sync_id: int) -> None:
-            deadline_at = time.monotonic() + timeout
-            while time.monotonic() < deadline_at:
-                if link._network_backend.poll_peer_sync(sync_id=sync_id):
-                    return
-                # After a local wire-idle observation no new master edge can
-                # be created without ticking the emulator.  Service only
-                # already-admitted slave work while waiting for the peer's
-                # marker; this keeps the final handshake symmetric without
-                # reopening a native transfer on the faster side.
-                link._network_backend.service_pending_edges(max_edges=1)
-                time.sleep(0.001)
-            raise RuntimeError(
-                f"peer shutdown sync {sync_id} did not converge: backend={backend_snapshot()}"
-            )
-
-        cooperative_sync(sync_id=ready_sync_id, timeout=timeout, step_frames=1)
-        link._network_backend.wait_for_wire_idle(
+        _peer_shutdown_sync(
+            link._network_backend,
+            cooperative_sync=cooperative_sync,
+            step=session.step,
+            backend_snapshot=backend_snapshot,
+            ready_sync_id=ready_sync_id,
+            release_sync_id=release_sync_id,
             timeout=timeout,
-            progress_callback=lambda: session.step(1),
-            stable_checks=4,
         )
-        link._network_backend.announce_sync(sync_id=release_sync_id)
-        wait_for_peer_marker(release_sync_id)
-        link._network_backend.wait_for_wire_idle(
-            timeout=timeout,
-            progress_callback=lambda: link._network_backend.service_pending_edges(max_edges=1),
-            stable_checks=4,
-        )
-        # The release marker can be consumed while the peer is still
-        # finishing its own idle wait.  A final passive acknowledgement makes
-        # both sides observe that second drain before either detaches.
-        final_sync_id = release_sync_id + 1
-        link._network_backend.announce_sync(sync_id=final_sync_id)
-        wait_for_peer_marker(final_sync_id)
-        link._network_backend.wait_for_wire_idle(
-            timeout=timeout,
-            progress_callback=lambda: link._network_backend.service_pending_edges(max_edges=1),
-            stable_checks=4,
-        )
-        # Do not detach as soon as the peer sees the final marker: the peer
-        # may still be returning from its own final idle drain.  Advertise a
-        # completion marker only after that drain and wait passively for the
-        # matching completion marker.  No emulator tick occurs in this last
-        # exchange, so it cannot create a new master transfer between the
-        # marker and teardown.
-        done_sync_id = final_sync_id + 1
-        link._network_backend.announce_sync(sync_id=done_sync_id)
-        wait_for_peer_marker(done_sync_id)
 
     def current_menu_item() -> int | None:
         try:
@@ -959,12 +1165,15 @@ def main() -> int:
                         progress_callback=lambda: session.step(1),
                     )
                     # Both peers have now observed the quiet acknowledgement.
-                    # Use one final live rendezvous before either process
-                    # closes its socket; otherwise a peer can still be
-                    # advancing its last owner tick when the other teardown
-                    # sends BYE, leaving a legitimate final EDGE_REQ without
-                    # a response.
-                    cooperative_sync(sync_id=123, timeout=10.0, step_frames=1)
+                    # LinkMenu-only runs finish with a drain and passive
+                    # shutdown acknowledgements before either socket closes.
+                    # Trade and battle use a live rendezvous to continue
+                    # gameplay while servicing the peer's serial work.
+                    _finish_link_menu_phase(
+                        args.goal,
+                        cooperative_sync=cooperative_sync,
+                        peer_shutdown_sync=peer_shutdown_sync,
+                    )
                     log("phase 1 done: LinkMenu fired on both peers")
                     break
                 if not link_menu_quiet_announced:

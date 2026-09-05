@@ -88,6 +88,39 @@ UNIT_MODULES = frozenset(
 
 KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES
 
+# Reviewed ROM-free exceptions in mixed modules. Only actual test functions
+# belong here; unlisted future functions retain the module's real-ROM tier.
+ROM_FREE_TESTS = frozenset(
+    {
+        ("test_pyboy_link_session_subprocess.py", name)
+        for name in (
+            "test_link_menu_history_preserves_first_samples_across_buffer_reuse",
+            "test_link_menu_history_validates_call_and_bank",
+            "test_link_menu_history_rejects_call_to_wrong_target",
+            "test_link_menu_history_additive_result_compatibility",
+            "test_link_menu_history_reports_missing_symbols_and_registration_errors",
+            "test_link_menu_history_bounds_callback_errors_and_keeps_partial_samples",
+            "test_link_menu_history_decisive_directions_ignore_stale_second_bytes",
+            "test_link_menu_history_received_candidate_follows_rom_order",
+            "test_link_menu_history_failure_summary_survives_large_result_tail",
+            "test_link_menu_history_missing_call_symbols_remains_observable",
+            "test_link_menu_history_rejects_post_call_outside_bank",
+            "test_setup_handshake_failure_returns_bounded_non_success_sentinels",
+            "test_collect_pair_rejects_missing_or_partial_required_rows",
+            "test_strict_acceptance_rejects_link_menu_only_result",
+            "test_strict_acceptance_rejects_missing_native_edge_req",
+            "test_peer_shutdown_protocol_drains_and_waits_for_late_done_without_ticks",
+            "test_peer_shutdown_protocol_propagates_backend_errors",
+            "test_peer_shutdown_protocol_missing_done_times_out_without_ticks",
+            "test_peer_shutdown_protocol_phase_dispatch_preserves_continued_gameplay",
+            "test_hold_at_sync_boundary_does_not_tick_past_ready_marker",
+            "test_hold_at_sync_boundary_ticks_timed_rom_phase",
+            "test_collect_pair_enforces_hard_deadline_without_waiting_for_peers",
+            "test_partial_peer_sentinel_is_fatal_before_gameplay_assertions",
+        )
+    }
+)
+
 LOCAL_LINK_MODULES = frozenset(
     {
         "test_link_integration.py",
@@ -255,6 +288,10 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     """
 
     filename = Path(path).name
+    test_key = (filename, test_name)
+    if test_key in ROM_FREE_TESTS:
+        return frozenset({"unit"})
+
     marks: set[str] = set()
 
     if filename in REAL_ROM_MODULES:
@@ -274,7 +311,6 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     if filename in MCP_STDIO_MODULES:
         marks.add("mcp_stdio")
 
-    test_key = (filename, test_name)
     if test_key in TRADE_TESTS:
         marks.update(("acceptance", "trade"))
     if test_key in TRADE_ACCEPTANCE_TESTS:
@@ -307,6 +343,7 @@ __all__ = [
     "REAL_ROM_MODULES",
     "REMOTE_LINK_MODULES",
     "REMOTE_VERSION_PAIR_NODEIDS",
+    "ROM_FREE_TESTS",
     "SUPPORTED_VERSIONS",
     "TIER_REQUIRED_NODEIDS",
     "TIER_REQUIRED_TESTS",
