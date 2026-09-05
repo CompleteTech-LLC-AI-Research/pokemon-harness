@@ -12,11 +12,11 @@ existing ``pyboy.mb.serial`` instance is reused and only its
 This module now exists purely as a back-compat re-export so callers
 (and tests) that import :class:`SerialCore`, :class:`NullBackend`, etc.
 keep working. The constants ``ROLE_INTERNAL`` / ``ROLE_EXTERNAL`` /
-``CYCLES_PER_EDGE_DMG`` / ``SC_TRANSFER_ENABLE`` / ``SC_CLOCK_SOURCE``
-/ ``SC_CLOCK_SPEED`` / ``IF_SERIAL`` / ``CYCLES_PER_BYTE_DMG`` /
-``MAX_CYCLES`` are imported from PyBoy where available and fall back
-to local definitions when PyBoy isn't importable (pure-Python unit
-test runs).
+``CYCLES_PER_EDGE_DMG`` / ``CYCLES_PER_EDGE_CGB_FAST`` /
+``SC_TRANSFER_ENABLE`` / ``SC_CLOCK_SOURCE`` / ``SC_CLOCK_SPEED`` /
+``IF_SERIAL`` / ``CYCLES_PER_BYTE_DMG`` / ``MAX_CYCLES`` are imported
+from PyBoy where available and fall back to local definitions when
+PyBoy isn't importable (pure-Python unit test runs).
 
 See :doc:`docs/pyboy_serial_overhaul_design.md` for the full design.
 """
@@ -28,7 +28,8 @@ from typing import Protocol
 # Local fallback constants — match the PyBoy values exactly. Used when
 # PyBoy isn't importable (e.g. sdist-only unit tests) and shadowed by
 # the PyBoy-side constants below when it is.
-CYCLES_PER_EDGE_DMG: int = 128
+CYCLES_PER_EDGE_DMG: int = 512
+CYCLES_PER_EDGE_CGB_FAST: int = CYCLES_PER_EDGE_DMG // 32
 CYCLES_PER_BYTE_DMG: int = 8 * CYCLES_PER_EDGE_DMG
 SC_TRANSFER_ENABLE: int = 0x80
 SC_CLOCK_SPEED: int = 0x02
@@ -80,6 +81,9 @@ if _PYBOY_AVAILABLE:
     # Constants — prefer PyBoy's values when exposed.
     CYCLES_PER_EDGE_DMG = getattr(
         _pyboy_serial, "CYCLES_PER_EDGE_DMG", CYCLES_PER_EDGE_DMG
+    )
+    CYCLES_PER_EDGE_CGB_FAST = getattr(
+        _pyboy_serial, "CYCLES_PER_EDGE_CGB_FAST", CYCLES_PER_EDGE_CGB_FAST
     )
     CYCLES_PER_BYTE_DMG = getattr(
         _pyboy_serial, "CYCLES_PER_BYTE_DMG", CYCLES_PER_BYTE_DMG
@@ -157,6 +161,7 @@ if LocalBackend is None:
 
 __all__ = [
     "CYCLES_PER_BYTE_DMG",
+    "CYCLES_PER_EDGE_CGB_FAST",
     "CYCLES_PER_EDGE_DMG",
     "IF_SERIAL",
     "MAX_CYCLES",

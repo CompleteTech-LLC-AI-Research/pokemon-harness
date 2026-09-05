@@ -67,15 +67,18 @@ cdef class Motherboard:
     cdef void buttonevent(self, WindowEvent) noexcept
     cdef void stop(self, bint, object, object) noexcept
     @cython.locals(cycles=int64_t, cycles_target=int64_t, mode0_cycles=int64_t, breakpoint_index=int64_t)
-    cpdef bint tick(self) noexcept with gil
+    # Serial/network callbacks can raise from Serial.tick or the owner
+    # dispatch hook. Keep the exception edge all the way through the
+    # motherboard instead of converting it into an unraisable exception.
+    cpdef bint tick(self) except * with gil
 
     cdef void switch_speed(self) noexcept nogil
 
-    cdef uint8_t getitem(self, uint16_t) noexcept nogil
+    cdef uint8_t getitem(self, uint16_t) except * nogil
     @final
-    cdef void setitem(self, uint16_t, uint8_t) noexcept nogil
-    cdef uint8_t getitem_io_ports(self, uint16_t) noexcept nogil
-    cdef void setitem_io_ports(self, uint16_t, uint8_t) noexcept nogil
+    cdef void setitem(self, uint16_t, uint8_t) except * nogil
+    cdef uint8_t getitem_io_ports(self, uint16_t) except * nogil
+    cdef void setitem_io_ports(self, uint16_t, uint8_t) except * nogil
 
     @cython.locals(offset=cython.int, dst=cython.int, n=cython.int)
     cdef void transfer_DMA(self, uint8_t) noexcept nogil

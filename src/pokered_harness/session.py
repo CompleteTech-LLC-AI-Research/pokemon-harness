@@ -459,6 +459,8 @@ class Session:
         emulator operations must leave it false.
         """
         timeout = _validate_timeout(timeout_s, "timeout_s")
+        if not allow_closed:
+            self._ensure_open()
         acquired = self._lock.acquire(timeout=timeout)
         if not acquired:
             raise SessionLockTimeout(
@@ -496,6 +498,7 @@ class Session:
         """Register an execution hook at a symbol label, tagging fired
         events with the current tick. Encapsulates the ``EventBus``
         interaction so callers don't reach into ``_pyboy``."""
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             bank, addr = self._symbols.bank_addr(symbol_name)
@@ -530,6 +533,7 @@ class Session:
         dispatcher still gives each callback an owned, independently closable
         registration and avoids duplicate physical PyBoy breakpoints.
         """
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             bank, addr = self._symbols.bank_addr(symbol_name)
@@ -552,6 +556,7 @@ class Session:
         replace_existing: bool = False,
     ) -> HookRegistration:
         """Register a session-serialized callback at a raw address."""
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             return self._register_event_hook_at_locked(
@@ -619,6 +624,7 @@ class Session:
 
         Used by the link-cable bridge to mutate emulator memory when serial
         routines fire. For plain event emission prefer :meth:`register_hook`."""
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             bank, addr = self._symbols.bank_addr(symbol_name)
@@ -707,6 +713,7 @@ class Session:
 
     def step(self, count: int = 1, *, render: bool | None = None) -> None:
         _validate_positive_int(count, "count")
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             self._step_locked(count, render=render)
@@ -737,18 +744,21 @@ class Session:
 
     def press(self, button: str | Button, *, duration: int = 1) -> None:
         _validate_positive_int(duration, "duration")
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             name = validate_button(str(button)).value
             self._pyboy.button(name, duration)
 
     def hold(self, button: str | Button) -> None:
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             name = validate_button(str(button)).value
             self._pyboy.button_press(name)
 
     def release(self, button: str | Button) -> None:
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             name = validate_button(str(button)).value
@@ -757,18 +767,22 @@ class Session:
     # --- observation ---------------------------------------------------
 
     def read_game_state(self) -> GameState:
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             return parse_game_state(self._pyboy.memory, self._symbols)
 
     def event_snapshot(self) -> list[GameEvent]:
         """Return a consistent copy of the current event log."""
+        self._ensure_open()
         with self._lock:
+            self._ensure_open()
             return list(self._events)
 
     # --- save / load ---------------------------------------------------
 
     def save_state(self) -> bytes:
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             buf = BytesIO()
@@ -784,6 +798,7 @@ class Session:
         payload = bytes(data)
         if not payload:
             raise InvalidStateError("save-state must not be empty")
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             self._pyboy.load_state(BytesIO(payload))
@@ -798,6 +813,7 @@ class Session:
             )
         if value < 0:
             raise ValueError(f"tick must be non-negative, got {value}")
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             self._tick = value
@@ -826,6 +842,7 @@ class Session:
         if not wanted:
             raise ValueError("event_names must be non-empty")
 
+        self._ensure_open()
         with self._lock:
             self._ensure_open()
             start_tick = self._tick

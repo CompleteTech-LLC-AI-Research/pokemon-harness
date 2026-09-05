@@ -32,17 +32,19 @@ logger = pyboy.logging.get_logger(__name__)
 
 # --- Constants ----------------------------------------------------------
 
-# One shift edge (rising or falling) every 128 CPU cycles gives the
-# classic 8192 Hz DMG serial clock. Eight edges = one byte = 1024 Hz of
-# byte-rate throughput. CGB fast serial is 32x faster at normal CPU speed
-# and 64x faster in CGB double-speed hardware.
-CYCLES_PER_EDGE_DMG = 128
-CYCLES_PER_EDGE_CGB_FAST = CYCLES_PER_EDGE_DMG // 32
+# PyBoy's CPU counter is measured in oscillator cycles (4.194304 MHz at
+# normal speed), not four-cycle machine instructions. The hardware serial
+# rates therefore translate to 512 CPU cycles per edge at 8192 Hz and 16
+# CPU cycles per edge at the CGB fast rate (262144 Hz). CGB double-speed
+# doubles both the CPU and serial clocks, so these CPU-cycle periods remain
+# unchanged there: 16384 Hz is 512 cycles/edge and 524288 Hz is 16.
+CYCLES_PER_EDGE_DMG = 512
+CYCLES_PER_EDGE_CGB_FAST = 16
 CYCLES_PER_BYTE_DMG = 8 * CYCLES_PER_EDGE_DMG
 
 # Kept for back-compat with any external consumer that imported the
 # legacy name.
-CYCLES_8192HZ = 128
+CYCLES_8192HZ = CYCLES_PER_EDGE_DMG
 
 # FF02 bits.
 SC_TRANSFER_ENABLE = 0x80
@@ -60,6 +62,13 @@ ROLE_EXTERNAL = 0  # slave
 # pyboy.utils.STATE_VERSION is bumped by upstream releases; this tracks
 # whether we've written the bit-accurate extension fields.
 SERIAL_STATE_VERSION = 1
+
+# The extension originally stored the shift register and bit count without
+# recording the serial timing domain.  Keep that ten-field layout readable,
+# but tag new saves so an in-flight transfer written with the old 128/4-cycle
+# scheduler can be retimed when loaded after the hardware-cadence correction.
+SERIAL_STATE_FORMAT_MAGIC = 0xA5
+SERIAL_STATE_FORMAT_VERSION = 2
 
 
 # --- Backends -----------------------------------------------------------
@@ -264,11 +273,11 @@ class Serial:
             self._bits_remaining = 8
             if self.internal_clock:
                 # Master: schedule first edge.
-                # Fast serial and the CPU both double in CGB double-speed
-                # mode, so fast mode remains four raw CPU cycles per edge.
-                # Two raw cycles would double the hardware rate twice.
+                # The CPU cycle counter and the hardware serial clock both
+                # double together in CGB double-speed mode. Use the rate
+                # selected by SC bit 1 directly in that same cycle domain.
                 self.clock_target = self.clock + (
-                    4 if self.double_speed else (128 << self.cpu_speed_shift)
+                    16 if self.double_speed else 512
                 )
             else:
                 # Slave: no internal clock, waits for apply_external_edge.
@@ -281,7 +290,7 @@ class Serial:
             # preserving the already-shifted bits.
             if was_double_speed != self.double_speed:
                 self.clock_target = self.clock + (
-                    4 if self.double_speed else (128 << self.cpu_speed_shift)
+                    16 if self.double_speed else 512
                 )
         else:
             # Same-role writes do not disturb an active slave transfer.
@@ -362,9 +371,7 @@ class Serial:
                             break
                         else:
                             self.clock_target = self.clock_target + (
-                                4
-                                if self.double_speed
-                                else (128 << self.cpu_speed_shift)
+                                16 if self.double_speed else 512
                             )
 
         if self.clock_target > self.clock:
@@ -427,6 +434,34 @@ class Serial:
 
     # --- save/load ------------------------------------------------------
 
+    def _migrate_legacy_timing(self):
+        """Retarget an old in-flight transfer to the hardware cadence.
+
+        Saves written before the assembly-informed timing correction contain
+        the current deadline but no timing-domain marker.  Their old periods
+        were 128 DMG cycles (or 128 shifted by CGB CPU speed) and 4 CGB-fast
+        cycles.  Only an armed internal transfer needs migration; slave
+        transfers have no local deadline and legacy eight-field saves are
+        already handled by the conservative no-transfer path below.
+        """
+        if not (self.transfer_enabled and self.internal_clock and self._bits_remaining > 0):
+            return
+
+        old_period = (
+            4
+            if self.cgb_mode and self.double_speed
+            else (128 << self.cpu_speed_shift)
+        )
+        new_period = 16 if self.cgb_mode and self.double_speed else 512
+        remaining = self.clock_target - self.clock
+        if remaining < 1:
+            remaining = 1
+        new_remaining = (
+            (remaining * new_period + old_period - 1) // old_period
+        )
+        self.clock_target = self.clock + max(1, new_remaining)
+        self._cycles_to_interrupt = self.clock_target - self.clock
+
     def save_state(self, f):
         f.write(self.SB)
         f.write(self.SC)
@@ -440,6 +475,8 @@ class Serial:
         # load_state tolerates their absence.
         f.write(self._shift_register)
         f.write(self._bits_remaining)
+        f.write(SERIAL_STATE_FORMAT_MAGIC)
+        f.write(SERIAL_STATE_FORMAT_VERSION)
 
     def load_state(self, f, state_version):
         # ``state_version`` is the enclosing PyBoy save version. The serial
@@ -454,9 +491,11 @@ class Serial:
         self.clock = f.read_64bit()
         self.clock_target = f.read_64bit()
         self.double_speed = 1 if self.cgb_mode and (self.SC & 0x02) else 0
-        # Attempt to restore extended fields. Older states (and
-        # upstream PyBoy saves) don't have them, so recover
-        # conservatively: assume no in-flight transfer.
+        # Attempt to restore extended fields. Older states (and upstream
+        # PyBoy saves) don't have them, so recover conservatively: assume no
+        # in-flight transfer. The prior harness format had the two extension
+        # bytes but no timing marker; preserve its transfer and retime its
+        # remaining deadline to the corrected hardware cadence.
         try:
             self._shift_register = f.read()
             self._bits_remaining = f.read()
@@ -467,6 +506,26 @@ class Serial:
             self.SC = self.SC & ~0x80 & 0xFF
             self.clock_target = (1 << 31)
             self._cycles_to_interrupt = (1 << 31)
+            return 0
+
+        try:
+            format_magic = f.read()
+        except Exception:
+            self._migrate_legacy_timing()
+            return 0
+
+        if format_magic != SERIAL_STATE_FORMAT_MAGIC:
+            raise ValueError(
+                "unknown bit-accurate serial state format marker: "
+                f"0x{format_magic:02x}"
+            )
+        format_version = f.read()
+        if format_version != SERIAL_STATE_FORMAT_VERSION:
+            raise ValueError(
+                "unsupported bit-accurate serial state format version: "
+                f"{format_version}"
+            )
+        return 0
 
 
 __all__ = [
@@ -483,6 +542,8 @@ __all__ = [
     "SC_CLOCK_SPEED",
     "SC_TRANSFER_ENABLE",
     "SERIAL_STATE_VERSION",
+    "SERIAL_STATE_FORMAT_MAGIC",
+    "SERIAL_STATE_FORMAT_VERSION",
     "Serial",
     "SerialBackend",
 ]

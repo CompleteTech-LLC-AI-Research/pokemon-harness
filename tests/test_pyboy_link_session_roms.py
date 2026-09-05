@@ -1169,7 +1169,11 @@ _BATTLE_DIAG_SYMBOLS = (
     "BattleTransition",
     "MainInBattleLoop",
     "DisplayBattleMenu",
+    "DisplayBattleMenu.leftColumn_WaitForInput",
+    "DisplayBattleMenu.rightColumn_WaitForInput",
     "MoveSelectionMenu",
+    "MoveSelectionMenu.menuset",
+    "MainInBattleLoop.selectEnemyMove",
     "LinkBattleExchangeData",
     "ExecutePlayerMove",
     "ExecuteEnemyMove",
@@ -1289,6 +1293,7 @@ def test_yellow_pair_warps_to_colosseum():
 def _drive_complete_battle_turn(
     a, b, link, *, counters: dict,
     battle_budget_frames: int = 6000, step_frames: int = 20,
+    completion: str = "turn",
 ) -> dict:
     """Drive a full link-battle turn from COLOSSEUM warp to damage resolution.
 
@@ -1307,19 +1312,25 @@ def _drive_complete_battle_turn(
     6. ``LinkBattleExchangeData`` nibble-exchanges both sides' moves.
     7. ``ExecutePlayerMove`` / ``ExecuteEnemyMove`` fire as the turn resolves.
 
-    The broad matrix acceptance requires the native
-    ``LinkBattleExchangeData`` move exchange plus at least one execute path on
-    each side. The focused Red/Yellow release case additionally requires
-    ``PlayerCalcMoveDamage``; the damage hook is intentionally not required
-    here because valid Gen I moves can resolve without that routine.
+    ``completion`` controls the bounded stopping condition. ``"versus"``
+    stops after both sides enter the battle intro, ``"turn"`` stops after the
+    native ``LinkBattleExchangeData`` move exchange plus at least one execute
+    path on each side, and ``"damage"`` additionally requires
+    ``PlayerCalcMoveDamage`` on both sides. The broad matrix uses ``"turn"``;
+    the focused Red/Yellow release case uses ``"damage"``. This keeps the
+    wait aligned with each caller's actual acceptance assertion instead of
+    making non-damaging but valid Gen I moves consume the whole frame budget.
     """
     cct = counters["CableClub_DoBattleOrTrade"]
     vs = counters["DisplayLinkBattleVersusTextBox"]
     main = counters["MainInBattleLoop"]
     battle_menu = counters["DisplayBattleMenu"]
     mm = counters["MoveSelectionMenu"]
+    select_enemy = counters["MainInBattleLoop.selectEnemyMove"]
     lbe = counters["LinkBattleExchangeData"]
     dmg = counters["PlayerCalcMoveDamage"]
+    epm = counters["ExecutePlayerMove"]
+    eem = counters["ExecuteEnemyMove"]
     selected_move_slots: list[int] = []
     selected_move_ids: list[int] = []
     active_move_choices: list[tuple[tuple[int, int], ...]] = []
@@ -1336,6 +1347,10 @@ def _drive_complete_battle_turn(
         raise ValueError("step_frames must be positive")
     if battle_budget_frames < 0:
         raise ValueError("battle_budget_frames must be non-negative")
+    if completion not in {"versus", "turn", "damage"}:
+        raise ValueError(
+            "completion must be one of: versus, turn, damage"
+        )
 
     phase_frames = 0
     remaining_budget = battle_budget_frames
@@ -1406,7 +1421,42 @@ def _drive_complete_battle_turn(
     # strict milestone assertions while making a scheduler/ROM stall visible.
     if cct[0] > 0 and cct[1] > 0:
         wait_interleaved(lambda: vs[0] > 0 and vs[1] > 0)
-    if vs[0] > 0 and vs[1] > 0:
+
+    def menu_fields(session) -> tuple[int, int, int] | None:
+        try:
+            memory = session._pyboy.memory
+            symbols = session.symbols
+            return (
+                int(memory[symbols.addr_of("wCurrentMenuItem")]),
+                int(memory[symbols.addr_of("wMaxMenuItem")]),
+                int(memory[symbols.addr_of("wMenuWatchedKeys")]),
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return None
+
+    def battle_menu_input_ready(session) -> bool:
+        fields = menu_fields(session)
+        if fields is None:
+            return False
+        current, maximum, watched_keys = fields
+        return 0 <= current <= 1 and maximum == 1 and watched_keys & 0x01
+
+    def move_menu_input_ready(session) -> bool:
+        fields = menu_fields(session)
+        if fields is None:
+            return False
+        current, maximum, watched_keys = fields
+        return (
+            # The ROM stores ``wNumMovesMinusOne + 2`` as the menu maximum;
+            # that is one greater than the last real move slot.  A four-move
+            # mon therefore exposes max=5 while valid move cursors remain
+            # 1..4.  This mirrors SelectMenuItem_CursorDown in the cartridge
+            # code instead of treating wMaxMenuItem as a move count.
+            1 <= current < maximum <= 5
+            and watched_keys & 0x01
+        )
+
+    if completion != "versus" and vs[0] > 0 and vs[1] > 0:
         wait_interleaved(
             lambda: (
                 main[0] > 0
@@ -1415,26 +1465,67 @@ def _drive_complete_battle_turn(
                 and battle_menu[1] > 0
             ),
         )
+        wait_interleaved(
+            lambda: battle_menu_input_ready(a) and battle_menu_input_ready(b)
+        )
 
     menu_ready = (
-        main[0] > 0
+        completion != "versus"
+        and main[0] > 0
         and main[1] > 0
         and battle_menu[0] > 0
         and battle_menu[1] > 0
+        and battle_menu_input_ready(a)
+        and battle_menu_input_ready(b)
     )
-    if menu_ready and tick_bounded(min(step_frames, 4)):
+    if menu_ready:
         # Let both ROMs finish drawing/entering HandleMenuInput, then select
-        # FIGHT exactly once on each real battle menu.
-        a.press("a")
-        b.press("a")
-        wait_interleaved(lambda: mm[0] > 0 and mm[1] > 0)
+        # FIGHT through the real command menu. The input-ready hook/fields
+        # are ROM-owned milestones; retrying only while a side still exposes
+        # that menu avoids losing a one-frame A event to the intro transition.
+        tick_bounded(min(step_frames, 4))
+        next_fight_input_frame = [0, 0]
+        while remaining_budget > 0 and not (mm[0] > 0 and mm[1] > 0):
+            for idx, session in enumerate((a, b)):
+                if (
+                    mm[idx] == 0
+                    and phase_frames >= next_fight_input_frame[idx]
+                    and battle_menu_input_ready(session)
+                ):
+                    session.press("a")
+                    next_fight_input_frame[idx] = phase_frames + 8
+            tick_bounded(min(step_frames, 2))
 
-    move_menu_ready = mm[0] > 0 and mm[1] > 0
+    if completion != "versus":
+        wait_interleaved(
+            lambda: (
+                mm[0] > 0
+                and mm[1] > 0
+                and move_menu_input_ready(a)
+                and move_menu_input_ready(b)
+            )
+        )
+
+    move_menu_ready = (
+        completion != "versus"
+        and mm[0] > 0
+        and mm[1] > 0
+        and move_menu_input_ready(a)
+        and move_menu_input_ready(b)
+    )
     if move_menu_ready:
         # The hook fires at function entry.  Give the ROM enough input-free
         # time to install the menu cursor before inspecting it.
         settle = min(step_frames, 4)
         tick_bounded(settle)
+
+        # ``battle_budget_frames`` covers the normal battle phase, but a
+        # ROM can enter MoveSelectionMenu at the exact end of that budget.
+        # Reserve a small, separately bounded handoff window so a valid menu
+        # cannot be mistaken for a transport failure merely because the
+        # final A edge was sampled on the next joypad poll.
+        if remaining_budget == 0:
+            remaining_budget = 1200
 
         slot_a, move_a = _assert_active_battle_state_is_legal(a)
         slot_b, move_b = _assert_active_battle_state_is_legal(b)
@@ -1484,16 +1575,47 @@ def _drive_complete_battle_turn(
         assert menu_cursor(a, count_a) == slot_a
         assert menu_cursor(b, count_b) == slot_b
 
-        # A legal move is now selected through the ROM's own menu handling.
-        # No subsequent input is injected while link exchange or damage code
-        # runs.
-        a.press("a")
-        b.press("a")
+        # A legal move is selected through the ROM's own menu handling.  The
+        # cartridge's HandleMenuInput waits for a fresh low-sensitivity
+        # joypad sample; a single event can be queued just before that poll
+        # and be consumed by the surrounding transition instead. Retry only
+        # while the ROM still exposes the move menu, and stop per side as
+        # soon as the ROM-owned selectEnemyMove label proves that A was
+        # consumed. No input is injected once that boundary is crossed.
+        select_enemy_before = [select_enemy[0], select_enemy[1]]
+        next_move_input_frame = [phase_frames, phase_frames]
+        move_input_attempts = [0, 0]
+        while remaining_budget > 0 and not (
+            select_enemy[0] > select_enemy_before[0]
+            and select_enemy[1] > select_enemy_before[1]
+        ):
+            for idx, session in enumerate((a, b)):
+                if (
+                    select_enemy[idx] == select_enemy_before[idx]
+                    and phase_frames >= next_move_input_frame[idx]
+                    and move_menu_input_ready(session)
+                ):
+                    session.press("a")
+                    move_input_attempts[idx] += 1
+                    next_move_input_frame[idx] = phase_frames + 8
+            tick_bounded(min(step_frames, 2))
 
     # Keep the original bounded resolution window and acceptance semantics:
     # callers decide whether link exchange, execution, or damage is required
     # for their tier.  Crucially, this loop never sends blind input.
-    while remaining_budget > 0 and not (dmg[0] > 0 and dmg[1] > 0):
+    def completion_reached() -> bool:
+        if completion == "versus":
+            return vs[0] > 0 and vs[1] > 0
+        if completion == "damage":
+            return dmg[0] > 0 and dmg[1] > 0
+        return (
+            lbe[0] > 0
+            and lbe[1] > 0
+            and epm[0] + eem[0] > 0
+            and epm[1] + eem[1] > 0
+        )
+
+    while remaining_budget > 0 and not completion_reached():
         tick_bounded(step_frames)
 
     return {
@@ -1504,8 +1626,12 @@ def _drive_complete_battle_turn(
         "dmg": dmg,
         "main": main,
         "battle_menu": battle_menu,
+        "select_enemy_move": select_enemy,
         "menu_ready": menu_ready,
         "move_menu_ready": move_menu_ready,
+        "move_input_attempts": move_input_attempts if move_menu_ready else [],
+        "final_menu_fields": (menu_fields(a), menu_fields(b)),
+        "remaining_budget": remaining_budget,
         "active_move_choices": active_move_choices,
         "selected_move_slots": selected_move_slots,
         "selected_move_ids": selected_move_ids,
@@ -1541,7 +1667,12 @@ def test_yellow_pair_starts_link_battle():
         assert warp["final_map_b"] == COLOSSEUM_MAP_ID
 
         diag = _drive_complete_battle_turn(
-            a, b, link, counters=counters, battle_budget_frames=2400
+            a,
+            b,
+            link,
+            counters=counters,
+            battle_budget_frames=2400,
+            completion="versus",
         )
 
         print("\nyellow<->yellow battle-start diagnostic:")
@@ -1621,13 +1752,21 @@ def test_pair_completes_battle_turn(version_a, version_b):
         for sym, cnt in counters.items():
             print(f"  {sym}: {cnt}")
         print(f"  battle_phase_frames: {diag['battle_phase_frames']}")
+        print(
+            "  battle handoff: "
+            f"menu_fields={diag['final_menu_fields']} "
+            f"remaining_budget={diag['remaining_budget']} "
+            f"move_menu_ready={diag['move_menu_ready']} "
+            f"move_input_attempts={diag['move_input_attempts']}"
+        )
 
         epm = counters["ExecutePlayerMove"]
         eem = counters["ExecuteEnemyMove"]
         lbe = counters["LinkBattleExchangeData"]
         assert lbe[0] > 0 and lbe[1] > 0, (
             f"LinkBattleExchangeData didn't fire on both sides; moves "
-            f"were never exchanged via the link. counters={counters}"
+            f"were never exchanged via the link. counters={counters} "
+            f"diag={diag}"
         )
         # Either ExecutePlayerMove or ExecuteEnemyMove (or both) must
         # fire on each side. In heavily-mismatched pairings (L54 vs
@@ -1670,7 +1809,9 @@ def test_red_yellow_battle_turn_is_resolved():
         warp = _drive_past_link_menu_to_colosseum(a, b, link)
         assert warp["final_map_a"] == COLOSSEUM_MAP_ID
         assert warp["final_map_b"] == COLOSSEUM_MAP_ID
-        _drive_complete_battle_turn(a, b, link, counters=counters)
+        _drive_complete_battle_turn(
+            a, b, link, counters=counters, completion="damage"
+        )
 
         required_hooks = (
             "DisplayLinkBattleVersusTextBox",

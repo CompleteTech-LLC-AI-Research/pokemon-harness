@@ -49,7 +49,7 @@ cdef class Serial:
     # Using the spelling it uses for the callable ABI avoids a platform
     # typedef mismatch (uint64_t is unsigned long on LP64) while preserving
     # the 64-bit cycle value at the Python/C boundary.
-    cpdef bint tick(self, unsigned long long) noexcept nogil
+    cpdef bint tick(self, unsigned long long) except * nogil
 
     cpdef void set_SB(self, uint8_t) noexcept nogil
     cpdef void set_SC(self, uint8_t) noexcept nogil
