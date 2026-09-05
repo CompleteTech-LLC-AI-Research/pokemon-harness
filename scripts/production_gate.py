@@ -266,6 +266,21 @@ class MatrixCaseResult:
 
 
 @dataclass
+class FailureDetail:
+    """One redacted case failure; character counts describe sanitized input."""
+
+    iteration: int
+    nodeid: str
+    outcome: str
+    reason: str
+    original_chars: int
+    omitted_chars: int
+    truncated: bool
+    nodeid_original_chars: int
+    nodeid_omitted_chars: int
+
+
+@dataclass
 class TierResult:
     name: str
     description: str
@@ -282,6 +297,8 @@ class TierResult:
     iteration_failures: list[str] = field(default_factory=list)
     selected_nodeids: list[str] = field(default_factory=list)
     case_results: list[MatrixCaseResult] = field(default_factory=list)
+    failure_details: list[FailureDetail] = field(default_factory=list)
+    failure_details_omitted: int = 0
 
 
 @dataclass
@@ -2249,6 +2266,9 @@ def run_matrix_tier(
     aggregate = Counts()
     aggregate_reasons: Counter[str] = Counter()
     case_results_by_nodeid: dict[str, MatrixCaseResult] = {}
+    failure_details: list[FailureDetail] = []
+    failure_details_omitted = 0
+    failure_detail_budget = MAX_FAILURE_DETAILS_CHARS
     output_tails: list[str] = []
     pending = deque(nodeids)
     active: dict[str, dict[str, Any]] = {}
@@ -2265,6 +2285,7 @@ def run_matrix_tier(
         report_kind: str = "final",
         cleanup_error: str = "",
     ) -> None:
+        nonlocal failure_detail_budget, failure_details_omitted
         _add_counts(aggregate, report.counts)
         aggregate_reasons.update(report.skip_reasons)
         problems: list[str] = []
@@ -2308,6 +2329,19 @@ def run_matrix_tier(
             )
         if problems:
             failures.extend(f"{nodeid}: {problem}" for problem in problems)
+            for records, outcome in (
+                (report.failed_records, None),
+                (report.collection_errors, "collection_error"),
+                (report.collection_skips, "collection_skip"),
+            ):
+                for record in records:
+                    failure_detail_budget, omitted = _retain_failure_detail(
+                        failure_details,
+                        record if outcome is None else {**record, "outcome": outcome},
+                        iteration=1,
+                        remaining_chars=failure_detail_budget,
+                    )
+                    failure_details_omitted += omitted
             if output.strip():
                 output_tails.append(f"{nodeid}\n{output[-4000:]}")
         case_results_by_nodeid[nodeid] = MatrixCaseResult(
@@ -2599,13 +2633,89 @@ def run_matrix_tier(
         iteration_failures=failures,
         selected_nodeids=list(nodeids),
         case_results=case_results,
+        failure_details=failure_details,
+        failure_details_omitted=failure_details_omitted,
     )
 
 
 MAX_ITERATION_FAILURES = 32
+MAX_FAILURE_DETAIL_CHARS = 65_536
+MAX_FAILURE_DETAILS_CHARS = 1_048_576
+MAX_FAILURE_DETAILS = 128
+MAX_FAILURE_NODEID_CHARS = 1_000
 MAX_ITERATION_FAILURE_CHARS = 2000
 MAX_FAILED_OUTPUT_CHARS = 8000
 _EVIDENCE_OMITTED = "\n[...additional failure evidence omitted...]"
+
+
+def _failure_excerpt(safe: str, limit: int) -> tuple[str, int]:
+    """Clip already-sanitized text, preserving its test line and exception."""
+    if len(safe) <= limit:
+        return safe, 0
+    marker = "\n[...middle truncated; see omitted_chars metadata...]\n"
+    available = limit - len(marker)
+    head = (available + 1) // 2
+    tail = available // 2
+    return safe[:head] + marker + safe[-tail:], len(safe) - available
+
+
+def _retain_failure_detail(
+    details: list[FailureDetail],
+    record: dict[str, str],
+    *,
+    iteration: int,
+    remaining_chars: int,
+) -> tuple[int, int]:
+    """Return remaining text budget and exactly zero or one omitted record.
+
+    Only retained evidence is bounded here. Existing subprocess capture and
+    report loading are unchanged. Sanitize one existing record before slicing;
+    never collect additional logs or split a credential/blob before redaction.
+    """
+    if len(details) >= MAX_FAILURE_DETAILS or remaining_chars < MAX_FAILURE_NODEID_CHARS + 128:
+        return remaining_chars, 1
+    nodeid = _safe_text(record["nodeid"], limit=sys.maxsize)
+    nodeid_original_chars = len(nodeid)
+    nodeid, nodeid_omitted = _failure_excerpt(nodeid, MAX_FAILURE_NODEID_CHARS)
+    # Runtime outcomes are validated vocabulary; serializers may receive a
+    # directly constructed record, which still needs redaction and budgeting.
+    outcome = _safe_text(record["outcome"], limit=sys.maxsize)
+    if remaining_chars - len(nodeid) - len(outcome) < 128:
+        return remaining_chars, 1
+    safe = _safe_text(record["reason"], limit=sys.maxsize)
+    original_chars = len(safe)
+    limit = min(MAX_FAILURE_DETAIL_CHARS, remaining_chars - len(nodeid) - len(outcome))
+    reason, omitted = _failure_excerpt(safe, limit)
+    details.append(
+        FailureDetail(
+            iteration=iteration,
+            nodeid=nodeid,
+            outcome=outcome,
+            reason=reason,
+            original_chars=original_chars,
+            omitted_chars=omitted,
+            truncated=bool(omitted or nodeid_omitted),
+            nodeid_original_chars=nodeid_original_chars,
+            nodeid_omitted_chars=nodeid_omitted,
+        )
+    )
+    return remaining_chars - len(nodeid) - len(outcome) - len(reason), 0
+
+
+def _failure_detail_lines(details: Iterable[dict[str, Any]], omitted: int) -> Iterable[str]:
+    for detail in details:
+        yield (
+            f"    failure-detail: iteration {detail['iteration']}: "
+            f"{detail['nodeid']}: {detail['outcome']} "
+            f"original_chars={detail['original_chars']} "
+            f"omitted_chars={detail['omitted_chars']} "
+            f"truncated={detail['truncated']} "
+            f"nodeid_original_chars={detail['nodeid_original_chars']} "
+            f"nodeid_omitted_chars={detail['nodeid_omitted_chars']}"
+        )
+        yield detail["reason"]
+    if omitted:
+        yield f"    failure-details-omitted: {omitted}"
 
 
 def _bounded_failure_text(value: str, limit: int, *, tail: bool = False) -> str:
@@ -2673,6 +2783,9 @@ def run_tier(
     output_tail = ""
     command: list[str] | None = None
     iteration_failures: list[str] = []
+    failure_details: list[FailureDetail] = []
+    failure_details_omitted = 0
+    failure_detail_budget = MAX_FAILURE_DETAILS_CHARS
     omitted_failures = 0
     failed_output = ""
     output_omitted = False
@@ -2738,6 +2851,19 @@ def run_tier(
             )
         if problems:
             # Put actionable case evidence before generic accounting summaries.
+            for records, outcome in (
+                (report.failed_records, None),
+                (report.collection_errors, "collection_error"),
+                (report.collection_skips, "collection_skip"),
+            ):
+                for record in records:
+                    failure_detail_budget, omitted = _retain_failure_detail(
+                        failure_details,
+                        record if outcome is None else {**record, "outcome": outcome},
+                        iteration=iteration,
+                        remaining_chars=failure_detail_budget,
+                    )
+                    failure_details_omitted += omitted
             details = (
                 f"{_bounded_failure_text(record['nodeid'], 500)}: {record['outcome']}: "
                 f"{_bounded_failure_text(record['reason'], 1300, tail=True)}"
@@ -2811,6 +2937,8 @@ def run_tier(
         output_tail=output_tail,
         iteration_failures=iteration_failures,
         selected_nodeids=selected_nodeids,
+        failure_details=failure_details,
+        failure_details_omitted=failure_details_omitted,
     )
 
 
@@ -3182,6 +3310,11 @@ def render_text(
             lines.append(f"    skip[{count}]: {reason}")
         for failure in tier.iteration_failures:
             lines.append(f"    iteration-failure: {failure}")
+        lines.extend(
+            _failure_detail_lines(
+                (asdict(detail) for detail in tier.failure_details), tier.failure_details_omitted
+            )
+        )
         for case in tier.case_results:
             lines.append(
                 f"    case {case.status:4} {case.nodeid}: "
@@ -3527,6 +3660,42 @@ def _safe_tier(
         _safe_diagnostic(failure, roots, replacements=replacements, limit=2000)
         for failure in tier.iteration_failures
     ]
+    # Reapply the evidence boundary for directly constructed records as well
+    # as runner results. Root replacement and redaction precede any clipping.
+    # Preserve existing truncation metadata; only add newly omitted characters.
+    safe_details: list[FailureDetail] = []
+    remaining_chars = MAX_FAILURE_DETAILS_CHARS
+    omitted_details = tier.failure_details_omitted
+    for detail in tier.failure_details:
+        if (
+            len(safe_details) >= MAX_FAILURE_DETAILS
+            or remaining_chars < MAX_FAILURE_NODEID_CHARS + 128
+        ):
+            omitted_details += 1
+            continue
+        record = {
+            key: _safe_diagnostic(
+                getattr(detail, key), roots, replacements=replacements, limit=sys.maxsize
+            )
+            for key in ("nodeid", "outcome", "reason")
+        }
+        remaining_chars, omitted = _retain_failure_detail(
+            safe_details, record, iteration=detail.iteration, remaining_chars=remaining_chars
+        )
+        omitted_details += omitted
+        if not omitted:
+            safe_detail = safe_details[-1]
+            if detail.omitted_chars:
+                safe_detail.original_chars = detail.original_chars
+                safe_detail.omitted_chars += detail.omitted_chars
+            if detail.nodeid_omitted_chars:
+                safe_detail.nodeid_original_chars = detail.nodeid_original_chars
+                safe_detail.nodeid_omitted_chars += detail.nodeid_omitted_chars
+            safe_detail.truncated = bool(
+                safe_detail.omitted_chars or safe_detail.nodeid_omitted_chars
+            )
+    data["failure_details"] = [asdict(detail) for detail in safe_details]
+    data["failure_details_omitted"] = omitted_details
     data["selected_nodeids"] = [
         _safe_diagnostic(nodeid, roots, replacements=replacements, limit=1000)
         for nodeid in tier.selected_nodeids
@@ -3837,6 +4006,11 @@ def render_evidence_text(payload: dict[str, Any]) -> str:
             lines.append(f"    skip[{count}]: {reason}")
         for failure in tier.get("iteration_failures", []):
             lines.append(f"    iteration-failure: {failure}")
+        lines.extend(
+            _failure_detail_lines(
+                tier.get("failure_details", []), tier.get("failure_details_omitted", 0)
+            )
+        )
         for case in tier.get("case_results", []):
             if not isinstance(case, dict):
                 continue

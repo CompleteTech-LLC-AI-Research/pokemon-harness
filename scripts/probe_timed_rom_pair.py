@@ -41,6 +41,50 @@ MENU_TERMINAL_RESERVE = 131_072
 CALL_LOG_BYTE_LIMIT = 16 * 1024 * 1024
 INLINE_CALL_WINDOW = 4
 MILESTONE_EVENT_LIMIT = 32
+READINESS_PHASES = (
+    "party_qualified",
+    "link_menu_trade_ready",
+    "link_menu_a_applied",
+    "trade_center_reached",
+    "select_mon_ready",
+    "outgoing_slot_ready",
+    "pre_evolution_copy_validated",
+    "post_save_cycle_returned",
+)
+
+
+class _PeerReadiness:
+    """Eight publish-once flags per owner; no emulator or payload crosses owners."""
+
+    def __init__(self, raw, index):
+        self.raw, self.index = raw, index
+
+    def publish_ready(self, phase):
+        self.raw[self.index * len(READINESS_PHASES) + READINESS_PHASES.index(phase)] = 1
+
+    def peer_ready(self, phase):
+        return bool(
+            self.raw[(1 - self.index) * len(READINESS_PHASES) + READINESS_PHASES.index(phase)]
+        )
+
+    def snapshot(self):
+        return {
+            "own": {
+                phase: bool(self.raw[self.index * len(READINESS_PHASES) + i])
+                for i, phase in enumerate(READINESS_PHASES)
+            },
+            "peer": {phase: self.peer_ready(phase) for phase in READINESS_PHASES},
+        }
+
+
+def _driver_factory(path):
+    if not isinstance(path, str) or path.count(":") != 1:
+        raise ValueError("owner driver must be an importable module:function string")
+    module, name = path.split(":")
+    factory = getattr(importlib.import_module(module), name)
+    if not callable(factory):
+        raise TypeError("owner driver factory must be callable")
+    return factory
 
 
 class CallEvidenceLog:
@@ -346,6 +390,11 @@ def _run_owner(
     asset_resolver,
     checkpoint=None,
     evidence_path=None,
+    owner_driver=None,
+    peer_state=None,
+    goal_flag=None,
+    goal_stop=None,
+    driver_options=None,
 ):
     record = records[index]
     session = endpoint = None
@@ -356,6 +405,19 @@ def _run_owner(
     profile = validate_input_profile(args)
     scheduled_offsets = set()
     log = observer = milestone_context = None
+    driver = None
+
+    def goal_cancel(exc=None):
+        if owner_driver is None or goal_flag is None or goal_stop is None:
+            return False
+        if not (goal_flag.is_set() and goal_stop.is_set() and cancelled.is_set()):
+            return False
+        if exc is None:
+            return True
+        from pokered_harness.link.timed_wire import Cancelled
+
+        return type(exc) is Cancelled
+
     seen_events = 0
     call_index = 0
     first_calls, last_calls, milestone_calls = [], [], []
@@ -458,7 +520,18 @@ def _run_owner(
         session.load_state(assets["state"])
         record["loaded"] = observed()
         publish("loaded")
-        if getattr(args, "rom_milestones", False):
+        if owner_driver is not None:
+            if chunk != 1 or peer_state is None or goal_flag is None or goal_stop is None:
+                raise ValueError("owner driver requires whole one-frame calls and shared flags")
+            driver = _driver_factory(owner_driver)(
+                session=session,
+                side=("listen", "connect")[index],
+                options=driver_options,
+                peer_state=peer_state,
+            )
+            record["driver_snapshot"] = _jsonable(driver.snapshot())
+            record["milestone_observer"] = "owner_driver"
+        if getattr(args, "rom_milestones", False) and driver is None:
             from scripts._timed_menu_probe import observe_rom_milestones
 
             milestone_context = observe_rom_milestones(
@@ -526,11 +599,14 @@ def _run_owner(
             try:
                 if observer is not None:
                     observer.check()
-                if profile == "menu" and offset not in scheduled_offsets:
-                    from scripts._timed_menu_probe import menu_input_at
-
+                if driver is not None or (profile == "menu" and offset not in scheduled_offsets):
                     scheduled_offsets.add(offset)
-                    suggested = menu_input_at(offset)
+                    if driver is not None:
+                        suggested = driver.before_step(frame_offset=offset)
+                    else:
+                        from scripts._timed_menu_probe import menu_input_at
+
+                        suggested = menu_input_at(offset)
                     if suggested is not None:
                         button, duration = suggested
                         call["input"] = {
@@ -549,6 +625,8 @@ def _run_owner(
             except BaseException as exc:
                 call["status"] = "interrupted"
                 call["error"] = f"{type(exc).__name__}: {exc}"
+                if goal_cancel(exc):
+                    call["expected_goal_cancellation"] = True
                 raise
             finally:
                 call["elapsed_s"] = time.monotonic() - call["started_monotonic"]
@@ -575,18 +653,39 @@ def _run_owner(
                             call["status"] = "completed_no_progress"
                         elif actual != call["requested_frames"]:
                             call["status"] = "completed_partial"
+                    driver_failure = finalization_failure = None
+                    if driver is not None:
+                        try:
+                            driver.after_step(call=call)
+                            record["driver_snapshot"] = _jsonable(driver.snapshot())
+                            if driver.objective_complete():
+                                goal_flag.set()
+                            record["local_goal"] = goal_flag.is_set()
+                        except BaseException as exc:
+                            driver_failure = exc
+                            call["driver_error"] = f"{type(exc).__name__}: {exc}"
+                            record["errors"].append(f"driver observation: {call['driver_error']}")
                     try:
                         finish_call(call)
-                    except Exception as exc:
+                    except BaseException as exc:
+                        finalization_failure = exc
                         if log is not None:
                             record["unspooled_call"] = call
-                            record["errors"].append(
-                                f"call finalization: {type(exc).__name__}: {exc}"
-                            )
-                        if "error" not in call:
-                            raise
+                        record["errors"].append(f"call finalization: {type(exc).__name__}: {exc}")
                     finally:
                         publish("public_tick_returned")
+                    if "error" not in call:
+                        failures = [
+                            failure
+                            for failure in (driver_failure, finalization_failure)
+                            if failure is not None
+                        ]
+                        if len(failures) == 2:
+                            raise BaseExceptionGroup(
+                                "driver observation and call finalization failed", failures
+                            )
+                        if failures:
+                            raise failures[0]
             if call["actual_completed_frames"] == 0:
                 call["status"] = "completed_no_progress"
                 record["termination"] = "no_progress"
@@ -595,15 +694,30 @@ def _run_owner(
                 call["status"] = "completed_partial"
                 record["termination"] = "incomplete_public_call"
                 break
-        record.setdefault("termination", "cancelled_or_deadline")
+        record.setdefault(
+            "termination", "goal_cancelled" if goal_cancel() else "cancelled_or_deadline"
+        )
     except BaseException as exc:
-        record["errors"].append(f"{type(exc).__name__}: {exc}")
-        record["termination"] = "owner_failure"
+        if goal_cancel(exc):
+            record["expected_goal_cancellation"] = f"{type(exc).__name__}: {exc}"
+            record["termination"] = "goal_cancelled"
+        else:
+            record["errors"].append(f"{type(exc).__name__}: {exc}")
+            record["termination"] = "owner_failure"
     finally:
-        done.set()
+        if owner_driver is None or record.get("termination") != "goal_cancelled":
+            done.set()
         # Supervisor signals BOTH peers before either owner tears down.
         cancelled.wait(max(0, overall - time.monotonic()))
         if session is not None:
+            if driver is not None:
+                try:
+                    record["driver_snapshot"] = _jsonable(driver.snapshot())
+                    record["local_goal"] = goal_flag.is_set()
+                except BaseException as exc:
+                    record["errors"].append(
+                        f"final driver observation: {type(exc).__name__}: {exc}"
+                    )
             try:
                 record["final"] = observed()
                 publish("owner_unwound")
@@ -623,6 +737,14 @@ def _run_owner(
         except BaseException as exc:
             record["errors"].append(f"cleanup: {type(exc).__name__}: {exc}")
         finally:
+            if driver is not None:
+                try:
+                    close_driver = getattr(driver, "close", None)
+                    if close_driver is not None:
+                        close_driver()
+                        record["cleanup"].append("owner_driver_closed")
+                except BaseException as exc:
+                    record["errors"].append(f"driver cleanup: {type(exc).__name__}: {exc}")
             if observer is not None:
                 try:
                     record["milestones"] = observer.snapshot()
@@ -832,6 +954,11 @@ def process_owner(
     overall,
     report_sender,
     stderr_path,
+    owner_driver=None,
+    peer_state=None,
+    goal_flag=None,
+    goal_stop=None,
+    driver_options=None,
 ):
     """Spawn-safe target: no emulator, callbacks, or test closures cross processes."""
     saved, stderr_worker, stderr = _capture_stderr(stderr_path)
@@ -894,6 +1021,17 @@ def process_owner(
             TimedRemoteEndpoint.from_connected_socket,
             resolve_assets,
             checkpoint,
+            **(
+                {
+                    "owner_driver": owner_driver,
+                    "peer_state": peer_state,
+                    "goal_flag": goal_flag,
+                    "goal_stop": goal_stop,
+                    "driver_options": driver_options,
+                }
+                if owner_driver is not None
+                else {}
+            ),
         )
     except BaseException as exc:
         record["errors"].append(f"child: {type(exc).__name__}: {exc}")
@@ -954,9 +1092,16 @@ def process_owner(
             report_sender.close()
 
 
-def run_process_pair(args, *, context=None, child_target=None):
+def run_process_pair(args, *, context=None, child_target=None, owner_driver=None):
     """Two spawn owners with bounded report drains and terminate/kill fallback."""
     validate_input_profile(args)
+    if owner_driver is not None:
+        if not isinstance(owner_driver, str) or owner_driver.count(":") != 1:
+            raise ValueError("owner driver must be an importable module:function string")
+        if args.listener_chunk != 1 or args.connector_chunk != 1:
+            raise ValueError("owner driver requires one-frame chunks")
+        if len(getattr(args, "owner_driver_options", [])) != 2:
+            raise ValueError("owner driver requires two serialized option mappings")
     context = context or multiprocessing.get_context("spawn")
     child_target = child_target or process_owner
     started = time.monotonic()
@@ -978,6 +1123,11 @@ def run_process_pair(args, *, context=None, child_target=None):
     cancel = _SharedFlag(context.RawValue("B", 0))
     done = _SharedFlag(context.RawValue("B", 0))
     barrier = context.Barrier(2)
+    if owner_driver is not None:
+        readiness = context.RawArray("B", 2 * len(READINESS_PHASES))
+        goals = [_SharedFlag(context.RawValue("B", 0)) for _ in range(2)]
+        goal_stop = _SharedFlag(context.RawValue("B", 0))
+        result["owner_driver"] = owner_driver
     processes, receivers, senders, readers, sockets = [], [], [], [], []
     records = [
         {"side": side, "calls": [], "cleanup": [], "errors": [], "termination": "missing_report"}
@@ -1029,6 +1179,17 @@ def run_process_pair(args, *, context=None, child_target=None):
                     overall,
                     sender,
                     str(artifact_dir / f"owner-{index}.stderr"),
+                )
+                + (
+                    (
+                        owner_driver,
+                        _PeerReadiness(readiness, index),
+                        goals[index],
+                        goal_stop,
+                        _jsonable(args.owner_driver_options[index]),
+                    )
+                    if owner_driver is not None
+                    else ()
                 ),
                 name=f"timed-rom-process-{index}",
                 daemon=True,
@@ -1042,15 +1203,27 @@ def run_process_pair(args, *, context=None, child_target=None):
         for sock in sockets:
             sock.close()
         while time.monotonic() < deadline and not done.wait(0.01):
+            if owner_driver is not None and all(flag.is_set() for flag in goals):
+                goal_stop.set()
+                break
             if any(not process.is_alive() for process in processes):
                 break
-        result["stop_reason"] = "owner_completion_or_failure" if done.is_set() else "deadline"
+        result["stop_reason"] = (
+            "both_owner_goals"
+            if owner_driver is not None and goal_stop.is_set()
+            else "owner_completion_or_failure"
+            if done.is_set()
+            else "deadline"
+        )
     except Exception as exc:
         result["stop_reason"] = "startup_failure"
         result["supervisor_cancel_errors"].append(f"{type(exc).__name__}: {exc}")
     finally:
         result["cancelled_monotonic"] = time.monotonic()
         cancel.set()
+        if owner_driver is not None:
+            result["owner_goals"] = [flag.is_set() for flag in goals]
+            result["goal_stop"] = goal_stop.is_set()
         # A lock-free shared byte reaches children before endpoint publication.
         # Do not acquire the barrier lock: a killed child may own it.
         cleanup_deadline = min(overall, time.monotonic() + args.cleanup_timeout)

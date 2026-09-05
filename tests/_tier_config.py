@@ -63,6 +63,7 @@ UNIT_MODULES = frozenset(
         "test_execution_adapter.py",
         "test_fixture_provenance.py",
         "test_game_state.py",
+        "test_gate_failure_retention.py",
         "test_link_orchestrator.py",
         "test_link_pair.py",
         "test_link_protocol.py",
@@ -77,6 +78,7 @@ UNIT_MODULES = frozenset(
         "test_native_hook_exceptions.py",
         "test_network_backend.py",
         "test_probe_timed_rom_pair.py",
+        "test_probe_timed_trade_pair.py",
         "test_production_gate.py",
         "test_pyboy_link_imports.py",
         "test_pyboy_link_session.py",
@@ -105,6 +107,7 @@ UNIT_MODULES = frozenset(
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
         "test_timed_wire.py",
+        "test_timed_trade_probe.py",
     }
 )
 
