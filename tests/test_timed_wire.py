@@ -194,11 +194,82 @@ def test_handshake_rejects_epoch_and_capabilities(kind, peer_epoch, caps):
             if caps:
                 encoded = encoded[:-1] + bytes([caps])
             b.sendall(encoded)
-            with pytest.raises(wire.WireError):
+            with pytest.raises(wire.ProtocolError) as caught:
                 channel.handshake(deadline=deadline())
             assert channel.closed
+            assert caught.value is channel.error
         finally:
             channel.close()
+
+
+@pytest.mark.parametrize("stage", ["select", "send"])
+@pytest.mark.parametrize("reason", ["epoch", "capabilities", "eof", "close"])
+@pytest.mark.parametrize("revision", [2, 3])
+def test_handshake_writer_preserves_terminal_reason(kind, stage, reason, revision, monkeypatch):
+    """Close after the writer's open check, before its real socket operation."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def pause_writer():
+        entered.set()
+        assert release.wait(BOUND), "test did not release handshake writer"
+
+    with sockets(kind) as (a, b):
+
+        class SendGateSocket:
+            def __getattr__(self, name):
+                return getattr(a, name)
+
+            def send(self, data):
+                if stage == "send":
+                    pause_writer()
+                return a.send(data)
+
+        original_select = wire.select.select
+
+        def gated_select(readable, writable, exceptional, timeout):
+            if writable and stage == "select":
+                pause_writer()
+            return original_select(readable, writable, exceptional, timeout)
+
+        # Patch only this leaf module; reader readiness still uses real select.
+        monkeypatch.setattr(wire, "select", SimpleNamespace(select=gated_select))
+        channel = wire.TimedWireChannel(SendGateSocket(), epoch=EPOCH, revision=revision)
+        writer = Job(lambda: channel.handshake(deadline=deadline()))
+        try:
+            assert entered.wait(BOUND), "handshake did not reach socket barrier"
+            if reason == "close":
+                channel.close()
+            elif reason == "eof":
+                b.shutdown(socket.SHUT_WR)
+            else:
+                peer_epoch = b"z" * 16 if reason == "epoch" else EPOCH
+                valid_caps = 1 if revision == 3 else 0
+                encoded = wire.encode_frame(
+                    wire.Frame(peer_epoch, 1, wire.Hello(valid_caps), revision)
+                )
+                if reason == "capabilities":
+                    encoded = encoded[:-1] + bytes([1 - valid_caps])
+                b.sendall(encoded)
+            # Joining proves _terminate has closed the fd, not just set _closed.
+            channel._reader.join(BOUND)
+            assert not channel._reader.is_alive(), "reader did not terminate"
+            assert channel.closed and a.fileno() == -1
+            stored = channel.error
+            expected = (
+                wire.ProtocolError if reason in ("epoch", "capabilities") else wire.ChannelClosed
+            )
+            assert isinstance(stored, expected)
+            release.set()
+            with pytest.raises(expected) as caught:
+                writer.result()
+            assert caught.value is stored, "socket failure masked the stored terminal reason"
+            assert channel.error is stored
+        finally:
+            release.set()
+            channel.close()
+            writer.thread.join(BOUND + 1)
+            assert not writer.thread.is_alive(), "handshake writer leaked"
 
 
 def test_initial_zero_edge_then_equal_completeness_and_independent_progress(kind):

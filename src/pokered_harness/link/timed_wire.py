@@ -293,10 +293,11 @@ class TimedWireChannel:
         if self._error is not None:
             raise self._error
 
-    def _terminate(self, error: WireError) -> None:
+    def _terminate(self, error: WireError) -> WireError:
+        """Retain and return the first terminal reason, including close races."""
         with self._condition:
             if self._error is not None:
-                return
+                return self._error
             self._error = error
             self._closed.set()
             self._queue.clear()
@@ -314,6 +315,7 @@ class TimedWireChannel:
             self._sock.close()
         except OSError:
             pass
+        return error
 
     def close(self) -> None:
         self._terminate(ChannelClosed("channel closed"))
@@ -455,7 +457,9 @@ class TimedWireChannel:
         except (WireError, OSError, ValueError) as exc:
             error = exc if isinstance(exc, WireError) else ChannelClosed(str(exc))
             if admitted:
-                self._terminate(error)
+                # Reader termination can close the fd during select/send.
+                # Surface its original reason instead of the resulting OS error.
+                error = self._terminate(error)
             raise error from None
         finally:
             self._send_lock.release()
