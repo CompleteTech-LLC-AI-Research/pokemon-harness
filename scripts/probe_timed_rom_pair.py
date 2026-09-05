@@ -54,26 +54,25 @@ READINESS_PHASES = (
 
 
 class _PeerReadiness:
-    """Eight publish-once flags per owner; no emulator or payload crosses owners."""
+    """Bounded publish-once flags; no emulator or payload crosses owners."""
 
-    def __init__(self, raw, index):
+    def __init__(self, raw, index, phases=READINESS_PHASES):
         self.raw, self.index = raw, index
+        self.phases = phases
 
     def publish_ready(self, phase):
-        self.raw[self.index * len(READINESS_PHASES) + READINESS_PHASES.index(phase)] = 1
+        self.raw[self.index * len(self.phases) + self.phases.index(phase)] = 1
 
     def peer_ready(self, phase):
-        return bool(
-            self.raw[(1 - self.index) * len(READINESS_PHASES) + READINESS_PHASES.index(phase)]
-        )
+        return bool(self.raw[(1 - self.index) * len(self.phases) + self.phases.index(phase)])
 
     def snapshot(self):
         return {
             "own": {
-                phase: bool(self.raw[self.index * len(READINESS_PHASES) + i])
-                for i, phase in enumerate(READINESS_PHASES)
+                phase: bool(self.raw[self.index * len(self.phases) + i])
+                for i, phase in enumerate(self.phases)
             },
-            "peer": {phase: self.peer_ready(phase) for phase in READINESS_PHASES},
+            "peer": {phase: self.peer_ready(phase) for phase in self.phases},
         }
 
 
@@ -1092,8 +1091,24 @@ def process_owner(
             report_sender.close()
 
 
-def run_process_pair(args, *, context=None, child_target=None, owner_driver=None):
+def run_process_pair(
+    args, *, context=None, child_target=None, owner_driver=None, owner_driver_phases=None
+):
     """Two spawn owners with bounded report drains and terminate/kill fallback."""
+    phases = READINESS_PHASES if owner_driver_phases is None else owner_driver_phases
+    if (
+        not isinstance(phases, tuple)
+        or not 1 <= len(phases) <= 32
+        or any(
+            not isinstance(phase, str) or not phase.strip() or len(phase) > 64 for phase in phases
+        )
+        or len(set(phases)) != len(phases)
+    ):
+        raise ValueError(
+            "owner driver phases must be 1..32 unique nonempty strings of at most 64 characters"
+        )
+    if owner_driver_phases is not None and owner_driver is None:
+        raise ValueError("custom owner driver phases require an owner driver")
     validate_input_profile(args)
     if owner_driver is not None:
         if not isinstance(owner_driver, str) or owner_driver.count(":") != 1:
@@ -1110,12 +1125,15 @@ def run_process_pair(args, *, context=None, child_target=None, owner_driver=None
     result = {
         "label": "cancellation_diagnostic_not_graceful_tick_or_gameplay_success",
         "owner_mode": "process",
+        "owner_driver_phases": list(phases),
         "quantum_cycles": QUANTUM_CYCLES,
         "owners": [],
         "threads_alive": [],
         "processes_alive": [],
         "supervisor_cancel_errors": [],
     }
+    if owner_driver is not None:
+        result["owner_driver"] = owner_driver
     if deadline <= started:
         return dict(result, stop_reason="insufficient_remaining_budget")
     artifact_dir = Path(tempfile.mkdtemp(prefix="poke-timed-process-"))
@@ -1124,10 +1142,9 @@ def run_process_pair(args, *, context=None, child_target=None, owner_driver=None
     done = _SharedFlag(context.RawValue("B", 0))
     barrier = context.Barrier(2)
     if owner_driver is not None:
-        readiness = context.RawArray("B", 2 * len(READINESS_PHASES))
+        readiness = context.RawArray("B", 2 * len(phases))
         goals = [_SharedFlag(context.RawValue("B", 0)) for _ in range(2)]
         goal_stop = _SharedFlag(context.RawValue("B", 0))
-        result["owner_driver"] = owner_driver
     processes, receivers, senders, readers, sockets = [], [], [], [], []
     records = [
         {"side": side, "calls": [], "cleanup": [], "errors": [], "termination": "missing_report"}
@@ -1183,7 +1200,7 @@ def run_process_pair(args, *, context=None, child_target=None, owner_driver=None
                 + (
                     (
                         owner_driver,
-                        _PeerReadiness(readiness, index),
+                        _PeerReadiness(readiness, index, phases),
                         goals[index],
                         goal_stop,
                         _jsonable(args.owner_driver_options[index]),

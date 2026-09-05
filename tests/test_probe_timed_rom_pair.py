@@ -623,9 +623,16 @@ def test_process_spawn_missing_assets_reports_both_child_failures(spawned_probe_
         assert json.loads(json.dumps(owner))["stdout"] == stdout
 
 
-def test_process_spawn_failure_cancels_waiting_peer(spawned_probe_args):
+@pytest.mark.parametrize("explicit_default_phases", [False, True])
+def test_process_spawn_failure_cancels_waiting_peer(spawned_probe_args, explicit_default_phases):
     spawned_probe_args.test_scenario = "failure"
-    result = probe.run_process_pair(spawned_probe_args, child_target=_spawn_diagnostic_owner)
+    phase_options = {"owner_driver_phases": None} if explicit_default_phases else {}
+    result = probe.run_process_pair(
+        spawned_probe_args, child_target=_spawn_diagnostic_owner, **phase_options
+    )
+    assert "owner_driver" not in result
+    assert result["owner_driver_phases"] == list(probe.READINESS_PHASES)
+    assert (spawned_probe_args.listener_chunk, spawned_probe_args.connector_chunk) == (1, 2)
     assert result["processes_alive"] == []
     assert result["tcp_nodelay"] == [0, 0]
     owners = result["owners"]
