@@ -91,6 +91,7 @@ UNIT_MODULES = frozenset(
         "test_state_text.py",
         "test_symbol_loader.py",
         "test_timed_link_session.py",
+        "test_timed_remote.py",
         "test_timed_wire.py",
     }
 )
@@ -292,6 +293,46 @@ TIMING_SENSITIVE_TESTS = frozenset(
             "test_listen_and_connect_over_loopback_exchange_byte",
         ),
         ("test_network_backend.py", "test_sync_with_peer_rendezvous"),
+        (
+            "test_timed_link_session.py",
+            "test_real_pair_repeated_public_frames_bounded_wire_volume",
+        ),
+        (
+            "test_timed_link_session.py",
+            "test_real_v3_external_cancel_interrupts_active_receive",
+        ),
+        (
+            "test_timed_link_session.py",
+            "test_real_v3_poll_returning_after_deadline_never_applies_edge",
+        ),
+        # Real peer scheduling, fragmented ingress, and bounded owner waits;
+        # facade doubles and validation-only remote cases stay unit-only.
+        (
+            "test_timed_remote.py",
+            "test_exact_prelude_zero_nonce_and_coalesced_hello_not_overread",
+        ),
+        (
+            "test_timed_remote.py",
+            "test_prelude_and_hello_waits_share_deadline_and_cancel_cleanup",
+        ),
+        (
+            "test_timed_remote.py",
+            "test_connect_listen_share_exact_factory_deadline_through_hello",
+        ),
+        ("test_timed_remote.py", "test_accept_wait_is_bounded_and_closes_listener"),
+        (
+            "test_timed_remote.py",
+            "test_authored_runtime_two_owner_factory_attach_passive_sync_and_bilateral_fence",
+        ),
+        (
+            "test_timed_remote.py",
+            "test_external_cancel_survives_factory_into_real_endpoint_wait",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_wirecontrol_handshake_rejects_caps_and_revision_without_downgrade",
+        ),
+        ("test_timed_wire.py", "test_handshake_writer_preserves_terminal_reason"),
         (
             "test_timed_wire.py",
             "test_bidirectional_concurrent_requests_and_responses",
