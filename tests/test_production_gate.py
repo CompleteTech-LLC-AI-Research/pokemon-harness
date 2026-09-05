@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import io
@@ -166,6 +167,108 @@ def test_tier_classifier_marks_late_rearm_as_timing_sensitive():
     )
     assert "unit" in marks
     assert "timing_sensitive" in marks
+
+
+# Independently reviewed bodies use fake memory/backends/results or ordinary
+# Python children, never ROM peers. Keep this oracle independent of the tier
+# implementation: deriving it from its allowlist would hide missing entries.
+_SUBPROCESS_MODULE = "tests/test_pyboy_link_session_subprocess.py"
+_REVIEWED_SUBPROCESS_UNIT_TESTS = (
+    "test_link_menu_history_preserves_first_samples_across_buffer_reuse",
+    "test_link_menu_history_validates_call_and_bank",
+    "test_link_menu_history_rejects_call_to_wrong_target",
+    "test_link_menu_history_additive_result_compatibility",
+    "test_link_menu_history_reports_missing_symbols_and_registration_errors",
+    "test_link_menu_history_bounds_callback_errors_and_keeps_partial_samples",
+    "test_link_menu_history_decisive_directions_ignore_stale_second_bytes",
+    "test_link_menu_history_received_candidate_follows_rom_order",
+    "test_link_menu_history_failure_summary_survives_large_result_tail",
+    "test_link_menu_history_missing_call_symbols_remains_observable",
+    "test_link_menu_history_rejects_post_call_outside_bank",
+    "test_setup_handshake_failure_returns_bounded_non_success_sentinels",
+    "test_collect_pair_rejects_missing_or_partial_required_rows",
+    "test_strict_acceptance_rejects_link_menu_only_result",
+    "test_strict_acceptance_rejects_missing_native_edge_req",
+    "test_peer_shutdown_protocol_drains_and_waits_for_late_done_without_ticks",
+    "test_peer_shutdown_protocol_propagates_backend_errors",
+    "test_peer_shutdown_protocol_missing_done_times_out_without_ticks",
+    "test_peer_shutdown_protocol_phase_dispatch_preserves_continued_gameplay",
+    "test_hold_at_sync_boundary_does_not_tick_past_ready_marker",
+    "test_hold_at_sync_boundary_ticks_timed_rom_phase",
+    "test_collect_pair_enforces_hard_deadline_without_waiting_for_peers",
+    "test_partial_peer_sentinel_is_fatal_before_gameplay_assertions",
+)
+_REVIEWED_SUBPROCESS_REAL_TESTS = {
+    "test_subprocess_pair_reaches_link_menu_over_tcp": {"real_rom", "remote_link"},
+    "test_subprocess_pair_completes_trade_over_tcp": {
+        "real_rom",
+        "remote_link",
+        "acceptance",
+        "trade",
+        "trade_acceptance",
+    },
+    "test_subprocess_pair_resolves_battle_turn_over_tcp": {
+        "real_rom",
+        "remote_link",
+        "acceptance",
+        "battle",
+        "battle_acceptance",
+    },
+}
+
+
+@pytest.mark.parametrize("test_name", _REVIEWED_SUBPROCESS_UNIT_TESTS)
+def test_tier_classifier_subprocess_reviewed_fakes_are_exactly_unit(test_name):
+    assert classify_test(_SUBPROCESS_MODULE, test_name) == {"unit"}
+
+
+@pytest.mark.parametrize("test_name,expected", _REVIEWED_SUBPROCESS_REAL_TESTS.items())
+def test_tier_classifier_subprocess_real_entrypoints_keep_exact_markers(test_name, expected):
+    assert classify_test(_SUBPROCESS_MODULE, test_name) == expected
+
+
+@pytest.mark.parametrize(
+    "test_name",
+    (
+        "test_future_subprocess_case",
+        "test_fake_only_future_case",
+        "test_link_menu_history_future_case",
+        "test_peer_shutdown_protocol_future_case",
+        "test_collect_pair_future_case",
+        "test_hold_at_sync_boundary_future_case",
+        "test_strict_acceptance_future_case",
+        "test_link_menu_history_validates_call_and_bank_future_case",
+    ),
+)
+def test_tier_classifier_subprocess_unknown_names_remain_real_remote(test_name):
+    assert classify_test(_SUBPROCESS_MODULE, test_name) == {"real_rom", "remote_link"}
+
+
+def test_tier_classifier_subprocess_fake_exceptions_are_module_scoped():
+    assert classify_test(
+        "tests/test_link_integration_remote.py",
+        "test_link_menu_history_validates_call_and_bank",
+    ) == {
+        "real_rom",
+        "remote_link",
+    }
+
+
+def test_tier_classifier_subprocess_reviewed_inventory_matches_source():
+    # Parse only: importing or collecting the live peer module is unnecessary.
+    source = Path(__file__).resolve().parent / Path(_SUBPROCESS_MODULE).name
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    names = [
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    ]
+    reviewed = set(_REVIEWED_SUBPROCESS_UNIT_TESTS) | set(_REVIEWED_SUBPROCESS_REAL_TESTS)
+    assert len(_REVIEWED_SUBPROCESS_UNIT_TESTS) == len(set(_REVIEWED_SUBPROCESS_UNIT_TESTS))
+    assert set(_REVIEWED_SUBPROCESS_UNIT_TESTS).isdisjoint(_REVIEWED_SUBPROCESS_REAL_TESTS)
+    assert len(names) == len(set(names)), "duplicate test definitions hide reviewed coverage"
+    assert set(names) == reviewed, "subprocess test inventory changed; review tier membership"
 
 
 def test_relative_python_path_does_not_dereference_virtualenv_symlink(tmp_path):
