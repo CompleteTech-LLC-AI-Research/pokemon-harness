@@ -1,4 +1,4 @@
-"""Opt-in timed-wire v2 codec and socket channel; no emulator integration.
+"""Opt-in timed-wire v2/v3 codec and socket channel; no emulator integration.
 
 Epochs identify a session, not an authenticated peer. Deadlines are absolute
 ``time.monotonic()`` values. Hello is handled internally by ``handshake``;
@@ -72,7 +72,26 @@ class EdgeResponse:
     bit: int
 
 
-Message: TypeAlias = Hello | Progress | EdgeRequest | EmissionComplete | EdgeResponse
+@dataclass(frozen=True)
+class Sync:
+    marker_id: int
+
+
+@dataclass(frozen=True)
+class Fence:
+    fence_id: int
+    through_edge_id: int
+
+
+@dataclass(frozen=True)
+class FenceAck:
+    fence_id: int
+    through_edge_id: int
+
+
+Message: TypeAlias = (
+    Hello | Progress | EdgeRequest | EmissionComplete | EdgeResponse | Sync | Fence | FenceAck
+)
 
 
 @dataclass(frozen=True)
@@ -80,6 +99,7 @@ class Frame:
     epoch: bytes
     sequence: int
     message: Message
+    revision: int = 2
 
 
 HEADER = struct.Struct(">4sBBH16sQ")
@@ -92,6 +112,9 @@ _LAYOUTS = {
     EdgeRequest: (3, struct.Struct(">QQQB")),
     EmissionComplete: (4, struct.Struct(">QQ")),
     EdgeResponse: (5, struct.Struct(">QQB")),
+    Sync: (6, struct.Struct(">B")),
+    Fence: (7, struct.Struct(">QQ")),
+    FenceAck: (8, struct.Struct(">QQ")),
 }
 _TYPES = {tag: (cls, layout) for cls, (tag, layout) in _LAYOUTS.items()}
 
@@ -106,17 +129,33 @@ def _epoch(epoch: bytes) -> None:
         raise ProtocolError("epoch must be exactly 16 bytes")
 
 
-def _payload(message: Message) -> tuple[int, bytes]:
+def _revision(revision: int) -> None:
+    if type(revision) is not int or revision not in (2, 3):
+        raise ProtocolError("revision must be 2 or 3")
+
+
+def _payload(message: Message, revision: int = 2) -> tuple[int, bytes]:
+    _revision(revision)
     entry = _LAYOUTS.get(type(message))
     if entry is None:
         raise ProtocolError("unknown message type")
     tag, layout = entry
+    if revision == 2 and tag >= 6:
+        raise ProtocolError("control messages require revision 3")
     values = tuple(getattr(message, name) for name in message.__dataclass_fields__)
     for index, value in enumerate(values):
-        bits = 32 if tag == 1 else 1 if tag in (3, 5) and index == len(values) - 1 else 64
+        bits = (
+            32
+            if tag == 1
+            else 8
+            if tag == 6
+            else 1
+            if tag in (3, 5) and index == len(values) - 1
+            else 64
+        )
         _uint(value, bits)
-    if isinstance(message, Hello) and message.capabilities != 0:
-        raise ProtocolError("v2 capabilities must be zero")
+    if isinstance(message, Hello) and message.capabilities != (1 if revision == 3 else 0):
+        raise ProtocolError("Hello capabilities must be zero for v2 or one for v3")
     if (
         isinstance(message, EdgeRequest)
         and message.scheduled_half_cycle > message.observed_half_cycle
@@ -132,29 +171,31 @@ def encode_frame(frame: Frame) -> bytes:
     _uint(frame.sequence)
     if frame.sequence == 0:
         raise ProtocolError("sequence starts at one")
-    tag, body = _payload(frame.message)
-    return HEADER.pack(b"PKTW", 2, tag, len(body), frame.epoch, frame.sequence) + body
+    tag, body = _payload(frame.message, frame.revision)
+    return HEADER.pack(b"PKTW", frame.revision, tag, len(body), frame.epoch, frame.sequence) + body
 
 
-def _header(data: bytes) -> tuple[type, struct.Struct, bytes, int]:
+def _header(data: bytes) -> tuple[type, struct.Struct, bytes, int, int]:
     magic, version, tag, length, epoch, sequence = HEADER.unpack(data)
-    if magic != b"PKTW" or version != 2 or tag not in _TYPES:
+    if magic != b"PKTW" or version not in (2, 3) or tag not in _TYPES:
         raise ProtocolError("invalid magic, version, or message type")
+    if version == 2 and tag >= 6:
+        raise ProtocolError("control messages require revision 3")
     cls, layout = _TYPES[tag]
     if length > MAX_BODY or length != layout.size or sequence == 0:
         raise ProtocolError("invalid payload length or sequence")
-    return cls, layout, epoch, sequence
+    return cls, layout, epoch, sequence, version
 
 
 def decode_frame(data: bytes) -> Frame:
     if type(data) is not bytes or len(data) < HEADER.size:
         raise ProtocolError("expected complete frame bytes")
-    cls, layout, epoch, sequence = _header(data[: HEADER.size])
+    cls, layout, epoch, sequence, revision = _header(data[: HEADER.size])
     if len(data) != HEADER.size + layout.size:
         raise ProtocolError("frame length mismatch")
     message = cls(*layout.unpack(data[HEADER.size :]))
-    _payload(message)
-    return Frame(epoch, sequence, message)
+    _payload(message, revision)
+    return Frame(epoch, sequence, message, revision)
 
 
 @dataclass
@@ -163,6 +204,8 @@ class _Direction:
     hello: bool = False
     last_edge_id: int = 0
     pending: set[int] = field(default_factory=set)
+    last_fence_id: int = 0
+    pending_fences: dict[int, int] = field(default_factory=dict)
     settled: int = 0
     watermark: int | None = None
 
@@ -192,16 +235,29 @@ class TimedWireChannel:
     work. Both directional outstanding sets and the receive queue are bounded
     by inbound_capacity. No callbacks run on the reader. Close wakes all
     waiters and joins the reader for at most 0.2 seconds, never itself.
+    Revision 3 requires Hello(1); there is no revision negotiation. Each
+    directional pending-fence map is also bounded by inbound_capacity.
+    The reader queues fences without acknowledging them: the owner must send
+    FenceAck only after applying the identified prefix.
     """
 
-    def __init__(self, sock: socket.socket, *, epoch: bytes, inbound_capacity: int = 64):
+    def __init__(
+        self,
+        sock: socket.socket,
+        *,
+        epoch: bytes,
+        inbound_capacity: int = 64,
+        revision: int = 2,
+    ):
         _epoch(epoch)
+        _revision(revision)
         if type(inbound_capacity) is not int or inbound_capacity < 1:
             raise ValueError("inbound_capacity must be a positive integer")
         sock.getpeername()
         sock.setblocking(False)
         self._sock = sock
         self._epoch = epoch
+        self._revision = revision
         self._capacity = inbound_capacity
         self._condition = threading.Condition()
         self._send_lock = threading.Lock()
@@ -219,6 +275,10 @@ class TimedWireChannel:
     @property
     def epoch(self) -> bytes:
         return self._epoch
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
     @property
     def closed(self) -> bool:
@@ -242,6 +302,8 @@ class TimedWireChannel:
             self._queue.clear()
             self._incoming.pending.clear()
             self._outgoing.pending.clear()
+            self._incoming.pending_fences.clear()
+            self._outgoing.pending_fences.clear()
             self._condition.notify_all()
         # Never hold protocol state locks across socket operations.
         try:
@@ -261,6 +323,8 @@ class TimedWireChannel:
     def _accept(self, frame: Frame, direction: _Direction, opposite: _Direction) -> None:
         """Validate fully, then mutate; caller holds the condition lock."""
         message = frame.message
+        if frame.revision != self.revision:
+            raise ProtocolError("revision mismatch")
         if frame.epoch != self.epoch or frame.sequence != direction.sequence + 1:
             raise ProtocolError("epoch or sequence mismatch")
         if isinstance(message, Hello):
@@ -287,6 +351,18 @@ class TimedWireChannel:
                 raise ProtocolError("emission watermark regressed")
         if isinstance(message, EdgeResponse) and message.edge_id not in opposite.pending:
             raise ProtocolError("response does not match an outstanding request")
+        if isinstance(message, Fence):
+            if message.fence_id != direction.last_fence_id + 1:
+                raise ProtocolError("fence IDs must be contiguous from one")
+            if message.through_edge_id != direction.last_edge_id:
+                raise ProtocolError("fence must identify exact request prefix")
+            if len(direction.pending_fences) >= self._capacity:
+                raise ProtocolError("outstanding fence capacity exceeded")
+        if (
+            isinstance(message, FenceAck)
+            and opposite.pending_fences.get(message.fence_id) != message.through_edge_id
+        ):
+            raise ProtocolError("ack does not match an outstanding fence prefix")
 
         direction.sequence = frame.sequence
         if isinstance(message, Hello):
@@ -301,10 +377,16 @@ class TimedWireChannel:
         elif isinstance(message, EdgeResponse):
             # delivered_half_cycle belongs to the responder's clock domain.
             opposite.pending.remove(message.edge_id)
+        elif isinstance(message, Fence):
+            direction.last_fence_id = message.fence_id
+            direction.pending_fences[message.fence_id] = message.through_edge_id
+        elif isinstance(message, FenceAck):
+            # Compare the saved prefix, not the direction's possibly newer edge ID.
+            del opposite.pending_fences[message.fence_id]
 
     def handshake(self, *, deadline: float, cancel_event: threading.Event | None = None) -> None:
         _deadline(deadline)
-        self._send(Hello(), deadline, cancel_event, hello_once=True)
+        self._send(Hello(1 if self.revision == 3 else 0), deadline, cancel_event, hello_once=True)
         with self._condition:
             while True:
                 self._check_open()
@@ -327,7 +409,7 @@ class TimedWireChannel:
         hello_once: bool = False,
     ) -> Frame:
         _deadline(deadline)
-        _payload(message)
+        _payload(message, self.revision)
         while True:
             with self._condition:
                 self._check_open()
@@ -339,8 +421,8 @@ class TimedWireChannel:
                 self._check_open()
                 _remaining(deadline, cancel_event)
                 if hello_once and self._outgoing.hello:
-                    return Frame(self.epoch, 1, Hello())
-                frame = Frame(self.epoch, self._outgoing.sequence + 1, message)
+                    return Frame(self.epoch, 1, message, self.revision)
+                frame = Frame(self.epoch, self._outgoing.sequence + 1, message, self.revision)
                 data = encode_frame(frame)
                 self._accept(frame, self._outgoing, self._incoming)
                 admitted = True
@@ -419,7 +501,9 @@ class TimedWireChannel:
                 if len(buffer) != target:
                     continue
                 if target == HEADER.size:
-                    _, layout, epoch, _ = _header(bytes(buffer))
+                    _, layout, epoch, _, revision = _header(bytes(buffer))
+                    if revision != self.revision:
+                        raise ProtocolError("revision mismatch")
                     if epoch != self.epoch:
                         raise ProtocolError("epoch mismatch")
                     target += layout.size
