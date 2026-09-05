@@ -7,7 +7,8 @@ half hardware cycles. Normal CPU ticks contribute two halves, double-speed
 ticks one: retaining halves exactly preserves odd double-speed carry.
 
 The caller serializes emulator execution, executes at most a reserved bound,
-then commits actual CPU clock and instruction count before changing speed.
+then commits actual CPU clock and instruction count with at most one speed
+transition, or changes speed separately at the committed clock.
 An instruction that cannot fit must not execute. Reset/load/reconnect requires
 a new instance and an independently agreed epoch, never rebasing this one.
 
@@ -65,6 +66,14 @@ class Permit:
 
 
 @dataclass(frozen=True)
+class SpeedTransition:
+    """One observed speed change at an inclusive raw CPU clock boundary."""
+
+    raw_cpu_clock: int
+    double_speed: bool
+
+
+@dataclass(frozen=True)
 class TimedEdge:
     epoch: str
     sequence: int
@@ -96,6 +105,7 @@ class TimeSnapshot:
     terminal_reason: str | None
     pending_delivery: bool
     observed_raw_cpu_clock: int
+    double_speed: bool = False
 
 
 class EmulatedTimeCoordinator:
@@ -204,6 +214,7 @@ class EmulatedTimeCoordinator:
                 self._terminal_reason,
                 self._pending_delivery is not None,
                 self._observed_raw,
+                self._rate == 1,
             )
 
     def begin_episode(self, request_id: str, *, cycle_budget: int, instruction_cap: int) -> None:
@@ -293,7 +304,14 @@ class EmulatedTimeCoordinator:
             self._integer(max_cpu_cycles, "max_cpu_cycles", 1)
             return self._reserve(max_cpu_cycles)
 
-    def commit(self, permit: Permit, *, raw_cpu_clock: int, instructions: int) -> TimeSnapshot:
+    def commit(
+        self,
+        permit: Permit,
+        *,
+        raw_cpu_clock: int,
+        instructions: int,
+        speed_transition: SpeedTransition | None = None,
+    ) -> TimeSnapshot:
         """Commit actual positive progress, possibly smaller than the permit.
 
         Actual instructions may be zero (for example HALT or DMA progress),
@@ -304,6 +322,9 @@ class EmulatedTimeCoordinator:
         terminal snapshot may exceed scheduling invariants: it reports observed
         execution, not permission. This also applies if transport failure or close
         occurred during execution. A rollback cannot yield normalized elapsed.
+        A transition splits the interval into old-rate and new-rate integer
+        halves; either endpoint is allowed. Malformed transition metadata keeps
+        only the observed endpoint because normalized elapsed is unknown.
         """
         with self._condition:
             if permit is not self._pending or self._pending is None:
@@ -311,24 +332,80 @@ class EmulatedTimeCoordinator:
                 self._fail("invalid or already committed permit")
             self._integer(raw_cpu_clock, "raw_cpu_clock")
             self._observed_raw = raw_cpu_clock
+            rate = self._rate
+            if speed_transition is not None:
+                if (
+                    type(speed_transition) is not SpeedTransition
+                    or type(speed_transition.raw_cpu_clock) is not int
+                    or type(speed_transition.double_speed) is not bool
+                    or not self._raw <= speed_transition.raw_cpu_clock <= raw_cpu_clock
+                ):
+                    self._pending = None
+                    self._fail("invalid speed transition; unknown normalized interval")
+                rate = 1 if speed_transition.double_speed else 2
             delta = raw_cpu_clock - self._raw
             if delta <= 0:
+                self._rate = rate
                 self._pending = None
                 self._fail("CPU clock rollback or zero progress; elapsed cannot advance")
             if self._episode_open and type(instructions) is int and instructions >= 0:
                 self._instructions = max(0, self._instructions - instructions)
-            self._local += delta * self._rate
+            elapsed = delta * self._rate
+            if speed_transition is not None:
+                elapsed = (speed_transition.raw_cpu_clock - self._raw) * self._rate + (
+                    raw_cpu_clock - speed_transition.raw_cpu_clock
+                ) * rate
+            self._local += elapsed
             self._raw = raw_cpu_clock
+            self._rate = rate
             self._pending = None
             self._condition.notify_all()
             self._open()
             self._integer(instructions, "instructions")
             if delta > permit.cpu_cycles:
                 self._fail("physical permit overrun; actual elapsed recorded")
+            if elapsed > permit.half_cycles:
+                self._fail("half-cycle permit overrun; actual elapsed recorded")
             if instructions > permit.instruction_cap:
                 self._fail("instruction cap exceeded; actual elapsed recorded")
             if self._edges and self._local - self._edges[0][0] > self._max_lateness:
                 self._fail("edge lateness exceeds bound; actual elapsed recorded")
+            return self.snapshot()
+
+    def discard_unconsumed_permit(
+        self,
+        permit: Permit,
+        *,
+        raw_cpu_clock: int,
+        instructions: int = 0,
+        double_speed: bool | None = None,
+    ) -> TimeSnapshot:
+        """Release an identity-bound reservation after verified zero execution.
+
+        No allowance or committed time changes. Invalid reports retain a valid
+        observed endpoint but cannot establish a normalized interval. After
+        closure, release still occurs before the existing terminal is raised.
+        """
+        with self._condition:
+            if permit is not self._pending or self._pending is None:
+                self._open()
+                self._fail("invalid or already consumed permit")
+            if type(raw_cpu_clock) is int and raw_cpu_clock >= 0:
+                self._observed_raw = raw_cpu_clock
+            self._pending = None
+            self._condition.notify_all()
+            if (
+                type(raw_cpu_clock) is not int
+                or raw_cpu_clock != self._raw
+                or type(instructions) is not int
+                or instructions != 0
+                or (
+                    double_speed is not None
+                    and (type(double_speed) is not bool or double_speed != (self._rate == 1))
+                )
+            ):
+                self._fail("invalid unconsumed permit report; unknown normalized interval")
+            self._open()
             return self.snapshot()
 
     def set_speed(self, *, raw_cpu_clock: int, double_speed: bool) -> None:

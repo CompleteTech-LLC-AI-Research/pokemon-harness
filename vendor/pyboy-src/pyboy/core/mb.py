@@ -82,6 +82,13 @@ class Motherboard:
         self.wram_select = 0
         self.cgb_undocumented = array("B", [0] * 4)
         self.double_speed = False
+        self.execution_before = None
+        self.execution_after = None
+        self._execution_governor_enabled = False
+        self._execution_governor_active = False
+        self.speed_transition_count = 0
+        self.speed_transition_clock = 0
+        self.speed_transition_double_speed = False
 
         if self.cgb:
             self.hdma = HDMA()
@@ -100,6 +107,9 @@ class Motherboard:
     def switch_speed(self):
         if self.key1 & 0b1:
             self.double_speed = not self.double_speed
+            self.speed_transition_count += 1
+            self.speed_transition_clock = self.cpu.cycles
+            self.speed_transition_double_speed = self.double_speed
             self.lcd.tick(self.cpu.cycles)
             self.lcd.speed_shift = 1 if self.double_speed else 0
             self.sound.tick(self.cpu.cycles)
@@ -259,6 +269,8 @@ class Motherboard:
         logger.debug("State saved.")
 
     def load_state(self, f):
+        if self._execution_governor_enabled or self._execution_governor_active:
+            raise PyBoyInvalidOperationException("Detach execution governor before loading state and establish a new epoch")
         logger.debug("Loading state...")
         state_version = f.read()
         if state_version >= 2:
@@ -333,9 +345,146 @@ class Motherboard:
     # Coordinator
     #
 
-    def tick(self):
-        while not self.lcd.frame_done:
+    def set_execution_governor(self, before, after):
+        """Attach a reservation/report pair, or detach with (None, None).
+
+        before(raw_cpu_clock, double_speed, kind, required_cpu_cycles) returns
+        a strict int grant >= required_cpu_cycles and <= 9223372036854775807.
+        kind is "cpu" (required 24, tick target 4) or "hdma" (required 206).
+        after(start_raw, end_raw, start_double_speed, end_double_speed, kind,
+              required_cpu_cycles, transition_count, transition_clock,
+              transition_double_speed) reports actual execution. Clocks/counts
+        are ints and speeds are bools; transition_count is the per-step delta.
+        Transition clock/speed are meaningful only when that delta is one.
+
+        A reservation commits no progress. Only the after callback's actual
+        timestamps describe execution; errors never imply rollback. Detach
+        before loading state and establish a new timeline epoch before reuse.
+        """
+        if self._execution_governor_active:
+            raise PyBoyInvalidOperationException("Cannot replace execution governor during a callback pair")
+        if not ((before is None and after is None) or (callable(before) and callable(after))):
+            raise PyBoyInvalidOperationException("Execution governor requires two callables or two None values")
+        self.execution_before = before
+        self.execution_after = after
+        self._execution_governor_enabled = before is not None
+
+    def _execution_step(self):
+        """Reserve one bounded step and report actual metadata before dispatch.
+
+        Transition clock/speed describe this step only when count delta is one.
+        Native noexcept CPU/HDMA failures cannot be caught here; propagated
+        execution exceptions still receive a best-effort report without masking
+        the original exception if reporting also fails.
+        """
+        if self._execution_governor_active:
+            raise PyBoyInvalidOperationException("Recursive governed execution")
+        if not self._execution_governor_enabled:
+            raise PyBoyInvalidOperationException("Execution governor is not configured")
+        self._execution_governor_active = True
+        try:
+            before = self.execution_before
+            after = self.execution_after
+            start_raw = int(self.cpu.cycles)
+            start_speed = bool(self.double_speed)
+            start_count = int(self.speed_transition_count)
+            start_transition_clock = int(self.speed_transition_clock)
+            start_transition_speed = bool(self.speed_transition_double_speed)
+            is_hdma = bool(
+                self.cgb_mode
+                and not self.cpu.halted
+                and self.hdma.transfer_active
+                and self.lcd._STAT._mode & 0b11 == 0
+            )
+            kind = "hdma" if is_hdma else "cpu"
+            required = 206 if is_hdma else 24
+            if start_raw < 0 or start_raw > 9223372036854775807 - required:
+                raise PyBoyInvalidOperationException("Execution clock cannot safely fit the required step in int64")
+            grant = before(start_raw, start_speed, kind, required)
+            if type(grant) is not int or grant < required or grant > 9223372036854775807:
+                raise PyBoyInvalidOperationException("Execution grant must be an int within the required bound and int64")
             if (
+                self.cpu.cycles != start_raw
+                or self.double_speed != start_speed
+                or self.speed_transition_count != start_count
+                or self.speed_transition_clock != start_transition_clock
+                or self.speed_transition_double_speed != start_transition_speed
+                or self.execution_before is not before
+                or self.execution_after is not after
+                or not self._execution_governor_enabled
+                or is_hdma != bool(
+                    self.cgb_mode
+                    and not self.cpu.halted
+                    and self.hdma.transfer_active
+                    and self.lcd._STAT._mode & 0b11 == 0
+                )
+            ):
+                raise PyBoyInvalidOperationException(
+                    "Execution reservation changed clock, speed, callbacks or HDMA eligibility"
+                )
+            try:
+                if is_hdma:
+                    self.cpu.cycles = self.cpu.cycles + self.hdma.tick(self)
+                else:
+                    # Excess credit is not permission to batch; HALT also uses 4.
+                    self.cpu.tick(4)
+            except BaseException:
+                try:
+                    after(
+                        start_raw, int(self.cpu.cycles), start_speed, bool(self.double_speed), kind, required,
+                        int(self.speed_transition_count) - start_count,
+                        int(self.speed_transition_clock), bool(self.speed_transition_double_speed),
+                    )
+                except BaseException:  # noqa: S110, BLE001 - Preserve the primary execution exception.
+                    pass
+                raise
+            end_raw = int(self.cpu.cycles)
+            end_speed = bool(self.double_speed)
+            transition_count = int(self.speed_transition_count) - start_count
+            transition_clock = int(self.speed_transition_clock)
+            transition_speed = bool(self.speed_transition_double_speed)
+            actual_delta = end_raw - start_raw
+            after(
+                start_raw, end_raw, start_speed, end_speed, kind, required,
+                transition_count, transition_clock, transition_speed,
+            )
+            if (
+                self.cpu.cycles != end_raw
+                or self.double_speed != end_speed
+                or int(self.speed_transition_count) != start_count + transition_count
+                or self.speed_transition_clock != transition_clock
+                or self.speed_transition_double_speed != transition_speed
+                or self.execution_before is not before
+                or self.execution_after is not after
+                or not self._execution_governor_enabled
+            ):
+                raise PyBoyInvalidOperationException("Execution report changed clock, speed, transitions or callbacks")
+            if actual_delta < 0 or actual_delta > required or transition_count < 0 or transition_count > 1:
+                raise PyBoyInvalidOperationException("Execution exceeded reserved bound or speed-transition limit; no rollback")
+            if (
+                (transition_count == 0 and end_speed != start_speed)
+                or (actual_delta == 0 and transition_count != 0)
+                or (
+                    transition_count == 1
+                    and (
+                        transition_clock < start_raw
+                        or transition_clock > end_raw
+                        or transition_speed != end_speed
+                        or end_speed == start_speed
+                    )
+                )
+            ):
+                raise PyBoyInvalidOperationException("Execution speed-transition metadata is inconsistent; no rollback")
+        finally:
+            self._execution_governor_active = False
+
+    def tick(self):
+        if self._execution_governor_active:
+            raise PyBoyInvalidOperationException("Recursive motherboard tick during execution callback pair")
+        while not self.lcd.frame_done:
+            if self._execution_governor_enabled:
+                self._execution_step()
+            elif (
                 self.cgb_mode
                 and (not self.cpu.halted)
                 and self.hdma.transfer_active

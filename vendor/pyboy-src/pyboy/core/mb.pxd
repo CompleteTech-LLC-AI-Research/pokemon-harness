@@ -51,8 +51,25 @@ cdef class Motherboard:
     cdef HDMA hdma
     cdef uint8_t key0, key1, wram_select
     cdef uint8_t[4] cgb_undocumented
-    cdef bint double_speed
+    cdef readonly bint double_speed
     cdef readonly bint cgb, cgb_mode
+
+    # Optional execution governor; callbacks are installed only by the setter.
+    cdef readonly object execution_before, execution_after
+    cdef bint _execution_governor_active, _execution_governor_enabled
+    cdef readonly uint64_t speed_transition_count
+    cdef readonly int64_t speed_transition_clock
+    cdef readonly bint speed_transition_double_speed
+    cpdef void set_execution_governor(self, object before, object after) except * with gil
+
+    # Box snapshots before subtraction so raw-clock/count differences cannot
+    # overflow signed C arithmetic at native integer boundaries.
+    @cython.locals(
+        start_raw=object, end_raw=object, start_count=object,
+        transition_count=object, actual_delta=object,
+        start_transition_clock=object, transition_clock=object,
+    )
+    cpdef void _execution_step(self) except * with gil
 
     cdef dict breakpoints
     # public: harness lockstep coordinator drives tick/breakpoint loop per peer
