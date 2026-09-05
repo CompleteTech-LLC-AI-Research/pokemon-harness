@@ -2,7 +2,14 @@
 
 import hashlib
 import json
+import multiprocessing
+import os
+import signal
+import socket
+import struct
+import sys
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,6 +70,26 @@ def test_operation_timeout_and_native_policy_are_explicit():
 def test_quantum_is_not_a_cli_tuning_knob():
     with pytest.raises(SystemExit):
         arguments("--quantum", "512")
+
+
+def test_owner_mode_keeps_thread_default_and_requires_explicit_process():
+    baseline = arguments()
+    process = arguments("--owner-mode", "process")
+    assert baseline.owner_mode == "thread"
+    assert process.owner_mode == "process"
+    for name in (
+        "listener_chunk",
+        "connector_chunk",
+        "frame_limit",
+        "operation_timeout",
+        "rearm_budget",
+        "rearm_instruction_cap",
+        "max_edge_lateness",
+    ):
+        assert getattr(baseline, name) == getattr(process, name)
+    assert probe.QUANTUM_CYCLES == 256
+    with pytest.raises(SystemExit):
+        arguments("--owner-mode", "fork")
 
 
 @pytest.mark.parametrize("version", ["blue_gb", "red_gb", "../yellow"])
@@ -478,3 +505,502 @@ def test_asset_resolution_uses_external_roots_and_canonical_pins(monkeypatch, tm
     contents[fixture_root / family / "cable_club.state"] = b"corrupted"
     with pytest.raises(ValueError, match="fixture bytes"):
         probe.resolve_assets(version, tmp_path)
+
+
+def _spawn_diagnostic_owner(
+    args_dict,
+    index,
+    sock,
+    cancel_event,
+    done_event,
+    barrier,
+    deadline,
+    overall,
+    report_sender,
+    stderr_path,
+):
+    """Serializable synthetic owner; never loads assets or claims native progress."""
+    scenario = args_dict["test_scenario"]
+    record = {
+        "side": ("listener", "connector")[index],
+        "calls": [],
+        "cleanup": [],
+        "errors": [],
+        "termination": "cancelled_or_deadline",
+        "test_pid": os.getpid(),
+        "test_executable": sys.executable,
+        "test_repo_root": args_dict["repo_root"],
+        "test_tcp_nodelay": sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY),
+    }
+    try:
+        sock.settimeout(max(0.001, deadline - time.monotonic()))
+        sock.sendall(bytes([index]))
+        assert sock.recv(1) == bytes([1 - index])
+        if scenario in ("ignore_cancel", "partial_report"):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            Path(stderr_path).with_suffix(".checkpoint.json").write_text(
+                json.dumps({"synthetic_checkpoint": True, "phase": "before_unresponsive_wait"})
+            )
+        barrier.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if scenario in ("ignore_cancel", "partial_report"):
+            if scenario == "partial_report":
+                os.write(report_sender.fileno(), struct.pack("!i", 1024) + b"{")
+                # A dead/stuck child may own a shared condition indefinitely.
+                abandoned_event = multiprocessing.get_context("spawn").Event()
+                abandoned_event._cond.acquire()
+            # Parent must kill this process; test fixture also reaps on assertion failure.
+            time.sleep(30)
+            return
+        if index == 0:
+            record["errors"].append("injected failure before endpoint publication")
+            record["termination"] = "owner_failure"
+            done_event.set()
+        record["test_cancel_seen"] = cancel_event.wait(max(0, overall - time.monotonic()))
+        assert record["test_cancel_seen"]
+        record["cleanup"].append("synthetic_socket_closed")
+        if index == 0 and scenario == "invalid_json":
+            report_sender.send_bytes(b"not JSON")
+        elif index == 0 and scenario == "oversize":
+            report_sender.send_bytes(b"x" * (probe.MAX_REPORT_BYTES + 1))
+        else:
+            report_sender.send_bytes(json.dumps(record).encode())
+    finally:
+        sock.close()
+        report_sender.close()
+
+
+@pytest.fixture
+def spawned_probe_args(tmp_path):
+    """Retain a final emergency reap so a failed assertion cannot leak test children."""
+    before = {child.pid for child in multiprocessing.active_children()}
+    args = arguments(
+        "--owner-mode",
+        "process",
+        "--repo-root",
+        str(tmp_path),
+        "--pair-timeout",
+        "3",
+        "--cleanup-timeout",
+        "1",
+        "--overall-timeout",
+        "8",
+    )
+    try:
+        yield args
+    finally:
+        for child in multiprocessing.active_children():
+            if child.pid not in before:
+                child.kill()
+                child.join(2)
+
+
+def test_process_spawn_missing_assets_reports_both_child_failures(spawned_probe_args):
+    result = probe.run_process_pair(spawned_probe_args)
+    assert result["tcp_nodelay"] == [0, 0]
+    assert result["processes_alive"] == []
+    assert result["threads_alive"] == []
+    assert len(result["owners"]) == 2
+    for owner in result["owners"]:
+        assert owner["pid"] != os.getpid()
+        assert owner["owner_complete"] and not owner["alive"]
+        assert owner["termination"] == "owner_failure"
+        expected = f"manifest not found: {spawned_probe_args.repo_root / 'release-evidence' / 'fixture-manifest.json'}"
+        assert any(expected in error for error in owner["errors"])
+        assert owner["actual_missing"] is True
+        assert owner["cleanup"] == []
+        assert not owner["forced_termination"]
+        assert owner["runtime"]["executable"] == sys.executable
+        assert owner["runtime"]["modules"] == probe.runtime_identity()["modules"]
+        assert owner["stderr"]["bytes"] <= probe.STDERR_LIMIT
+        stdout = owner["stdout"]
+        assert stdout["bytes"] <= probe.STDERR_LIMIT
+        assert stdout["total_bytes"] >= stdout["bytes"]
+        assert stdout["truncated"] is False
+        assert stdout["drainer_alive"] is False
+        assert Path(stdout["path"]).is_file()
+        assert Path(stdout["path"]).stat().st_size == stdout["bytes"]
+        assert json.loads(json.dumps(owner))["stdout"] == stdout
+
+
+def test_process_spawn_failure_cancels_waiting_peer(spawned_probe_args):
+    spawned_probe_args.test_scenario = "failure"
+    result = probe.run_process_pair(spawned_probe_args, child_target=_spawn_diagnostic_owner)
+    assert result["processes_alive"] == []
+    assert result["tcp_nodelay"] == [0, 0]
+    owners = result["owners"]
+    assert len({owner["pid"] for owner in owners}) == 2
+    for owner in owners:
+        assert owner["pid"] == owner["test_pid"] != os.getpid()
+        assert owner["test_executable"] == sys.executable
+        assert owner["test_repo_root"] == str(spawned_probe_args.repo_root)
+        assert owner["test_tcp_nodelay"] == 0
+        assert owner["test_cancel_seen"] is True
+        assert owner["owner_complete"] and not owner["alive"]
+        assert owner["exitcode"] == 0
+        assert not owner["forced_termination"]
+        assert owner["actual_missing"] is True
+    assert owners[0]["termination"] == "owner_failure"
+    assert owners[1]["termination"] == "cancelled_or_deadline"
+
+
+def test_process_spawn_deadline_terminates_unresponsive_owners(spawned_probe_args):
+    spawned_probe_args.test_scenario = "ignore_cancel"
+    started = time.monotonic()
+    result = probe.run_process_pair(spawned_probe_args, child_target=_spawn_diagnostic_owner)
+    assert time.monotonic() - started < spawned_probe_args.overall_timeout
+    assert result["stop_reason"] == "deadline"
+    assert result["processes_alive"] == []
+    for owner in result["owners"]:
+        assert owner["forced_termination"]
+        assert owner["exitcode"] == -signal.SIGKILL
+        assert owner["actual_missing"] is True
+        assert not owner["alive"]
+        assert owner["cleanup"] == []
+        assert "final" not in owner
+        assert owner["last_checkpoint"] == {
+            "synthetic_checkpoint": True,
+            "phase": "before_unresponsive_wait",
+        }
+        assert owner["checkpoint_is_final"] is False
+
+
+@pytest.mark.parametrize("scenario", ["invalid_json", "oversize"])
+def test_process_spawn_rejects_invalid_child_report(spawned_probe_args, scenario):
+    spawned_probe_args.test_scenario = scenario
+    result = probe.run_process_pair(spawned_probe_args, child_target=_spawn_diagnostic_owner)
+    assert result["processes_alive"] == []
+    assert result["owners"][0]["errors"]
+    assert result["owners"][0]["actual_missing"] is True
+    assert result["owners"][0]["cleanup"] == []
+    assert result["owners"][1]["test_cancel_seen"] is True
+
+
+def test_process_cancellation_bridge_sets_local_event_before_publication():
+    shared = probe._SharedFlag(multiprocessing.get_context("spawn").RawValue("B", 0))
+    local = threading.Event()
+    stop = threading.Event()
+    errors = []
+    shared.set()
+    watcher = threading.Thread(
+        target=probe.cancellation_bridge,
+        args=(shared, local, [None], threading.Lock(), stop, errors),
+    )
+    watcher.start()
+    try:
+        assert local.wait(1), "pre-publication cancellation never reached local threading.Event"
+        assert type(local) is threading.Event
+    finally:
+        stop.set()
+        watcher.join(1)
+    assert not watcher.is_alive()
+    assert errors == []
+
+
+def test_process_cancellation_bridge_continues_after_endpoint_cancel_error():
+    shared = probe._SharedFlag(multiprocessing.get_context("spawn").RawValue("B", 0))
+    local, stop, reached = threading.Event(), threading.Event(), threading.Event()
+    errors, callers = [], []
+
+    def fail():
+        assert local.is_set()
+        raise RuntimeError("first endpoint cancellation failed")
+
+    def second():
+        callers.append(threading.get_ident())
+        reached.set()
+
+    endpoints = [SimpleNamespace(cancel=fail), SimpleNamespace(cancel=second)]
+    watcher = threading.Thread(
+        target=probe.cancellation_bridge,
+        args=(shared, local, endpoints, threading.Lock(), stop, errors),
+    )
+    watcher.start()
+    try:
+        shared.set()
+        assert reached.wait(1)
+    finally:
+        stop.set()
+        watcher.join(1)
+    assert not watcher.is_alive()
+    assert callers and all(caller == watcher.ident for caller in callers)
+    assert any("first endpoint cancellation failed" in str(error) for error in errors)
+
+
+@pytest.mark.parametrize("owner_mode", ["thread", "process"])
+def test_run_probe_dispatches_owner_mode_and_preserves_reversed_chunks(monkeypatch, owner_mode):
+    calls = []
+    args = arguments("--owner-mode", owner_mode, "--both-orientations")
+
+    def selected(options):
+        calls.append(vars(options).copy())
+        return {"threads_alive": [], "processes_alive": []}
+
+    def wrong_mode(options):
+        pytest.fail("probe dispatched the wrong execution mode")
+
+    monkeypatch.setattr(probe, "runtime_identity", dict)
+    monkeypatch.setattr(probe, "run_pair", selected if owner_mode == "thread" else wrong_mode)
+    monkeypatch.setattr(
+        probe,
+        "run_process_pair",
+        selected if owner_mode == "process" else wrong_mode,
+    )
+    report = probe.run_probe(args)
+    assert len(report["pairs"]) == len(calls) == 2
+    assert (calls[0]["listener"], calls[0]["connector"]) == ("blue_color", "yellow")
+    assert (calls[1]["listener"], calls[1]["connector"]) == ("yellow", "blue_color")
+    assert calls[0]["absolute_deadline"] == calls[1]["absolute_deadline"]
+    assert [(call["listener_chunk"], call["connector_chunk"]) for call in calls] == [(1, 2)] * 2
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "live_process",
+        "killed",
+        "missing_actual",
+        "nonzero_child",
+        "partial_call",
+        "watcher",
+        "stderr_drainer",
+        "stdout_drainer",
+        "stdout_error",
+    ],
+)
+def test_process_main_never_reports_success_for_incomplete_owner(monkeypatch, tmp_path, failure):
+    owner = {
+        "errors": [],
+        "termination": "frame_bound",
+        "owner_complete": True,
+        "alive": False,
+        "forced_termination": False,
+        "actual_missing": False,
+        "exitcode": 0,
+        "calls": [],
+        "final": {"frame_count": 6},
+    }
+    pair = {
+        "owner_mode": "process",
+        "stop_reason": "owner_completion_or_failure",
+        "threads_alive": [],
+        "processes_alive": [],
+        "owners": [owner],
+    }
+    if failure == "live_process":
+        pair["processes_alive"] = [123]
+        owner.update(alive=True, owner_complete=False)
+    elif failure == "killed":
+        owner["forced_termination"] = True
+    elif failure == "missing_actual":
+        owner["actual_missing"] = True
+        del owner["final"]
+    elif failure == "nonzero_child":
+        owner["exitcode"] = 1
+    elif failure == "watcher":
+        owner["watcher_alive"] = True
+    elif failure == "stderr_drainer":
+        owner["stderr"] = {"drainer_alive": True}
+    elif failure == "stdout_drainer":
+        owner["stdout"] = {"drainer_alive": True}
+    elif failure == "stdout_error":
+        owner["stdout"] = {"error": "injected stdout capture failure"}
+    else:
+        owner["calls"] = [{"status": "interrupted", "actual_completed_frames": 1, "requested": 2}]
+    args = arguments("--owner-mode", "process", "--output", str(tmp_path / "report.json"))
+    monkeypatch.setattr(probe, "parse_args", lambda argv: args)
+    monkeypatch.setattr(probe, "run_probe", lambda args: {"pairs": [pair]})
+    assert probe.main([]) != 0
+
+
+def test_process_stderr_capture_drains_native_fd_flood_with_bounded_retention(tmp_path):
+    path = tmp_path / "native-stderr.bin"
+    saved, worker, stats = probe._capture_stderr(path)
+    block = b"native-symbol-warning\n" * 1024
+    written = 0
+    try:
+        for _ in range(16):
+            remaining = memoryview(block)
+            while remaining:
+                count = os.write(2, remaining)
+                written += count
+                remaining = remaining[count:]
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+        worker.join(2)
+    assert not worker.is_alive()
+    assert written > probe.STDERR_LIMIT
+    assert path.stat().st_size == stats["bytes"] == probe.STDERR_LIMIT
+    assert stats["total_bytes"] == written
+    assert stats["truncated"] is True
+    assert path.read_bytes() == (block * 16)[: probe.STDERR_LIMIT]
+
+
+def test_process_stdout_capture_drains_native_fd_flood_with_bounded_retention(tmp_path):
+    path = tmp_path / "native-stdout.bin"
+    sys.stdout.flush()
+    saved, worker, stats = probe._capture_stderr(path, fd=1)
+    block = b"native-symbol-stdout-warning\n" * 1024
+    written = 0
+    try:
+        for _ in range(16):
+            remaining = memoryview(block)
+            while remaining:
+                count = os.write(1, remaining)
+                written += count
+                remaining = remaining[count:]
+    finally:
+        os.dup2(saved, 1)
+        os.close(saved)
+        worker.join(2)
+    assert not worker.is_alive()
+    assert written > probe.STDERR_LIMIT
+    assert path.stat().st_size == stats["bytes"] == probe.STDERR_LIMIT
+    assert stats["total_bytes"] == written
+    assert stats["truncated"] is True
+    assert not stats.get("error")
+    assert path.read_bytes() == (block * 16)[: probe.STDERR_LIMIT]
+    assert json.loads(json.dumps(stats)) == stats
+
+
+def test_jsonable_paths_preserve_real_filesystem_spelling(tmp_path):
+    path = tmp_path / "root with spaces" / "fixture.json"
+    assert json.loads(json.dumps(probe._jsonable({"repo_root": path}))) == {"repo_root": str(path)}
+
+
+def test_partial_normal_public_return_is_not_frame_bound_success(monkeypatch):
+    harness = Harness()
+
+    def partial_return(self, count, *, render):
+        self.record("step")
+        assert count == 2
+        self.harness.in_step.wait(timeout=2)
+        self._pyboy.frame_count += 1
+        self._pyboy.mb.cpu.cycles += 100
+
+    monkeypatch.setattr(FakeSession, "step", partial_return)
+    result = harness.run("--frame-limit", "4", "--listener-chunk", "2", "--connector-chunk", "2")
+    assert result["threads_alive"] == []
+    for owner in result["owners"]:
+        assert owner["termination"] == "incomplete_public_call"
+        assert len(owner["calls"]) == 1
+        call = owner["calls"][0]
+        assert call["status"] == "completed_partial"
+        assert call["requested_frames"] == 2
+        assert call["actual_completed_frames"] == 1
+        assert owner["final"]["frame_count"] == 11
+        assert owner["final"]["session_tick"] == 11
+        assert owner["final"]["cpu_cycles"] == 200
+        assert owner["cleanup"] == ["endpoint_detached", "session_closed_without_save"]
+
+
+def test_second_process_startup_error_preserves_first_orientation_report(monkeypatch):
+    first = {"threads_alive": [], "processes_alive": [], "evidence": "first orientation retained"}
+    calls = []
+
+    def runner(args):
+        calls.append(args.listener)
+        if len(calls) == 2:
+            raise OSError("injected second process startup failure")
+        return first
+
+    monkeypatch.setattr(probe, "runtime_identity", dict)
+    monkeypatch.setattr(probe, "run_process_pair", runner)
+    result = probe.run_probe(arguments("--owner-mode", "process", "--both-orientations"))
+    assert result["pairs"][0] == first
+    assert result["pairs"][1]["stop_reason"] == "startup_failure"
+    assert result["pairs"][1]["supervisor_cancel_errors"] == [
+        "OSError: injected second process startup failure"
+    ]
+
+
+class _NoSharedEventContext:
+    """Fail immediately if the supervisor tries to use child-lockable Events."""
+
+    def __init__(self, *, fail_second_start=False):
+        self.context = multiprocessing.get_context("spawn")
+        self.fail_second_start = fail_second_start
+        self.process_count = 0
+
+    def __getattr__(self, name):
+        return getattr(self.context, name)
+
+    def Event(self):
+        pytest.fail("supervisor must not depend on multiprocessing.Event locks")
+
+    def Process(self, **kwargs):
+        self.process_count += 1
+        if self.fail_second_start and self.process_count == 2:
+            return _FailedStartProcess()
+        return self.context.Process(**kwargs)
+
+
+class _FailedStartProcess:
+    def start(self):
+        raise OSError("injected second owner start failure")
+
+
+def _spawn_wait_for_startup_cancel(
+    args_dict,
+    index,
+    sock,
+    cancel_event,
+    done_event,
+    barrier,
+    deadline,
+    overall,
+    report_sender,
+    stderr_path,
+):
+    """Owner starts without a peer, waits for supervisor cancellation, then reports."""
+    observed = cancel_event.wait(max(0, overall - time.monotonic()))
+    record = {
+        "side": "listener",
+        "calls": [],
+        "cleanup": [],
+        "errors": [],
+        "termination": "cancelled_or_deadline",
+        "test_cancel_seen": observed,
+    }
+    report_sender.send_bytes(json.dumps(record).encode())
+    report_sender.close()
+    sock.close()
+
+
+def test_process_startup_failure_signals_without_shared_event_locks(spawned_probe_args):
+    started = time.monotonic()
+    result = probe.run_process_pair(
+        spawned_probe_args,
+        context=_NoSharedEventContext(fail_second_start=True),
+        child_target=_spawn_wait_for_startup_cancel,
+    )
+    assert time.monotonic() - started < spawned_probe_args.overall_timeout
+    assert result["stop_reason"] == "startup_failure"
+    assert any(
+        "injected second owner start failure" in error
+        for error in result["supervisor_cancel_errors"]
+    )
+    assert result["processes_alive"] == result["report_readers_alive"] == []
+    assert result["owners"][0]["test_cancel_seen"] is True
+    assert result["owners"][0]["exitcode"] == 0
+    assert result["owners"][1]["pid"] is None
+    assert result["owners"][1]["actual_missing"] is True
+
+
+def test_process_partial_report_kill_reaps_reader_without_shared_event_locks(spawned_probe_args):
+    spawned_probe_args.test_scenario = "partial_report"
+    started = time.monotonic()
+    result = probe.run_process_pair(
+        spawned_probe_args,
+        context=_NoSharedEventContext(),
+        child_target=_spawn_diagnostic_owner,
+    )
+    assert time.monotonic() - started < spawned_probe_args.overall_timeout
+    assert result["stop_reason"] == "deadline"
+    assert result["processes_alive"] == result["report_readers_alive"] == []
+    for owner in result["owners"]:
+        assert owner["forced_termination"]
+        assert owner["exitcode"] == -signal.SIGKILL
+        assert owner["actual_missing"] is True
+        assert owner["errors"]
+        assert owner["cleanup"] == []

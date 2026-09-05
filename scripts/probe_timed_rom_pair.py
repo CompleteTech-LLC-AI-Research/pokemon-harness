@@ -14,8 +14,11 @@ import hashlib
 import importlib
 import json
 import math
+import multiprocessing
+import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -31,6 +34,8 @@ from tests._rom_assets import find_rom_root, fixture_path
 
 VERSIONS = ("red_color", "blue_color", "yellow")
 QUANTUM_CYCLES = 256
+MAX_REPORT_BYTES = 1_048_576
+STDERR_LIMIT = 65_536
 
 
 def positive_float(value):
@@ -52,6 +57,7 @@ def parse_args(argv=None):
     parser.add_argument("--listener", choices=VERSIONS, default="blue_color")
     parser.add_argument("--connector", choices=VERSIONS, default="yellow")
     parser.add_argument("--both-orientations", action="store_true")
+    parser.add_argument("--owner-mode", choices=("thread", "process"), default="thread")
     parser.add_argument("--listener-chunk", type=positive_int, default=1)
     parser.add_argument("--connector-chunk", type=positive_int, default=2)
     parser.add_argument("--frame-limit", type=positive_int, default=6)
@@ -136,6 +142,8 @@ def runtime_identity():
 
 
 def _jsonable(value):
+    if isinstance(value, Path):
+        return str(value)
     if dataclasses.is_dataclass(value):
         return _jsonable(dataclasses.asdict(value))
     if isinstance(value, dict):
@@ -188,6 +196,150 @@ def observe(session, endpoint=None):
     return _jsonable(result)
 
 
+def _run_owner(
+    index,
+    args,
+    records,
+    sockets,
+    cancelled,
+    done,
+    barrier,
+    endpoints,
+    guard,
+    deadline,
+    overall,
+    session_factory,
+    endpoint_factory,
+    asset_resolver,
+    checkpoint=None,
+):
+    record = records[index]
+    session = endpoint = None
+    bound = False
+    version = (args.listener, args.connector)[index]
+    chunk = (args.listener_chunk, args.connector_chunk)[index]
+    record.update(version=version, owner_thread=threading.get_ident(), pid=os.getpid())
+
+    def publish(phase):
+        record["phase"] = phase
+        if checkpoint is not None:
+            try:
+                checkpoint(record)
+            except Exception as exc:
+                if "checkpoint_error" not in record:
+                    record["checkpoint_error"] = f"{type(exc).__name__}: {exc}"
+                    record["errors"].append(f"checkpoint: {record['checkpoint_error']}")
+
+    try:
+        publish("asset_validation")
+        record["tcp_nodelay"] = sockets[index].getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+        assets = asset_resolver(version, args.repo_root)
+        record["provenance"] = assets["provenance"]
+        if cancelled.is_set() or time.monotonic() >= deadline:
+            raise TimeoutError("diagnostic expired during asset validation")
+        session = session_factory(assets["rom"], assets["sym"], **assets["pins"])
+        session.load_state(assets["state"])
+        record["loaded"] = observe(session)
+        publish("loaded")
+        endpoint = endpoint_factory(
+            sockets[index],
+            side=record["side"],
+            rom_version=assets["family"],
+            deadline=deadline,
+            cancel_event=cancelled,
+            rearm_budget=args.rearm_budget,
+            rearm_instruction_cap=args.rearm_instruction_cap,
+            max_edge_lateness=args.max_edge_lateness,
+            quantum_cycles=QUANTUM_CYCLES,
+            operation_timeout=args.operation_timeout,
+        )
+        with guard:
+            endpoints[index] = endpoint
+            if cancelled.is_set():
+                endpoint.cancel()
+        with session.locked(timeout_s=max(0.001, deadline - time.monotonic())):
+            endpoint.attach(session._pyboy, deadline=deadline)
+            session.bind_timed_execution(
+                endpoint, timeout_s=max(0.001, deadline - time.monotonic())
+            )
+            bound = True
+        record["attached"] = observe(session, endpoint)
+        record["metadata"] = _jsonable(endpoint.metadata)
+        publish("attached_waiting_peer")
+        barrier.wait(timeout=max(0.001, deadline - time.monotonic()))
+        initial = session._pyboy.frame_count
+        while not cancelled.is_set() and time.monotonic() < deadline:
+            remaining = args.frame_limit - (session._pyboy.frame_count - initial)
+            if remaining <= 0:
+                record["termination"] = "frame_bound"
+                break
+            call = {
+                "started_monotonic": time.monotonic(),
+                "requested_frames": min(chunk, remaining),
+                "before": observe(session, endpoint),
+            }
+            record["calls"].append(call)
+            publish("public_tick")
+            try:
+                session.step(call["requested_frames"], render=False)
+                call["status"] = "completed"
+            except BaseException as exc:
+                call["status"] = "interrupted"
+                call["error"] = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                call["elapsed_s"] = time.monotonic() - call["started_monotonic"]
+                try:
+                    call["after"] = observe(session, endpoint)
+                    call["actual_completed_frames"] = (
+                        call["after"]["frame_count"] - call["before"]["frame_count"]
+                    )
+                    publish("public_tick_returned")
+                except BaseException as exc:
+                    call["observation_error"] = f"{type(exc).__name__}: {exc}"
+                    if "error" not in call:
+                        raise
+            if call["actual_completed_frames"] == 0:
+                call["status"] = "completed_no_progress"
+                record["termination"] = "no_progress"
+                break
+            if call["actual_completed_frames"] != call["requested_frames"]:
+                call["status"] = "completed_partial"
+                record["termination"] = "incomplete_public_call"
+                break
+        record.setdefault("termination", "cancelled_or_deadline")
+    except BaseException as exc:
+        record["errors"].append(f"{type(exc).__name__}: {exc}")
+        record["termination"] = "owner_failure"
+    finally:
+        done.set()
+        # Supervisor signals BOTH peers before either owner tears down.
+        cancelled.wait(max(0, overall - time.monotonic()))
+        if session is not None:
+            try:
+                record["final"] = observe(session, endpoint)
+                publish("owner_unwound")
+            except BaseException as exc:
+                record["errors"].append(f"final observation: {exc}")
+        detached = endpoint is None
+        try:
+            if endpoint is not None:
+                if bound:
+                    session.unbind_timed_execution(endpoint, timeout_s=args.cleanup_timeout)
+                else:
+                    endpoint.close()
+                detached = True
+                record["cleanup"].append("endpoint_detached")
+            if session is not None and detached:
+                session.close(save=False, timeout_s=max(0.001, overall - time.monotonic()))
+                record["cleanup"].append("session_closed_without_save")
+        except BaseException as exc:
+            record["errors"].append(f"cleanup: {type(exc).__name__}: {exc}")
+        finally:
+            sockets[index].close()
+            publish("cleanup_finished")
+
+
 def run_pair(args, *, session_factory=None, endpoint_factory=None, asset_resolver=None):
     """Dependency seams allow asset-free owner/lifecycle tests, not gameplay claims."""
     from pokered_harness.link.timed_remote import TimedRemoteEndpoint
@@ -230,106 +382,22 @@ def run_pair(args, *, session_factory=None, endpoint_factory=None, asset_resolve
     sockets = (accepted, connector)
 
     def owner(index):
-        record = records[index]
-        session = endpoint = None
-        bound = False
-        version = (args.listener, args.connector)[index]
-        chunk = (args.listener_chunk, args.connector_chunk)[index]
-        record.update(version=version, owner_thread=threading.get_ident())
-        try:
-            assets = asset_resolver(version, args.repo_root)
-            record["provenance"] = assets["provenance"]
-            if cancelled.is_set() or time.monotonic() >= deadline:
-                raise TimeoutError("diagnostic expired during asset validation")
-            session = session_factory(assets["rom"], assets["sym"], **assets["pins"])
-            session.load_state(assets["state"])
-            record["loaded"] = observe(session)
-            endpoint = endpoint_factory(
-                sockets[index],
-                side=record["side"],
-                rom_version=assets["family"],
-                deadline=deadline,
-                cancel_event=cancelled,
-                rearm_budget=args.rearm_budget,
-                rearm_instruction_cap=args.rearm_instruction_cap,
-                max_edge_lateness=args.max_edge_lateness,
-                quantum_cycles=QUANTUM_CYCLES,
-                operation_timeout=args.operation_timeout,
-            )
-            with guard:
-                endpoints[index] = endpoint
-                if cancelled.is_set():
-                    endpoint.cancel()
-            with session.locked(timeout_s=max(0.001, deadline - time.monotonic())):
-                endpoint.attach(session._pyboy, deadline=deadline)
-                session.bind_timed_execution(
-                    endpoint, timeout_s=max(0.001, deadline - time.monotonic())
-                )
-                bound = True
-            record["attached"] = observe(session, endpoint)
-            record["metadata"] = _jsonable(endpoint.metadata)
-            barrier.wait(timeout=max(0.001, deadline - time.monotonic()))
-            initial = session._pyboy.frame_count
-            while not cancelled.is_set() and time.monotonic() < deadline:
-                remaining = args.frame_limit - (session._pyboy.frame_count - initial)
-                if remaining <= 0:
-                    record["termination"] = "frame_bound"
-                    break
-                call = {
-                    "requested_frames": min(chunk, remaining),
-                    "before": observe(session, endpoint),
-                }
-                record["calls"].append(call)
-                try:
-                    session.step(call["requested_frames"], render=False)
-                    call["status"] = "completed"
-                except BaseException as exc:
-                    call["status"] = "interrupted"
-                    call["error"] = f"{type(exc).__name__}: {exc}"
-                    raise
-                finally:
-                    try:
-                        call["after"] = observe(session, endpoint)
-                        call["actual_completed_frames"] = (
-                            call["after"]["frame_count"] - call["before"]["frame_count"]
-                        )
-                    except BaseException as exc:
-                        call["observation_error"] = f"{type(exc).__name__}: {exc}"
-                        if "error" not in call:
-                            raise
-                if call["actual_completed_frames"] == 0:
-                    call["status"] = "completed_no_progress"
-                    record["termination"] = "no_progress"
-                    break
-            record.setdefault("termination", "cancelled_or_deadline")
-        except BaseException as exc:
-            record["errors"].append(f"{type(exc).__name__}: {exc}")
-            record["termination"] = "owner_failure"
-        finally:
-            done.set()
-            # Supervisor signals BOTH peers before either owner tears down.
-            cancelled.wait(max(0, overall - time.monotonic()))
-            if session is not None:
-                try:
-                    record["final"] = observe(session, endpoint)
-                except BaseException as exc:
-                    record["errors"].append(f"final observation: {exc}")
-            detached = endpoint is None
-            try:
-                if endpoint is not None:
-                    if bound:
-                        session.unbind_timed_execution(endpoint, timeout_s=args.cleanup_timeout)
-                    else:
-                        endpoint.close()
-                    detached = True
-                    record["cleanup"].append("endpoint_detached")
-                if session is not None and detached:
-                    session.close(save=False, timeout_s=max(0.001, overall - time.monotonic()))
-                    record["cleanup"].append("session_closed_without_save")
-            except BaseException as exc:
-                record["errors"].append(f"cleanup: {type(exc).__name__}: {exc}")
-            finally:
-                sockets[index].close()
+        _run_owner(
+            index,
+            args,
+            records,
+            sockets,
+            cancelled,
+            done,
+            barrier,
+            endpoints,
+            guard,
+            deadline,
+            overall,
+            session_factory,
+            endpoint_factory,
+            asset_resolver,
+        )
 
     threads = [
         threading.Thread(target=owner, args=(i,), daemon=True, name=f"timed-rom-{i}")
@@ -368,6 +436,363 @@ def run_pair(args, *, session_factory=None, endpoint_factory=None, asset_resolve
     }
 
 
+class _SharedFlag:
+    """Monotonic one-byte signal, with no process-shared lock to strand.
+
+    Only transition is zero to one. Cancellation has one parent writer; done
+    writers all store the same value. No read-modify-write operation is used.
+    """
+
+    def __init__(self, storage):
+        self._storage = storage
+
+    def set(self):
+        self._storage.value = 1
+
+    def is_set(self):
+        return self._storage.value != 0
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        while not self.is_set():
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return False
+            time.sleep(0.01 if remaining is None else min(0.01, remaining))
+        return True
+
+
+def cancellation_bridge(shared, local, endpoints, guard, stop, errors):
+    """Bridge process cancellation to the concrete Event required by the wire API."""
+    while not stop.is_set():
+        if not shared.wait(0.01):
+            continue
+        local.set()
+        with guard:
+            for endpoint in endpoints:
+                if endpoint is not None:
+                    try:
+                        endpoint.cancel()
+                    except Exception as exc:
+                        errors.append(f"cancel: {type(exc).__name__}: {exc}")
+        return
+
+
+def _capture_stderr(path, fd=2):
+    """Drain native fd writes continuously, retaining at most STDERR_LIMIT bytes."""
+    read_fd, write_fd = os.pipe()
+    saved = os.dup(fd)
+    os.dup2(write_fd, fd)
+    os.close(write_fd)
+    stats = {"path": str(path), "bytes": 0, "total_bytes": 0, "truncated": False}
+
+    def drain():
+        try:
+            with os.fdopen(read_fd, "rb", buffering=0) as source, open(path, "xb") as output:
+                while block := source.read(8192):
+                    remaining = max(0, STDERR_LIMIT - stats["bytes"])
+                    retained = block[:remaining]
+                    output.write(retained)
+                    stats["bytes"] += len(retained)
+                    stats["total_bytes"] += len(block)
+                    stats["truncated"] = stats["total_bytes"] > STDERR_LIMIT
+        except Exception as exc:
+            stats["error"] = f"{type(exc).__name__}: {exc}"
+
+    worker = threading.Thread(target=drain, daemon=True, name=f"fd-{fd}-drain")
+    worker.start()
+    return saved, worker, stats
+
+
+def process_owner(
+    args_dict,
+    index,
+    sock,
+    cancel_event,
+    done_event,
+    barrier,
+    deadline,
+    overall,
+    report_sender,
+    stderr_path,
+):
+    """Spawn-safe target: no emulator, callbacks, or test closures cross processes."""
+    saved, stderr_worker, stderr = _capture_stderr(stderr_path)
+    try:
+        stdout_saved, stdout_worker, stdout = _capture_stderr(
+            Path(stderr_path).with_suffix(".stdout"), fd=1
+        )
+    except BaseException:
+        os.dup2(saved, 2)
+        os.close(saved)
+        stderr_worker.join(timeout=0.2)
+        raise
+    records = [
+        {"side": side, "calls": [], "cleanup": [], "errors": []}
+        for side in ("listener", "connector")
+    ]
+    record = records[index]
+
+    def checkpoint(value):
+        payload = json.dumps(_jsonable(value)).encode()
+        if len(payload) > MAX_REPORT_BYTES:
+            raise ValueError("owner checkpoint exceeds byte limit")
+        path = Path(stderr_path).with_suffix(".checkpoint.json")
+        temporary = path.with_suffix(".pending")
+        with temporary.open("wb") as stream:
+            stream.write(payload)
+        os.replace(temporary, path)
+
+    local, stop = threading.Event(), threading.Event()
+    guard = threading.Lock()
+    endpoints = [None, None]
+    bridge_errors = []
+    watcher = threading.Thread(
+        target=cancellation_bridge,
+        args=(cancel_event, local, endpoints, guard, stop, bridge_errors),
+        daemon=True,
+    )
+    watcher.start()
+    try:
+        from pokered_harness.link.timed_remote import TimedRemoteEndpoint
+        from pokered_harness.session import Session
+
+        args = argparse.Namespace(**args_dict)
+        args.repo_root = Path(args.repo_root)
+        record["runtime"] = runtime_identity()
+        record["child_started_monotonic"] = time.monotonic()
+        _run_owner(
+            index,
+            args,
+            records,
+            [sock, sock],
+            local,
+            done_event,
+            barrier,
+            endpoints,
+            guard,
+            deadline,
+            overall,
+            Session.from_files,
+            TimedRemoteEndpoint.from_connected_socket,
+            resolve_assets,
+            checkpoint,
+        )
+    except BaseException as exc:
+        record["errors"].append(f"child: {type(exc).__name__}: {exc}")
+        record["termination"] = "owner_failure"
+        done_event.set()
+    finally:
+        stop.set()
+        watcher.join(timeout=0.1)
+        record["watcher_alive"] = watcher.is_alive()
+        if watcher.is_alive():
+            record["errors"].append("cancellation watcher did not stop")
+        record["errors"].extend(bridge_errors)
+        sock.close()
+        for name, fd, original, worker, stats in (
+            ("stdout", 1, stdout_saved, stdout_worker, stdout),
+            ("stderr", 2, saved, stderr_worker, stderr),
+        ):
+            try:
+                getattr(sys, name).flush()
+            except Exception as exc:
+                stats["error"] = f"flush: {type(exc).__name__}: {exc}"
+            try:
+                os.dup2(original, fd)
+            except Exception as exc:
+                stats["error"] = f"restore: {type(exc).__name__}: {exc}"
+            finally:
+                os.close(original)
+            worker.join(timeout=0.2)
+            record[name] = stats
+            stats["drainer_alive"] = worker.is_alive()
+            if worker.is_alive() or stats.get("error"):
+                record["errors"].append(f"{name} capture did not complete cleanly")
+        payload = json.dumps(_jsonable(record)).encode()
+        if len(payload) > MAX_REPORT_BYTES:
+            record = {
+                "side": record["side"],
+                "calls": [],
+                "cleanup": [],
+                "errors": ["owner report exceeds byte limit"],
+                "termination": "report_overflow",
+                "actual_missing": True,
+                "stderr": stderr,
+                "stdout": stdout,
+            }
+            payload = json.dumps(record).encode()
+        try:
+            report_sender.send_bytes(payload)
+        finally:
+            report_sender.close()
+
+
+def run_process_pair(args, *, context=None, child_target=None):
+    """Two spawn owners with bounded report drains and terminate/kill fallback."""
+    context = context or multiprocessing.get_context("spawn")
+    child_target = child_target or process_owner
+    started = time.monotonic()
+    overall = getattr(args, "absolute_deadline", started + args.overall_timeout)
+    deadline = min(overall - args.cleanup_timeout, started + args.pair_timeout)
+    result = {
+        "label": "cancellation_diagnostic_not_graceful_tick_or_gameplay_success",
+        "owner_mode": "process",
+        "quantum_cycles": QUANTUM_CYCLES,
+        "owners": [],
+        "threads_alive": [],
+        "processes_alive": [],
+        "supervisor_cancel_errors": [],
+    }
+    if deadline <= started:
+        return dict(result, stop_reason="insufficient_remaining_budget")
+    artifact_dir = Path(tempfile.mkdtemp(prefix="poke-timed-process-"))
+    result["artifact_dir"] = str(artifact_dir)
+    cancel = _SharedFlag(context.RawValue("B", 0))
+    done = _SharedFlag(context.RawValue("B", 0))
+    barrier = context.Barrier(2)
+    processes, receivers, senders, readers, sockets = [], [], [], [], []
+    records = [
+        {"side": side, "calls": [], "cleanup": [], "errors": [], "termination": "missing_report"}
+        for side in ("listener", "connector")
+    ]
+
+    def receive(index, connection):
+        try:
+            packet = json.loads(connection.recv_bytes(MAX_REPORT_BYTES))
+            if not isinstance(packet, dict) or any(
+                not isinstance(packet.get(key), list) for key in ("calls", "cleanup", "errors")
+            ):
+                raise ValueError("invalid owner report schema")
+            records[index] = packet
+        except Exception as exc:
+            records[index]["errors"].append(f"report: {type(exc).__name__}: {exc}")
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(max(0.001, deadline - time.monotonic()))
+            result["address"] = listener.getsockname()
+            connector = socket.create_connection(
+                result["address"], timeout=max(0.001, deadline - time.monotonic())
+            )
+            sockets.append(connector)
+            accepted, _ = listener.accept()
+            sockets.insert(0, accepted)
+        result["tcp_nodelay"] = [
+            sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) for sock in sockets
+        ]
+        for index, sock in enumerate(sockets):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("process startup deadline expired")
+            receiver, sender = context.Pipe(duplex=False)
+            receivers.append(receiver)
+            senders.append(sender)
+            process = context.Process(
+                target=child_target,
+                args=(
+                    _jsonable(vars(args)),
+                    index,
+                    sock,
+                    cancel,
+                    done,
+                    barrier,
+                    deadline,
+                    overall,
+                    sender,
+                    str(artifact_dir / f"owner-{index}.stderr"),
+                ),
+                name=f"timed-rom-process-{index}",
+                daemon=True,
+            )
+            process.start()
+            processes.append(process)
+            sender.close()
+            reader = threading.Thread(target=receive, args=(index, receiver), daemon=True)
+            reader.start()
+            readers.append(reader)
+        for sock in sockets:
+            sock.close()
+        while time.monotonic() < deadline and not done.wait(0.01):
+            if any(not process.is_alive() for process in processes):
+                break
+        result["stop_reason"] = "owner_completion_or_failure" if done.is_set() else "deadline"
+    except Exception as exc:
+        result["stop_reason"] = "startup_failure"
+        result["supervisor_cancel_errors"].append(f"{type(exc).__name__}: {exc}")
+    finally:
+        result["cancelled_monotonic"] = time.monotonic()
+        cancel.set()
+        # A lock-free shared byte reaches children before endpoint publication.
+        # Do not acquire the barrier lock: a killed child may own it.
+        cleanup_deadline = min(overall, time.monotonic() + args.cleanup_timeout)
+        graceful_deadline = max(time.monotonic(), cleanup_deadline - 0.4)
+        for process in processes:
+            process.join(max(0, graceful_deadline - time.monotonic()))
+        forced = set()
+        for index, process in enumerate(processes):
+            if process.is_alive():
+                forced.add(index)
+                process.terminate()
+        for process in processes:
+            process.join(max(0, cleanup_deadline - 0.2 - time.monotonic()))
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+        for process in processes:
+            process.join(max(0, cleanup_deadline - time.monotonic()))
+        for reader in readers:
+            reader.join(max(0, cleanup_deadline - time.monotonic()))
+        result["owners"] = json.loads(json.dumps(records))
+        for index, record in enumerate(result["owners"]):
+            checkpoint_path = artifact_dir / f"owner-{index}.checkpoint.json"
+            if "final" not in record and checkpoint_path.exists():
+                try:
+                    with checkpoint_path.open("rb") as stream:
+                        payload = stream.read(MAX_REPORT_BYTES + 1)
+                    if len(payload) > MAX_REPORT_BYTES:
+                        raise ValueError("checkpoint exceeds byte limit")
+                    record["last_checkpoint"] = json.loads(payload)
+                    record["checkpoint_is_final"] = False
+                except Exception as exc:
+                    record["errors"].append(f"checkpoint: {type(exc).__name__}: {exc}")
+            process = processes[index] if index < len(processes) else None
+            alive = process is not None and process.is_alive()
+            record.update(
+                pid=process.pid if process else None,
+                exitcode=process.exitcode if process else None,
+                alive=alive,
+                owner_complete=process is not None and not alive,
+                forced_termination=index in forced,
+                actual_missing="final" not in record,
+            )
+            if index in forced or alive:
+                record["cleanup"] = []
+                record["cleanup_status"] = "nongraceful_forced_or_live"
+            if alive:
+                result["processes_alive"].append(process.pid)
+            if process is None or process.exitcode != 0 or index in forced:
+                record["errors"].append("owner did not exit normally")
+            for name in ("stderr", "stdout"):
+                path = artifact_dir / f"owner-{index}.{name}"
+                record.setdefault(
+                    name,
+                    {
+                        "path": str(path),
+                        "bytes": path.stat().st_size if path.exists() else 0,
+                        "truncated": None,
+                    },
+                )
+        result["report_readers_alive"] = [
+            i for i, reader in enumerate(readers) if reader.is_alive()
+        ]
+        for resource in (*sockets, *senders, *receivers):
+            resource.close()
+        result["elapsed_s"] = time.monotonic() - started
+    return result
+
+
 def run_probe(args):
     started = time.monotonic()
     args.absolute_deadline = started + args.overall_timeout
@@ -377,11 +802,30 @@ def run_probe(args):
         "options": _jsonable(vars(args)),
         "pairs": [],
     }
-    report["pairs"].append(run_pair(args))
-    if args.both_orientations and not report["pairs"][-1]["threads_alive"]:
+    runner = run_process_pair if getattr(args, "owner_mode", "thread") == "process" else run_pair
+
+    def collect(options):
+        try:
+            return runner(options)
+        except Exception as exc:
+            # Preserve prior orientation evidence if a subsequent startup fails.
+            return {
+                "stop_reason": "startup_failure",
+                "owners": [],
+                "threads_alive": [],
+                "supervisor_cancel_errors": [f"{type(exc).__name__}: {exc}"],
+            }
+
+    report["pairs"].append(collect(args))
+    if (
+        args.both_orientations
+        and not report["pairs"][-1]["threads_alive"]
+        and not report["pairs"][-1].get("processes_alive")
+        and not report["pairs"][-1].get("report_readers_alive")
+    ):
         reverse = argparse.Namespace(**vars(args))
         reverse.listener, reverse.connector = args.connector, args.listener
-        report["pairs"].append(run_pair(reverse))
+        report["pairs"].append(collect(reverse))
     report["elapsed_s"] = time.monotonic() - started
     return report
 
@@ -402,10 +846,23 @@ def main(argv=None):
         if "error" in report
         or any(
             pair["threads_alive"]
+            or pair.get("processes_alive")
+            or pair.get("report_readers_alive")
             or pair.get("supervisor_cancel_errors")
             or pair["stop_reason"] != "owner_completion_or_failure"
             or any(
-                owner["errors"] or owner.get("termination") != "frame_bound"
+                owner["errors"]
+                or owner.get("termination") != "frame_bound"
+                or owner.get("alive")
+                or owner.get("forced_termination")
+                or owner.get("actual_missing")
+                or owner.get("exitcode", 0) != 0
+                or owner.get("watcher_alive")
+                or owner.get("stderr", {}).get("drainer_alive")
+                or owner.get("stderr", {}).get("error")
+                or owner.get("stdout", {}).get("drainer_alive")
+                or owner.get("stdout", {}).get("error")
+                or any(call.get("status") != "completed" for call in owner.get("calls", []))
                 for owner in pair["owners"]
             )
             for pair in report.get("pairs", [])

@@ -332,6 +332,52 @@ TIMING_SENSITIVE_TESTS = frozenset(
             "test_probe_timed_rom_pair.py",
             "test_attach_failure_retains_loaded_native_evidence_without_binding",
         ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_partial_normal_public_return_is_not_frame_bound_success",
+        ),
+        # Spawned owners, cancellation watchers, and pipe drainers use real
+        # scheduling and bounded waits even with synthetic or missing assets.
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_missing_assets_reports_both_child_failures",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_failure_cancels_waiting_peer",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_deadline_terminates_unresponsive_owners",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_rejects_invalid_child_report",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_cancellation_bridge_sets_local_event_before_publication",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_cancellation_bridge_continues_after_endpoint_cancel_error",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_stderr_capture_drains_native_fd_flood_with_bounded_retention",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_stdout_capture_drains_native_fd_flood_with_bounded_retention",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_startup_failure_signals_without_shared_event_locks",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_partial_report_kill_reaps_reader_without_shared_event_locks",
+        ),
         ("test_network_backend.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
         (
             "test_network_backend.py",
