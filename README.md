@@ -9,7 +9,140 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-**Status: `PARTIAL` — not production-ready.** At `1f19707`, source and
+**Status: `PARTIAL` — experimental branch, not production-ready.**
+
+At harness commit `4275957`, the source `--unit-only` gate passed `2,924`
+unit tests and `955` timing checks (`191` cases in each of five repetitions),
+with zero failures, errors, skips, xfails, or xpasses. The local, unpublished
+report is `pokemon-mcp-source-4275957-20260905/gate-report.json`. The native
+gate also passed `2,924` unit tests in `133.8s` and `955` timing checks
+(`191` cases across five repetitions) in `287.2s`, with zero failures, errors,
+skips, xfails, or xpasses. Its local, unpublished report is
+`pokemon-mcp-native-4275957-20260905/gate-report.json`.
+These checks do not establish real-ROM gameplay or release readiness.
+
+A fresh native build from `4275957` verified unchanged hashes for `280`
+tracked files, including `116` vendor files, and all eleven required native
+extension imports. Hook, speed-state, and import regressions passed `16/16`;
+the native counter probe passed `28/28`. Dependency and Cython bootstrap
+checks passed. The local, unpublished build record is
+`poke-native-4275957-20260905-JRdYYV/BUILD.md`; this is build/runtime evidence.
+The separately reported clean source installation at `4275957` passed
+dependency checks, source bootstrap, imports outside the checkout, and
+`120` import/MCP tests in `26.19s` (exit `0`). Its local, unpublished evidence
+is associated with `poke-clean-source-4275957-20260905-PqvMoP`; it does not
+qualify real-ROM MCP operation.
+
+Explicit opt-in timed MCP routing is implemented at `4275957`. Authored tests
+cover this path, but are not real-ROM acceptance. An actual-ROM MCP policy
+failure remains under investigation; no validated gameplay policy is claimed.
+
+The actual-MCP smoke matrix passed in source and native: `10/10` each,
+comprising all nine ordered canonical ROM pairs plus one asset-free redaction
+test, with zero failures, errors, or skips. Reported pytest durations were
+`56.32s` and `50.10s` (XML suite times `56.309s` and `50.086s`). Local,
+unpublished reports are `poke-mcp-matrix-4275957-source-20260905.xml` and
+`poke-mcp-matrix-4275957-native-20260905.xml`. These runs used `4275957` code
+with the frozen, uncommitted `tests/test_mcp_timed_rom.py`, SHA-256
+`77dc9d092b27f36cc879ca2f29752647defde5a549a237f407ac732b06af955e`.
+The smoke policy used quantum `256`, rearm budget `4096`, instruction cap
+`1024`, edge lateness `4096`, and a five-second operation deadline. This is
+scoped MCP smoke evidence, not gameplay or a qualified default policy.
+The narrower `32/16/32` policy failures remain
+unresolved in source (`2.51s`) and native (`2.18s`); the larger-policy smoke
+does not supersede those failure artifacts or the gate results below.
+
+A separate native milestone diagnostic on `4fca3a3` ran Blue-color listener
+to Yellow connector for `623.635s`. Each owner completed all `600` one-frame
+calls (`600` actual frames), with no interrupted or partial calls. Both
+recorded save-request, Yes/No, save-game, and LinkMenu milestones and reached
+Trade Center map `0xEF`. Endpoint detach, hook removal, and session close
+completed with no errors, forced termination, or surviving owners/readers.
+The local, unpublished report is
+`poke-milestone-600-20260905-ZZVHBS/report.json`. It used the same explicit
+diagnostic policy: rearm `4096`, instruction cap `1024`, lateness `4096`,
+quantum `256`, operation deadline `5s`. This single orientation establishes
+milestone progression, not a completed trade exchange, gameplay matrix,
+graceful protocol shutdown, or default-policy qualification. The full dual-runtime
+gate on `4fca3a3` and unit gates on `079aea1` remain pending at this snapshot;
+no outcome is claimed.
+
+At the later `f458fc7` snapshot, the `4ee075b` timing correction addresses
+CPU overshoot without widening the bound. The lead reported scoped
+regressions passing `430` tests in source (`45.08s`) and native (`40.87s`);
+these are implementation checks, not real-game proof. The atomic DMA gap
+remains: a `412`-half-cycle operation can exceed the `64`-half-cycle limit.
+
+The local, unpublished `poke-narrow-ten-repeats-2l3xvr4b/manifest.json`
+records the narrow-policy Blue-color-listener/Yellow-connector actual-MCP
+smoke passing five repetitions per runtime, with zero failures, errors,
+skips, supervisor failures, or leftover processes. Numeric policy evidence
+records rearm `32`, instruction cap `16`, lateness `32`, quantum `256`, and
+operation deadline `5s`; the log's aligned-profile label is stale. Its recorded
+HEAD is `81737bd`, with frozen working-file changes later committed in
+`4ee075b` and checked hashes unchanged during the run; it is not an
+exact-`f458fc7` gate. These targeted passes follow earlier failed runs, whose
+artifacts remain retained; they do not qualify trade, a full matrix, or a
+default policy.
+
+The lead also reported one `079aea1` native unit setup-race failure, followed
+by a correction and ten passing targeted repetitions; full-gate acceptance
+remains pending. The dual unit/timing gate
+(`pokemon-trade-dual-f458fc7-20260905`) ended `FAIL`: source passed `3,308`
+unit and `995` timing checks; native passed `3,307` unit checks with one
+failure and `994` timing checks with one failure. Native unit failed
+`test_bounded_incoming_queue_fails_closed[socketpair]`; timing failed
+`test_cancel_reaches_active_real_credit_wait_without_session_lock` in
+iteration three (`cpu88 > 88`). No skips or errors were recorded. The
+separately reported `18/18` narrow-policy ordered matrix smokes are not
+gameplay acceptance. The older full dual-runtime gate has no terminal outcome
+claimed here; actual full trade remains unverified.
+
+### Earlier experimental gates
+
+The `4e1e801` dual gate failed timing: source `844` passed / `1` failed;
+native `843` passed / `2` failed. Both passed `2,394` unit tests. This retained
+flaky-gate result (`pokemon-process-dual-4e1e801-20260905/gate-report.json`,
+local and unpublished) is not erased by later scoped passes.
+
+At harness commit `e8db87e`, the dual-runtime `--unit-only` gate collected
+`2,512` tests per runtime. Source and native each passed `2,368` unit tests
+and `785` timing checks (`157` cases in each of five repetitions), with zero
+failures, errors, skips, xfails, or xpasses. The retained evidence bundle is
+`pokemon-routing-dual-e8db87e-20260905` (`gate-report.json`), local and
+unpublished. This is unit/timing evidence only, not real-ROM gameplay
+or a full release gate.
+
+The native runtime in that gate was built from the vendored code at `013b386`;
+the source runtime at `e8db87e` includes the subsequent boolean save-state
+restore correction. This combination is tested evidence, not an exact combined
+native release build of `e8db87e`.
+
+The earlier timed routing used `TimedRemoteEndpoint` and
+`Session.bind_timed_execution`. Threaded Blue-color/Yellow diagnostics
+advanced only five to six frames before bounded cancellation. They do not
+prove trade, battle, rendezvous liveness, or graceful shutdown. Completed
+whole calls in authored tests do not qualify real-ROM gameplay. Earlier full
+real-ROM gates remain failed; the scoped passes below do not supersede them.
+
+### Historical source candidate evidence
+
+The historically recorded source battle
+matrix passed `19/19`; the recorded four-worker source trade matrix failed
+at `18/19`. The historical full source gate at
+`2eb21a5b45e67f47bb89697daeed76509adf4b13` passed unit `980/980` and
+local `47/47`, but its remote tier failed at `22/23`: the Yellow/Yellow TCP
+LinkMenu test reached the listener's menu and then reported
+`NetworkBackendError: backend closed`. Its terminal report is `FAIL`: trade
+passed `18/19`, battle `19/19`, and timing `55/55`. The separate full native
+gate at `f4fddfc` also ended `FAIL`: unit `1,060/1,060`, local `47/47`, remote
+`11/12`, trade `14/19`, battle `15/19`, and timing `55/55`. Both terminal
+reports recorded zero skips; neither qualifies the release.
+
+### Historical origin/master evidence at `1f19707`
+
+The following records describe the earlier origin/master candidate, not the
+current experimental branch. At `1f19707`, source and
 native each passed `1,176/1,176` unit tests and `65/65` total timing checks
 (`13` cases in each of five repetitions), with zero failures, skips, xfails,
 xpasses, or errors. Each collected `1,320` tests; `19/19` trade and `19/19`
@@ -20,7 +153,7 @@ in `6.74s` and native `3/3` in `1.89s`, with zero failures, skips, or errors
 and one SDL warning per runtime. These checks run 120 frames plus
 state/save/load assertions; they do not establish gameplay qualification.
 
-The fresh native build is documented in the external bundle
+That historical native build is documented in the external bundle
 `poke-serial-native-20260905-V7dHOU/QUALIFICATION.md`: its base is `e1686ca`
 with a serial overlay whose hash matches `1f19707`. The later dual gate above
 tests the candidate harness with that runtime; the build alone is not a clean
@@ -36,18 +169,19 @@ clock: this supports investigating time coordination, not a precise root-cause
 claim. Raw evidence is retained in
 `pokemon-native-blue-yellow-02a8e85-LMtfZm/output.log` and `result.json`.
 
-The candidate fixes serial idle/external-clock hints beyond `2^31`, dispatch
+That candidate fixed serial idle/external-clock hints beyond `2^31`, dispatch
 lock ordering and admission deadlines, failure-first gate evidence retention,
 and partial pipe capture. Peer stack diagnostics are opt-in through a positive,
 finite `POKERED_PEER_TRACE_AFTER_SECONDS`; optional `POKERED_PEER_TRACE_DIR`
 must already exist. At most two one-shot dumps are scheduled, with no ROM
-changes. Experimental time coordinator `344aa95` is on another branch and is
-not included in this candidate. The original `02a8e85` dual gate's native timing
+changes. At that historical snapshot, experimental time coordinator `344aa95`
+was on another branch and was not included in `1f19707`; this exclusion does
+not describe the current experimental branch. The original `02a8e85` dual gate's native timing
 failure (`64/65`) and lost failed test identity and iteration output remain historical failures;
 subsequent test-race and gate-report fixes precede the verified `1f19707` pass.
 No clean full source/native gameplay gate is established.
 
-### Prior candidate evidence
+### Earlier full-gate snapshots retained from origin/master
 
 The recorded source battle matrix passed `19/19`; the recorded four-worker
 source trade matrix failed at `18/19`. The historical full source snapshot at
@@ -64,7 +198,7 @@ The follow-up LinkMenu-only shutdown change passed five consecutive
 Yellow/Yellow real-ROM replays (`24.48s`, `22.20s`, `22.67s`, `23.08s`,
 `21.41s`). These targeted checks do not replace a full gate on the new candidate.
 
-Recorded evidence, using the operator-supplied assets pinned in
+Historical recorded evidence, using the operator-supplied assets pinned in
 [`VERSIONS.md`](VERSIONS.md):
 
 - **Clean editable install:** an exact-commit archive of `2eb21a5` passed
@@ -84,9 +218,9 @@ Recorded evidence, using the operator-supplied assets pinned in
   lifecycle, and packaging regression set passed `155/155`.
 - **Native build:** the vendored PyBoy 2.7.0 fork
   (`c565df66c3731fad2856169a90f6bbec99925915`) built a CPython 3.12 Linux
-  wheel successfully in an isolated temporary copy. A complete strict
-  gameplay run using that compiled wheel is not claimed here; the recorded
-  acceptance results below use the bundled source runtime.
+  wheel successfully in an isolated temporary copy. That build alone does
+  not qualify gameplay. The separate historical full native gate at `f4fddfc`
+  failed as recorded above; the acceptance results below use source mode.
 - **Strict battle acceptance:** the source-runtime gate passed `19/19` local
   and TCP real-ROM entrypoints in `1,237.8s`, with no skips, errors, or
   test-only protocol bypasses. All five ROM hashes, three symbol hashes, and
@@ -149,8 +283,15 @@ This is state-observation evidence, not live MCP gameplay evidence.
 
 ### Recorded candidate matrix
 
+The following matrix retains historical results; it is not the `e8db87e`
+unit/timing snapshot above or current experimental gameplay acceptance.
+
 | Capability | Recorded result | Evidence boundary |
 |---|---|---|
+| Source unit/timing | `PASS` — 980/980 unit and 55/55 timing cases | Recorded source runtime, Python 3.12.13, PyBoy 2.7.0 fork `c565df66c3731fad2856169a90f6bbec99925915`; 1,132 tests collected and all five ROM/SYM pins validated. |
+| Strict trade | `FAIL` — 18/19 | Recorded source runtime; all 19 rows declared and executed with `workers=4`. The sole failure is `red_color-listen-blue_color-connect` at the Trade Center warp after 722.6s; 18 other real-ROM local/TCP rows passed. |
+| Strict battle | `PASS` — 19/19 | Recorded source runtime; all 19 local/TCP real-ROM rows passed in 1,237.8s with no skips, errors, or test-only protocol bypasses. |
+| Native/Cython build | `PASS` — wheel built | Build evidence only. The separate full native gate at `f4fddfc` failed remote, trade, and battle; compiled gameplay remains unqualified. |
 | Source/native unit and timing | `PASS` — each 1,176/1,176 unit and 65/65 total timing | `1f19707`; 1,320 collected per runtime, five repetitions of 13 timing cases. Strict trade/battle declared, not executed. |
 | Source/native canonical boot | `PASS` — each 3/3 | `1f19707`; source 6.74s, native 1.89s. 120 frames plus state/save/load; not gameplay. |
 | Prior source strict trade | `FAIL` — 18/19 | Historical source runtime; all 19 rows declared and executed with `workers=4`. The sole failure is `red_color-listen-blue_color-connect` at the Trade Center warp after 722.6s; 18 other real-ROM local/TCP rows passed. |

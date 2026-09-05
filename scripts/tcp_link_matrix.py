@@ -75,6 +75,17 @@ def _nodeid(test: tuple[str, str], parameter_id: str | None = None) -> str:
     return f"{module}::{name}{suffix}"
 
 
+# Public timed MCP lifecycle smoke is required separately from trade/battle.
+# These are canonical ordered listener/connector pairs, not gameplay evidence.
+TIMED_MCP_SMOKE_NODEIDS = frozenset(
+    _nodeid(
+        ("tests/test_mcp_timed_rom.py", "test_timed_rom_stdio_pair"),
+        _strict_profile_case_id(listener, connector),
+    )
+    for listener, connector in REMOTE_STRICT_PROFILE_PAIRS
+)
+
+
 STRICT_TRADE_NODEIDS = frozenset(
     _nodeid(
         (
@@ -252,14 +263,16 @@ def _json_strict_profile_pairs() -> list[dict[str, str]]:
 def required_matrix_nodeids() -> dict[str, frozenset[str]]:
     """Return node IDs required by each production-gate tier.
 
-    The MCP and subprocess smoke nodes are part of the remote tier but are not
-    version-pair matrix rows.  They are included here so the gate manifest and
-    the standalone audit cannot drift apart.
+    MCP and subprocess smoke nodes are part of the remote tier, separately
+    from strict trade/battle. Timed MCP smoke requires all nine canonical
+    ordered pairs. These declarations keep the gate manifest and standalone
+    audit aligned; collection is not runtime evidence.
     """
 
     return {
         "local": LOCAL_VERSION_PAIR_NODEIDS | LOCAL_VARIANT_NODEIDS,
         "remote": REMOTE_VERSION_PAIR_NODEIDS
+        | TIMED_MCP_SMOKE_NODEIDS
         | frozenset(
             {
                 _nodeid(
@@ -344,6 +357,7 @@ def audit_collection(
             ("local-version-pairs", LOCAL_VERSION_PAIR_NODEIDS),
             ("remote-role-pairs", REMOTE_VERSION_PAIR_NODEIDS),
             ("remote-reversed-roles", REMOTE_REVERSED_ROLE_NODEIDS),
+            ("timed-mcp-smoke", TIMED_MCP_SMOKE_NODEIDS),
             ("local-rom-variants", LOCAL_VARIANT_NODEIDS),
             ("strict-trade-entrypoints", STRICT_TRADE_NODEIDS),
             ("strict-battle-entrypoints", STRICT_BATTLE_NODEIDS),

@@ -27,7 +27,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -38,6 +38,7 @@ from mcp.shared.exceptions import McpError
 
 from pokered_harness.config import SUPPORTED_ROM_VERSIONS
 from pokered_harness.events.hooks import GameEvent
+from pokered_harness.link.emulated_time import CoordinatorClosed, EmulatedTimeError
 from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
@@ -52,6 +53,14 @@ from pokered_harness.link.serial_link import (
     SerialLinkTimeout,
     TcpSerialLink,
 )
+from pokered_harness.link.timed_wire import (
+    Cancelled,
+    ChannelClosed,
+    DeadlineExceeded,
+    ProtocolError,
+    WireError,
+)
+from pokered_harness.mcp_timed_owner import TimedOwner, TimedOwnerPolicy
 from pokered_harness.serialize import to_jsonable
 from pokered_harness.session import (
     InvalidStateError,
@@ -554,6 +563,17 @@ def _error_code(exc: Exception) -> str:
     declared_code = getattr(exc, "code", None)
     if isinstance(declared_code, str) and declared_code:
         return declared_code
+    for error_type, code in (
+        (Cancelled, "timed_cancelled"),
+        (DeadlineExceeded, "timed_deadline_exceeded"),
+        (ProtocolError, "timed_protocol_error"),
+        (ChannelClosed, "timed_channel_closed"),
+        (CoordinatorClosed, "timed_coordinator_closed"),
+        (EmulatedTimeError, "timed_execution_error"),
+        (WireError, "timed_wire_error"),
+    ):
+        if isinstance(exc, error_type):
+            return code
     if isinstance(exc, SessionClosedError):
         return "session_closed"
     if isinstance(exc, VersionMismatch):
@@ -727,8 +747,28 @@ def dispatch_tool(
     name: str,
     arguments: dict[str, Any],
     link: LinkState | None = None,
+    *,
+    timed_owner: TimedOwner | None = None,
 ) -> Any:
     """Pure dispatch — no asyncio, no MCP types. Unit-testable on its own."""
+    if timed_owner is not None:
+        if name == "link_status":
+            return _timed_status(timed_owner)
+        request = _timed_tool_request(timed_owner, session, name, arguments, link)
+        if name == "link_listen":
+            try:
+                return _timed_status_payload(
+                    request.ready.result(timeout=max(0.0, request.deadline - time.monotonic()))
+                )
+            except TimeoutError as exc:
+                if request.ready.done():
+                    raise
+                request.cancel()
+                raise McpHarnessError(
+                    "timed_deadline", "listener readiness deadline expired"
+                ) from exc
+        result = request.result()
+        return _timed_status(timed_owner) if name in {"link_connect", "link_disconnect"} else result
     if not name.startswith("link_"):
         # A server can receive multiple MCP requests concurrently. Session's
         # own lock protects individual calls, while this operation lock keeps
@@ -2428,8 +2468,22 @@ def read_resource(
     session: Session,
     uri: str,
     link: LinkState | None = None,
+    *,
+    timed_owner: TimedOwner | None = None,
 ) -> str:
     """Resource reader — returns JSON text."""
+    if timed_owner is not None:
+        if timed_owner.session is not session:
+            raise McpHarnessError(
+                "invalid_timed_configuration", "timed owner belongs to another session"
+            )
+        if uri in {_URI_PEER_GAME_STATE, _URI_LINK_TRANSPORT}:
+            raise McpHarnessError(
+                "timed_unsupported_resource", "timed remote transport has no local peer"
+            )
+        if uri == _URI_LINK_STATUS:
+            return json.dumps(_timed_status(timed_owner))
+        return timed_owner.submit(lambda owned: read_resource(owned, uri, link)).result()
     if uri == _URI_GAME_STATE:
         return json.dumps(to_jsonable(session.read_game_state()))
     if uri == _URI_EVENT_LOG:
@@ -2507,6 +2561,189 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
 
 
 # -- server wiring -----------------------------------------------------------
+
+
+_TIMED_INTEGER_FIELDS = (
+    "rearm_budget",
+    "rearm_instruction_cap",
+    "max_edge_lateness",
+    "quantum_cycles",
+    "max_wait_attempts",
+    "inbound_capacity",
+    "queue_capacity",
+)
+_TIMED_TIMEOUT_FIELDS = (
+    "operation_timeout",
+    "request_timeout",
+    "lock_timeout",
+    "close_timeout",
+)
+
+
+def load_timed_policy_from_env() -> TimedOwnerPolicy | None:
+    """Select timed transport explicitly; no policy value has an implicit default.
+
+    Set POKERED_LINK_TRANSPORT=timed and POKERED_TIMED_<FIELD> for every
+    TimedOwnerPolicy field. Cycle/count fields are integers; timeout fields
+    are finite positive seconds. Legacy remains the default transport.
+    """
+    mode = os.environ.get("POKERED_LINK_TRANSPORT", "legacy").strip().lower()
+    if mode not in {"legacy", "timed"}:
+        raise McpHarnessError(
+            "invalid_timed_configuration",
+            "POKERED_LINK_TRANSPORT must be legacy or timed",
+        )
+    fields = _TIMED_INTEGER_FIELDS + _TIMED_TIMEOUT_FIELDS
+    values = {field: os.environ.get(f"POKERED_TIMED_{field.upper()}") for field in fields}
+    if mode == "legacy":
+        if any(value is not None for value in values.values()):
+            raise McpHarnessError(
+                "invalid_timed_configuration",
+                "POKERED_TIMED_* policy requires POKERED_LINK_TRANSPORT=timed",
+            )
+        return None
+    missing = [
+        f"POKERED_TIMED_{field.upper()}"
+        for field, value in values.items()
+        if value is None or not value.strip()
+    ]
+    if missing:
+        raise McpHarnessError(
+            "invalid_timed_configuration", "missing explicit timed policy: " + ", ".join(missing)
+        )
+    try:
+        parsed = {
+            field: (int(value) if field in _TIMED_INTEGER_FIELDS else float(value))
+            for field, value in values.items()
+        }
+        return TimedOwnerPolicy(**parsed)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise McpHarnessError("invalid_timed_configuration", str(exc)) from exc
+
+
+def _timed_status_payload(snapshot: Any) -> dict[str, Any]:
+    # The owner snapshot is immutable and contains no foreign-thread reads.
+    def thaw(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: thaw(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [thaw(item) for item in value]
+        return to_jsonable(value)
+
+    payload = thaw(snapshot)
+    payload["transport"] = "timed"
+    payload["mode"] = payload.get("state", "unknown")
+    payload["remote_mode"] = payload["mode"]
+    payload["primary_tick"] = payload.get("tick")
+    payload["peer_tick"] = None
+    payload["paired"] = False
+    payload["link_backend"] = "timed"
+    payload["remote_bind_port"] = payload.get("port")
+    payload["remote_peer_rom_version"] = payload.get("peer_rom_version")
+    payload["remote_error"] = payload.get("error")
+    payload["remote_role"] = payload.get("role")
+    return payload
+
+
+def _timed_status(owner: TimedOwner) -> dict[str, Any]:
+    return _timed_status_payload(owner.status())
+
+
+def _timed_tool_request(
+    owner: TimedOwner,
+    session: Session,
+    name: str,
+    args: dict[str, Any],
+    link: LinkState | None,
+) -> Any:
+    if owner.session is not session:
+        raise McpHarnessError(
+            "invalid_timed_configuration", "timed owner belongs to another session"
+        )
+    if name in {"link_listen", "link_connect"}:
+        version = _validate_rom_version(
+            args.get("rom_version", link.primary_version if link else "red")
+        )
+        if link is not None:
+            _require_primary_rom_version(link, version)
+        peer_version = _optional_rom_version(args.get("peer_rom_version"))
+        deadline = None
+        if "timeout_s" in args:
+            deadline = time.monotonic() + _validate_timeout(args["timeout_s"])
+        host = _validate_remote_host(args.get("host", "127.0.0.1"))
+        if host == "localhost":
+            host = "127.0.0.1"
+        port = _positive_port(args["port"])
+        operation = owner.listen if name == "link_listen" else owner.connect
+        return operation(host, port, version, deadline=deadline, peer_rom_version=peer_version)
+    if name == "link_disconnect":
+        return owner.disconnect()
+    if name == "link_step":
+
+        def step(owned: Session) -> Any:
+            if owner.status()["state"] != "connected":
+                raise McpHarnessError(
+                    "timed_not_connected", "link_step requires a timed connection"
+                )
+            result = _dispatch_session_tool(owned, "step", args)
+            return {"primary_tick": result["tick"], "peer_tick": None}
+
+        return owner.submit(step)
+    if name.startswith("link_"):
+        raise McpHarnessError(
+            "timed_unsupported_tool", f"{name} is not supported by timed remote transport"
+        )
+    return owner.submit(lambda owned: _dispatch_session_tool(owned, name, args))
+
+
+async def _await_owner_request(request: Any, *, ready: bool = False) -> Any:
+    """Isolate asyncio cancellation while the owner retains the queue outcome."""
+    deadline = asyncio.timeout(max(0.0, request.deadline - time.monotonic()))
+    try:
+        async with deadline:
+            return await (request.wait_ready() if ready else request.wait())
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise
+        request.cancel()
+        # Deadline cancellation can race the owner publishing a terminal
+        # protocol failure. The shielded canonical future retains that reason;
+        # preserve its identity instead of replacing it with a wrapper timeout.
+        if request.future.done() and not request.future.cancelled():
+            terminal = request.future.exception()
+            if terminal is not None and getattr(terminal, "code", None) != "timed_cancelled":
+                raise terminal
+        raise McpHarnessError("timed_deadline", "timed owner request deadline expired") from exc
+    except asyncio.CancelledError:
+        request.cancel()
+        raise
+
+
+async def _shutdown_timed_owner(
+    owner: TimedOwner, policy: TimedOwnerPolicy, tasks: _McpTaskRegistry
+) -> None:
+    """Cancel execution out of band; detach only through the owner queue."""
+    deadline = time.monotonic() + policy.close_timeout
+    owner.cancel()
+    owner.disconnect()
+
+    def join_owner() -> bool:
+        remaining = deadline - time.monotonic()
+        return remaining > 0 and owner.close(timeout=remaining)
+
+    # Only the bounded join uses the executor. Session access, cancellation
+    # recovery, endpoint detach and Session.close remain on the native owner.
+    worker = tasks.start(join_owner)
+    try:
+        closed = await asyncio.wait_for(
+            asyncio.shield(worker), max(0.0, deadline - time.monotonic())
+        )
+    except TimeoutError:
+        closed = False
+    if not closed:
+        raise McpHarnessError(
+            "timed_cleanup_pending", "timed owner retained pending cleanup; session remains owned"
+        )
 
 
 def _consume_task_exception(task: asyncio.Task[Any]) -> None:
@@ -2619,6 +2856,8 @@ def build_server(
     primary_version: str = "red",
     peer_version: str = "red",
     link: LinkState | None = None,
+    timed_policy: TimedOwnerPolicy | None = None,
+    timed_owner: TimedOwner | None = None,
 ) -> Server:
     """Construct an MCP ``Server`` bound to ``session``.
 
@@ -2630,6 +2869,13 @@ def build_server(
     The server stays un-run — caller invokes ``server.run`` via an
     appropriate transport. This makes the wiring itself testable without
     spawning stdio pipes.
+
+    ``timed_policy`` explicitly selects single-session timed remote mode.
+    Every live Session operation then runs on ``_pokered_timed_owner``;
+    status is a cached observation. The caller must close that owner (which
+    closes its Session) or use ``serve_stdio`` for managed shutdown. A false
+    owner close result retains ownership and must never trigger foreign
+    Session teardown. Supplying a local peer or active legacy link is invalid.
     """
     if link is None:
         link = LinkState(
@@ -2638,31 +2884,96 @@ def build_server(
             peer_version=peer_version,
         )
 
+    if timed_owner is not None and timed_policy is None:
+        raise McpHarnessError("invalid_timed_configuration", "timed_owner requires timed_policy")
+    if timed_policy is not None and (link.peer_session is not None or peer_session is not None):
+        raise McpHarnessError(
+            "invalid_timed_configuration", "timed transport requires a single local session"
+        )
+    if timed_policy is not None and (
+        link.remote_mode != "idle"
+        or link.pair is not None
+        or link.local_link_session is not None
+        or link.remote_link is not None
+        or link.remote_endpoint is not None
+        or link.network_session is not None
+        or link._pending_remote_link is not None
+        or link._pending_remote_endpoint is not None
+        or link._pending_network_session is not None
+        or link._pending_listener_socket is not None
+        or link._listener_socket is not None
+        or link._listener_start_in_progress
+        or link._connect_in_progress
+        or link._disconnecting
+    ):
+        raise McpHarnessError(
+            "invalid_timed_configuration", "timed transport requires an idle legacy link"
+        )
+    if timed_owner is not None and (
+        timed_owner.session is not session or timed_owner.policy != timed_policy
+    ):
+        raise McpHarnessError(
+            "invalid_timed_configuration", "timed owner session or policy does not match server"
+        )
+    if timed_policy is not None:
+        timed_owner = timed_owner or TimedOwner(session, timed_policy)
+
     server: Server = Server("pokered-harness")
     request_tasks = _McpTaskRegistry()
     # ``serve_stdio`` uses this private handle during transport EOF cleanup.
     # Keeping it on the server also makes the ownership explicit for callers
     # that construct a server first and select their transport later.
     server._pokered_request_tasks = request_tasks  # type: ignore[attr-defined]
+    server._pokered_timed_owner = timed_owner  # type: ignore[attr-defined]
 
     @server.list_tools()
     async def _list_tools() -> list[mcp_types.Tool]:
+        if timed_owner is not None:
+            specs = [
+                spec
+                for spec in _tool_specs(has_peer=True)
+                if spec.name not in _LOCAL_LINK_TOOL_NAMES or spec.name == "link_step"
+            ]
+            for spec in specs:
+                if spec.name in {"link_listen", "link_connect"}:
+                    spec.inputSchema["properties"]["timeout_s"].pop("default", None)
+                    spec.description = (
+                        "Bind timed listener and return when ready; poll link_status for connection."
+                        if spec.name == "link_listen"
+                        else "Connect timed transport within the explicit setup deadline."
+                    )
+                elif spec.name == "link_step":
+                    spec.description = (
+                        "Advance this session by count ticks through its timed endpoint."
+                    )
+            return specs
         return _tool_specs(has_peer=link.peer_session is not None)
 
     @server.call_tool()
-    async def _call_tool(
-        name: str, arguments: dict[str, Any] | None
-    ) -> mcp_types.CallToolResult:
+    async def _call_tool(name: str, arguments: dict[str, Any] | None) -> mcp_types.CallToolResult:
         args = arguments or {}
+        if timed_owner is not None:
+            try:
+                if name == "link_status":
+                    return _text_reply(_timed_status(timed_owner))
+                request = _timed_tool_request(timed_owner, session, name, args, link)
+                result = await _await_owner_request(request, ready=name == "link_listen")
+                if name in {"link_listen", "link_connect", "link_disconnect"}:
+                    result = (
+                        _timed_status_payload(result)
+                        if name == "link_listen"
+                        else _timed_status(timed_owner)
+                    )
+                return _text_reply(result)
+            except Exception as exc:  # noqa: BLE001
+                return _error_reply(exc)
         # ``asyncio.to_thread`` cannot cancel a Python worker that is already
         # executing. Keep an explicit Task and shield it so a cancelled MCP
         # request does not orphan an emulator operation. For link-related
         # work, close the remote transport from a second thread to wake a
         # serial hook or an in-progress connect before waiting for the worker
         # to settle.
-        worker = request_tasks.start(
-            lambda: dispatch_tool(session, name, args, link)
-        )
+        worker = request_tasks.start(lambda: dispatch_tool(session, name, args, link))
         try:
             # The emulator is not asyncio-aware. Run the blocking operation
             # off the event loop while the Session/LinkState locks preserve
@@ -2672,9 +2983,7 @@ def build_server(
                 worker,
                 task_registry=request_tasks,
                 cancel_cleanup=(
-                    None
-                    if name == "link_status"
-                    else lambda: _disconnect_remote(link, session)
+                    None if name == "link_status" else lambda: _disconnect_remote(link, session)
                 ),
             )
         except Exception as exc:  # noqa: BLE001
@@ -2688,9 +2997,24 @@ def build_server(
     @server.read_resource()
     async def _read_resource(uri: Any) -> str:
         resource_uri = str(uri)
-        worker = request_tasks.start(
-            lambda: read_resource(session, resource_uri, link)
-        )
+        if timed_owner is not None:
+            try:
+                if resource_uri == _URI_LINK_STATUS:
+                    return json.dumps(_timed_status(timed_owner))
+                if resource_uri in {_URI_PEER_GAME_STATE, _URI_LINK_TRANSPORT}:
+                    raise McpHarnessError(
+                        "timed_unsupported_resource", "timed remote transport has no local peer"
+                    )
+                return await _await_owner_request(
+                    timed_owner.submit(lambda owned: read_resource(owned, resource_uri, link))
+                )
+            except Exception as exc:
+                raise McpError(
+                    mcp_types.ErrorData(
+                        code=0, message=str(exc) or type(exc).__name__, data=_error_payload(exc)
+                    )
+                ) from exc
+        worker = request_tasks.start(lambda: read_resource(session, resource_uri, link))
         try:
             return await _await_blocking_task(
                 worker,
@@ -2739,20 +3063,46 @@ async def serve_stdio(
     primary_version: str = "red",
     peer_version: str = "red",
     link: LinkState | None = None,
+    timed_policy: TimedOwnerPolicy | None = None,
+    timed_owner: TimedOwner | None = None,
 ) -> None:
+    """Serve MCP; timed mode transfers Session cleanup to its persistent owner."""
     owned_link = link or LinkState(
         peer_session=peer_session,
         primary_version=primary_version,
         peer_version=peer_version,
     )
+    timed_options: dict[str, Any] = {}
+    if timed_policy is not None or timed_owner is not None:
+        timed_options = {"timed_policy": timed_policy, "timed_owner": timed_owner}
     server = build_server(
         session,
         peer_session=peer_session,
         primary_version=primary_version,
         peer_version=peer_version,
         link=owned_link,
+        **timed_options,
     )
+    owner = getattr(server, "_pokered_timed_owner", None)
     request_tasks = getattr(server, "_pokered_request_tasks", None)
+    if owner is not None:
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                with contextlib.redirect_stdout(sys.stderr):
+                    await server.run(
+                        read_stream, write_stream, server.create_initialization_options()
+                    )
+        finally:
+            active_exception = sys.exc_info()[1]
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    await _shutdown_timed_owner(owner, timed_policy, request_tasks)
+            except Exception as exc:
+                if active_exception is not None:
+                    active_exception.add_note(f"MCP timed cleanup failed: {exc}")
+                else:
+                    raise
+        return
     try:
         async with stdio_server() as (read_stream, write_stream):
             # stdio_server captures the real stdout file descriptor before
@@ -2837,6 +3187,10 @@ def main() -> None:
       ``POKERED_PEER_ROM_SHA1`` — when set, a peer Session is constructed
       at startup and the link-cable tools become usable. The pair is NOT
       auto-paired — invoke ``link_pair`` explicitly.
+    * ``POKERED_LINK_TRANSPORT=timed`` — explicitly select timed remote
+      transport. Every ``POKERED_TIMED_<FIELD>`` listed by
+      :func:`load_timed_policy_from_env` is required; no timing policy is
+      qualified or selected implicitly. Local peer configuration is invalid.
     """
     from pokered_harness.config import (
         VersionsConfigError,
@@ -2844,6 +3198,11 @@ def main() -> None:
         load_primary_env,
         load_versions,
     )
+
+    try:
+        timed_policy = load_timed_policy_from_env()
+    except McpHarnessError as exc:
+        raise SystemExit(f"invalid timed MCP configuration: {exc}") from exc
 
     if _env_flag("POKERED_SKIP_SHA1"):
         raise SystemExit(
@@ -2867,6 +3226,10 @@ def main() -> None:
     primary_rom, primary_sym = primary_env.resolved_paths()
     assert primary_rom is not None and primary_sym is not None
     peer_rom, peer_sym = peer_env.resolved_paths()
+    if timed_policy is not None and peer_rom is not None:
+        raise SystemExit(
+            "timed MCP transport requires a single local session; unset POKERED_PEER_*"
+        )
     peer_symbol_sha_override = os.environ.get("POKERED_PEER_SYM_SHA1")
     if (
         peer_sym is None
@@ -2997,6 +3360,7 @@ def main() -> None:
     # visible but out of the RPC channel.
     peer_session: Session | None = None
     session: Session | None = None
+    timed_owner: TimedOwner | None = None
     try:
         with contextlib.redirect_stdout(sys.stderr):
             session = Session.from_files(
@@ -3019,26 +3383,48 @@ def main() -> None:
                 )
                 register_default_hooks(peer_session)
 
+        timed_options: dict[str, Any] = {}
+        if timed_policy is not None:
+            timed_owner = TimedOwner(session, timed_policy)
+            timed_options = {"timed_policy": timed_policy, "timed_owner": timed_owner}
         asyncio.run(
             serve_stdio(
                 session,
                 peer_session=peer_session,
                 primary_version=primary_env.version,
                 peer_version=peer_env.version,
+                **timed_options,
             )
         )
     finally:
         active_exception = sys.exc_info()[1]
-        cleanup_errors = _close_sessions_independently(peer_session, session)
+        owner_stopped = timed_owner is None
+        owner_error: Exception | None = None
+        if timed_owner is not None:
+            try:
+                owner_stopped = timed_owner.close(timeout=timed_policy.close_timeout)
+            except Exception as exc:  # noqa: BLE001 - ownership remains transferred
+                owner_error = exc
+        cleanup_errors = _close_sessions_independently(
+            peer_session, session if timed_owner is None else None
+        )
+        if not owner_stopped:
+            cleanup_errors.append(
+                (
+                    "primary",
+                    owner_error
+                    or McpHarnessError(
+                        "timed_cleanup_pending",
+                        "Session retained by unresolved timed owner; foreign close refused",
+                    ),
+                )
+            )
         if cleanup_errors:
             details = "; ".join(
-                f"{role} {type(exc).__name__}: {exc}"
-                for role, exc in cleanup_errors
+                f"{role} {type(exc).__name__}: {exc}" for role, exc in cleanup_errors
             )
             if active_exception is not None:
-                active_exception.add_note(
-                    f"MCP session cleanup failed: {details}"
-                )
+                active_exception.add_note(f"MCP session cleanup failed: {details}")
             else:
                 raise McpHarnessError("server_cleanup_failed", details)
 
@@ -3060,8 +3446,11 @@ if __name__ == "__main__":
 __all__ = [
     "DEFAULT_HOOKS",
     "LinkState",
+    "TimedOwner",
+    "TimedOwnerPolicy",
     "build_server",
     "dispatch_tool",
+    "load_timed_policy_from_env",
     "main",
     "read_resource",
     "register_default_hooks",

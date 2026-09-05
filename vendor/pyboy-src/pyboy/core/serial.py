@@ -543,6 +543,10 @@ class Serial:
         return 0
 
 
+# Compatibility name for link consumers; preserves the native Serial type.
+SerialCore = Serial
+
+
 __all__ = [
     "CYCLES_8192HZ",
     "CYCLES_PER_BYTE_DMG",
@@ -561,4 +565,5 @@ __all__ = [
     "SERIAL_STATE_FORMAT_VERSION",
     "Serial",
     "SerialBackend",
+    "SerialCore",
 ]

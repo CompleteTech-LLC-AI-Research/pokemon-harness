@@ -35,6 +35,8 @@ class CPU:
         self.halted = False
         self.stopped = False
         self.cycles = 0
+        # Lifetime counter; intentionally excluded from save/load state.
+        self.retired_instructions = 0
 
     def save_state(self, f):
         for n in [self.A, self.F, self.B, self.C, self.D, self.E]:
@@ -135,9 +137,13 @@ class CPU:
 
         self.bail = False
         while self.cycles < _target:
+            _dispatch_cycles = self.cycles
             self.fetch_and_execute()
             if self.bail:  # Possible cycles-target changes
                 break
+            # Prevent dispatch without forward cycle progress from repeating indefinitely.
+            if self.cycles <= _dispatch_cycles:
+                raise RuntimeError("CPU dispatch made no cycle progress")
 
     def check_interrupts(self):
         if self.interrupt_queued:
@@ -184,6 +190,10 @@ class CPU:
         self.interrupt_master_enable = False
 
     def fetch_and_execute(self):
+        retired_instructions_max = 0xFFFFFFFFFFFFFFFF
+        if self.retired_instructions >= retired_instructions_max:
+            raise OverflowError("retired_instructions counter overflow")
+
         # HACK: Shortcut the mb.getitem() calls
         if (not self.mb.bootrom_enabled) and self.PC + 2 < 0x4000:
             pc1 = self.mb.cartridge.rombanks[self.mb.cartridge.rombank_selected_low, self.PC]
@@ -216,4 +226,8 @@ class CPU:
                 b = pc2
                 v = (a << 8) + b
 
-        return opcodes.execute_opcode(self, opcode, v)
+        result = opcodes.execute_opcode(self, opcode, v)
+        # BRK has a table length but is a debugger trap, not an instruction.
+        if opcodes.OPCODE_LENGTHS[opcode] > 0 and opcode != 0xDB:
+            self.retired_instructions += 1
+        return result

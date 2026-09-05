@@ -40,6 +40,7 @@ REAL_ROM_MODULES = frozenset(
         "test_mcp_real_link.py",
         "test_link_symbols_real_roms.py",
         "test_mcp_stdio_integration.py",
+        "test_mcp_timed_rom.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
@@ -54,9 +55,15 @@ UNIT_MODULES = frozenset(
     {
         "test_agent_sync.py",
         "test_config.py",
+        "test_cpu_instruction_counter.py",
+        "test_emulated_time.py",
+        "test_emulated_time_held_delivery.py",
+        "test_emulated_time_segments.py",
         "test_events.py",
+        "test_execution_adapter.py",
         "test_fixture_provenance.py",
         "test_game_state.py",
+        "test_gate_failure_retention.py",
         "test_link_orchestrator.py",
         "test_link_pair.py",
         "test_link_protocol.py",
@@ -65,8 +72,15 @@ UNIT_MODULES = frozenset(
         "test_mcp_lifecycle_hardening.py",
         "test_link_transport.py",
         "test_mcp_server.py",
+        "test_mcp_timed_remote.py",
+        "test_mcp_timed_stdio.py",
+        "test_native_execution_governor.py",
+        "test_native_hook_exceptions.py",
         "test_network_backend.py",
+        "test_probe_timed_rom_pair.py",
+        "test_probe_timed_trade_pair.py",
         "test_production_gate.py",
+        "test_pyboy_link_imports.py",
         "test_pyboy_link_session.py",
         "test_remote_endpoint.py",
         "test_runtime_packaging.py",
@@ -75,6 +89,8 @@ UNIT_MODULES = frozenset(
         "test_serial_link.py",
         "test_serial_ownership.py",
         "test_session.py",
+        "test_session_timed_execution.py",
+        "test_speed_state_restore.py",
         "test_state_bag.py",
         "test_state_battle.py",
         "test_state_menu.py",
@@ -84,6 +100,14 @@ UNIT_MODULES = frozenset(
         "test_state_status.py",
         "test_state_text.py",
         "test_symbol_loader.py",
+        "test_timed_link_session.py",
+        "test_timed_input_observation.py",
+        "test_timed_menu_probe.py",
+        "test_timed_mcp_matrix.py",
+        "test_timed_menu_milestones.py",
+        "test_timed_remote.py",
+        "test_timed_wire.py",
+        "test_timed_trade_probe.py",
     }
 )
 
@@ -121,6 +145,12 @@ ROM_FREE_TESTS = frozenset(
             "test_partial_peer_sentinel_is_fatal_before_gameplay_assertions",
         )
     }
+    | {
+        (
+            "test_mcp_timed_rom.py",
+            "test_rom_client_load_state_timeout_redacts_data",
+        ),
+    }
 )
 
 LOCAL_LINK_MODULES = frozenset(
@@ -134,11 +164,12 @@ REMOTE_LINK_MODULES = frozenset(
     {
         "test_link_integration_remote.py",
         "test_mcp_real_link.py",
+        "test_mcp_timed_rom.py",
         "test_pyboy_link_session_subprocess.py",
     }
 )
 
-MCP_STDIO_MODULES = frozenset({"test_mcp_stdio_integration.py"})
+MCP_STDIO_MODULES = frozenset({"test_mcp_stdio_integration.py", "test_mcp_timed_rom.py"})
 
 # The broad trade set keeps ROM milestones visible in diagnostics. The strict
 # acceptance set below is deliberately narrower and is what the production
@@ -273,6 +304,198 @@ TIER_REQUIRED_TESTS = {
 # lane, whose exact name is owned by that lane.
 TIMING_SENSITIVE_TESTS = frozenset(
     {
+        (
+            "test_timed_menu_milestones.py",
+            "test_authored_cartridge_actual_helper_is_non_mutating",
+        ),
+        (
+            "test_mcp_timed_stdio.py",
+            "test_authored_timed_stdio_pair_frames_and_cleanup",
+        ),
+        (
+            "test_mcp_timed_stdio.py",
+            "test_authored_timed_stdio_expected_peer_mismatch",
+        ),
+        (
+            "test_timed_input_observation.py",
+            "test_actual_foreign_thread_cannot_observe",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_status_is_immutable_and_available_while_busy",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_queue_bound_and_cancelled_request_never_runs",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_expired_queued_request_never_executes_later",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_queued_cancel_preserves_active_real_epoch",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_real_partial_progress_active_interrupt_is_terminal",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_async_cancel_keeps_event_loop_responsive_during_endpoint_cleanup",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_close_retains_busy_owner_until_retry_and_closes_session_on_owner",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_mcp_cached_status_tool_and_resource_return_while_owner_blocked",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_stored_protocol_error_precedes_active_caller_cancellation",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_failure_survives_cancel_and_cleanup",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_failure_first_per_epoch_and_attributed_across_reconnect",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_failure_mcp_status_never_reads_native_while_blocked",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_failure_first_observed_at_cleanup_before_unbind",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_failure_attach_finally_preserves_setup_exception",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_blocked_cancellation_keeps_queue_and_cleanup_deadlines_live",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_blocked_cancellation_retains_failed_unbind_until_explicit_retry",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_server_outer_deadline_preserves_canonical_protocol_error",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_request_wait_has_independent_deadline_without_supervisor",
+        ),
+        ("test_session_timed_execution.py", "test_binding_lock_wait_is_bounded"),
+        (
+            "test_session_timed_execution.py",
+            "test_cancel_reaches_active_real_credit_wait_without_session_lock",
+        ),
+        (
+            "test_session_timed_execution.py",
+            "test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_events",
+        ),
+        (
+            "test_session_timed_execution.py",
+            "test_real_partial_public_tick_failure_counts_only_completed_frames",
+        ),
+        # Synthetic owners still exercise real supervisor/thread waits.
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_supervisor_cancels_both_and_owner_detaches_before_stop",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_interrupted_multiframe_call_records_actual_partial_progress",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_detach_failure_never_stops_session_with_live_binding",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_unpublished_factory_failure_cancels_peer_original_event",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_no_progress_return_is_explicit_and_does_not_count_requested_frames",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_first_supervisor_cancel_exception_does_not_skip_second_endpoint",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_live_owners_report_incomplete_cleanup_without_mutating_returned_report",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_attach_failure_retains_loaded_native_evidence_without_binding",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_partial_normal_public_return_is_not_frame_bound_success",
+        ),
+        # Spawned owners, cancellation watchers, and pipe drainers use real
+        # scheduling and bounded waits even with synthetic or missing assets.
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_missing_assets_reports_both_child_failures",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_failure_cancels_waiting_peer",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_deadline_terminates_unresponsive_owners",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_rejects_invalid_child_report",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_cancellation_bridge_sets_local_event_before_publication",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_cancellation_bridge_continues_after_endpoint_cancel_error",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_stderr_capture_drains_native_fd_flood_with_bounded_retention",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_stdout_capture_drains_native_fd_flood_with_bounded_retention",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_startup_failure_signals_without_shared_event_locks",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_early_startup_failure_forces_termination_without_shared_event_locks",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_partial_report_kill_reaps_reader_without_shared_event_locks",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_propagates_explicit_menu_profile",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_report_overflow_is_explicit_bounded_and_not_success",
+        ),
         ("test_network_backend.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
         (
             "test_network_backend.py",
@@ -284,6 +507,68 @@ TIMING_SENSITIVE_TESTS = frozenset(
             "test_listen_and_connect_over_loopback_exchange_byte",
         ),
         ("test_network_backend.py", "test_sync_with_peer_rendezvous"),
+        (
+            "test_timed_link_session.py",
+            "test_real_pair_repeated_public_frames_bounded_wire_volume",
+        ),
+        (
+            "test_timed_link_session.py",
+            "test_real_v3_external_cancel_interrupts_active_receive",
+        ),
+        (
+            "test_timed_link_session.py",
+            "test_real_v3_poll_returning_after_deadline_never_applies_edge",
+        ),
+        # Real peer scheduling, fragmented ingress, and bounded owner waits;
+        # facade doubles and validation-only remote cases stay unit-only.
+        (
+            "test_timed_remote.py",
+            "test_exact_prelude_zero_nonce_and_coalesced_hello_not_overread",
+        ),
+        (
+            "test_timed_remote.py",
+            "test_prelude_and_hello_waits_share_deadline_and_cancel_cleanup",
+        ),
+        (
+            "test_timed_remote.py",
+            "test_connect_listen_share_exact_factory_deadline_through_hello",
+        ),
+        ("test_timed_remote.py", "test_accept_wait_is_bounded_and_closes_listener"),
+        (
+            "test_timed_remote.py",
+            "test_authored_runtime_two_owner_factory_attach_passive_sync_and_bilateral_fence",
+        ),
+        (
+            "test_timed_remote.py",
+            "test_external_cancel_survives_factory_into_real_endpoint_wait",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_wirecontrol_handshake_rejects_caps_and_revision_without_downgrade",
+        ),
+        ("test_timed_wire.py", "test_handshake_writer_preserves_terminal_reason"),
+        (
+            "test_timed_wire.py",
+            "test_bidirectional_concurrent_requests_and_responses",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_fast_response_before_writer_return_and_before_request_consumption",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_waiting_writer_admission_is_bounded_and_does_not_skip_sequence",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_peer_application_waits_for_local_hello_send_publication",
+        ),
+        (
+            "test_timed_wire.py",
+            "test_one_absolute_deadline_covers_admission_and_partial_write",
+        ),
+        ("test_timed_wire.py", "test_close_wakes_receive"),
+        ("test_timed_wire.py", "test_close_wakes_partial_frame_reader"),
     }
 )
 

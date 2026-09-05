@@ -158,6 +158,9 @@ class Session:
         # ``view`` is stashed for introspection; the actual wiring into the
         # PyBoy factory happens in ``from_files`` where the ROM is loaded.
         self._view = view
+        self._timed_endpoint = None
+        self._timed_attachment = None
+        self._timed_executing = False
 
     # --- construction --------------------------------------------------
 
@@ -308,9 +311,17 @@ class Session:
         completion, failure, or another bounded timeout; it never starts a
         second concurrent stop.
         """
-        timeout_s = _validate_timeout(timeout_s, "timeout_s")
+        timeout_s = min(_validate_timeout(timeout_s, "timeout_s"), threading.TIMEOUT_MAX)
         stop_deadline = time.monotonic() + timeout_s
         current_thread_id = threading.get_ident()
+        endpoint = self._timed_endpoint
+        if endpoint is not None:
+            if endpoint._owner != current_thread_id:
+                self.cancel_timed_execution()
+                raise SessionError("timed execution requires owner cleanup before close")
+            self.unbind_timed_execution(
+                endpoint, timeout_s=max(0.0, stop_deadline - time.monotonic())
+            )
         with self._lifecycle_lock:
             if self._stopped:
                 return
@@ -367,6 +378,8 @@ class Session:
                     f"the {timeout_s:g}s shutdown deadline"
                 )
             lock_acquired = True
+            if self._timed_endpoint is not None:
+                raise SessionError("timed execution must be detached before shutdown")
             # EventBus hooks are physical PyBoy callbacks too. Deactivate and
             # deregister them while the session lock proves that no callback
             # is currently running. Raw serial hooks are guarded separately
@@ -711,9 +724,126 @@ class Session:
 
     # --- actions -------------------------------------------------------
 
+    def bind_timed_execution(
+        self, endpoint, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
+    ) -> None:
+        """Route whole public ticks through an already attached timed endpoint.
+
+        Attach and bind on the same thread while holding :meth:`locked`.
+        Load fixtures before attachment. This adapter deliberately checks the
+        concrete endpoint's private ownership contract; a callable alone cannot
+        prove emulator identity or governor ownership. It supplies no peer
+        scheduling or rendezvous guarantee.
+        """
+        from pokered_harness.link.timed_remote import TimedRemoteEndpoint
+
+        timeout_s = _validate_timeout(timeout_s, "timeout_s")
+        if not isinstance(endpoint, TimedRemoteEndpoint):
+            raise SessionError("timed execution requires a TimedRemoteEndpoint")
+        if (
+            endpoint._owner != threading.get_ident()
+            or endpoint.session._owner != threading.get_ident()
+        ):
+            raise SessionError("timed execution requires the attaching owner thread")
+        self._check_timed_owner()
+        with self.locked(timeout_s=min(timeout_s, threading.TIMEOUT_MAX)):
+            if self._timed_endpoint is not None:
+                raise SessionError("timed execution is already bound")
+            self._validate_timed_endpoint(endpoint)
+            timed = endpoint.session
+            self._timed_attachment = (
+                timed._board,
+                timed._core,
+                timed._previous_backend,
+                timed._previous_dispatch,
+            )
+            self._timed_endpoint = endpoint
+
+    def unbind_timed_execution(
+        self, endpoint, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
+    ) -> None:
+        """Close on the owner and restore ordinary execution after detachment.
+
+        The lock wait is bounded; endpoint cleanup itself is synchronous and
+        cannot be preempted. A failed cleanup retains the binding, preventing
+        an ordinary tick from bypassing a live governor. Retry on the owner.
+        """
+        timeout_s = _validate_timeout(timeout_s, "timeout_s")
+        self._check_timed_owner()
+        with self.locked(
+            timeout_s=min(timeout_s, threading.TIMEOUT_MAX), allow_closed=True
+        ):
+            if endpoint is not self._timed_endpoint or endpoint is None:
+                raise SessionError("timed execution endpoint does not match binding")
+            self._check_timed_owner()
+            self._check_timed_idle(endpoint)
+            endpoint.close()
+            timed = endpoint.session
+            if any(value is not None for value in (timed._pyboy, timed._board, timed._core)):
+                raise SessionError("timed endpoint cleanup did not detach emulator")
+            if timed._adapter is not None and timed._adapter._board is not None:
+                raise SessionError("timed endpoint governor remains attached")
+            board, core, backend, dispatch = self._timed_attachment
+            if (
+                self._pyboy.mb is not board
+                or board.serial is not core
+                or core.backend is not backend
+                or core.owner_dispatch_callback is not dispatch[0]
+                or core.owner_dispatch_enabled != dispatch[1]
+                or board.execution_before is not None
+                or board.execution_after is not None
+            ):
+                raise SessionError("timed endpoint cleanup did not restore native ownership")
+            self._timed_endpoint = None
+            self._timed_attachment = None
+
+    def cancel_timed_execution(self) -> None:
+        """Signal active execution/waits without acquiring the emulator lock.
+
+        Any thread may cancel. The attaching owner must still unbind; neither
+        cancellation nor an execution failure restores ordinary tick routing.
+        """
+        endpoint = self._timed_endpoint
+        if endpoint is not None:
+            endpoint.cancel()
+
+    def _check_timed_owner(self) -> None:
+        endpoint = self._timed_endpoint
+        if endpoint is not None and (
+            endpoint._owner != threading.get_ident()
+            or endpoint.session._owner != threading.get_ident()
+        ):
+            raise SessionError("timed execution requires the attaching owner thread")
+
+    def _check_timed_idle(self, endpoint) -> None:
+        timed = endpoint.session
+        if self._timed_executing or any(
+            (timed._active, timed._attaching, timed._control_active, timed._in_edge, timed._pumping)
+        ):
+            raise SessionError("timed execution requires an idle owner boundary")
+
+    def _validate_timed_endpoint(self, endpoint) -> None:
+        timed = endpoint.session
+        owner = threading.get_ident()
+        if endpoint._owner != owner or timed._owner != owner:
+            raise SessionError("timed execution requires the attaching owner thread")
+        self._check_timed_idle(endpoint)
+        endpoint._check_cancelled()
+        timed._check()
+        if timed._pyboy is not self._pyboy or timed._board is None:
+            raise SessionError("timed endpoint is not attached to this Session emulator")
+        if type(getattr(self._pyboy, "frame_count", None)) is not int or self._pyboy.frame_count < 0:
+            raise SessionError("timed execution requires the native public frame_count")
+        timed._verify_registration()
+
+    def _admit_timed_execution(self) -> None:
+        if self._timed_endpoint is not None:
+            self._validate_timed_endpoint(self._timed_endpoint)
+
     def step(self, count: int = 1, *, render: bool | None = None) -> None:
         _validate_positive_int(count, "count")
         self._ensure_open()
+        self._check_timed_owner()
         with self._lock:
             self._ensure_open()
             self._step_locked(count, render=render)
@@ -730,37 +860,59 @@ class Session:
         path.
         """
         # Increment BEFORE pyboy.tick so hooks firing mid-step read the
-        # post-step tick value. Roll it back if the emulator rejects the
-        # tick, so bookkeeping never claims frames that were not run.
+        # anticipated post-step value. Timed calls reconcile completed frames
+        # from PyBoy's real public counter on every outcome, including a
+        # successful return while paused or quitting and an interrupted frame.
+        # Ordinary execution retains its historical exception rollback.
+        self._admit_timed_execution()
+        endpoint = self._timed_endpoint
+        start_frame = self._pyboy.frame_count if endpoint is not None else None
         old_tick = self._tick
         self._tick += count
         if render is None:
             render = self._view
+        was_executing = self._timed_executing
+        self._timed_executing = True
         try:
-            self._pyboy.tick(count, render=render)
-        except Exception:
-            self._tick = old_tick
+            if endpoint is None:
+                self._pyboy.tick(count, render=render)
+            else:
+                endpoint.tick(count, render=render, sound=True)
+                self._tick = old_tick + (self._pyboy.frame_count - start_frame)
+        except BaseException as exc:
+            if endpoint is not None:
+                self._tick = old_tick + (self._pyboy.frame_count - start_frame)
+            elif isinstance(exc, Exception):
+                self._tick = old_tick
             raise
+        finally:
+            self._timed_executing = was_executing
 
     def press(self, button: str | Button, *, duration: int = 1) -> None:
         _validate_positive_int(duration, "duration")
         self._ensure_open()
+        self._check_timed_owner()
         with self._lock:
             self._ensure_open()
+            self._admit_timed_execution()
             name = validate_button(str(button)).value
             self._pyboy.button(name, duration)
 
     def hold(self, button: str | Button) -> None:
         self._ensure_open()
+        self._check_timed_owner()
         with self._lock:
             self._ensure_open()
+            self._admit_timed_execution()
             name = validate_button(str(button)).value
             self._pyboy.button_press(name)
 
     def release(self, button: str | Button) -> None:
         self._ensure_open()
+        self._check_timed_owner()
         with self._lock:
             self._ensure_open()
+            self._admit_timed_execution()
             name = validate_button(str(button)).value
             self._pyboy.button_release(name)
 
@@ -793,6 +945,8 @@ class Session:
             return data
 
     def load_state(self, data: bytes) -> None:
+        if self._timed_endpoint is not None:
+            raise SessionError("cannot load state during a bound timed epoch")
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise InvalidStateError("save-state must be bytes-like")
         payload = bytes(data)
@@ -801,12 +955,16 @@ class Session:
         self._ensure_open()
         with self._lock:
             self._ensure_open()
+            if self._timed_endpoint is not None:
+                raise SessionError("cannot load state during a bound timed epoch")
             self._pyboy.load_state(BytesIO(payload))
             # After load_state the emulated clock has been restored, but our
             # external tick counter is just bookkeeping — callers can reset
             # it via reset_tick if they care about matching exactly.
 
     def reset_tick(self, value: int = 0) -> None:
+        if self._timed_endpoint is not None:
+            raise SessionError("cannot reset tick during a bound timed epoch")
         if not isinstance(value, int) or isinstance(value, bool):
             raise ValueError(  # noqa: TRY004 - preserve the public ValueError contract
                 f"tick must be a non-negative integer, got {value!r}"
@@ -816,6 +974,8 @@ class Session:
         self._ensure_open()
         with self._lock:
             self._ensure_open()
+            if self._timed_endpoint is not None:
+                raise SessionError("cannot reset tick during a bound timed epoch")
             self._tick = value
 
     # --- event-driven advance -----------------------------------------
@@ -843,6 +1003,7 @@ class Session:
             raise ValueError("event_names must be non-empty")
 
         self._ensure_open()
+        self._check_timed_owner()
         with self._lock:
             self._ensure_open()
             start_tick = self._tick
@@ -857,7 +1018,10 @@ class Session:
                         )
 
                 ticks_left = deadline - self._tick
+                previous_tick = self._tick
                 self._step_locked(min(chunk, ticks_left), render=render)
+                if self._timed_endpoint is not None and self._tick == previous_tick:
+                    break
 
             # Final check after the last chunk.
             for name in wanted:

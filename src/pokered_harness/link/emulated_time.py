@@ -1,0 +1,763 @@
+"""Opt-in, transport-independent scheduling; not a hardware-accuracy claim.
+
+Construction does not activate any emulator or production path. Each instance
+owns one epoch, anchored at local raw CPU clock and explicit peer progress zero.
+Budgets are FULL hardware cycles; all ``half_cycle(s)`` fields are integers in
+half hardware cycles. Normal CPU ticks contribute two halves, double-speed
+ticks one: retaining halves exactly preserves odd double-speed carry.
+
+The caller serializes emulator execution, executes at most a reserved bound,
+then commits actual CPU clock and instruction count with at most one speed
+transition, or changes speed separately at the committed clock.
+An instruction that cannot fit must not execute. Reset/load/reconnect requires
+a new instance and an independently agreed epoch, never rebasing this one.
+
+The configurable quantum is experimental: 128 full cycles remains the default.
+Q256 is a provisional native-adapter choice, not evidence of native readiness.
+Permits are execution bounds, not committed progress. An in-flight native
+``on_edge`` callback before post-execution commit remains the adapter's
+responsibility; this module does not synchronize that callback or integrate it.
+
+Transport authentication and completeness are CALLER responsibilities. An
+inclusive watermark attests that its contiguous received edge prefix includes
+ALL edges at or before its time. This class checks epoch and receipt sequence,
+not network origin. Edges may arrive late within an explicit full-cycle bound;
+watermark contradictions always terminate independently of that bound. Observed
+execution is never rolled back in terminal diagnostics. Delivered metadata must
+be acknowledged before ordinary permits; a batch may explicitly hold one bounded
+rearm episode within its original lateness deadline. Acknowledgement is a caller assertion,
+not evidence that this module applied an edge to hardware or an emulator.
+
+Request IDs increase lexicographically (use fixed-width numeric strings).
+Only the latest progress/edge receipt is replayable; older sequence numbers
+fail closed. These contracts bound duplicate history. Queued edges and payload
+sizes are bounded as well; a transport must provide backpressure upstream.
+"""
+
+from __future__ import annotations
+
+import heapq
+import math
+import time
+from dataclasses import dataclass
+from itertools import count
+from threading import TIMEOUT_MAX, Condition
+from typing import NoReturn
+
+QUANTUM_CYCLES = 128
+MAX_PENDING_EDGES = 1024
+MAX_EDGE_PAYLOAD_BYTES = 4096
+_DELIVERY_TOKENS = count(1)
+
+
+class EmulatedTimeError(ValueError):
+    """Invalid input or contract violation; the coordinator is terminal."""
+
+
+class CoordinatorClosed(EmulatedTimeError):
+    """Operation attempted after cancellation, closure, or contract failure."""
+
+
+@dataclass(frozen=True)
+class Permit:
+    token: int
+    cpu_cycles: int
+    half_cycles: int
+    instruction_cap: int
+
+
+@dataclass(frozen=True)
+class SpeedTransition:
+    """One observed speed change at an inclusive raw CPU clock boundary."""
+
+    raw_cpu_clock: int
+    double_speed: bool
+
+
+@dataclass(frozen=True)
+class TimedEdge:
+    epoch: str
+    sequence: int
+    at_half_cycle: int
+    payload: bytes
+
+
+@dataclass(frozen=True)
+class EdgeDelivery(TimedEdge):
+    delivered_half_cycle: int
+    lateness_half_cycles: int
+    batch_token: int
+
+
+@dataclass(frozen=True)
+class FailureSnapshot:
+    """One scalar-only first failure; later settlement cannot rewrite it.
+
+    Constructor validation may precede accounting initialization. The first
+    terminal event must be a contract failure; earlier cancellation/closure
+    leaves this record absent permanently.
+    Boundary lateness is prospective; other lateness phases measure local time.
+    """
+
+    reason: str
+    terminal_reason: str
+    phase: str
+    epoch: str | None
+    local_half_cycles: int | None
+    peer_half_cycles: int | None
+    raw_cpu_clock: int | None
+    observed_raw_cpu_clock: int | None
+    edge_sequence: int | None = None
+    edge_at_half_cycle: int | None = None
+    measured_lateness_half_cycles: int | None = None
+    allowed_lateness_half_cycles: int | None = None
+    excess_half_cycles: int | None = None
+    emission_complete_half_cycle: int | None = None
+
+
+@dataclass(frozen=True)
+class TimeSnapshot:
+    local_half_cycles: int
+    peer_half_cycles: int
+    debt_half_cycles: int
+    remaining_episode_half_cycles: int
+    remaining_instructions: int
+    pending_permit: bool
+    closed: bool
+    cancelled: bool
+    epoch: str
+    request_id: str | None
+    active_episode: bool
+    raw_cpu_clock: int
+    terminal_reason: str | None
+    pending_delivery: bool
+    observed_raw_cpu_clock: int
+    double_speed: bool = False
+    failure: FailureSnapshot | None = None
+
+
+class EmulatedTimeCoordinator:
+    """Single-owner execution permits with concurrent peer/transport updates.
+
+    ``rearm_budget`` is required, in full cycles (zero disables rearm).
+    ``quantum_cycles`` is experimental, positive, and measured in full cycles.
+    ``enforce_completeness`` defaults to False for standalone compatibility.
+    When True, every permit ends at or before the trusted inclusive watermark
+    plus the lateness allowance, independently of peer and episode credit.
+    This bounds unseen-edge lateness if the caller's completeness attestation
+    is truthful and execution stays within its permit; it does not guarantee
+    progress when an atomic step cannot fit. The initial watermark remains -1.
+    Validation failures on an existing instance close it and wake all waiters.
+    A blocked reserve returns None; it never sleeps. ``_condition`` is the
+    standard Condition used by waits, allowing tests to observe the wait seam.
+    """
+
+    def __init__(
+        self,
+        *,
+        epoch: str,
+        raw_cpu_clock: int,
+        rearm_budget: int,
+        max_edge_lateness: int,
+        double_speed: bool = False,
+        quantum_cycles: int = QUANTUM_CYCLES,
+        enforce_completeness: bool = False,
+    ) -> None:
+        self._condition = Condition()
+        self._closed = False
+        self._cancelled = False
+        self._terminal_reason: str | None = None
+        self._failure: FailureSnapshot | None = None
+        with self._condition:
+            self._name(epoch, "epoch")
+            self._integer(raw_cpu_clock, "raw_cpu_clock")
+            self._integer(rearm_budget, "rearm_budget")
+            self._integer(max_edge_lateness, "max_edge_lateness")
+            self._integer(quantum_cycles, "quantum_cycles", 1)
+            self._boolean(double_speed)
+            if type(enforce_completeness) is not bool:
+                self._fail("enforce_completeness must be bool")
+        self._epoch = epoch
+        self._raw = raw_cpu_clock
+        self._observed_raw = raw_cpu_clock
+        self._rate = 1 if double_speed else 2
+        self._rearm = rearm_budget * 2
+        self._quantum = quantum_cycles * 2
+        self._max_lateness = max_edge_lateness * 2
+        self._enforce_completeness = enforce_completeness
+        self._local = self._peer = 0
+        self._progress_sequence = 0
+        self._pending: Permit | None = None
+        self._token = 0
+        self._episode: tuple[str, int, int] | None = None
+        self._episode_open = False
+        self._episode_end = 0
+        self._instructions = 0
+        self._edge_sequence = 0
+        self._last_edge: TimedEdge | None = None
+        self._edges: list[tuple[int, int, TimedEdge]] = []
+        self._watermark = -1
+        self._watermark_sequence = 0
+        self._pending_delivery: int | None = None
+        self._held_delivery: tuple[EdgeDelivery, ...] = ()
+        self._held_deadline: int | None = None
+        self._delivery_episode: tuple[str, int, int] | None = None
+
+    def _fail(
+        self,
+        message: str,
+        *,
+        phase: str = "validation",
+        edge_sequence: int | None = None,
+        edge_at_half_cycle: int | None = None,
+        measured_lateness_half_cycles: int | None = None,
+    ) -> NoReturn:
+        if self._terminal_reason is None:
+            self._terminal_reason = message
+            allowed = self._max_lateness if measured_lateness_half_cycles is not None else None
+            self._failure = FailureSnapshot(
+                reason=message,
+                terminal_reason=self._terminal_reason,
+                phase=phase,
+                epoch=getattr(self, "_epoch", None),
+                local_half_cycles=getattr(self, "_local", None),
+                peer_half_cycles=getattr(self, "_peer", None),
+                raw_cpu_clock=getattr(self, "_raw", None),
+                observed_raw_cpu_clock=getattr(self, "_observed_raw", None),
+                edge_sequence=edge_sequence,
+                edge_at_half_cycle=edge_at_half_cycle,
+                measured_lateness_half_cycles=measured_lateness_half_cycles,
+                allowed_lateness_half_cycles=allowed,
+                excess_half_cycles=(
+                    max(0, measured_lateness_half_cycles - allowed)
+                    if measured_lateness_half_cycles is not None and allowed is not None
+                    else None
+                ),
+                emission_complete_half_cycle=getattr(self, "_watermark", None),
+            )
+        self._closed = True
+        self._condition.notify_all()
+        raise EmulatedTimeError(message)
+
+    def _open(self) -> None:
+        if self._closed:
+            raise CoordinatorClosed(self._terminal_reason or "coordinator closed")
+
+    def _integer(self, value: int, name: str, minimum: int = 0) -> None:
+        if type(value) is not int or value < minimum:
+            self._fail(f"{name} must be an integer >= {minimum}")
+
+    def _name(self, value: str, name: str) -> None:
+        if type(value) is not str or not value or len(value) > 256:
+            self._fail(f"{name} must be a nonempty string of at most 256 characters")
+
+    def _boolean(self, value: bool) -> None:
+        if type(value) is not bool:
+            self._fail("double_speed must be bool")
+
+    def _check_epoch(self, epoch: str) -> None:
+        self._name(epoch, "epoch")
+        if epoch != self._epoch:
+            self._fail("epoch mismatch; construct a new coordinator")
+
+    def _debt(self) -> int:
+        return max(0, self._local - self._peer - self._quantum)
+
+    def _active_episode(self) -> bool:
+        return self._episode_open and self._episode_end > self._local and self._instructions > 0
+
+    def snapshot(self) -> TimeSnapshot:
+        """Read immutable accounting, including after terminal failure."""
+        with self._condition:
+            return TimeSnapshot(
+                self._local,
+                self._peer,
+                self._debt(),
+                max(0, self._episode_end - self._local),
+                self._instructions,
+                self._pending is not None,
+                self._closed,
+                self._cancelled,
+                self._epoch,
+                self._episode[0] if self._episode else None,
+                self._episode_open,
+                self._raw,
+                self._terminal_reason,
+                self._pending_delivery is not None,
+                self._observed_raw,
+                self._rate == 1,
+                self._failure,
+            )
+
+    def begin_episode(self, request_id: str, *, cycle_budget: int, instruction_cap: int) -> None:
+        """Fix an episode's start allowance; retries cannot replenish it.
+
+        The local ceiling is min(P+Q+R, start+cycle_budget). A new request
+        requires exhausted or explicitly finished allowance AND zero debt.
+        Finishing never changes debt; only committed peer progress repays it.
+        An identical retired request remains a no-op and never reopens.
+        """
+        with self._condition:
+            self._open()
+            self._name(request_id, "request_id")
+            self._integer(cycle_budget, "cycle_budget", 1)
+            self._integer(instruction_cap, "instruction_cap", 1)
+            if cycle_budget * 2 > self._rearm:
+                self._fail("episode exceeds explicit rearm_budget")
+            episode = (request_id, cycle_budget, instruction_cap)
+            if self._episode is not None:
+                if episode == self._episode:
+                    return
+                if request_id <= self._episode[0]:
+                    self._fail("request IDs must increase; conflicting replay")
+            if self._delivery_episode is not None:
+                self._fail("cannot replace held delivery episode before acknowledgement")
+            if self._pending or self._debt() or self._active_episode():
+                self._fail("cannot replace pending, indebted, or active episode")
+            self._episode = episode
+            self._episode_open = True
+            self._episode_end = self._local + cycle_budget * 2
+            self._instructions = instruction_cap
+            self._condition.notify_all()
+
+    def begin_delivery_rearm(
+        self, batch_token: int, request_id: str, *, cycle_budget: int, instruction_cap: int
+    ) -> None:
+        """Associate one bounded episode with an unacknowledged delivery.
+
+        The batch's original earliest edge fixes the emulated lateness deadline.
+        Identical retries never refill or reopen allowance, even after finish.
+        The owner separately bounds wall-clock waiting with wait_for_permit.
+        """
+        with self._condition:
+            self._open()
+            self._integer(batch_token, "batch_token", 1)
+            self._name(request_id, "request_id")
+            self._integer(cycle_budget, "cycle_budget", 1)
+            self._integer(instruction_cap, "instruction_cap", 1)
+            if cycle_budget * 2 > self._rearm:
+                self._fail("episode exceeds explicit rearm_budget")
+            if batch_token != self._pending_delivery:
+                self._fail("rearm requires a pending delivered batch")
+            if self._pending is not None:
+                self._fail("delivery rearm requires no outstanding permit")
+            episode = (request_id, cycle_budget, instruction_cap)
+            if self._delivery_episode is not None:
+                if episode == self._delivery_episode:
+                    return
+                self._fail("delivery batch already has a rearm allowance")
+            # A replay of an ordinary episode cannot acquire a new association.
+            if self._episode is not None and request_id <= self._episode[0]:
+                self._fail("request IDs must increase; conflicting replay")
+            self.begin_episode(
+                request_id, cycle_budget=cycle_budget, instruction_cap=instruction_cap
+            )
+            self._delivery_episode = self._episode
+            self._condition.notify_all()
+
+    def finish_episode(self, request_id: str) -> None:
+        """Retire allowance and resume ordinary credit without changing debt.
+
+        No permit may be outstanding. Matching retries are idempotent; the
+        retained request ID and parameters prevent replay from restoring credit.
+        A finished snapshot retains request_id but reports active_episode=False.
+        """
+        with self._condition:
+            self._open()
+            self._name(request_id, "request_id")
+            if self._episode is None or request_id != self._episode[0]:
+                self._fail("finish requires the current request ID")
+            if self._pending is not None:
+                self._fail("finish requires no outstanding permit")
+            self._episode_open = False
+            self._episode_end = self._local
+            self._instructions = 0
+            self._condition.notify_all()
+
+    def _reserve(self, max_cpu_cycles: int) -> Permit | None:
+        if (
+            self._pending is not None
+            or (
+                self._pending_delivery is not None
+                and not (
+                    self._delivery_episode is not None
+                    and self._episode == self._delivery_episode
+                    and self._active_episode()
+                )
+            )
+            or not self._progress_sequence
+        ):
+            return None
+        ceiling = self._peer + self._quantum
+        active = self._episode_open
+        if active:
+            if not self._instructions:
+                return None
+            ceiling = min(ceiling + self._rearm, self._episode_end)
+        if self._held_deadline is not None:
+            if self._local > self._held_deadline:
+                edge = self._held_delivery[0]
+                self._fail(
+                    "held delivery lateness exceeds bound",
+                    phase="reserve.held_lateness",
+                    edge_sequence=edge.sequence,
+                    edge_at_half_cycle=edge.at_half_cycle,
+                    measured_lateness_half_cycles=self._local - edge.at_half_cycle,
+                )
+            ceiling = min(ceiling, self._held_deadline)
+        if self._edges:
+            scheduled = self._edges[0][0]
+            distance = scheduled - self._local
+            if distance <= 0:
+                return None
+            # Allow a bounded instruction reservation through the lateness
+            # deadline, without extending ordinary or episode credit.
+            boundary = self._local + ((distance + self._rate - 1) // self._rate) * self._rate
+            if boundary - scheduled > self._max_lateness:
+                self._fail(
+                    "future edge boundary cannot fit speed and lateness bound",
+                    phase="reserve.boundary_lateness",
+                    edge_sequence=self._edges[0][2].sequence,
+                    edge_at_half_cycle=scheduled,
+                    measured_lateness_half_cycles=boundary - scheduled,
+                )
+            ceiling = min(ceiling, scheduled + self._max_lateness)
+        if self._enforce_completeness:
+            # Bound the entire in-flight permit, including all rearm credit.
+            # Peer progress alone does not attest to receipt of earlier edges.
+            ceiling = min(ceiling, self._watermark + self._max_lateness)
+        cycles = min(max_cpu_cycles, max(0, ceiling - self._local) // self._rate)
+        if not cycles:
+            return None
+        self._token += 1
+        self._pending = Permit(
+            self._token, cycles, cycles * self._rate, self._instructions if active else cycles
+        )
+        return self._pending
+
+    def reserve(self, max_cpu_cycles: int) -> Permit | None:
+        with self._condition:
+            self._open()
+            self._integer(max_cpu_cycles, "max_cpu_cycles", 1)
+            return self._reserve(max_cpu_cycles)
+
+    def commit(
+        self,
+        permit: Permit,
+        *,
+        raw_cpu_clock: int,
+        instructions: int,
+        speed_transition: SpeedTransition | None = None,
+    ) -> TimeSnapshot:
+        """Commit actual positive progress, possibly smaller than the permit.
+
+        Actual instructions may be zero (for example HALT or DMA progress),
+        but CPU clock delta must be positive and consumes the cycle allowance.
+        Permit identity is instance-bound, not merely equal dataclass fields.
+        With a valid outstanding permit, actual positive elapsed time is recorded
+        BEFORE checking overruns, instruction validity, and edge lateness. Thus a
+        terminal snapshot may exceed scheduling invariants: it reports observed
+        execution, not permission. This also applies if transport failure or close
+        occurred during execution. A rollback cannot yield normalized elapsed.
+        A transition splits the interval into old-rate and new-rate integer
+        halves; either endpoint is allowed. Malformed transition metadata keeps
+        only the observed endpoint because normalized elapsed is unknown.
+        """
+        with self._condition:
+            if permit is not self._pending or self._pending is None:
+                self._open()
+                self._fail("invalid or already committed permit")
+            self._integer(raw_cpu_clock, "raw_cpu_clock")
+            self._observed_raw = raw_cpu_clock
+            rate = self._rate
+            if speed_transition is not None:
+                if (
+                    type(speed_transition) is not SpeedTransition
+                    or type(speed_transition.raw_cpu_clock) is not int
+                    or type(speed_transition.double_speed) is not bool
+                    or not self._raw <= speed_transition.raw_cpu_clock <= raw_cpu_clock
+                ):
+                    self._pending = None
+                    self._fail("invalid speed transition; unknown normalized interval")
+                rate = 1 if speed_transition.double_speed else 2
+            delta = raw_cpu_clock - self._raw
+            if delta <= 0:
+                self._rate = rate
+                self._pending = None
+                self._fail("CPU clock rollback or zero progress; elapsed cannot advance")
+            if self._episode_open and type(instructions) is int and instructions >= 0:
+                self._instructions = max(0, self._instructions - instructions)
+            elapsed = delta * self._rate
+            if speed_transition is not None:
+                elapsed = (speed_transition.raw_cpu_clock - self._raw) * self._rate + (
+                    raw_cpu_clock - speed_transition.raw_cpu_clock
+                ) * rate
+            self._local += elapsed
+            self._raw = raw_cpu_clock
+            self._rate = rate
+            self._pending = None
+            self._condition.notify_all()
+            self._open()
+            self._integer(instructions, "instructions")
+            if delta > permit.cpu_cycles:
+                self._fail("physical permit overrun; actual elapsed recorded")
+            if elapsed > permit.half_cycles:
+                self._fail("half-cycle permit overrun; actual elapsed recorded")
+            if instructions > permit.instruction_cap:
+                self._fail("instruction cap exceeded; actual elapsed recorded")
+            if self._held_deadline is not None and self._local > self._held_deadline:
+                edge = self._held_delivery[0]
+                self._fail(
+                    "held delivery lateness exceeds bound; actual elapsed recorded",
+                    phase="commit.held_lateness",
+                    edge_sequence=edge.sequence,
+                    edge_at_half_cycle=edge.at_half_cycle,
+                    measured_lateness_half_cycles=self._local - edge.at_half_cycle,
+                )
+            if self._edges and self._local - self._edges[0][0] > self._max_lateness:
+                self._fail(
+                    "edge lateness exceeds bound; actual elapsed recorded",
+                    phase="commit.edge_lateness",
+                    edge_sequence=self._edges[0][2].sequence,
+                    edge_at_half_cycle=self._edges[0][0],
+                    measured_lateness_half_cycles=self._local - self._edges[0][0],
+                )
+            return self.snapshot()
+
+    def discard_unconsumed_permit(
+        self,
+        permit: Permit,
+        *,
+        raw_cpu_clock: int,
+        instructions: int = 0,
+        double_speed: bool | None = None,
+    ) -> TimeSnapshot:
+        """Release an identity-bound reservation after verified zero execution.
+
+        No allowance or committed time changes. Invalid reports retain a valid
+        observed endpoint but cannot establish a normalized interval. After
+        closure, release still occurs before the existing terminal is raised.
+        """
+        with self._condition:
+            if permit is not self._pending or self._pending is None:
+                self._open()
+                self._fail("invalid or already consumed permit")
+            if type(raw_cpu_clock) is int and raw_cpu_clock >= 0:
+                self._observed_raw = raw_cpu_clock
+            self._pending = None
+            self._condition.notify_all()
+            if (
+                type(raw_cpu_clock) is not int
+                or raw_cpu_clock != self._raw
+                or type(instructions) is not int
+                or instructions != 0
+                or (
+                    double_speed is not None
+                    and (type(double_speed) is not bool or double_speed != (self._rate == 1))
+                )
+            ):
+                self._fail("invalid unconsumed permit report; unknown normalized interval")
+            self._open()
+            return self.snapshot()
+
+    def set_speed(self, *, raw_cpu_clock: int, double_speed: bool) -> None:
+        """Switch only after committing all old-rate execution at this clock."""
+        with self._condition:
+            self._open()
+            self._integer(raw_cpu_clock, "raw_cpu_clock")
+            self._boolean(double_speed)
+            if self._pending is not None or raw_cpu_clock != self._raw:
+                self._fail("speed change requires committed old-rate clock and no permit")
+            self._rate = 1 if double_speed else 2
+            self._condition.notify_all()
+
+    def record_peer_progress(
+        self, *, epoch: str, sequence: int, committed_half_cycles: int
+    ) -> bool:
+        """Accept a contiguous committed-progress sequence, anchored at zero."""
+        with self._condition:
+            self._open()
+            self._check_epoch(epoch)
+            self._integer(sequence, "sequence", 1)
+            self._integer(committed_half_cycles, "committed_half_cycles")
+            if sequence == self._progress_sequence:
+                if committed_half_cycles == self._peer:
+                    return False
+                self._fail("conflicting progress replay")
+            if sequence != self._progress_sequence + 1:
+                self._fail("noncontiguous progress sequence")
+            if not self._progress_sequence and committed_half_cycles != 0:
+                self._fail("first peer progress must anchor epoch at zero")
+            if committed_half_cycles < self._peer:
+                self._fail("peer progress rollback")
+            self._progress_sequence = sequence
+            self._peer = committed_half_cycles
+            self._condition.notify_all()
+            return True
+
+    def receive_edge(
+        self, *, epoch: str, sequence: int, at_half_cycle: int, payload: bytes
+    ) -> bool:
+        with self._condition:
+            self._open()
+            self._check_epoch(epoch)
+            self._integer(sequence, "sequence", 1)
+            self._integer(at_half_cycle, "at_half_cycle")
+            if type(payload) is not bytes or len(payload) > MAX_EDGE_PAYLOAD_BYTES:
+                self._fail("payload must be bytes within MAX_EDGE_PAYLOAD_BYTES")
+            edge = TimedEdge(epoch, sequence, at_half_cycle, payload)
+            if sequence == self._edge_sequence:
+                if edge == self._last_edge:
+                    return False
+                self._fail("conflicting edge replay")
+            if sequence != self._edge_sequence + 1:
+                self._fail("noncontiguous edge receipt sequence")
+            if at_half_cycle <= self._watermark:
+                self._fail("edge contradicts inclusive completeness watermark")
+            if self._local - at_half_cycle > self._max_lateness:
+                self._fail(
+                    "edge lateness exceeds bound",
+                    phase="receive_edge.lateness",
+                    edge_sequence=sequence,
+                    edge_at_half_cycle=at_half_cycle,
+                    measured_lateness_half_cycles=self._local - at_half_cycle,
+                )
+            if len(self._edges) >= MAX_PENDING_EDGES:
+                self._fail("edge backlog exhausted")
+            self._edge_sequence = sequence
+            self._last_edge = edge
+            heapq.heappush(self._edges, (at_half_cycle, sequence, edge))
+            self._condition.notify_all()
+            return True
+
+    def advance_watermark(self, *, epoch: str, sequence: int, through_half_cycle: int) -> None:
+        """Trust an inclusive completeness attestation for the received prefix.
+
+        Sequence zero is the explicit empty prefix. A missing receipt, time
+        regression, or sequence regression fails closed; a bare time cannot
+        establish completeness. The caller must authenticate the attestation.
+        """
+        with self._condition:
+            self._open()
+            self._check_epoch(epoch)
+            self._integer(sequence, "sequence")
+            self._integer(through_half_cycle, "through_half_cycle")
+            if sequence != self._edge_sequence or sequence < self._watermark_sequence:
+                self._fail("watermark requires complete contiguous receipt prefix")
+            if through_half_cycle < self._watermark:
+                self._fail("watermark rollback")
+            self._watermark = through_half_cycle
+            self._watermark_sequence = sequence
+            self._condition.notify_all()
+
+    def pop_ready_edges(self) -> tuple[EdgeDelivery, ...]:
+        """Release ordered metadata at current committed time, never while executing.
+
+        A nonempty batch blocks execution except its associated delivery rearm.
+        Neither release nor acknowledgement proves native edge application.
+        """
+        with self._condition:
+            self._open()
+            if self._pending is not None or self._pending_delivery is not None:
+                return ()
+            ready = []
+            through = min(self._local, self._watermark)
+            batch_token = next(_DELIVERY_TOKENS)
+            while self._edges and self._edges[0][0] <= through:
+                edge = heapq.heappop(self._edges)[2]
+                lateness = self._local - edge.at_half_cycle
+                if lateness > self._max_lateness:
+                    self._fail(
+                        "delivery lateness exceeds bound",
+                        phase="delivery.lateness",
+                        edge_sequence=edge.sequence,
+                        edge_at_half_cycle=edge.at_half_cycle,
+                        measured_lateness_half_cycles=lateness,
+                    )
+                ready.append(
+                    EdgeDelivery(
+                        edge.epoch,
+                        edge.sequence,
+                        edge.at_half_cycle,
+                        edge.payload,
+                        self._local,
+                        lateness,
+                        batch_token,
+                    )
+                )
+            if ready:
+                self._pending_delivery = batch_token
+                self._held_delivery = tuple(ready)
+                self._held_deadline = ready[0].at_half_cycle + self._max_lateness
+                self._condition.notify_all()
+            return tuple(ready)
+
+    def acknowledge_delivery(self, batch_token: int) -> None:
+        """Caller asserts application; tokens are unique across in-process instances.
+
+        Tokens reject wrong-instance and retired batches, not authenticate callers.
+        """
+        with self._condition:
+            self._open()
+            self._integer(batch_token, "batch_token", 1)
+            if batch_token != self._pending_delivery:
+                self._fail("invalid or already acknowledged delivery batch")
+            if self._pending is not None:
+                self._fail("acknowledgement requires no outstanding permit")
+            if self._delivery_episode is not None:
+                self._episode_open = False
+                self._episode_end = self._local
+                self._instructions = 0
+            self._pending_delivery = None
+            self._held_delivery = ()
+            self._held_deadline = None
+            self._delivery_episode = None
+            self._condition.notify_all()
+
+    def wait_for_permit(self, max_cpu_cycles: int, *, deadline: float) -> Permit | None:
+        """Wait on the condition until a grant or an absolute monotonic deadline.
+
+        Expiry returns None without mutation. Cancel/close wake and raise
+        CoordinatorClosed. No wall-clock sleeping or polling supplies credit.
+        """
+        with self._condition:
+            self._open()
+            self._integer(max_cpu_cycles, "max_cpu_cycles", 1)
+            if type(deadline) not in (int, float):
+                self._fail("deadline must be finite monotonic seconds")
+            try:
+                finite = math.isfinite(deadline)
+            except OverflowError:
+                finite = False
+            if not finite or deadline < 0:
+                self._fail("deadline must be finite nonnegative monotonic seconds")
+            while True:
+                self._open()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                permit = self._reserve(max_cpu_cycles)
+                if permit is not None:
+                    return permit
+                self._condition.wait(min(remaining, TIMEOUT_MAX))
+
+    def cancel(self) -> None:
+        with self._condition:
+            self._cancelled = True
+            self._closed = True
+            if self._terminal_reason is None:
+                self._terminal_reason = "coordinator cancelled"
+            self._condition.notify_all()
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            if self._terminal_reason is None:
+                self._terminal_reason = "coordinator closed"
+            self._condition.notify_all()
+
+    def reset(self, *, epoch: str, raw_cpu_clock: int) -> None:
+        """Fail terminally: create a new instance after any clock/epoch reset."""
+        with self._condition:
+            self._open()
+            self._fail("reset forbidden; construct a new coordinator for a new epoch")
