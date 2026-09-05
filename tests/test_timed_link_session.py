@@ -97,6 +97,36 @@ class ScriptedChannel:
         self._peer.close()
 
 
+class NoFurtherEdgesChannel(ScriptedChannel):
+    """Synthetic control peer: all requests are queued before each idle poll.
+
+    Attest only the owner's last published interval, with the received prefix.
+    This explicit no-further-edges script is not a second CPU or runtime proof.
+    It never invents peer CPU progress or changes execution policy.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.received_edge = 0
+        self.complete_through = -1
+
+    def poll(self):
+        message = super().poll()
+        if isinstance(message, EdgeRequest):
+            self.received_edge = message.edge_id
+        elif isinstance(message, EmissionComplete):
+            self.complete_through = message.through_half_cycle
+        elif message is None:
+            progress = next(
+                (m.settled_half_cycles for m in reversed(self.sent) if isinstance(m, Progress)),
+                0,
+            )
+            if progress > max(0, self.complete_through):
+                self.complete_through = progress
+                return EmissionComplete(progress, self.received_edge)
+        return message
+
+
 @pytest.fixture
 def session_type():
     return importlib.import_module("pokered_harness.link.timed_link_session").TimedLinkSession
@@ -171,7 +201,7 @@ def test_public_tick_executes_real_instructions_and_preserves_result(session_typ
     start = game.mb.cpu.cycles
     retired = game.mb.cpu.retired_instructions
     frame = game.frame_count
-    with attached(session_type, game) as (session, channel):
+    with attached(session_type, game, NoFurtherEdgesChannel()) as (session, channel):
         result = session.tick(1, render=False, sound=False)
         assert calls and type(result) is type(calls[-1]) and result == calls[-1]
         assert game.frame_count == frame + 1
@@ -223,7 +253,7 @@ def test_control_close_restores_owned_backend_and_callbacks(session_type, game):
 def test_control_eighth_response_precedes_irq_and_latches_real_byte(session_type, game):
     # Transfer armed by real LDH instruction after the idle-only attachment.
     game.memory[0xC000:0xC008] = [0x3E, 0x80, 0xE0, 0x02, 0x00, 0x18, 0xFE, 0x00]
-    channel = ScriptedChannel()
+    channel = NoFurtherEdgesChannel()
     owner = threading.get_ident()
     observations = []
     queued = False
@@ -269,7 +299,7 @@ def test_control_failure_after_successful_public_execution_cleans_up(session_typ
         raise error
 
     game.tick = fail_after
-    with attached(session_type, game) as (session, channel):
+    with attached(session_type, game, NoFurtherEdgesChannel()) as (session, channel):
         with pytest.raises(RuntimeError) as caught:
             session.tick(1, render=False, sound=False)
         assert caught.value is error
@@ -316,8 +346,14 @@ def test_real_channel_handshake_attach_and_cleanup(session_type, game):
         worker.join(1)
 
 
-@pytest.mark.parametrize("exchange", [False, True], ids=["idle", "delayed-byte"])
-def test_real_pair_repeated_public_frames_bounded_wire_volume(session_type, tmp_path, exchange):
+@pytest.mark.parametrize(
+    "exchange,lateness",
+    [(False, 4096), (True, 4096), (False, 32)],
+    ids=["idle", "delayed-byte", "asymmetric-L64-half"],
+)
+def test_real_pair_repeated_public_frames_bounded_wire_volume(
+    session_type, tmp_path, exchange, lateness
+):
     """Real wire, public PyBoy ticks and CPU counts; no fabricated peer credit."""
     left, right = socket.socketpair()
     channels = [
@@ -331,12 +367,22 @@ def test_real_pair_repeated_public_frames_bounded_wire_volume(session_type, tmp_
     edge_requests = [[], []]
     edge_responses = [[], []]
     request_permits = []
+    progress = [[], []]
+    messages = [[], []]
+    publications = [[], []]
+    native_progress = []
     start = threading.Barrier(2)
     for i, channel in enumerate(channels):
         original = channel.send
 
         def observe(message, *, deadline, cancel_event=None, index=i, send=original):
             counts[index] += 1
+            messages[index].append(message)
+            if isinstance(message, Progress):
+                progress[index].append(message.settled_half_cycles)
+                if sessions[index]._in_edge:
+                    assert message.settled_half_cycles == sessions[index]._settled
+                    native_progress.append(message)
             if isinstance(message, EdgeRequest):
                 edge_requests[index].append(message)
                 request_permits.append(sessions[index].snapshot().pending_permit)
@@ -351,17 +397,29 @@ def test_real_pair_repeated_public_frames_bounded_wire_volume(session_type, tmp_
                 channel,
                 rearm_budget=4096,
                 rearm_instruction_cap=1024,
-                max_edge_lateness=4096,
+                max_edge_lateness=lateness,
                 quantum_cycles=256,
                 operation_timeout=5,
                 max_wait_attempts=16,
                 inbound_capacity=64,
             )
         )
+        publish = sessions[i]._publish
+
+        def observe_publish(*, force=False, index=i, original=publish):
+            begin = len(messages[index])
+            result = original(force=force)
+            publications[index].append(messages[index][begin:])
+            return result
+
+        sessions[i]._publish = observe_publish
 
     def owner(index):
         try:
             with authored_game(tmp_path, f"pair-{index}") as emulator:
+                if lateness == 32 and index == 1:
+                    # Real asymmetric 4-cycle NOP / 12-cycle JR retirement.
+                    emulator.memory[0xC000:0xC003] = [0x00, 0x18, 0xFD]
                 if exchange:
                     # Slave arms after the first master's 512-cycle edge.
                     # NOPs are real retired instructions, not injected clocks.
@@ -386,6 +444,9 @@ def test_real_pair_repeated_public_frames_bounded_wire_volume(session_type, tmp_
                     emulator.memory[0xC000 : 0xC000 + len(code)] = code
                 session = sessions[index]
                 session.attach(emulator, deadline=time.monotonic() + 10)
+                assert session._coordinator._enforce_completeness is True
+                if lateness == 32:
+                    assert session._lateness == 64 and session._threshold == 128
                 start.wait(10)
                 raw = emulator.mb.cpu.cycles
                 retired = emulator.mb.cpu.retired_instructions
@@ -426,13 +487,51 @@ def test_real_pair_repeated_public_frames_bounded_wire_volume(session_type, tmp_
             if exchange:
                 assert sb == (0x3C, 0xA5)[index]
                 assert irq == 8 and not armed
-            else:
+            elif lateness != 32 or index == 0:
                 assert cycles == retired * 12
+            else:
+                assert retired * 4 < cycles < retired * 12
             assert snapshot.local_half_cycles == cycles * 2
             # At least a fourfold reduction from two messages per instruction;
             # permits coalescing policy choices without accepting per-step spam.
-            assert 0 < counts[index] <= retired // 2 + 32
+            if lateness == 32:
+                deltas = [b - a for a, b in zip(progress[index], progress[index][1:])]
+                assert any(0 < delta < 128 for delta in deltas)
+                assert snapshot.local_half_cycles <= sessions[index]._coordinator_watermark + 64
+            else:
+                assert 0 < counts[index] <= retired // 2 + 32
+            # When a safe publication sends both independently coalesced
+            # frontiers, its emission prefix must be sent first.
+            both = []
+            for batch in publications[index]:
+                if any(isinstance(m, EmissionComplete) for m in batch) and any(
+                    isinstance(m, Progress) for m in batch
+                ):
+                    assert len(batch) == 2
+                    assert isinstance(batch[0], EmissionComplete)
+                    assert isinstance(batch[1], Progress)
+                    assert batch[0].through_half_cycle == batch[1].settled_half_cycles
+                    both.append(batch)
+            assert both
+            watermark = -1
+            last_edge = 0
+            # Attachment sends only the truthful zero CPU anchor; it must not
+            # certify edge zero absent before the first safe owner pump.
+            assert messages[index][0] == Progress(0)
+            for position, message in enumerate(messages[index][1:], start=1):
+                if isinstance(message, EdgeRequest):
+                    assert message.scheduled_half_cycle > watermark
+                    last_edge = message.edge_id
+                    assert messages[index][position + 1] == EmissionComplete(
+                        message.scheduled_half_cycle, message.edge_id
+                    )
+                elif isinstance(message, EmissionComplete):
+                    assert message.last_edge_id == last_edge
+                    watermark = message.through_half_cycle
+                elif isinstance(message, Progress):
+                    assert message.settled_half_cycles <= watermark
         if exchange:
+            assert native_progress
             assert [m.edge_id for m in edge_requests[0]] == list(range(1, 9))
             assert not edge_requests[1]
             assert [m.edge_id for m in edge_responses[1]] == list(range(1, 9))
@@ -879,7 +978,7 @@ def test_v3_sync_passive_consuming_and_never_bootstraps(session_type, game):
 def test_v3_fence_ack_waits_for_contiguous_applied_prefix(session_type, game):
     # IDs are receive order, not timestamp order: completing edge 2 alone
     # must not acknowledge a fence through 2 while edge 1 is still future.
-    channel = ScriptedChannel(
+    channel = NoFurtherEdgesChannel(
         [
             EdgeRequest(1, 100, 100, 1),
             EdgeRequest(2, 0, 0, 0),
@@ -932,7 +1031,7 @@ def test_v3_on_edge_stages_controls_until_safe_owner_boundary(session_type, game
     # Initial serial arm is explicit local test setup; remote Sync never arms.
     code = [0x00] * 127 + [0xF0, 0x01, 0x18, 0xFE]
     game.memory[0xC000 : 0xC000 + len(code)] = code
-    channel = ScriptedChannel(revision=3)
+    channel = NoFurtherEdgesChannel(revision=3)
     with control_session(session_type, game, channel) as (session, _):
         core = game.mb.serial
         core.set_SB(0xA5)
@@ -1322,4 +1421,243 @@ def test_real_v3_poll_returning_after_deadline_never_applies_edge(session_type, 
         assert game.mb.cpu.cycles == game.mb.cpu.retired_instructions == 0
         assert session.snapshot().closed and channel.closed
         assert core.backend is original_backend
+        assert game.mb.execution_before is game.mb.execution_after is None
+
+
+@pytest.mark.parametrize("revision", [2, 3])
+def test_timed_attach_always_enforces_completeness(session_type, game, revision):
+    with attached(session_type, game, ScriptedChannel(revision=revision)) as (session, _):
+        assert session._coordinator._enforce_completeness is True
+        assert session._coordinator_watermark == -1
+        assert game.mb.cpu.cycles == game.mb.cpu.retired_instructions == 0
+
+
+def test_source_completeness_progress_due_forces_prefix_below_threshold(
+    session_type, source_lifecycle_game
+):
+    """Synthetic publication bookkeeping at a genuinely retired CPU frontier.
+
+    Only cached send positions are arranged; CPU/serial clocks and coordinator
+    time stay untouched. The known no-edge script makes both prefixes valid.
+    Actual paired edge/coalescing coverage remains in the real-wire test.
+    """
+    game, _ = source_lifecycle_game
+    board = game.mb
+    board.lcd.tick = lambda clock: setattr(board.lcd, "frame_done", clock >= 312) or 0
+    channel = NoFurtherEdgesChannel(revision=3)
+    # Synthetic peer explicitly reports this settled interval; not a runtime
+    # liveness assertion or a future completeness watermark.
+    channel.messages.append(Progress(476))
+    with attached(session_type, game, channel, quantum_cycles=256) as (session, _):
+        session.tick(1, render=False, sound=False)
+        assert board.cpu.cycles == 312 and board.cpu.retired_instructions == 26
+        assert board.serial.last_cycles == 312
+        before = session.snapshot()
+        assert before.local_half_cycles == 624
+        session._sent_progress = 480
+        session._sent_watermark = 512
+        assert 624 - 480 >= session._threshold == 128
+        assert 0 < 624 - 512 < session._threshold
+        sent_before = len(channel.sent)
+        session._publish()
+        assert channel.sent[sent_before:] == [EmissionComplete(624, 0), Progress(624)]
+        assert session.snapshot() == before
+        assert board.cpu.cycles == 312 and board.cpu.retired_instructions == 26
+
+
+def test_control_completeness_bootstrap_edge_zero_waits_for_prefix(session_type, game):
+    """Synthetic edge-zero control script; actual Serial, no CPU clock writes."""
+    channel = ScriptedChannel([EdgeRequest(1, 0, 0, 1)], revision=3)
+    with attached(session_type, game, channel, max_edge_lateness=32) as (session, _):
+        core = game.mb.serial
+        core.set_SB(0)
+        core.set_SC(0x80)
+        before = (core.SB, core.SC, core._bits_remaining)
+        session.service_controls(deadline=time.monotonic() + 1)
+        assert session._coordinator_watermark == -1
+        assert (core.SB, core.SC, core._bits_remaining) == before
+        assert not any(isinstance(m, EdgeResponse) for m in channel.sent)
+        channel.messages.append(EmissionComplete(0, 1))
+        session.service_controls(deadline=time.monotonic() + 1)
+        assert [m for m in channel.sent if isinstance(m, EdgeResponse)] == [EdgeResponse(1, 0, 0)]
+        assert core._bits_remaining == 7
+        assert session.controls_snapshot()["completed_edge_prefix"] == 1
+        assert not game.memory[0xFF0F] & 8
+        assert game.mb.cpu.cycles == game.mb.cpu.retired_instructions == 0
+
+
+def test_control_completeness_watermark_only_pump_wakes_without_receive(session_type, game):
+    """Synthetic passive prefix advance must be noticed by the initial pump."""
+    channel = ScriptedChannel([Progress(476)], revision=3)
+    with attached(session_type, game, channel, max_edge_lateness=32) as (session, _):
+        session.service_controls(deadline=time.monotonic() + 1)
+        before = session.snapshot()
+        assert before.peer_half_cycles == 476
+        assert session._coordinator_watermark == -1  # Progress is not completeness.
+        channel.messages.append(EmissionComplete(476, 0))
+
+        def unexpected_receive(**kwargs):
+            pytest.fail("watermark-only initial pump must return without blocking receive")
+
+        channel.receive = unexpected_receive
+        session._wait_for_progress(0.2)
+        after = session.snapshot()
+        assert after.peer_half_cycles == before.peer_half_cycles
+        assert session._coordinator_watermark == 476
+        assert after.local_half_cycles == before.local_half_cycles == 0
+        assert game.mb.cpu.cycles == game.mb.cpu.retired_instructions == 0
+
+
+def test_source_completeness_withheld_edge_then_prefix_keeps_cpu_bound(
+    session_type, source_lifecycle_game
+):
+    """Synthetic P/W476 and edge512 script; real JR and Serial execution.
+
+    This controls receipt ordering, not peer runtime progress. P476 alone
+    cannot certify W476, and receiving an edge alone cannot raise W+L540.
+    """
+    game, _ = source_lifecycle_game
+    board, core = game.mb, game.mb.serial
+    board.lcd.tick = lambda clock: setattr(board.lcd, "frame_done", clock >= 264) or 0
+    channel = ScriptedChannel([Progress(476), EmissionComplete(476, 0)], revision=3)
+    with attached(session_type, game, channel, quantum_cycles=256, max_edge_lateness=32) as (
+        session,
+        _,
+    ):
+        core.set_SB(0)
+        core.set_SC(0x80)
+        arrivals = deque([EdgeRequest(1, 512, 512, 1), EmissionComplete(512, 1)])
+        waits = []
+
+        def receive(*, deadline, cancel_event=None):
+            channel._check(cancel_event)
+            assert time.monotonic() < deadline
+            assert board.cpu.cycles == 252
+            assert board.cpu.retired_instructions == 21
+            assert session.snapshot().local_half_cycles == 504
+            assert session._coordinator_watermark == 476
+            assert not session.snapshot().pending_permit
+            assert core._bits_remaining == 8
+            assert not any(isinstance(m, EdgeResponse) for m in channel.sent)
+            assert arrivals, "CPU failed to resume after the complete prefix"
+            message = arrivals.popleft()
+            waits.append(message)
+            return message
+
+        channel.receive = receive
+        session.tick(1, render=False, sound=False)
+        assert waits == [EdgeRequest(1, 512, 512, 1), EmissionComplete(512, 1)]
+        assert board.cpu.cycles == 264 and board.cpu.retired_instructions == 22
+        assert session.snapshot().local_half_cycles == 528 <= 512 + 64
+        assert session._coordinator_watermark == 512
+        assert [m for m in channel.sent if isinstance(m, EdgeResponse)] == [EdgeResponse(1, 528, 0)]
+        assert core._bits_remaining == 7
+        assert not board.cpu.interrupts_flag_register & 8
+        assert session.controls_snapshot()["completed_edge_prefix"] == 1
+
+
+def test_source_completeness_stop_preserves_actual_speed_interval(
+    session_type, source_lifecycle_game
+):
+    """Authored STOP, real CPU/Serial, synthetic frame boundary and EC0 peer."""
+    game, _ = source_lifecycle_game
+    board = game.mb
+    board.cgb = True
+    board.key1 = 1
+    game._test_memory[0xC000:0xC004] = bytes([0x10, 0, 0x18, 0xFE])
+    channel = ScriptedChannel([EmissionComplete(0, 0)], revision=3)
+    with attached(session_type, game, channel, quantum_cycles=256, max_edge_lateness=32) as (
+        session,
+        _,
+    ):
+        session.tick(1, render=False, sound=False)
+        assert board.cpu.retired_instructions == 1
+        assert board.cpu.cycles == 4
+        assert board.double_speed and board.speed_transition_count == 1
+        boundary = board.speed_transition_clock
+        assert session.snapshot().local_half_cycles == boundary * 2 + (4 - boundary)
+        assert session.snapshot().raw_cpu_clock == 4
+        assert session.snapshot().local_half_cycles <= 64
+        assert not session.snapshot().pending_permit
+        assert not any(isinstance(m, EdgeRequest) for m in channel.sent)
+
+
+def test_source_completeness_hdma_412_explicit_nonprogress(session_type, source_lifecycle_game):
+    """Real source HDMA selection, CPU and Serial; synthetic inert LCD HBlank.
+
+    L64 cannot fit the atomic 206 CPU cycles / 412 half-cycles. A partial
+    reservation must never execute DMA, retire CPU work, or advance clocks.
+    """
+    game, _ = source_lifecycle_game
+    board = game.mb
+    board.cgb_mode = True
+    board_module = _source_module("core/mb.py", "pyboy.core._timed_hdma_mb")
+    board.hdma = board_module.HDMA()
+    board.hdma.hdma1 = 0xC0
+    board.hdma.set_hdma5(0x80, board)
+    assert board.hdma.transfer_active and board.lcd._STAT._mode == 0
+    channel = ScriptedChannel([Progress(476), EmissionComplete(0, 0)], revision=3)
+    original_backend = board.serial.backend
+    with attached(session_type, game, channel, quantum_cycles=256, max_edge_lateness=32) as (
+        session,
+        _,
+    ):
+        reserve = session._coordinator.reserve
+        permits = []
+
+        def observe_reservation(required):
+            assert required == 206
+            permit = reserve(required)
+            if permit is not None:
+                permits.append((permit.cpu_cycles, permit.half_cycles))
+            return permit
+
+        session._coordinator.reserve = observe_reservation
+        waits = []
+
+        def cancel_unfittable_dma(*, deadline, cancel_event=None):
+            assert time.monotonic() < deadline
+            waits.append((board.cpu.cycles, board.cpu.retired_instructions))
+            assert not session.snapshot().pending_permit
+            session.cancel()
+            channel._check(cancel_event)
+
+        channel.receive = cancel_unfittable_dma
+        with pytest.raises(Cancelled):
+            session.tick(1, render=False, sound=False)
+        assert waits == [(0, 0)]
+        assert permits and all(p == (32, 64) for p in permits)
+        assert board.cpu.cycles == board.cpu.retired_instructions == 0
+        assert session.snapshot().local_half_cycles == session.snapshot().raw_cpu_clock == 0
+        assert board.hdma.transfer_active and board.hdma.curr_src == 0xC000
+        assert board.hdma.curr_dst == 0x8000
+        assert game.frame_count == 0
+        assert not any(isinstance(m, Progress) and m.settled_half_cycles for m in channel.sent)
+        assert channel.closed and session.snapshot().cancelled
+        assert board.serial.backend is original_backend
+        assert board.execution_before is board.execution_after is None
+
+
+def test_control_completeness_cancel_wait_preserves_real_cpu_frontier(session_type, game):
+    channel = ScriptedChannel(revision=3)
+    with attached(session_type, game, channel, quantum_cycles=256, max_edge_lateness=32) as (
+        session,
+        _,
+    ):
+        waits = []
+
+        def cancel_wait(*, deadline, cancel_event=None):
+            assert time.monotonic() < deadline
+            waits.append((game.mb.cpu.cycles, game.mb.cpu.retired_instructions))
+            assert session._coordinator_watermark == -1
+            session.cancel()
+            channel._check(cancel_event)
+
+        channel.receive = cancel_wait
+        with pytest.raises(Cancelled):
+            session.tick(1, render=False, sound=False)
+        assert waits == [(12, 1)]
+        assert game.mb.cpu.cycles == 12 and game.mb.cpu.retired_instructions == 1
+        assert session.snapshot().local_half_cycles == 24
+        assert session.snapshot().cancelled and channel.closed
         assert game.mb.execution_before is game.mb.execution_after is None

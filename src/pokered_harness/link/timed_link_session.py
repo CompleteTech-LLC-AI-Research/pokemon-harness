@@ -305,6 +305,7 @@ class TimedLinkSession:
                 rearm_budget=self._rearm,
                 max_edge_lateness=self._lateness // 2,
                 quantum_cycles=self._quantum,
+                enforce_completeness=True,
             )
             self._adapter = _TimedAdapter(self)
             self.channel.handshake(deadline=deadline, cancel_event=self._cancel_view)
@@ -529,16 +530,18 @@ class TimedLinkSession:
         if self._core.last_cycles != self._board.cpu.cycles:
             raise EmulatedTimeError("peripherals have not reached the CPU endpoint")
         self._settled = local
-        if local > self._sent_progress and (
+        progress_due = local > self._sent_progress and (
             force or local - self._sent_progress >= self._threshold
-        ):
-            self._send(Progress(local))
-            self._sent_progress = local
+        )
+        # Publish the proven emission prefix before granting peer CPU credit.
         if local > self._sent_watermark and (
-            force or local - self._sent_watermark >= self._threshold
+            force or progress_due or local - self._sent_watermark >= self._threshold
         ):
             self._send(EmissionComplete(local, self._out_edge))
             self._sent_watermark, self._sent_prefix = local, self._out_edge
+        if progress_due:
+            self._send(Progress(local))
+            self._sent_progress = local
 
     def _start_hold(self, scheduled, deadline):
         if self._held_deadline is None:
@@ -684,10 +687,12 @@ class TimedLinkSession:
     def _wait_for_progress(self, remaining):
         deadline = min(time.monotonic() + remaining, self._deadline())
         before = self._coordinator.snapshot()
+        before_watermark = self._coordinator_watermark
         self._safe_pump(force=True, deadline=deadline)
         after = self._coordinator.snapshot()
         if (
             after.peer_half_cycles != before.peer_half_cycles
+            or self._coordinator_watermark > before_watermark
             or after.request_id != before.request_id
             or after.pending_delivery != before.pending_delivery
         ):

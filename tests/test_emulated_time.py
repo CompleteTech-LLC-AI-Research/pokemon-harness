@@ -1011,6 +1011,7 @@ def assert_lateness_failure(c, reason, phase, *, sequence, at, measured, allowed
         "measured_lateness_half_cycles": measured,
         "allowed_lateness_half_cycles": allowed,
         "excess_half_cycles": max(0, measured - allowed),
+        "emission_complete_half_cycle": c._watermark,
     }
     assert snapshot.closed and snapshot.terminal_reason == reason
     assert all(type(value) in (str, int, type(None)) for value in asdict(failure).values())
@@ -1310,3 +1311,171 @@ def test_failure_commit_validation_precedes_edge_lateness(cycles, instructions, 
     assert failure.edge_sequence is failure.edge_at_half_cycle is None
     assert failure.measured_lateness_half_cycles is None
     assert failure.allowed_lateness_half_cycles is failure.excess_half_cycles is None
+
+
+@pytest.mark.parametrize("invalid", [None, 0, 1, -1, 0.0, 1.0, "false", [], {}])
+def test_completeness_option_requires_real_boolean(invalid):
+    with pytest.raises(EmulatedTimeError) as error:
+        coordinator(enforce_completeness=invalid)
+    assert type(error.value) is EmulatedTimeError
+    assert str(error.value) == "enforce_completeness must be bool"
+
+
+def test_completeness_disabled_preserves_default_standalone_permits():
+    default = coordinator(max_edge_lateness=32, quantum_cycles=256)
+    disabled = coordinator(max_edge_lateness=32, quantum_cycles=256, enforce_completeness=False)
+    assert default.snapshot() == disabled.snapshot()
+    for c in (default, disabled):
+        permit = c.reserve(206)
+        assert (permit.cpu_cycles, permit.half_cycles) == (206, 412)
+        assert c.snapshot().local_half_cycles == 0
+        c.commit(permit, raw_cpu_clock=1206, instructions=0)
+    assert default.snapshot() == disabled.snapshot()
+
+
+@pytest.mark.parametrize("double_speed,cycles,halves", [(False, 31, 62), (True, 63, 63)])
+def test_completeness_bootstrap_minus_one_bounds_whole_permit_and_accepts_edge_zero(
+    double_speed, cycles, halves
+):
+    c = coordinator(enforce_completeness=True, max_edge_lateness=32, double_speed=double_speed)
+    permit = c.reserve(1000)
+    assert (permit.cpu_cycles, permit.half_cycles) == (cycles, halves)
+    assert permit.half_cycles <= -1 + 64
+    c.commit(permit, raw_cpu_clock=1000 + cycles, instructions=0)
+    assert c.reserve(1) is None
+    assert c.receive_edge(epoch="epoch-1", sequence=1, at_half_cycle=0, payload=b"bootstrap")
+    assert c.pop_ready_edges() == ()
+    c.advance_watermark(epoch="epoch-1", sequence=1, through_half_cycle=0)
+    (edge,) = c.pop_ready_edges()
+    assert edge.at_half_cycle == 0 and edge.lateness_half_cycles == halves <= 64
+    c.acknowledge_delivery(edge.batch_token)
+    assert c.snapshot().failure is None
+
+
+@pytest.mark.parametrize("mode", ["ordinary", "episode", "known_edge", "held_rearm"])
+@pytest.mark.parametrize("double_speed", [False, True])
+def test_completeness_caps_whole_permit_after_other_allowances(mode, double_speed):
+    c = coordinator(enforce_completeness=True, max_edge_lateness=32, double_speed=double_speed)
+    if mode == "held_rearm":
+        token = delivery_batch(c)
+        c.begin_delivery_rearm(token, "request-1", cycle_budget=32, instruction_cap=100)
+    else:
+        c.advance_watermark(epoch="epoch-1", sequence=0, through_half_cycle=0)
+        if mode == "episode":
+            c.begin_episode("request-1", cycle_budget=32, instruction_cap=100)
+        elif mode == "known_edge":
+            c.receive_edge(epoch="epoch-1", sequence=1, at_half_cycle=8, payload=b"known")
+    before = c.snapshot()
+    permit = c.reserve(1000)
+    assert permit.half_cycles == 64
+    assert permit.cpu_cycles == (64 if double_speed else 32)
+    assert before.local_half_cycles + permit.half_cycles <= 0 + 64
+    c.commit(permit, raw_cpu_clock=1000 + permit.cpu_cycles, instructions=0)
+    assert c.reserve(1) is None
+    assert c.snapshot().local_half_cycles == 64 and c.snapshot().failure is None
+
+
+def test_completeness_delayed_edge_512_cannot_be_crossed_past_540_before_receipt():
+    c = coordinator(enforce_completeness=True, max_edge_lateness=32)
+    c.record_peer_progress(epoch="epoch-1", sequence=2, committed_half_cycles=476)
+    c.advance_watermark(epoch="epoch-1", sequence=0, through_half_cycle=476)
+    advance(c, 1000, 238)
+    assert c.snapshot().local_half_cycles == c.snapshot().peer_half_cycles == 476
+    permit = c.reserve(48)
+    assert (permit.cpu_cycles, permit.half_cycles) == (32, 64)
+    assert 476 + permit.half_cycles == 540
+    # Commit only the granted budget; the delayed receipt is still absent.
+    c.commit(permit, raw_cpu_clock=1270, instructions=0)
+    before = c.snapshot()
+    assert c.reserve(48) is None and c.snapshot() == before
+    assert c.receive_edge(epoch="epoch-1", sequence=1, at_half_cycle=512, payload=b"delayed")
+    assert c.pop_ready_edges() == ()
+    c.advance_watermark(epoch="epoch-1", sequence=1, through_half_cycle=512)
+    (edge,) = c.pop_ready_edges()
+    assert (edge.at_half_cycle, edge.delivered_half_cycle, edge.lateness_half_cycles) == (
+        512,
+        540,
+        28,
+    )
+    assert edge.delivered_half_cycle <= 512 + 64
+    c.acknowledge_delivery(edge.batch_token)
+    permit = c.reserve(48)
+    assert permit.half_cycles == 36 and 540 + permit.half_cycles == 576
+    c.commit(permit, raw_cpu_clock=1288, instructions=0)
+    assert c.reserve(1) is None and c.snapshot().failure is None
+
+
+@pytest.mark.parametrize("double_speed", [False, True])
+def test_completeness_hdma_412_half_cycle_batch_cannot_fit_without_execution(double_speed):
+    c = coordinator(
+        enforce_completeness=True,
+        max_edge_lateness=32,
+        quantum_cycles=256,
+        double_speed=double_speed,
+    )
+    c.advance_watermark(epoch="epoch-1", sequence=0, through_half_cycle=0)
+    before = c.snapshot()
+    atomic_cycles = 412 if double_speed else 206
+    for _ in range(2):
+        permit = c.reserve(atomic_cycles)
+        assert permit.half_cycles == 64
+        assert permit.cpu_cycles < atomic_cycles
+        # An indivisible batch cannot use this partial budget. Release it with
+        # zero execution; never commit part of HDMA or retry with an uncapped path.
+        assert c.discard_unconsumed_permit(permit, raw_cpu_clock=1000) == before
+    assert c.snapshot().local_half_cycles == 0 and c.snapshot().failure is None
+
+
+def test_completeness_first_failure_watermark_is_additive_scalar_and_frozen():
+    c = coordinator(enforce_completeness=True, max_edge_lateness=32)
+    c.advance_watermark(epoch="epoch-1", sequence=0, through_half_cycle=476)
+    permit = c.reserve(1)
+    with pytest.raises(EmulatedTimeError) as error:
+        c.receive_edge(epoch="epoch-1", sequence=1, at_half_cycle=476, payload=b"private payload")
+    assert str(error.value) == "edge contradicts inclusive completeness watermark"
+    first = c.snapshot().failure
+    assert first.emission_complete_half_cycle == 476
+    values = asdict(first)
+    assert all(type(value) in (str, int, type(None)) for value in values.values())
+    assert "private payload" not in repr(values) and "payload" not in values
+    assert fields(first)[-1].name == "emission_complete_half_cycle"
+    legacy = {
+        name: value for name, value in values.items() if name != "emission_complete_half_cycle"
+    }
+    assert module.FailureSnapshot(**legacy).emission_complete_half_cycle is None
+    assert module.FailureSnapshot(*legacy.values()).emission_complete_half_cycle is None
+    with pytest.raises(FrozenInstanceError):
+        first.emission_complete_half_cycle = 999
+    c.cancel()
+    c.close()
+    with pytest.raises(CoordinatorClosed):
+        c.commit(permit, raw_cpu_clock=1001, instructions=0)
+    assert c.snapshot().failure is first and first.emission_complete_half_cycle == 476
+
+
+@pytest.mark.parametrize(
+    "options,reason",
+    [
+        ({"raw_cpu_clock": -1}, "raw_cpu_clock must be an integer >= 0"),
+        ({"double_speed": 1}, "double_speed must be bool"),
+    ],
+)
+def test_completeness_option_preserves_prior_constructor_validation_order(options, reason):
+    with pytest.raises(EmulatedTimeError) as error:
+        coordinator(enforce_completeness=1, **options)
+    assert type(error.value) is EmulatedTimeError and str(error.value) == reason
+
+
+def test_completeness_constructor_failure_watermark_is_unavailable():
+    c = EmulatedTimeCoordinator.__new__(EmulatedTimeCoordinator)
+    with pytest.raises(EmulatedTimeError, match="^enforce_completeness must be bool$"):
+        c.__init__(
+            epoch="epoch-1",
+            raw_cpu_clock=1000,
+            rearm_budget=32,
+            max_edge_lateness=32,
+            enforce_completeness=1,
+        )
+    # Construction failed before snapshot accounting exists; inspect its retained
+    # failure directly to distinguish unavailable completeness from bootstrap -1.
+    assert c._failure.emission_complete_half_cycle is None

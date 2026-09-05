@@ -179,6 +179,7 @@ def assert_lateness_failure(status, *, generation, epoch, cycles=40):
         "measured_lateness_half_cycles": cycles * 2,
         "allowed_lateness_half_cycles": 64,
         "excess_half_cycles": cycles * 2 - 64,
+        "emission_complete_half_cycle": -1,
     }
     assert status["failure"] == expected
     assert status["accounting"]["failure"] == expected
@@ -328,10 +329,15 @@ def test_cached_failure_attach_finally_preserves_setup_exception(
         failure = ProtocolError("injected attach failure after accounting becomes available")
         supplied, consumed = [], []
         generation = owner.generation
+        listener_attached, release_failure = threading.Event(), threading.Event()
+        ordering = []
 
         def attach(endpoint, current_game, *, deadline):
             answer = original_attach(endpoint, current_game, deadline=deadline)
             if current_game is game:
+                listener_attached.set()
+                assert release_failure.wait(BOUND), "test did not release setup failure injection"
+                ordering.append("listener_failure")
                 snapshot = late_accounting(endpoint.epoch.hex())
                 supplied.append(snapshot)
                 snapshots[endpoint] = snapshot
@@ -349,12 +355,22 @@ def test_cached_failure_attach_finally_preserves_setup_exception(
         monkeypatch.setattr(TimedRemoteEndpoint, "attach", attach)
         monkeypatch.setattr(TimedRemoteEndpoint, "snapshot", snapshot)
         listener = owner.listen("127.0.0.1", 0, "red")
-        address = listener.ready.result(timeout=BOUND)
-        connector = peer[0].connect("127.0.0.1", address["port"], "blue")
+        try:
+            address = listener.ready.result(timeout=BOUND)
+            connector = peer[0].connect("127.0.0.1", address["port"], "blue")
+            assert listener_attached.wait(BOUND), "listener did not complete real attachment"
+            connected = result(connector)
+            assert connected["state"] == "connected"
+            assert connector.phase == "done" and connector.future.exception() is None
+            assert not listener.future.done()
+            assert supplied == [] and consumed == []
+            ordering.append("connector_setup_complete")
+        finally:
+            release_failure.set()
         with pytest.raises(ProtocolError) as raised:
             result(listener)
         assert raised.value is failure
-        result(connector)
+        assert ordering == ["connector_setup_complete", "listener_failure"]
         result(owner.disconnect())
         assert len(supplied) == 1 and consumed == supplied
         status = owner.status()

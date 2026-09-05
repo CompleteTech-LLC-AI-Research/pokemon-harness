@@ -112,6 +112,7 @@ class FailureSnapshot:
     measured_lateness_half_cycles: int | None = None
     allowed_lateness_half_cycles: int | None = None
     excess_half_cycles: int | None = None
+    emission_complete_half_cycle: int | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,12 @@ class EmulatedTimeCoordinator:
 
     ``rearm_budget`` is required, in full cycles (zero disables rearm).
     ``quantum_cycles`` is experimental, positive, and measured in full cycles.
+    ``enforce_completeness`` defaults to False for standalone compatibility.
+    When True, every permit ends at or before the trusted inclusive watermark
+    plus the lateness allowance, independently of peer and episode credit.
+    This bounds unseen-edge lateness if the caller's completeness attestation
+    is truthful and execution stays within its permit; it does not guarantee
+    progress when an atomic step cannot fit. The initial watermark remains -1.
     Validation failures on an existing instance close it and wake all waiters.
     A blocked reserve returns None; it never sleeps. ``_condition`` is the
     standard Condition used by waits, allowing tests to observe the wait seam.
@@ -154,6 +161,7 @@ class EmulatedTimeCoordinator:
         max_edge_lateness: int,
         double_speed: bool = False,
         quantum_cycles: int = QUANTUM_CYCLES,
+        enforce_completeness: bool = False,
     ) -> None:
         self._condition = Condition()
         self._closed = False
@@ -167,6 +175,8 @@ class EmulatedTimeCoordinator:
             self._integer(max_edge_lateness, "max_edge_lateness")
             self._integer(quantum_cycles, "quantum_cycles", 1)
             self._boolean(double_speed)
+            if type(enforce_completeness) is not bool:
+                self._fail("enforce_completeness must be bool")
         self._epoch = epoch
         self._raw = raw_cpu_clock
         self._observed_raw = raw_cpu_clock
@@ -174,6 +184,7 @@ class EmulatedTimeCoordinator:
         self._rearm = rearm_budget * 2
         self._quantum = quantum_cycles * 2
         self._max_lateness = max_edge_lateness * 2
+        self._enforce_completeness = enforce_completeness
         self._local = self._peer = 0
         self._progress_sequence = 0
         self._pending: Permit | None = None
@@ -222,6 +233,7 @@ class EmulatedTimeCoordinator:
                     if measured_lateness_half_cycles is not None and allowed is not None
                     else None
                 ),
+                emission_complete_half_cycle=getattr(self, "_watermark", None),
             )
         self._closed = True
         self._condition.notify_all()
@@ -410,6 +422,10 @@ class EmulatedTimeCoordinator:
                     measured_lateness_half_cycles=boundary - scheduled,
                 )
             ceiling = min(ceiling, scheduled + self._max_lateness)
+        if self._enforce_completeness:
+            # Bound the entire in-flight permit, including all rearm credit.
+            # Peer progress alone does not attest to receipt of earlier edges.
+            ceiling = min(ceiling, self._watermark + self._max_lateness)
         cycles = min(max_cpu_cycles, max(0, ceiling - self._local) // self._rate)
         if not cycles:
             return None
