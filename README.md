@@ -11,6 +11,54 @@ symbol files, save states, or other ROM-derived artifacts.
 
 **Status: `PARTIAL` — experimental branch, not production-ready.**
 
+At harness commit `4275957`, the source `--unit-only` gate passed `2,924`
+unit tests and `955` timing checks (`191` cases in each of five repetitions),
+with zero failures, errors, skips, xfails, or xpasses. The local, unpublished
+report is `pokemon-mcp-source-4275957-20260905/gate-report.json`. The native
+gate also passed `2,924` unit tests in `133.8s` and `955` timing checks
+(`191` cases across five repetitions) in `287.2s`, with zero failures, errors,
+skips, xfails, or xpasses. Its local, unpublished report is
+`pokemon-mcp-native-4275957-20260905/gate-report.json`.
+These checks do not establish real-ROM gameplay or release readiness.
+
+A fresh native build from `4275957` verified unchanged hashes for `280`
+tracked files, including `116` vendor files, and all eleven required native
+extension imports. Hook, speed-state, and import regressions passed `16/16`;
+the native counter probe passed `28/28`. Dependency and Cython bootstrap
+checks passed. The local, unpublished build record is
+`poke-native-4275957-20260905-JRdYYV/BUILD.md`; this is build/runtime evidence.
+The separately reported clean source installation at `4275957` passed
+dependency checks, source bootstrap, imports outside the checkout, and
+`120` import/MCP tests in `26.19s` (exit `0`). Its local, unpublished evidence
+is associated with `poke-clean-source-4275957-20260905-PqvMoP`; it does not
+qualify real-ROM MCP operation.
+
+Explicit opt-in timed MCP routing is implemented at `4275957`. Authored tests
+cover this path, but are not real-ROM acceptance. An actual-ROM MCP policy
+failure remains under investigation; no validated gameplay policy is claimed.
+
+The actual-MCP smoke matrix passed in source and native: `10/10` each,
+comprising all nine ordered canonical ROM pairs plus one asset-free redaction
+test, with zero failures, errors, or skips. Reported pytest durations were
+`56.32s` and `50.10s` (XML suite times `56.309s` and `50.086s`). Local,
+unpublished reports are `poke-mcp-matrix-4275957-source-20260905.xml` and
+`poke-mcp-matrix-4275957-native-20260905.xml`. These runs used `4275957` code
+with the frozen, uncommitted `tests/test_mcp_timed_rom.py`, SHA-256
+`77dc9d092b27f36cc879ca2f29752647defde5a549a237f407ac732b06af955e`.
+The smoke policy used quantum `256`, rearm budget `4096`, instruction cap
+`1024`, edge lateness `4096`, and a five-second operation deadline. This is
+scoped MCP smoke evidence, not gameplay or a qualified default policy.
+The narrower `32/16/32` policy failures remain
+unresolved in source (`2.51s`) and native (`2.18s`); the larger-policy smoke
+does not supersede those failure artifacts or the gate results below.
+
+### Earlier experimental gates
+
+The `4e1e801` dual gate failed timing: source `844` passed / `1` failed;
+native `843` passed / `2` failed. Both passed `2,394` unit tests. This retained
+flaky-gate result (`pokemon-process-dual-4e1e801-20260905/gate-report.json`,
+local and unpublished) is not erased by later scoped passes.
+
 At harness commit `e8db87e`, the dual-runtime `--unit-only` gate collected
 `2,512` tests per runtime. Source and native each passed `2,368` unit tests
 and `785` timing checks (`157` cases in each of five repetitions), with zero
@@ -24,13 +72,11 @@ the source runtime at `e8db87e` includes the subsequent boolean save-state
 restore correction. This combination is tested evidence, not an exact combined
 native release build of `e8db87e`.
 
-Timed execution remains explicitly opt-in and default-off through
-`TimedRemoteEndpoint` and `Session.bind_timed_execution`; it is not fully
-adopted by the MCP link workflow. Threaded Blue-color/Yellow diagnostics
+The earlier timed routing used `TimedRemoteEndpoint` and
+`Session.bind_timed_execution`. Threaded Blue-color/Yellow diagnostics
 advanced only five to six frames before bounded cancellation. They do not
-prove trade, battle, rendezvous liveness, or graceful shutdown. The intended
-two-process diagnostic, completion of whole calls in that diagnostic, and
-full gameplay remain unverified. Earlier full
+prove trade, battle, rendezvous liveness, or graceful shutdown. Completed
+whole calls in authored tests do not qualify real-ROM gameplay. Earlier full
 real-ROM gates remain failed; the scoped passes below do not supersede them.
 
 ### Historical source candidate evidence
