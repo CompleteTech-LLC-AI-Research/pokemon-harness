@@ -14,6 +14,7 @@ import socket
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 
 from .emulated_time import EmulatedTimeCoordinator, EmulatedTimeError
 from .execution_adapter import ExecutionGovernorAdapter
@@ -24,9 +25,32 @@ from .timed_wire import (
     EdgeRequest,
     EdgeResponse,
     EmissionComplete,
+    Fence,
+    FenceAck,
     Progress,
     ProtocolError,
+    Sync,
 )
+
+
+class _CancellationView:
+    """Observe two thread-safe events without changing either or spawning a thread."""
+
+    def __init__(self, internal, external):
+        self._internal, self._external = internal, external
+
+    def is_set(self):
+        return self._internal.is_set() or (self._external is not None and self._external.is_set())
+
+    def wait(self, timeout=None):
+        # Event-compatible bounded waiting for transport control doubles too.
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        while not self.is_set():
+            remaining = 0.01 if deadline is None else deadline - time.monotonic()
+            if remaining <= 0:
+                return self.is_set()
+            self._internal.wait(min(0.01, remaining))
+        return True
 
 
 class _TimedAdapter(ExecutionGovernorAdapter):
@@ -77,6 +101,7 @@ class TimedLinkSession:
         operation_timeout=1.0,
         max_wait_attempts=16,
         inbound_capacity=64,
+        cancel_event=None,
     ):
         for name, value, minimum in (
             ("rearm_budget", rearm_budget, 0),
@@ -96,6 +121,8 @@ class TimedLinkSession:
             raise ValueError("operation_timeout must be finite and positive")
         if type(channel.epoch) is not bytes or len(channel.epoch) != 16:
             raise ValueError("channel epoch must be 16 bytes")
+        if cancel_event is not None and not isinstance(cancel_event, threading.Event):
+            raise TypeError("cancel_event must be a threading.Event or None")
         self.channel = channel
         self._epoch = channel.epoch.hex()
         self._rearm = rearm_budget
@@ -107,6 +134,7 @@ class TimedLinkSession:
         self._attempts = max_wait_attempts
         self._capacity = inbound_capacity
         self._cancel = threading.Event()
+        self._cancel_view = _CancellationView(self._cancel, cancel_event)
         self._terminal = threading.Event()
         self._owner = None
         self._used = False
@@ -145,6 +173,15 @@ class TimedLinkSession:
         self._segments = []
         self._transition_count = 0
         self._mapped_raw = 0
+        self._control_active = False
+        self._control_deadline = None
+        self._sync_markers = deque()
+        self._inbound_fences = deque()
+        self._outbound_fences = {}
+        self._last_inbound_fence = self._last_outbound_fence = 0
+        self._completed_prefix = 0
+        self._completion_gaps = set()
+        self._bootstrap_writes = []
 
     @staticmethod
     def _loopback(channel):
@@ -162,12 +199,17 @@ class TimedLinkSession:
                 raise ValueError("timed TCP requires both endpoints on loopback")
 
     def _check(self):
-        if self._cancel.is_set():
+        if self._cancel_view.is_set():
             raise Cancelled("timed session cancelled")
         if self._terminal.is_set():
             raise ChannelClosed("timed session is terminal")
         if self.channel.closed:
             raise self.channel.error or ChannelClosed("timed channel closed")
+        now = time.monotonic()
+        if self._control_deadline is not None and now >= self._control_deadline:
+            raise DeadlineExceeded("control deadline expired")
+        if self._pump_deadline is not None and now >= self._pump_deadline:
+            raise DeadlineExceeded("owner pump deadline expired")
 
     def _require_owner(self):
         if threading.get_ident() != self._owner:
@@ -176,7 +218,7 @@ class TimedLinkSession:
     def _require_execution(self):
         self._require_owner()
         self._check()
-        if not self._active or self._in_edge or self._pumping:
+        if not self._active or self._in_edge or self._pumping or self._control_active:
             raise RuntimeError("recursive or unowned timed execution")
         self._verify_registration()
 
@@ -190,9 +232,11 @@ class TimedLinkSession:
         ):
             raise RuntimeError("timed session registration was replaced")
 
-    def attach(self, pyboy, *, deadline):
+    def attach(self, pyboy, *, deadline, startup_internal_clock=None):
         if type(deadline) not in (int, float) or not math.isfinite(deadline):
             raise ValueError("deadline must be finite absolute monotonic seconds")
+        if startup_internal_clock is not None and type(startup_internal_clock) is not bool:
+            raise TypeError("startup_internal_clock must be bool or None")
         if self._used:
             raise RuntimeError("timed session epoch cannot be reused")
         self._used = True
@@ -203,13 +247,16 @@ class TimedLinkSession:
             self._loopback(self.channel)
             board, core = pyboy.mb, pyboy.mb.serial
             if (
-                core.transfer_enabled
-                or board.execution_before is not None
+                board.execution_before is not None
                 or board.execution_after is not None
                 or core.owner_dispatch_enabled
                 or core.owner_dispatch_callback is not None
             ):
                 raise RuntimeError("attach requires idle serial and no callback ownership")
+            if core.transfer_enabled and (
+                startup_internal_clock is None or core.internal_clock or core._bits_remaining != 8
+            ):
+                raise RuntimeError("startup requires idle or a fresh external eight-bit transfer")
             # Do not mistake a serial clock offset from a save for CPU time.
             if core.last_cycles != board.cpu.cycles:
                 raise RuntimeError("attach requires serial.last_cycles == cpu.cycles")
@@ -233,6 +280,13 @@ class TimedLinkSession:
                 board.speed_transition_clock,
                 board.speed_transition_double_speed,
                 core.last_cycles,
+                core.SB,
+                core.SC,
+                core._bits_remaining,
+                core.transfer_enabled,
+                core.internal_clock,
+                core.clock,
+                core.clock_target,
             )
             self._segments = [(board.cpu.cycles, 0, bool(board.double_speed))]
             self._mapped_raw = board.cpu.cycles
@@ -246,7 +300,7 @@ class TimedLinkSession:
                 quantum_cycles=self._quantum,
             )
             self._adapter = _TimedAdapter(self)
-            self.channel.handshake(deadline=deadline, cancel_event=self._cancel)
+            self.channel.handshake(deadline=deadline, cancel_event=self._cancel_view)
             self._check()
             if (
                 pyboy.mb is not board
@@ -254,7 +308,6 @@ class TimedLinkSession:
                 or core.backend is not self._previous_backend
                 or core.owner_dispatch_callback is not self._previous_dispatch[0]
                 or core.owner_dispatch_enabled != self._previous_dispatch[1]
-                or core.transfer_enabled
                 or attach_state
                 != (
                     board.cpu.cycles,
@@ -264,11 +317,20 @@ class TimedLinkSession:
                     board.speed_transition_clock,
                     board.speed_transition_double_speed,
                     core.last_cycles,
+                    core.SB,
+                    core.SC,
+                    core._bits_remaining,
+                    core.transfer_enabled,
+                    core.internal_clock,
+                    core.clock,
+                    core.clock_target,
                 )
             ):
                 raise RuntimeError("emulator ownership or state changed during handshake")
             self._adapter.attach(board)
             core.backend = self
+            if startup_internal_clock is not None:
+                self._bootstrap(startup_internal_clock, deadline)
             self._send(Progress(0), deadline)
             self._sent_progress = 0
         except BaseException as exc:
@@ -278,18 +340,50 @@ class TimedLinkSession:
         finally:
             self._attaching = False
 
+    def _bootstrap(self, internal, deadline):
+        """Exactly two or three native register writes; no emulated execution.
+
+        Once a write starts, failure retains actual register state and retires
+        this epoch. This explicitly restarts a fresh external byte.
+        """
+        core = self._core
+        control = (core.SC & 2) | 0x80 | int(internal)
+        writes = [("SB", 1 if internal else 2), ("SC", control)]
+        if core.transfer_enabled:
+            writes.insert(0, ("SC", core.SC & ~0x80))
+        before = (self._board.cpu.cycles, self._board.cpu.retired_instructions)
+        for register, value in writes:
+            self._check()
+            if time.monotonic() >= deadline:
+                raise DeadlineExceeded("startup register-write deadline expired")
+            self._verify_registration()
+            # These native setters cannot execute CPU instructions. Avoid IO
+            # accessors which also call Serial.tick while a byte is armed.
+            (core.set_SB if register == "SB" else core.set_SC)(value)
+            self._bootstrap_writes.append((register, value))
+            if before != (self._board.cpu.cycles, self._board.cpu.retired_instructions):
+                raise EmulatedTimeError("startup unexpectedly executed CPU work")
+
     def _deadline(self):
         deadline = time.monotonic() + self._timeout
+        if self._control_deadline is not None:
+            deadline = min(deadline, self._control_deadline)
         if self._pump_deadline is not None:
             deadline = min(deadline, self._pump_deadline)
         return min(deadline, self._held_deadline) if self._held_deadline is not None else deadline
 
     def _send(self, message, deadline=None):
         self._check()
+        if deadline is not None and self._control_deadline is not None:
+            deadline = min(deadline, self._control_deadline)
+        if deadline is not None and self._held_deadline is not None:
+            deadline = min(deadline, self._held_deadline)
+        if deadline is not None and self._pump_deadline is not None:
+            deadline = min(deadline, self._pump_deadline)
         self.channel.send(
             message,
             deadline=self._deadline() if deadline is None else deadline,
-            cancel_event=self._cancel,
+            cancel_event=self._cancel_view,
         )
 
     def _observe_map(self):
@@ -327,9 +421,19 @@ class TimedLinkSession:
                 raise ProtocolError("unexpected or duplicate edge response")
             self._response = message
             return
-        if not isinstance(message, (Progress, EdgeRequest, EmissionComplete)):
+        if not isinstance(
+            message, (Progress, EdgeRequest, EmissionComplete, Sync, Fence, FenceAck)
+        ):
             raise ProtocolError("unexpected timed session message")
-        if len(self._ingress) + len(self._edges) + len(self._delivery) >= self._capacity:
+        if (
+            isinstance(message, (Sync, Fence, FenceAck))
+            and getattr(self.channel, "revision", 2) != 3
+        ):
+            raise ProtocolError("owner controls require wire revision 3")
+        if (
+            len(self._ingress) + len(self._edges) + len(self._delivery) + len(self._completion_gaps)
+            >= self._capacity
+        ):
             raise ProtocolError("session ingress capacity exhausted")
         if isinstance(message, EdgeRequest):
             self._edge_deadlines.setdefault(message.edge_id, time.monotonic() + self._timeout)
@@ -339,10 +443,12 @@ class TimedLinkSession:
         # A flood cannot turn a pre-step boundary into an unbounded drain.
         for _ in range(self._capacity):
             self._check()
+            if self._pump_deadline is not None and time.monotonic() >= self._pump_deadline:
+                raise DeadlineExceeded("owner pump deadline expired")
             try:
                 message = self.channel.poll()
             except ChannelClosed:
-                if self._cancel.is_set():
+                if self._cancel_view.is_set():
                     raise Cancelled("timed session cancelled") from None
                 raise
             if message is None:
@@ -351,6 +457,7 @@ class TimedLinkSession:
 
     def _consume(self):
         for _ in range(min(len(self._ingress), self._capacity)):
+            self._check()
             message = self._ingress.popleft()
             if isinstance(message, Progress):
                 self._peer_progress_sequence += 1
@@ -374,7 +481,7 @@ class TimedLinkSession:
                 )
                 self._admitted_edge = message.edge_id
                 self._edges.append(message)
-            else:
+            elif isinstance(message, EmissionComplete):
                 if (
                     message.last_edge_id != self._ingress_edge
                     or message.through_half_cycle < self._ingress_watermark
@@ -388,6 +495,24 @@ class TimedLinkSession:
                     through_half_cycle=message.through_half_cycle,
                 )
                 self._coordinator_watermark = message.through_half_cycle
+            elif isinstance(message, Sync):
+                if len(self._sync_markers) >= self._capacity:
+                    raise ProtocolError("peer sync marker capacity exhausted")
+                self._sync_markers.append(message.marker_id)
+            elif isinstance(message, Fence):
+                if (
+                    message.fence_id != self._last_inbound_fence + 1
+                    or message.through_edge_id != self._ingress_edge
+                    or len(self._inbound_fences) >= self._capacity
+                ):
+                    raise ProtocolError("invalid or excessive inbound fence")
+                self._last_inbound_fence = message.fence_id
+                self._inbound_fences.append(message)
+            else:
+                pending = self._outbound_fences.get(message.fence_id)
+                if pending is None or pending != (message.through_edge_id, False):
+                    raise ProtocolError("unexpected or conflicting fence acknowledgement")
+                self._outbound_fences[message.fence_id] = (message.through_edge_id, True)
 
     def _publish(self, *, force=False):
         if self._in_edge:
@@ -473,6 +598,7 @@ class TimedLinkSession:
         for _ in range(self._capacity):
             if not self._delivery:
                 break
+            self._check()
             self._check_hold()
             if core.internal_clock:
                 raise ProtocolError("incoming clock conflicts with local internal clock")
@@ -490,6 +616,7 @@ class TimedLinkSession:
             )
             if completed:
                 self._board.cpu.set_interruptflag(0x08)
+            self._complete_edge(edge.sequence)
             self._delivery.popleft()
             del self._edge_deadlines[edge.sequence]
         if self._batch_token is not None and not self._delivery:
@@ -498,13 +625,35 @@ class TimedLinkSession:
             self._episode_id = None
             self._held_deadline = self._held_start = self._held_counter = self._held_earliest = None
 
-    def _safe_pump(self, *, rearm=True, force=False):
+    def _complete_edge(self, sequence):
+        if sequence <= self._completed_prefix or sequence in self._completion_gaps:
+            raise ProtocolError("edge completion repeated")
+        self._completion_gaps.add(sequence)
+        while self._completed_prefix + 1 in self._completion_gaps:
+            self._completed_prefix += 1
+            self._completion_gaps.remove(self._completed_prefix)
+        if len(self._completion_gaps) > self._capacity:
+            raise ProtocolError("completed edge prefix gap capacity exhausted")
+
+    def _ack_fences(self):
+        for _ in range(self._capacity):
+            if not self._inbound_fences:
+                break
+            fence = self._inbound_fences[0]
+            if fence.through_edge_id > self._completed_prefix:
+                break
+            self._send(FenceAck(fence.fence_id, fence.through_edge_id))
+            self._inbound_fences.popleft()
+
+    def _safe_pump(self, *, rearm=True, force=False, deadline=None):
         self._require_owner()
         self._check()
         if self._in_edge or self._pumping or self._coordinator.snapshot().pending_permit:
             raise RuntimeError("unsafe recursive timed pump")
         self._pumping = True
         self._pump_deadline = time.monotonic() + self._timeout
+        if deadline is not None:
+            self._pump_deadline = min(self._pump_deadline, deadline)
         try:
             snap = self._coordinator.snapshot()
             if (
@@ -517,14 +666,17 @@ class TimedLinkSession:
             if self._edge_deadlines and time.monotonic() >= min(self._edge_deadlines.values()):
                 raise DeadlineExceeded("incoming edge fixed deadline expired")
             self._deliver(rearm=rearm)
+            self._ack_fences()
             self._publish(force=force)
+            self._check()
         finally:
             self._pumping = False
             self._pump_deadline = None
 
     def _wait_for_progress(self, remaining):
+        deadline = min(time.monotonic() + remaining, self._deadline())
         before = self._coordinator.snapshot()
-        self._safe_pump(force=True)
+        self._safe_pump(force=True, deadline=deadline)
         after = self._coordinator.snapshot()
         if (
             after.peer_half_cycles != before.peer_half_cycles
@@ -532,9 +684,138 @@ class TimedLinkSession:
             or after.pending_delivery != before.pending_delivery
         ):
             return
-        deadline = min(time.monotonic() + remaining, self._deadline())
-        self._stage(self.channel.receive(deadline=deadline, cancel_event=self._cancel))
-        self._safe_pump(force=True)
+        deadline = min(deadline, self._deadline())
+        self._stage(self.channel.receive(deadline=deadline, cancel_event=self._cancel_view))
+        self._safe_pump(force=True, deadline=deadline)
+
+    @contextmanager
+    def _control_operation(self, deadline=None):
+        try:
+            self._require_owner()
+            self._check()
+            if (
+                self._active
+                or self._attaching
+                or self._in_edge
+                or self._pumping
+                or self._control_active
+                or self._board is None
+            ):
+                raise RuntimeError("control operations require an idle owner boundary")
+            if getattr(self.channel, "revision", 2) != 3:
+                raise ProtocolError("owner controls require wire revision 3")
+            if deadline is not None:
+                if type(deadline) not in (int, float) or not math.isfinite(deadline):
+                    raise ValueError("deadline must be finite absolute monotonic seconds")
+                if time.monotonic() >= deadline:
+                    raise DeadlineExceeded("control deadline expired")
+            self._verify_registration()
+        except BaseException as exc:
+            self._fail(exc)
+            # A rejected idle-owner call has no outer operation to detach it.
+            # Foreign or recursive callers must leave cleanup to that owner.
+            if threading.get_ident() == self._owner and not (
+                self._active
+                or self._attaching
+                or self._in_edge
+                or self._pumping
+                or self._control_active
+            ):
+                self._cleanup(preserve=exc)
+            raise
+        self._control_active = True
+        self._control_deadline = deadline
+        try:
+            yield
+            self._check()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise DeadlineExceeded("control deadline expired")
+        except BaseException as exc:
+            self._fail(exc)
+            # The yielded operation has unwound. Reentrant close while it
+            # was active could signal termination, but could not detach it.
+            self._control_active = False
+            self._cleanup(preserve=exc)
+            raise
+        finally:
+            self._control_active = False
+            self._control_deadline = None
+
+    def service_controls(self, *, deadline):
+        """Bounded nonwaiting owner pump; never execute CPU or begin rearm.
+
+        An empty transport poll returns immediately. The facade may call again
+        under the same absolute deadline; absence of messages is not wire idle.
+        """
+        with self._control_operation(deadline):
+            self._safe_pump(rearm=False, force=True, deadline=deadline)
+            self._check()
+            if time.monotonic() >= deadline:
+                raise DeadlineExceeded("control deadline expired")
+            return self.controls_snapshot()
+
+    def announce_sync(self, marker, *, deadline):
+        with self._control_operation(deadline):
+            if type(marker) is not int or not 0 <= marker <= 255:
+                raise ValueError("sync marker must be uint8")
+            self._send(Sync(marker), deadline)
+
+    def poll_peer_sync(self, marker):
+        """Consume one owner-processed matching marker, without reading wire."""
+        with self._control_operation():
+            if type(marker) is not int or not 0 <= marker <= 255:
+                raise ValueError("sync marker must be uint8")
+            try:
+                self._sync_markers.remove(marker)
+            except ValueError:
+                return False
+            return True
+
+    def start_fence(self, *, deadline):
+        with self._control_operation(deadline):
+            self._safe_pump(rearm=False, force=True, deadline=deadline)
+            if len(self._outbound_fences) >= self._capacity:
+                raise ProtocolError("outbound fence capacity exhausted")
+            fence_id = self._last_outbound_fence + 1
+            self._outbound_fences[fence_id] = (self._out_edge, False)
+            self._send(Fence(fence_id, self._out_edge), deadline)
+            self._last_outbound_fence = fence_id
+            return fence_id
+
+    def poll_fence(self, fence_id):
+        """Consume a correlated acknowledgement; it proves only its prefix."""
+        with self._control_operation():
+            if type(fence_id) is not int or fence_id < 1:
+                raise ValueError("fence ID must be a positive integer")
+            pending = self._outbound_fences.get(fence_id)
+            if pending is None or not pending[1]:
+                return False
+            del self._outbound_fences[fence_id]
+            return True
+
+    def controls_snapshot(self):
+        """Owner-only local observations, never a permanent wire-idle assertion."""
+        self._require_owner()
+        pending_delivery = bool(self._delivery or self._edges or self._batch_token is not None)
+        pending_response = self._waiting_edge is not None or self._in_edge
+        return {
+            "pending_ingress": len(self._ingress),
+            "pending_delivery": pending_delivery,
+            "pending_response": pending_response,
+            "pending_inbound_fences": len(self._inbound_fences),
+            "pending_outbound_fences": len(self._outbound_fences),
+            "pending_sync_markers": len(self._sync_markers),
+            "completed_edge_prefix": self._completed_prefix,
+            "completion_gaps": len(self._completion_gaps),
+            "bootstrap_writes": len(self._bootstrap_writes),
+            "quiescent": not (
+                self._ingress
+                or pending_delivery
+                or pending_response
+                or self._inbound_fences
+                or self._completion_gaps
+            ),
+        }
 
     def on_edge(self, our_bit, our_role):
         self._require_owner()
@@ -572,7 +853,7 @@ class TimedLinkSession:
                     ):
                         raise ProtocolError("peer edge delivery outside lateness bound")
                     return response.bit
-                self._stage(self.channel.receive(deadline=deadline, cancel_event=self._cancel))
+                self._stage(self.channel.receive(deadline=deadline, cancel_event=self._cancel_view))
             raise DeadlineExceeded("edge response message budget exhausted")
         finally:
             self._waiting_edge = self._response = None
@@ -586,9 +867,9 @@ class TimedLinkSession:
             raise
         if self._board is None:
             self._check()
-        if self._active or self._attaching or self._board is None:
+        if self._active or self._attaching or self._control_active or self._board is None:
             exc = RuntimeError("recursive tick or unattached timed session")
-            if self._active:
+            if self._active or self._control_active:
                 self._fail(exc)
             raise exc
         self._active = True
@@ -615,7 +896,10 @@ class TimedLinkSession:
             self._terminal_error = f"{type(exc).__name__}: {exc}"
         self._terminal.set()
         if self._coordinator is not None:
-            self._coordinator.close()
+            if self._cancel_view.is_set():
+                self._coordinator.cancel()
+            else:
+                self._coordinator.close()
         try:
             self.channel.close()
         # Cleanup must preserve the primary failure, including cancellation.
@@ -624,7 +908,7 @@ class TimedLinkSession:
 
     def _cleanup(self, *, preserve=None):
         self._require_owner()
-        if self._active or self._in_edge or self._pumping:
+        if self._active or self._in_edge or self._pumping or self._control_active:
             raise RuntimeError("cannot detach during native execution")
         try:
             # Preflight the whole attachment before changing any owned field.
@@ -687,7 +971,10 @@ class TimedLinkSession:
         self._cleanup()
 
     def snapshot(self):
-        """Return immutable actual accounting, including terminal outcomes."""
+        """Read locked accounting from any thread, including terminal outcomes.
+
+        This never reads native emulator state or asserts wire quiescence.
+        """
         if self._coordinator is None:
             raise RuntimeError("session has no attached accounting epoch")
         return self._coordinator.snapshot()
