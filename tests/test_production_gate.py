@@ -441,11 +441,35 @@ def test_fixture_manifest_input_pins_match_versions_and_inspected_bytes(tmp_path
     assert any("does not match inspected bytes" in problem for problem in problems)
 
 
+# Independent contract: do not derive these from the tier configuration.
+_CANONICAL_BOOT_NODEIDS = frozenset(
+    {
+        "tests/test_rom_boot.py::test_canonical_rom_boot_state_roundtrip[red-color]",
+        "tests/test_rom_boot.py::test_canonical_rom_boot_state_roundtrip[blue-color]",
+        "tests/test_rom_boot.py::test_canonical_rom_boot_state_roundtrip[yellow]",
+    }
+)
+
+
+def test_canonical_boot_nodes_are_required_and_classified_local():
+    assert {
+        nodeid
+        for nodeid in TIER_REQUIRED_NODEIDS["local"]
+        if nodeid.startswith("tests/test_rom_boot.py::")
+    } == _CANONICAL_BOOT_NODEIDS
+    assert classify_test("tests/test_rom_boot.py", "test_canonical_rom_boot_state_roundtrip") == {
+        "real_rom"
+    }
+    assert gate.TIER_EXPRESSIONS["local"] == "real_rom and not remote_link and not acceptance"
+
+
 def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert SUPPORTED_VERSIONS == ("red", "blue", "yellow")
     assert len(TIER_REQUIRED_NODEIDS["remote"]) == 11
-    assert len(TIER_REQUIRED_NODEIDS["local"]) == 18
-    assert TIER_REQUIRED_NODEIDS == required_matrix_nodeids()
+    assert len(TIER_REQUIRED_NODEIDS["local"]) == 21
+    expected = required_matrix_nodeids()
+    expected["local"] = expected["local"] | _CANONICAL_BOOT_NODEIDS
+    assert TIER_REQUIRED_NODEIDS == expected
     assert len(LOCAL_VERSION_PAIR_NODEIDS) == 9
     assert len(REMOTE_VERSION_PAIR_NODEIDS) == 9
     assert len(REMOTE_REVERSED_ROLE_NODEIDS) == 6
@@ -642,6 +666,84 @@ def test_run_tier_fails_when_a_required_matrix_case_is_missing(tmp_path, monkeyp
 
     assert result.status == "FAIL"
     assert any("red-blue" in failure for failure in result.iteration_failures)
+
+
+@pytest.mark.parametrize("missing_nodeid", sorted(_CANONICAL_BOOT_NODEIDS))
+def test_local_gate_rejects_each_missing_canonical_boot_result(
+    tmp_path, monkeypatch, missing_nodeid
+):
+    complete = TIER_REQUIRED_NODEIDS["local"]
+    assert _CANONICAL_BOOT_NODEIDS <= complete
+
+    def fake_run_pytest_once(**kwargs):
+        selected = tuple(sorted(complete - {missing_nodeid}))
+        return (
+            0,
+            gate.GateReport(
+                counts=gate.Counts(total=len(selected), passed=len(selected)),
+                nodeids=selected,
+            ),
+            "",
+            ["python", "-m", "pytest"],
+        )
+
+    monkeypatch.setattr(gate, "run_pytest_once", fake_run_pytest_once)
+    result = gate.run_tier(
+        name="local",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+        required_nodeids=complete,
+    )
+    assert result.status == "FAIL"
+    assert any(
+        f"required matrix case is absent from selected items: {missing_nodeid}" in failure
+        for failure in result.iteration_failures
+    )
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "red/pokemon-red-color.gb",
+        "blue/pokemon-blue-color.gb",
+        "yellow/pokemon-yellow.gbc",
+        "red/pokemon-red.sym",
+        "blue/pokemon-blue.sym",
+        "yellow/pokemon-yellow.sym",
+    ),
+)
+def test_local_gate_preflight_blocks_each_missing_canonical_asset(tmp_path, monkeypatch, relative):
+    records = gate.inspect_assets(tmp_path / "rom", tmp_path / "fixtures", {})
+    # Isolate one real missing-file inspection result so unrelated missing
+    # stock ROMs or fixtures cannot make this rejection pass accidentally.
+    (record,) = [r for r in records if Path(r.path) == tmp_path / "rom" / relative]
+    assert record.status == "missing"
+    problems = gate.required_asset_problems([record])
+    assert len(problems) == 1
+
+    def unexpected_pytest(**kwargs):
+        pytest.fail("asset preflight must block before spawning pytest")
+
+    monkeypatch.setattr(gate, "run_pytest_once", unexpected_pytest)
+    result = gate.run_tier(
+        name="local",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=problems,
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+        required_nodeids=_CANONICAL_BOOT_NODEIDS,
+    )
+    assert result.status == "BLOCKED"
+    assert result.required
+    assert problems[0] in result.reason
 
 
 def test_run_tier_repeats_timing_cases_at_least_five_times(tmp_path, monkeypatch):
