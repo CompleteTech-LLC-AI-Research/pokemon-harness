@@ -52,6 +52,21 @@ The narrower `32/16/32` policy failures remain
 unresolved in source (`2.51s`) and native (`2.18s`); the larger-policy smoke
 does not supersede those failure artifacts or the gate results below.
 
+A separate native milestone diagnostic on `4fca3a3` ran Blue-color listener
+to Yellow connector for `623.635s`. Each owner completed all `600` one-frame
+calls (`600` actual frames), with no interrupted or partial calls. Both
+recorded save-request, Yes/No, save-game, and LinkMenu milestones and reached
+Trade Center map `0xEF`. Endpoint detach, hook removal, and session close
+completed with no errors, forced termination, or surviving owners/readers.
+The local, unpublished report is
+`poke-milestone-600-20260905-ZZVHBS/report.json`. It used the same explicit
+diagnostic policy: rearm `4096`, instruction cap `1024`, lateness `4096`,
+quantum `256`, operation deadline `5s`. This single orientation establishes
+milestone progression, not a completed trade exchange, gameplay matrix,
+graceful protocol shutdown, or default-policy qualification. The full source
+gate on `4fca3a3` and unit gates on `079aea1` remain pending at this snapshot;
+no outcome is claimed.
+
 ### Earlier experimental gates
 
 The `4e1e801` dual gate failed timing: source `844` passed / `1` failed;
