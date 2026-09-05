@@ -98,7 +98,7 @@ cdef class Motherboard:
     cdef void setitem_io_ports(self, uint16_t, uint8_t) except * nogil
 
     @cython.locals(offset=cython.int, dst=cython.int, n=cython.int)
-    cdef void transfer_DMA(self, uint8_t) noexcept nogil
+    cdef void transfer_DMA(self, uint8_t) except * nogil
     cdef int save_state(self, IntIOInterface) except -1
     cdef int load_state(self, IntIOInterface) except -1
 
@@ -115,8 +115,8 @@ cdef class HDMA:
     cdef uint16_t curr_src
     cdef uint16_t curr_dst
 
-    cdef void set_hdma5(self, uint8_t, Motherboard) noexcept nogil
-    cdef int tick(self, Motherboard) noexcept nogil
+    cdef void set_hdma5(self, uint8_t, Motherboard) except * nogil
+    cdef int tick(self, Motherboard) except * nogil
 
     cdef int save_state(self, IntIOInterface) except -1
     cdef int load_state(self, IntIOInterface, int) except -1

@@ -4,7 +4,7 @@
 #
 
 
-from libc.stdint cimport int16_t, int64_t, uint8_t, uint16_t
+from libc.stdint cimport int16_t, int64_t, uint8_t, uint16_t, uint64_t
 
 cimport pyboy.core.mb
 from pyboy.utils cimport IntIOInterface
@@ -33,17 +33,18 @@ cdef class CPU:
     # two native PyBoy instances on one deterministic cycle horizon.  Keep
     # this public in the Cython ABI, matching the source-runtime attribute.
     cdef public int64_t cycles
+    cdef readonly uint64_t retired_instructions
 
-    cdef inline int check_interrupts(self) noexcept nogil
+    cdef inline int check_interrupts(self) except * nogil
 
     @cython.final
     cpdef void set_interruptflag(self, int) noexcept nogil
-    cdef bint handle_interrupt(self, uint8_t, uint16_t) noexcept nogil
+    cdef bint handle_interrupt(self, uint8_t, uint16_t) except * nogil
 
-    @cython.locals(pc1=uint16_t,pc2=uint16_t,pc3=uint16_t, opcode=uint16_t, v=cython.int, a=cython.int, b=cython.int)
-    cdef inline uint8_t fetch_and_execute(self) noexcept nogil
+    @cython.locals(pc1=uint16_t,pc2=uint16_t,pc3=uint16_t, opcode=uint16_t, v=cython.int, a=cython.int, b=cython.int, result=uint8_t, retired_instructions_max=uint64_t)
+    cdef inline uint8_t fetch_and_execute(self) except * nogil
     @cython.locals(_cycles0=int64_t)
-    cdef int tick(self, int64_t) noexcept nogil
+    cdef int tick(self, int64_t) except * nogil
     cdef int save_state(self, IntIOInterface) except -1
     cdef int load_state(self, IntIOInterface, int) except -1
 

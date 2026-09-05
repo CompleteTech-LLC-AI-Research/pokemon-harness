@@ -54,6 +54,7 @@ UNIT_MODULES = frozenset(
     {
         "test_agent_sync.py",
         "test_config.py",
+        "test_cpu_instruction_counter.py",
         "test_emulated_time.py",
         "test_emulated_time_segments.py",
         "test_events.py",
