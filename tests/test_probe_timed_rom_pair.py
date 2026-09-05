@@ -530,6 +530,7 @@ def _spawn_diagnostic_owner(
         "test_pid": os.getpid(),
         "test_executable": sys.executable,
         "test_repo_root": args_dict["repo_root"],
+        "test_input_profile": args_dict["input_profile"],
         "test_tcp_nodelay": sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY),
     }
     try:
@@ -917,10 +918,23 @@ def test_second_process_startup_error_preserves_first_orientation_report(monkeyp
 class _NoSharedEventContext:
     """Fail immediately if the supervisor tries to use child-lockable Events."""
 
-    def __init__(self, *, fail_second_start=False):
+    def __init__(self, *, fail_second_start=False, block_before_owner=False):
         self.context = multiprocessing.get_context("spawn")
         self.fail_second_start = fail_second_start
+        self.block_before_owner = block_before_owner
         self.process_count = 0
+        self.startup = {}
+        self.connections = []
+        if fail_second_start:
+            self.ready_receiver, self.ready_sender = self.context.Pipe(duplex=False)
+            self.connections.extend((self.ready_receiver, self.ready_sender))
+            if block_before_owner:
+                self.gate_receiver, self.gate_sender = self.context.Pipe(duplex=False)
+                self.connections.extend((self.gate_receiver, self.gate_sender))
+
+    def close(self):
+        for connection in self.connections:
+            connection.close()
 
     def __getattr__(self, name):
         return getattr(self.context, name)
@@ -931,13 +945,50 @@ class _NoSharedEventContext:
     def Process(self, **kwargs):
         self.process_count += 1
         if self.fail_second_start and self.process_count == 2:
-            return _FailedStartProcess()
+            deadline, overall = kwargs["args"][6:8]
+            return _FailedStartProcess(self, min(deadline, overall))
+        if self.fail_second_start:
+            if self.block_before_owner:
+                kwargs["args"] = (kwargs["args"], self.ready_sender, self.gate_receiver)
+                kwargs["target"] = _spawn_block_before_owner
+            else:
+                kwargs["kwargs"] = {"ready_sender": self.ready_sender}
         return self.context.Process(**kwargs)
 
 
 class _FailedStartProcess:
+    def __init__(self, context, deadline):
+        self.context = context
+        self.deadline = deadline
+
     def start(self):
+        self.context.startup["pair_deadline"] = self.deadline
+        if not self.context.ready_receiver.poll(max(0, self.deadline - time.monotonic())):
+            raise TimeoutError("first owner readiness missed existing pair deadline")
+        self.context.startup.update(json.loads(self.context.ready_receiver.recv_bytes(4096)))
+        self.context.startup["injected_monotonic"] = time.monotonic()
+        if self.context.startup["injected_monotonic"] >= self.deadline:
+            raise TimeoutError("first owner readiness arrived after existing pair deadline")
         raise OSError("injected second owner start failure")
+
+
+def _spawn_block_before_owner(owner_args, ready_sender, gate_receiver):
+    """Hold a real spawned child before owner entry until termination or overall bound."""
+    ready_sender.send_bytes(
+        json.dumps(
+            {
+                "phase": "before_owner_entry",
+                "ready_monotonic": time.monotonic(),
+                "pid": os.getpid(),
+            }
+        ).encode()
+    )
+    ready_sender.close()
+    # The parent retains the write end but never releases this gate. No sleep,
+    # shared Event, owner report, or cooperative cancellation is involved.
+    if gate_receiver.poll(max(0, owner_args[7] - time.monotonic())):
+        raise AssertionError("pre-owner startup gate unexpectedly released")
+    gate_receiver.close()
 
 
 def _spawn_wait_for_startup_cancel(
@@ -951,8 +1002,21 @@ def _spawn_wait_for_startup_cancel(
     overall,
     report_sender,
     stderr_path,
+    *,
+    ready_sender,
 ):
     """Owner starts without a peer, waits for supervisor cancellation, then reports."""
+    ready = time.monotonic()
+    ready_sender.send_bytes(
+        json.dumps(
+            {
+                "phase": "cancellation_wait",
+                "ready_monotonic": ready,
+                "pid": os.getpid(),
+            }
+        ).encode()
+    )
+    ready_sender.close()
     observed = cancel_event.wait(max(0, overall - time.monotonic()))
     record = {
         "side": "listener",
@@ -961,19 +1025,53 @@ def _spawn_wait_for_startup_cancel(
         "errors": [],
         "termination": "cancelled_or_deadline",
         "test_cancel_seen": observed,
+        "test_ready_monotonic": ready,
+        "test_cancel_seen_monotonic": time.monotonic(),
     }
     report_sender.send_bytes(json.dumps(record).encode())
     report_sender.close()
     sock.close()
 
 
-def test_process_startup_failure_signals_without_shared_event_locks(spawned_probe_args):
-    started = time.monotonic()
-    result = probe.run_process_pair(
-        spawned_probe_args,
-        context=_NoSharedEventContext(fail_second_start=True),
-        child_target=_spawn_wait_for_startup_cancel,
+def _print_startup_evidence(context, args, result, started, returned):
+    owner = result["owners"][0]
+    print(
+        json.dumps(
+            {
+                **context.startup,
+                "started": started,
+                "cancelled_monotonic": result["cancelled_monotonic"],
+                "cancel_seen_monotonic": owner.get("test_cancel_seen_monotonic"),
+                "returned": returned,
+                "elapsed_s": returned - started,
+                "cleanup_elapsed_s": returned - result["cancelled_monotonic"],
+                "pair_timeout": args.pair_timeout,
+                "cleanup_timeout": args.cleanup_timeout,
+                "overall_timeout": args.overall_timeout,
+                "exitcode": owner["exitcode"],
+                "forced_termination": owner["forced_termination"],
+                "cancel_seen": owner.get("test_cancel_seen"),
+                "live_process_count": len(result["processes_alive"]),
+                "live_reader_count": len(result["report_readers_alive"]),
+            },
+            sort_keys=True,
+        )
     )
+
+
+def test_process_startup_failure_signals_without_shared_event_locks(spawned_probe_args):
+    context = _NoSharedEventContext(fail_second_start=True)
+    started = time.monotonic()
+    try:
+        result = probe.run_process_pair(
+            spawned_probe_args,
+            context=context,
+            child_target=_spawn_wait_for_startup_cancel,
+        )
+    finally:
+        context.close()
+    returned = time.monotonic()
+    _print_startup_evidence(context, spawned_probe_args, result, started, returned)
     assert time.monotonic() - started < spawned_probe_args.overall_timeout
     assert result["stop_reason"] == "startup_failure"
     assert any(
@@ -983,6 +1081,56 @@ def test_process_startup_failure_signals_without_shared_event_locks(spawned_prob
     assert result["processes_alive"] == result["report_readers_alive"] == []
     assert result["owners"][0]["test_cancel_seen"] is True
     assert result["owners"][0]["exitcode"] == 0
+    assert result["owners"][0]["forced_termination"] is False
+    assert context.startup["phase"] == "cancellation_wait"
+    assert context.startup["pid"] == result["owners"][0]["pid"]
+    assert context.startup["ready_monotonic"] == result["owners"][0]["test_ready_monotonic"]
+    assert started <= context.startup["ready_monotonic"] <= context.startup["injected_monotonic"]
+    assert context.startup["injected_monotonic"] < context.startup["pair_deadline"]
+    assert context.startup["injected_monotonic"] <= result["cancelled_monotonic"]
+    assert (
+        result["cancelled_monotonic"]
+        <= result["owners"][0]["test_cancel_seen_monotonic"]
+        <= returned
+    )
+    assert result["owners"][1]["pid"] is None
+    assert result["owners"][1]["actual_missing"] is True
+
+
+def test_process_early_startup_failure_forces_termination_without_shared_event_locks(
+    spawned_probe_args,
+):
+    context = _NoSharedEventContext(fail_second_start=True, block_before_owner=True)
+    started = time.monotonic()
+    try:
+        result = probe.run_process_pair(
+            spawned_probe_args, context=context, child_target=_spawn_wait_for_startup_cancel
+        )
+    finally:
+        context.close()
+    returned = time.monotonic()
+    _print_startup_evidence(context, spawned_probe_args, result, started, returned)
+    assert returned - started < spawned_probe_args.overall_timeout
+    assert result["stop_reason"] == "startup_failure"
+    assert any(
+        "injected second owner start failure" in error
+        for error in result["supervisor_cancel_errors"]
+    )
+    assert context.startup["phase"] == "before_owner_entry"
+    assert started <= context.startup["ready_monotonic"] <= context.startup["injected_monotonic"]
+    assert context.startup["injected_monotonic"] < context.startup["pair_deadline"]
+    assert context.startup["injected_monotonic"] <= result["cancelled_monotonic"] <= returned
+    assert result["processes_alive"] == result["report_readers_alive"] == []
+    owner = result["owners"][0]
+    assert owner["pid"] == context.startup["pid"]
+    assert owner["owner_complete"] and not owner["alive"]
+    assert owner["forced_termination"] is True
+    assert owner["exitcode"] in (-signal.SIGTERM, -signal.SIGKILL)
+    assert owner["termination"] == "missing_report"
+    assert "test_cancel_seen" not in owner
+    assert owner["actual_missing"] is True
+    assert owner["cleanup"] == []
+    assert owner["cleanup_status"] == "nongraceful_forced_or_live"
     assert result["owners"][1]["pid"] is None
     assert result["owners"][1]["actual_missing"] is True
 
@@ -1004,3 +1152,364 @@ def test_process_partial_report_kill_reaps_reader_without_shared_event_locks(spa
         assert owner["actual_missing"] is True
         assert owner["errors"]
         assert owner["cleanup"] == []
+
+
+def test_menu_profile_is_explicit_and_requires_both_single_frame_chunks():
+    assert arguments().input_profile == "none"
+    assert arguments("--input-profile", "none").connector_chunk == 2
+    for listener, connector in ((1, 2), (2, 1), (2, 2)):
+        with pytest.raises(SystemExit):
+            arguments(
+                "--input-profile",
+                "menu",
+                "--listener-chunk",
+                str(listener),
+                "--connector-chunk",
+                str(connector),
+            )
+    args = arguments("--input-profile", "menu", "--connector-chunk", "1")
+    assert args.input_profile == "menu"
+    assert args.listener_chunk == args.connector_chunk == 1
+    with pytest.raises(SystemExit):
+        arguments("--input-profile", "automatic")
+
+
+class _ReadOnlyProbeMemory:
+    def __getitem__(self, address):
+        mapped_io = {
+            0xFFFF: 0x01,  # IE
+            0xFF0F: 0x00,  # IF
+            0xFF00: 0xCF,  # JOYP
+            0xFF44: 0x07,  # LY
+            0xFF41: 0x80,  # STAT
+            0xFF40: 0x91,  # LCDC
+        }
+        if address in mapped_io:
+            return mapped_io[address]
+        return address & 255
+
+    def __setitem__(self, address, value):
+        pytest.fail("menu diagnostic attempted a memory write")
+
+
+class _MenuSession(FakeSession):
+    def __init__(self, harness, family, behavior):
+        super().__init__(harness, family)
+        self.behavior = behavior
+        self.inputs = []
+        self.steps = []
+        self._pyboy.memory = _ReadOnlyProbeMemory()
+        self._pyboy.register_file = SimpleNamespace(
+            A=1, F=0xB0, B=0, C=0x13, D=0, E=0xD8, HL=0xC123, SP=0xDFFE, PC=0x1234
+        )
+        input_addresses = {
+            name: 0xFF80 + index
+            for index, name in enumerate(
+                (
+                    "hLoadedROMBank",
+                    "hJoyInput",
+                    "hJoyPressed",
+                    "hJoyHeld",
+                    "hJoyLast",
+                    "wJoyIgnore",
+                    "wStatusFlags5",
+                    "wWalkCounter",
+                    "hVBlankOccurred",
+                    "hSerialReceivedNewData",
+                    "hSerialSendData",
+                    "hSerialReceiveData",
+                )
+            )
+        }
+
+        def address(name):
+            if behavior == "missing_symbol" or (
+                behavior == "observation_failure" and self._pyboy.frame_count > 10
+            ):
+                raise KeyError(name)
+            return input_addresses.get(name, 0xC000 + len(name))
+
+        self.symbols = SimpleNamespace(addr_of=address)
+
+    def press(self, button, *, duration=1):
+        self.record("press")
+        assert self.endpoint is not None
+        self.inputs.append(
+            (self._pyboy.frame_count - 10, button, duration, self._pyboy.mb.cpu.cycles)
+        )
+        if self.behavior == "press_failure":
+            raise RuntimeError("injected input admission failure")
+
+    def step(self, count, *, render):
+        self.record("step")
+        self.steps.append(count)
+        assert render is False
+        if self.behavior == "zero":
+            return
+        if self.behavior == "interrupt_before_frame":
+            self._pyboy.mb.cpu.cycles += 4
+            raise RuntimeError("interrupted before complete frame")
+        advance = 2 if self.behavior == "overadvance" else count
+        self._pyboy.frame_count += advance
+        self._pyboy.mb.cpu.cycles += 100 * advance
+        if self.behavior == "interrupt_after_frame":
+            raise RuntimeError("interrupted after actual frame")
+
+
+def _run_menu_owner(*extra, behavior="complete", profile="menu", checkpoint=None):
+    """One synthetic owner runs production scheduling without a peer CPU or ROM."""
+    args = arguments(
+        "--input-profile",
+        profile,
+        "--listener-chunk",
+        "1",
+        "--connector-chunk",
+        "1",
+        "--frame-limit",
+        "77",
+        *extra,
+    )
+    harness = Harness()
+    session = _MenuSession(harness, "blue", behavior)
+    cancelled = threading.Event()
+
+    class Done:
+        def set(self):
+            cancelled.set()
+
+    records = [{"side": "listener", "calls": [], "cleanup": [], "errors": []}, {}]
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        with socket.create_connection(listener.getsockname(), timeout=1) as connector:
+            accepted, _ = listener.accept()
+            try:
+                probe._run_owner(
+                    0,
+                    args,
+                    records,
+                    [accepted, connector],
+                    cancelled,
+                    Done(),
+                    threading.Barrier(1),
+                    [None, None],
+                    threading.Lock(),
+                    time.monotonic() + 3,
+                    time.monotonic() + 5,
+                    lambda *args, **kwargs: session,
+                    harness.endpoint,
+                    harness.assets,
+                    checkpoint,
+                )
+            finally:
+                accepted.close()
+    return session, records[0]
+
+
+def test_menu_profile_schedules_once_per_actual_offset_without_press_ticks():
+    session, record = _run_menu_owner()
+    assert record["errors"] == []
+    assert record["termination"] == "frame_bound"
+    expected = [
+        (0, "up", 6),
+        (20, "up", 6),
+        (40, "up", 6),
+        (60, "a", 4),
+        (68, "a", 4),
+        (76, "a", 4),
+    ]
+    assert [event[:3] for event in session.inputs] == expected
+    assert [event[3] for event in session.inputs] == [
+        100 + offset * 100 for offset, _, _ in expected
+    ]
+    assert session.steps == [1] * 77
+    assert record["final"]["frame_count"] == record["final"]["session_tick"] == 87
+    assert record["final"]["cpu_cycles"] == 7800
+    assert all(
+        call["actual_completed_frames"] == call["requested_frames"] == 1 for call in record["calls"]
+    )
+    assert [call["frame_offset"] for call in record["calls"]] == list(range(77))
+    queued = [call["input"] for call in record["calls"] if "input" in call]
+    assert queued == [
+        {
+            "button": button,
+            "duration": duration,
+            "actual_completed_frame_offset": offset,
+            "status": "queued",
+        }
+        for offset, button, duration in expected
+    ]
+    for observation in [record["loaded"], record["attached"], record["final"]] + [
+        observation for call in record["calls"] for observation in (call["before"], call["after"])
+    ]:
+        assert len(observation["menu"]) == 10
+        assert observation["menu"]["wCurMap"] == len("wCurMap")
+
+
+@pytest.mark.parametrize(
+    "behavior,frames,cycles,status,termination",
+    [
+        ("zero", 0, 0, "completed_no_progress", "no_progress"),
+        ("interrupt_before_frame", 0, 4, "interrupted", "owner_failure"),
+        ("interrupt_after_frame", 1, 100, "interrupted", "owner_failure"),
+        ("overadvance", 2, 200, "completed_partial", "incomplete_public_call"),
+    ],
+)
+def test_menu_profile_terminal_call_keeps_actual_progress_and_no_duplicate_input(
+    behavior,
+    frames,
+    cycles,
+    status,
+    termination,
+):
+    session, record = _run_menu_owner(behavior=behavior)
+    assert session.steps == [1]
+    assert [event[:3] for event in session.inputs] == [(0, "up", 6)]
+    assert record["termination"] == termination
+    call = record["calls"][0]
+    assert call["status"] == status
+    assert call["actual_completed_frames"] == frames
+    assert call["after"]["frame_count"] == record["final"]["frame_count"] == 10 + frames
+    assert record["final"]["cpu_cycles"] == 100 + cycles
+    assert record["cleanup"] == ["endpoint_detached", "session_closed_without_save"]
+
+
+def test_none_profile_preserves_no_input_and_unequal_chunk_support():
+    session, record = _run_menu_owner("--listener-chunk", "2", "--frame-limit", "4", profile="none")
+    assert session.inputs == []
+    assert session.steps == [2, 2]
+    assert record["termination"] == "frame_bound"
+    assert record["final"]["frame_count"] == 14
+
+
+def test_process_spawn_propagates_explicit_menu_profile(spawned_probe_args):
+    spawned_probe_args.input_profile = "menu"
+    spawned_probe_args.connector_chunk = 1
+    spawned_probe_args.test_scenario = "failure"
+    result = probe.run_process_pair(spawned_probe_args, child_target=_spawn_diagnostic_owner)
+    assert result["processes_alive"] == result["report_readers_alive"] == []
+    assert [owner["test_input_profile"] for owner in result["owners"]] == ["menu", "menu"]
+
+
+def test_process_report_overflow_is_explicit_bounded_and_not_success(monkeypatch, tmp_path):
+    packets = []
+
+    def huge_owner(index, args, records, *rest):
+        records[index].update(
+            calls=[{"evidence": "x" * (probe.MAX_REPORT_BYTES + 1)}],
+            final={"frame_count": 123},
+            termination="frame_bound",
+        )
+
+    monkeypatch.setattr(probe, "_run_owner", huge_owner)
+    monkeypatch.setattr(probe, "runtime_identity", dict)
+    shared = probe._SharedFlag(multiprocessing.get_context("spawn").RawValue("B", 0))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as unused:
+        # process_owner closes its socket; its injected owner performs no transport.
+        sender = SimpleNamespace(send_bytes=packets.append, close=lambda: None)
+        probe.process_owner(
+            vars(arguments()),
+            0,
+            unused,
+            shared,
+            threading.Event(),
+            threading.Barrier(1),
+            time.monotonic() + 1,
+            time.monotonic() + 2,
+            sender,
+            str(tmp_path / "overflow.stderr"),
+        )
+    assert len(packets) == 1
+    assert len(packets[0]) <= probe.MAX_REPORT_BYTES
+    report = json.loads(packets[0])
+    assert report["termination"] == "report_overflow"
+    assert report["actual_missing"] is True
+    assert report["errors"] == ["owner report exceeds byte limit"]
+    assert "final" not in report
+    assert "stdout" in report and "stderr" in report
+    artifact = Path(report["full_evidence"]["path"]).read_bytes()
+    assert len(artifact) == report["full_evidence"]["bytes"] > probe.MAX_REPORT_BYTES
+    assert hashlib.sha256(artifact).hexdigest() == report["full_evidence"]["sha256"]
+    assert json.loads(artifact)["final"] == {"frame_count": 123}
+    assert len(json.loads(artifact)["calls"][0]["evidence"]) == probe.MAX_REPORT_BYTES + 1
+
+
+@pytest.mark.parametrize("runner", ["run_pair", "run_process_pair"])
+def test_programmatic_menu_profile_rejects_multiframe_before_owner_creation(runner):
+    args = arguments()
+    args.input_profile = "menu"
+    with pytest.raises(ValueError):
+        getattr(probe, runner)(args)
+
+
+def test_menu_profile_capacity_stops_before_another_input_or_tick():
+    def expand_evidence(record):
+        if record["phase"] == "public_tick_returned":
+            record["test_evidence"] = "x" * probe.MAX_REPORT_BYTES
+
+    session, record = _run_menu_owner(checkpoint=expand_evidence)
+    assert session.steps == [1]
+    assert len(session.inputs) == 1
+    assert record["termination"] == "owner_failure"
+    assert any("menu report capacity reached" in error for error in record["errors"])
+    assert record["final"]["frame_count"] == 11
+    assert len(record["test_evidence"]) == probe.MAX_REPORT_BYTES
+
+
+def test_menu_profile_missing_symbol_fails_before_attach_or_input():
+    session, record = _run_menu_owner(behavior="missing_symbol")
+    assert session.inputs == session.steps == []
+    assert "bind" not in session.calls
+    assert record["termination"] == "owner_failure"
+    assert any("wCurMap" in error for error in record["errors"])
+    assert record["last_native_observation"]["frame_count"] == 10
+
+
+def test_menu_profile_observation_failure_preserves_completed_native_frame():
+    session, record = _run_menu_owner(behavior="observation_failure")
+    assert session.steps == [1]
+    assert record["termination"] == "owner_failure"
+    call = record["calls"][0]
+    assert call["actual_completed_frames"] == 1
+    assert call["after"]["frame_count"] == record["final"]["frame_count"] == 11
+    assert "wCurMap" in call["observation_error"]
+
+
+def test_menu_profile_press_failure_keeps_native_observations_without_tick():
+    session, record = _run_menu_owner(behavior="press_failure")
+    assert session.steps == []
+    assert len(session.inputs) == 1
+    assert record["termination"] == "owner_failure"
+    call = record["calls"][0]
+    assert call["input"]["status"] == "requested"
+    assert call["status"] == "interrupted"
+    assert call["actual_completed_frames"] == 0
+    assert call["before"]["frame_count"] == call["after"]["frame_count"] == 10
+
+
+def test_menu_profile_checkpoints_queued_input_before_public_tick(monkeypatch):
+    checkpoints = []
+    original = _MenuSession.step
+
+    def capture(record):
+        checkpoints.append(json.loads(json.dumps(record)))
+
+    def checked_step(self, count, *, render):
+        checkpoint = checkpoints[-1]
+        assert checkpoint["phase"] == "input_queued_before_public_tick"
+        call = checkpoint["calls"][-1]
+        assert call["input"] == {
+            "button": "up",
+            "duration": 6,
+            "actual_completed_frame_offset": 0,
+            "status": "queued",
+        }
+        assert call["before"]["frame_count"] == self._pyboy.frame_count == 10
+        assert "after" not in call
+        return original(self, count, render=render)
+
+    monkeypatch.setattr(_MenuSession, "step", checked_step)
+    session, record = _run_menu_owner("--frame-limit", "1", checkpoint=capture)
+    assert session.steps == [1]
+    assert record["errors"] == []
+    assert record["final"]["frame_count"] == 11

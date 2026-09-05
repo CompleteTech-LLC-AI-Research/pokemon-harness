@@ -70,11 +70,14 @@ UNIT_MODULES = frozenset(
         "test_mcp_lifecycle_hardening.py",
         "test_link_transport.py",
         "test_mcp_server.py",
+        "test_mcp_timed_remote.py",
+        "test_mcp_timed_stdio.py",
         "test_native_execution_governor.py",
         "test_native_hook_exceptions.py",
         "test_network_backend.py",
         "test_probe_timed_rom_pair.py",
         "test_production_gate.py",
+        "test_pyboy_link_imports.py",
         "test_pyboy_link_session.py",
         "test_remote_endpoint.py",
         "test_runtime_packaging.py",
@@ -95,6 +98,8 @@ UNIT_MODULES = frozenset(
         "test_state_text.py",
         "test_symbol_loader.py",
         "test_timed_link_session.py",
+        "test_timed_input_observation.py",
+        "test_timed_menu_probe.py",
         "test_timed_remote.py",
         "test_timed_wire.py",
     }
@@ -286,6 +291,70 @@ TIER_REQUIRED_TESTS = {
 # lane, whose exact name is owned by that lane.
 TIMING_SENSITIVE_TESTS = frozenset(
     {
+        (
+            "test_mcp_timed_stdio.py",
+            "test_authored_timed_stdio_pair_frames_and_cleanup",
+        ),
+        (
+            "test_mcp_timed_stdio.py",
+            "test_authored_timed_stdio_expected_peer_mismatch",
+        ),
+        (
+            "test_timed_input_observation.py",
+            "test_actual_foreign_thread_cannot_observe",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_status_is_immutable_and_available_while_busy",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_queue_bound_and_cancelled_request_never_runs",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_expired_queued_request_never_executes_later",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_queued_cancel_preserves_active_real_epoch",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_real_partial_progress_active_interrupt_is_terminal",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_async_cancel_keeps_event_loop_responsive_during_endpoint_cleanup",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_close_retains_busy_owner_until_retry_and_closes_session_on_owner",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_mcp_cached_status_tool_and_resource_return_while_owner_blocked",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_stored_protocol_error_precedes_active_caller_cancellation",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_blocked_cancellation_keeps_queue_and_cleanup_deadlines_live",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_blocked_cancellation_retains_failed_unbind_until_explicit_retry",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_server_outer_deadline_preserves_canonical_protocol_error",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_request_wait_has_independent_deadline_without_supervisor",
+        ),
         ("test_session_timed_execution.py", "test_binding_lock_wait_is_bounded"),
         (
             "test_session_timed_execution.py",
@@ -376,7 +445,19 @@ TIMING_SENSITIVE_TESTS = frozenset(
         ),
         (
             "test_probe_timed_rom_pair.py",
+            "test_process_early_startup_failure_forces_termination_without_shared_event_locks",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
             "test_process_partial_report_kill_reaps_reader_without_shared_event_locks",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_spawn_propagates_explicit_menu_profile",
+        ),
+        (
+            "test_probe_timed_rom_pair.py",
+            "test_process_report_overflow_is_explicit_bounded_and_not_success",
         ),
         ("test_network_backend.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
         (

@@ -36,6 +36,16 @@ VERSIONS = ("red_color", "blue_color", "yellow")
 QUANTUM_CYCLES = 256
 MAX_REPORT_BYTES = 1_048_576
 STDERR_LIMIT = 65_536
+MENU_TERMINAL_RESERVE = 131_072
+
+
+def validate_input_profile(args):
+    profile = getattr(args, "input_profile", "none")
+    if profile not in ("none", "menu"):
+        raise ValueError("unknown input profile")
+    if profile == "menu" and (args.listener_chunk != 1 or args.connector_chunk != 1):
+        raise ValueError("menu input requires listener_chunk=connector_chunk=1")
+    return profile
 
 
 def positive_float(value):
@@ -58,6 +68,7 @@ def parse_args(argv=None):
     parser.add_argument("--connector", choices=VERSIONS, default="yellow")
     parser.add_argument("--both-orientations", action="store_true")
     parser.add_argument("--owner-mode", choices=("thread", "process"), default="thread")
+    parser.add_argument("--input-profile", choices=("none", "menu"), default="none")
     parser.add_argument("--listener-chunk", type=positive_int, default=1)
     parser.add_argument("--connector-chunk", type=positive_int, default=2)
     parser.add_argument("--frame-limit", type=positive_int, default=6)
@@ -70,7 +81,12 @@ def parse_args(argv=None):
     parser.add_argument("--max-edge-lateness", type=positive_int, required=True)
     parser.add_argument("--repo-root", type=Path, default=ROOT)
     parser.add_argument("--output", type=Path, required=True)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    try:
+        validate_input_profile(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def resolve_assets(version, repo_root):
@@ -219,6 +235,31 @@ def _run_owner(
     version = (args.listener, args.connector)[index]
     chunk = (args.listener_chunk, args.connector_chunk)[index]
     record.update(version=version, owner_thread=threading.get_ident(), pid=os.getpid())
+    profile = validate_input_profile(args)
+    scheduled_offsets = set()
+
+    def observed():
+        record.pop("last_native_observation", None)
+        result = observe(session, endpoint)
+        if profile == "menu":
+            from scripts._timed_menu_probe import read_input_snapshot, read_menu_snapshot
+
+            try:
+                result["menu"] = read_menu_snapshot(
+                    symbols=session.symbols,
+                    memory=session._pyboy.memory,
+                    owner_thread_id=record["owner_thread"],
+                )
+                result["input_state"] = read_input_snapshot(
+                    symbols=session.symbols,
+                    memory=session._pyboy.memory,
+                    register_file=session._pyboy.register_file,
+                    owner_thread_id=record["owner_thread"],
+                )
+            except Exception:
+                record["last_native_observation"] = result
+                raise
+        return result
 
     def publish(phase):
         record["phase"] = phase
@@ -239,7 +280,7 @@ def _run_owner(
             raise TimeoutError("diagnostic expired during asset validation")
         session = session_factory(assets["rom"], assets["sym"], **assets["pins"])
         session.load_state(assets["state"])
-        record["loaded"] = observe(session)
+        record["loaded"] = observed()
         publish("loaded")
         endpoint = endpoint_factory(
             sockets[index],
@@ -263,24 +304,46 @@ def _run_owner(
                 endpoint, timeout_s=max(0.001, deadline - time.monotonic())
             )
             bound = True
-        record["attached"] = observe(session, endpoint)
+        record["attached"] = observed()
         record["metadata"] = _jsonable(endpoint.metadata)
         publish("attached_waiting_peer")
         barrier.wait(timeout=max(0.001, deadline - time.monotonic()))
         initial = session._pyboy.frame_count
         while not cancelled.is_set() and time.monotonic() < deadline:
-            remaining = args.frame_limit - (session._pyboy.frame_count - initial)
+            offset = session._pyboy.frame_count - initial
+            remaining = args.frame_limit - offset
             if remaining <= 0:
                 record["termination"] = "frame_bound"
                 break
+            if profile == "menu" and len(json.dumps(_jsonable(record)).encode()) > (
+                MAX_REPORT_BYTES - MENU_TERMINAL_RESERVE
+            ):
+                raise RuntimeError("menu report capacity reached; no further input or tick")
             call = {
+                "frame_offset": offset,
                 "started_monotonic": time.monotonic(),
                 "requested_frames": min(chunk, remaining),
-                "before": observe(session, endpoint),
+                "before": observed(),
             }
             record["calls"].append(call)
             publish("public_tick")
             try:
+                if profile == "menu" and offset not in scheduled_offsets:
+                    from scripts._timed_menu_probe import menu_input_at
+
+                    scheduled_offsets.add(offset)
+                    suggested = menu_input_at(offset)
+                    if suggested is not None:
+                        button, duration = suggested
+                        call["input"] = {
+                            "button": button,
+                            "duration": duration,
+                            "actual_completed_frame_offset": offset,
+                            "status": "requested",
+                        }
+                        session.press(button, duration=duration)
+                        call["input"]["status"] = "queued"
+                        publish("input_queued_before_public_tick")
                 session.step(call["requested_frames"], render=False)
                 call["status"] = "completed"
             except BaseException as exc:
@@ -290,12 +353,17 @@ def _run_owner(
             finally:
                 call["elapsed_s"] = time.monotonic() - call["started_monotonic"]
                 try:
-                    call["after"] = observe(session, endpoint)
+                    call["after"] = observed()
                     call["actual_completed_frames"] = (
                         call["after"]["frame_count"] - call["before"]["frame_count"]
                     )
                     publish("public_tick_returned")
                 except BaseException as exc:
+                    if "last_native_observation" in record:
+                        call["after"] = record["last_native_observation"]
+                        call["actual_completed_frames"] = (
+                            call["after"]["frame_count"] - call["before"]["frame_count"]
+                        )
                     call["observation_error"] = f"{type(exc).__name__}: {exc}"
                     if "error" not in call:
                         raise
@@ -317,9 +385,11 @@ def _run_owner(
         cancelled.wait(max(0, overall - time.monotonic()))
         if session is not None:
             try:
-                record["final"] = observe(session, endpoint)
+                record["final"] = observed()
                 publish("owner_unwound")
             except BaseException as exc:
+                if "last_native_observation" in record:
+                    record["final"] = record["last_native_observation"]
                 record["errors"].append(f"final observation: {exc}")
         detached = endpoint is None
         try:
@@ -342,6 +412,7 @@ def _run_owner(
 
 def run_pair(args, *, session_factory=None, endpoint_factory=None, asset_resolver=None):
     """Dependency seams allow asset-free owner/lifecycle tests, not gameplay claims."""
+    validate_input_profile(args)
     from pokered_harness.link.timed_remote import TimedRemoteEndpoint
     from pokered_harness.session import Session
 
@@ -611,6 +682,10 @@ def process_owner(
                 record["errors"].append(f"{name} capture did not complete cleanly")
         payload = json.dumps(_jsonable(record)).encode()
         if len(payload) > MAX_REPORT_BYTES:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix="poke-timed-owner-overflow-", suffix=".json", delete=False
+            ) as artifact:
+                artifact.write(payload)
             record = {
                 "side": record["side"],
                 "calls": [],
@@ -620,6 +695,11 @@ def process_owner(
                 "actual_missing": True,
                 "stderr": stderr,
                 "stdout": stdout,
+                "full_evidence": {
+                    "path": artifact.name,
+                    "bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                },
             }
             payload = json.dumps(record).encode()
         try:
@@ -630,6 +710,7 @@ def process_owner(
 
 def run_process_pair(args, *, context=None, child_target=None):
     """Two spawn owners with bounded report drains and terminate/kill fallback."""
+    validate_input_profile(args)
     context = context or multiprocessing.get_context("spawn")
     child_target = child_target or process_owner
     started = time.monotonic()
