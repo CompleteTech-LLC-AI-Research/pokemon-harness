@@ -17,9 +17,11 @@ import socket as _socket
 import struct
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
+from pokered_harness.link import network_backend as network_module
 from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
@@ -31,6 +33,229 @@ _OP_EDGE_REQ = 0x10
 _OP_EDGE_RESP = 0x11
 _OP_SYNC = 0x20
 _OP_EXCHANGE = 0x30
+
+
+def test_external_service_does_not_hold_dispatch_while_waiting_for_serial_gate():
+    """Tick A must still dispatch after external service B waits for its gate."""
+    a, b = NetworkBackend.pair()
+    waiting = threading.Event()
+    errors = []
+    results = []
+
+    class ObservedGate(SerialOperationGate):
+        def __enter__(self):
+            if threading.current_thread() is worker:
+                waiting.set()
+            return super().__enter__()
+
+    gate = ObservedGate()
+    b._serial_gate = gate
+    b._dispatch_to_owner = True
+    b._local_core = _CompletingSlaveCore()
+    # Both queued edges are real owner-dispatch requests. No receiver is
+    # needed: keeping completed responses queued makes accounting deterministic.
+    first = network_module._InboundEdge(1)
+    second = network_module._InboundEdge(0)
+    b._edge_queue.put_nowait(first)
+    b._edge_queue.put_nowait(second)
+    b._edge_pending = 2
+
+    def external_service():
+        try:
+            results.append(b.service_pending_edges(max_edges=1))
+        except BaseException as exc:  # noqa: BLE001 - propagate worker failures below
+            errors.append(exc)
+
+    worker = threading.Thread(target=external_service, daemon=True)
+    try:
+        with gate:
+            worker.start()
+            assert waiting.wait(timeout=1.0)
+            # B has reached gate admission. With the old
+            # ordering it already holds dispatch, creating the exact inversion.
+            # Probe nonblocking so a regression fails without wedging pytest.
+            acquired = b._owner_dispatch_lock.acquire(blocking=False)
+            assert acquired, "external service holds dispatch while waiting for serial gate"
+            b._owner_dispatch_lock.release()
+            assert b.service_pending_edges(max_edges=1) == 1
+            # A waiter must not reserve the first edge before owning the gate:
+            # the tick owner must apply that first edge, preserving wire FIFO.
+            assert b._completed_edge_queue.get_nowait() is first
+            assert b._local_core.SB == 1
+            b._local_core.transfer_enabled = 1
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert errors == []
+        assert results == [1]
+        assert b._completed_edge_queue.get_nowait() is second
+        assert b._local_core.SB == 0
+        assert b._stats["owner_edge_applied"] == 2
+    finally:
+        worker.join(timeout=1.0)
+        a.stop()
+        b.stop()
+
+
+@pytest.mark.parametrize("lock_name", ["_edge_call_lock", "_edge_response_lock"])
+@pytest.mark.parametrize("acquired", [False, True], ids=["timeout", "scheduler-overshoot"])
+def test_edge_admission_expiry_preserves_active_response(monkeypatch, lock_name, acquired):
+    """An unadmitted caller cannot close or consume the active transaction."""
+    a, b = NetworkBackend.pair()
+    now = [100.0]
+    waits = []
+    releases = []
+
+    class ExpiringLock:
+        def acquire(self, *, timeout):
+            waits.append(timeout)
+            # Model scheduler delay through the absolute deadline, including
+            # a lock that becomes available just as its caller resumes.
+            now[0] = 110.0 if acquired else round(now[0] + timeout, 12)
+            return acquired
+
+        def release(self):
+            releases.append(True)
+
+    def forbidden_close(*args, **kwargs):
+        pytest.fail("admission timeout called terminal cleanup")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(network_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+            patch.setattr(a, lock_name, ExpiringLock())
+            patch.setattr(a, "_mark_closed", forbidden_close)
+            a._edge_inflight = True
+            a._resp_queue.put_nowait(1)
+            before = dict(a._stats)
+            with pytest.raises(NetworkBackendError, match="admission timed out"):
+                a.on_edge(our_bit=0, our_role=1)
+            assert waits
+            assert all(0 < timeout <= network_module._SEND_POLL_SECONDS for timeout in waits)
+            if acquired:
+                assert waits == [network_module._SEND_POLL_SECONDS]
+            else:
+                assert len(waits) == round(10.0 / network_module._SEND_POLL_SECONDS)
+                assert sum(waits) == pytest.approx(10.0)
+            assert releases == ([True] if acquired else [])
+            assert a.connected
+            assert not a._closed_event.is_set()
+            assert a._reader_exc is None
+            assert a._edge_inflight is True
+            assert a._resp_queue.get_nowait() == 1
+            assert a._resp_queue.empty()
+            assert a._stats == before
+            with pytest.raises(BlockingIOError):
+                b._sock.recv(1)
+            # The successfully acquired outer lock must also be released
+            # when response-lock admission expires.
+            if lock_name == "_edge_response_lock":
+                assert a._edge_call_lock.acquire(blocking=False)
+                a._edge_call_lock.release()
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_edge_admission_and_write_waits_reduce_original_response_budget(monkeypatch):
+    """Every phase spends the original ten seconds, including both admissions."""
+    a, b = NetworkBackend.pair()
+    now = [100.0]
+    waits = []
+
+    class SpendingLock:
+        def __init__(self, name, elapsed):
+            self.name = name
+            self.elapsed = elapsed
+
+        def acquire(self, *, timeout):
+            waits.append((self.name, timeout))
+            # Successful acquisition may resume late after a scheduler stall;
+            # subsequent phases must still use the original absolute deadline.
+            now[0] += self.elapsed
+            return True
+
+        def release(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    def send(frame, *, timeout, operation):
+        assert frame == struct.pack(">BB", _OP_EDGE_REQ, 1)
+        assert operation == "EDGE_REQ"
+        waits.append(("send", timeout))
+        now[0] += 0.003
+
+    def receive(q, *, timeout, timeout_message):
+        assert q is a._resp_queue
+        assert "10s" in timeout_message
+        waits.append(("response", timeout))
+        return 0
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(network_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+            patch.setattr(a, "_edge_call_lock", SpendingLock("call", 9.98))
+            patch.setattr(a, "_edge_response_lock", SpendingLock("admission-response", 0.01))
+            patch.setattr(a, "_write_lock", SpendingLock("write", 0.004))
+            patch.setattr(a, "_send_frame", send)
+            patch.setattr(a, "_queue_get", receive)
+            assert a.on_edge(our_bit=1, our_role=1) == 0
+            assert [name for name, _ in waits] == [
+                "call", "admission-response", "write", "send", "response"
+            ]
+            assert [timeout for _, timeout in waits] == pytest.approx(
+                [network_module._SEND_POLL_SECONDS, 0.02, 0.01, 0.006, 0.003]
+            )
+            assert a._edge_inflight is False
+            assert a._stats["edge_req_sent"] == 1
+            assert a._stats["edge_resp_received"] == 1
+    finally:
+        a.stop()
+        b.stop()
+
+
+@pytest.mark.parametrize("acquired", [False, True], ids=["waiting", "just-acquired"])
+def test_edge_admission_observes_close_without_waiting_full_budget(monkeypatch, acquired):
+    a, b = NetworkBackend.pair()
+    waits = []
+    releases = []
+
+    class ClosingLock:
+        def acquire(self, *, timeout):
+            waits.append(timeout)
+            assert len(waits) == 1, "admission retried after terminal close"
+            a._closed = True
+            a._closed_event.set()
+            return acquired
+
+        def release(self):
+            releases.append(True)
+
+    def forbidden_close(*args, **kwargs):
+        pytest.fail("unadmitted caller attempted terminal cleanup")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(network_module, "time", SimpleNamespace(monotonic=lambda: 100.0))
+            patch.setattr(a, "_edge_call_lock", ClosingLock())
+            patch.setattr(a, "_mark_closed", forbidden_close)
+            with pytest.raises(NetworkBackendError, match="closed"):
+                a.on_edge(our_bit=1, our_role=1)
+            assert waits == [network_module._SEND_POLL_SECONDS]
+            assert releases == ([True] if acquired else [])
+            assert a._edge_inflight is False
+            assert a._stats["edge_req_sent"] == 0
+            with pytest.raises(BlockingIOError):
+                b._sock.recv(1)
+    finally:
+        # This test models the terminal flag transition without closing the
+        # socket, so release that owned descriptor explicitly.
+        a._sock.close()
+        b.stop()
 
 
 # ---------------------------------------------------------------------------

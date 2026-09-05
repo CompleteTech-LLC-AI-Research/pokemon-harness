@@ -185,6 +185,7 @@ _REVIEWED_SUBPROCESS_UNIT_TESTS = (
     "test_link_menu_history_failure_summary_survives_large_result_tail",
     "test_link_menu_history_missing_call_symbols_remains_observable",
     "test_link_menu_history_rejects_post_call_outside_bank",
+    "test_peer_trace_watchdog",
     "test_setup_handshake_failure_returns_bounded_non_success_sentinels",
     "test_collect_pair_rejects_missing_or_partial_required_rows",
     "test_strict_acceptance_rejects_link_menu_only_result",
