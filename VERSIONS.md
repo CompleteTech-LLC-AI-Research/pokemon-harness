@@ -5,7 +5,49 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Current candidate status: `PARTIAL` — not production-ready. PR #56 head
+Current candidate status at `1f19707`: `PARTIAL` — not production-ready.
+The dual source/native unit gate collected `1,320` tests per runtime and
+passed `1,176/1,176` unit tests plus `65/65` total timing checks per runtime
+(`13` cases in each of five repetitions), with zero failures, skips, xfails,
+xpasses, or errors. Its `19/19` trade and `19/19` battle declarations were
+not executed by this asset-free unit gate. The retained report is
+`pokemon-qualification-dual-unit-1f19707-20260905/gate-report.json`.
+
+Canonical Red/Blue/Yellow boot checks at `1f19707` passed source `3/3` in
+`6.74s` and native `3/3` in `1.89s`, with zero failures, skips, or errors
+and one SDL warning each. These checks exercise 120 frames plus state and
+save/load checks; they do not establish gameplay qualification.
+
+The freshly built native runtime is documented in
+`poke-serial-native-20260905-V7dHOU/QUALIFICATION.md`: its base is `e1686ca`
+with serial overlays, and its serial source SHA-256 matches `1f19707`.
+That build record is scoped provenance, not a clean full gameplay gate.
+The native Blue-color listener / Yellow connector replay at `02a8e85`
+(runtime identical to `1f19707`) failed after `721.67s`; both peers exited
+cleanly with return code `1`. Blue never reached LinkMenu and executed
+`CloseLinkConnection` once at local tick `1332`; Yellow reached LinkMenu at
+local tick `628` and input at `660`. There were `6,248` balanced native edges,
+zero transport errors, and no keepalive traffic. Peer-local ticks are not a
+common clock: this supports investigating time coordination, not a precise
+root-cause claim. Retained evidence is
+`pokemon-native-blue-yellow-02a8e85-LMtfZm/output.log` and `result.json`.
+
+The original dual unit gate at `02a8e85` failed native timing at `64/65`
+and lost failed test identity and iteration output through a gate-reporting bug.
+Subsequent verified
+test races were corrected before the passing `1f19707` dual gate; the older
+failure remains historical evidence. Candidate fixes cover serial idle and
+external-clock hints beyond `2^31`, dispatch lock ordering and admission
+deadlines, failure-first gate evidence, and partial pipe capture. Peer tracing
+is opt-in via positive finite `POKERED_PEER_TRACE_AFTER_SECONDS`, with optional
+existing `POKERED_PEER_TRACE_DIR` and at most two one-shot dumps. These are
+diagnostics with no ROM changes. Experimental coordinator `344aa95` is on
+another branch and is not included in this candidate. No clean full source/native
+gameplay qualification is established.
+
+### Prior candidate evidence
+
+Historical PR #56 head
 `86b66577856780b2d880222a1d6986d38af88333` has scoped source and native
 unit/timing passes: each collected `1,201` tests, passed `1,060/1,060` unit
 tests, and passed `55/55` total timing checks (`11` cases across five runs),
@@ -25,28 +67,30 @@ log. Native head association is recorded in `result-86b6657.txt` and
 `identity.txt` alongside that qualification bundle, identifying the clean,
 read-only target and exact-commit build archive.
 
-The parent full source gate at `2eb21a5` remains ongoing: unit `980/980` and
-local `47/47` passed, but remote failed `22/23` with a Yellow/Yellow LinkMenu
-backend-close error. The same ongoing run also failed the
+The historical full source gate snapshot at `2eb21a5` recorded unit `980/980`
+and local `47/47` passes, but remote failed `22/23` with a Yellow/Yellow LinkMenu
+backend-close error. The same run also failed the
 Blue-color listener / Red-color connector
 trade at the Trade Center warp after 936 applied edges, with no backend errors.
-This is a failed row, not a completed strict-matrix result. The
+Its trade tier finished at `18/19`; battle was ongoing at that snapshot, not
+a current live-status claim. The historical
 full native run at `f4fddfc` passed unit `1,060/1,060` and local `47/47`, but
 remote failed `11/12` on Yellow/Yellow LinkMenu. That listener executed the
 ROM's `CloseLinkConnection` before
 LinkMenu, after 6,248 balanced edges; it is distinct from the source shutdown
-race fixed in PR #56. Its strict rows are still
-running; the failed remote tier prevents full-gate qualification regardless
+race fixed in PR #56. Its trade tier was ongoing with two failures at that
+snapshot; the failed remote tier prevents full-gate qualification regardless
 of their results. The bundle is `pokemon-full-native-f4fddfc-20260905`;
 no native gameplay pass is established by these scoped results.
 
-Independent integration verification of the uncommitted evidence worktree
+Historical independent integration verification of the uncommitted evidence worktree
 passed fixture-free Red/Blue/Yellow boot/state/hash tests: source `3/3` in
 `6.74s` and native `3/3` in `1.64s`, with only an SDL warning and
 no external fixture loading or direct RAM edits. Normal save/load restores
 self-captured emulator state. Both commands exited `0`.
 These scoped runs are not attributed to either
-committed head above; exact committed-candidate qualification remains pending.
+committed head above; the newer exact-head boot results are recorded separately
+in the opening summary and do not establish full qualification.
 Complete candidate source/native
 gates, authentic strict trade/battle without test-only game-state bypasses,
 MCP startup/state/action/lifecycle checks, serialized emulator access and
@@ -108,7 +152,7 @@ matrix deadlines, runtime-provenance checks, fail-closed subprocess result
 validation, and network close diagnostics. The native/Cython strict-gate result
 below predates the targeted fix and remains layer-scoped. The pre-fix
 native/Cython strict real-ROM gate recorded at
-`/tmp/poke-harness-native-strict-evidence-a8576b5` declared and executed 19/19
+`poke-harness-native-strict-evidence-a8576b5` declared and executed 19/19
 entries in each tier, with trade `16/19` and battle `17/19`; its failure rows
 are recorded below. The post-fix serialized source strict-trade production
 gate below completed 19/19 declared and executed trade entries and finished
@@ -243,7 +287,7 @@ coordinator and remote TCP transport. The optional Cython/native build's
 compiled serial-contract probe and focused 110/110 serial-link suite are
 historical prior-candidate diagnostic evidence. The pre-fix native/Cython
 strict real-ROM gate is recorded at
-`/tmp/poke-harness-native-strict-evidence-a8576b5`; it used Python `3.12.13`
+`poke-harness-native-strict-evidence-a8576b5`; it used Python `3.12.13`
 with PyBoy `2.7.0` and fork `c565df66c3731fad2856169a90f6bbec99925915`, and
 declared and executed 19/19 entries in each tier. Its trade result is `16/19`
 and its battle result is `17/19`; the failure details and evidence boundary
@@ -413,7 +457,7 @@ summary. Neither record establishes a complete current candidate gate.
 ### Post-fix serialized source strict-trade production gate
 
 The post-fix serialized source strict-trade production gate at
-`/tmp/poke-harness-source-serial-acceptance-20260904/evidence` used source
+`poke-harness-source-serial-acceptance-20260904/evidence` used source
 Python `3.12.13`, PyBoy `2.7.0` with fork
 `c565df66c3731fad2856169a90f6bbec99925915`, bit-accurate serial, and
 `matrix-workers=1`. This evidence is after code fix `7b4b5b72` (cherry-picked
@@ -441,7 +485,7 @@ The evidence bundle's SHA-256 hashes are:
 ### Pre-fix native/Cython strict real-ROM gate
 
 The pre-fix gate artifact at
-`/tmp/poke-harness-native-strict-evidence-a8576b5` records
+`poke-harness-native-strict-evidence-a8576b5` records
 Python `3.12.13`, PyBoy `2.7.0`, and fork
 `c565df66c3731fad2856169a90f6bbec99925915`. It declared and executed all
 19/19 entry points in each tier. No native owner/IRQ errors occurred. Every

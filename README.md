@@ -9,14 +9,57 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-**Status: `PARTIAL` — not production-ready.** The recorded source battle
-matrix passed `19/19`; the recorded four-worker source trade matrix failed
-at `18/19`. The ongoing full source gate at
-`2eb21a5b45e67f47bb89697daeed76509adf4b13` has passed unit `980/980` and
+**Status: `PARTIAL` — not production-ready.** At `1f19707`, source and
+native each passed `1,176/1,176` unit tests and `65/65` total timing checks
+(`13` cases in each of five repetitions), with zero failures, skips, xfails,
+xpasses, or errors. Each collected `1,320` tests; `19/19` trade and `19/19`
+battle entrypoints were declared but not executed by this unit-only gate.
+The external report is `pokemon-qualification-dual-unit-1f19707-20260905/gate-report.json`.
+Canonical Red/Blue/Yellow boot checks at the same head passed source `3/3`
+in `6.74s` and native `3/3` in `1.89s`, with zero failures, skips, or errors
+and one SDL warning per runtime. These checks run 120 frames plus
+state/save/load assertions; they do not establish gameplay qualification.
+
+The fresh native build is documented in the external bundle
+`poke-serial-native-20260905-V7dHOU/QUALIFICATION.md`: its base is `e1686ca`
+with a serial overlay whose hash matches `1f19707`. The later dual gate above
+tests the candidate harness with that runtime; the build alone is not a clean
+full gameplay qualification.
+
+The native Blue-color listener / Yellow connector trade replay at `02a8e85`
+(runtime identical to `1f19707`) failed after `721.67s`. Both peers exited
+cleanly with return code `1`. Blue recorded zero LinkMenu hits and one
+`CloseLinkConnection` at local tick `1332`; Yellow reached LinkMenu at local
+tick `628` and input at `660`. Transport recorded `6,248` balanced native
+edges, zero errors, and zero keepalive exchanges. Local ticks are not a common
+clock: this supports investigating time coordination, not a precise root-cause
+claim. Raw evidence is retained in
+`pokemon-native-blue-yellow-02a8e85-LMtfZm/output.log` and `result.json`.
+
+The candidate fixes serial idle/external-clock hints beyond `2^31`, dispatch
+lock ordering and admission deadlines, failure-first gate evidence retention,
+and partial pipe capture. Peer stack diagnostics are opt-in through a positive,
+finite `POKERED_PEER_TRACE_AFTER_SECONDS`; optional `POKERED_PEER_TRACE_DIR`
+must already exist. At most two one-shot dumps are scheduled, with no ROM
+changes. Experimental time coordinator `344aa95` is on another branch and is
+not included in this candidate. The original `02a8e85` dual gate's native timing
+failure (`64/65`) and lost failed test identity and iteration output remain historical failures;
+subsequent test-race and gate-report fixes precede the verified `1f19707` pass.
+No clean full source/native gameplay gate is established.
+
+### Prior candidate evidence
+
+The recorded source battle matrix passed `19/19`; the recorded four-worker
+source trade matrix failed at `18/19`. The historical full source snapshot at
+`2eb21a5b45e67f47bb89697daeed76509adf4b13` passed unit `980/980` and
 local `47/47`, but its remote tier failed at `22/23`: the Yellow/Yellow TCP
 LinkMenu test reached the listener's menu and then reported
-`NetworkBackendError: backend closed`. Strict matrices are still running;
-this gate cannot qualify the release even if its remaining tiers pass.
+`NetworkBackendError: backend closed`. Its later trade snapshot failed at
+`18/19`, with battle still ongoing when recorded; this is historical status,
+not a claim that the run remains active. The historical native full-gate
+snapshot at `f4fddfc` passed unit `1,060/1,060` and local `47/47`, failed
+remote `11/12`, and had two trade failures while that tier was ongoing.
+Neither failed gate qualifies the release.
 The follow-up LinkMenu-only shutdown change passed five consecutive
 Yellow/Yellow real-ROM replays (`24.48s`, `22.20s`, `22.67s`, `23.08s`,
 `21.41s`). These targeted checks do not replace a full gate on the new candidate.
@@ -108,10 +151,12 @@ This is state-observation evidence, not live MCP gameplay evidence.
 
 | Capability | Recorded result | Evidence boundary |
 |---|---|---|
-| Source unit/timing | `PASS` — 980/980 unit and 55/55 timing cases | Recorded source runtime, Python 3.12.13, PyBoy 2.7.0 fork `c565df66c3731fad2856169a90f6bbec99925915`; 1,132 tests collected and all five ROM/SYM pins validated. |
-| Strict trade | `FAIL` — 18/19 | Recorded source runtime; all 19 rows declared and executed with `workers=4`. The sole failure is `red_color-listen-blue_color-connect` at the Trade Center warp after 722.6s; 18 other real-ROM local/TCP rows passed. |
-| Strict battle | `PASS` — 19/19 | Recorded source runtime; all 19 local/TCP real-ROM rows passed in 1,237.8s with no skips, errors, or test-only protocol bypasses. |
-| Native/Cython build | `PASS` — wheel built | Vendored PyBoy native wheel build passed in an isolated temporary copy. No strict gameplay run using the compiled wheel is claimed. |
+| Source/native unit and timing | `PASS` — each 1,176/1,176 unit and 65/65 total timing | `1f19707`; 1,320 collected per runtime, five repetitions of 13 timing cases. Strict trade/battle declared, not executed. |
+| Source/native canonical boot | `PASS` — each 3/3 | `1f19707`; source 6.74s, native 1.89s. 120 frames plus state/save/load; not gameplay. |
+| Prior source strict trade | `FAIL` — 18/19 | Historical source runtime; all 19 rows declared and executed with `workers=4`. The sole failure is `red_color-listen-blue_color-connect` at the Trade Center warp after 722.6s; 18 other real-ROM local/TCP rows passed. |
+| Prior source strict battle | `PASS` — 19/19 | Historical source runtime; all 19 local/TCP real-ROM rows passed in 1,237.8s with no skips, errors, or test-only protocol bypasses. |
+| Native Blue/Yellow trade replay | `FAIL` — 721.67s | `02a8e85`, runtime identical to `1f19707`; clean failed peer exits do not establish gameplay success. |
+| Native/Cython build | `PASS` — fresh build and identity checks | Base `e1686ca` plus matching serial overlay; candidate dual unit and boot passes above do not qualify compiled gameplay. |
 | Release readiness | `PARTIAL` | Source gate failed; compiled-runtime gameplay qualification remains open. Clean install and MCP startup/state/action/lifecycle must be verified for the declared scope. Unadvertised extensions remain separate coverage limits. |
 
 ### Historical evidence boundary

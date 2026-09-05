@@ -6,17 +6,50 @@ ROMs, symbols, save states, and sanitized evidence remain operator-managed.
 
 ## Current evidence and release decision
 
-**Release status: `PARTIAL`, not `PRODUCTION-READY`.** The full source gate
-for candidate `2eb21a5b45e67f47bb89697daeed76509adf4b13` is unfinished and
-already has a failed remote tier: unit `980/980` and local `47/47` passed,
-but remote finished at `22/23`. The Yellow/Yellow TCP LinkMenu test reached
-the listener's menu before `NetworkBackendError: backend closed`. Remaining
-strict matrices are still running; their results cannot erase this failure.
-The follow-up LinkMenu-only shutdown change passed five consecutive real-ROM
-Yellow/Yellow replays. This is a scoped regression result; a full gate on that
-candidate remains required.
-The completed results recorded in [README](../README.md#release-status)
-are scoped evidence, not completion of that gate or acceptance of a later head.
+**Release status: `PARTIAL`, not `PRODUCTION-READY`.** Candidate `1f19707`
+passed the dual source/native unit-and-timing gate and canonical boot checks.
+No clean full source/native gameplay qualification is established.
+
+| Latest scope at `1f19707` | Recorded result | Evidence boundary |
+|---|---|---|
+| Source and native unit/timing | Each runtime: `1,176/1,176` unit and `65/65` total timing (`13` cases × five repetitions) | `1,320` collected in each runtime; zero failures, skips, xfails, xpasses, or errors. All `19/19` trade and `19/19` battle entrypoints declared, but not executed by this unit gate. |
+| Canonical boot/state/save/load | Source `3/3` in `6.74s`; native `3/3` in `1.89s` | Zero failures, skips, or errors; one SDL warning each. Color Red, color Blue, and Yellow run 120 frames, then state and save/load checks. Not intro completion, MCP, or gameplay acceptance. |
+
+The external unit bundle is `pokemon-qualification-dual-unit-1f19707-20260905`
+(`gate-report.json`). Native build provenance is retained in
+`poke-serial-native-20260905-V7dHOU/QUALIFICATION.md`: a fresh base-`e1686ca`
+build with serial overlays whose serial source hash matches `1f19707`.
+That build record alone is not an exact-head full gameplay gate.
+
+The native Blue-color listener / Yellow connector trade replay at `02a8e85`
+(runtime identical to `1f19707`) failed after `721.67s`; both peers exited
+cleanly with return code `1`. Blue recorded no LinkMenu entry and one
+`CloseLinkConnection` at local tick `1332`; Yellow recorded LinkMenu at local
+tick `628` and input at `660`. Transport recorded `6,248` balanced native
+edges, zero errors, and no keepalive traffic. Local ticks are not a common
+clock: this supports investigating time coordination, not a precise root-cause
+claim. Retain `pokemon-native-blue-yellow-02a8e85-LMtfZm/output.log` and
+`result.json` through the release handoff.
+
+The original dual unit gate at `02a8e85` failed native timing at `64/65`, and
+a gate bug lost failed test identity and iteration output. Subsequent verified test races
+were corrected before the dual `1f19707` pass; preserve that older failure.
+
+### Retained historical results
+
+The historical full source snapshot at
+`2eb21a5b45e67f47bb89697daeed76509adf4b13` passed unit `980/980` and local
+`47/47`, failed remote `22/23` on Yellow/Yellow LinkMenu with
+`NetworkBackendError: backend closed`, and failed strict trade `18/19`;
+battle was ongoing at that snapshot. The historical native full-gate snapshot
+at `f4fddfc` passed unit `1,060/1,060` and local `47/47`, failed remote
+`11/12`, and had trade ongoing with two failures recorded. These are historical
+snapshots, not live progress reports. The follow-up LinkMenu-only shutdown
+change passed five consecutive Yellow/Yellow real-ROM replays; targeted
+passes do not erase a failed full gate.
+
+The following older results and those in [README](../README.md#release-status)
+remain scoped to their recorded runs, not acceptance of `1f19707`.
 
 | Scope | Recorded result | Evidence boundary |
 |---|---|---|
@@ -52,6 +85,13 @@ missing symbols and unrecognized values are exposed as unknown instead of
 guessed zero or `False`; a partial or unknown observation must not be promoted
 to a valid menu, trade, or battle state. This is state-observation evidence,
 not live MCP gameplay evidence.
+
+Candidate `1f19707` includes serial idle/external-clock `MAX_CYCLES` handling
+beyond `2^31`, dispatch lock-order and admission-deadline fixes, failure-first
+gate evidence, and partial pipe-output capture. These hardening and diagnostic
+changes do not modify ROMs or establish gameplay acceptance. Experimental
+time coordinator `344aa95` exists on another branch and is not included in
+this candidate.
 
 ## Capability boundary
 
@@ -290,7 +330,7 @@ python scripts/production_gate.py \
 
 The `--unit-only` selection runs only unit and timing checks, including
 schema validation; it does not validate ROM bytes or execute gameplay.
-Use the recorded source unit/timing result above only for its named scope.
+Use the recorded source/native unit/timing results above only for their named scope.
 The standard-library editable-install path passed in a fresh Python 3.12.13
 environment at `2eb21a5`, including `ensurepip`, pip dependency validation, and
 source bootstrap identity. Retain equivalent evidence for a later candidate;
@@ -418,6 +458,21 @@ emulator, MCP, trade, or battle compatibility.
 
 ### Tier B: one real session and MCP stdio
 
+To reproduce the scoped canonical boot checks with operator-selected runtime
+and asset roots:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src:vendor/pyboy-src \
+POKERED_ROM_ROOT="$ROM_ROOT" POKERED_FIXTURE_ROOT="$FIXTURE_ROOT" \
+"$RUNTIME_PYTHON" -m pytest -p pytest_asyncio.plugin -o addopts='' -q \
+  tests/test_rom_boot.py
+```
+
+For native, select the verified native interpreter and use `PYTHONPATH=src`
+so installed extensions remain selected. This checks 120 boot frames and
+state/save/load only; the passing `1f19707` results above do not replace MCP
+or gameplay tiers.
+
 Use one explicit ROM hash. This example uses stock Red:
 
 ```bash
@@ -543,6 +598,15 @@ gameplay. A complete passing source release gate and compiled-runtime gameplay
 qualification remain open. Record both child traces and exact deadlines when
 investigating a regression.
 
+For opt-in subprocess-peer Python stack diagnostics, set
+`POKERED_PEER_TRACE_AFTER_SECONDS` to a positive finite number. Optionally set
+`POKERED_PEER_TRACE_DIR` to an existing external directory to retain private,
+unique per-process logs; otherwise output goes to stderr and may be truncated
+by parent capture. At most two one-shot dump schedules are attempted per peer,
+including cleanup. This does not terminate the peer, inspect emulator state,
+or guarantee native C stack frames. Keep these diagnostic artifacts outside
+version control; stack capture is not gameplay evidence.
+
 The ROM-free concurrency/lifecycle probe is:
 
 ```bash
@@ -582,7 +646,7 @@ milestones are outside this strict claim.
 
 The recorded source results are battle `PASS` at 19/19 and four-worker trade
 `FAIL` at 18/19. The failed trade row is Red-color listener to Blue-color
-connector. The full candidate gate remains unfinished. Rerun affected tiers
+connector. No clean full gate is established for `1f19707`. Rerun affected tiers
 after runtime changes and retain complete results; diagnostic retries and
 historical native results do not replace a passing matrix.
 
