@@ -739,6 +739,9 @@ def test_constructor_registration_failure_rolls_back_only_owned_hooks(probe, cle
 def test_nonprogressing_input_attempts_have_fixed_fail_closed_quotas(probe, phase, limit, button):
     session, _, driver = make_driver(probe, slot=1)
     set_menu(session)
+    if phase == "hidden_event":
+        # Stay beside the left terminal without accepting the requested facing change.
+        set_menu(session, wXCoord=3, wYCoord=4, wSpritePlayerStateData1FacingDirection=8)
     if phase == "cursor":
         session.fire("TradeCenter_SelectMon.playerMonMenu_HandleInput")
         session.fire("HandleMenuInput")
@@ -780,3 +783,205 @@ def test_native_hook_failure_is_sticky_and_raised_after_public_step(probe):
     with pytest.raises(RuntimeError):
         driver.before_step(frame_offset=1)
     assert session.external_steps == 0
+
+
+# Hidden events are checked on A against the tile IN FRONT of the player:
+# pokered home/overworld.asm:82, home/hidden_events.asm:7,
+# engine/overworld/hidden_events.asm:60, data/events/hidden_events.asm:126.
+# bills_pc.asm:503/520 additionally requires serial role and inward facing.
+# Standing at (3,4)/(6,4) is correct; stepping onto (4,4)/(5,4) is not required.
+TERMINALS = [
+    (2, 3, 0x0C, 0x08, "right", "CableClubLeftGameboy"),
+    (1, 6, 0x08, 0x0C, "left", "CableClubRightGameboy"),
+]
+
+
+@pytest.mark.parametrize("role,x,facing,wrong_facing,direction,hook", TERMINALS)
+def test_terminal_face_then_a_precedes_hidden_event_hook(
+    probe, role, x, facing, wrong_facing, direction, hook
+):
+    session, _, driver = make_driver(probe)
+    set_menu(
+        session,
+        hSerialConnectionStatus=role,
+        wXCoord=x,
+        wYCoord=4,
+        wSpritePlayerStateData1FacingDirection=wrong_facing,
+    )
+    session.fire("LinkMenu.doneChoosingMenuSelection")
+    assert driver.before_step(frame_offset=749) == (direction, 8)
+    assert driver.snapshot()["hook_counts"][hook] == 0
+    # Simulated ROM observation, not helper RAM mutation: direction turns at the table.
+    session.set_bytes("wSpritePlayerStateData1FacingDirection", [facing])
+    for offset in range(750, 779):
+        assert driver.before_step(frame_offset=offset) is None
+        session.external_steps += 1
+        driver.after_step(call={"status": "completed", "actual_completed_frames": 1})
+    assert driver.before_step(frame_offset=779) == ("a", 4)
+    assert driver.snapshot()["hook_counts"][hook] == 0
+    assert driver.objective_complete() is False
+    session.fire(hook)
+    assert driver.snapshot()["hook_counts"][hook] == 1
+    assert driver.before_step(frame_offset=809) == ("a", 4)
+    session.fire("CableClub_DoBattleOrTrade")
+    for offset in range(839, 844):
+        assert driver.before_step(frame_offset=offset) is None
+        session.external_steps += 1
+        driver.after_step(call={"status": "completed", "actual_completed_frames": 1})
+    assert session.external_steps == 34
+    assert driver.snapshot()["copy_complete"] is False
+
+
+@pytest.mark.parametrize("role,x,facing,wrong_facing,direction,hook", TERMINALS)
+def test_already_facing_terminal_requests_a_without_walking_or_waiting_for_hook(
+    probe, role, x, facing, wrong_facing, direction, hook
+):
+    session, _, driver = make_driver(probe)
+    set_menu(
+        session,
+        hSerialConnectionStatus=role,
+        wXCoord=x,
+        wYCoord=4,
+        wSpritePlayerStateData1FacingDirection=facing,
+    )
+    session.fire("LinkMenu.doneChoosingMenuSelection")
+    assert driver.before_step(frame_offset=779) == ("a", 4)
+    assert driver.snapshot()["hook_counts"][hook] == 0
+
+
+@pytest.mark.parametrize("role,x,facing,wrong_facing,direction,hook", TERMINALS)
+@pytest.mark.parametrize("wrong_position", [(0, 0), (4, 4), (5, 4), (3, 3), (6, 5)])
+def test_hidden_event_a_requires_actual_role_specific_player_position(
+    probe, role, x, facing, wrong_facing, direction, hook, wrong_position
+):
+    session, _, driver = make_driver(probe)
+    set_menu(
+        session,
+        hSerialConnectionStatus=role,
+        wXCoord=wrong_position[0],
+        wYCoord=wrong_position[1],
+        wSpritePlayerStateData1FacingDirection=facing,
+    )
+    session.fire("LinkMenu.doneChoosingMenuSelection")
+    try:
+        action = driver.before_step(frame_offset=779)
+    except RuntimeError:
+        assert driver.snapshot()["unsupported_reason"]
+    else:
+        assert action is None or action[0] != "a"
+
+
+def test_hidden_event_fix_does_not_expand_existing_input_quotas(probe):
+    assert probe.INPUT_LIMITS == {"approach": 3, "hidden_event": 6, "cursor": 12, "dialogue": 32}
+
+
+@pytest.mark.parametrize("role,x,facing,wrong_facing,direction,hook", TERMINALS)
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("wJoyIgnore", 255),
+        ("wJoyIgnore", 1),
+        ("wWalkCounter", 1),
+        ("wStatusFlags5", 0x04),
+        ("wStatusFlags5", 0x80),
+    ],
+)
+def test_orientation_does_not_authorize_a_while_rom_input_is_not_ready(
+    probe, role, x, facing, wrong_facing, direction, hook, field, value
+):
+    session, _, driver = make_driver(probe)
+    set_menu(
+        session,
+        hSerialConnectionStatus=role,
+        wXCoord=x,
+        wYCoord=4,
+        wSpritePlayerStateData1FacingDirection=facing,
+        **{field: value},
+    )
+    session.fire("LinkMenu.doneChoosingMenuSelection")
+    # EnterMap masks input; walking and the guarded status bits defer interaction.
+    for offset in range(100):
+        assert driver.before_step(frame_offset=offset) is None
+        session.external_steps += 1
+        driver.after_step(call={"status": "completed", "actual_completed_frames": 1})
+    assert driver.snapshot()["input_attempts"] == []
+    session.set_bytes(field, [0])
+    assert driver.before_step(frame_offset=100) == ("a", 4)
+    assert session.external_steps == 100
+
+
+@pytest.mark.parametrize("field,value", [("wCurMap", 64), ("wCurMap", 240), ("wLinkState", 0)])
+def test_historical_room_readiness_does_not_authorize_a_after_live_room_changes(
+    probe, field, value
+):
+    session, _, driver = make_driver(probe)
+    set_menu(session, wXCoord=3, wYCoord=4, wSpritePlayerStateData1FacingDirection=8)
+    session.fire("LinkMenu.doneChoosingMenuSelection")
+    assert driver.before_step(frame_offset=0) == ("right", 8)
+    session.set_bytes("wSpritePlayerStateData1FacingDirection", [12])
+    session.set_bytes(field, [value])
+    assert driver.before_step(frame_offset=100) is None
+
+
+@pytest.mark.parametrize("role", [0, 3, 255])
+def test_terminal_interaction_rejects_unknown_serial_roles(probe, role):
+    session, _, driver = make_driver(probe)
+    set_menu(
+        session,
+        hSerialConnectionStatus=role,
+        wXCoord=3,
+        wYCoord=4,
+        wSpritePlayerStateData1FacingDirection=12,
+    )
+    session.fire("LinkMenu.doneChoosingMenuSelection")
+    with pytest.raises(RuntimeError, match="serial role"):
+        driver.before_step(frame_offset=0)
+
+
+def test_terminal_peer_readiness_gates_input_but_never_external_cpu(probe):
+    session, readiness, driver = make_driver(probe)
+    readiness.peer.remove("trade_center_reached")
+    set_menu(session, wXCoord=3, wYCoord=4, wSpritePlayerStateData1FacingDirection=12)
+    session.fire("LinkMenu.doneChoosingMenuSelection")
+    for offset in range(5):
+        assert driver.before_step(frame_offset=offset) is None
+        session.external_steps += 1
+        driver.after_step(call={"status": "completed", "actual_completed_frames": 1})
+    readiness.peer.add("trade_center_reached")
+    assert driver.before_step(frame_offset=5) == ("a", 4)
+    assert session.external_steps == 5
+
+
+def test_terminal_facing_action_and_quota_observations_are_bounded_and_detached(probe):
+    session, _, driver = make_driver(probe)
+    set_menu(session, wXCoord=3, wYCoord=4, wSpritePlayerStateData1FacingDirection=8)
+    session.fire("LinkMenu.doneChoosingMenuSelection")
+    assert driver.before_step(frame_offset=0) == ("right", 8)
+    first = driver.snapshot()
+    assert first["interaction_observation"]["facing"] == 8
+    assert first["input_attempts"] == [{"kind": "hidden_event", "context": "warp", "count": 1}]
+    assert first["last_action"]
+    first["interaction_observation"]["facing"] = 255
+    first["input_attempts"].clear()
+    assert driver.snapshot()["interaction_observation"]["facing"] == 8
+    session.set_bytes("wSpritePlayerStateData1FacingDirection", [12])
+    assert driver.before_step(frame_offset=30) == ("a", 4)
+    size = len(json.dumps(driver.snapshot()))
+    for offset in range(31, 40):
+        assert driver.before_step(frame_offset=offset) is None
+    assert len(json.dumps(driver.snapshot())) == size
+    assert driver.snapshot()["input_attempts"] == [
+        {"kind": "hidden_event", "context": "warp", "count": 2}
+    ]
+
+
+def test_terminal_direction_and_a_share_unchanged_six_attempt_budget(probe):
+    session, _, driver = make_driver(probe)
+    set_menu(session, wXCoord=3, wYCoord=4, wSpritePlayerStateData1FacingDirection=8)
+    session.fire("LinkMenu.doneChoosingMenuSelection")
+    assert driver.before_step(frame_offset=0) == ("right", 8)
+    session.set_bytes("wSpritePlayerStateData1FacingDirection", [12])
+    for offset in (30, 60, 90, 120, 150):
+        assert driver.before_step(frame_offset=offset) == ("a", 4)
+    with pytest.raises(RuntimeError, match="hidden_event input quota exhausted"):
+        driver.before_step(frame_offset=180)

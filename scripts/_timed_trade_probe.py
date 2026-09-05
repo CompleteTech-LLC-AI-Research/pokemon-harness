@@ -40,6 +40,10 @@ MENU_FIELDS = (
     "wYCoord",
     "wLinkState",
     "hSerialConnectionStatus",
+    "wSpritePlayerStateData1FacingDirection",
+    "wJoyIgnore",
+    "wWalkCounter",
+    "wStatusFlags5",
 )
 OBSERVATION_SYMBOLS = (
     "SaveGameData",
@@ -168,6 +172,8 @@ class TradeOwnerDriver:
         self.copy = None
         self.final = None
         self.error = None
+        self.interaction_observation = None
+        self.last_action = None
         self.before = read_party(session)
         if type(self.slot) is not int or not 0 <= self.slot < self.before["count"]:
             raise ValueError("outgoing slot outside initial party")
@@ -290,12 +296,12 @@ class TradeOwnerDriver:
                     return None
                 self.sent.add(once)
             if once is None:
-                if button == "a":
+                if self.flags[3] and self.menu_context in (None, "warp"):
+                    kind = "hidden_event"
+                elif button == "a":
                     kind = "dialogue"
                 elif self.menu_context is None and not self.flags[3]:
                     kind = "approach"
-                elif self.flags[3] and self.menu_context in (None, "warp"):
-                    kind = "hidden_event"
                 else:
                     kind = "cursor"
                 budget_key = (kind, self.menu_context)
@@ -305,6 +311,13 @@ class TradeOwnerDriver:
                     raise RuntimeError(self.error)
                 self.input_attempts[budget_key] = attempts + 1
             self.next_input = frame_offset + cadence
+            self.last_action = {
+                "frame_offset": frame_offset,
+                "button": button,
+                "duration": duration,
+                "cadence": cadence,
+                "phase": self.menu_context,
+            }
             return button, duration
 
         if not self.peer.peer_ready("party_qualified"):
@@ -373,10 +386,44 @@ class TradeOwnerDriver:
         if self.flags[3] and self.peer.peer_ready("trade_center_reached"):
             if context not in (None, "warp"):
                 return None
+            # EF arrival can precede completion of the room's warp setup.
+            if menu["wCurMap"] != 0xEF or menu["wLinkState"] != 1:
+                return None
             role = menu["hSerialConnectionStatus"]
             if role not in (1, 2):
                 raise RuntimeError("unsupported serial role")
-            return pulse("right" if role == 2 else "left", 8, 30)
+            expected_x, facing, direction = (3, 0x0C, "right") if role == 2 else (6, 0x08, "left")
+            self.interaction_observation = {
+                "frame_offset": frame_offset,
+                "map": menu["wCurMap"],
+                "link_state": menu["wLinkState"],
+                "serial_role": role,
+                "x": menu["wXCoord"],
+                "y": menu["wYCoord"],
+                "facing": menu["wSpritePlayerStateData1FacingDirection"],
+                "joy_ignore": menu["wJoyIgnore"],
+                "walk_counter": menu["wWalkCounter"],
+                "status_flags5": menu["wStatusFlags5"],
+                "admission_reason": "checking",
+            }
+            # OverworldLoop skips joypad polling during a walking animation;
+            # EnterMap masks input until map setup completes.
+            if menu["wJoyIgnore"] != 0 or menu["wWalkCounter"] != 0:
+                self.interaction_observation["admission_reason"] = "input_masked_or_walking"
+                return None
+            if menu["wStatusFlags5"] & 0x84:
+                self.interaction_observation["admission_reason"] = "a_blocked_or_scripted_movement"
+                return None
+            if (menu["wXCoord"], menu["wYCoord"]) != (expected_x, 4):
+                self.interaction_observation["admission_reason"] = "unexpected_adjacent_coordinates"
+                return None
+            if menu["wSpritePlayerStateData1FacingDirection"] != facing:
+                self.interaction_observation["admission_reason"] = "orient"
+                return pulse(direction, 8, 30)
+            # Hidden-event lookup tests the tile IN FRONT and requires A.
+            # bills_pc.asm additionally checks role/facing inside the handler.
+            self.interaction_observation["admission_reason"] = "interact"
+            return pulse("a", 4, 20)
         if context is None:
             if self.counts["SaveGameData"] or self.counts["Serial_SyncAndExchangeNybble"]:
                 return None
@@ -420,6 +467,12 @@ class TradeOwnerDriver:
                 "outgoing_slot": self.slot,
                 "checkpoint": self.checkpoint,
                 "phase": self.phase,
+                "interaction_observation": self.interaction_observation,
+                "last_action": self.last_action,
+                "input_attempts": [
+                    {"kind": kind, "context": context, "count": count}
+                    for (kind, context), count in self.input_attempts.items()
+                ],
                 "readiness": list(self.flags),
                 "checkpoint_reached": self.objective_complete(),
                 "copy_complete": bool(self.flags[6]),
