@@ -63,9 +63,33 @@ The local, unpublished report is
 diagnostic policy: rearm `4096`, instruction cap `1024`, lateness `4096`,
 quantum `256`, operation deadline `5s`. This single orientation establishes
 milestone progression, not a completed trade exchange, gameplay matrix,
-graceful protocol shutdown, or default-policy qualification. The full source
+graceful protocol shutdown, or default-policy qualification. The full dual-runtime
 gate on `4fca3a3` and unit gates on `079aea1` remain pending at this snapshot;
 no outcome is claimed.
+
+At the later `f458fc7` snapshot, the `4ee075b` timing correction addresses
+CPU overshoot without widening the bound. The lead reported scoped
+regressions passing `430` tests in source (`45.08s`) and native (`40.87s`);
+these are implementation checks, not real-game proof. The atomic DMA gap
+remains: a `412`-half-cycle operation can exceed the `64`-half-cycle limit.
+
+The local, unpublished `poke-narrow-ten-repeats-2l3xvr4b/manifest.json`
+records the narrow-policy Blue-color-listener/Yellow-connector actual-MCP
+smoke passing five repetitions per runtime, with zero failures, errors,
+skips, supervisor failures, or leftover processes. Numeric policy evidence
+records rearm `32`, instruction cap `16`, lateness `32`, quantum `256`, and
+operation deadline `5s`; the log's aligned-profile label is stale. Its recorded
+HEAD is `81737bd`, with frozen working-file changes later committed in
+`4ee075b` and checked hashes unchanged during the run; it is not an
+exact-`f458fc7` gate. These targeted passes follow earlier failed runs, whose
+artifacts remain retained; they do not qualify trade, a full matrix, or a
+default policy.
+
+The lead also reported one `079aea1` native unit setup-race failure, followed
+by a correction and ten passing targeted repetitions; full-gate acceptance
+remains pending. The current dual gate (`pokemon-trade-dual-f458fc7-20260905`)
+and older full dual-runtime gate are still running at this snapshot. Actual full
+trade remains unverified; no terminal gate outcome is claimed.
 
 ### Earlier experimental gates
 
