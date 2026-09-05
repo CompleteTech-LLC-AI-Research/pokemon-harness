@@ -11,6 +11,30 @@ symbol files, save states, or other ROM-derived artifacts.
 
 **Status: `PARTIAL` — experimental branch, not production-ready.**
 
+At `74e8db3`, the dual unit/timing gate completed `PASS`, collecting `3,594`
+tests per runtime. Source passed `3,441` unit tests in `151.4s` and `1,075`
+timing checks in `319.8s`; native passed `3,441` unit tests in `174.0s` and
+`1,075` timing checks in `349.7s`. Both recorded zero failures, errors, skips,
+xfails, or xpasses. The local, unpublished report is
+`pokemon-batch-dual-74e8db3-20260905/gate-report.json`. This scoped pass does
+not erase the historical `f458fc7` native failures below or qualify gameplay.
+
+The separate `74e8db3` narrow-policy actual-MCP smoke matrix passed all `18`
+runs (nine ordered pairs per runtime), with zero failures, errors, skips, or
+leftover processes and unchanged checked files. Its local, unpublished
+manifest is `poke-narrow-matrix18-74e8db3-rfww1gsd/manifest.json`; this is new
+smoke evidence, distinct from the earlier `f458fc7` report, not trade completion.
+
+The unbatched full-trade attempt failed to complete: its terminal report has
+`status=incomplete`, `complete=false`, and a deadline stop after `3600.186s`.
+Both owners completed `274` frames, interrupted the next call, and remained
+in approach without trade goals. Both detached and closed with exit `0` and
+no surviving owner, but recorded cancellation errors and missing goal/party
+evidence. The local, unpublished report is
+`poke-timed-trade-full-20260905-AeExoS/report.json`. The new batched trade run
+remains live at this snapshot; no completed trade or default-policy
+qualification is claimed.
+
 At harness commit `4275957`, the source `--unit-only` gate passed `2,924`
 unit tests and `955` timing checks (`191` cases in each of five repetitions),
 with zero failures, errors, skips, xfails, or xpasses. The local, unpublished
