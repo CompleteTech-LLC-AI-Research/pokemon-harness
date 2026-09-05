@@ -46,12 +46,51 @@ path.
 The following claims are deliberately scoped to their named run and do not
 change the `PARTIAL` release decision.
 
-### Latest completed source-runtime evidence
+### Latest scoped candidate evidence (`1f19707`, 2026-09-05)
 
-- The ongoing full gate at `2eb21a5` passed unit `980/980` and local `47/47`,
+- Source and native each passed `1,176/1,176` unit tests and `65/65` total
+  timing checks (`13` cases in each of five repetitions), with no failures,
+  skips, or errors. Each collected `1,320` tests; `19/19` trade and `19/19`
+  battle entrypoints were declared, not executed by this unit-only gate.
+- Canonical boot checks passed source `3/3` in `6.74s` and native `3/3` in
+  `1.89s`, with zero failures, skips, or errors and one SDL warning each.
+  They exercise `120` frames plus state/save/load checks, not gameplay.
+- The fresh native build used base `e1686ca` plus the serial fix; its serial
+  source hash matches `1f19707`. Build identity and scoped passes do not
+  establish a clean full gameplay qualification.
+- The native Blue/Yellow replay at `02a8e85` (runtime identical to `1f19707`)
+  failed in `721.67s`; both peers exited cleanly with return code `1`.
+  Blue recorded no LinkMenu and one `CloseLinkConnection` at local tick
+  `1332`; Yellow reached LinkMenu at `628` and input at `660`. There were
+  `6,248` balanced native edges, zero errors, and no keepalive traffic.
+  Local ticks are not a common clock: this supports investigating time
+  coordination, not a proven precise root cause.
+- Retain the original `02a8e85` dual-gate failure: native timing was `64/65`
+  and a gate bug lost failed test identity and iteration output. Subsequent verified test
+  races were corrected before the passing `1f19707` dual gate; the later
+  pass does not erase that earlier failure.
+
+The candidate fixes serial idle/external hints to retain `MAX_CYCLES` when
+the cycle counter exceeds `2^31`,
+dispatch lock ordering and admission deadlines, failure-first gate evidence,
+and partial pipe capture. Optional peer diagnostics use a positive finite
+`POKERED_PEER_TRACE_AFTER_SECONDS` and, optionally, an existing
+`POKERED_PEER_TRACE_DIR`; they schedule at most two one-shot stack dumps and
+make no ROM changes. Experimental coordinator `344aa95` is on another branch
+and is not included in this candidate. Release status remains `PARTIAL`.
+
+### Historical source-runtime and full-gate evidence
+
+- The historical full-gate snapshot at `2eb21a5` passed unit `980/980` and
+  local `47/47`,
   but remote failed `22/23` with a Yellow/Yellow LinkMenu backend-close error.
+  Its trade tier failed `18/19`; battle was ongoing at that snapshot, not a
+  current running-status claim.
   The follow-up shutdown change passed five consecutive targeted real-ROM
   replays; a full candidate gate is still required.
+- The historical native full-gate snapshot at `f4fddfc` passed unit
+  `1,060/1,060` and local `47/47`, but failed remote `11/12`. Its trade tier
+  was unfinished with failures at that snapshot; no full native pass is claimed.
 - The recorded source strict battle gate passed `19/19` local and TCP real-ROM
   entrypoints in `1,237.8s`, with no skips, errors, or test-only protocol
   bypasses. This is battle-tier acceptance, not full candidate acceptance.

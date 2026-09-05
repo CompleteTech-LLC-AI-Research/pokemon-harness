@@ -2305,15 +2305,15 @@ def _diagnostic_evidence_payload(roots, diagnostics, *, dual=False):
         )
         for value in diagnostics
     ]
-    common = dict(
-        project_root=roots[0],
-        rom_root=roots[1],
-        fixture_root=roots[2],
-        assets=[],
-        overall="FAIL",
-        generated_at="2026-09-05T00:00:00+00:00",
-        evidence_error=diagnostics[0],
-    )
+    common = {
+        "project_root": roots[0],
+        "rom_root": roots[1],
+        "fixture_root": roots[2],
+        "assets": [],
+        "overall": "FAIL",
+        "generated_at": "2026-09-05T00:00:00+00:00",
+        "evidence_error": diagnostics[0],
+    }
     if dual:
         other = _runtime_result("cython", gate_problems=tuple(diagnostics))
         other.runtime = dict(result.runtime, pyboy_mode="cython")

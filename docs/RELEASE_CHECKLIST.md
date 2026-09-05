@@ -18,7 +18,39 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-**Release decision: `PARTIAL`.** This reconciliation starts from documentation
+**Release decision: `PARTIAL`, not production-ready.** At `1f19707`, the
+dual source/native unit gate passed `1176/1176` unit tests and `65/65` total
+timing checks per runtime (`13` cases in each of five repetitions), with zero
+failures, skips, xfails, xpasses, or errors. Each runtime collected `1320`
+tests and declared `19/19` trade and `19/19` battle entrypoints; neither
+gameplay tier was executed by this unit-only gate. Retained evidence:
+`pokemon-qualification-dual-unit-1f19707-20260905/gate-report.json`.
+
+Canonical boot/state/hash checks at `1f19707` passed source `3/3` in `6.74s`
+and native `3/3` in `1.89s`, with zero failures, skips, or errors and one SDL
+warning per runtime. They step `120` frames and check state/save/load; they
+are not gameplay acceptance. The fresh native build is documented in
+`poke-serial-native-20260905-V7dHOU/QUALIFICATION.md`: its base is `e1686ca`
+with serial overlays, and its serial input hash matches `1f19707`. Build
+provenance and these scoped passes do not establish a clean full gameplay gate.
+
+The native Blue-listener/Yellow-connector trade replay at `02a8e85` (runtime
+identical to `1f19707`) failed after `721.67s`; both peers exited cleanly
+with return code `1`. Blue recorded no LinkMenu entry and one
+`CloseLinkConnection` at local tick `1332`; Yellow recorded LinkMenu at
+`628` and input at `660`. Transport recorded `6248` balanced native edges,
+zero errors, and zero keepalive traffic. Local ticks are not a common clock:
+this supports investigating time coordination, not a precise root-cause claim.
+Retain `pokemon-native-blue-yellow-02a8e85-LMtfZm/output.log` and
+`result.json` as failed diagnostic evidence. The original `02a8e85` dual unit
+gate also had a native timing failure (`64/65`); a gate-reporting bug lost
+failed test identity and iteration output. Runtime identity remained known
+as native. Subsequent verified test races and reporting were corrected;
+the `1f19707` dual pass does not erase that earlier failure.
+
+### Prior scoped evidence
+
+The preceding reconciliation started from documentation
 head `f4fddfc6dd45fa8b130ac9409d533b8945c5538c`. Completed scoped evidence at
 `86b66577856780b2d880222a1d6986d38af88333` is:
 
@@ -48,18 +80,20 @@ and clean archive scope are recorded in `poke-native-qualification-bkFdAX`'s
 
 The parent full source run at `2eb21a5` passed unit `980/980` and local `47/47`
 but failed remote `22/23` with a Yellow/Yellow LinkMenu backend-close error.
-Its strict rows are ongoing; later passes cannot erase that failure. The full
+Its historical strict-trade result was `18/19` (failed), with battle still
+ongoing at that snapshot; later passes cannot erase the failures. The full
 native run at `f4fddfc`, with bundle name
 `pokemon-full-native-f4fddfc-20260905`, passed unit `1060/1060` and local
 `47/47` but failed remote `11/12` on Yellow/Yellow LinkMenu.
-Independent integration verification records these results. Strict rows are still running; the
+Independent integration verification records these historical results. Native
+trade was ongoing with two failures at that snapshot, not a current live count; the
 remote failure prevents full-gate qualification regardless of their results.
 These scoped passes do not establish native gameplay acceptance.
 The separately recorded source battle `19/19` pass and four-worker source
 trade `18/19` failure (Red-color listener to Blue-color connector at Trade
 Center warp) remain scoped results, not full candidate acceptance.
 
-Required candidate source/native, boot/state/hash, MCP, authenticity,
+Required full candidate source/native, MCP, authenticity,
 concurrency, cleanup, install/launch, and independent review gates remain open
 until their complete current evidence passes. Enforced loopback-only operation
 is allowed. Vanilla link fixtures, additional platforms, MCP-facing
@@ -193,6 +227,15 @@ release decision.
 
 ## Change summary
 
+Candidate `1f19707` includes serial idle/external-hint `MAX_CYCLES` handling
+beyond `2^31`, dispatch lock ordering and admission deadlines, failure-first
+gate evidence, partial pipe capture, and corrected timing-test ordering.
+Peer stack diagnostics are opt-in through positive finite
+`POKERED_PEER_TRACE_AFTER_SECONDS`; optional `POKERED_PEER_TRACE_DIR` must
+already exist. Capture is bounded to two one-shot dumps and makes no ROM
+changes. Experimental coordinator `344aa95` is on another branch and is not
+included in this candidate or its qualification claim.
+
 The state-validity, transport, and release-gate hardening represented by the
 audited code snapshot, plus the targeted post-snapshot `EDGE_RESP` closure
 fix, are additive: they improve classification, lifecycle behavior, and
@@ -241,7 +284,7 @@ release readiness.
   are recorded above; these are strict real-ROM outcomes, not bypasses.
 - [ ] Full candidate source/native trade and battle acceptance passes every
   required row. Recorded source battle passed 19/19; four-worker source trade
-  failed 18/19. Native verification is ongoing. Unit, timing, transport, and
+  failed 18/19. Native gameplay remains unqualified. Unit, timing, transport, and
   LinkMenu results do not substitute for gameplay acceptance.
 
 ## ROM, symbol, and BYO asset identity
@@ -266,24 +309,28 @@ release readiness.
   gate scopes without collection errors.
 - [x] Historical scoped unit evidence records 586/586 in integrated source and
   Cython gates (the complete PR #17 baseline passed 554/554).
-- [x] Scoped source and native unit gates at `86b6657` each passed `1060/1060`
-  and timing `55/55` total across five repetitions; see the named bundles above.
+- [x] Scoped source and native unit gates at `1f19707` each passed `1176/1176`
+  and timing `65/65` total across five repetitions; see the named bundle above.
+  The `86b6657` results remain historical scoped evidence.
 - [x] Parent `2eb21a5` passed fresh standard-library venv/editable installation,
   dependency and source identity checks, plus a separate fresh wheel install,
   ten public imports, and pinned Red-color MCP startup/EOF cleanup. No MCP
   requests or gameplay were exercised by that packaging probe.
 - [ ] The release candidate installs and launches with the documented commands,
   using the same runtime for tests and MCP; complete evidence is retained.
-- [x] Scoped fixture-free Red, Blue, and Yellow boot/state/hash tests passed
+- [x] Historical scoped fixture-free Red, Blue, and Yellow boot/state/hash tests passed
   source `3/3` in `6.74s` and native `3/3` in `1.64s`, with only an SDL warning,
   with no external fixture loading or direct RAM edits. Normal save/load
   restores self-captured emulator state. Independent integration verification
   attributes these runs to the uncommitted evidence worktree. Both commands
   exited `0`; this is not commit qualification.
-- [ ] Fixture-free real-ROM Red, Blue, and Yellow boot/state/hash checks pass
-  on the exact committed release candidate with retained evidence.
-- [ ] Candidate timing-sensitive tests pass at least five repetitions without
-  weakened assertions; every required tier has no skips, xfails, failures,
+- [x] Fixture-free canonical color Red, color Blue, and Yellow boot/state/hash
+  checks passed at `1f19707`: source `3/3` in `6.74s`, native `3/3` in
+  `1.89s`, with zero failures/skips/errors and one SDL warning each. These
+  `120`-frame state/save/load checks do not establish gameplay acceptance.
+- [x] Candidate timing-sensitive tests passed five repetitions at `1f19707`
+  in source and native mode, with controlled ordering and worker completion.
+- [ ] Every required tier has no skips, xfails, failures,
   errors, or timeouts. Missing assets cause skips only in optional diagnostics.
 - [x] Historical timing tests pass 40/40 in each of five repetitions in the
   PR #19 follow-up gate and the post-PR #23 gate; the prior-candidate timing
@@ -323,7 +370,8 @@ release readiness.
   listener/connector directions; strict trade and strict battle each passed
   19/19 with bounded teardown.
 - [ ] A clean current full source/native gate passes. The parent source run
-  and full native run have both failed remote, while strict rows continue.
+  at `2eb21a5` and full native run at `f4fddfc` both failed remote; their
+  ongoing strict-row records above are historical snapshots.
   Scoped passes and diagnostic retries cannot qualify either full gate.
 - [ ] Authentic handshake, nybble exchange, menu selection, post-menu blocks,
   complete trade records, and battle turns pass on the candidate. Production
