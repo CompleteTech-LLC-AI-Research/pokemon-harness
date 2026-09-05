@@ -221,6 +221,8 @@ class TimedOwner:
                 "tick": None,
                 "current_tick": None,
                 "accounting": None,
+                "failure": None,
+                "last_failure": None,
                 "transport": "timed",
                 "mode": "idle",
                 "observed_at": time.monotonic(),
@@ -572,11 +574,13 @@ class TimedOwner:
                 "timed_peer_mismatch", "peer ROM version does not match expectation"
             )
         with self.session.locked(timeout_s=self._remaining(request)):
-            endpoint.attach(self.session._pyboy, deadline=request.deadline)
-            self._remaining(request)
-            self.session.bind_timed_execution(endpoint, timeout_s=self._remaining(request))
-            self._bound = True
-            self._observe()
+            try:
+                endpoint.attach(self.session._pyboy, deadline=request.deadline)
+                self._remaining(request)
+                self.session.bind_timed_execution(endpoint, timeout_s=self._remaining(request))
+                self._bound = True
+            finally:
+                self._observe(failure_only=not self._bound)
         with self._condition:
             self._publish(
                 state="connected",
@@ -595,6 +599,9 @@ class TimedOwner:
                     "timed_cleanup_failed", "cancellation worker is still running"
                 )
             with self.session.locked(timeout_s=self.policy.lock_timeout, allow_closed=True):
+                # Retain evidence before detach, even if cleanup fails. This
+                # runs only on the owner and holds no owner state lock.
+                self._observe(failure_only=True)
                 if self._bound:
                     self.session.unbind_timed_execution(
                         endpoint, timeout_s=self.policy.lock_timeout
@@ -621,6 +628,7 @@ class TimedOwner:
                 peer_rom_version=None,
                 epoch=None,
                 accounting=None,
+                failure=None,
             )
             self._condition.notify_all()
         return self.status()
@@ -645,17 +653,40 @@ class TimedOwner:
                 self._observe()
         return result
 
-    def _observe(self):
+    def _observe(self, *, failure_only=False):
         """Refresh native evidence on the owner, including partial failed calls."""
         changes = {}
+        record = None
         try:
-            changes["tick"] = self.session.current_tick()
-            changes["native_observed_at"] = time.monotonic()
+            if not failure_only:
+                changes["tick"] = self.session.current_tick()
+                changes["native_observed_at"] = time.monotonic()
             if self._endpoint is not None:
-                changes["accounting"] = _freeze(self._endpoint.snapshot())
+                snapshot = self._endpoint.snapshot()
+                if not failure_only:
+                    changes["accounting"] = _freeze(snapshot)
+                failure = getattr(snapshot, "failure", None)
+                if failure is not None:
+                    record = _freeze(
+                        {
+                            "generation": self._generation,
+                            "epoch": self._endpoint.epoch.hex(),
+                            "failure": failure,
+                        }
+                    )
         except BaseException as exc:  # noqa: BLE001 - observation cannot erase an action outcome
             changes["snapshot_error"] = f"{type(exc).__name__}: {exc}"
         with self._condition:
+            if record is not None:
+                previous = self._cache["last_failure"]
+                if previous is None or (previous["generation"], previous["epoch"]) != (
+                    record["generation"],
+                    record["epoch"],
+                ):
+                    # First observed failure in this epoch is canonical. The
+                    # tagged history survives live accounting/generation reset.
+                    changes["last_failure"] = record
+                    changes["failure"] = record["failure"]
             self._publish(**changes)
 
     def _work(self):

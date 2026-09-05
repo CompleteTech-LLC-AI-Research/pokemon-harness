@@ -105,11 +105,335 @@ def block_owner(owner):
     return request, release
 
 
+@pytest.fixture
+def failure_snapshots(monkeypatch):
+    """Replace accounting only; real owner, binding and cleanup remain in use."""
+    from pokered_harness.link.timed_remote import TimedRemoteEndpoint
+
+    endpoints, snapshots, reads = {}, {}, []
+    original_attach = TimedRemoteEndpoint.attach
+    original_snapshot = TimedRemoteEndpoint.snapshot
+
+    def attach(endpoint, game, *, deadline):
+        answer = original_attach(endpoint, game, deadline=deadline)
+        endpoints[game] = endpoint
+        return answer
+
+    def snapshot(endpoint):
+        identity = threading.get_ident()
+        reads.append(identity)
+        assert identity == endpoint._owner, "foreign native snapshot read"
+        if endpoint in snapshots:
+            return snapshots[endpoint]
+        return original_snapshot(endpoint)
+
+    monkeypatch.setattr(TimedRemoteEndpoint, "attach", attach)
+    monkeypatch.setattr(TimedRemoteEndpoint, "snapshot", snapshot)
+    return endpoints, snapshots, reads
+
+
+def late_accounting(epoch, *, cycles=40):
+    """Produce failure via a real guard on a separate, deterministic coordinator."""
+    from pokered_harness.link.emulated_time import EmulatedTimeCoordinator, EmulatedTimeError
+
+    coordinator = EmulatedTimeCoordinator(
+        epoch=epoch,
+        raw_cpu_clock=100,
+        rearm_budget=32,
+        max_edge_lateness=32,
+        quantum_cycles=256,
+    )
+    coordinator.record_peer_progress(epoch=epoch, sequence=1, committed_half_cycles=0)
+    permit = coordinator.reserve(cycles)
+    assert permit is not None
+    coordinator.commit(permit, raw_cpu_clock=100 + cycles, instructions=1)
+    with pytest.raises(EmulatedTimeError, match="^edge lateness exceeds bound$"):
+        coordinator.receive_edge(epoch=epoch, sequence=1, at_half_cycle=0, payload=b"x")
+    return coordinator.snapshot()
+
+
+def publish_late_accounting(owner, game, failure_snapshots, *, cycles=40):
+    endpoints, snapshots, _ = failure_snapshots
+    endpoint = endpoints[game]
+    snapshot = late_accounting(endpoint.epoch.hex(), cycles=cycles)
+
+    def publish(session):
+        snapshots[endpoint] = snapshot
+
+    result(owner.submit(publish))
+    return owner.status()
+
+
+def assert_lateness_failure(status, *, generation, epoch, cycles=40):
+    expected = {
+        "reason": "edge lateness exceeds bound",
+        "terminal_reason": "edge lateness exceeds bound",
+        "phase": "receive_edge.lateness",
+        "epoch": epoch,
+        "local_half_cycles": cycles * 2,
+        "peer_half_cycles": 0,
+        "raw_cpu_clock": 100 + cycles,
+        "observed_raw_cpu_clock": 100 + cycles,
+        "edge_sequence": 1,
+        "edge_at_half_cycle": 0,
+        "measured_lateness_half_cycles": cycles * 2,
+        "allowed_lateness_half_cycles": 64,
+        "excess_half_cycles": cycles * 2 - 64,
+    }
+    assert status["failure"] == expected
+    assert status["accounting"]["failure"] == expected
+    assert status["last_failure"] == {
+        "generation": generation,
+        "epoch": epoch,
+        "failure": expected,
+    }
+    with pytest.raises(TypeError):
+        status["failure"]["reason"] = "overwritten"
+    with pytest.raises(TypeError):
+        status["last_failure"]["generation"] = -1
+    with pytest.raises(TypeError):
+        status["last_failure"]["failure"]["excess_half_cycles"] = 0
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_cached_failure_survives_cancel_and_cleanup(
+    tmp_path, monkeypatch, failure_snapshots, cleanup_fails
+):
+    with linked(tmp_path) as ((owner, session, game), _):
+        before = owner.status()
+        assert before["failure"] is None and before["last_failure"] is None
+        status = publish_late_accounting(owner, game, failure_snapshots)
+        assert_lateness_failure(status, generation=before["generation"], epoch=before["epoch"])
+        historical = status["last_failure"]
+        with monkeypatch.context() as patch:
+            if cleanup_fails:
+
+                def failed_unbind(*args, **kwargs):
+                    raise RuntimeError("failure snapshot cleanup injection")
+
+                patch.setattr(session, "unbind_timed_execution", failed_unbind)
+                with pytest.raises(RuntimeError, match="failure snapshot cleanup injection"):
+                    result(owner.cancel())
+                failed = owner.status()
+                assert failed["state"] == "cleanup_failed"
+                assert failed["cleanup_pending"]
+                assert failed["last_failure"] == historical
+                assert failed["failure"] == status["failure"]
+            else:
+                result(owner.cancel())
+        if cleanup_fails:
+            result(owner.disconnect())
+        cleaned = owner.status()
+        assert cleaned["state"] == "idle" and not cleaned["cleanup_pending"]
+        assert cleaned["generation"] == before["generation"] + 1
+        assert cleaned["epoch"] is None and cleaned["accounting"] is None
+        assert cleaned["failure"] is None
+        assert cleaned["last_failure"] == historical
+        # Previously returned immutable observations are never rewritten by cleanup.
+        assert status["failure"] == historical["failure"]
+
+
+def test_cached_failure_first_per_epoch_and_attributed_across_reconnect(
+    tmp_path, failure_snapshots
+):
+    with linked(tmp_path) as ((owner, _, game), (peer, _, _)):
+        first = publish_late_accounting(owner, game, failure_snapshots)
+        historical = first["last_failure"]
+        # Deliberately supply a different coordinator observation in the fake;
+        # this isolates the owner's first-record rule, not coordinator behavior.
+        second = publish_late_accounting(owner, game, failure_snapshots, cycles=48)
+        assert second["accounting"]["failure"]["measured_lateness_half_cycles"] == 96
+        assert second["failure"] == historical["failure"]
+        assert second["last_failure"] == historical
+        result(owner.disconnect())
+        result(peer.disconnect())
+        # The authored CPU loop clears SC normally before another attachment.
+        result(owner.submit("step", 1, render=False))
+        result(peer.submit("step", 1, render=False))
+        listener = owner.listen("127.0.0.1", 0, "red")
+        address = listener.ready.result(timeout=BOUND)
+        assert address["last_failure"] == historical
+        assert address["failure"] is None
+        result(peer.connect("127.0.0.1", address["port"], "blue"))
+        result(listener)
+        connected = owner.status()
+        assert connected["generation"] == first["generation"] + 1
+        assert connected["epoch"] != first["epoch"]
+        assert connected["failure"] is None
+        assert connected["accounting"]["failure"] is None
+        assert connected["last_failure"] == historical
+        new_failure = publish_late_accounting(owner, game, failure_snapshots, cycles=48)
+        assert_lateness_failure(
+            new_failure, generation=connected["generation"], epoch=connected["epoch"], cycles=48
+        )
+        assert first["last_failure"] == historical
+
+
+def test_cached_failure_first_observed_at_cleanup_before_unbind(
+    tmp_path, monkeypatch, failure_snapshots
+):
+    from dataclasses import asdict
+
+    with linked(tmp_path) as ((owner, session, game), _):
+        endpoints, snapshots, reads = failure_snapshots
+        endpoint = endpoints[game]
+        before = owner.status()
+        snapshot = late_accounting(endpoint.epoch.hex())
+        expected = {
+            "generation": before["generation"],
+            "epoch": endpoint.epoch.hex(),
+            "failure": asdict(snapshot.failure),
+        }
+        original_unbind = session.unbind_timed_execution
+        unbind_observations = []
+
+        def unbind(*args, **kwargs):
+            cached = owner.status()
+            unbind_observations.append(cached)
+            assert threading.get_ident() == endpoint._owner
+            assert cached["last_failure"] == expected
+            assert cached["failure"] == expected["failure"]
+            # Failure-only cleanup observation preserves the previous accounting.
+            assert cached["accounting"] == before["accounting"]
+            return original_unbind(*args, **kwargs)
+
+        monkeypatch.setattr(session, "unbind_timed_execution", unbind)
+        read_count = len(reads)
+        snapshots[endpoint] = snapshot
+        assert owner.status()["last_failure"] is None
+        assert len(reads) == read_count
+        cleaned = result(owner.disconnect())
+        assert len(unbind_observations) == 1
+        assert cleaned["last_failure"] == expected
+        assert cleaned["failure"] is None and cleaned["accounting"] is None
+        assert cleaned["generation"] == before["generation"] + 1
+        assert cleaned["state"] == "idle"
+        assert before["last_failure"] is None
+        with pytest.raises(TypeError):
+            cleaned["last_failure"]["failure"]["excess_half_cycles"] = 0
+
+
+def test_cached_failure_attach_finally_preserves_setup_exception(
+    tmp_path, monkeypatch, failure_snapshots
+):
+    from dataclasses import asdict
+
+    from pokered_harness.link.timed_remote import TimedRemoteEndpoint
+    from pokered_harness.link.timed_wire import ProtocolError
+
+    with owned(tmp_path, "setup-owner") as (owner, _, game), owned(tmp_path, "setup-peer") as peer:
+        endpoints, snapshots, _ = failure_snapshots
+        original_attach = TimedRemoteEndpoint.attach
+        original_snapshot = TimedRemoteEndpoint.snapshot
+        failure = ProtocolError("injected attach failure after accounting becomes available")
+        supplied, consumed = [], []
+        generation = owner.generation
+
+        def attach(endpoint, current_game, *, deadline):
+            answer = original_attach(endpoint, current_game, deadline=deadline)
+            if current_game is game:
+                snapshot = late_accounting(endpoint.epoch.hex())
+                supplied.append(snapshot)
+                snapshots[endpoint] = snapshot
+                raise failure
+            return answer
+
+        def snapshot(endpoint):
+            observed = original_snapshot(endpoint)
+            if endpoint in snapshots:
+                # Make evidence available only to the attach-finally observation;
+                # a later cleanup read cannot rescue a missing setup capture.
+                consumed.append(snapshots.pop(endpoint))
+            return observed
+
+        monkeypatch.setattr(TimedRemoteEndpoint, "attach", attach)
+        monkeypatch.setattr(TimedRemoteEndpoint, "snapshot", snapshot)
+        listener = owner.listen("127.0.0.1", 0, "red")
+        address = listener.ready.result(timeout=BOUND)
+        connector = peer[0].connect("127.0.0.1", address["port"], "blue")
+        with pytest.raises(ProtocolError) as raised:
+            result(listener)
+        assert raised.value is failure
+        result(connector)
+        result(owner.disconnect())
+        assert len(supplied) == 1 and consumed == supplied
+        status = owner.status()
+        assert status["last_failure"] == {
+            "generation": generation,
+            "epoch": endpoints[game].epoch.hex(),
+            "failure": asdict(supplied[0].failure),
+        }
+        assert status["failure"] is None and status["accounting"] is None
+        assert status["state"] == "idle"
+        assert listener.future.exception() is failure
+
+
+@pytest.mark.asyncio
+async def test_cached_failure_mcp_status_never_reads_native_while_blocked(
+    tmp_path, monkeypatch, failure_snapshots
+):
+    from mcp import types
+
+    from pokered_harness.mcp_server import build_server
+
+    with linked(tmp_path) as ((owner, session, game), _):
+        before = owner.status()
+        status = publish_late_accounting(owner, game, failure_snapshots)
+        assert_lateness_failure(status, generation=before["generation"], epoch=before["epoch"])
+        server = build_server(session, timed_owner=owner, timed_policy=owner.policy)
+        active, release = block_owner(owner)
+        reads = tuple(failure_snapshots[2])
+        tick_reads = []
+        original_tick = session.current_tick
+
+        def tick():
+            tick_reads.append(threading.get_ident())
+            return original_tick()
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(session, "current_tick", tick)
+                tool = await asyncio.wait_for(
+                    server.request_handlers[types.CallToolRequest](
+                        types.CallToolRequest(
+                            params=types.CallToolRequestParams(name="link_status", arguments={})
+                        )
+                    ),
+                    1,
+                )
+                resource = await asyncio.wait_for(
+                    server.request_handlers[types.ReadResourceRequest](
+                        types.ReadResourceRequest(
+                            params=types.ReadResourceRequestParams(uri="pokered://link-status")
+                        )
+                    ),
+                    1,
+                )
+                assert not tool.root.isError
+                tool_status = json.loads(tool.root.content[0].text)
+                resource_status = json.loads(resource.root.contents[0].text)
+                for response in (tool_status, resource_status):
+                    assert response["failure"] == status["failure"]
+                    assert response["last_failure"] == status["last_failure"]
+                    assert response["transport"] == "timed" and response["active"]
+                    assert response["current_tick"] == response["tick"] == before["tick"]
+                assert not active.future.done()
+                assert tuple(failure_snapshots[2]) == reads
+                assert tick_reads == []
+        finally:
+            release.set()
+        result(active)
+
+
 def test_cached_status_is_immutable_and_available_while_busy(tmp_path):
     with owned(tmp_path) as (owner, _, _):
+        initial = owner.status()
+        assert initial["failure"] is None and initial["last_failure"] is None
+        assert initial["accounting"] is None and initial["epoch"] is None
         request, release = block_owner(owner)
         try:
             status = owner.status()
+            assert status["failure"] is None and status["last_failure"] is None
             assert not request.future.done()
             with pytest.raises(TypeError):
                 status["generation"] = -1
@@ -208,11 +532,34 @@ def test_cleanup_failure_retains_binding_and_blocks_reconnect_until_retry(tmp_pa
 
 
 @pytest.mark.parametrize("interrupt", ["cancel", "deadline"])
-def test_real_partial_progress_active_interrupt_is_terminal(tmp_path, interrupt):
+def test_real_partial_progress_active_interrupt_is_terminal(tmp_path, monkeypatch, interrupt):
+    """Real CPU progress; the owner-module clock for both owners is controlled.
+
+    The unchanged two-second logical budget expires after active partial progress.
+    Real Event/Future bounds still limit readiness and settlement; wire/native time
+    and the separate wall-clock deadline regressions remain real. The cancel
+    branch uses real time throughout; the deadline branch is not a wall-clock
+    CPU-throughput assertion.
+    """
+    from types import SimpleNamespace
+
+    from pokered_harness import mcp_timed_owner
+
     with linked(tmp_path) as ((left, session, game), (right, _, peer)):
         entered, release = threading.Event(), threading.Event()
         start = game.frame_count
         retired = game.mb.cpu.retired_instructions
+        progress = {}
+
+        def step(current, label, current_game):
+            progress[label] = (current_game.frame_count, current_game.mb.cpu.retired_instructions)
+            try:
+                return current.step(3, render=False)
+            finally:
+                progress[label] = (
+                    current_game.frame_count,
+                    current_game.mb.cpu.retired_instructions,
+                )
 
         def hook(_context):
             if game.frame_count == start + 1 and not entered.is_set():
@@ -220,18 +567,52 @@ def test_real_partial_progress_active_interrupt_is_terminal(tmp_path, interrupt)
                 assert release.wait(BOUND)
 
         result(left.submit(lambda current: current.register_hook_at_address(0, 0x155, hook)))
-        deadline = time.monotonic() + 2.0 if interrupt == "deadline" else None
-        active = left.submit("step", 3, render=False, deadline=deadline)
-        peer_work = right.submit("step", 3, render=False)
+        clock = SimpleNamespace(now=time.monotonic())
+        if interrupt == "deadline":
+            # Replace this module's binding, never the shared time module.
+            monkeypatch.setattr(
+                mcp_timed_owner, "time", SimpleNamespace(monotonic=lambda: clock.now)
+            )
+        deadline = clock.now + 2.0 if interrupt == "deadline" else None
+        active = left.submit(step, "left", game, deadline=deadline)
+        peer_work = right.submit(step, "right", peer)
         try:
-            assert entered.wait(BOUND), "authored CPU did not enter its second frame"
+            try:
+                assert entered.wait(BOUND), "authored CPU did not enter its second frame"
+            except AssertionError as error:
+
+                def diagnostic(owner, request, label):
+                    return {
+                        "phase": request.phase,
+                        "done": request.future.done(),
+                        "error": repr(request.future.exception())
+                        if request.future.done()
+                        else None,
+                        "owner_progress": progress.get(label),
+                        "status": dict(owner.status()),
+                    }
+
+                error.add_note(
+                    f"start={start}, retired={retired}, "
+                    f"left={diagnostic(left, active, 'left')!r}, "
+                    f"right={diagnostic(right, peer_work, 'right')!r}"
+                )
+                raise
             assert game.frame_count == start + 1
             assert game.mb.cpu.retired_instructions > retired
             if interrupt == "cancel":
                 active.cancel()
             else:
+                assert active.phase == "running" and not active.future.done()
+                assert not active.cancel_event.is_set()
+                assert active.deadline == deadline == clock.now + 2.0
+                with left._condition:
+                    clock.now = deadline
+                    left._condition.notify_all()
                 with pytest.raises(TimedOwnerError) as failure:
-                    result(active)
+                    # Raw Future cannot initiate expiry via OwnerRequest.result:
+                    # the independent supervisor must settle the active request.
+                    active.future.result(timeout=BOUND)
                 assert failure.value.code == "timed_deadline"
             assert not left.status()["admitting"]
         finally:
@@ -523,7 +904,9 @@ def test_invalid_local_input_preserves_connected_epoch(tmp_path, operation):
         assert peer.frame_count == peer_frame + 1
 
 
-def test_stored_protocol_error_precedes_active_caller_cancellation(tmp_path, monkeypatch):
+def test_stored_protocol_error_precedes_active_caller_cancellation(
+    tmp_path, monkeypatch, failure_snapshots
+):
     """Inject only a first wire terminal reason, never scheduler or CPU state."""
     from pokered_harness.link.timed_remote import TimedRemoteEndpoint
     from pokered_harness.link.timed_wire import ProtocolError
@@ -538,6 +921,8 @@ def test_stored_protocol_error_precedes_active_caller_cancellation(tmp_path, mon
 
     monkeypatch.setattr(TimedRemoteEndpoint, "attach", observe_attach)
     with linked(tmp_path) as ((owner, _, game), _):
+        cached = publish_late_accounting(owner, game, failure_snapshots)
+        historical = cached["last_failure"]
         entered, release = threading.Event(), threading.Event()
         failure = ProtocolError("first stored protocol failure before caller cancellation")
 
@@ -558,12 +943,15 @@ def test_stored_protocol_error_precedes_active_caller_cancellation(tmp_path, mon
             with pytest.raises(ProtocolError) as raised:
                 result(active)
             assert raised.value is failure
+            assert owner.status()["last_failure"] == historical
         finally:
             release.set()
         result(owner.disconnect())
         with pytest.raises(ProtocolError) as raised:
             result(active)
         assert raised.value is failure
+        assert owner.status()["last_failure"] == historical
+        assert owner.status()["failure"] is None
 
 
 @pytest.mark.asyncio

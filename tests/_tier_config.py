@@ -355,6 +355,26 @@ TIMING_SENSITIVE_TESTS = frozenset(
         ),
         (
             "test_mcp_timed_remote.py",
+            "test_cached_failure_survives_cancel_and_cleanup",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_failure_first_per_epoch_and_attributed_across_reconnect",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_failure_mcp_status_never_reads_native_while_blocked",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_failure_first_observed_at_cleanup_before_unbind",
+        ),
+        (
+            "test_mcp_timed_remote.py",
+            "test_cached_failure_attach_finally_preserves_setup_exception",
+        ),
+        (
+            "test_mcp_timed_remote.py",
             "test_blocked_cancellation_keeps_queue_and_cleanup_deadlines_live",
         ),
         (

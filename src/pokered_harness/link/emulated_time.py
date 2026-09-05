@@ -90,6 +90,31 @@ class EdgeDelivery(TimedEdge):
 
 
 @dataclass(frozen=True)
+class FailureSnapshot:
+    """One scalar-only first failure; later settlement cannot rewrite it.
+
+    Constructor validation may precede accounting initialization. The first
+    terminal event must be a contract failure; earlier cancellation/closure
+    leaves this record absent permanently.
+    Boundary lateness is prospective; other lateness phases measure local time.
+    """
+
+    reason: str
+    terminal_reason: str
+    phase: str
+    epoch: str | None
+    local_half_cycles: int | None
+    peer_half_cycles: int | None
+    raw_cpu_clock: int | None
+    observed_raw_cpu_clock: int | None
+    edge_sequence: int | None = None
+    edge_at_half_cycle: int | None = None
+    measured_lateness_half_cycles: int | None = None
+    allowed_lateness_half_cycles: int | None = None
+    excess_half_cycles: int | None = None
+
+
+@dataclass(frozen=True)
 class TimeSnapshot:
     local_half_cycles: int
     peer_half_cycles: int
@@ -107,6 +132,7 @@ class TimeSnapshot:
     pending_delivery: bool
     observed_raw_cpu_clock: int
     double_speed: bool = False
+    failure: FailureSnapshot | None = None
 
 
 class EmulatedTimeCoordinator:
@@ -133,6 +159,7 @@ class EmulatedTimeCoordinator:
         self._closed = False
         self._cancelled = False
         self._terminal_reason: str | None = None
+        self._failure: FailureSnapshot | None = None
         with self._condition:
             self._name(epoch, "epoch")
             self._integer(raw_cpu_clock, "raw_cpu_clock")
@@ -165,9 +192,37 @@ class EmulatedTimeCoordinator:
         self._held_deadline: int | None = None
         self._delivery_episode: tuple[str, int, int] | None = None
 
-    def _fail(self, message: str) -> NoReturn:
+    def _fail(
+        self,
+        message: str,
+        *,
+        phase: str = "validation",
+        edge_sequence: int | None = None,
+        edge_at_half_cycle: int | None = None,
+        measured_lateness_half_cycles: int | None = None,
+    ) -> NoReturn:
         if self._terminal_reason is None:
             self._terminal_reason = message
+            allowed = self._max_lateness if measured_lateness_half_cycles is not None else None
+            self._failure = FailureSnapshot(
+                reason=message,
+                terminal_reason=self._terminal_reason,
+                phase=phase,
+                epoch=getattr(self, "_epoch", None),
+                local_half_cycles=getattr(self, "_local", None),
+                peer_half_cycles=getattr(self, "_peer", None),
+                raw_cpu_clock=getattr(self, "_raw", None),
+                observed_raw_cpu_clock=getattr(self, "_observed_raw", None),
+                edge_sequence=edge_sequence,
+                edge_at_half_cycle=edge_at_half_cycle,
+                measured_lateness_half_cycles=measured_lateness_half_cycles,
+                allowed_lateness_half_cycles=allowed,
+                excess_half_cycles=(
+                    max(0, measured_lateness_half_cycles - allowed)
+                    if measured_lateness_half_cycles is not None and allowed is not None
+                    else None
+                ),
+            )
         self._closed = True
         self._condition.notify_all()
         raise EmulatedTimeError(message)
@@ -219,6 +274,7 @@ class EmulatedTimeCoordinator:
                 self._pending_delivery is not None,
                 self._observed_raw,
                 self._rate == 1,
+                self._failure,
             )
 
     def begin_episode(self, request_id: str, *, cycle_budget: int, instruction_cap: int) -> None:
@@ -328,7 +384,14 @@ class EmulatedTimeCoordinator:
             ceiling = min(ceiling + self._rearm, self._episode_end)
         if self._held_deadline is not None:
             if self._local > self._held_deadline:
-                self._fail("held delivery lateness exceeds bound")
+                edge = self._held_delivery[0]
+                self._fail(
+                    "held delivery lateness exceeds bound",
+                    phase="reserve.held_lateness",
+                    edge_sequence=edge.sequence,
+                    edge_at_half_cycle=edge.at_half_cycle,
+                    measured_lateness_half_cycles=self._local - edge.at_half_cycle,
+                )
             ceiling = min(ceiling, self._held_deadline)
         if self._edges:
             scheduled = self._edges[0][0]
@@ -339,7 +402,13 @@ class EmulatedTimeCoordinator:
             # deadline, without extending ordinary or episode credit.
             boundary = self._local + ((distance + self._rate - 1) // self._rate) * self._rate
             if boundary - scheduled > self._max_lateness:
-                self._fail("future edge boundary cannot fit speed and lateness bound")
+                self._fail(
+                    "future edge boundary cannot fit speed and lateness bound",
+                    phase="reserve.boundary_lateness",
+                    edge_sequence=self._edges[0][2].sequence,
+                    edge_at_half_cycle=scheduled,
+                    measured_lateness_half_cycles=boundary - scheduled,
+                )
             ceiling = min(ceiling, scheduled + self._max_lateness)
         cycles = min(max_cpu_cycles, max(0, ceiling - self._local) // self._rate)
         if not cycles:
@@ -421,9 +490,22 @@ class EmulatedTimeCoordinator:
             if instructions > permit.instruction_cap:
                 self._fail("instruction cap exceeded; actual elapsed recorded")
             if self._held_deadline is not None and self._local > self._held_deadline:
-                self._fail("held delivery lateness exceeds bound; actual elapsed recorded")
+                edge = self._held_delivery[0]
+                self._fail(
+                    "held delivery lateness exceeds bound; actual elapsed recorded",
+                    phase="commit.held_lateness",
+                    edge_sequence=edge.sequence,
+                    edge_at_half_cycle=edge.at_half_cycle,
+                    measured_lateness_half_cycles=self._local - edge.at_half_cycle,
+                )
             if self._edges and self._local - self._edges[0][0] > self._max_lateness:
-                self._fail("edge lateness exceeds bound; actual elapsed recorded")
+                self._fail(
+                    "edge lateness exceeds bound; actual elapsed recorded",
+                    phase="commit.edge_lateness",
+                    edge_sequence=self._edges[0][2].sequence,
+                    edge_at_half_cycle=self._edges[0][0],
+                    measured_lateness_half_cycles=self._local - self._edges[0][0],
+                )
             return self.snapshot()
 
     def discard_unconsumed_permit(
@@ -517,7 +599,13 @@ class EmulatedTimeCoordinator:
             if at_half_cycle <= self._watermark:
                 self._fail("edge contradicts inclusive completeness watermark")
             if self._local - at_half_cycle > self._max_lateness:
-                self._fail("edge lateness exceeds bound")
+                self._fail(
+                    "edge lateness exceeds bound",
+                    phase="receive_edge.lateness",
+                    edge_sequence=sequence,
+                    edge_at_half_cycle=at_half_cycle,
+                    measured_lateness_half_cycles=self._local - at_half_cycle,
+                )
             if len(self._edges) >= MAX_PENDING_EDGES:
                 self._fail("edge backlog exhausted")
             self._edge_sequence = sequence
@@ -563,7 +651,13 @@ class EmulatedTimeCoordinator:
                 edge = heapq.heappop(self._edges)[2]
                 lateness = self._local - edge.at_half_cycle
                 if lateness > self._max_lateness:
-                    self._fail("delivery lateness exceeds bound")
+                    self._fail(
+                        "delivery lateness exceeds bound",
+                        phase="delivery.lateness",
+                        edge_sequence=edge.sequence,
+                        edge_at_half_cycle=edge.at_half_cycle,
+                        measured_lateness_half_cycles=lateness,
+                    )
                 ready.append(
                     EdgeDelivery(
                         edge.epoch,
