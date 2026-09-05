@@ -6,6 +6,7 @@ and STOP events below are controlled inputs, not opcode or hardware validation.
 """
 
 import importlib.util
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,9 @@ def source_mb():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert Path(module.__file__).resolve() == path.resolve()
+    # Source calls use format arguments that the native PyBoy logger cannot accept.
+    # Isolate this source-fake dependency without changing PyBoy's shared logger.
+    module.logger = logging.getLogger(f"{__name__}.source_mb")
     return module
 
 
