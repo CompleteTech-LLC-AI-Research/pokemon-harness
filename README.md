@@ -31,9 +31,17 @@ Both owners completed `274` frames, interrupted the next call, and remained
 in approach without trade goals. Both detached and closed with exit `0` and
 no surviving owner, but recorded cancellation errors and missing goal/party
 evidence. The local, unpublished report is
-`poke-timed-trade-full-20260905-AeExoS/report.json`. The new batched trade run
-remains live at this snapshot; no completed trade or default-policy
-qualification is claimed.
+`poke-timed-trade-full-20260905-AeExoS/report.json`. The batched trade attempt
+also failed to complete after `965.494s` (`status=incomplete`,
+`complete=false`): Blue exhausted the `hidden_event` input quota in the warp
+phase and Yellow was cancelled. Blue completed `929` whole frames and Yellow
+`928`, with one interrupted call each and neither trade goal reached. Both
+detached, closed their drivers and sessions, and exited `0`, without forced
+termination or surviving owners, threads, or report readers. These clean
+process exits do not negate the recorded driver/cancellation errors. Its
+local, unpublished report is
+`poke-batched-trade-74e8db3-20260905-r8Huo6/report.json`; no completed trade
+or default-policy qualification is claimed.
 
 At harness commit `4275957`, the source `--unit-only` gate passed `2,924`
 unit tests and `955` timing checks (`191` cases in each of five repetitions),
