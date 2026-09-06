@@ -1419,6 +1419,80 @@ class _CompletingSlaveCore:
         return True
 
 
+def test_owner_completion_and_irq_precede_blocked_edge_response(monkeypatch):
+    """An eighth external edge is locally complete before TCP can reply.
+
+    A TCP response is flow control for the peer's clock edge, not part of
+    the local Game Boy's shift-register completion.  Keep its write blocked
+    until after the owner has applied the edge, then prove SB/SC-equivalent
+    core state and the owner IRQ are already observable.
+    """
+    master, slave = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    irq_calls: list[str] = []
+    response_write_started = threading.Event()
+    release_response_write = threading.Event()
+    sender_result: list[int] = []
+    sender_errors: list[BaseException] = []
+    original_send_frame = slave._send_frame
+
+    def blocked_response_write(frame, *, timeout, operation, cancel_event=None):
+        if operation == "EDGE_RESP":
+            response_write_started.set()
+            assert release_response_write.wait(timeout=1.0), "test response release timed out"
+        return original_send_frame(
+            frame,
+            timeout=timeout,
+            operation=operation,
+            cancel_event=cancel_event,
+        )
+
+    def send_master_edge() -> None:
+        try:
+            sender_result.append(master.on_edge(our_bit=1, our_role=1))
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            sender_errors.append(exc)
+
+    monkeypatch.setattr(slave, "_send_frame", blocked_response_write)
+    master.start_receiver(local_core=None)
+    slave.start_receiver(
+        local_core=core,
+        irq_callback=lambda: irq_calls.append("serial"),
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    sender = threading.Thread(target=send_master_edge, daemon=True)
+    try:
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and slave.debug_snapshot()["pending_edge_requests"] == 0:
+            time.sleep(0.005)
+        assert slave.debug_snapshot()["pending_edge_requests"] == 1
+
+        assert slave.service_pending_edges(max_edges=1) == 1
+        assert response_write_started.wait(timeout=1.0)
+        # The response thread is stuck in sendall, but the completed eighth
+        # edge has already latched data, disarmed the slave, and requested
+        # the owner-side serial IRQ.
+        assert core.SB == 1
+        assert core.transfer_enabled == 0
+        assert irq_calls == ["serial"]
+        assert slave.debug_snapshot()["irq_callbacks"] == 1
+        assert sender.is_alive(), "master unexpectedly received a blocked response"
+
+        release_response_write.set()
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert sender_errors == []
+        assert sender_result == [0]
+        slave.wait_for_wire_idle(timeout=1.0)
+    finally:
+        release_response_write.set()
+        sender.join(timeout=1.0)
+        master.stop()
+        slave.stop()
+
+
 class _BlockingSlaveCore:
     """Pause edge application so a transport-idle timeout is observable."""
 
