@@ -11,6 +11,50 @@ symbol files, save states, or other ROM-derived artifacts.
 
 **Status: `PARTIAL` — experimental branch, not production-ready.**
 
+The newer hosted gate at `656917ba95843decf4a33d98158be0049ef7a22e`
+failed: unit tests recorded `3,913` passes and `1` failure; five timing
+repetitions recorded `1,100` passes and `5` failures. Both tiers recorded
+zero errors, skips, xfails, or xpasses. The failing case in both tiers was
+`test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_events`
+with `_queue.Empty`. See the
+[hosted gate report](https://github.com/CompleteDotTech/pokemon/actions/runs/34001368361).
+The paired-call timing failure remains unresolved; older passing snapshots
+below do not qualify this revision. Experimental transport changes and
+trade/battle observations in separate worktrees are not integrated acceptance
+evidence. Full remote trade and battle completion remain unproven.
+
+At `74e8db3`, the dual unit/timing gate completed `PASS`, collecting `3,594`
+tests per runtime. Source passed `3,441` unit tests in `151.4s` and `1,075`
+timing checks in `319.8s`; native passed `3,441` unit tests in `174.0s` and
+`1,075` timing checks in `349.7s`. Both recorded zero failures, errors, skips,
+xfails, or xpasses. The local, unpublished report is
+`pokemon-batch-dual-74e8db3-20260905/gate-report.json`. This scoped pass does
+not erase the historical `f458fc7` native failures below or qualify gameplay.
+
+The separate `74e8db3` narrow-policy actual-MCP smoke matrix passed all `18`
+runs (nine ordered pairs per runtime), with zero failures, errors, skips, or
+leftover processes and unchanged checked files. Its local, unpublished
+manifest is `poke-narrow-matrix18-74e8db3-rfww1gsd/manifest.json`; this is new
+smoke evidence, distinct from the earlier `f458fc7` report, not trade completion.
+
+The unbatched full-trade attempt failed to complete: its terminal report has
+`status=incomplete`, `complete=false`, and a deadline stop after `3600.186s`.
+Both owners completed `274` frames, interrupted the next call, and remained
+in approach without trade goals. Both detached and closed with exit `0` and
+no surviving owner, but recorded cancellation errors and missing goal/party
+evidence. The local, unpublished report is
+`poke-timed-trade-full-20260905-AeExoS/report.json`. The batched trade attempt
+also failed to complete after `965.494s` (`status=incomplete`,
+`complete=false`): Blue exhausted the `hidden_event` input quota in the warp
+phase and Yellow was cancelled. Blue completed `929` whole frames and Yellow
+`928`, with one interrupted call each and neither trade goal reached. Both
+detached, closed their drivers and sessions, and exited `0`, without forced
+termination or surviving owners, threads, or report readers. These clean
+process exits do not negate the recorded driver/cancellation errors. Its
+local, unpublished report is
+`poke-batched-trade-74e8db3-20260905-r8Huo6/report.json`; no completed trade
+or default-policy qualification is claimed.
+
 At harness commit `4275957`, the source `--unit-only` gate passed `2,924`
 unit tests and `955` timing checks (`191` cases in each of five repetitions),
 with zero failures, errors, skips, xfails, or xpasses. The local, unpublished

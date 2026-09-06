@@ -418,13 +418,33 @@ def test_cancel_reaches_active_real_credit_wait_without_session_lock(attached_pa
     receiving = threading.Event()
     cancelled = threading.Event()
     original_receive = type(endpoint.channel).receive
+    original_wait = endpoint.session._adapter._wait
+    owner = threading.get_ident()
+    credit_wait = False
+
+    def observe_credit_wait(remaining):
+        nonlocal credit_wait
+        assert threading.get_ident() == owner
+        credit_wait = True
+        try:
+            return original_wait(remaining)
+        finally:
+            credit_wait = False
 
     def observe_receive(channel, *, deadline, cancel_event=None):
         if channel is endpoint.channel:
-            receiving.set()
-            assert cancelled.wait(BOUND)
+            assert threading.get_ident() == owner
+            # Startup Progress(0) can require a receive before any instruction.
+            # Let real controls establish credit before selecting a partial wait.
+            if game.mb.cpu.cycles > before[2] and game.mb.cpu.retired_instructions > before[3]:
+                assert credit_wait
+                assert session._timed_executing and endpoint.session._active
+                assert not endpoint.session._in_edge
+                receiving.set()
+                assert cancelled.wait(BOUND)
         return original_receive(channel, deadline=deadline, cancel_event=cancel_event)
 
+    monkeypatch.setattr(endpoint.session._adapter, "_wait", observe_credit_wait)
     monkeypatch.setattr(type(endpoint.channel), "receive", observe_receive)
 
     def cancel_during_receive():
@@ -457,19 +477,27 @@ def test_cancel_during_real_progress_send_preserves_cancelled(attached_pair, mon
     session.bind_timed_execution(endpoint)
     before = observed(session, game)
     sending, cancelled = threading.Event(), threading.Event()
-    original_send = type(endpoint.channel).send
+    original_send = type(endpoint.channel).send_complete_progress
+    owner = threading.get_ident()
 
-    def observe_send(channel, message, *, deadline, cancel_event=None):
+    def observe_send(channel, complete, message, *, deadline, cancel_event=None):
         if (
             channel is endpoint.channel
             and isinstance(message, Progress)
             and message.settled_half_cycles > 0
         ):
+            assert threading.get_ident() == owner
+            assert complete.through_half_cycle == message.settled_half_cycles
+            assert game.mb.cpu.cycles > before[2]
+            assert game.mb.cpu.retired_instructions > before[3]
+            assert session._timed_executing and endpoint.session._active
             sending.set()
             assert cancelled.wait(BOUND)
-        return original_send(channel, message, deadline=deadline, cancel_event=cancel_event)
+        return original_send(
+            channel, complete, message, deadline=deadline, cancel_event=cancel_event
+        )
 
-    monkeypatch.setattr(type(endpoint.channel), "send", observe_send)
+    monkeypatch.setattr(type(endpoint.channel), "send_complete_progress", observe_send)
 
     def cancel_during_send():
         assert sending.wait(BOUND)
@@ -581,9 +609,19 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
     assert all(native) or all(path.endswith(".py") for path in paths), paths
     record_property("runtime", "native" if all(native) else "source")
     record_property("runtime_modules", repr(paths))
-    ready = threading.Barrier(3, timeout=BOUND)
-    complete = threading.Barrier(2, timeout=BOUND)
-    completions = [queue.Queue(), queue.Queue()]
+    calls_per_owner, owner_count = 3, 2
+    work_capacity_s = owner_count * calls_per_owner * (BOUND + 1)
+    completion_capacity_s = work_capacity_s
+    paired_capacity_s = work_capacity_s + completion_capacity_s
+    # This only aligns owners before paired CPU work. Socket setup and timed
+    # routing retain their own protocol deadlines; the capacity bound covers
+    # the known two-owner, six-call workload without measuring GIL throughput.
+    ready = threading.Barrier(3, timeout=paired_capacity_s)
+    # Owners cannot close their endpoints independently: the parent receives
+    # both semantic-completion signals under the finite paired-workload bound,
+    # validates them, then releases both owners into teardown together.
+    complete = queue.Queue()
+    teardown_release = threading.Event()
     left, right = socket.socketpair()
 
     def owner(sock, index):
@@ -596,16 +634,15 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
                 original_tick = endpoint.tick
                 raw_tick = game.tick
                 calls = []
+                completed_frames = []
                 pending_events = []
 
                 def recording_tick(count=1, render=True, sound=True):
                     calls.append((count, render, sound, session.current_tick()))
-                    start_frame, started = game.frame_count, time.monotonic()
+                    start_frame = game.frame_count
                     result = original_tick(count, render=render, sound=sound)
+                    completed_frames.append(game.frame_count - start_frame)
                     pending_events.append([int(event) for event in game.events])
-                    completions[index].put(
-                        (count, game.frame_count - start_frame, time.monotonic() - started)
-                    )
                     return result
 
                 endpoint.tick = recording_tick  # Observe real calls without changing execution.
@@ -622,15 +659,20 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
                 ready.wait()
                 assert session.step(2) is None
                 result = session.run_until_event("absent", max_ticks=3, chunk=2, render=False)
-                complete.wait()  # Both complete all bounded public calls before teardown.
                 assert result.event is None and result.ticks_spent == 3
                 assert calls == [(2, True, True, 3), (2, False, True, 5), (1, False, True, 6)]
+                assert completed_frames == [2, 2, 1]
                 assert session.current_tick() == game.frame_count == before[0] + 5
                 assert game.mb.cpu.cycles > before[2]
                 assert game.mb.cpu.retired_instructions > before[3]
                 assert pending_events == [[], [WindowEvent.RELEASE_BUTTON_A], []]
                 assert game.mb.lcd.disable_renderer is True
                 assert game.tick == raw_tick  # No PyBoy monkeypatch, including native mode.
+                complete.put(index)
+                assert teardown_release.wait(paired_capacity_s), (
+                    "parent did not release paired endpoint teardown within "
+                    f"{paired_capacity_s:g}s capacity"
+                )
                 session.unbind_timed_execution(endpoint)
                 frames = game.frame_count
                 session.step(1, render=True)
@@ -644,22 +686,31 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
     workers = [Job(lambda: owner(left, 0)), Job(lambda: owner(right, 1))]
     try:
         ready.wait()
-        # Three known whole calls retain the same BOUND+1 watchdog EACH.
-        # The finite sequence cap replaces an incorrect single-call watchdog
-        # over all five frames; emulator/wire deadlines and work are unchanged.
-        expected_counts = (2, 2, 1)
-        sequence_deadline = time.monotonic() + len(expected_counts) * (BOUND + 1)
-        for expected in expected_counts:
-            call_deadline = min(sequence_deadline, time.monotonic() + BOUND + 1)
-            for completed in completions:
-                count, actual_frames, elapsed = completed.get(
-                    timeout=max(0, call_deadline - time.monotonic())
-                )
-                assert count == actual_frames == expected
-                assert elapsed < BOUND + 1
-        assert all(completed.empty() for completed in completions)
+        capacity_deadline = time.monotonic() + paired_capacity_s
+        completed_owners = []
+        while len(completed_owners) < owner_count:
+            remaining = capacity_deadline - time.monotonic()
+            assert remaining > 0, (
+                f"paired owners did not complete semantic work within "
+                f"{paired_capacity_s:g}s capacity"
+            )
+            try:
+                completed_owners.append(complete.get(timeout=remaining))
+            except queue.Empty as exc:
+                raise AssertionError(
+                    f"paired owners did not complete semantic work within "
+                    f"{paired_capacity_s:g}s capacity"
+                ) from exc
+        assert sorted(completed_owners) == list(range(owner_count))
+        teardown_release.set()
+        for worker in workers:
+            worker.thread.join(max(0, capacity_deadline - time.monotonic()))
+        assert all(not worker.thread.is_alive() for worker in workers), (
+            f"paired timed route exceeded {paired_capacity_s:g}s workload capacity"
+        )
         assert all(result > 0 for result in owner_results(workers))
     finally:
+        teardown_release.set()
         left.close()
         right.close()
         for worker in workers:

@@ -28,9 +28,11 @@ from pokered_harness.link.timed_wire import (
     EmissionComplete,
     Fence,
     FenceAck,
+    Frame,
     Progress,
     Sync,
     TimedWireChannel,
+    encode_frame,
 )
 
 
@@ -45,6 +47,7 @@ class ScriptedChannel:
         # explicitly sends zero progress before its application messages.
         self.messages = deque((Progress(0), *messages))
         self.sent = []
+        self.send_calls = []
         self.send_deadlines = []
         self.closed = False
         self.error = None
@@ -64,6 +67,22 @@ class ScriptedChannel:
             raise Cancelled("control cancellation")
 
     def send(self, message, *, deadline, cancel_event=None):
+        self.send_calls.append(("send", (message,), deadline, cancel_event))
+        self._record_message(message, deadline=deadline, cancel_event=cancel_event)
+
+    def send_complete_progress(self, complete, progress, *, deadline, cancel_event=None):
+        """Explicit synthetic batch capability, not two calls to single send.
+
+        This records the API shape and preserves per-message observation hooks;
+        real framed batching is exercised separately by the paired channels.
+        """
+        assert type(complete) is EmissionComplete and type(progress) is Progress
+        assert complete.through_half_cycle == progress.settled_half_cycles
+        self.send_calls.append(("complete_progress", (complete, progress), deadline, cancel_event))
+        self._record_message(complete, deadline=deadline, cancel_event=cancel_event)
+        self._record_message(progress, deadline=deadline, cancel_event=cancel_event)
+
+    def _record_message(self, message, *, deadline, cancel_event):
         self._check(cancel_event)
         if time.monotonic() >= deadline:
             raise TimeoutError("control send deadline")
@@ -370,12 +389,12 @@ def test_real_pair_repeated_public_frames_bounded_wire_volume(
     progress = [[], []]
     messages = [[], []]
     publications = [[], []]
+    send_calls = [[], []]
     native_progress = []
     start = threading.Barrier(2)
     for i, channel in enumerate(channels):
-        original = channel.send
 
-        def observe(message, *, deadline, cancel_event=None, index=i, send=original):
+        def record(message, index=i):
             counts[index] += 1
             messages[index].append(message)
             if isinstance(message, Progress):
@@ -389,9 +408,35 @@ def test_real_pair_repeated_public_frames_bounded_wire_volume(
             if isinstance(message, EdgeResponse):
                 edge_responses[index].append(message)
                 assert sessions[index].snapshot().pending_delivery
+
+        original = channel.send
+
+        def observe(message, *, deadline, cancel_event=None, index=i, send=original, log=record):
+            send_calls[index].append(("send", (message,)))
+            log(message)
             return send(message, deadline=deadline, cancel_event=cancel_event)
 
         channel.send = observe
+        original_batch = channel.send_complete_progress
+
+        def observe_batch(
+            complete,
+            progress,
+            *,
+            deadline,
+            cancel_event=None,
+            index=i,
+            send=original_batch,
+            log=record,
+        ):
+            assert not sessions[index]._in_edge
+            assert cancel_event is sessions[index]._cancel_view
+            send_calls[index].append(("complete_progress", (complete, progress)))
+            log(complete)
+            log(progress)
+            return send(complete, progress, deadline=deadline, cancel_event=cancel_event)
+
+        channel.send_complete_progress = observe_batch
         sessions.append(
             session_type(
                 channel,
@@ -408,8 +453,9 @@ def test_real_pair_repeated_public_frames_bounded_wire_volume(
 
         def observe_publish(*, force=False, index=i, original=publish):
             begin = len(messages[index])
+            call_begin = len(send_calls[index])
             result = original(force=force)
-            publications[index].append(messages[index][begin:])
+            publications[index].append((messages[index][begin:], send_calls[index][call_begin:]))
             return result
 
         sessions[i]._publish = observe_publish
@@ -503,7 +549,7 @@ def test_real_pair_repeated_public_frames_bounded_wire_volume(
             # When a safe publication sends both independently coalesced
             # frontiers, its emission prefix must be sent first.
             both = []
-            for batch in publications[index]:
+            for batch, calls in publications[index]:
                 if any(isinstance(m, EmissionComplete) for m in batch) and any(
                     isinstance(m, Progress) for m in batch
                 ):
@@ -511,6 +557,7 @@ def test_real_pair_repeated_public_frames_bounded_wire_volume(
                     assert isinstance(batch[0], EmissionComplete)
                     assert isinstance(batch[1], Progress)
                     assert batch[0].through_half_cycle == batch[1].settled_half_cycles
+                    assert calls == [("complete_progress", tuple(batch))]
                     both.append(batch)
             assert both
             watermark = -1
@@ -1459,8 +1506,13 @@ def test_source_completeness_progress_due_forces_prefix_below_threshold(
         assert 624 - 480 >= session._threshold == 128
         assert 0 < 624 - 512 < session._threshold
         sent_before = len(channel.sent)
+        calls_before = len(channel.send_calls)
         session._publish()
         assert channel.sent[sent_before:] == [EmissionComplete(624, 0), Progress(624)]
+        calls = channel.send_calls[calls_before:]
+        assert len(calls) == 1
+        assert calls[0][:2] == ("complete_progress", (EmissionComplete(624, 0), Progress(624)))
+        assert calls[0][3] is session._cancel_view
         assert session.snapshot() == before
         assert board.cpu.cycles == 312 and board.cpu.retired_instructions == 26
 
@@ -1661,3 +1713,180 @@ def test_control_completeness_cancel_wait_preserves_real_cpu_frontier(session_ty
         assert session.snapshot().local_half_cycles == 24
         assert session.snapshot().cancelled and channel.closed
         assert game.mb.execution_before is game.mb.execution_after is None
+
+
+def test_real_v3_complete_progress_equal_watermark_accepts_current_prefix(
+    session_type, source_lifecycle_game
+):
+    """Real wire acceptance; real source CPU, synthetic publication bookkeeping.
+
+    Temporarily suppress credit at an already retired endpoint to send only
+    EC through the real standalone path, then publish its matching credit.
+    No clocks, CPU counters, wire sequence, or wire prefix state are replaced.
+    """
+    game, _ = source_lifecycle_game
+    with (
+        real_v3_channels() as (channel, peer),
+        attached(session_type, game, channel) as (session, _),
+    ):
+        peer.send(Progress(0), deadline=time.monotonic() + 1)
+        # Decode the bootstrap anchor before CPU execution; its safe zero EC
+        # is explicit, rather than depending on reader-thread arrival timing.
+        session.service_controls(deadline=time.monotonic() + 1)
+        assert peer.receive(deadline=time.monotonic() + 1) == Progress(0)
+        assert peer.receive(deadline=time.monotonic() + 1) == EmissionComplete(0, 0)
+        publish = session._publish
+
+        def complete_without_credit(*, force=False):
+            local = session.snapshot().local_half_cycles
+            if local == 0:
+                return publish(force=force)
+            assert local == 24 and game.mb.cpu.cycles == 12
+            previous_progress = session._sent_progress
+            session._sent_progress = local  # Explicit synthetic cache seam.
+            try:
+                return publish(force=force)
+            finally:
+                session._sent_progress = previous_progress
+
+        session._publish = complete_without_credit
+        session.tick(1, render=False, sound=False)
+        session._publish = publish
+        assert peer.receive(deadline=time.monotonic() + 1) == EmissionComplete(24, 0)
+        assert (session._sent_watermark, session._sent_prefix, session._sent_progress) == (
+            24,
+            0,
+            0,
+        )
+        before = session.snapshot()
+        calls = []
+        batch = channel.send_complete_progress
+
+        def observe(complete, progress, *, deadline, cancel_event=None):
+            calls.append((complete, progress, deadline, cancel_event))
+            assert (session._sent_watermark, session._sent_prefix, session._sent_progress) == (
+                24,
+                0,
+                0,
+            )
+            return batch(complete, progress, deadline=deadline, cancel_event=cancel_event)
+
+        channel.send_complete_progress = observe
+        deadline = time.monotonic() + 1
+        session.service_controls(deadline=deadline)
+        assert len(calls) == 1
+        assert calls[0][:2] == (EmissionComplete(24, 0), Progress(24))
+        assert calls[0][2] <= deadline and calls[0][3] is session._cancel_view
+        # Both actual reader-side frames must pass the real prefix validator.
+        assert peer.receive(deadline=deadline) == EmissionComplete(24, 0)
+        assert peer.receive(deadline=deadline) == Progress(24)
+        assert (session._sent_watermark, session._sent_prefix, session._sent_progress) == (
+            24,
+            0,
+            24,
+        )
+        assert session.snapshot() == before
+        assert game.mb.cpu.cycles == 12 and game.mb.cpu.retired_instructions == 1
+        assert not channel.closed and not peer.closed
+
+
+@pytest.mark.parametrize("failure_type", [Cancelled, DeadlineExceeded, ChannelClosed])
+def test_control_complete_progress_failure_preserves_sent_frontiers(
+    session_type, source_lifecycle_game, failure_type
+):
+    """Synthetic canonical batch failures after real CPU/peripheral settlement."""
+    game, _ = source_lifecycle_game
+    channel = ScriptedChannel(revision=3)
+    backend = game.mb.serial.backend
+    with attached(session_type, game, channel) as (session, _):
+        sentinel = failure_type("synthetic complete-progress failure")
+        attempts = []
+        before = (session._sent_watermark, session._sent_prefix, session._sent_progress)
+
+        def fail(complete, progress, *, deadline, cancel_event=None):
+            assert time.monotonic() < deadline
+            assert cancel_event is session._cancel_view
+            assert game.mb.cpu.cycles == game.mb.serial.last_cycles == 12
+            assert game.mb.cpu.retired_instructions == 1
+            attempts.append((complete, progress))
+            raise sentinel
+
+        channel.send_complete_progress = fail
+        with pytest.raises(failure_type) as caught:
+            session.tick(1, render=False, sound=False)
+        assert caught.value is sentinel
+        assert attempts == [(EmissionComplete(24, 0), Progress(24))]
+        assert (session._sent_watermark, session._sent_prefix, session._sent_progress) == before
+        assert not any(isinstance(m, Progress) and m.settled_half_cycles for m in channel.sent)
+        assert game.mb.cpu.cycles == 12 and game.mb.cpu.retired_instructions == 1
+        assert session.snapshot().closed and channel.closed
+        assert game.mb.serial.backend is backend
+        assert game.mb.execution_before is game.mb.execution_after is None
+
+
+def test_real_v3_partial_complete_progress_write_preserves_sent_frontiers(
+    session_type, source_lifecycle_game
+):
+    """Real EC bytes leave the socket, then a synthetic send fault cuts off P.
+
+    The actual wire admission/write/termination path remains in use. This is
+    controlled transport failure evidence, not network throughput acceptance.
+    """
+    game, _ = source_lifecycle_game
+    backend = game.mb.serial.backend
+    with (
+        real_v3_channels() as (channel, peer),
+        attached(session_type, game, channel) as (session, _),
+    ):
+        peer.send(Progress(0), deadline=time.monotonic() + 1)
+        session.service_controls(deadline=time.monotonic() + 1)
+        before = (session._sent_watermark, session._sent_prefix, session._sent_progress)
+        batch = channel.send_complete_progress
+        attempts = []
+        written = bytearray()
+        expected = []
+
+        class PartialWriteSocket:
+            """Delegate the real fd; inject failure only after actual EC bytes."""
+
+            def __init__(self, sock, prefix):
+                self.sock = sock
+                self.prefix = prefix
+
+            def __getattr__(self, name):
+                return getattr(self.sock, name)
+
+            def send(self, data):
+                if len(written) == len(self.prefix):
+                    raise BrokenPipeError("synthetic failure after complete EC bytes")
+                remaining = len(self.prefix) - len(written)
+                count = self.sock.send(data[:remaining])
+                written.extend(data[:count])
+                return count
+
+        def interrupt_batch(complete, progress, *, deadline, cancel_event=None):
+            assert game.mb.cpu.cycles == game.mb.serial.last_cycles == 12
+            prefix = encode_frame(Frame(channel.epoch, channel._outgoing.sequence + 1, complete, 3))
+            expected.append(prefix)
+            attempts.append((complete, progress))
+            channel._sock = PartialWriteSocket(channel._sock, prefix)
+            return batch(complete, progress, deadline=deadline, cancel_event=cancel_event)
+
+        channel.send_complete_progress = interrupt_batch
+        with pytest.raises(
+            ChannelClosed, match="synthetic failure after complete EC bytes"
+        ) as caught:
+            session.tick(1, render=False, sound=False)
+        assert attempts == [(EmissionComplete(24, 0), Progress(24))]
+        assert len(expected) == 1 and bytes(written) == expected[0]
+        assert written, "the failure must follow a real partial batch write"
+        assert (session._sent_watermark, session._sent_prefix, session._sent_progress) == before
+        assert caught.value is channel.error
+        assert game.mb.cpu.cycles == 12 and game.mb.cpu.retired_instructions == 1
+        assert session.snapshot().local_half_cycles == 24
+        assert session.snapshot().closed and channel.closed
+        assert game.mb.serial.backend is backend
+        assert game.mb.execution_before is game.mb.execution_after is None
+        with pytest.raises(ChannelClosed):
+            session.tick(0, render=False, sound=False)
+        assert len(attempts) == 1

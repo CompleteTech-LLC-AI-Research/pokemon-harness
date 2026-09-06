@@ -77,7 +77,10 @@ UNIT_MODULES = frozenset(
         "test_native_execution_governor.py",
         "test_native_hook_exceptions.py",
         "test_network_backend.py",
+        "test_pre_linkmenu_observation.py",
         "test_probe_timed_rom_pair.py",
+        "test_probe_owner_phases.py",
+        "test_probe_timed_battle_pair.py",
         "test_probe_timed_trade_pair.py",
         "test_production_gate.py",
         "test_pyboy_link_imports.py",
@@ -101,12 +104,14 @@ UNIT_MODULES = frozenset(
         "test_state_text.py",
         "test_symbol_loader.py",
         "test_timed_link_session.py",
+        "test_timed_battle_probe.py",
         "test_timed_input_observation.py",
         "test_timed_menu_probe.py",
         "test_timed_mcp_matrix.py",
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
         "test_timed_wire.py",
+        "test_timed_wire_batch.py",
         "test_timed_trade_probe.py",
     }
 )
@@ -304,6 +309,30 @@ TIER_REQUIRED_TESTS = {
 # lane, whose exact name is owned by that lane.
 TIMING_SENSITIVE_TESTS = frozenset(
     {
+        (
+            "test_probe_owner_phases.py",
+            "test_spawn_serializes_and_reports_exact_owner_phase_schema",
+        ),
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_lock_contention_failure_is_nonterminal",
+        ),
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_writer_barrier_excludes_interleaving",
+        ),
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_real_receive_order_and_sequence",
+        ),
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_real_receiver_rejects_sequence_replay",
+        ),
+        (
+            "test_timed_wire_batch.py",
+            "test_batch_real_receiver_preserves_queue_bound",
+        ),
         (
             "test_timed_menu_milestones.py",
             "test_authored_cartridge_actual_helper_is_non_mutating",
@@ -510,6 +539,14 @@ TIMING_SENSITIVE_TESTS = frozenset(
         (
             "test_timed_link_session.py",
             "test_real_pair_repeated_public_frames_bounded_wire_volume",
+        ),
+        (
+            "test_timed_link_session.py",
+            "test_real_v3_complete_progress_equal_watermark_accepts_current_prefix",
+        ),
+        (
+            "test_timed_link_session.py",
+            "test_real_v3_partial_complete_progress_write_preserves_sent_frontiers",
         ),
         (
             "test_timed_link_session.py",

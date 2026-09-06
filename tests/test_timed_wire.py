@@ -540,15 +540,78 @@ def test_bounded_outstanding_requests_release_capacity_on_response(kind):
         exchange(left, right, wire.EdgeRequest(2, 1, 1, 0))
 
 
-def test_bounded_incoming_queue_fails_closed(kind):
-    with channels(kind, inbound_capacity=1) as (left, right):
-        left.send(wire.Progress(0), deadline=deadline())
-        wait_state(right, lambda: len(right._queue) == 1)
-        left.send(wire.Progress(1), deadline=deadline())
-        wait_state(right, lambda: right.closed)
-        assert isinstance(right.error, wire.ProtocolError)
-        with pytest.raises(wire.ProtocolError):
-            right.receive(deadline=deadline())
+@pytest.mark.parametrize("order", ["sender_returns_first", "peer_closes_first"])
+def test_bounded_incoming_queue_fails_closed(kind, order):
+    class OverflowGateSocket(ReturnGateSocket):
+        def send(self, data, *args):
+            count = super().send(data, *args)
+            # Releasing the gate must lead to the final open check, not a
+            # second send iteration after a partial write.
+            assert count == len(data)
+            return count
+
+        def shutdown(self, how):
+            # EOF must not release the writer before the test observes it.
+            return self.sock.shutdown(how)
+
+    with sockets(kind) as (a, b):
+        gate = OverflowGateSocket(a)
+        left = wire.TimedWireChannel(gate, epoch=EPOCH, inbound_capacity=1)
+        right = wire.TimedWireChannel(b, epoch=EPOCH, inbound_capacity=1)
+        sender = None
+        try:
+            hello = Job(lambda: left.handshake(deadline=deadline()))
+            right.handshake(deadline=deadline())
+            hello.result()
+            left.send(wire.Progress(0), deadline=deadline())
+            wait_state(right, lambda: len(right._queue) == 1)
+            with right._condition:
+                assert right._capacity == len(right._queue) == 1
+                assert right._queue[0].message == wire.Progress(0)
+                assert right._incoming.sequence == 2
+                assert right._incoming.settled == 0
+                assert not right.closed
+                if order == "sender_returns_first":
+                    # The reader cannot process overflow until send returns.
+                    assert left.send(wire.Progress(1), deadline=deadline()) is None
+                    assert not right.closed
+                    assert len(right._queue) == 1
+            if order == "peer_closes_first":
+                gate.armed = True
+                sender = Job(lambda: left.send(wire.Progress(1), deadline=deadline()))
+                assert gate.delivered.wait(BOUND)
+                wait_state(right, lambda: right.closed)
+                wait_state(left, lambda: left.closed)
+                assert type(left.error) is wire.ChannelClosed
+                assert str(left.error) == "peer closed connection"
+                assert sender.thread.is_alive()
+                assert not gate.release.is_set()
+                gate.release.set()
+                with pytest.raises(wire.ChannelClosed, match="^peer closed connection$") as caught:
+                    sender.result()
+                assert caught.value is left.error
+            wait_state(right, lambda: right.closed)
+            error = right.error
+            assert type(error) is wire.ProtocolError
+            assert str(error) == "inbound queue capacity exceeded"
+            with right._condition:
+                assert right._capacity == 1
+                assert not right._queue
+                assert right._incoming.sequence == 2
+                assert right._incoming.settled == 0
+            with pytest.raises(
+                wire.ProtocolError, match="^inbound queue capacity exceeded$"
+            ) as caught:
+                right.receive(deadline=deadline())
+            assert caught.value is error
+            assert right.error is error
+        finally:
+            gate.release.set()
+            left.close()
+            right.close()
+            if sender is not None:
+                sender.thread.join(BOUND + 1)
+                assert not sender.thread.is_alive(), "wire worker exceeded outer guard"
 
 
 @pytest.mark.parametrize(
