@@ -1032,7 +1032,7 @@ def _tcp_call_name(node: ast.expr) -> str | None:
 
 def _tcp_uses_global_deadline(node: ast.AST) -> bool:
     return any(
-        isinstance(child, ast.Name) and child.id in {"deadline", "remaining"}
+        isinstance(child, ast.Name) and child.id in {"deadline", "remaining", "bounded_timeout"}
         for child in ast.walk(node)
     )
 

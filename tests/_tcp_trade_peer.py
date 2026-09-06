@@ -487,6 +487,7 @@ def _hold_at_sync_boundary(
     timeout: float,
     service_pending_edges: Callable[[], int],
     progress_callback: Callable[[], None] | None = None,
+    deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
@@ -501,20 +502,24 @@ def _hold_at_sync_boundary(
     if timeout <= 0:
         raise ValueError("timeout must be a positive number")
 
-    deadline = monotonic() + timeout
+    deadline_at = (
+        min(monotonic() + timeout, deadline) if deadline is not None else monotonic() + timeout
+    )
 
     def wait_for_peer(marker: int, *, phase: str) -> None:
         while True:
             if backend.poll_peer_sync(sync_id=marker):
                 return
-            remaining = deadline - monotonic()
+            remaining = deadline_at - monotonic()
             if remaining <= 0:
+                if deadline is not None and monotonic() >= deadline:
+                    raise TimeoutError(f"sync boundary {phase} exceeded the process deadline")
                 raise RuntimeError(f"sync boundary {phase} did not converge: marker={marker}")
             if progress_callback is None:
                 service_pending_edges()
             else:
                 progress_callback()
-            remaining = deadline - monotonic()
+            remaining = deadline_at - monotonic()
             if remaining > 0:
                 sleep(min(0.001, remaining))
 
@@ -803,6 +808,7 @@ def _peer_shutdown_sync(
     ready_sync_id: int,
     release_sync_id: int,
     timeout: float = 120.0,
+    deadline: float | None = None,
     monotonic=time.monotonic,
     sleep=time.sleep,
 ) -> None:
@@ -818,9 +824,21 @@ def _peer_shutdown_sync(
     the other side is finishing its drain.
     """
 
+    deadline_at = min(monotonic() + timeout, deadline) if deadline is not None else None
+
+    def remaining_timeout(phase: str) -> float:
+        if deadline_at is None:
+            return timeout
+        remaining = deadline_at - monotonic()
+        if remaining <= 0:
+            if deadline is not None and monotonic() >= deadline:
+                raise TimeoutError(f"peer shutdown {phase} exceeded the process deadline")
+            raise RuntimeError(f"peer shutdown {phase} exceeded its deadline: backend={backend_snapshot()}")
+        return remaining
+
     def wait_for_peer_marker(sync_id: int) -> None:
-        deadline_at = monotonic() + timeout
-        while monotonic() < deadline_at:
+        marker_deadline = deadline_at if deadline_at is not None else monotonic() + timeout
+        while monotonic() < marker_deadline:
             if backend.poll_peer_sync(sync_id=sync_id):
                 return
             # After a local wire-idle observation no new master edge can
@@ -830,20 +848,22 @@ def _peer_shutdown_sync(
             # reopening a native transfer on the faster side.
             backend.service_pending_edges(max_edges=1)
             sleep(0.001)
+        if deadline is not None and monotonic() >= deadline:
+            raise TimeoutError(f"peer shutdown sync {sync_id} exceeded the process deadline")
         raise RuntimeError(
             f"peer shutdown sync {sync_id} did not converge: backend={backend_snapshot()}"
         )
 
-    cooperative_sync(sync_id=ready_sync_id, timeout=timeout, step_frames=1)
+    cooperative_sync(sync_id=ready_sync_id, timeout=remaining_timeout("ready sync"), step_frames=1)
     backend.wait_for_wire_idle(
-        timeout=timeout,
+        timeout=remaining_timeout("first wire-idle wait"),
         progress_callback=lambda: step(1),
         stable_checks=4,
     )
     backend.announce_sync(sync_id=release_sync_id)
     wait_for_peer_marker(release_sync_id)
     backend.wait_for_wire_idle(
-        timeout=timeout,
+        timeout=remaining_timeout("second wire-idle wait"),
         progress_callback=lambda: backend.service_pending_edges(max_edges=1),
         stable_checks=4,
     )
@@ -854,7 +874,7 @@ def _peer_shutdown_sync(
     backend.announce_sync(sync_id=final_sync_id)
     wait_for_peer_marker(final_sync_id)
     backend.wait_for_wire_idle(
-        timeout=timeout,
+        timeout=remaining_timeout("third wire-idle wait"),
         progress_callback=lambda: backend.service_pending_edges(max_edges=1),
         stable_checks=4,
     )
@@ -869,12 +889,12 @@ def _peer_shutdown_sync(
     wait_for_peer_marker(done_sync_id)
 
 
-def _finish_link_menu_phase(goal, *, cooperative_sync, peer_shutdown_sync):
+def _finish_link_menu_phase(goal, *, cooperative_sync, peer_shutdown_sync, timeout=10.0):
     """Use passive shutdown only when no further gameplay is requested."""
     if goal == "link_menu":
-        peer_shutdown_sync(ready_sync_id=123, release_sync_id=124, timeout=10.0)
+        peer_shutdown_sync(ready_sync_id=123, release_sync_id=124, timeout=timeout)
     else:
-        cooperative_sync(sync_id=123, timeout=10.0, step_frames=1)
+        cooperative_sync(sync_id=123, timeout=timeout, step_frames=1)
 
 
 def _party_summary(session) -> dict[str, object]:
@@ -1143,6 +1163,10 @@ def _run_peer(trace=None) -> int:
 
     def remaining(phase: str) -> float:
         return _deadline_remaining(deadline, phase=phase)
+
+    def bounded_timeout(timeout: float, *, phase: str) -> float:
+        """Cap a phase-local wait at the process-wide gameplay deadline."""
+        return min(timeout, remaining(phase))
 
     def setup_error_text(exc: BaseException) -> str:
         try:
@@ -1535,11 +1559,13 @@ def _run_peer(trace=None) -> int:
         if step_frames <= 0:
             raise ValueError("step_frames must be a positive integer")
         link._network_backend.announce_sync(sync_id=sync_id)
-        deadline_at = time.monotonic() + timeout
+        deadline_at = min(deadline, time.monotonic() + timeout)
         while time.monotonic() < deadline_at:
             if link._network_backend.poll_peer_sync(sync_id=sync_id):
                 return
             session.step(step_frames)
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"cooperative sync {sync_id} exceeded the process deadline")
         raise RuntimeError(
             f"cooperative sync {sync_id} did not converge: "
             f"local={state_snapshot()} backend={backend_snapshot()}"
@@ -1562,6 +1588,8 @@ def _run_peer(trace=None) -> int:
             while not backend.poll_peer_sync(sync_id=marker):
                 remaining_at = deadline_at - time.monotonic()
                 if remaining_at <= 0:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"passive sync {phase} exceeded the process deadline")
                     raise RuntimeError(
                         f"passive sync {phase} did not converge: "
                         f"marker={marker} backend={backend_snapshot()}"
@@ -1584,6 +1612,7 @@ def _run_peer(trace=None) -> int:
             ready_sync_id=ready_sync_id,
             release_sync_id=release_sync_id,
             timeout=timeout,
+            deadline=deadline,
         )
 
     def current_menu_item() -> int | None:
@@ -1619,7 +1648,7 @@ def _run_peer(trace=None) -> int:
         timeout: float = 60.0,
     ) -> dict[str, int]:
         """Wait until ROM menu fields describe an input-ready menu."""
-        deadline_at = time.monotonic() + timeout
+        deadline_at = min(deadline, time.monotonic() + timeout)
         while time.monotonic() < deadline_at:
             snapshot = menu_snapshot()
             current = snapshot.get("wCurrentMenuItem")
@@ -1634,6 +1663,8 @@ def _run_peer(trace=None) -> int:
             ):
                 return snapshot
             session.step(2)
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{label} exceeded the process deadline")
         raise RuntimeError(
             f"{label} did not become input-ready: "
             f"menu={menu_snapshot()} state={state_snapshot()} "
@@ -1687,6 +1718,8 @@ def _run_peer(trace=None) -> int:
                 log(f"{label}: peer directional LinkMenu selection evidence observed")
                 return
             session.step(1)
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{label} LinkMenu selection exchange exceeded the process deadline")
         raise RuntimeError(
             f"{label} LinkMenu selection exchange did not converge: "
             f"local_directional_evidence={link_menu_exchange_announced} "
@@ -1710,7 +1743,7 @@ def _run_peer(trace=None) -> int:
         """Move a ROM-owned cursor with bounded one-shot directions."""
         if input_duration <= 0 or settle_frames <= 0:
             raise ValueError("menu input and settle durations must be positive")
-        deadline_at = time.monotonic() + timeout
+        deadline_at = min(deadline, time.monotonic() + timeout)
         while time.monotonic() < deadline_at:
             snapshot = wait_for_menu_ready(
                 label=label,
@@ -1727,6 +1760,8 @@ def _run_peer(trace=None) -> int:
                 button = "up"
             session.press(button, duration=input_duration)
             session.step(settle_frames)
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{label} cursor movement exceeded the process deadline")
         raise RuntimeError(
             f"{label} cursor did not reach {target}: "
             f"menu={menu_snapshot()} state={state_snapshot()} "
@@ -1817,7 +1852,11 @@ def _run_peer(trace=None) -> int:
         # state. Keep this rendezvous passive: advancing one ROM while the
         # other is still constructing its PyBoy can produce a
         # direction-dependent first serial exchange.
-        passive_sync(ready_sync_id=99, release_sync_id=98, timeout=60.0)
+        passive_sync(
+            ready_sync_id=99,
+            release_sync_id=98,
+            timeout=bounded_timeout(60.0, phase="initial passive sync"),
+        )
         # Phase 1: walk UP ×3 + A-mash to reach LinkMenu.
         for _ in range(3):
             session.press("up", duration=6)
@@ -1829,7 +1868,7 @@ def _run_peer(trace=None) -> int:
         # connection-role negotiation. Keep ticking while waiting for the
         # peer marker so a slave IRQ can re-arm instead of freezing one
         # process inside a blocking transport barrier.
-        cooperative_sync(sync_id=100, timeout=60.0)
+        cooperative_sync(sync_id=100, timeout=bounded_timeout(60.0, phase="initial cooperative sync"))
         log("phase 1 start")
         last_progress = time.monotonic()
         serial_phase_ticks = 0
@@ -1854,6 +1893,7 @@ def _run_peer(trace=None) -> int:
                         args.goal,
                         cooperative_sync=cooperative_sync,
                         peer_shutdown_sync=peer_shutdown_sync,
+                        timeout=bounded_timeout(10.0, phase="LinkMenu finish"),
                     )
                     log("phase 1 done: LinkMenu fired on both peers")
                     break
@@ -1894,7 +1934,11 @@ def _run_peer(trace=None) -> int:
                     # single real frame while waiting so a legitimate final
                     # cable edge can be serviced, but no menu/RAM state is
                     # written and neither TCP role is treated as clock owner.
-                    cooperative_sync(sync_id=123, timeout=60.0, step_frames=1)
+                    cooperative_sync(
+                        sync_id=123,
+                        timeout=bounded_timeout(60.0, phase="Cable Club save-choice sync"),
+                        step_frames=1,
+                    )
                     close_count_at_save_choice_release = counters["CloseLinkConnection"][0]
                     session.press("a", duration=1)
                     if args.reset_serial_transcript_before_cable_club_sync:
@@ -1996,7 +2040,7 @@ def _run_peer(trace=None) -> int:
             # Center. Without this the vote-exchange nibble loop has
             # no way to guarantee overlap in Pokemon's polling windows.
             log("sync: link_menu barrier")
-            cooperative_sync(sync_id=1, timeout=60.0)
+            cooperative_sync(sync_id=1, timeout=bounded_timeout(60.0, phase="trade LinkMenu sync"))
             log("sync: past link_menu barrier")
             # The LinkMenu hook fires before the ROM has finished installing
             # its final menu fields. Settle those fields and rendezvous at
@@ -2009,7 +2053,7 @@ def _run_peer(trace=None) -> int:
                 max_item=link_menu_max,
                 expected_max=link_menu_max,
                 required_keys=0x01,
-                timeout=60.0,
+                timeout=bounded_timeout(60.0, phase="trade LinkMenu readiness"),
             )
             session.step(60)
             move_menu_to_item(
@@ -2017,6 +2061,7 @@ def _run_peer(trace=None) -> int:
                 min_item=0,
                 max_item=link_menu_max,
                 label="trade LinkMenu",
+                timeout=bounded_timeout(30.0, phase="trade LinkMenu cursor"),
                 input_duration=12,
                 settle_frames=40,
             )
@@ -2026,7 +2071,11 @@ def _run_peer(trace=None) -> int:
             # input boundary. A one-frame cooperative barrier keeps each
             # owner thread live for any final serial edge without allowing
             # one side to consume the choice several host frames ahead.
-            cooperative_sync(sync_id=19, timeout=120.0, step_frames=1)
+            cooperative_sync(
+                sync_id=19,
+                timeout=bounded_timeout(120.0, phase="trade selection sync"),
+                step_frames=1,
+            )
             if args.reset_serial_transcript_before_link_menu:
                 link._network_backend.enable_serial_transcript(
                     max_entries=args.serial_transcript_entries
@@ -2040,7 +2089,10 @@ def _run_peer(trace=None) -> int:
             # selection.  Advance only after both ROMs independently report
             # a post-call directional vote observation. The paired sync in
             # the wait below requires the complementary peer observation.
-            wait_for_link_menu_selection_exchange(label="trade")
+            wait_for_link_menu_selection_exchange(
+                label="trade",
+                timeout=bounded_timeout(120.0, phase="trade LinkMenu exchange"),
+            )
             log("trade menu selection exchange verified on both peers")
             # Trade Center warp — A-mash until map becomes 0xEF. Once one
             # peer reaches the map it must keep ticking while the other peer
@@ -2081,11 +2133,15 @@ def _run_peer(trace=None) -> int:
             # no-tick hold is unsafe here because an already-armed ROM may
             # still need its next native serial callback to finish the phase.
             link._network_backend.wait_for_wire_idle(
-                timeout=120.0,
+                timeout=bounded_timeout(120.0, phase="trade wire-idle wait"),
                 progress_callback=lambda: session.step(1),
                 stable_checks=4,
             )
-            cooperative_sync(sync_id=18, timeout=120.0, step_frames=1)
+            cooperative_sync(
+                sync_id=18,
+                timeout=bounded_timeout(120.0, phase="trade-center sync"),
+                step_frames=1,
+            )
             log("sync: trade-center cooperative barrier complete")
             shot("03_post_warp_sync")
 
@@ -2187,7 +2243,10 @@ def _run_peer(trace=None) -> int:
                 # drive the menu. Safe to sync (game is in UI-setup phase,
                 # no active serial traffic).
                 log("sync: select_mon barrier")
-                cooperative_sync(sync_id=3, timeout=60.0)
+                cooperative_sync(
+                    sync_id=3,
+                    timeout=bounded_timeout(60.0, phase="select-mon sync"),
+                )
                 log("sync: past select_mon barrier")
                 shot("06_select_mon_sync")
             else:
@@ -2242,7 +2301,10 @@ def _run_peer(trace=None) -> int:
                 party_after_trade = _party_summary(session)
                 log("sync: post-trade barrier")
                 try:
-                    cooperative_sync(sync_id=4, timeout=120.0)
+                    cooperative_sync(
+                        sync_id=4,
+                        timeout=bounded_timeout(120.0, phase="post-trade sync"),
+                    )
                     log("sync: past post-trade barrier")
                     shot("07_post_trade")
                 except Exception as exc:  # noqa: BLE001
@@ -2250,11 +2312,18 @@ def _run_peer(trace=None) -> int:
                     drive_error = f"{type(exc).__name__}: {exc}"
                     log(f"post-trade sync raised {type(exc).__name__}: {exc}")
                 log("sync: post-trade shutdown drain")
-                peer_shutdown_sync(ready_sync_id=5, release_sync_id=6)
+                peer_shutdown_sync(
+                    ready_sync_id=5,
+                    release_sync_id=6,
+                    timeout=bounded_timeout(120.0, phase="post-trade shutdown"),
+                )
                 log("sync: post-trade shutdown barrier complete")
         elif args.goal == "battle":
             log("sync: link_menu battle barrier")
-            cooperative_sync(sync_id=11, timeout=120.0)
+            cooperative_sync(
+                sync_id=11,
+                timeout=bounded_timeout(120.0, phase="battle LinkMenu sync"),
+            )
             log("sync: past link_menu battle barrier")
 
             # LinkMenu opens with TRADE selected (item 0); BATTLE is the
@@ -2273,7 +2342,7 @@ def _run_peer(trace=None) -> int:
                 max_item=link_menu_max,
                 expected_max=link_menu_max,
                 required_keys=0x01,
-                timeout=60.0,
+                timeout=bounded_timeout(60.0, phase="battle LinkMenu readiness"),
             )
             initial_item = link_menu_before["wCurrentMenuItem"]
             # LinkMenu's hook and menu-field initialization occur before its
@@ -2286,6 +2355,7 @@ def _run_peer(trace=None) -> int:
                 min_item=0,
                 max_item=link_menu_max,
                 label="battle LinkMenu",
+                timeout=bounded_timeout(30.0, phase="battle LinkMenu cursor"),
                 input_duration=12,
                 settle_frames=40,
             )
@@ -2306,11 +2376,18 @@ def _run_peer(trace=None) -> int:
             # drained, and a no-tick hold could strand an EDGE_RESP. Once both
             # processes announce readiness, they commit A from the same menu
             # phase without starving the owner pump.
-            cooperative_sync(sync_id=117, timeout=120.0, step_frames=1)
+            cooperative_sync(
+                sync_id=117,
+                timeout=bounded_timeout(120.0, phase="battle selection sync"),
+                step_frames=1,
+            )
             session.press("a", duration=4)
             # Do not advance based on the input event alone.  Both ROMs must
             # return with their own native directional LinkMenu evidence.
-            wait_for_link_menu_selection_exchange(label="battle")
+            wait_for_link_menu_selection_exchange(
+                label="battle",
+                timeout=bounded_timeout(120.0, phase="battle LinkMenu exchange"),
+            )
             shot("02_battle_menu")
 
             COLOSSEUM = 0xF0
@@ -2418,7 +2495,7 @@ def _run_peer(trace=None) -> int:
             # Let the owner continue for a bounded stable quiet window before
             # entering the no-tick ready/release barrier.
             link._network_backend.wait_for_wire_idle(
-                timeout=120.0,
+                timeout=bounded_timeout(120.0, phase="battle VS-text wire-idle wait"),
                 progress_callback=lambda: session.step(1),
                 stable_checks=4,
             )
@@ -2427,7 +2504,8 @@ def _run_peer(trace=None) -> int:
                 link._network_backend,
                 ready_sync_id=113,
                 release_sync_id=114,
-                timeout=120.0,
+                timeout=bounded_timeout(120.0, phase="battle VS-text hold"),
+                deadline=deadline,
                 service_pending_edges=lambda: link._network_backend.service_pending_edges(
                     max_edges=1
                 ),
@@ -2454,7 +2532,8 @@ def _run_peer(trace=None) -> int:
                 link._network_backend,
                 ready_sync_id=115,
                 release_sync_id=116,
-                timeout=120.0,
+                timeout=bounded_timeout(120.0, phase="battle transition hold"),
+                deadline=deadline,
                 service_pending_edges=lambda: link._network_backend.service_pending_edges(
                     max_edges=1
                 ),
@@ -2522,7 +2601,8 @@ def _run_peer(trace=None) -> int:
                 link._network_backend,
                 ready_sync_id=12,
                 release_sync_id=16,
-                timeout=120.0,
+                timeout=bounded_timeout(120.0, phase="battle command hold"),
+                deadline=deadline,
                 service_pending_edges=lambda: link._network_backend.service_pending_edges(
                     max_edges=1
                 ),
@@ -2536,6 +2616,7 @@ def _run_peer(trace=None) -> int:
                 min_item=0,
                 max_item=1,
                 label="battle command menu",
+                timeout=bounded_timeout(30.0, phase="battle command cursor"),
             )
             log(
                 "battle menu ready; selecting FIGHT through ordinary input "
@@ -2591,7 +2672,8 @@ def _run_peer(trace=None) -> int:
                 link._network_backend,
                 ready_sync_id=13,
                 release_sync_id=17,
-                timeout=120.0,
+                timeout=bounded_timeout(120.0, phase="battle move hold"),
+                deadline=deadline,
                 service_pending_edges=lambda: link._network_backend.service_pending_edges(
                     max_edges=1
                 ),
@@ -2640,7 +2722,10 @@ def _run_peer(trace=None) -> int:
                     last_battle_log = time.monotonic()
             if battle_turn_announced:
                 try:
-                    cooperative_sync(sync_id=15, timeout=120.0)
+                    cooperative_sync(
+                        sync_id=15,
+                        timeout=bounded_timeout(120.0, phase="battle turn sync"),
+                    )
                     log("sync: past battle turn barrier")
                     shot("06_battle_synced")
                 except Exception as exc:  # noqa: BLE001
@@ -2652,7 +2737,11 @@ def _run_peer(trace=None) -> int:
                     session.press("a", duration=4)
                     session.step(20)
                 log("sync: post-battle shutdown drain")
-                peer_shutdown_sync(ready_sync_id=21, release_sync_id=22)
+                peer_shutdown_sync(
+                    ready_sync_id=21,
+                    release_sync_id=22,
+                    timeout=bounded_timeout(120.0, phase="post-battle shutdown"),
+                )
                 log("sync: post-battle shutdown barrier complete")
             if not peer_battle_turn_ready:
                 log(
