@@ -559,17 +559,19 @@ def _link_menu_receive_candidate(values):
 
 
 def _link_menu_has_real_selection_exchange(history):
-    """Return whether the ROM has exchanged a non-idle LinkMenu vote.
+    """Return whether this ROM has post-call, directional vote evidence.
 
     ``LinkMenu`` entry alone is not permission to drive the next game phase:
     Cable Club peers may enter its polling loop at different host times and
     may negotiate which Game Boy supplies clocks.  The post-call hook is the
     only observation here that proves the ROM actually returned from its
-    native selection exchange.  Require both the locally sent vote and the
-    received peer vote; all data remains an observation, never a menu write.
+    native selection exchange.  A real exchange can be asymmetric at either
+    endpoint: one ROM can retain its sent vote while the other retains the
+    received vote.  Require one locally observed, non-idle direction here;
+    the existing peer sync below requires that evidence from both ROMs before
+    gameplay advances.  All data remains an observation, never a menu write.
     """
-    decisive = history.first_decisive
-    return "sent" in decisive and "received" in decisive
+    return bool({"sent", "received"} & history.first_decisive.keys())
 
 
 def _read_link_menu_fields(session, *, include_map=False, on_error=None):
@@ -1584,12 +1586,15 @@ def _run_peer(trace=None) -> int:
         )
 
     def wait_for_link_menu_selection_exchange(*, label: str, timeout: float = 120.0) -> None:
-        """Require each ROM to observe a real, non-idle LinkMenu exchange.
+        """Require both ROMs to observe a real, non-idle LinkMenu exchange.
 
-        The control marker only reports local ROM evidence.  It never
-        selects a menu item or infers Game Boy clock ownership from the TCP
-        role.  Keep stepping while the peer catches up because either ROM may
-        be the active serial clock at this point.
+        Each marker reports one local, post-call directional observation.  A
+        peer marker supplies a second independent observation, so the pair
+        proves the combined exchange without assuming that either single ROM
+        retains both buffer directions. It never selects a menu item or
+        infers Game Boy clock ownership from the TCP role. Keep stepping while
+        the peer catches up because either ROM may be the active serial clock
+        at this point.
         """
         nonlocal link_menu_exchange_announced, peer_link_menu_exchange_ready
 
@@ -1601,17 +1606,18 @@ def _run_peer(trace=None) -> int:
             ):
                 link._network_backend.announce_sync(sync_id=125)
                 link_menu_exchange_announced = True
-                log(f"{label}: local LinkMenu selection exchange observed")
+                log(f"{label}: local directional LinkMenu selection evidence observed")
             if link_menu_exchange_announced and not peer_link_menu_exchange_ready:
                 peer_link_menu_exchange_ready = link._network_backend.poll_peer_sync(sync_id=125)
             if link_menu_exchange_announced and peer_link_menu_exchange_ready:
-                log(f"{label}: peer LinkMenu selection exchange observed")
+                log(f"{label}: peer directional LinkMenu selection evidence observed")
                 return
             session.step(1)
         raise RuntimeError(
             f"{label} LinkMenu selection exchange did not converge: "
-            f"local_evidence={link_menu_exchange_announced} "
-            f"peer_evidence={peer_link_menu_exchange_ready} "
+            f"local_directional_evidence={link_menu_exchange_announced} "
+            f"peer_directional_evidence={peer_link_menu_exchange_ready} "
+            f"local_directions={sorted(link_menu_history.first_decisive)} "
             f"history={link_menu_history.snapshot()} "
             f"menu={menu_snapshot()} state={state_snapshot()} "
             f"backend={backend_snapshot()}"
@@ -1881,7 +1887,8 @@ def _run_peer(trace=None) -> int:
             session.press("a", duration=4)
             # A queued input is not evidence that Cable Club exchanged a
             # selection.  Advance only after both ROMs independently report
-            # the post-call sent-and-received vote evidence.
+            # a post-call directional vote observation. The paired sync in
+            # the wait below requires the complementary peer observation.
             wait_for_link_menu_selection_exchange(label="trade")
             log("trade menu selection exchange verified on both peers")
             # Trade Center warp — A-mash until map becomes 0xEF. Once one
@@ -2151,7 +2158,7 @@ def _run_peer(trace=None) -> int:
             cooperative_sync(sync_id=117, timeout=120.0, step_frames=1)
             session.press("a", duration=4)
             # Do not advance based on the input event alone.  Both ROMs must
-            # return from their own native LinkMenu selection exchange.
+            # return with their own native directional LinkMenu evidence.
             wait_for_link_menu_selection_exchange(label="battle")
             shot("02_battle_menu")
 
