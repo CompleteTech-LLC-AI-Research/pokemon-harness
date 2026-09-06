@@ -1067,9 +1067,22 @@ def _run_peer(trace=None) -> int:
             "(1..4096 records; 0 disables it)."
         ),
     )
+    ap.add_argument(
+        "--reset-serial-transcript-before-link-menu",
+        action="store_true",
+        default=False,
+        help=(
+            "Diagnostic-only: reset the enabled bounded serial transcript "
+            "after sync 19 and immediately before the ordinary LinkMenu A press "
+            "(requires --serial-transcript-entries)."
+        ),
+    )
     ap.add_argument("--label", default="")
     ap.add_argument("--repo-root", type=Path, required=True)
     args = ap.parse_args()
+
+    if args.reset_serial_transcript_before_link_menu and not args.serial_transcript_entries:
+        ap.error("--reset-serial-transcript-before-link-menu requires --serial-transcript-entries")
 
     # Establish the one process-wide cutoff before any ROM, TCP, or handshake
     # work. The existing gameplay code below continues to use this value.
@@ -1985,6 +1998,14 @@ def _run_peer(trace=None) -> int:
             # owner thread live for any final serial edge without allowing
             # one side to consume the choice several host frames ahead.
             cooperative_sync(sync_id=19, timeout=120.0, step_frames=1)
+            if args.reset_serial_transcript_before_link_menu:
+                link._network_backend.enable_serial_transcript(
+                    max_entries=args.serial_transcript_entries
+                )
+                log(
+                    "serial transcript reset after sync 19 before LinkMenu A press: "
+                    f"{args.serial_transcript_entries} bounded local records"
+                )
             session.press("a", duration=4)
             # A queued input is not evidence that Cable Club exchanged a
             # selection.  Advance only after both ROMs independently report
