@@ -157,9 +157,12 @@ class PyBoyLinkSession:
         self._original_ticks: dict[int, tuple[str, object]] = {}
         # The native serial core may already have an owner-dispatch callback
         # installed by another integration. Keep the exact callback and
-        # enabled state, plus our replacement callback, so detach restores
-        # only state still owned by this session.
-        self._previous_owner_dispatch: list[tuple[object | None, object, object] | None] = []
+        # enabled state, and owner-wake signal, plus our replacements, so
+        # detach restores only state still owned by this session.  ``None``
+        # deliberately denotes an older native/runtime contract.
+        self._previous_owner_dispatch: list[
+            tuple[object | None, object, object | None, object, object] | None
+        ] = []
         self._network_is_internal_clock = network_is_internal_clock
         self._local_rom_version = local_rom_version
         # When True, per-frame stepping keeps the LCD renderer on and calls
@@ -317,7 +320,9 @@ class PyBoyLinkSession:
             # only a register-level bootstrap; no emulator tick is allowed
             # until a versioned peer has selected the deterministic role.
             core.backend = self._network_backend
-            owner_dispatch_state: tuple[object | None, object, object] | None = None
+            owner_dispatch_state: (
+                tuple[object | None, object, object | None, object, object] | None
+            ) = None
             try:
                 with self._serial_gate:
                     self._initialize_network_clock_role(core)
@@ -571,37 +576,47 @@ class PyBoyLinkSession:
     @staticmethod
     def _enable_network_owner_pump(
         core: object, backend: NetworkBackend
-    ) -> tuple[object | None, object, object] | None:
-        """Install the serial-tick owner pump when the native core supports it."""
-        if not hasattr(core, "owner_dispatch_callback") or not hasattr(
-            core, "owner_dispatch_enabled"
-        ):
-            # Lightweight legacy doubles do not expose the optional native
-            # pump. The per-frame owner wrapper remains the safe fallback for
-            # those integrations; the bundled patched PyBoy core always has
-            # the fields and therefore gets the higher-throughput path.
+    ) -> tuple[object | None, object, object | None, object, object] | None:
+        """Install a signal-gated native owner pump when supported.
+
+        The backend signal is the only cross-thread object installed on the
+        serial core. Transport workers notify it, and native serial code
+        consumes it before calling this callback at an owner-safe boundary.
+        Older PyBoy builds and test doubles lack one or more capabilities;
+        they retain the existing frame-wrapper fallback without mutation.
+        """
+        try:
+            signal = backend.owner_dispatch_signal
+            previous_callback = core.owner_dispatch_callback
+            previous_enabled = core.owner_dispatch_enabled
+            previous_signal = core.owner_dispatch_signal
+        except AttributeError:
             return None
-        previous_callback = core.owner_dispatch_callback
-        previous_enabled = core.owner_dispatch_enabled
         owner_pump = PyBoyLinkSession._make_network_owner_pump(backend)
         try:
+            # Commit enabled last so no callback can observe a partially
+            # installed signal/callback pair.
+            core.owner_dispatch_enabled = False
+            core.owner_dispatch_signal = signal
             core.owner_dispatch_callback = owner_pump
             core.owner_dispatch_enabled = True
         except BaseException as exc:
-            # If a native setter rejects the replacement, make the partial
-            # install transactional before propagating the original error.
+            # A native setter may reject an assignment. Restore the complete
+            # observed state before propagating that original failure.
             try:
-                core.owner_dispatch_enabled = previous_enabled
+                core.owner_dispatch_enabled = False
+                core.owner_dispatch_signal = previous_signal
                 core.owner_dispatch_callback = previous_callback
+                core.owner_dispatch_enabled = previous_enabled
             except BaseException as rollback_error:  # noqa: BLE001
-                exc.add_note(f"owner-dispatch callback rollback also failed: {rollback_error!r}")
+                exc.add_note(f"owner-dispatch setup rollback also failed: {rollback_error!r}")
             raise
-        return previous_callback, previous_enabled, owner_pump
+        return previous_callback, previous_enabled, previous_signal, owner_pump, signal
 
     @staticmethod
     def _disable_network_owner_pump(
         core: object,
-        state: tuple[object | None, object, object] | None,
+        state: tuple[object | None, object, object | None, object, object] | None,
     ) -> None:
         """Restore a session-owned owner pump before detaching a core.
 
@@ -609,13 +624,45 @@ class PyBoyLinkSession:
         attached, leave that replacement untouched rather than clobbering a
         newer owner during teardown.
         """
-        if state is None or not hasattr(core, "owner_dispatch_callback"):
+        if state is None:
             return
-        previous_callback, previous_enabled, installed_callback = state
-        if core.owner_dispatch_callback is not installed_callback:
+        (
+            previous_callback,
+            previous_enabled,
+            previous_signal,
+            installed_callback,
+            installed_signal,
+        ) = state
+        try:
+            still_owned = (
+                core.owner_dispatch_callback is installed_callback
+                and core.owner_dispatch_signal is installed_signal
+            )
+        except AttributeError:
+            # Native teardown can remove optional fields before the session
+            # is detached. There is no owner-dispatch state left to restore.
             return
-        core.owner_dispatch_enabled = previous_enabled
-        core.owner_dispatch_callback = previous_callback
+        if not still_owned:
+            return
+        # Disable before replacing the two coupled values, then restore the
+        # exact enabled flag last. This mirrors the transactional setup order.
+        try:
+            core.owner_dispatch_enabled = False
+            core.owner_dispatch_signal = previous_signal
+            core.owner_dispatch_callback = previous_callback
+            core.owner_dispatch_enabled = previous_enabled
+        except BaseException as exc:
+            # Keep the installed pair coherent if native teardown rejects a
+            # value.  The caller retains its bookkeeping and can retry or
+            # surface the original failure without a half-restored adapter.
+            try:
+                core.owner_dispatch_enabled = False
+                core.owner_dispatch_signal = installed_signal
+                core.owner_dispatch_callback = installed_callback
+                core.owner_dispatch_enabled = True
+            except BaseException as rollback_error:  # noqa: BLE001
+                exc.add_note(f"owner-dispatch teardown rollback also failed: {rollback_error!r}")
+            raise
 
     def _restore_network_tick_owner(self, pyboy: _PyBoyLike) -> None:
         """Restore a PyBoy tick method installed by :meth:`attach`."""
