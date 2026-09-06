@@ -610,11 +610,18 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
     record_property("runtime", "native" if all(native) else "source")
     record_property("runtime_modules", repr(paths))
     calls_per_owner, owner_count = 3, 2
-    paired_capacity_s = owner_count * calls_per_owner * (BOUND + 1)
+    work_capacity_s = owner_count * calls_per_owner * (BOUND + 1)
+    completion_capacity_s = BOUND + 1
+    paired_capacity_s = work_capacity_s + completion_capacity_s
     # This only aligns owners before paired CPU work. Socket setup and timed
     # routing retain their own protocol deadlines; the capacity bound covers
     # the known two-owner, six-call workload without measuring GIL throughput.
     ready = threading.Barrier(3, timeout=paired_capacity_s)
+    # A completed owner must keep its endpoint alive while its peer routes the
+    # final public frame. This is intentionally a two-owner rendezvous: it is
+    # not a main-thread join, so neither owner may close early. The peer has
+    # exactly one public-call budget to reach this point.
+    complete = threading.Barrier(owner_count, timeout=completion_capacity_s)
     left, right = socket.socketpair()
 
     def owner(sock, index):
@@ -666,6 +673,7 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
                 session.step(1, render=True)
                 assert game.frame_count == frames + 1
                 assert len(calls) == 3
+                complete.wait()
                 return game.mb.cpu.retired_instructions
             finally:
                 if endpoint is not None:
@@ -678,7 +686,7 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
         for worker in workers:
             worker.thread.join(max(0, capacity_deadline - time.monotonic()))
         assert all(not worker.thread.is_alive() for worker in workers), (
-            f"paired timed route exceeded {paired_capacity_s:g}s six-call capacity"
+            f"paired timed route exceeded {paired_capacity_s:g}s workload-and-completion capacity"
         )
         assert all(result > 0 for result in owner_results(workers))
     finally:
