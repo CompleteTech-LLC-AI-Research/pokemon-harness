@@ -114,9 +114,23 @@ def test_clean_wheel_install_imports_the_vendored_link_package(tmp_path) -> None
     assert create_venv.returncode == 0, create_venv.stdout + create_venv.stderr
     installed_python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
+    install_env = os.environ.copy()
+    for name in (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "VIRTUAL_ENV",
+        "UV_PROJECT_ENVIRONMENT",
+        "PYBOY_NO_CYTHON",
+    ):
+        install_env.pop(name, None)
+    for name in tuple(install_env):
+        if name.startswith("POKERED_"):
+            install_env.pop(name)
+
     install = subprocess.run(
         [str(installed_python), "-m", "pip", "install", "--no-cache-dir", str(wheels[0])],
         cwd=tmp_path,
+        env=install_env,
         capture_output=True,
         text=True,
         check=False,
@@ -136,6 +150,7 @@ def test_clean_wheel_install_imports_the_vendored_link_package(tmp_path) -> None
             ),
         ],
         cwd=tmp_path,
+        env=install_env,
         capture_output=True,
         text=True,
         check=False,
