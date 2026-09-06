@@ -11,6 +11,18 @@ symbol files, save states, or other ROM-derived artifacts.
 
 **Status: `PARTIAL` — experimental branch, not production-ready.**
 
+The newer hosted gate at `656917ba95843decf4a33d98158be0049ef7a22e`
+failed: unit tests recorded `3,913` passes and `1` failure; five timing
+repetitions recorded `1,100` passes and `5` failures. Both tiers recorded
+zero errors, skips, xfails, or xpasses. The failing case in both tiers was
+`test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_events`
+with `_queue.Empty`. See the
+[hosted gate report](https://github.com/CompleteDotTech/pokemon/actions/runs/34001368361).
+The paired-call timing failure remains unresolved; older passing snapshots
+below do not qualify this revision. Experimental transport changes and
+trade/battle observations in separate worktrees are not integrated acceptance
+evidence. Full remote trade and battle completion remain unproven.
+
 At `74e8db3`, the dual unit/timing gate completed `PASS`, collecting `3,594`
 tests per runtime. Source passed `3,441` unit tests in `151.4s` and `1,075`
 timing checks in `319.8s`; native passed `3,441` unit tests in `174.0s` and
