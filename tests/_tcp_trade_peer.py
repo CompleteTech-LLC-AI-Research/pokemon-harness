@@ -1058,6 +1058,15 @@ def _run_peer(trace=None) -> int:
         default=False,
         help="Include bounded pre-LinkMenu diagnostics and their availability status.",
     )
+    ap.add_argument(
+        "--serial-transcript-entries",
+        type=int,
+        default=0,
+        help=(
+            "Opt in to a bounded local NetworkBackend serial transcript "
+            "(1..4096 records; 0 disables it)."
+        ),
+    )
     ap.add_argument("--label", default="")
     ap.add_argument("--repo-root", type=Path, required=True)
     args = ap.parse_args()
@@ -1203,6 +1212,8 @@ def _run_peer(trace=None) -> int:
 
         if not math.isfinite(args.deadline_seconds) or args.deadline_seconds <= 0:
             raise ValueError("deadline-seconds must be finite and positive")
+        if not 0 <= args.serial_transcript_entries <= 4096:
+            raise ValueError("serial-transcript-entries must be 0 or between 1 and 4096")
         remaining("setup")
         sys.path.insert(0, str(args.repo_root / "src"))
 
@@ -1351,12 +1362,21 @@ def _run_peer(trace=None) -> int:
             else:
                 raise RuntimeError(f"could not connect to listener: {last_exc}")
         remaining("TCP setup")
+        backend = getattr(link, "_network_backend", None)
+        if backend is None:
+            raise RuntimeError("network backend missing before attach")
+        if args.serial_transcript_entries:
+            # ``attach`` starts the receiver and performs the versioned HELLO
+            # negotiation. Enable before it so the bounded transcript covers
+            # every possible serial edge after a connected backend exists.
+            backend.enable_serial_transcript(max_entries=args.serial_transcript_entries)
+            log(
+                "serial transcript enabled: "
+                f"{args.serial_transcript_entries} bounded local records"
+            )
         log("TCP established, attaching PyBoy")
         link.attach(session._pyboy)
         remaining("PyBoy attach")
-        backend = getattr(link, "_network_backend", None)
-        if backend is None:
-            raise RuntimeError("network backend missing after attach")
         peer_version = backend.wait_for_hello(timeout=min(30.0, remaining("HELLO handshake")))
         remaining("HELLO handshake")
         selected_internal = link.negotiate_network_clock_role(peer_version)
