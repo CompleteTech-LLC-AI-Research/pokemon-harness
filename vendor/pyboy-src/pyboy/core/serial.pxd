@@ -14,6 +14,15 @@ from pyboy.logging.logging cimport Logger
 # need nogil access use local cdef copies at method entry.
 cdef Logger logger
 
+
+@final
+cdef class OwnerDispatchSignal:
+    # A coalescing token only; backend queues own payload and FIFO order.
+    cdef bint _pending
+    cpdef void notify(self) except *
+    cpdef bint consume(self) noexcept
+
+
 @final
 cdef class Serial:
     # @final on the class ensures cpdef methods monomorphize to direct C
@@ -40,6 +49,7 @@ cdef class Serial:
     # applying an incoming edge cannot re-enter serial register access.
     cdef public object owner_dispatch_callback
     cdef public bint owner_dispatch_enabled
+    cdef public OwnerDispatchSignal owner_dispatch_signal
 
     # Called by Motherboard after its CPU instruction batch, never from the
     # serial tick/register access path itself.
