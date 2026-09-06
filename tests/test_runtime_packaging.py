@@ -55,7 +55,7 @@ def test_project_bundles_the_pinned_pyboy_source() -> None:
     package_dir = setuptools["package-dir"]
 
     assert "pyboy" in packages
-    assert "pyboy.link" not in packages
+    assert "pyboy.link" in packages
     assert package_dir["pyboy"] == "vendor/pyboy-src/pyboy"
     assert not any(dep.lower().startswith("pyboy") for dep in project["project"]["dependencies"])
 
@@ -65,6 +65,86 @@ def test_project_bundles_the_pinned_pyboy_source() -> None:
         .strip()
     )
     assert marker == EXPECTED_PYBOY_REVISION
+
+
+def test_clean_wheel_install_imports_the_vendored_link_package(tmp_path) -> None:
+    """Exercise the wheel, not this checkout's importable vendored source."""
+    wheel_dir = tmp_path / "wheels"
+    builder = tmp_path / "wheel-builder-venv"
+    create_builder = subprocess.run(
+        [sys.executable, "-m", "venv", str(builder)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert create_builder.returncode == 0, create_builder.stdout + create_builder.stderr
+    builder_python = builder / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+    build_env = os.environ.copy()
+    build_env["PYBOY_NO_CYTHON"] = "1"
+    build = subprocess.run(
+        [
+            str(builder_python),
+            "-m",
+            "pip",
+            "wheel",
+            "--no-deps",
+            "--wheel-dir",
+            str(wheel_dir),
+            ".",
+        ],
+        cwd=ROOT,
+        env=build_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+
+    wheels = sorted(wheel_dir.glob("pokered_harness-*.whl"))
+    assert len(wheels) == 1, wheels
+
+    environment = tmp_path / "clean-wheel-venv"
+    create_venv = subprocess.run(
+        [sys.executable, "-m", "venv", str(environment)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert create_venv.returncode == 0, create_venv.stdout + create_venv.stderr
+    installed_python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+    install = subprocess.run(
+        [str(installed_python), "-m", "pip", "install", "--no-cache-dir", str(wheels[0])],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert install.returncode == 0, install.stdout + install.stderr
+
+    imported = subprocess.run(
+        [
+            str(installed_python),
+            "-I",
+            "-c",
+            (
+                "import json; import pyboy.link; "
+                "from pyboy.link import LinkSession, NetworkBackend; "
+                "print(json.dumps({'module': pyboy.link.__file__, "
+                "'session': LinkSession.__module__, 'network': NetworkBackend.__module__}))"
+            ),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert imported.returncode == 0, imported.stdout + imported.stderr
+    loaded = json.loads(imported.stdout)
+    assert Path(loaded["module"]).is_relative_to(environment)
+    assert loaded["session"] == "pyboy.link.session"
+    assert loaded["network"] == "pyboy.link.network"
 
 
 def test_cython_build_pins_the_compiler_and_preserves_serial_widths() -> None:
