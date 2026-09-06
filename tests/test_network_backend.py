@@ -13,6 +13,7 @@ coverage:
 
 from __future__ import annotations
 
+import json
 import socket as _socket
 import struct
 import threading
@@ -895,6 +896,116 @@ def test_serial_transcript_copies_worker_edge_byte_completion_and_irq_outcome():
     finally:
         master_backend.stop()
         slave_backend.stop()
+
+
+def _complete_worker_edge_with_transcript_context(
+    provider,
+    *,
+    max_bytes: int = 1024,
+) -> dict[str, object]:
+    """Return one completed worker record produced with a context provider."""
+    master_backend, slave_backend = NetworkBackend.pair()
+    slave_core = _CompletingSlaveCore()
+    master_backend.enable_serial_transcript(max_entries=16)
+    slave_backend.enable_serial_transcript(max_entries=16)
+    slave_backend.set_serial_transcript_context_provider(
+        provider,
+        max_bytes=max_bytes,
+    )
+    master_backend.start_receiver(local_core=None)
+    slave_backend.start_receiver(local_core=slave_core)
+    try:
+        assert master_backend.on_edge(our_bit=1, our_role=1) == 0
+        slave_backend.wait_for_wire_idle(timeout=1.0)
+        records = slave_backend.snapshot_stats()["serial_transcript"]["records"]
+        return next(record for record in records if record["event"] == "worker_edge_applied")
+    finally:
+        master_backend.stop()
+        slave_backend.stop()
+
+
+def test_serial_transcript_completion_copies_provider_context():
+    """Completed-byte records retain a deep copied provider context."""
+    supplied = {
+        "pc": 0x1234,
+        "serial": {"ignoring_initial_data": 1, "byte_ordinal": 3},
+    }
+
+    record = _complete_worker_edge_with_transcript_context(lambda: supplied)
+
+    assert record["byte_complete"] is True
+    assert record["completion_context"] == {
+        "status": "ok",
+        "truncated": False,
+        "value": {
+            "pc": 0x1234,
+            "serial": {"ignoring_initial_data": 1, "byte_ordinal": 3},
+        },
+    }
+    # The diagnostic record must not retain aliases into the provider's data.
+    supplied["pc"] = 0xFFFF
+    supplied["serial"]["byte_ordinal"] = 99
+    assert record["completion_context"]["value"] == {
+        "pc": 0x1234,
+        "serial": {"ignoring_initial_data": 1, "byte_ordinal": 3},
+    }
+
+
+def test_serial_transcript_context_provider_failure_is_worker_safe():
+    """A provider exception is recorded compactly and cannot kill the worker."""
+
+    def provider() -> dict[str, object]:
+        raise RuntimeError("provider secret must not escape diagnostics")
+
+    record = _complete_worker_edge_with_transcript_context(provider)
+
+    assert record["byte_complete"] is True
+    assert record["completion_context"] == {
+        "status": "provider_error",
+        "error_type": "RuntimeError",
+    }
+    assert "provider secret" not in repr(record["completion_context"])
+
+
+def test_serial_transcript_context_provider_is_disabled_by_default_and_bounded():
+    """Provider work is opt-in; enabled context has a strict serialized bound."""
+    backend, peer = NetworkBackend.pair()
+    calls: list[object] = []
+
+    def disabled_provider() -> dict[str, object]:
+        calls.append(object())
+        return {"pc": 0x1234}
+
+    try:
+        backend.set_serial_transcript_context_provider(disabled_provider, max_bytes=96)
+        assert backend.snapshot_stats()["serial_transcript"] == {
+            "enabled": False,
+            "capacity": 0,
+            "dropped": 0,
+            "records": [],
+        }
+        # A disabled transcript must not invoke a provider even if a caller
+        # reaches the completion-recording path directly.
+        backend._record_serial_event("worker_edge_applied", byte_complete=True)
+        assert calls == []
+    finally:
+        backend.stop()
+        peer.stop()
+
+    supplied = {"pc": 0x1234, "oversized": "x" * 10_000}
+    record = _complete_worker_edge_with_transcript_context(lambda: supplied, max_bytes=96)
+    context = record["completion_context"]
+    assert context["status"] == "ok"
+    assert context["truncated"] is True
+    assert context["value"]["pc"] == 0x1234
+    encoded = json.dumps(
+        context["value"],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert len(encoded) <= 96
+    supplied["pc"] = 0xFFFF
+    assert context["value"]["pc"] == 0x1234
 
 
 def test_multiple_bytes_exchange():
