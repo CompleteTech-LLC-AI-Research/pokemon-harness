@@ -5,6 +5,7 @@ SessionSpy below is only a facade delegation double, never owner/CPU proof.
 Source/native synthetic retirement and IRQ settlement belong to the owner gate.
 """
 
+import ast
 import hashlib
 import importlib
 import importlib.machinery
@@ -984,3 +985,121 @@ def test_factory_forwards_original_cancel_event_to_session(remote, monkeypatch):
         finally:
             endpoint.close()
             peer.close()
+
+
+# The real-ROM TCP peer driver deliberately has no import-time PyBoy
+# dependency. Parse it rather than booting a ROM so a newly added phase helper
+# cannot quietly start a fresh fixed-duration timeout after the process-wide
+# deadline is nearly spent.
+_TCP_TRADE_PEER = Path(__file__).with_name("_tcp_trade_peer.py")
+_TCP_PHASE_CALLS = {
+    "cooperative_sync",
+    "passive_sync",
+    "peer_shutdown_sync",
+    "_finish_link_menu_phase",
+    "wait_for_link_menu_selection_exchange",
+    "wait_for_menu_ready",
+    "move_menu_to_item",
+    "wait_for_wire_idle",
+    "_hold_at_sync_boundary",
+}
+_TCP_TIMEOUT_HELPERS = {
+    "cooperative_sync",
+    "passive_sync",
+    "peer_shutdown_sync",
+    "wait_for_link_menu_selection_exchange",
+    "wait_for_menu_ready",
+    "move_menu_to_item",
+}
+
+
+def _tcp_trade_peer_driver() -> ast.FunctionDef:
+    tree = ast.parse(_TCP_TRADE_PEER.read_text(encoding="utf-8"), filename=str(_TCP_TRADE_PEER))
+    return next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_peer"
+    )
+
+
+def _tcp_call_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _tcp_uses_global_deadline(node: ast.AST) -> bool:
+    return any(
+        isinstance(child, ast.Name) and child.id in {"deadline", "remaining"}
+        for child in ast.walk(node)
+    )
+
+
+def _tcp_timeout_keyword(call: ast.Call) -> ast.keyword | None:
+    return next((keyword for keyword in call.keywords if keyword.arg == "timeout"), None)
+
+
+def _tcp_direct_phase_calls(driver: ast.FunctionDef) -> list[ast.Call]:
+    """Return phase calls in the drive body, excluding nested helper bodies."""
+
+    calls: list[ast.Call] = []
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            if node is driver:
+                self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if _tcp_call_name(node.func) in _TCP_PHASE_CALLS:
+                calls.append(node)
+            self.generic_visit(node)
+
+    Visitor().visit(driver)
+    return calls
+
+
+def test_tcp_trade_peer_phase_timeouts_are_globally_bounded():
+    """Every wait-capable phase call derives its timeout from ``deadline``."""
+    violations = []
+    for call in _tcp_direct_phase_calls(_tcp_trade_peer_driver()):
+        timeout = _tcp_timeout_keyword(call)
+        if timeout is None:
+            violations.append(f"line {call.lineno}: {_tcp_call_name(call.func)} has no timeout")
+        elif not _tcp_uses_global_deadline(timeout.value):
+            violations.append(f"line {call.lineno}: {_tcp_call_name(call.func)}")
+
+    assert not violations, "unbounded TCP phase timeouts: " + ", ".join(violations)
+
+
+def test_tcp_trade_peer_timeout_helpers_clamp_inner_deadlines():
+    """Timeout-accepting phase helpers cannot create independent deadlines."""
+    helpers = {
+        node.name: node
+        for node in ast.walk(_tcp_trade_peer_driver())
+        if isinstance(node, ast.FunctionDef) and node.name in _TCP_TIMEOUT_HELPERS
+    }
+    assert helpers.keys() == _TCP_TIMEOUT_HELPERS
+
+    violations = []
+    for name, helper in helpers.items():
+        if not _tcp_uses_global_deadline(helper):
+            violations.append(name)
+            continue
+        deadline_assignments = [
+            node
+            for node in ast.walk(helper)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and "deadline" in target.id
+                for target in node.targets
+            )
+        ]
+        if any(
+            not _tcp_uses_global_deadline(assignment.value)
+            for assignment in deadline_assignments
+        ):
+            violations.append(name)
+
+    assert not violations, "helpers create an independent timeout: " + ", ".join(violations)
