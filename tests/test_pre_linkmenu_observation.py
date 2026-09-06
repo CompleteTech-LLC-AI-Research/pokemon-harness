@@ -268,3 +268,131 @@ def test_pre_linkmenu_resolver_rejects_decision_signature_mutation(monkeypatch, 
         enabled=True, role="listen", version="blue_color", rom_bytes=bytes(corrupted), symbol_bytes=symbols,
     ).snapshot()
     assert snapshot["reason"] == "signature_mismatch:" + reason
+
+
+class _FakeCPU:
+    cycles = 99
+    PC = 0x1234
+    SP = 0xFFFE
+    A = 0x12
+    F = 0xB0
+
+
+class _FakePyBoy:
+    def __init__(self, *, fail_address=None):
+        self.memory = {}
+        self.mb = type("MB", (), {"cpu": _FakeCPU()})()
+        self.fail_address = fail_address
+        self.registered = {}
+        self.deregistered = []
+
+    def hook_register(self, bank, address, callback, context):
+        if address == self.fail_address:
+            raise RuntimeError("planned registration failure")
+        self.registered[(bank, address)] = callback
+
+    def hook_deregister(self, bank, address):
+        self.deregistered.append((bank, address))
+        self.registered.pop((bank, address))
+
+
+class _FakeSymbols:
+    def __init__(self, addresses):
+        self.addresses = addresses
+
+    def bank_addr(self, name):
+        return self.addresses[name]
+
+
+class _FakeSession:
+    def __init__(self, addresses, *, fail_address=None):
+        self.symbols = _FakeSymbols(addresses)
+        self._pyboy = _FakePyBoy(fail_address=fail_address)
+
+    def current_tick(self):
+        return 17
+
+
+def _installed_observer(monkeypatch):
+    rom, symbols = synthetic_resolver_fixture(monkeypatch)
+    observer = peer._resolve_pre_link_menu(
+        enabled=True, role="listen", version="blue_color", rom_bytes=rom, symbol_bytes=symbols,
+    )
+    addresses = {
+        name: (0, 0xFF80 + offset)
+        for offset, (name, _length) in enumerate(peer._PRE_LINK_MENU_FIELDS)
+    }
+    for offset, (name, _length) in enumerate(peer._PRE_LINK_MENU_FIELDS):
+        addresses[name] = (0, 0xFF80 + offset * 2)
+    return observer, addresses
+
+
+def test_pre_linkmenu_installs_fifteen_owned_hooks_and_cleans_them(monkeypatch):
+    observer, addresses = _installed_observer(monkeypatch)
+    session = _FakeSession(addresses)
+    for _name, address in addresses.values():
+        session._pyboy.memory[address] = 7
+        session._pyboy.memory[address + 1] = 8
+
+    observer.install(session)
+    assert observer.reason == "external_pending"
+    assert observer.available is False
+    assert len(session._pyboy.registered) == 15
+    serial = observer.snapshot()["sites"]["Serial_SyncAndExchangeNybble"]
+    assert (serial["bank"], serial["address"]) not in session._pyboy.registered
+
+    observer.external_registered()
+    before = observer.snapshot()["sites"]["CableClubNPC.beforeSync"]
+    session._pyboy.registered[(before["bank"], before["address"])](None)
+    snapshot = observer.snapshot()
+    assert snapshot["available"] is True
+    assert snapshot["counts"]["CableClubNPC.beforeSync"] == 1
+    assert snapshot["recent"][-1]["frame"] == 17
+    assert snapshot["recent"][-1]["fields"]["wUnknownSerialCounter"] == [7, 8]
+
+    observer.close()
+    assert observer.snapshot()["reason"] == "closed"
+    assert session._pyboy.registered == {}
+    assert len(session._pyboy.deregistered) == 15
+    assert (serial["bank"], serial["address"]) not in session._pyboy.deregistered
+
+
+def test_pre_linkmenu_owned_registration_failure_rolls_back_without_serial(monkeypatch):
+    observer, addresses = _installed_observer(monkeypatch)
+    owned = [site for site in observer.config.sites if site[0] not in (
+        "LinkMenu", "Serial_SyncAndExchangeNybble",
+    )]
+    fail = owned[2]
+    session = _FakeSession(addresses, fail_address=fail[2])
+
+    observer.install(session)
+    snapshot = observer.snapshot()
+    assert snapshot["available"] is False
+    assert snapshot["reason"] == "hook_registration_error:" + fail[0]
+    assert snapshot["hooks"][fail[0]]["status"] == "registration_failed"
+    assert len(session._pyboy.deregistered) == 2
+    assert session._pyboy.registered == {}
+    assert all(address != observer.snapshot()["sites"]["Serial_SyncAndExchangeNybble"]["address"]
+               for _bank, address in session._pyboy.deregistered)
+
+
+def test_linkmenu_serial_callback_fans_out_to_available_pre_observer(monkeypatch):
+    observer, addresses = _installed_observer(monkeypatch)
+    serial = next(site for site in observer.config.sites
+                  if site[0] == "Serial_SyncAndExchangeNybble")
+    addresses["Serial_SyncAndExchangeNybble"] = (serial[1], serial[2])
+    session = _FakeSession(addresses)
+    for _name, address in addresses.values():
+        session._pyboy.memory[address] = 1
+        session._pyboy.memory[address + 1] = 2
+    observer.install(session)
+    menu = peer._LinkMenuHistory(session, role="listen", version="blue_color")
+    # Narrow the pre-existing history object to its serial owner for this fake
+    # session; the callback's counter must still run alongside the fan-out.
+    menu.counts = {}
+    buckets = {"Serial_SyncAndExchangeNybble": [0]}
+    menu.install(buckets, observers_by_address={(serial[1], serial[2]): observer})
+    session._pyboy.registered[(serial[1], serial[2])](None)
+    assert buckets["Serial_SyncAndExchangeNybble"] == [1]
+    assert observer.snapshot()["available"] is True
+    assert observer.snapshot()["counts"]["Serial_SyncAndExchangeNybble"] == 1

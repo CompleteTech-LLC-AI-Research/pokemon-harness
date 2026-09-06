@@ -380,6 +380,9 @@ class _PreLinkMenuHistory:
 
     def close(self):
         self.available = False
+        if not self._attempted:
+            # Keep disabled/asset-validation reasons in the emitted result.
+            return
         if self._owner is not None and get_ident() != self._owner:
             self._error("close", "owner_thread", RuntimeError())
             self.cleanup_pending = [event for event, _, _ in self._owned]
@@ -1049,6 +1052,16 @@ def _run_peer(trace=None) -> int:
     def log(msg):
         print(f"[peer {args.role}] {msg}", file=sys.stderr, flush=True)
 
+    def close_pre_link_menu_observer():
+        if pre_link_menu_history is None:
+            return
+        try:
+            pre_link_menu_history.close()
+        except BaseException as exc:  # noqa: BLE001 - Diagnostic cleanup cannot replace gameplay errors.
+            pre_link_menu_history.available = False
+            pre_link_menu_history.reason = "cleanup_error:" + type(exc).__name__[:128]
+            pre_link_menu_history._error("close", "cleanup", exc)
+
     def remaining(phase: str) -> float:
         return _deadline_remaining(deadline, phase=phase)
 
@@ -1252,7 +1265,21 @@ def _run_peer(trace=None) -> int:
 
         remaining("hook setup")
         link_menu_history.session = session
-        link_menu_history.install(counters)
+        if pre_link_menu_history is None:
+            link_menu_history.install(counters)
+        else:
+            observers_by_address = {}
+            try:
+                pre_link_menu_history.install(session)
+                if pre_link_menu_history.reason == "external_pending":
+                    for event, bank, address in pre_link_menu_history.config.sites:
+                        if event == "Serial_SyncAndExchangeNybble":
+                            observers_by_address[(bank, address)] = pre_link_menu_history
+            except BaseException as exc:  # noqa: BLE001 - Optional diagnostics cannot fail setup.
+                close_pre_link_menu_observer()
+                pre_link_menu_history.reason = "observer_install_error:" + type(exc).__name__[:128]
+                pre_link_menu_history._error("install", "setup", exc)
+            link_menu_history.install(counters, observers_by_address=observers_by_address)
 
         log(f"establishing TCP {args.role}")
         if args.role == "listen":
@@ -1319,6 +1346,8 @@ def _run_peer(trace=None) -> int:
         log(f"EXCEPTION in setup: {drive_error}")
     finally:
         if not setup_complete:
+            if pre_link_menu_history is not None:
+                close_pre_link_menu_observer()
             if trace is not None:
                 trace.cleanup(deadline)
             partial_backend = getattr(link, "_network_backend", None) if link is not None else None
@@ -2470,6 +2499,8 @@ def _run_peer(trace=None) -> int:
         log(f"EXCEPTION in drive loop: {type(exc).__name__}: {exc}")
 
     finally:
+        if pre_link_menu_history is not None:
+            close_pre_link_menu_observer()
         if trace is not None:
             trace.cleanup(deadline)
         # Detach the link while the emulator is still alive.  Stopping the
