@@ -13,6 +13,7 @@ coverage:
 
 from __future__ import annotations
 
+import json
 import socket as _socket
 import struct
 import threading
@@ -778,6 +779,233 @@ def test_two_serialcores_exchange_byte_via_network_backend():
     finally:
         ba.stop()
         bb.stop()
+
+
+def test_serial_transcript_is_disabled_by_default_and_validates_capacity():
+    """Transcript diagnostics are opt-in and have a deliberately small API."""
+    backend, peer = NetworkBackend.pair()
+    try:
+        expected_disabled = {
+            "enabled": False,
+            "capacity": 0,
+            "dropped": 0,
+            "records": [],
+        }
+        assert backend.snapshot_stats()["serial_transcript"] == expected_disabled
+        assert backend.debug_snapshot()["serial_transcript"] == expected_disabled
+
+        with pytest.raises(ValueError, match="between 1 and"):
+            backend.enable_serial_transcript(max_entries=0)
+        with pytest.raises(ValueError, match="between 1 and"):
+            backend.enable_serial_transcript(max_entries=4097)
+        assert backend.snapshot_stats()["serial_transcript"] == expected_disabled
+    finally:
+        backend.stop()
+        peer.stop()
+
+
+def test_serial_transcript_ring_drops_oldest_records_in_sequence_order():
+    """A small transcript remains bounded while preserving local event order."""
+    backend, peer_backend = NetworkBackend.pair()
+    backend.enable_serial_transcript(max_entries=2)
+
+    def reply_once() -> None:
+        frame = peer_backend._recv_exactly(2)
+        assert frame == struct.pack(">BB", _OP_EDGE_REQ, 1)
+        peer_backend._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, 0))
+
+    peer = threading.Thread(target=reply_once, daemon=True)
+    peer.start()
+    backend.start_receiver(local_core=None)
+    try:
+        assert backend.on_edge(our_bit=1, our_role=1) == 0
+        peer.join(timeout=1.0)
+        assert not peer.is_alive()
+
+        transcript = backend.snapshot_stats()["serial_transcript"]
+        records = transcript["records"]
+        assert transcript["enabled"] is True
+        assert transcript["capacity"] == 2
+        assert transcript["dropped"] == 1
+        assert [record["sequence"] for record in records] == [2, 3]
+        assert [record["event"] for record in records] == [
+            "edge_resp_received",
+            "edge_resp_consumed",
+        ]
+        timestamps = [record["monotonic_s"] for record in records]
+        assert timestamps == sorted(timestamps)
+
+        backend.disable_serial_transcript()
+        assert backend.snapshot_stats()["serial_transcript"] == {
+            "enabled": False,
+            "capacity": 0,
+            "dropped": 0,
+            "records": [],
+        }
+    finally:
+        peer.join(timeout=1.0)
+        backend.stop()
+        peer_backend.stop()
+
+
+def test_serial_transcript_copies_worker_edge_byte_completion_and_irq_outcome():
+    """Snapshots retain a local, immutable copy of worker-side edge evidence."""
+    master_backend, slave_backend = NetworkBackend.pair()
+    slave_core = _CompletingSlaveCore()
+    slave_irqs: list[int] = []
+    master_backend.enable_serial_transcript(max_entries=16)
+    slave_backend.enable_serial_transcript(max_entries=16)
+    master_backend.start_receiver(local_core=None)
+    slave_backend.start_receiver(
+        local_core=slave_core,
+        irq_callback=lambda: slave_irqs.append(1),
+    )
+    try:
+        assert master_backend.on_edge(our_bit=1, our_role=1) == 0
+        slave_backend.wait_for_wire_idle(timeout=1.0)
+        assert slave_irqs == [1]
+
+        records = slave_backend.snapshot_stats()["serial_transcript"]["records"]
+        worker_edge = next(record for record in records if record["event"] == "worker_edge_applied")
+        assert worker_edge["direction"] == "peer_to_local"
+        assert worker_edge["edge_bit"] == 1
+        assert worker_edge["response_bit"] == 0
+        assert worker_edge["byte_complete"] is True
+        assert worker_edge["local_state_before"] == {
+            "core_present": True,
+            "type": "_CompletingSlaveCore",
+            "transfer_enabled": 1,
+            "internal_clock": 0,
+            "SB": 0,
+            "SC": 0x80,
+        }
+        assert worker_edge["local_state_after"]["transfer_enabled"] == 0
+        assert worker_edge["local_state_after"]["SB"] == 1
+        assert any(
+            record["event"] == "irq_callback" and record["outcome"] == "success"
+            for record in records
+        )
+
+        # The public snapshot owns both outer records and nested core state.
+        worker_edge["local_state_before"]["SB"] = 99
+        fresh_records = slave_backend.snapshot_stats()["serial_transcript"]["records"]
+        fresh_worker_edge = next(
+            record for record in fresh_records if record["event"] == "worker_edge_applied"
+        )
+        assert fresh_worker_edge["local_state_before"]["SB"] == 0
+    finally:
+        master_backend.stop()
+        slave_backend.stop()
+
+
+def _complete_worker_edge_with_transcript_context(
+    provider,
+    *,
+    max_bytes: int = 1024,
+) -> dict[str, object]:
+    """Return one completed worker record produced with a context provider."""
+    master_backend, slave_backend = NetworkBackend.pair()
+    slave_core = _CompletingSlaveCore()
+    master_backend.enable_serial_transcript(max_entries=16)
+    slave_backend.enable_serial_transcript(max_entries=16)
+    slave_backend.set_serial_transcript_context_provider(
+        provider,
+        max_bytes=max_bytes,
+    )
+    master_backend.start_receiver(local_core=None)
+    slave_backend.start_receiver(local_core=slave_core)
+    try:
+        assert master_backend.on_edge(our_bit=1, our_role=1) == 0
+        slave_backend.wait_for_wire_idle(timeout=1.0)
+        records = slave_backend.snapshot_stats()["serial_transcript"]["records"]
+        return next(record for record in records if record["event"] == "worker_edge_applied")
+    finally:
+        master_backend.stop()
+        slave_backend.stop()
+
+
+def test_serial_transcript_completion_copies_provider_context():
+    """Completed-byte records retain a deep copied provider context."""
+    supplied = {
+        "pc": 0x1234,
+        "serial": {"ignoring_initial_data": 1, "byte_ordinal": 3},
+    }
+
+    record = _complete_worker_edge_with_transcript_context(lambda: supplied)
+
+    assert record["byte_complete"] is True
+    assert record["completion_context"] == {
+        "status": "ok",
+        "truncated": False,
+        "value": {
+            "pc": 0x1234,
+            "serial": {"ignoring_initial_data": 1, "byte_ordinal": 3},
+        },
+    }
+    # The diagnostic record must not retain aliases into the provider's data.
+    supplied["pc"] = 0xFFFF
+    supplied["serial"]["byte_ordinal"] = 99
+    assert record["completion_context"]["value"] == {
+        "pc": 0x1234,
+        "serial": {"ignoring_initial_data": 1, "byte_ordinal": 3},
+    }
+
+
+def test_serial_transcript_context_provider_failure_is_worker_safe():
+    """A provider exception is recorded compactly and cannot kill the worker."""
+
+    def provider() -> dict[str, object]:
+        raise RuntimeError("provider secret must not escape diagnostics")
+
+    record = _complete_worker_edge_with_transcript_context(provider)
+
+    assert record["byte_complete"] is True
+    assert record["completion_context"] == {
+        "status": "provider_error",
+        "error_type": "RuntimeError",
+    }
+    assert "provider secret" not in repr(record["completion_context"])
+
+
+def test_serial_transcript_context_provider_is_disabled_by_default_and_bounded():
+    """Provider work is opt-in; enabled context has a strict serialized bound."""
+    backend, peer = NetworkBackend.pair()
+    calls: list[object] = []
+
+    def disabled_provider() -> dict[str, object]:
+        calls.append(object())
+        return {"pc": 0x1234}
+
+    try:
+        backend.set_serial_transcript_context_provider(disabled_provider, max_bytes=96)
+        assert backend.snapshot_stats()["serial_transcript"] == {
+            "enabled": False,
+            "capacity": 0,
+            "dropped": 0,
+            "records": [],
+        }
+        # A disabled transcript must not invoke a provider even if a caller
+        # reaches the completion-recording path directly.
+        backend._record_serial_event("worker_edge_applied", byte_complete=True)
+        assert calls == []
+    finally:
+        backend.stop()
+        peer.stop()
+
+    supplied = {"pc": 0x1234, "oversized": "x" * 10_000}
+    record = _complete_worker_edge_with_transcript_context(lambda: supplied, max_bytes=96)
+    context = record["completion_context"]
+    assert context["status"] == "ok"
+    assert context["truncated"] is True
+    assert context["value"]["pc"] == 0x1234
+    encoded = json.dumps(
+        context["value"],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert len(encoded) <= 96
+    supplied["pc"] = 0xFFFF
+    assert context["value"]["pc"] == 0x1234
 
 
 def test_multiple_bytes_exchange():

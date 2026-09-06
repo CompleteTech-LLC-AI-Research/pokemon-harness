@@ -325,6 +325,54 @@ def test_detach_all_stops_session_network_backend_workers():
         peer.stop()
 
 
+def test_serial_completion_context_provider_reads_cpu_and_hram():
+    """The diagnostic snapshot identifies the ROM's serial receive phase."""
+    pyboy = _FakePyBoy()
+    pyboy.mb.cpu = SimpleNamespace(PC=0x1E68)
+    pyboy.memory = {0xFFAB: 1}
+
+    snapshot = PyBoyLinkSession._make_serial_completion_context_provider(pyboy)
+
+    assert snapshot() == {
+        "cpu_pc": 0x1E68,
+        "h_serial_ignoring_initial_data": 1,
+    }
+
+
+def test_serial_completion_context_provider_prefers_lowercase_indexable_pc():
+    """A supported lowercase PC alias wins over the legacy uppercase alias."""
+
+    class _IndexOnly:
+        def __index__(self):
+            return 0x2A7C
+
+    pyboy = _FakePyBoy()
+    pyboy.mb.cpu = SimpleNamespace(pc=_IndexOnly(), PC=0x1E68)
+
+    snapshot = PyBoyLinkSession._make_serial_completion_context_provider(pyboy)
+
+    assert snapshot() == {"cpu_pc": 0x2A7C}
+
+
+def test_serial_completion_context_provider_omits_boolean_pc():
+    """A bool must not be misreported as an integer program counter."""
+    pyboy = _FakePyBoy()
+    pyboy.mb.cpu = SimpleNamespace(pc=True, PC=0x1E68)
+
+    snapshot = PyBoyLinkSession._make_serial_completion_context_provider(pyboy)
+
+    assert snapshot() == {}
+
+
+def test_serial_completion_context_provider_tolerates_missing_emulation_internals():
+    """Diagnostics must not disrupt lightweight integrations or teardown."""
+    snapshot = PyBoyLinkSession._make_serial_completion_context_provider(
+        SimpleNamespace(mb=SimpleNamespace())
+    )
+
+    assert snapshot() == {}
+
+
 @pytest.mark.parametrize("is_internal_clock", [True, False])
 def test_network_attach_does_not_seed_game_role_status(is_internal_clock):
     """Native attach leaves ROM-owned serial role state untouched.

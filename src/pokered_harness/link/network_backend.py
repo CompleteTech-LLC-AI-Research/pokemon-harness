@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import errno
 import ipaddress
+import json
 import math
 import queue
 import select
@@ -60,6 +61,7 @@ import socket
 import struct
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -102,6 +104,7 @@ _POST_BYTE_REARM_GRACE_SECONDS = 1.500
 _ACTIVE_EXCHANGE_GRACE_SECONDS = 1.000
 _ACTIVE_EXCHANGE_EDGE_THRESHOLD = 64
 _ACTIVE_EXCHANGE_REARM_WAIT_SECONDS = 5.0
+_MAX_SERIAL_TRANSCRIPT_ENTRIES = 4096
 
 
 class NetworkBackendError(RuntimeError):
@@ -410,6 +413,12 @@ class NetworkBackend:
         # Slave-mode config — set by start_receiver.
         self._local_core: object | None = None
         self._irq_callback: Callable[[], None] | None = None
+        # Optional owner-thread context sampled only for enabled transcript
+        # byte completions.  It is deliberately observational: a provider
+        # failure is recorded in the transcript and never changes transport
+        # or emulator behavior.
+        self._serial_transcript_context_provider: Callable[[], object] | None = None
+        self._serial_transcript_context_max_bytes = 1024
         self._serial_gate = SerialOperationGate()
         self._dispatch_to_owner = False
         self._reader: threading.Thread | None = None
@@ -460,6 +469,14 @@ class NetworkBackend:
         self._active_exchange_until: float = 0.0
         self._consecutive_armed_edges: int = 0
         self._post_byte_rearm_until: float = 0.0
+        # The edge path is timing-sensitive, so detailed records are opt-in.
+        # Once enabled, this fixed-size ring is the only transcript storage:
+        # a busy or broken peer can never cause unbounded diagnostic memory.
+        self._serial_transcript_lock = threading.Lock()
+        self._serial_transcript: deque[dict[str, object]] | None = None
+        self._serial_transcript_capacity = 0
+        self._serial_transcript_dropped = 0
+        self._serial_transcript_sequence = 0
 
         if self._local_rom_version is not None:
             self._send_hello(self._local_rom_version)
@@ -666,6 +683,7 @@ class NetworkBackend:
         ``EDGE_RESP`` frames (responses to our own master-side
         ``on_edge`` requests) are put on the response queue for the
         blocking ``on_edge`` call to pick up.
+
         """
         with self._receiver_start_lock:
             if self._reader is not None:
@@ -732,6 +750,11 @@ class NetworkBackend:
 
             frame_out = _FRAME.pack(_OP_EDGE_REQ, our_bit & 1)
             self._stats["edge_req_sent"] = int(self._stats["edge_req_sent"]) + 1
+            self._record_serial_event(
+                "edge_req_sent",
+                direction="local_to_peer",
+                edge_bit=our_bit & 1,
+            )
             # EDGE_RESP has no request id, so a late response cannot be
             # retried or matched to a later transfer. Reuse the admission
             # deadline rather than granting send and receive fresh budgets.
@@ -753,6 +776,11 @@ class NetworkBackend:
                     ),
                 )
                 self._stats["edge_resp_received"] = int(self._stats["edge_resp_received"]) + 1
+                self._record_serial_event(
+                    "edge_resp_consumed",
+                    direction="peer_to_local",
+                    edge_bit=bit,
+                )
                 return bit
             except OSError as exc:
                 error = NetworkBackendError(f"failed to send EDGE_REQ: {exc}")
@@ -959,7 +987,116 @@ class NetworkBackend:
             if isinstance(reader_error, dict):
                 pre_close_copy["reader_error"] = dict(reader_error)
             snap["pre_close_snapshot"] = pre_close_copy
+        snap.update(self.snapshot_stats())
         return snap
+
+    def enable_serial_transcript(self, *, max_entries: int = 256) -> None:
+        """Enable a bounded local serial edge/byte diagnostic transcript.
+
+        Records describe only observations available in this process: wire
+        direction and bits, best-effort local core state, slave byte
+        completion, and IRQ callback result. They never change serial
+        scheduling or infer peer-core state. The transcript starts empty on
+        every enable so callers can bracket one diagnostic attempt.
+        """
+        if not 1 <= max_entries <= _MAX_SERIAL_TRANSCRIPT_ENTRIES:
+            raise ValueError(
+                "max_entries must be between 1 and "
+                f"{_MAX_SERIAL_TRANSCRIPT_ENTRIES}, got {max_entries}"
+            )
+        with self._serial_transcript_lock:
+            self._serial_transcript = deque(maxlen=max_entries)
+            self._serial_transcript_capacity = max_entries
+            self._serial_transcript_dropped = 0
+            self._serial_transcript_sequence = 0
+
+    def set_serial_transcript_context_provider(
+        self, provider: Callable[[], object] | None, *, max_bytes: int = 1024
+    ) -> None:
+        """Set an optional bounded completion-context diagnostic provider.
+
+        The provider is called only when a transcript is enabled and a slave
+        byte completes. Its return value is copied through a compact JSON
+        representation; errors are reported as data and cannot affect wire
+        operation.
+        """
+        if provider is not None and not callable(provider):
+            raise TypeError("provider must be callable or None")
+        if (
+            isinstance(max_bytes, bool)
+            or not isinstance(max_bytes, int)
+            or not 1 <= max_bytes <= 4096
+        ):
+            raise ValueError("max_bytes must be between 1 and 4096")
+        self._serial_transcript_context_provider = provider
+        self._serial_transcript_context_max_bytes = max_bytes
+
+    def disable_serial_transcript(self) -> None:
+        """Disable and discard serial transcript records immediately."""
+        with self._serial_transcript_lock:
+            self._serial_transcript = None
+            self._serial_transcript_capacity = 0
+            self._serial_transcript_dropped = 0
+            self._serial_transcript_sequence = 0
+
+    def snapshot_stats(self) -> dict[str, object]:
+        """Return a copy of bounded serial transcript diagnostics.
+
+        Sequence order is local backend event order, not emulator-cycle
+        atomicity: owner and transport threads can observe a core between
+        ticks. Returned records are copied so callers cannot mutate the live
+        ring.
+        """
+        with self._serial_transcript_lock:
+            transcript = self._serial_transcript
+            if transcript is None:
+                return {
+                    "serial_transcript": {
+                        "enabled": False,
+                        "capacity": 0,
+                        "dropped": 0,
+                        "records": [],
+                    }
+                }
+            records: list[dict[str, object]] = []
+            for record in transcript:
+                copied = dict(record)
+                for key in ("local_state_before", "local_state_after"):
+                    value = copied.get(key)
+                    if isinstance(value, dict):
+                        copied[key] = dict(value)
+                completion_context = copied.get("completion_context")
+                if isinstance(completion_context, dict):
+                    copied["completion_context"] = json.loads(json.dumps(completion_context))
+                records.append(copied)
+            return {
+                "serial_transcript": {
+                    "enabled": True,
+                    "capacity": self._serial_transcript_capacity,
+                    "dropped": self._serial_transcript_dropped,
+                    "records": records,
+                }
+            }
+
+    def _record_serial_event(self, event: str, **fields: object) -> None:
+        """Append one local diagnostic record when the opt-in ring is live."""
+        if self._serial_transcript is None:
+            return
+        record: dict[str, object] = {
+            "sequence": 0,
+            "monotonic_s": time.monotonic(),
+            "event": event,
+            **fields,
+        }
+        with self._serial_transcript_lock:
+            transcript = self._serial_transcript
+            if transcript is None:
+                return
+            if len(transcript) == transcript.maxlen:
+                self._serial_transcript_dropped += 1
+            self._serial_transcript_sequence += 1
+            record["sequence"] = self._serial_transcript_sequence
+            transcript.append(record)
 
     def wait_for_wire_idle(
         self,
@@ -1264,6 +1401,11 @@ class NetworkBackend:
                         self._edge_pending += 1
                         self._edge_pending_condition.notify_all()
                     request = _InboundEdge(payload & 1)
+                    self._record_serial_event(
+                        "edge_req_received",
+                        direction="peer_to_local",
+                        edge_bit=payload & 1,
+                    )
                     try:
                         self._edge_queue.put_nowait(request)
                     except queue.Full as exc:
@@ -1289,6 +1431,11 @@ class NetworkBackend:
                             self._resp_queue.put_nowait(payload & 1)
                         except queue.Full as exc:
                             raise NetworkBackendError("duplicate or unsolicited EDGE_RESP") from exc
+                    self._record_serial_event(
+                        "edge_resp_received",
+                        direction="peer_to_local",
+                        edge_bit=payload & 1,
+                    )
                 elif opcode == _OP_SYNC:
                     with self._sync_lock:
                         if payload in self._sync_pending:
@@ -1459,7 +1606,9 @@ class NetworkBackend:
                 try:
                     self._completed_edge_queue.put_nowait(request)
                 except queue.Full as exc:
-                    self._mark_closed(NetworkBackendError("completed EDGE_REQ response queue is full"))
+                    self._mark_closed(
+                        NetworkBackendError("completed EDGE_REQ response queue is full")
+                    )
                     self._decrement_edge_pending()
                     raise NetworkBackendError("completed EDGE_REQ response queue is full") from exc
                 applied += 1
@@ -1488,12 +1637,26 @@ class NetworkBackend:
                 self._apply_owner_keepalive(request, core)
                 return True
             if not transfer_enabled:
+                self._record_serial_event(
+                    "owner_edge_deferred",
+                    direction="peer_to_local",
+                    edge_bit=request.peer_bit & 1,
+                    reason="local_core_unarmed",
+                    local_state_before=(
+                        self._core_state_snapshot(core)
+                        if self._serial_transcript is not None
+                        else None
+                    ),
+                )
                 return False
             self._apply_owner_edge(request)
             return True
 
     def _apply_owner_keepalive(self, request: _InboundEdge, core: object) -> None:
         """Prepare one no-data response for a transient internal-clock edge."""
+        state_before = (
+            self._core_state_snapshot(core) if self._serial_transcript is not None else None
+        )
         self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
         now = time.monotonic()
         if now < self._active_exchange_until:
@@ -1508,6 +1671,17 @@ class NetworkBackend:
         request.response_bit = 0 if self._keepalive_bit_idx == 7 else 1
         request.completed = False
         self._keepalive_bit_idx = (self._keepalive_bit_idx + 1) & 7
+        self._record_serial_event(
+            "owner_keepalive_applied",
+            direction="peer_to_local",
+            edge_bit=request.peer_bit & 1,
+            response_bit=request.response_bit,
+            byte_complete=False,
+            local_state_before=state_before,
+            local_state_after=(
+                self._core_state_snapshot(core) if state_before is not None else None
+            ),
+        )
 
     def _apply_owner_edge(self, request: _InboundEdge) -> None:
         """Perform one authentic external edge under the shared gate."""
@@ -1518,21 +1692,89 @@ class NetworkBackend:
             raise NetworkBackendError("serial core became unarmed before EDGE_REQ dispatch")
         if bool(getattr(core, "internal_clock", 0)):
             raise NetworkBackendError("serial core became internal-clock before EDGE_REQ dispatch")
+        state_before = (
+            self._core_state_snapshot(core) if self._serial_transcript is not None else None
+        )
         our_bit = int(core.peek_out_bit()) & 1
         completed = bool(core.apply_external_edge(request.peer_bit & 1))
         request.response_bit = our_bit
         request.completed = completed
+        completion_context = self._serial_completion_context() if completed else None
         # A real external edge ends any transient 0xFE keep-alive stream.
         # The next internal-clock transition must restart at the first bit of
         # SERIAL_NO_DATA_BYTE rather than continuing from the old byte index.
         self._keepalive_bit_idx = 0
         self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
         self._stats["slave_armed_edges"] = int(self._stats["slave_armed_edges"]) + 1
+        self._record_serial_event(
+            "owner_edge_applied",
+            direction="peer_to_local",
+            edge_bit=request.peer_bit & 1,
+            response_bit=our_bit,
+            byte_complete=completed,
+            completion_context=completion_context,
+            local_state_before=state_before,
+            local_state_after=(
+                self._core_state_snapshot(core) if state_before is not None else None
+            ),
+        )
         if completed:
             self._stats["last_slave_byte_complete_at"] = time.monotonic()
-            if self._irq_callback is not None:
+            if self._irq_callback is None:
+                self._record_serial_event(
+                    "irq_callback",
+                    direction="local",
+                    byte_complete=True,
+                    outcome="not_configured",
+                )
+            else:
                 self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
-                self._irq_callback()
+                try:
+                    self._irq_callback()
+                except Exception as exc:
+                    self._record_serial_event(
+                        "irq_callback",
+                        direction="local",
+                        byte_complete=True,
+                        outcome="error",
+                        error_type=type(exc).__name__,
+                    )
+                    raise
+                self._record_serial_event(
+                    "irq_callback",
+                    direction="local",
+                    byte_complete=True,
+                    outcome="success",
+                )
+
+    def _serial_completion_context(self) -> dict[str, object] | None:
+        """Capture a bounded, JSON-safe owner diagnostic without side effects."""
+        if self._serial_transcript is None:
+            return None
+        provider = self._serial_transcript_context_provider
+        if provider is None:
+            return None
+        try:
+            raw = provider()
+        except BaseException as exc:  # noqa: BLE001 - diagnostics must not break a link.
+            return {"status": "provider_error", "error_type": type(exc).__name__}
+        if not isinstance(raw, dict):
+            return {"status": "invalid_result"}
+        try:
+            copied = json.loads(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+        except (TypeError, ValueError, OverflowError):
+            return {"status": "invalid_result"}
+        value: dict[str, object] = {}
+        truncated = False
+        for key in sorted(copied):
+            candidate = dict(value)
+            candidate[key] = copied[key]
+            encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if len(encoded) <= self._serial_transcript_context_max_bytes:
+                value = candidate
+            else:
+                truncated = True
+        return {"status": "ok", "truncated": truncated, "value": value}
 
     def _send_edge_response(self, request: _InboundEdge) -> None:
         """Send an owner-produced response without touching emulator state."""
@@ -1542,18 +1784,43 @@ class NetworkBackend:
             ) from request.error
         if request.response_bit not in (0, 1):
             raise NetworkBackendError("owner produced an invalid EDGE_RESP bit")
-        with self._write_guard(
-            timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
-            operation="EDGE_RESP",
-        ) as write_deadline:
-            if self._closed:
-                return
-            self._send_frame(
-                _FRAME.pack(_OP_EDGE_RESP, request.response_bit),
-                timeout=max(0.0, write_deadline - time.monotonic()),
+        try:
+            with self._write_guard(
+                timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
                 operation="EDGE_RESP",
+            ) as write_deadline:
+                if self._closed:
+                    self._record_serial_event(
+                        "edge_resp_send",
+                        direction="local_to_peer",
+                        edge_bit=request.response_bit,
+                        byte_complete=request.completed,
+                        outcome="not_sent_closed",
+                    )
+                    return
+                self._send_frame(
+                    _FRAME.pack(_OP_EDGE_RESP, request.response_bit),
+                    timeout=max(0.0, write_deadline - time.monotonic()),
+                    operation="EDGE_RESP",
+                )
+                self._stats["edge_resp_sent"] = int(self._stats["edge_resp_sent"]) + 1
+        except (OSError, NetworkBackendError) as exc:
+            self._record_serial_event(
+                "edge_resp_send",
+                direction="local_to_peer",
+                edge_bit=request.response_bit,
+                byte_complete=request.completed,
+                outcome="error",
+                error_type=type(exc).__name__,
             )
-            self._stats["edge_resp_sent"] = int(self._stats["edge_resp_sent"]) + 1
+            raise
+        self._record_serial_event(
+            "edge_resp_send",
+            direction="local_to_peer",
+            edge_bit=request.response_bit,
+            byte_complete=request.completed,
+            outcome="success",
+        )
 
     def _signal_edge_worker_stop(self) -> None:
         target_queue = self._completed_edge_queue if self._dispatch_to_owner else self._edge_queue
@@ -1672,6 +1939,9 @@ class NetworkBackend:
 
         with self._serial_gate:
             if armed():
+                state_before = (
+                    self._core_state_snapshot(core) if self._serial_transcript is not None else None
+                )
                 slave_armed_edges = int(self._stats["slave_armed_edges"]) + 1
                 self._stats["slave_armed_edges"] = slave_armed_edges
                 self._consecutive_armed_edges += 1
@@ -1679,6 +1949,7 @@ class NetworkBackend:
                     self._active_exchange_until = time.monotonic() + _ACTIVE_EXCHANGE_GRACE_SECONDS
                 our_bit = core.peek_out_bit()
                 completed = core.apply_external_edge(peer_bit)
+                completion_context = self._serial_completion_context() if completed else None
                 if completed:
                     self._stats["last_slave_byte_complete_at"] = time.monotonic()
                     self._post_byte_rearm_until = time.monotonic() + _POST_BYTE_REARM_GRACE_SECONDS
@@ -1686,6 +1957,18 @@ class NetworkBackend:
                 # fresh at the top of a 0xFE byte boundary rather than
                 # mid-byte.
                 self._keepalive_bit_idx = 0
+                self._record_serial_event(
+                    "worker_edge_applied",
+                    direction="peer_to_local",
+                    edge_bit=peer_bit & 1,
+                    response_bit=our_bit & 1,
+                    byte_complete=completed,
+                    completion_context=completion_context,
+                    local_state_before=state_before,
+                    local_state_after=(
+                        self._core_state_snapshot(core) if state_before is not None else None
+                    ),
+                )
             else:
                 if active_exchange:
                     raise NetworkBackendError("slave did not re-arm during active serial exchange")
@@ -1703,10 +1986,24 @@ class NetworkBackend:
                         int(self._stats["keepalive_bytes_started"]) + 1
                     )
                 self._stats["keepalive_bits_sent"] = int(self._stats["keepalive_bits_sent"]) + 1
+                keepalive_state = (
+                    self._core_state_snapshot(core) if self._serial_transcript is not None else None
+                )
                 self._stats["last_keepalive_state"] = self._core_state_snapshot(core)
                 our_bit = 0 if self._keepalive_bit_idx == 7 else 1
                 self._keepalive_bit_idx = (self._keepalive_bit_idx + 1) & 7
                 completed = False
+                self._record_serial_event(
+                    "worker_keepalive_applied",
+                    direction="peer_to_local",
+                    edge_bit=peer_bit & 1,
+                    response_bit=our_bit,
+                    byte_complete=False,
+                    local_state_before=keepalive_state,
+                    local_state_after=(
+                        self._core_state_snapshot(core) if keepalive_state is not None else None
+                    ),
+                )
         try:
             with self._write_guard(
                 timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
@@ -1719,9 +2016,24 @@ class NetworkBackend:
                         operation="EDGE_RESP",
                     )
                     self._stats["edge_resp_sent"] = int(self._stats["edge_resp_sent"]) + 1
-        except (OSError, NetworkBackendError):
+        except (OSError, NetworkBackendError) as exc:
+            self._record_serial_event(
+                "edge_resp_send",
+                direction="local_to_peer",
+                edge_bit=our_bit & 1,
+                byte_complete=completed,
+                outcome="error",
+                error_type=type(exc).__name__,
+            )
             self._mark_closed()
             return
+        self._record_serial_event(
+            "edge_resp_send",
+            direction="local_to_peer",
+            edge_bit=our_bit & 1,
+            byte_complete=completed,
+            outcome="success" if not self._closed else "not_sent_closed",
+        )
         if completed and self._irq_callback is not None:
             try:
                 self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
@@ -1732,6 +2044,27 @@ class NetworkBackend:
                 # debug_snapshot() without changing transport behavior.
                 self._stats["irq_callback_errors"] = int(self._stats["irq_callback_errors"]) + 1
                 self._stats["last_irq_callback_error"] = type(exc).__name__
+                self._record_serial_event(
+                    "irq_callback",
+                    direction="local",
+                    byte_complete=True,
+                    outcome="error",
+                    error_type=type(exc).__name__,
+                )
+            else:
+                self._record_serial_event(
+                    "irq_callback",
+                    direction="local",
+                    byte_complete=True,
+                    outcome="success",
+                )
+        elif completed:
+            self._record_serial_event(
+                "irq_callback",
+                direction="local",
+                byte_complete=True,
+                outcome="not_configured",
+            )
 
     @staticmethod
     def _core_state_snapshot(core: object | None) -> dict[str, object]:
