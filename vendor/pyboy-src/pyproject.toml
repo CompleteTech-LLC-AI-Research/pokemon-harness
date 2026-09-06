@@ -58,7 +58,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 include-package-data = true
 zip-safe = false
-packages = ["pyboy", "pyboy.api", "pyboy.core", "pyboy.core.cartridge", "pyboy.logging", "pyboy.plugins"]
+packages = ["pyboy", "pyboy.api", "pyboy.core", "pyboy.core.cartridge", "pyboy.link", "pyboy.logging", "pyboy.plugins"]
 
 [tool.setuptools.package-data]
 "*" = [
