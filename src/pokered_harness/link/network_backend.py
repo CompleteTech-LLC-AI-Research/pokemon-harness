@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import errno
 import ipaddress
+import json
 import math
 import queue
 import select
@@ -412,6 +413,12 @@ class NetworkBackend:
         # Slave-mode config — set by start_receiver.
         self._local_core: object | None = None
         self._irq_callback: Callable[[], None] | None = None
+        # Optional owner-thread context sampled only for enabled transcript
+        # byte completions.  It is deliberately observational: a provider
+        # failure is recorded in the transcript and never changes transport
+        # or emulator behavior.
+        self._serial_transcript_context_provider: Callable[[], object] | None = None
+        self._serial_transcript_context_max_bytes = 1024
         self._serial_gate = SerialOperationGate()
         self._dispatch_to_owner = False
         self._reader: threading.Thread | None = None
@@ -676,6 +683,7 @@ class NetworkBackend:
         ``EDGE_RESP`` frames (responses to our own master-side
         ``on_edge`` requests) are put on the response queue for the
         blocking ``on_edge`` call to pick up.
+
         """
         with self._receiver_start_lock:
             if self._reader is not None:
@@ -1002,6 +1010,27 @@ class NetworkBackend:
             self._serial_transcript_dropped = 0
             self._serial_transcript_sequence = 0
 
+    def set_serial_transcript_context_provider(
+        self, provider: Callable[[], object] | None, *, max_bytes: int = 1024
+    ) -> None:
+        """Set an optional bounded completion-context diagnostic provider.
+
+        The provider is called only when a transcript is enabled and a slave
+        byte completes. Its return value is copied through a compact JSON
+        representation; errors are reported as data and cannot affect wire
+        operation.
+        """
+        if provider is not None and not callable(provider):
+            raise TypeError("provider must be callable or None")
+        if (
+            isinstance(max_bytes, bool)
+            or not isinstance(max_bytes, int)
+            or not 1 <= max_bytes <= 4096
+        ):
+            raise ValueError("max_bytes must be between 1 and 4096")
+        self._serial_transcript_context_provider = provider
+        self._serial_transcript_context_max_bytes = max_bytes
+
     def disable_serial_transcript(self) -> None:
         """Disable and discard serial transcript records immediately."""
         with self._serial_transcript_lock:
@@ -1036,6 +1065,9 @@ class NetworkBackend:
                     value = copied.get(key)
                     if isinstance(value, dict):
                         copied[key] = dict(value)
+                completion_context = copied.get("completion_context")
+                if isinstance(completion_context, dict):
+                    copied["completion_context"] = json.loads(json.dumps(completion_context))
                 records.append(copied)
             return {
                 "serial_transcript": {
@@ -1667,6 +1699,7 @@ class NetworkBackend:
         completed = bool(core.apply_external_edge(request.peer_bit & 1))
         request.response_bit = our_bit
         request.completed = completed
+        completion_context = self._serial_completion_context() if completed else None
         # A real external edge ends any transient 0xFE keep-alive stream.
         # The next internal-clock transition must restart at the first bit of
         # SERIAL_NO_DATA_BYTE rather than continuing from the old byte index.
@@ -1679,6 +1712,7 @@ class NetworkBackend:
             edge_bit=request.peer_bit & 1,
             response_bit=our_bit,
             byte_complete=completed,
+            completion_context=completion_context,
             local_state_before=state_before,
             local_state_after=(
                 self._core_state_snapshot(core) if state_before is not None else None
@@ -1712,6 +1746,35 @@ class NetworkBackend:
                     byte_complete=True,
                     outcome="success",
                 )
+
+    def _serial_completion_context(self) -> dict[str, object] | None:
+        """Capture a bounded, JSON-safe owner diagnostic without side effects."""
+        if self._serial_transcript is None:
+            return None
+        provider = self._serial_transcript_context_provider
+        if provider is None:
+            return None
+        try:
+            raw = provider()
+        except BaseException as exc:  # noqa: BLE001 - diagnostics must not break a link.
+            return {"status": "provider_error", "error_type": type(exc).__name__}
+        if not isinstance(raw, dict):
+            return {"status": "invalid_result"}
+        try:
+            copied = json.loads(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+        except (TypeError, ValueError, OverflowError):
+            return {"status": "invalid_result"}
+        value: dict[str, object] = {}
+        truncated = False
+        for key in sorted(copied):
+            candidate = dict(value)
+            candidate[key] = copied[key]
+            encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if len(encoded) <= self._serial_transcript_context_max_bytes:
+                value = candidate
+            else:
+                truncated = True
+        return {"status": "ok", "truncated": truncated, "value": value}
 
     def _send_edge_response(self, request: _InboundEdge) -> None:
         """Send an owner-produced response without touching emulator state."""
@@ -1886,6 +1949,7 @@ class NetworkBackend:
                     self._active_exchange_until = time.monotonic() + _ACTIVE_EXCHANGE_GRACE_SECONDS
                 our_bit = core.peek_out_bit()
                 completed = core.apply_external_edge(peer_bit)
+                completion_context = self._serial_completion_context() if completed else None
                 if completed:
                     self._stats["last_slave_byte_complete_at"] = time.monotonic()
                     self._post_byte_rearm_until = time.monotonic() + _POST_BYTE_REARM_GRACE_SECONDS
@@ -1899,6 +1963,7 @@ class NetworkBackend:
                     edge_bit=peer_bit & 1,
                     response_bit=our_bit & 1,
                     byte_complete=completed,
+                    completion_context=completion_context,
                     local_state_before=state_before,
                     local_state_after=(
                         self._core_state_snapshot(core) if state_before is not None else None

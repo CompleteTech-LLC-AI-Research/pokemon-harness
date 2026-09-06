@@ -320,6 +320,9 @@ class PyBoyLinkSession:
             try:
                 with self._serial_gate:
                     self._initialize_network_clock_role(core)
+                self._network_backend.set_serial_transcript_context_provider(
+                    self._make_serial_completion_context_provider(pyboy)
+                )
                 self._network_backend.start_receiver(
                     local_core=core,
                     irq_callback=self._make_serial_irq_raiser(pyboy),
@@ -461,6 +464,35 @@ class PyBoyLinkSession:
                 cpu.set_interruptflag(INTR_SERIAL)
 
         return _raise
+
+    @staticmethod
+    def _make_serial_completion_context_provider(pyboy):
+        """Return a read-only byte-completion diagnostic snapshot.
+
+        ``hSerialIgnoringInitialData`` is anchored at HRAM ``$FFAB`` in the
+        audited Red/Blue and Yellow cartridge sources. The provider is called
+        by ``NetworkBackend`` only after an external-clock byte completes and
+        only when its opt-in transcript is enabled; it neither steps the
+        emulator nor changes any serial or input state.
+        """
+
+        def _snapshot() -> dict[str, int]:
+            result: dict[str, int] = {}
+            cpu = getattr(getattr(pyboy, "mb", None), "cpu", None)
+            pc = getattr(cpu, "PC", None)
+            if type(pc) is int:
+                result["cpu_pc"] = pc
+            memory = getattr(pyboy, "memory", None)
+            if memory is not None:
+                try:
+                    ignored_initial = int(memory[0xFFAB])
+                except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                    pass
+                else:
+                    result["h_serial_ignoring_initial_data"] = ignored_initial
+            return result
+
+        return _snapshot
 
     def _install_network_tick_owner(self, pyboy: _PyBoyLike) -> None:
         """Make each normal PyBoy frame an owner-side serial boundary.
