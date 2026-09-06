@@ -558,6 +558,20 @@ def _link_menu_receive_candidate(values):
     return None
 
 
+def _link_menu_has_real_selection_exchange(history):
+    """Return whether the ROM has exchanged a non-idle LinkMenu vote.
+
+    ``LinkMenu`` entry alone is not permission to drive the next game phase:
+    Cable Club peers may enter its polling loop at different host times and
+    may negotiate which Game Boy supplies clocks.  The post-call hook is the
+    only observation here that proves the ROM actually returned from its
+    native selection exchange.  Require both the locally sent vote and the
+    received peer vote; all data remains an observation, never a menu write.
+    """
+    decisive = history.first_decisive
+    return "sent" in decisive and "received" in decisive
+
+
 def _read_link_menu_fields(session, *, include_map=False, on_error=None):
     """Read selection state without writes; optionally report bounded errors."""
     snapshot = {}
@@ -1042,9 +1056,9 @@ def _run_peer(trace=None) -> int:
     shots: list[str] = []
     select_mon_announced = False
     link_menu_announced = False
-    link_menu_quiet_announced = False
     peer_link_menu_ready = False
-    peer_link_menu_quiet_ready = False
+    link_menu_exchange_announced = False
+    peer_link_menu_exchange_ready = False
     battle_turn_announced = False
     peer_battle_turn_ready = False
     link_menu_max = 0
@@ -1569,6 +1583,40 @@ def _run_peer(trace=None) -> int:
             and watched & required_keys == required_keys
         )
 
+    def wait_for_link_menu_selection_exchange(*, label: str, timeout: float = 120.0) -> None:
+        """Require each ROM to observe a real, non-idle LinkMenu exchange.
+
+        The control marker only reports local ROM evidence.  It never
+        selects a menu item or infers Game Boy clock ownership from the TCP
+        role.  Keep stepping while the peer catches up because either ROM may
+        be the active serial clock at this point.
+        """
+        nonlocal link_menu_exchange_announced, peer_link_menu_exchange_ready
+
+        deadline_at = min(deadline, time.monotonic() + timeout)
+        while time.monotonic() < deadline_at:
+            if (
+                not link_menu_exchange_announced
+                and _link_menu_has_real_selection_exchange(link_menu_history)
+            ):
+                link._network_backend.announce_sync(sync_id=125)
+                link_menu_exchange_announced = True
+                log(f"{label}: local LinkMenu selection exchange observed")
+            if link_menu_exchange_announced and not peer_link_menu_exchange_ready:
+                peer_link_menu_exchange_ready = link._network_backend.poll_peer_sync(sync_id=125)
+            if link_menu_exchange_announced and peer_link_menu_exchange_ready:
+                log(f"{label}: peer LinkMenu selection exchange observed")
+                return
+            session.step(1)
+        raise RuntimeError(
+            f"{label} LinkMenu selection exchange did not converge: "
+            f"local_evidence={link_menu_exchange_announced} "
+            f"peer_evidence={peer_link_menu_exchange_ready} "
+            f"history={link_menu_history.snapshot()} "
+            f"menu={menu_snapshot()} state={state_snapshot()} "
+            f"backend={backend_snapshot()}"
+        )
+
     def move_menu_to_item(
         *,
         target: int,
@@ -1707,39 +1755,17 @@ def _run_peer(trace=None) -> int:
         serial_phase_ticks = 0
         peer_link_menu_ready = False
         while time.monotonic() < deadline:
-            # LinkMenu is a phase boundary, but the ROM can leave SC bit 7
-            # armed while waiting for the next peer clock. Keep ticking until
-            # both peers announce LinkMenu, then stop the emulators and drain
-            # only the transport work already admitted by the reader. This
-            # avoids closing an in-flight edge without requiring an impossible
-            # ROM-level "serial idle" state.
+            # TCP listener/connector is not a Game Boy clock-role contract.
+            # Cable Club may invert clock ownership while either ROM remains
+            # in its polling loop, so a peer which has already entered
+            # LinkMenu must continue authentic emulation until the other ROM
+            # independently observes that same entry.  Do not wait for wire
+            # quietness here: the next legitimate transfer can be the peer's
+            # final pre-menu edge.
             if link_menu_announced:
                 if not peer_link_menu_ready:
                     peer_link_menu_ready = link._network_backend.poll_peer_sync(sync_id=121)
                 if peer_link_menu_ready:
-                    if not link_menu_quiet_announced:
-                        link._network_backend.wait_for_wire_idle(
-                            timeout=10.0,
-                            progress_callback=lambda: session.step(1),
-                        )
-                        link._network_backend.announce_sync(sync_id=122)
-                        link_menu_quiet_announced = True
-                        log("phase 1 wire-idle acknowledgement sent")
-                    if link_menu_quiet_announced and not peer_link_menu_quiet_ready:
-                        peer_link_menu_quiet_ready = link._network_backend.poll_peer_sync(
-                            sync_id=122
-                        )
-                if peer_link_menu_quiet_ready:
-                    link._network_backend.wait_for_wire_idle(
-                        timeout=10.0,
-                        allow_peer_close=True,
-                        progress_callback=lambda: session.step(1),
-                    )
-                    # Both peers have now observed the quiet acknowledgement.
-                    # LinkMenu-only runs finish with a drain and passive
-                    # shutdown acknowledgements before either socket closes.
-                    # Trade and battle use a live rendezvous to continue
-                    # gameplay while servicing the peer's serial work.
                     _finish_link_menu_phase(
                         args.goal,
                         cooperative_sync=cooperative_sync,
@@ -1747,19 +1773,7 @@ def _run_peer(trace=None) -> int:
                     )
                     log("phase 1 done: LinkMenu fired on both peers")
                     break
-                if not link_menu_quiet_announced:
-                    session.step(4)
-                elif not peer_link_menu_quiet_ready:
-                    # The local idle marker only means this peer has drained
-                    # its currently admitted edges. The other peer may still
-                    # be completing its final edge and needs this owner
-                    # thread to keep pumping serial work until marker 122 is
-                    # observed on both sides.
-                    session.step(1)
-                else:
-                    # Both quiet markers are visible; avoid another emulator
-                    # tick before the close-tolerant final drain.
-                    time.sleep(0.001)
+                session.step(1)
                 continue
             in_serial_phase = (
                 counters["SaveGameData"][0] > 0 or counters["Serial_SyncAndExchangeNybble"][0] > 0
@@ -1819,13 +1833,11 @@ def _run_peer(trace=None) -> int:
                 )
                 last_progress = time.monotonic()
 
-        if not link_menu_announced or not peer_link_menu_quiet_ready:
+        if not link_menu_announced or not peer_link_menu_ready:
             raise RuntimeError(
                 "LinkMenu rendezvous did not converge before the gameplay phase: "
                 f"local_announced={link_menu_announced} "
                 f"peer_ready={peer_link_menu_ready} "
-                f"local_quiet_announced={link_menu_quiet_announced} "
-                f"peer_quiet_ready={peer_link_menu_quiet_ready} "
                 f"menu={menu_snapshot()} state={state_snapshot()} "
                 f"backend={backend_snapshot()}"
             )
@@ -1867,12 +1879,11 @@ def _run_peer(trace=None) -> int:
             # one side to consume the choice several host frames ahead.
             cooperative_sync(sync_id=19, timeout=120.0, step_frames=1)
             session.press("a", duration=4)
-            # The selection exchange may begin immediately after A. Keep a
-            # second cooperative boundary so both sides have admitted the
-            # authentic input before the warp phase starts.
-            cooperative_sync(sync_id=20, timeout=120.0, step_frames=1)
-            log("sync: trade menu A events queued on both peers")
-            session.step(20)
+            # A queued input is not evidence that Cable Club exchanged a
+            # selection.  Advance only after both ROMs independently report
+            # the post-call sent-and-received vote evidence.
+            wait_for_link_menu_selection_exchange(label="trade")
+            log("trade menu selection exchange verified on both peers")
             # Trade Center warp — A-mash until map becomes 0xEF. Once one
             # peer reaches the map it must keep ticking while the other peer
             # completes its ROM-owned selection exchange; stopping the first
@@ -2139,9 +2150,9 @@ def _run_peer(trace=None) -> int:
             # phase without starving the owner pump.
             cooperative_sync(sync_id=117, timeout=120.0, step_frames=1)
             session.press("a", duration=4)
-            # Let both owners admit the authentic selection before either
-            # side starts the warp-driving loop.
-            cooperative_sync(sync_id=118, timeout=120.0, step_frames=1)
+            # Do not advance based on the input event alone.  Both ROMs must
+            # return from their own native LinkMenu selection exchange.
+            wait_for_link_menu_selection_exchange(label="battle")
             shot("02_battle_menu")
 
             COLOSSEUM = 0xF0
@@ -2544,8 +2555,6 @@ def _run_peer(trace=None) -> int:
             goal_complete = (
                 link_menu_announced
                 and peer_link_menu_ready
-                and link_menu_quiet_announced
-                and peer_link_menu_quiet_ready
             )
         elif args.goal == "trade":
             goal_complete = counters["_AddEnemyMonToPlayerParty"][0] > 0
