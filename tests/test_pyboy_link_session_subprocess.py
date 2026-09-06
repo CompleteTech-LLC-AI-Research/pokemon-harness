@@ -20,6 +20,7 @@ NetworkBackend's REQ/RESP chatter in balance.
 
 from __future__ import annotations
 
+import ast
 import codecs
 import io
 import json
@@ -39,6 +40,7 @@ from tests._rom_assets import fixture_path, rom_path, sym_path
 from tests._tcp_trade_peer import _TRADE_DIAG_SYMBOLS, _hold_at_sync_boundary
 
 _REPO = Path(__file__).resolve().parents[1]
+_TCP_TRADE_PEER = Path(__file__).with_name("_tcp_trade_peer.py")
 _RESULT_PREFIX = "__TCP_TRADE_RESULT__ "
 _SUPERVISOR_RESULT_SOURCE = "supervisor"
 _MAX_FAILURE_SENTINEL_ERROR = 512
@@ -66,6 +68,115 @@ _REQUIRED_BACKEND_STATS = (
     "exchange_received",
     "pending_edge_requests",
 )
+
+
+def _tcp_call_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _is_tcp_confirmation_press(call: ast.Call) -> bool:
+    """Return whether *call* queues a public Cable Club A confirmation."""
+    return (
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "session"
+        and call.func.attr == "press"
+        and bool(call.args)
+        and isinstance(call.args[0], ast.Constant)
+        and call.args[0].value == "a"
+    )
+
+
+def _cable_club_entry_sync_contract(tree: ast.AST) -> tuple[bool, str]:
+    """Check the native-entry, passive-rendezvous, confirmation ordering.
+
+    Each subprocess observes its own ``CableClubNPC`` hook. A passive
+    ready/release handshake made only after that local observation means both
+    peers have reached the native entry boundary without advancing a ROM. The
+    first subsequent A is the serial-driving save confirmation.
+    """
+    ready_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _tcp_call_name(node.func) == "_is_cable_club_save_choice_ready"
+    ]
+    if not ready_calls:
+        return False, "driver never checks the native Cable Club save-choice predicate"
+
+    ready_line = max(call.lineno for call in ready_calls)
+    confirmations = sorted(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and node.lineno > ready_line
+            and _is_tcp_confirmation_press(node)
+        ),
+        key=lambda call: call.lineno,
+    )
+    if not confirmations:
+        return False, "no A confirmation follows the Cable Club readiness predicate"
+
+    first_confirmation = confirmations[0]
+    passive_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _tcp_call_name(node.func) == "passive_sync"
+        and ready_line < node.lineno < first_confirmation.lineno
+    ]
+    if not passive_calls:
+        return False, (
+            "no passive control-plane sync occurs after CableClubNPC readiness "
+            "and before the first save-confirmation A"
+        )
+    if not any(
+        any(keyword.arg == "ready_sync_id" for keyword in call.keywords)
+        and any(keyword.arg == "release_sync_id" for keyword in call.keywords)
+        for call in passive_calls
+    ):
+        return False, "Cable Club passive sync must use ready and release markers"
+    return True, ""
+
+
+def test_cable_club_entry_sync_contract_recognizes_only_passive_preconfirmation_sync():
+    """Keep the source contract specific to the two-marker passive protocol."""
+    compliant = ast.parse(
+        """
+if _is_cable_club_save_choice_ready(counters, menu_snapshot()):
+    passive_sync(ready_sync_id=127, release_sync_id=128, timeout=1.0)
+    session.press("a", duration=1)
+"""
+    )
+    cooperative = ast.parse(
+        """
+if _is_cable_club_save_choice_ready(counters, menu_snapshot()):
+    cooperative_sync(sync_id=127, timeout=1.0)
+    session.press("a", duration=1)
+"""
+    )
+
+    assert _cable_club_entry_sync_contract(compliant) == (True, "")
+    assert "no passive control-plane sync" in _cable_club_entry_sync_contract(cooperative)[1]
+
+
+def test_tcp_peer_waits_for_both_cable_club_entries_before_save_confirmation():
+    """The serial-driving A is barred until both peers reached CableClubNPC."""
+    tree = ast.parse(_TCP_TRADE_PEER.read_text(encoding="utf-8"), filename=str(_TCP_TRADE_PEER))
+    predicate = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_is_cable_club_save_choice_ready"
+    )
+    assert "CableClubNPC" in ast.unparse(predicate)
+
+    valid, reason = _cable_club_entry_sync_contract(tree)
+    assert valid, reason
 
 
 def _fixtures_ready() -> bool:
