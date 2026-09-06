@@ -9,19 +9,32 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-**Status: `PARTIAL` — experimental branch, not production-ready.**
+**Status: `PARTIAL` — `origin/master` is not production-ready.**
 
-The newer hosted gate at `656917ba95843decf4a33d98158be0049ef7a22e`
-failed: unit tests recorded `3,913` passes and `1` failure; five timing
+At `766eaa6aafecad039d5b10934ec36f8ec933645e`, the hosted
+[release-hygiene workflow](https://github.com/CompleteDotTech/pokemon/actions/runs/34028627290)
+passed. It verifies packaging and a clean wheel-install/runtime contract; it
+does not run the real-ROM remote trade or battle acceptance matrix. The
+documented default is the bundled PyBoy source runtime, not a separately
+installed stock PyBoy wheel. The optional Cython build remains a distinct
+explicit runtime mode.
+
+Remote TCP transport and diagnostics are implemented, loopback-only, and
+unauthenticated. No current-head, complete remote trade or battle acceptance
+result exists, so neither operation is supported as a production claim.
+
+### Historical experimental evidence
+
+At historical revision `656917ba95843decf4a33d98158be0049ef7a22e`, a hosted
+gate failed: unit tests recorded `3,913` passes and `1` failure; five timing
 repetitions recorded `1,100` passes and `5` failures. Both tiers recorded
 zero errors, skips, xfails, or xpasses. The failing case in both tiers was
 `test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_events`
 with `_queue.Empty`. See the
-[hosted gate report](https://github.com/CompleteDotTech/pokemon/actions/runs/34001368361).
-The paired-call timing failure remains unresolved; older passing snapshots
-below do not qualify this revision. Experimental transport changes and
-trade/battle observations in separate worktrees are not integrated acceptance
-evidence. Full remote trade and battle completion remain unproven.
+[historical gate report](https://github.com/CompleteDotTech/pokemon/actions/runs/34001368361).
+That result neither qualifies nor, by itself, diagnoses the current master
+revision. The historical observations below are retained for investigation,
+not as current acceptance evidence.
 
 At `74e8db3`, the dual unit/timing gate completed `PASS`, collecting `3,594`
 tests per runtime. Source passed `3,441` unit tests in `151.4s` and `1,075`
@@ -186,7 +199,7 @@ reports recorded zero skips; neither qualifies the release.
 ### Historical origin/master evidence at `1f19707`
 
 The following records describe the earlier origin/master candidate, not the
-current experimental branch. At `1f19707`, source and
+then-current experimental branch. At `1f19707`, source and
 native each passed `1,176/1,176` unit tests and `65/65` total timing checks
 (`13` cases in each of five repetitions), with zero failures, skips, xfails,
 xpasses, or errors. Each collected `1,320` tests; `19/19` trade and `19/19`
@@ -220,7 +233,7 @@ finite `POKERED_PEER_TRACE_AFTER_SECONDS`; optional `POKERED_PEER_TRACE_DIR`
 must already exist. At most two one-shot dumps are scheduled, with no ROM
 changes. At that historical snapshot, experimental time coordinator `344aa95`
 was on another branch and was not included in `1f19707`; this exclusion does
-not describe the current experimental branch. The original `02a8e85` dual gate's native timing
+not describe the then-current experimental branch. The original `02a8e85` dual gate's native timing
 failure (`64/65`) and lost failed test identity and iteration output remain historical failures;
 subsequent test-race and gate-report fixes precede the verified `1f19707` pass.
 No clean full source/native gameplay gate is established.
@@ -328,7 +341,7 @@ This is state-observation evidence, not live MCP gameplay evidence.
 ### Recorded candidate matrix
 
 The following matrix retains historical results; it is not the `e8db87e`
-unit/timing snapshot above or current experimental gameplay acceptance.
+unit/timing snapshot above or then-current experimental gameplay acceptance.
 
 | Capability | Recorded result | Evidence boundary |
 |---|---|---|

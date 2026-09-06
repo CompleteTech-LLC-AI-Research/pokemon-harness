@@ -5,45 +5,21 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Current candidate status at `1f19707`: `PARTIAL` — not production-ready.
-The dual source/native unit gate collected `1,320` tests per runtime and
-passed `1,176/1,176` unit tests plus `65/65` total timing checks per runtime
-(`13` cases in each of five repetitions), with zero failures, skips, xfails,
-xpasses, or errors. Its `19/19` trade and `19/19` battle declarations were
-not executed by this asset-free unit gate. The retained report is
-`pokemon-qualification-dual-unit-1f19707-20260905/gate-report.json`.
+Current status at `766eaa6aafecad039d5b10934ec36f8ec933645e`: `PARTIAL` —
+not production-ready. The current hosted release-hygiene workflow passed the
+packaging and clean wheel-install/runtime checks. Its success does not execute
+or establish the real-ROM remote trade or battle acceptance matrix.
 
-Canonical Red/Blue/Yellow boot checks at `1f19707` passed source `3/3` in
-`6.74s` and native `3/3` in `1.89s`, with zero failures, skips, or errors
-and one SDL warning each. These checks exercise 120 frames plus state and
-save/load checks; they do not establish gameplay qualification.
+The default packaged runtime is the bundled PyBoy `2.7.0` source fork at
+revision `c565df66c3731fad2856169a90f6bbec99925915`. Source mode is selected
+explicitly by `scripts/bootstrap_pyboy.py --mode source`; Cython is an optional
+separate mode and must be selected and verified explicitly. A standalone stock
+PyBoy wheel is not the documented runtime and must not shadow the package.
 
-The freshly built native runtime is documented in
-`poke-serial-native-20260905-V7dHOU/QUALIFICATION.md`: its base is `e1686ca`
-with serial overlays, and its serial source SHA-256 matches `1f19707`.
-That build record is scoped provenance, not a clean full gameplay gate.
-The native Blue-color listener / Yellow connector replay at `02a8e85`
-(runtime identical to `1f19707`) failed after `721.67s`; both peers exited
-cleanly with return code `1`. Blue never reached LinkMenu and executed
-`CloseLinkConnection` once at local tick `1332`; Yellow reached LinkMenu at
-local tick `628` and input at `660`. There were `6,248` balanced native edges,
-zero transport errors, and no keepalive traffic. Peer-local ticks are not a
-common clock: this supports investigating time coordination, not a precise
-root-cause claim. Retained evidence is
-`pokemon-native-blue-yellow-02a8e85-LMtfZm/output.log` and `result.json`.
-
-The original dual unit gate at `02a8e85` failed native timing at `64/65`
-and lost failed test identity and iteration output through a gate-reporting bug.
-Subsequent verified
-test races were corrected before the passing `1f19707` dual gate; the older
-failure remains historical evidence. Candidate fixes cover serial idle and
-external-clock hints beyond `2^31`, dispatch lock ordering and admission
-deadlines, failure-first gate evidence, and partial pipe capture. Peer tracing
-is opt-in via positive finite `POKERED_PEER_TRACE_AFTER_SECONDS`, with optional
-existing `POKERED_PEER_TRACE_DIR` and at most two one-shot dumps. These are
-diagnostics with no ROM changes. Experimental coordinator `344aa95` is on
-another branch and is not included in this candidate. No clean full source/native
-gameplay qualification is established.
+Remote TCP remains loopback-only, unauthenticated, and unencrypted. The code
+and diagnostics do not establish a current-head completed remote trade or
+battle. Historical rows below retain their original scope and do not qualify
+the current revision.
 
 ### Prior candidate evidence
 
@@ -283,21 +259,11 @@ reformatted.
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
-coordinator and remote TCP transport. The optional Cython/native build's
-compiled serial-contract probe and focused 110/110 serial-link suite are
-historical prior-candidate diagnostic evidence. The pre-fix native/Cython
-strict real-ROM gate is recorded at
-`poke-harness-native-strict-evidence-a8576b5`; it used Python `3.12.13`
-with PyBoy `2.7.0` and fork `c565df66c3731fad2856169a90f6bbec99925915`, and
-declared and executed 19/19 entries in each tier. Its trade result is `16/19`
-and its battle result is `17/19`; the failure details and evidence boundary
-are recorded below. The post-fix serialized source strict-trade production gate
-is `FAIL` at `18/19` after 19/19 declared and executed entries, and the
-pre-fix source-runtime local strict battle result is 9/9. A pre-existing
-PyBoy wheel must not be allowed to shadow
-this package; verify the runtime identity and selected mode before release. See
-the
-[production runbook](docs/PRODUCTION_RUNBOOK.md).
+coordinator and remote TCP transport. Source mode is the documented default;
+the Cython/native build is optional and requires an explicit build and runtime
+identity check. A pre-existing PyBoy wheel must not shadow this package.
+Neither runtime identity nor a source/native build proves real-ROM trade or
+battle acceptance. See the [production runbook](docs/PRODUCTION_RUNBOOK.md).
 
 ## ROM pins
 
