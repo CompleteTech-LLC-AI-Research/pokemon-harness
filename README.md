@@ -20,8 +20,9 @@ installed stock PyBoy wheel. The optional Cython build remains a distinct
 explicit runtime mode.
 
 Remote TCP transport and diagnostics are implemented, loopback-only, and
-unauthenticated. No current-head, complete remote trade or battle acceptance
-result exists, so neither operation is supported as a production claim.
+unauthenticated. The current source-runtime validation below passes all nine
+ordered TCP trade pairs; compiled-runtime, MCP-facing, cross-host, and strict
+battle acceptance remain unqualified.
 
 ### Current working-tree validation (2026-09-06)
 
@@ -30,17 +31,19 @@ the pinned
 vendored PyBoy source runtime (`PYBOY_NO_CYTHON=1`) with the operator-supplied
 ROM, symbol, and fixture roots:
 
-- The complete source-runtime strict trade tier passed `19/19` rows. This
-  covers all nine local version pairs, all nine TCP role pairs, and the
-  additional strict Red/Yellow party-record trade assertion.
+- The final four-worker source-runtime strict trade tier passed `19/19` rows
+  in `914.3s`. This covers all nine local version pairs, all nine TCP role
+  pairs, and the additional strict Red/Yellow party-record trade assertion.
 - Blue-color ↔ Blue-color completed LinkMenu, a full trade, and one battle
   turn. Native edge traffic was balanced, with the negotiated frame barrier
   completing without owner or reader errors.
 - Blue-color ↔ Yellow completed LinkMenu, a full party-record trade, and one
-  battle turn. Cross-family traffic used the native edge transport without
-  the frame barrier; both peers reached the ROM-owned trade/battle milestones.
-- The affected source regression slice passed `258` tests with `19` expected
-  asset-gated skips, and Ruff passed for the touched files.
+  battle turn. The affected ordered topology uses a short bounded frame-paced
+  rendezvous at the Trade Center walk boundary, then returns to native edge
+  pacing for the ROM-owned serial exchange; the reverse ordering remains on
+  its native path.
+- Focused non-ROM subprocess-helper checks passed `54` tests, and Ruff passed
+  for the touched driver.
 
 The strict trade tier is complete for the pinned source runtime, but the
 strict battle tier, compiled-runtime gameplay, MCP-facing starter/trade/battle

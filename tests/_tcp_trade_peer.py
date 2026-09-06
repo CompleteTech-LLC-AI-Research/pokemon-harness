@@ -2214,12 +2214,34 @@ def _run_peer(trace=None) -> int:
             cooperative_sync(sync_id=18, timeout=120.0, step_frames=1)
             log("sync: trade-center cooperative barrier complete")
             shot("03_post_warp_sync")
-            if args.version == "yellow" and peer_rom_version == "yellow":
-                # Yellow's input-sensitive preamble and LinkMenu selection
-                # use native edge pacing. Once both ROMs are at the verified
-                # Trade Center boundary, frame pacing keeps the larger
-                # trainer/party exchange in lockstep without disturbing
-                # public joypad sampling.
+            # Cross-family negotiation deliberately leaves Yellow's
+            # input-sensitive path on native edge pacing. The reproducible
+            # failure topology is the non-Yellow listener with Yellow as
+            # connector: use a short frame-paced walk rendezvous there, then
+            # return to native edges before the serial-heavy routine. The
+            # reverse ordered topology stays on its established native path;
+            # enabling a leader barrier there can strand Yellow waiting for a
+            # FRAME_TICK from the connector.
+            cross_family_walk_barrier = (
+                (
+                    args.role == "listen"
+                    and args.version != "yellow"
+                    and peer_rom_version == "yellow"
+                )
+                or (
+                    args.role == "connect"
+                    and args.version == "yellow"
+                    and peer_rom_version != "yellow"
+                )
+            )
+            if cross_family_walk_barrier:
+                link.set_network_frame_barrier(True)
+                log("enabled cross-family frame barrier at Trade Center boundary")
+            elif args.version == "yellow" and peer_rom_version == "yellow":
+                # Preserve the established Yellow↔Yellow pacing boundary;
+                # unlike the cross-family path, both cartridges share the
+                # same input/serial polling cadence and use the barrier for
+                # the full trade-center exchange.
                 link.set_network_frame_barrier(True)
                 log("enabled Yellow frame barrier at Trade Center boundary")
 
@@ -2232,15 +2254,24 @@ def _run_peer(trace=None) -> int:
                 session.press(walk_dir, duration=8)
                 session.step(30)
 
+            if cross_family_walk_barrier:
+                # The walk is still a ROM-owned overworld phase, so rendezvous
+                # before the first A press while frame pacing is active. This
+                # keeps both cartridges on the same side of the hidden-event
+                # transition without holding either emulator during serial
+                # work. Complete a second transport-only handshake before
+                # changing the pacing mode, so no owner frame is in flight
+                # on either side when native edge pacing resumes.
+                passive_sync(ready_sync_id=20, release_sync_id=21, timeout=120.0)
+                passive_sync(ready_sync_id=22, release_sync_id=23, timeout=120.0)
+                link.set_network_frame_barrier(False)
+                log("sync: hidden-event walk boundary complete")
+                log("disabled cross-family frame barrier before native data exchange")
+
             # A-mash to dismiss "JUST A MOMENT!" and start
-            # CableClub_DoBattleOrTrade. NO sync barrier here — the
-            # big trainer/party block exchange that runs inside
-            # CableClub_DoBattleOrTrade needs both sides' CPUs
-            # actively ticking to exchange bytes. Blocking on a
-            # barrier mid-exchange would stall both ends. Instead
-            # we rely on the warp barrier (sync_id=2) aligning us
-            # closely enough that the natural parallel tick rates
-            # keep the exchange progressing on both sides.
+            # CableClub_DoBattleOrTrade. Keep both CPUs actively ticking
+            # through the native edge-level exchange once the public input
+            # transition begins.
             while time.monotonic() < deadline:
                 if counters["CableClub_DoBattleOrTrade"][0] > 0:
                     break
