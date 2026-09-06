@@ -792,6 +792,348 @@ def _history_session(*, target_bank=0, target_address=0x2247, opcode=0xCD):
     return session, memory, hooks, registrations, failures, fire
 
 
+def _history_closure_session(*, sp=0xD000, counter=0xC100, caller="timeout"):
+    session, memory, hooks, registrations, failures, fire = _history_session()
+    symbols = session.symbols
+    locations = {
+        "CableClubNPC.syncLoop": (3, 0x6000),
+        "CableClubNPC.failedToEstablishConnection": (3, 0x6010),
+        "CableClubNPC.choseNo": (3, 0x6010),
+        "CableClubNPC.didNotConnect": (3, 0x6018),
+        "wUnknownSerialCounter": (0, counter),
+    }
+    session.symbols = SimpleNamespace(
+        bank_addr=lambda name: locations[name] if name in locations else symbols.bank_addr(name),
+        addr_of=lambda name: locations[name][1] if name in locations else symbols.addr_of(name),
+    )
+    session._pyboy.register_file = SimpleNamespace(SP=sp)
+    bank, start = session.symbols.bank_addr("CableClubNPC.syncLoop")
+    _, decline = session.symbols.bank_addr("CableClubNPC.choseNo")
+    _, target = session.symbols.bank_addr("CloseLinkConnection")
+    memory.update({(bank, address): 0 for address in range(start, decline + 8)})
+    # CD inside a three-byte instruction's operand is not a CALL boundary.
+    memory.update({(bank, start): 0x01, (bank, start + 1): 0xCD, (bank, start + 2): 0x50})
+    for address in (start + 4, decline):
+        memory.update({(bank, address): 0xCD, (bank, address + 1): target & 255,
+                       (bank, address + 2): target >> 8})
+    return_pc = (start + 7) if caller == "timeout" else decline + 3
+    memory.update({sp: return_pc & 255, sp + 1: return_pc >> 8,
+                   counter: 0x34, counter + 1: 0x12})
+    return session, memory, hooks, registrations, failures, fire
+
+
+@pytest.mark.parametrize("caller", ["timeout", "decline"])
+def test_link_menu_history_closure_classifies_exact_call(caller):
+    from tests._tcp_trade_peer import _LinkMenuHistory
+
+    session, memory, hooks, registrations, _, fire = _history_closure_session(caller=caller)
+    history = _LinkMenuHistory(session, role="listen", version="yellow")
+    buckets = {name: [0] for name in _TRADE_DIAG_SYMBOLS}
+    history.install(buckets)
+    installed = list(registrations)
+    reads = list(memory.reads)
+    history.install(buckets)
+    assert registrations == installed
+    assert memory.reads == reads
+    fire("CloseLinkConnection")
+    result = history.snapshot()
+    closure = result["recent"][-1]["closure"]
+    assert closure["classification"] == caller
+    assert closure["reason"]
+    assert closure["counter"] == {
+        "status": "ok", "symbol": "wUnknownSerialCounter", "address": 0xC100,
+        "bytes": [0x34, 0x12], "value_be": 0x3412, "reason": "current_observation_only",
+    }
+    assert closure["stack"]["status"] == "ok"
+    assert closure["stack"]["sp"] == 0xD000
+    assert closure["stack"]["return_pc"] == (0x6007 if caller == "timeout" else 0x6013)
+    bank, address = session.symbols.bank_addr("CloseLinkConnection")
+    assert closure["bank"] == {
+        "status": "ok", "value": bank, "address": address,
+        "provenance": "existing_CloseLinkConnection_hook",
+        "reason": "banked_callback_dispatch",
+    }
+    assert len(closure["callers"]) == 2
+    assert [record["offset"] for record in closure["callers"]] == [4, 0]
+    assert all(record["status"] == "ok" for record in closure["callers"])
+    assert result["error_count"] == 0
+    assert buckets["CloseLinkConnection"] == [1]
+    assert len(hooks) == len(registrations)
+    assert memory.writes == []
+    assert memory.reads[len(reads):] == [key for key in memory.reads[len(reads):]
+                                       if isinstance(key, int)]
+    json.dumps(result)
+
+
+@pytest.mark.parametrize("sp,valid", [
+    (0xC000, True), (0xDFFE, True), (0xFF80, True), (0xFFFD, True),
+    (0xBFFF, False), (0xDFFF, False), (0xE000, False), (0xFF00, False),
+    (0xFF7F, False), (0xFFFE, False), (0xFFFF, False), (-1, False),
+    (0x10000, False),
+])
+def test_link_menu_history_closure_stack_bounds(sp, valid):
+    from tests._tcp_trade_peer import _LinkMenuHistory
+
+    session, memory, _, _, _, fire = _history_closure_session(sp=sp)
+    history = _LinkMenuHistory(session, role="listen", version="blue")
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    memory.reads.clear()
+    fire("LinkMenu")
+    legacy_reads = list(memory.reads)
+    memory.reads.clear()
+    fire("CloseLinkConnection")
+    result = history.snapshot()
+    closure = result["recent"][-1]["closure"]
+    assert closure["stack"]["status"] == ("ok" if valid else "invalid")
+    assert closure["classification"] == ("timeout" if valid else "unknown")
+    if not valid:
+        assert memory.reads[:len(legacy_reads)] == legacy_reads
+        closure_reads = memory.reads[len(legacy_reads):]
+        assert sp not in closure_reads and sp + 1 not in closure_reads
+        assert closure["stack"]["bytes"] is None
+        assert closure["stack"]["return_pc"] is None
+    assert not any(0xFF00 <= key <= 0xFF7F or key == 0xFFFF for key in memory.reads)
+    assert result["error_count"] == 0
+    assert memory.writes == []
+
+
+@pytest.mark.parametrize("address,valid", [
+    (0xC000, True), (0xDFFE, True), (0xBFFF, False), (0xDFFF, False),
+    (0xE000, False), (0xFF00, False), (0xFF80, False), (0xFFFF, False),
+])
+def test_link_menu_history_closure_counter_bounds(address, valid):
+    from tests._tcp_trade_peer import _LinkMenuHistory
+
+    session, memory, _, _, _, fire = _history_closure_session(counter=address)
+    history = _LinkMenuHistory(session, role="listen", version="red")
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    memory.reads.clear()
+    fire("LinkMenu")
+    legacy_reads = list(memory.reads)
+    memory.reads.clear()
+    fire("CloseLinkConnection")
+    result = history.snapshot()
+    counter = result["recent"][-1]["closure"]["counter"]
+    assert counter["status"] == ("ok" if valid else "invalid")
+    if valid:
+        assert counter["bytes"] == [0x34, 0x12]
+        assert counter["value_be"] == 0x3412
+    else:
+        assert memory.reads[:len(legacy_reads)] == legacy_reads
+        closure_reads = memory.reads[len(legacy_reads):]
+        assert address not in closure_reads and address + 1 not in closure_reads
+        assert counter["bytes"] is None and counter["value_be"] is None
+    # A counter sample cannot establish that a decrement or reload occurred.
+    assert result["counts"]["CloseLinkConnection"] == 1
+    assert result["total"] == 2
+    assert result["error_count"] == 0
+    assert memory.writes == []
+
+
+@pytest.mark.parametrize("case", [
+    "wrong_return", "wrong_target", "conditional", "duplicate", "operand_only",
+    "truncated", "illegal", "cross_bank", "empty", "oversize", "missing_start",
+    "missing_end", "ambiguous",
+])
+def test_link_menu_history_closure_rejects_unvalidated_callers(case):
+    from tests._tcp_trade_peer import _LinkMenuHistory
+
+    session, memory, _, _, _, fire = _history_closure_session()
+    symbols = session.symbols
+    bank, start = symbols.bank_addr("CableClubNPC.syncLoop")
+    _, target = symbols.bank_addr("CloseLinkConnection")
+    overrides = {}
+    if case == "wrong_return":
+        memory.update({0xD000: 0x08})
+    elif case == "wrong_target":
+        memory.update({(bank, start + 5): (target + 1) & 255})
+    elif case == "conditional":
+        memory.update({(bank, start + 4): 0xC4})
+    elif case == "duplicate":
+        memory.update({(bank, start + 8): 0xCD, (bank, start + 9): target & 255,
+                       (bank, start + 10): target >> 8})
+    elif case == "operand_only":
+        memory.update({(bank, start + 3): 0x01, (bank, start + 6): 0})
+    elif case == "truncated":
+        memory.update({(bank, start + 15): 0x01})
+    elif case == "illegal":
+        memory.update({(bank, start + 15): 0xD3})
+    elif case in {"cross_bank", "empty", "oversize"}:
+        overrides["CableClubNPC.failedToEstablishConnection"] = {
+            "cross_bank": (bank + 1, start + 16), "empty": (bank, start),
+            "oversize": (bank, start + 33),
+        }[case]
+    elif case == "ambiguous":
+        overrides["CableClubNPC.choseNo"] = (bank, start)
+        overrides["CableClubNPC.didNotConnect"] = (bank, start + 16)
+
+    def bank_addr(name):
+        if (case == "missing_start" and name == "CableClubNPC.syncLoop") or (
+            case == "missing_end" and name == "CableClubNPC.failedToEstablishConnection"
+        ):
+            raise KeyError(name)
+        return overrides[name] if name in overrides else symbols.bank_addr(name)
+
+    session.symbols = SimpleNamespace(bank_addr=bank_addr, addr_of=symbols.addr_of)
+    history = _LinkMenuHistory(session, role="connect", version="yellow")
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    fire("CloseLinkConnection")
+    result = history.snapshot()
+    closure = result["recent"][-1]["closure"]
+    assert closure["classification"] == "unknown"
+    expected = "ok" if case in {"wrong_return", "ambiguous"} else (
+        "missing" if case.startswith("missing") else "invalid"
+    )
+    assert closure["callers"][0]["status"] == expected
+    assert len(closure["callers"]) == 2
+    assert result["error_count"] == 0 and result["errors"] == []
+    assert memory.writes == []
+
+
+@pytest.mark.parametrize("field,case", [
+    ("counter", "missing"), ("counter", "byte_missing"), ("counter", "byte_invalid"),
+    ("stack", "missing"), ("stack", "byte_missing"), ("stack", "byte_invalid"),
+    ("stack", "exception"),
+])
+def test_link_menu_history_closure_failures_stay_local(field, case):
+    from tests._tcp_trade_peer import _LinkMenuHistory
+
+    session, memory, _, _, _, fire = _history_closure_session()
+    if case == "missing" and field == "counter":
+        symbols = session.symbols
+
+        def addr_of(name):
+            if name == "wUnknownSerialCounter":
+                raise KeyError(name)
+            return symbols.addr_of(name)
+
+        session.symbols = SimpleNamespace(bank_addr=symbols.bank_addr, addr_of=addr_of)
+    elif case == "missing":
+        del session._pyboy.register_file
+    elif case == "exception":
+        class BrokenRegisters:
+            @property
+            def SP(self):
+                raise KeyboardInterrupt("x" * 1000)
+
+        session._pyboy.register_file = BrokenRegisters()
+    else:
+        address = 0xC101 if field == "counter" else 0xD001
+        if case == "byte_missing":
+            del memory[address]
+        else:
+            memory.update({address: 256})
+    history = _LinkMenuHistory(session, role="connect", version="blue", limit=2)
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    for _ in range(4):
+        fire("CloseLinkConnection")
+    result = history.snapshot()
+    for sample in [result["first"]["CloseLinkConnection"], *result["recent"]]:
+        closure = sample["closure"]
+        assert closure[field]["status"] == (
+            "missing" if case in {"missing", "byte_missing"} else "invalid"
+        )
+        assert isinstance(closure[field]["reason"], str)
+        assert 0 < len(closure[field]["reason"]) <= 256
+        assert closure[field]["bytes"] is None
+        if field == "stack":
+            assert closure["classification"] == "unknown"
+    assert result["total"] == 4 and len(result["recent"]) == 2
+    assert result["error_count"] == 0 and result["errors"] == []
+    assert memory.writes == []
+    json.dumps(result)
+
+
+@pytest.mark.parametrize("bank,address", [(4, 0x5200), (0, 0x2200), (True, 0x5200), (3.0, 0x5200)])
+def test_link_menu_history_closure_requires_matching_banked_callback(bank, address):
+    from tests._tcp_trade_peer import _LinkMenuHistory
+
+    session, memory, hooks, _, _, _ = _history_closure_session()
+    symbols = session.symbols
+    session.symbols = SimpleNamespace(
+        bank_addr=lambda name: (bank, address) if name == "CloseLinkConnection"
+        else symbols.bank_addr(name),
+        addr_of=symbols.addr_of,
+    )
+    history = _LinkMenuHistory(session, role="listen", version="yellow")
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    callback, context = hooks[bank, address]
+    callback(context)
+    result = history.snapshot()
+    closure = result["recent"][-1]["closure"]
+    assert closure["classification"] == "unknown"
+    assert closure["bank"]["status"] == ("ok" if type(bank) is int and bank else "invalid")
+    assert closure["bank"]["provenance"] == "existing_CloseLinkConnection_hook"
+    assert all(record["status"] == "invalid" for record in closure["callers"])
+    assert result["errors"] == [] and result["error_count"] == 0
+    assert memory.writes == []
+
+
+@pytest.mark.parametrize("field", ["stack", "counter"])
+@pytest.mark.parametrize("value", [True, 53248.0, "53248", None])
+def test_link_menu_history_closure_rejects_noninteger_addresses(field, value):
+    from tests._tcp_trade_peer import _LinkMenuHistory
+
+    session, memory, _, _, _, fire = _history_closure_session()
+    if field == "stack":
+        session._pyboy.register_file.SP = value
+    else:
+        symbols = session.symbols
+        session.symbols = SimpleNamespace(
+            bank_addr=symbols.bank_addr,
+            addr_of=lambda name: value if name == "wUnknownSerialCounter"
+            else symbols.addr_of(name),
+        )
+    history = _LinkMenuHistory(session, role="listen", version="blue")
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    fire("CloseLinkConnection")
+    result = history.snapshot()
+    closure = result["recent"][-1]["closure"]
+    assert closure[field]["status"] == "invalid"
+    assert closure[field]["bytes"] is None
+    assert closure["classification"] == ("unknown" if field == "stack" else "timeout")
+    assert result["errors"] == [] and result["error_count"] == 0
+    assert memory.writes == []
+
+
+def test_link_menu_history_closure_additive_shape_and_observation_only():
+    from tests._tcp_trade_peer import _LINK_MENU_HISTORY_EVENTS, _LinkMenuHistory
+
+    session, memory, hooks, registrations, _, fire = _history_closure_session()
+    history = _LinkMenuHistory(session, role="listen", version="red", limit=2)
+    buckets = {name: [0] for name in _TRADE_DIAG_SYMBOLS}
+    original_register = session._pyboy.hook_register
+
+    def register(bank, address, callback, context):
+        # All caller ROM reads must precede even the first hook installation.
+        assert all((3, addr) in memory.reads for addr in range(0x6000, 0x6018))
+        original_register(bank, address, callback, context)
+
+    session._pyboy.hook_register = register
+    history.install(buckets)
+    expected_hooks = {session.symbols.bank_addr(name) for name in _TRADE_DIAG_SYMBOLS}
+    expected_hooks.add((3, 0x5803))
+    assert set(hooks) == expected_hooks
+    before = dict(memory)
+    installed = list(registrations)
+    fire("LinkMenu")
+    plain = history.snapshot()["recent"][-1]
+    fire("CloseLinkConnection")
+    snapshot = history.snapshot()
+    closed = snapshot["recent"][-1]
+    assert set(closed) == set(plain) | {"closure"}
+    assert "closure" not in plain and "closure" not in snapshot
+    assert set(snapshot["counts"]) == set(_LINK_MENU_HISTORY_EVENTS)
+    assert snapshot["first_decisive"] == {}
+    assert snapshot["errors"] == [] and snapshot["error_count"] == 0
+    assert set(closed["closure"]) == {"classification", "reason", "counter", "stack", "bank", "callers"}
+    snapshot["first"]["CloseLinkConnection"]["closure"]["counter"]["bytes"][0] = 0
+    assert history.snapshot()["first"]["CloseLinkConnection"]["closure"]["counter"]["bytes"] == [0x34, 0x12]
+    assert dict(memory) == before and memory.writes == []
+    assert registrations == installed and session.tick == 0
+    assert session._pyboy.register_file.SP == 0xD000
+
+
 def test_link_menu_history_preserves_first_samples_across_buffer_reuse():
     from tests._tcp_trade_peer import _LinkMenuHistory
 

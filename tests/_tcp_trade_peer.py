@@ -193,6 +193,129 @@ def _read_link_menu_fields(session, *, include_map=False, on_error=None):
     return snapshot
 
 
+def _closure_integer(value, low, high):
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ValueError("integer outside permitted range")
+    return value
+
+
+def _closure_rom_address(bank, address):
+    _closure_integer(bank, 0, 255)
+    _closure_integer(address, 0 if bank == 0 else 0x4000, 0x3FFF if bank == 0 else 0x7FFF)
+
+
+def _closure_failure(record, exc):
+    record["status"] = "missing" if isinstance(exc, (KeyError, AttributeError)) else "invalid"
+    # Keep diagnostic failures local: the existing history error contract is unchanged.
+    record["reason"] = type(exc).__name__[:64]
+
+
+def _closure_callers(session):
+    """Decode only two bounded symbol spans, before hooks replace ROM bytes."""
+    records = []
+    for symbol, end_symbol, classification in (
+        ("CableClubNPC.syncLoop", "CableClubNPC.failedToEstablishConnection", "timeout"),
+        ("CableClubNPC.choseNo", "CableClubNPC.didNotConnect", "decline"),
+    ):
+        record = dict(
+            symbol=symbol, end_symbol=end_symbol, classification=classification,
+            status="missing", bank=None, call_address=None, return_pc=None,
+            target_bank=None, target_address=None, offset=None, span_end=None, reason="unresolved",
+        )
+        records.append(record)
+        try:
+            bank, start = session.symbols.bank_addr(symbol)
+            end_bank, end = session.symbols.bank_addr(end_symbol)
+            target_bank, target = session.symbols.bank_addr("CloseLinkConnection")
+            for b, a in ((bank, start), (end_bank, end), (target_bank, target)):
+                _closure_rom_address(b, a)
+            if bank != end_bank or bank != target_bank or not 1 <= end - start <= 32:
+                raise ValueError("invalid caller span or target bank")
+            record.update(bank=bank, span_end=end, target_bank=target_bank, target_address=target)
+            data = [
+                _closure_integer(session._pyboy.memory[bank, address], 0, 255)
+                for address in range(start, end)
+            ]
+            matches = []
+            offset = 0
+            while offset < len(data):
+                opcode = data[offset]
+                if opcode in (0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD):
+                    raise ValueError("invalid opcode in caller span")
+                size = 3 if opcode in (
+                    0x01, 0x08, 0x11, 0x21, 0x31, 0xC2, 0xC3, 0xC4, 0xCA,
+                    0xCC, 0xCD, 0xD2, 0xD4, 0xDA, 0xDC, 0xEA, 0xFA,
+                ) else 2 if opcode in (
+                    0x06, 0x0E, 0x10, 0x16, 0x18, 0x1E, 0x20, 0x26, 0x28,
+                    0x2E, 0x30, 0x36, 0x38, 0x3E, 0xC6, 0xCB, 0xCE, 0xD6,
+                    0xDE, 0xE0, 0xE6, 0xE8, 0xEE, 0xF0, 0xF6, 0xF8, 0xFE,
+                ) else 1
+                if offset + size > len(data):
+                    raise ValueError("truncated instruction in caller span")
+                if opcode == 0xCD and (data[offset + 1] | data[offset + 2] << 8) == target:
+                    _closure_rom_address(bank, start + offset + 3)
+                    matches.append(offset)
+                offset += size
+            if len(matches) != 1:
+                raise ValueError("caller span does not contain one unique matching CALL")
+            offset = matches[0]
+            record.update(status="ok", reason="validated_direct_call", offset=offset,
+                          call_address=start + offset, return_pc=start + offset + 3)
+        except BaseException as exc:  # noqa: BLE001
+            _closure_failure(record, exc)
+    return records
+
+
+def _closure_observation(session, callers, hook_address):
+    """Observe closure entry only; counter bytes do not establish counter history."""
+    counter = dict(status="missing", symbol="wUnknownSerialCounter", address=None,
+                   bytes=None, value_be=None, reason="unresolved")
+    stack = dict(status="missing", sp=None, bytes=None, return_pc=None, reason="unresolved")
+    bank = dict(status="missing", value=None, address=None,
+                provenance="existing_CloseLinkConnection_hook", reason="unavailable")
+    try:
+        address = session.symbols.addr_of("wUnknownSerialCounter")
+        _closure_integer(address, 0xC000, 0xDFFE)
+        counter["address"] = address
+        values = [_closure_integer(session._pyboy.memory[address + i], 0, 255) for i in range(2)]
+        counter.update(status="ok", bytes=values, value_be=values[0] << 8 | values[1],
+                       reason="current_observation_only")
+    except BaseException as exc:  # noqa: BLE001
+        _closure_failure(counter, exc)
+    try:
+        sp = session._pyboy.register_file.SP
+        _closure_integer(sp, 0, 0xFFFF)
+        stack["sp"] = sp
+        if not (0xC000 <= sp <= 0xDFFE or 0xFF80 <= sp <= 0xFFFD):
+            raise ValueError("stack pair is not wholly WRAM or HRAM")
+        values = [_closure_integer(session._pyboy.memory[sp + i], 0, 255) for i in range(2)]
+        stack.update(status="ok", bytes=values, return_pc=values[0] | values[1] << 8,
+                     reason="stack_entry_observation")
+    except BaseException as exc:  # noqa: BLE001
+        _closure_failure(stack, exc)
+    try:
+        if hook_address is None:
+            raise AttributeError("no registered callback address")
+        hook_bank, hook_pc = hook_address
+        _closure_rom_address(hook_bank, hook_pc)
+        # ROM0 callbacks cannot establish the switchable caller bank.
+        if hook_bank == 0:
+            raise ValueError("Close callback is not in switchable ROM")
+        bank.update(status="ok", value=hook_bank, address=hook_pc,
+                    reason="banked_callback_dispatch")
+    except BaseException as exc:  # noqa: BLE001
+        _closure_failure(bank, exc)
+    matches = [record for record in callers if (
+        record["status"] == "ok" and stack["status"] == "ok" and bank["status"] == "ok"
+        and record["bank"] == bank["value"] == record["target_bank"]
+        and record["target_address"] == bank["address"]
+        and record["return_pc"] == stack["return_pc"]
+    )]
+    return dict(classification=matches[0]["classification"] if len(matches) == 1 else "unknown",
+                reason="unique_validated_call_return" if len(matches) == 1 else "no_unique_validated_call_return",
+                counter=counter, stack=stack, bank=bank, callers=deepcopy(callers))
+
+
 class _LinkMenuHistory:
     """Bounded, read-only observations; first milestones survive buffer reuse.
 
@@ -217,6 +340,7 @@ class _LinkMenuHistory:
         self.error_count = 0
         self.errors = deque(maxlen=limit)
         self._installed = False
+        self._closure_callers = []
 
     def _error(self, event, stage, exc):
         self.error_count += 1
@@ -226,7 +350,7 @@ class _LinkMenuHistory:
             message = type(exc).__name__[:256]
         self.errors.append({"event": event, "stage": stage, "error": message})
 
-    def _observe(self, event):
+    def _observe(self, event, *, hook_address=None):
         self.total += 1
         self.counts[event] += 1
         sample = {
@@ -252,6 +376,10 @@ class _LinkMenuHistory:
         sample["recv_candidate"] = _link_menu_receive_candidate(
             sample.get("wLinkMenuSelectionReceiveBuffer", [])
         )
+        if event == "CloseLinkConnection":
+            sample["closure"] = _closure_observation(
+                self.session, self._closure_callers, hook_address
+            )
         self.first.setdefault(event, sample)
         # Idle exchanges can precede the first A/B vote by many frames.
         # Retain that vote separately even after the recent ring rolls over.
@@ -280,6 +408,7 @@ class _LinkMenuHistory:
         if self._installed:
             return
         self._installed = True
+        self._closure_callers = _closure_callers(self.session)
         # Resolve every address before instrumentation changes any ROM opcode.
         addresses = {}
         for event in dict.fromkeys((*_TRADE_DIAG_SYMBOLS, *_LINK_MENU_HISTORY_EVENTS)):
@@ -300,7 +429,7 @@ class _LinkMenuHistory:
             grouped.setdefault(address, []).append(event)
         for (bank, addr), events in grouped.items():
 
-            def callback(_ctx, events=tuple(events)):
+            def callback(_ctx, events=tuple(events), hook_address=(bank, addr)):
                 for event in events:
                     try:
                         if event in buckets:
@@ -309,7 +438,7 @@ class _LinkMenuHistory:
                         self._error(event, "counter", exc)
                     try:
                         if event in self.counts:
-                            self._observe(event)
+                            self._observe(event, hook_address=hook_address)
                     except BaseException as exc:  # noqa: BLE001
                         self._error(event, "callback", exc)
 

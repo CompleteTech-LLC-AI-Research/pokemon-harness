@@ -174,6 +174,14 @@ def test_tier_classifier_marks_late_rearm_as_timing_sensitive():
 # implementation: deriving it from its allowlist would hide missing entries.
 _SUBPROCESS_MODULE = "tests/test_pyboy_link_session_subprocess.py"
 _REVIEWED_SUBPROCESS_UNIT_TESTS = (
+    "test_link_menu_history_closure_classifies_exact_call",
+    "test_link_menu_history_closure_stack_bounds",
+    "test_link_menu_history_closure_counter_bounds",
+    "test_link_menu_history_closure_rejects_unvalidated_callers",
+    "test_link_menu_history_closure_failures_stay_local",
+    "test_link_menu_history_closure_requires_matching_banked_callback",
+    "test_link_menu_history_closure_rejects_noninteger_addresses",
+    "test_link_menu_history_closure_additive_shape_and_observation_only",
     "test_link_menu_history_preserves_first_samples_across_buffer_reuse",
     "test_link_menu_history_validates_call_and_bank",
     "test_link_menu_history_rejects_call_to_wrong_target",
