@@ -101,6 +101,34 @@ class NullBackend:
         return 1
 
 
+class OwnerDispatchSignal:
+    """Coalescing wake-up token for external-clock owner dispatch.
+
+    Transport workers call :meth:`notify` after queueing work. The emulator
+    owner consumes the token at its existing post-instruction boundary before
+    invoking the Python dispatch callback. The token deliberately carries no
+    serial or emulator state: backend queues retain the FIFO payload, so
+    coalescing notifications cannot lose an edge.
+
+    Both operations run under the CPython GIL in source and Cython builds.
+    That makes the single pending flag safe for worker notification without
+    adding a platform-specific atomic dependency to the vendored core.
+    """
+
+    def __init__(self):
+        self._pending = False
+
+    def notify(self):
+        """Record that owner-thread work is available."""
+        self._pending = True
+
+    def consume(self):
+        """Return and clear the pending token at the owner boundary."""
+        pending = self._pending
+        self._pending = False
+        return pending
+
+
 class LocalBackend:
     """Two in-process backends bridged bit-at-a-time.
 
@@ -199,6 +227,8 @@ class Serial:
         # the disconnected and low-level serial paths.
         self.owner_dispatch_callback = None
         self.owner_dispatch_enabled = False
+        # Workers may receive this token without retaining or touching PyBoy.
+        self.owner_dispatch_signal = OwnerDispatchSignal()
 
     # --- register writes ------------------------------------------------
 
@@ -306,6 +336,15 @@ class Serial:
         else:
             self._cycles_to_interrupt = 0
 
+        if fresh_transfer and self.transfer_enabled and not self.internal_clock:
+            # A completed slave byte clears transfer_enabled before a peer's
+            # response necessarily reaches the wire. A ROM re-arm must cause
+            # one owner drain so deferred transport work can be retried.
+            # set_SC is normally called from a nogil motherboard path, hence
+            # the narrow GIL section around this rare wake-up.
+            with cython.gil:
+                self.owner_dispatch_signal.notify()
+
     def dispatch_owner(self):
         """Pump queued peer edges at a safe motherboard boundary.
 
@@ -317,8 +356,8 @@ class Serial:
         """
         if (
             self.owner_dispatch_enabled
-            and self.transfer_enabled
             and not self.internal_clock
+            and self.owner_dispatch_signal.consume()
         ):
             callback = self.owner_dispatch_callback
             if callback is not None:
