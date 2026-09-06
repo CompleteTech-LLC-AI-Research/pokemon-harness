@@ -317,7 +317,6 @@ class Serial:
         """
         if (
             self.owner_dispatch_enabled
-            and self.transfer_enabled
             and not self.internal_clock
         ):
             callback = self.owner_dispatch_callback
