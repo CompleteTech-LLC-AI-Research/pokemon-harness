@@ -1309,6 +1309,111 @@ def test_owner_dispatch_close_waits_for_inflight_native_edge():
         b.stop()
 
 
+def test_owner_dispatch_defers_completion_irq_until_edge_response_is_written(monkeypatch):
+    """A completed slave byte cannot wake the ROM before its reply is on wire."""
+    a, b = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    events: list[str] = []
+    irqs: list[None] = []
+    sender_result: list[int] = []
+    original_send_frame = b._send_frame
+
+    def record_response_write(frame, *, timeout, operation):
+        assert operation == "EDGE_RESP"
+        assert frame == struct.pack(">BB", _OP_EDGE_RESP, 0)
+        events.append("edge_resp_written")
+        return original_send_frame(frame, timeout=timeout, operation=operation)
+
+    monkeypatch.setattr(b, "_send_frame", record_response_write)
+    a.start_receiver(local_core=None)
+    b.start_receiver(
+        local_core=core,
+        irq_callback=lambda: (events.append("irq_callback"), irqs.append(None)),
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    sender = threading.Thread(
+        target=lambda: sender_result.append(a.on_edge(our_bit=1, our_role=1)),
+        daemon=True,
+    )
+    try:
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and b.debug_snapshot()["pending_edge_requests"] == 0:
+            time.sleep(0.005)
+        assert b.debug_snapshot()["pending_edge_requests"] == 1
+
+        assert b.service_pending_edges(max_edges=1) == 1
+        # The owner thread must not run the serial IRQ while the response is
+        # still queued for the transport worker.
+        assert irqs == []
+        b.wait_for_wire_idle(timeout=1.0)
+        assert events == ["edge_resp_written"]
+
+        # A later owner boundary performs the deferred IRQ delivery; the
+        # documented return value remains the number of applied wire edges.
+        assert b.service_pending_edges(max_edges=1) == 0
+        assert events == ["edge_resp_written", "irq_callback"]
+        assert irqs == [None]
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert sender_result == [0]
+    finally:
+        sender.join(timeout=1.0)
+        a.stop()
+        b.stop()
+
+
+def test_owner_dispatch_does_not_deliver_completion_irq_after_response_write_failure(monkeypatch):
+    """A failed EDGE_RESP closes the link without advancing the slave ROM."""
+    a, b = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    irqs: list[None] = []
+    sender_errors: list[Exception] = []
+
+    def fail_response_write(frame, *, timeout, operation):
+        assert operation == "EDGE_RESP"
+        assert frame == struct.pack(">BB", _OP_EDGE_RESP, 0)
+        raise OSError("injected EDGE_RESP write failure")
+
+    monkeypatch.setattr(b, "_send_frame", fail_response_write)
+    a.start_receiver(local_core=None)
+    b.start_receiver(
+        local_core=core,
+        irq_callback=lambda: irqs.append(None),
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+
+    def send_edge() -> None:
+        try:
+            a.on_edge(our_bit=1, our_role=1)
+        except Exception as exc:  # noqa: BLE001 - failure is asserted below
+            sender_errors.append(exc)
+
+    sender = threading.Thread(target=send_edge, daemon=True)
+    try:
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and b.debug_snapshot()["pending_edge_requests"] == 0:
+            time.sleep(0.005)
+        assert b.debug_snapshot()["pending_edge_requests"] == 1
+        assert b.service_pending_edges(max_edges=1) == 1
+
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and b.connected:
+            time.sleep(0.005)
+        assert not b.connected
+        assert irqs == []
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert sender_errors and isinstance(sender_errors[0], NetworkBackendError)
+    finally:
+        sender.join(timeout=1.0)
+        a.stop()
+        b.stop()
+
+
 def test_stop_releases_owner_queued_edge_accounting():
     """Closing a queued owner-dispatch backend cannot strand pending work."""
     a, b = NetworkBackend.pair()
