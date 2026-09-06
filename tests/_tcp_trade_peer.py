@@ -797,25 +797,20 @@ class _LinkMenuHistory:
 def _peer_shutdown_sync(
     backend,
     *,
-    cooperative_sync,
     step,
     backend_snapshot,
     ready_sync_id: int,
-    release_sync_id: int,
     timeout: float = 120.0,
     monotonic=time.monotonic,
     sleep=time.sleep,
 ) -> None:
-    """Close a successful pair only after both peers have gone quiet.
+    """Close a successful pair only after both peers have drained serial work.
 
-    Reaching the same game milestone is not sufficient for teardown:
-    either ROM may still have an armed native serial transfer.  The first
-    marker lets both owners finish their local post-milestone drain; the
-    second marker is an acknowledgement that the resulting wire-idle
-    window was observed by both peers.  The ready barrier continues
-    stepping the owner emulator; the final acknowledgements service only
-    already-admitted edges so a faster peer cannot reopen a transfer while
-    the other side is finishing its drain.
+    LinkMenu entry is not itself wire idle: the cartridge can have one final
+    externally-clocked edge in flight. The owner therefore continues authentic
+    emulation until its local transport observes quiet *before* publishing a
+    teardown marker. Once both markers are present, only admitted slave work
+    is serviced; no emulator tick can start a new transfer before cleanup.
     """
 
     def wait_for_peer_marker(sync_id: int) -> None:
@@ -834,45 +829,24 @@ def _peer_shutdown_sync(
             f"peer shutdown sync {sync_id} did not converge: backend={backend_snapshot()}"
         )
 
-    cooperative_sync(sync_id=ready_sync_id, timeout=timeout, step_frames=1)
     backend.wait_for_wire_idle(
         timeout=timeout,
         progress_callback=lambda: step(1),
-        stable_checks=4,
+        stable_checks=8,
     )
-    backend.announce_sync(sync_id=release_sync_id)
-    wait_for_peer_marker(release_sync_id)
+    backend.announce_sync(sync_id=ready_sync_id)
+    wait_for_peer_marker(ready_sync_id)
     backend.wait_for_wire_idle(
         timeout=timeout,
         progress_callback=lambda: backend.service_pending_edges(max_edges=1),
-        stable_checks=4,
+        stable_checks=8,
     )
-    # The release marker can be consumed while the peer is still
-    # finishing its own idle wait.  A final passive acknowledgement makes
-    # both sides observe that second drain before either detaches.
-    final_sync_id = release_sync_id + 1
-    backend.announce_sync(sync_id=final_sync_id)
-    wait_for_peer_marker(final_sync_id)
-    backend.wait_for_wire_idle(
-        timeout=timeout,
-        progress_callback=lambda: backend.service_pending_edges(max_edges=1),
-        stable_checks=4,
-    )
-    # Do not detach as soon as the peer sees the final marker: the peer
-    # may still be returning from its own final idle drain.  Advertise a
-    # completion marker only after that drain and wait passively for the
-    # matching completion marker.  No emulator tick occurs in this last
-    # exchange, so it cannot create a new master transfer between the
-    # marker and teardown.
-    done_sync_id = final_sync_id + 1
-    backend.announce_sync(sync_id=done_sync_id)
-    wait_for_peer_marker(done_sync_id)
 
 
 def _finish_link_menu_phase(goal, *, cooperative_sync, peer_shutdown_sync):
     """Use passive shutdown only when no further gameplay is requested."""
     if goal == "link_menu":
-        peer_shutdown_sync(ready_sync_id=123, release_sync_id=124, timeout=10.0)
+        peer_shutdown_sync(ready_sync_id=124, timeout=10.0)
     else:
         cooperative_sync(sync_id=123, timeout=10.0, step_frames=1)
 
@@ -1092,6 +1066,7 @@ def _run_peer(trace=None) -> int:
     deadline_exceeded = False
     session = None
     link = None
+    native_internal_clock: bool | None = None
     party_before: dict[str, object] = {}
     party_after_trade: dict[str, object] | None = None
     final_state: dict[str, int] = {}
@@ -1221,7 +1196,7 @@ def _run_peer(trace=None) -> int:
         log(f"shot {phase}: {path}")
 
     def setup() -> None:
-        nonlocal link, link_menu_max, party_before, session, pre_link_menu_history
+        nonlocal link, link_menu_max, native_internal_clock, party_before, session, pre_link_menu_history
 
         if not math.isfinite(args.deadline_seconds) or args.deadline_seconds <= 0:
             raise ValueError("deadline-seconds must be finite and positive")
@@ -1393,6 +1368,7 @@ def _run_peer(trace=None) -> int:
         peer_version = backend.wait_for_hello(timeout=min(30.0, remaining("HELLO handshake")))
         remaining("HELLO handshake")
         selected_internal = link.negotiate_network_clock_role(peer_version)
+        native_internal_clock = bool(selected_internal)
         remaining("network clock negotiation")
         log(
             f"versioned handshake complete: local={fixture_version} "
@@ -1559,15 +1535,13 @@ def _run_peer(trace=None) -> int:
         wait_for_peer(release_sync_id, phase="release")
 
     def peer_shutdown_sync(
-        *, ready_sync_id: int, release_sync_id: int, timeout: float = 120.0
+        *, ready_sync_id: int, timeout: float = 120.0
     ) -> None:
         _peer_shutdown_sync(
             link._network_backend,
-            cooperative_sync=cooperative_sync,
             step=session.step,
             backend_snapshot=backend_snapshot,
             ready_sync_id=ready_sync_id,
-            release_sync_id=release_sync_id,
             timeout=timeout,
         )
 
@@ -1807,14 +1781,11 @@ def _run_peer(trace=None) -> int:
         for _ in range(3):
             session.press("up", duration=6)
             session.step(20)
-        # Start the receptionist interaction from a synchronized input
-        # boundary so both processes enter the Cable Club dialog at
-        # nearly the same game phase.
-        # The initial movement boundary can still overlap the ROM's final
-        # connection-role negotiation. Keep ticking while waiting for the
-        # peer marker so a slave IRQ can re-arm instead of freezing one
-        # process inside a blocking transport barrier.
-        cooperative_sync(sync_id=100, timeout=60.0)
+        # The fixtures already face their Cable Club receptionist; these UP
+        # inputs do not move either ROM. Let the transport-elected master
+        # enter CableClubNPC first so the ROM establishes its native $02/$01
+        # internal/external roles. Entering both loops simultaneously leaves
+        # both games attempting the internal-clock probe.
         log("phase 1 start")
         last_progress = time.monotonic()
         serial_phase_ticks = 0
@@ -1823,7 +1794,34 @@ def _run_peer(trace=None) -> int:
         peer_save_choice_ready = False
         save_choice_released = False
         close_count_at_save_choice_release = 0
+        if native_internal_clock is None:
+            raise RuntimeError("native network clock role was not negotiated")
+        local_is_connection_starter = native_internal_clock
+        local_role_announced = False
+        peer_role_announced = False
+        local_interaction_released = local_is_connection_starter
         while time.monotonic() < deadline:
+            status = int(session._pyboy.memory[session.symbols.addr_of("hSerialConnectionStatus")])
+            if (
+                local_is_connection_starter
+                and not local_role_announced
+                and counters["CableClubNPC"][0] > 0
+                and status == 0x02
+            ):
+                link._network_backend.announce_sync(sync_id=100)
+                local_role_announced = True
+                log("phase 1 local native internal-clock role observed")
+            if not local_is_connection_starter and not local_interaction_released:
+                if not peer_role_announced:
+                    peer_role_announced = link._network_backend.poll_peer_sync(sync_id=100)
+                if peer_role_announced and status == 0x01:
+                    local_interaction_released = True
+                    log("phase 1 native external-clock role observed; releasing receptionist input")
+                else:
+                    # Remain in the cartridge's real external-clock wait
+                    # path until the peer has emitted its role byte.
+                    session.step(2)
+                    continue
             # TCP listener/connector is not a Game Boy clock-role contract.
             # Cable Club may invert clock ownership while either ROM remains
             # in its polling loop, so a peer which has already entered
