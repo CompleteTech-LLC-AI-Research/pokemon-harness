@@ -113,6 +113,37 @@ class NetworkBackendError(RuntimeError):
     """Wraps socket errors + protocol errors from :class:`NetworkBackend`."""
 
 
+class OwnerDispatchSignal:
+    """A thread-safe, coalescing wake signal for emulator-owner dispatch.
+
+    Transport workers may call :meth:`notify`, but the emulator-owner thread
+    is the only consumer.  The signal deliberately carries no serial-core or
+    PyBoy object: queued backend work remains the source of truth, and one
+    pending bit merely avoids invoking an owner callback for every idle CPU
+    batch.  A private lock makes notification and consumption atomic without
+    making a network worker responsible for emulator state.
+    """
+
+    __slots__ = ("_lock", "_pending")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending = False
+
+    def notify(self) -> None:
+        """Request one owner dispatch; repeated notifications coalesce."""
+        with self._lock:
+            self._pending = True
+
+    def consume(self) -> bool:
+        """Atomically consume one pending owner-dispatch request."""
+        with self._lock:
+            if not self._pending:
+                return False
+            self._pending = False
+            return True
+
+
 @dataclass
 class _InboundEdge:
     """An EDGE_REQ awaiting execution by the emulator owner."""
@@ -376,6 +407,11 @@ class NetworkBackend:
         # only enqueues this owner-thread work; service_pending_edges() is
         # the sole delivery point for callbacks that may touch PyBoy state.
         self._pending_owner_irq_queue: queue.Queue[_InboundEdge] = queue.Queue(maxsize=256)
+        # This is intentionally backend-owned rather than a PyBoy object.
+        # A source-runtime adapter may consume it at the existing native
+        # post-instruction dispatch boundary, while the backend queues retain
+        # all work when notifications coalesce.
+        self._owner_dispatch_signal = OwnerDispatchSignal()
         # Counts EDGE_REQ frames from enqueue until their response has been
         # written.  A phase barrier can therefore wait for the wire work
         # already admitted by the reader without mistaking an armed-but-idle
@@ -487,6 +523,16 @@ class NetworkBackend:
 
         if self._local_rom_version is not None:
             self._send_hello(self._local_rom_version)
+
+    @property
+    def owner_dispatch_signal(self) -> OwnerDispatchSignal:
+        """Coalescing wake signal consumed by an owner-dispatch adapter.
+
+        The reader and response worker only notify this signal.  Consumers
+        must continue to call :meth:`service_pending_edges` on the emulator
+        owner thread after a successful :meth:`OwnerDispatchSignal.consume`.
+        """
+        return self._owner_dispatch_signal
 
     @classmethod
     def listen(
@@ -722,6 +768,11 @@ class NetworkBackend:
             )
             self._edge_worker.start()
             self._reader.start()
+
+    def _notify_owner_dispatch(self) -> None:
+        """Wake an attached owner adapter without exposing emulator state."""
+        if self._dispatch_to_owner:
+            self._owner_dispatch_signal.notify()
 
     # --- SerialBackend.on_edge (master path) --------------------------
 
@@ -1308,6 +1359,11 @@ class NetworkBackend:
             self._closed = True
             self._closed_event.set()
             self._hello_received.set()
+            # An owner adapter may otherwise be sleeping after the reader or
+            # response worker detects a terminal error.  The adapter still
+            # owns all PyBoy interaction; this only requests its next safe
+            # boundary so it can observe the closed backend.
+            self._notify_owner_dispatch()
             # Requests which have not produced a response cannot complete
             # after the transport is terminal. Clear the admitted-work
             # accounting now; worker finally blocks use the saturating helper
@@ -1429,6 +1485,7 @@ class NetworkBackend:
                                 self._edge_pending = 0
                             self._edge_pending_condition.notify_all()
                         raise NetworkBackendError("incoming EDGE_REQ queue is full") from exc
+                    self._notify_owner_dispatch()
                 elif opcode == _OP_EDGE_RESP:
                     if payload > 1:
                         raise NetworkBackendError(f"invalid EDGE_RESP bit payload {payload}")
@@ -1534,6 +1591,12 @@ class NetworkBackend:
                     response_sent = self._send_edge_response(request)
                     if response_sent and request.completed:
                         self._queue_owner_completion_irq(request)
+                        # The response is now on the wire and the pending
+                        # completion IRQ is durable in the backend queue.
+                        # Wake only after both facts hold: a worker must not
+                        # advance the local emulator or expose a completion
+                        # to it after a failed response write.
+                        self._notify_owner_dispatch()
             except Exception as exc:  # noqa: BLE001
                 self._mark_closed(exc)
                 return
