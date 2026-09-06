@@ -316,6 +316,52 @@ def _closure_observation(session, callers, hook_address):
                 counter=counter, stack=stack, bank=bank, callers=deepcopy(callers))
 
 
+def _serial_entry_observation(session, event):
+    """Bounded entry samples; neither save completion nor latch consumption."""
+    clock = dict(status="missing", monotonic_ns=None, scope="same_host_only", reason="unavailable")
+    tick = dict(status="missing", value=None,
+                semantics="anticipated_batch_end_not_instruction_time", reason="unavailable")
+    try:
+        clock.update(monotonic_ns=_closure_integer(time.monotonic_ns(), 0, (1 << 63) - 1),
+                     status="ok", reason="host_monotonic_clock")
+    except BaseException as exc:  # noqa: BLE001
+        _closure_failure(clock, exc)
+    try:
+        tick.update(value=_closure_integer(session.current_tick(), 0, (1 << 63) - 1),
+                    status="ok", reason="session_current_tick")
+    except BaseException as exc:  # noqa: BLE001
+        _closure_failure(tick, exc)
+    fields = {}
+    for symbol, size, low, high in (
+        ("wUnknownSerialCounter", 2, 0xC000, 0xDFFF),
+        ("wSerialSyncAndExchangeNybbleReceiveData", 1, 0xC000, 0xDFFF),
+        ("wSerialExchangeNybbleReceiveData", 1, 0xC000, 0xDFFF),
+        ("wSerialExchangeNybbleSendData", 1, 0xC000, 0xDFFF),
+        ("hSerialReceivedNewData", 1, 0xFF80, 0xFFFE),
+        ("hSerialSendData", 1, 0xFF80, 0xFFFE),
+        ("hSerialReceiveData", 1, 0xFF80, 0xFFFE),
+        ("hSerialConnectionStatus", 1, 0xFF80, 0xFFFE),
+    ):
+        record = dict(status="missing", address=None, bytes=None, value=None, reason="unavailable")
+        fields[symbol] = record
+        try:
+            address = _closure_integer(session.symbols.addr_of(symbol), low, high - size + 1)
+            record["address"] = address
+            values = [_closure_integer(session._pyboy.memory[address + i], 0, 255)
+                      for i in range(size)]
+            value = values[0] if size == 1 else values[0] << 8 | values[1]
+            record.update(status="ok", bytes=values, value=value,
+                          reason="current_observation_be" if size == 2 else "current_observation")
+        except BaseException as exc:  # noqa: BLE001
+            _closure_failure(record, exc)
+    return dict(
+        event=event, semantics="entry_only_not_completion_or_consumption",
+        clock=clock, local_tick=tick,
+        driver_step=dict(status="missing", value=None, reason="not_exposed_by_existing_callback"),
+        fields=fields,
+    )
+
+
 class _LinkMenuHistory:
     """Bounded, read-only observations; first milestones survive buffer reuse.
 
@@ -341,6 +387,7 @@ class _LinkMenuHistory:
         self.errors = deque(maxlen=limit)
         self._installed = False
         self._closure_callers = []
+        self.serial_entry = dict.fromkeys(("SaveGameData", "Serial_SyncAndExchangeNybble"))
 
     def _error(self, event, stage, exc):
         self.error_count += 1
@@ -360,6 +407,8 @@ class _LinkMenuHistory:
             "tick": None,
             "seq": self.total,
         }
+        if event in ("LinkMenu", "CloseLinkConnection"):
+            sample["serial_observation"] = _serial_entry_observation(self.session, event)
         try:
             sample["tick"] = int(self.session.current_tick())
         except BaseException as exc:  # noqa: BLE001
@@ -436,6 +485,8 @@ class _LinkMenuHistory:
                             buckets[event][0] += 1
                     except BaseException as exc:  # noqa: BLE001
                         self._error(event, "counter", exc)
+                    if event in self.serial_entry and self.serial_entry[event] is None:
+                        self.serial_entry[event] = _serial_entry_observation(self.session, event)
                     try:
                         if event in self.counts:
                             self._observe(event, hook_address=hook_address)
@@ -461,6 +512,7 @@ class _LinkMenuHistory:
                 "counts": self.counts,
                 "first": self.first,
                 "first_decisive": self.first_decisive,
+                "serial_entry": self.serial_entry,
                 "recent": list(self.recent),
                 "recent_dropped": max(0, self.total - len(self.recent)),
                 "recent_truncated": self.total > len(self.recent),

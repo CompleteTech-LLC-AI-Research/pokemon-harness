@@ -1134,6 +1134,219 @@ def test_link_menu_history_closure_additive_shape_and_observation_only():
     assert session._pyboy.register_file.SP == 0xD000
 
 
+_ENTRY_FIELDS = {
+    "wUnknownSerialCounter": (0xC200, 2),
+    "wSerialSyncAndExchangeNybbleReceiveData": (0xC210, 1),
+    "wSerialExchangeNybbleReceiveData": (0xC220, 1),
+    "wSerialExchangeNybbleSendData": (0xC230, 1),
+    "hSerialReceivedNewData": (0xFF80, 1),
+    "hSerialSendData": (0xFF81, 1),
+    "hSerialReceiveData": (0xFF82, 1),
+    "hSerialConnectionStatus": (0xFF83, 1),
+}
+
+
+def _history_entry_session():
+    session, memory, hooks, registrations, failures, fire = _history_closure_session()
+    symbols = session.symbols
+    session.symbols = SimpleNamespace(
+        bank_addr=symbols.bank_addr,
+        addr_of=lambda name: _ENTRY_FIELDS[name][0] if name in _ENTRY_FIELDS
+        else symbols.addr_of(name),
+    )
+    for address, size in _ENTRY_FIELDS.values():
+        memory.update({address + offset: 0x12 + offset for offset in range(size)})
+    return session, memory, hooks, registrations, failures, fire
+
+
+def test_link_menu_history_entry_first_only_and_immutable(monkeypatch):
+    from tests import _tcp_trade_peer as peer
+
+    session, memory, _, _, _, fire = _history_entry_session()
+    now = [100]
+    monkeypatch.setattr(peer.time, "monotonic_ns", lambda: now[0])
+    history = peer._LinkMenuHistory(session, role="listen", version="yellow", limit=2)
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    assert history.snapshot()["serial_entry"] == {
+        "SaveGameData": None, "Serial_SyncAndExchangeNybble": None,
+    }
+    for index, event in enumerate(("SaveGameData", "Serial_SyncAndExchangeNybble"), 1):
+        session.tick = index
+        now[0] = 100 * index
+        fire(event)
+    original = history.snapshot()["serial_entry"]
+    for index, (event, observation) in enumerate(original.items(), 1):
+        assert observation["event"] == event
+        assert observation["semantics"] == "entry_only_not_completion_or_consumption"
+        assert observation["clock"]["status"] == "ok"
+        assert observation["clock"]["monotonic_ns"] == 100 * index
+        assert observation["clock"]["scope"] == "same_host_only"
+        assert observation["local_tick"]["value"] == index
+        assert observation["local_tick"]["semantics"] == "anticipated_batch_end_not_instruction_time"
+        assert set(observation["fields"]) == set(_ENTRY_FIELDS)
+        assert observation["fields"]["wUnknownSerialCounter"]["bytes"] == [0x12, 0x13]
+        assert observation["fields"]["wUnknownSerialCounter"]["value"] == 0x1213
+    memory.update({0xC200: 0xFF})
+    session.tick = now[0] = 999
+    for _ in range(4):
+        for event in original:
+            memory.reads.clear()
+            fire(event)
+            assert memory.reads == []
+    assert history.snapshot()["serial_entry"] == original
+    snapshot = history.snapshot()
+    snapshot["serial_entry"]["SaveGameData"]["fields"]["wUnknownSerialCounter"]["bytes"][0] = 0
+    assert history.snapshot()["serial_entry"] == original
+    assert history.snapshot()["total"] == 0
+    assert history.snapshot()["recent"] == []
+    assert memory.writes == []
+    json.dumps(history.snapshot())
+
+
+@pytest.mark.parametrize("symbol", list(_ENTRY_FIELDS))
+@pytest.mark.parametrize("case", [
+    "missing", "invalid_address", "bool_address", "missing_byte", "invalid_byte",
+    "lower_bound", "upper_bound",
+])
+def test_link_menu_history_entry_invalid_and_missing_reads(symbol, case):
+    from tests import _tcp_trade_peer as peer
+
+    session, memory, _, _, _, fire = _history_entry_session()
+    symbols = session.symbols
+    address, size = _ENTRY_FIELDS[symbol]
+    boundary = (0xFF80 if symbol.startswith("h") else 0xC000) if case == "lower_bound" else (
+        0xFFFE if symbol.startswith("h") else 0xE000 - size
+    )
+    if case in {"lower_bound", "upper_bound"}:
+        memory.update({boundary + offset: 0x34 + offset for offset in range(size)})
+
+    def addr_of(name):
+        if name == symbol:
+            if case == "missing":
+                raise KeyError("x" * 1000)
+            if case == "invalid_address":
+                return 0xDFFF if size == 2 else (0xFF7F if name.startswith("h") else 0xE000)
+            if case == "bool_address":
+                return True
+            if case in {"lower_bound", "upper_bound"}:
+                return boundary
+        return symbols.addr_of(name)
+
+    session.symbols = SimpleNamespace(bank_addr=symbols.bank_addr, addr_of=addr_of)
+    if case == "missing_byte":
+        del memory[address + size - 1]
+    elif case == "invalid_byte":
+        memory.update({address + size - 1: 256})
+    history = peer._LinkMenuHistory(session, role="connect", version="yellow")
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    memory.reads.clear()
+    fire("SaveGameData")
+    snapshot = history.snapshot()
+    field = snapshot["serial_entry"]["SaveGameData"]["fields"][symbol]
+    if case in {"lower_bound", "upper_bound"}:
+        assert field == {
+            "status": "ok", "address": boundary,
+            "bytes": [0x34, 0x35] if size == 2 else [0x34],
+            "value": 0x3435 if size == 2 else 0x34,
+            "reason": "current_observation_be" if size == 2 else "current_observation",
+        }
+        assert snapshot["errors"] == [] and snapshot["error_count"] == 0
+        assert memory.writes == []
+        return
+    assert field["status"] == ("missing" if case in {"missing", "missing_byte"} else "invalid")
+    assert field["bytes"] is None and field["value"] is None
+    assert isinstance(field["reason"], str) and 0 < len(field["reason"]) <= 64
+    if case in {"missing", "invalid_address", "bool_address"}:
+        assert address not in memory.reads
+        if size == 2:
+            assert address + 1 not in memory.reads and 0xDFFF not in memory.reads
+    assert not any(key is True or 0xFF00 <= key <= 0xFF7F or key == 0xFFFF for key in memory.reads)
+    assert snapshot["errors"] == [] and snapshot["error_count"] == 0
+    assert memory.writes == []
+
+
+@pytest.mark.parametrize("field", ["clock", "local_tick"])
+@pytest.mark.parametrize("value", [True, -1, 1.5, None, "100", "exception"])
+def test_link_menu_history_entry_clock_failures(field, value, monkeypatch):
+    from tests import _tcp_trade_peer as peer
+
+    session, memory, _, _, _, fire = _history_entry_session()
+
+    def read():
+        if value == "exception":
+            raise KeyboardInterrupt("x" * 1000)
+        return value
+
+    if field == "clock":
+        monkeypatch.setattr(peer.time, "monotonic_ns", read)
+    else:
+        session.current_tick = read
+    history = peer._LinkMenuHistory(session, role="listen", version="blue")
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    fire("Serial_SyncAndExchangeNybble")
+    snapshot = history.snapshot()
+    observation = snapshot["serial_entry"]["Serial_SyncAndExchangeNybble"]
+    assert observation[field]["status"] == "invalid"
+    assert observation[field]["monotonic_ns" if field == "clock" else "value"] is None
+    assert 0 < len(observation[field]["reason"]) <= 64
+    assert all(record["status"] == "ok" for record in observation["fields"].values())
+    assert snapshot["errors"] == [] and snapshot["error_count"] == 0
+    assert memory.writes == []
+
+
+def test_link_menu_history_entry_preserves_callbacks_counts_and_bounds(monkeypatch):
+    from tests import _tcp_trade_peer as peer
+
+    session, memory, hooks, registrations, _, fire = _history_entry_session()
+    calls = []
+    monkeypatch.setattr(peer.time, "monotonic_ns", lambda: calls.append(1) or len(calls))
+    history = peer._LinkMenuHistory(session, role="listen", version="red", limit=2)
+    buckets = {name: [0] for name in _TRADE_DIAG_SYMBOLS}
+    history.install(buckets)
+    expected = {session.symbols.bank_addr(name) for name in _TRADE_DIAG_SYMBOLS} | {(3, 0x5803)}
+    assert set(hooks) == expected
+    installed = list(registrations)
+    history.install(buckets)
+    before = dict(memory)
+    for _ in range(5):
+        for event in ("SaveGameData", "Serial_SyncAndExchangeNybble", "LinkMenu", "CloseLinkConnection"):
+            fire(event)
+    snapshot = history.snapshot()
+    assert len(calls) == 12
+    assert snapshot["total"] == 10 and len(snapshot["recent"]) == 2
+    assert snapshot["recent_dropped"] == 8 and snapshot["recent_truncated"] is True
+    assert snapshot["counts"]["LinkMenu"] == snapshot["counts"]["CloseLinkConnection"] == 5
+    assert "SaveGameData" not in snapshot["counts"]
+    assert "Serial_SyncAndExchangeNybble" not in snapshot["first"]
+    for event in ("SaveGameData", "Serial_SyncAndExchangeNybble", "LinkMenu", "CloseLinkConnection"):
+        assert buckets[event] == [5]
+    for sample in [*snapshot["first"].values(), *snapshot["recent"]]:
+        assert sample["serial_observation"]["event"] == sample["event"]
+        assert sample["serial_observation"]["clock"]["status"] == "ok"
+    assert snapshot["errors"] == [] and snapshot["error_count"] == 0
+    assert registrations == installed and dict(memory) == before and memory.writes == []
+    assert session.tick == 0 and session._pyboy.register_file.SP == 0xD000
+
+
+def test_link_menu_history_entry_optional_step_identity():
+    from tests import _tcp_trade_peer as peer
+
+    session, memory, _, _, _, fire = _history_entry_session()
+    session.step_id = 999
+    session.driver_step = 888
+    history = peer._LinkMenuHistory(session, role="listen", version="blue")
+    history.install({name: [0] for name in _TRADE_DIAG_SYMBOLS})
+    for event in ("SaveGameData", "Serial_SyncAndExchangeNybble", "LinkMenu", "CloseLinkConnection"):
+        fire(event)
+    snapshot = history.snapshot()
+    observations = [*snapshot["serial_entry"].values(),
+                    *(sample["serial_observation"] for sample in snapshot["recent"])]
+    assert all(observation["driver_step"] == {
+        "status": "missing", "value": None, "reason": "not_exposed_by_existing_callback",
+    } for observation in observations)
+    assert memory.writes == []
+
+
 def test_link_menu_history_preserves_first_samples_across_buffer_reuse():
     from tests._tcp_trade_peer import _LinkMenuHistory
 
