@@ -1704,7 +1704,7 @@ def test_link_menu_finish_starts_teardown_only_through_draining_helper(goal):
         peer_shutdown_sync=shutdown,
     )
     if goal == "link_menu":
-        assert shutdown_calls == [{"ready_sync_id": 124, "timeout": 10.0}]
+        assert shutdown_calls == [{"ready_sync_id": 126, "timeout": 10.0}]
         assert backend.trace == []
     else:
         assert shutdown_calls == []

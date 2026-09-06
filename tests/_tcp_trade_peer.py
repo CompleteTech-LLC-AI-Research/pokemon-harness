@@ -576,20 +576,16 @@ def _link_menu_has_real_selection_exchange(history):
     return bool({"sent", "received"} & history.first_decisive.keys())
 
 
-def _is_cable_club_save_choice_ready(counters, menu):
+def _is_cable_club_save_choice_ready(confirmation, counters, menu):
     """Return whether Cable Club is awaiting its native save confirmation.
 
-    ``YesNoChoice`` is the last non-serial boundary in ``CableClubNPC``:
-    after ``HandleMenuInput`` returns with ``wCurrentMenuItem == 0`` the
-    cartridge calls ``SaveGameData`` and then its nybble handshake. Require
-    that observed control-flow sequence as well as the ROM-owned two-choice,
-    A-watching menu so a generic overworld menu cannot authorize the real A
-    input.
+    The latch is armed only at the verified ``CableClubNPC`` CALL site for
+    ``YesNoChoice`` and disarmed at that call's return address.  The generic
+    menu fields consequently qualify input only while that specific cartridge
+    call is active; persisted overworld menus cannot authorize a save input.
     """
     return bool(
-        counters["CableClubNPC"][0] > 0
-        and counters["YesNoChoice"][0] > 0
-        and counters["HandleMenuInput"][0] > 0
+        confirmation["call_entries"] > confirmation["return_entries"]
         and counters["SaveGameData"][0] == 0
         and counters["Serial_SyncAndExchangeNybble"][0] == 0
         and counters["LinkMenu"][0] == 0
@@ -598,6 +594,43 @@ def _is_cable_club_save_choice_ready(counters, menu):
         and menu.get("wMaxMenuItem") == 1
         and menu.get("wMenuWatchedKeys", 0) & 0x01 == 0x01
     )
+
+
+def _install_cable_club_confirmation_latch(session):
+    """Observe the one CableClubNPC CALL YesNoChoice site in a loaded ROM.
+
+    The hook is an owner-thread observation only.  Locating it from the
+    loaded symbols and requiring the unique direct target within the
+    CableClubNPC body prevents a generic YesNoChoice call elsewhere in the
+    ROM from being treated as the Cable Club confirmation boundary.
+    """
+    npc_bank, npc = session.symbols.bank_addr("CableClubNPC")
+    yes_no_bank, yes_no = session.symbols.bank_addr("YesNoChoice")
+    if yes_no_bank != 0 or npc_bank <= 0:
+        raise ValueError("Cable Club YesNoChoice call has incompatible banks")
+    memory = session._pyboy.memory
+    target = (0xCD, yes_no & 0xFF, yes_no >> 8)
+    candidates = []
+    for address in range(npc, min(npc + 0x100, 0x8000 - 6)):
+        call = tuple(int(memory[npc_bank, address + offset]) for offset in range(3))
+        if call == target:
+            candidates.append(address)
+    if len(candidates) != 1:
+        raise ValueError(
+            f"expected exactly one Cable Club YesNoChoice call site, found {len(candidates)}"
+        )
+    state = {"call_entries": 0, "return_entries": 0}
+    call_site = candidates[0]
+
+    def entered(_ctx):
+        state["call_entries"] += 1
+
+    def returned(_ctx):
+        state["return_entries"] += 1
+
+    session._pyboy.hook_register(npc_bank, call_site, entered, None)
+    session._pyboy.hook_register(npc_bank, call_site + 3, returned, None)
+    return state
 
 
 def _read_link_menu_fields(session, *, include_map=False, on_error=None):
@@ -801,6 +834,8 @@ def _peer_shutdown_sync(
     backend_snapshot,
     ready_sync_id: int,
     timeout: float = 120.0,
+    release_sync_id: int | None = None,
+    progress_after_marker: Callable[[], None] | None = None,
     monotonic=time.monotonic,
     sleep=time.sleep,
 ) -> None:
@@ -809,8 +844,11 @@ def _peer_shutdown_sync(
     LinkMenu entry is not itself wire idle: the cartridge can have one final
     externally-clocked edge in flight. The owner therefore continues authentic
     emulation until its local transport observes quiet *before* publishing a
-    teardown marker. Once both markers are present, only admitted slave work
-    is serviced; no emulator tick can start a new transfer before cleanup.
+    teardown marker. A frame-paced peer may still need the other owner to
+    advance while its own first quiet window is settling, so callers can
+    provide ``progress_after_marker`` to keep both native owners live through
+    the marker and final quiet-window handshake. The default remains
+    transport-only after the marker for lightweight/unit-test callers.
     """
 
     def wait_for_peer_marker(sync_id: int) -> None:
@@ -818,12 +856,26 @@ def _peer_shutdown_sync(
         while monotonic() < deadline_at:
             if backend.poll_peer_sync(sync_id=sync_id):
                 return
-            # After a local wire-idle observation no new master edge can
-            # be created without ticking the emulator.  Service only
-            # already-admitted slave work while waiting for the peer's
-            # marker; this keeps the final handshake symmetric without
-            # reopening a native transfer on the faster side.
-            backend.service_pending_edges(max_edges=1)
+            if progress_after_marker is None:
+                # After a local wire-idle observation no new master edge can
+                # be created without ticking the emulator. Service only
+                # already-admitted slave work for transport-only callers.
+                backend.service_pending_edges(max_edges=1)
+            else:
+                # A negotiated frame barrier can leave the peer inside its
+                # own quiet-window tick. Keep both owner clocks moving until
+                # the marker is observed; the final quiet-window drain below
+                # fences any edge admitted during this handshake.
+                try:
+                    progress_after_marker()
+                except BaseException:
+                    # The peer may have sent the expected release marker and
+                    # then closed before this owner entered its next frame
+                    # turn. Consume that queued marker before treating the
+                    # close as an error; unrelated failures still propagate.
+                    if backend.poll_peer_sync(sync_id=sync_id):
+                        return
+                    raise
             sleep(0.001)
         raise RuntimeError(
             f"peer shutdown sync {sync_id} did not converge: backend={backend_snapshot()}"
@@ -838,15 +890,33 @@ def _peer_shutdown_sync(
     wait_for_peer_marker(ready_sync_id)
     backend.wait_for_wire_idle(
         timeout=timeout,
-        progress_callback=lambda: backend.service_pending_edges(max_edges=1),
+        progress_callback=(
+            progress_after_marker
+            if progress_after_marker is not None
+            else lambda: backend.service_pending_edges(max_edges=1)
+        ),
         stable_checks=8,
     )
-
-
+    if release_sync_id is not None:
+        # Both peers have now completed a second local quiet observation.
+        # Keep the owner clocks live until both release markers are seen so
+        # neither process detaches while the other is still inside its final
+        # frame-paced drain.
+        backend.announce_sync(sync_id=release_sync_id)
+        wait_for_peer_marker(release_sync_id)
+        backend.wait_for_wire_idle(
+            timeout=timeout,
+            allow_peer_close=True,
+            progress_callback=lambda: backend.service_pending_edges(max_edges=1),
+            stable_checks=8,
+        )
 def _finish_link_menu_phase(goal, *, cooperative_sync, peer_shutdown_sync):
-    """Use passive shutdown only when no further gameplay is requested."""
+    """Finish only after LinkMenu's native selection exchange has settled."""
     if goal == "link_menu":
-        peer_shutdown_sync(ready_sync_id=124, timeout=10.0)
+        # 125 authenticates LinkMenu's directional selection exchange. Keep
+        # teardown markers disjoint so an old selection acknowledgement can
+        # never satisfy the passive wire-idle handshake.
+        peer_shutdown_sync(ready_sync_id=126, timeout=10.0)
     else:
         cooperative_sync(sync_id=123, timeout=10.0, step_frames=1)
 
@@ -1067,6 +1137,8 @@ def _run_peer(trace=None) -> int:
     session = None
     link = None
     native_internal_clock: bool | None = None
+    peer_rom_version: str | None = None
+    cable_club_confirmation: dict[str, int] | None = None
     party_before: dict[str, object] = {}
     party_after_trade: dict[str, object] | None = None
     final_state: dict[str, int] = {}
@@ -1151,6 +1223,10 @@ def _run_peer(trace=None) -> int:
         result["_final_state"] = final_state
         result["_final_cpu"] = final_cpu
         result["_link_menu_state"] = {} if setup_failed else link_menu_state
+        result["_cable_club_confirmation"] = (
+            {} if setup_failed or cable_club_confirmation is None
+            else dict(cable_club_confirmation)
+        )
         result["_link_menu_history"] = link_menu_history.snapshot()
         if pre_link_menu_history is not None:
             result["_pre_link_menu_history"] = pre_link_menu_history.snapshot()
@@ -1196,7 +1272,7 @@ def _run_peer(trace=None) -> int:
         log(f"shot {phase}: {path}")
 
     def setup() -> None:
-        nonlocal link, link_menu_max, native_internal_clock, party_before, session, pre_link_menu_history
+        nonlocal cable_club_confirmation, link, link_menu_max, native_internal_clock, party_before, session, pre_link_menu_history, peer_rom_version
 
         if not math.isfinite(args.deadline_seconds) or args.deadline_seconds <= 0:
             raise ValueError("deadline-seconds must be finite and positive")
@@ -1321,6 +1397,7 @@ def _run_peer(trace=None) -> int:
                 pre_link_menu_history.reason = "observer_install_error:" + type(exc).__name__[:128]
                 pre_link_menu_history._error("install", "setup", exc)
             link_menu_history.install(counters, observers_by_address=observers_by_address)
+        cable_club_confirmation = _install_cable_club_confirmation_latch(session)
 
         log(f"establishing TCP {args.role}")
         if args.role == "listen":
@@ -1366,6 +1443,7 @@ def _run_peer(trace=None) -> int:
         link.attach(session._pyboy)
         remaining("PyBoy attach")
         peer_version = backend.wait_for_hello(timeout=min(30.0, remaining("HELLO handshake")))
+        peer_rom_version = peer_version
         remaining("HELLO handshake")
         selected_internal = link.negotiate_network_clock_role(peer_version)
         native_internal_clock = bool(selected_internal)
@@ -1420,6 +1498,8 @@ def _run_peer(trace=None) -> int:
             emit_result(setup_failed=True)
     if not setup_complete:
         return 1
+    if cable_club_confirmation is None:
+        raise RuntimeError("Cable Club confirmation latch was not installed")
 
     drive_status = "ok"
 
@@ -1543,6 +1623,8 @@ def _run_peer(trace=None) -> int:
             backend_snapshot=backend_snapshot,
             ready_sync_id=ready_sync_id,
             timeout=timeout,
+            release_sync_id=ready_sync_id + 1,
+            progress_after_marker=lambda: session.step(1),
         )
 
     def current_menu_item() -> int | None:
@@ -1618,7 +1700,12 @@ def _run_peer(trace=None) -> int:
             and watched & required_keys == required_keys
         )
 
-    def wait_for_link_menu_selection_exchange(*, label: str, timeout: float = 120.0) -> None:
+    def wait_for_link_menu_selection_exchange(
+        *,
+        label: str,
+        timeout: float = 120.0,
+        input_retry: Callable[[], None] | None = None,
+    ) -> None:
         """Require both ROMs to observe a real, non-idle LinkMenu exchange.
 
         Each marker reports one local, post-call directional observation.  A
@@ -1645,6 +1732,8 @@ def _run_peer(trace=None) -> int:
             if link_menu_exchange_announced and peer_link_menu_exchange_ready:
                 log(f"{label}: peer directional LinkMenu selection evidence observed")
                 return
+            if input_retry is not None:
+                input_retry()
             session.step(1)
         raise RuntimeError(
             f"{label} LinkMenu selection exchange did not converge: "
@@ -1782,10 +1871,10 @@ def _run_peer(trace=None) -> int:
             session.press("up", duration=6)
             session.step(20)
         # The fixtures already face their Cable Club receptionist; these UP
-        # inputs do not move either ROM. Let the transport-elected master
-        # enter CableClubNPC first so the ROM establishes its native $02/$01
-        # internal/external roles. Entering both loops simultaneously leaves
-        # both games attempting the internal-clock probe.
+        # inputs do not move either ROM. Both cartridges must enter their
+        # ordinary Cable Club receptionist interaction before the native
+        # $02/$01 role election can complete; the TCP endpoint role is never
+        # a substitute for that cartridge-owned participation.
         log("phase 1 start")
         last_progress = time.monotonic()
         serial_phase_ticks = 0
@@ -1793,13 +1882,12 @@ def _run_peer(trace=None) -> int:
         save_choice_announced = False
         peer_save_choice_ready = False
         save_choice_released = False
+        save_choice_attempts = 0
         close_count_at_save_choice_release = 0
         if native_internal_clock is None:
             raise RuntimeError("native network clock role was not negotiated")
         local_is_connection_starter = native_internal_clock
         local_role_announced = False
-        peer_role_announced = False
-        local_interaction_released = local_is_connection_starter
         while time.monotonic() < deadline:
             status = int(session._pyboy.memory[session.symbols.addr_of("hSerialConnectionStatus")])
             if (
@@ -1811,17 +1899,6 @@ def _run_peer(trace=None) -> int:
                 link._network_backend.announce_sync(sync_id=100)
                 local_role_announced = True
                 log("phase 1 local native internal-clock role observed")
-            if not local_is_connection_starter and not local_interaction_released:
-                if not peer_role_announced:
-                    peer_role_announced = link._network_backend.poll_peer_sync(sync_id=100)
-                if peer_role_announced and status == 0x01:
-                    local_interaction_released = True
-                    log("phase 1 native external-clock role observed; releasing receptionist input")
-                else:
-                    # Remain in the cartridge's real external-clock wait
-                    # path until the peer has emitted its role byte.
-                    session.step(2)
-                    continue
             # TCP listener/connector is not a Game Boy clock-role contract.
             # Cable Club may invert clock ownership while either ROM remains
             # in its polling loop, so a peer which has already entered
@@ -1833,6 +1910,25 @@ def _run_peer(trace=None) -> int:
                 if not peer_link_menu_ready:
                     peer_link_menu_ready = link._network_backend.poll_peer_sync(sync_id=121)
                 if peer_link_menu_ready:
+                    if args.goal == "link_menu":
+                        # Menu-idle exchanges are the ROM's $D0 keepalive,
+                        # not a directional selection. Settle at the native
+                        # cursor, synchronize both owners, then submit one
+                        # ordinary A press. The post-call predicate below
+                        # proves the resulting exchange rather than treating
+                        # either the input event or menu entry as success.
+                        wait_for_menu_ready(
+                            label="link menu",
+                            min_item=0,
+                            max_item=link_menu_max,
+                            expected_max=link_menu_max,
+                            required_keys=0x01,
+                            timeout=60.0,
+                        )
+                        session.step(60)
+                        cooperative_sync(sync_id=118, timeout=120.0, step_frames=1)
+                        session.press("a", duration=4)
+                        wait_for_link_menu_selection_exchange(label="link menu")
                     _finish_link_menu_phase(
                         args.goal,
                         cooperative_sync=cooperative_sync,
@@ -1865,7 +1961,7 @@ def _run_peer(trace=None) -> int:
                 # pair, so synchronize at the native Yes/No input boundary,
                 # not after one ROM has already entered SaveGameData.
                 if not save_choice_announced and _is_cable_club_save_choice_ready(
-                    counters, menu_snapshot()
+                    cable_club_confirmation, counters, menu_snapshot()
                 ):
                     link._network_backend.announce_sync(sync_id=122)
                     save_choice_announced = True
@@ -1879,18 +1975,60 @@ def _run_peer(trace=None) -> int:
                     # written and neither TCP role is treated as clock owner.
                     cooperative_sync(sync_id=123, timeout=60.0, step_frames=1)
                     close_count_at_save_choice_release = counters["CloseLinkConnection"][0]
-                    session.press("a", duration=1)
+                    # Yellow's native Yes/No poll can begin several frames
+                    # after the shared boundary. Keep the input pulse within
+                    # the ordinary public button contract, but long enough
+                    # for both Red/Blue and Yellow to observe the same A
+                    # event without writing menu state.
+                    session.press("a", duration=4)
                     session.step(2)
+                    save_choice_attempts = 1
                     save_choice_released = True
                     log("phase 1 synchronized native Cable Club save choice released")
+                    continue
+                if save_choice_announced:
+                    # The verified CableClubNPC YesNoChoice call is active.
+                    # Do not keep pulsing A while the peer is still consuming
+                    # its Cable Club dialogue: that would select/save on only
+                    # one side and begin Serial_SyncAndExchangeNybble before
+                    # the peer can exchange its matching $6? nibble. Keep
+                    # servicing ordinary owner ticks without injecting input
+                    # until the peer publishes the same ROM-owned boundary.
+                    session.step(1)
                     continue
                 # One-frame public input pulses advance the dialogue without
                 # retaining A across the newly-created Yes/No menu. The next
                 # iteration observes that menu before another input can be
                 # queued.
-                session.press("a", duration=1)
-                session.step(2)
+                # Until this ROM's own handler hook fires it is still at the
+                # overworld receptionist, regardless of the serial role it
+                # observed from its peer. Both independent cartridges need
+                # the established initial A×4/settle×8 cadence to enter that
+                # native interaction; only after entry return to one-frame
+                # dialogue pulses that cannot auto-confirm the save menu.
+                entering_cable_club = counters["CableClubNPC"][0] == 0
+                session.press("a", duration=4 if entering_cable_club else 1)
+                session.step(8 if entering_cable_club else 2)
                 continue
+            if (
+                save_choice_released
+                and counters["SaveGameData"][0] == 0
+                and save_choice_attempts < 4
+                and _is_cable_club_save_choice_ready(
+                    cable_club_confirmation, counters, menu_snapshot()
+                )
+            ):
+                # A cross-family ROM can consume the shared boundary frame
+                # without sampling A in its first native poll. Retry only
+                # while the verified CableClubNPC YesNoChoice call is still
+                # active; once SaveGameData or the call return is observed,
+                # no further input is injected into the serial phase.
+                session.press("a", duration=4)
+                save_choice_attempts += 1
+                log(
+                    "phase 1 retrying native Cable Club save choice; "
+                    f"attempt={save_choice_attempts} confirmation={cable_club_confirmation}"
+                )
             in_serial_phase = (
                 counters["SaveGameData"][0] > 0 or counters["Serial_SyncAndExchangeNybble"][0] > 0
             )
@@ -2009,7 +2147,26 @@ def _run_peer(trace=None) -> int:
             # selection.  Advance only after both ROMs independently report
             # a post-call directional vote observation. The paired sync in
             # the wait below requires the complementary peer observation.
-            wait_for_link_menu_selection_exchange(label="trade")
+            next_trade_input_tick = session.current_tick() + 12
+
+            def retry_trade_selection_input() -> None:
+                nonlocal next_trade_input_tick
+                if session.current_tick() < next_trade_input_tick:
+                    return
+                if not menu_fields_ready(
+                    min_item=0,
+                    max_item=0,
+                    expected_max=link_menu_max,
+                    required_keys=0x01,
+                ):
+                    return
+                session.press("a", duration=4)
+                next_trade_input_tick = session.current_tick() + 12
+
+            wait_for_link_menu_selection_exchange(
+                label="trade",
+                input_retry=retry_trade_selection_input,
+            )
             log("trade menu selection exchange verified on both peers")
             # Trade Center warp — A-mash until map becomes 0xEF. Once one
             # peer reaches the map it must keep ticking while the other peer
@@ -2057,6 +2214,14 @@ def _run_peer(trace=None) -> int:
             cooperative_sync(sync_id=18, timeout=120.0, step_frames=1)
             log("sync: trade-center cooperative barrier complete")
             shot("03_post_warp_sync")
+            if args.version == "yellow" and peer_rom_version == "yellow":
+                # Yellow's input-sensitive preamble and LinkMenu selection
+                # use native edge pacing. Once both ROMs are at the verified
+                # Trade Center boundary, frame pacing keeps the larger
+                # trainer/party exchange in lockstep without disturbing
+                # public joypad sampling.
+                link.set_network_frame_barrier(True)
+                log("enabled Yellow frame barrier at Trade Center boundary")
 
             # Walk onto hidden-event trigger tile.
             conn_status = session._pyboy.memory[session.symbols.addr_of("hSerialConnectionStatus")]
@@ -2219,7 +2384,7 @@ def _run_peer(trace=None) -> int:
                     drive_error = f"{type(exc).__name__}: {exc}"
                     log(f"post-trade sync raised {type(exc).__name__}: {exc}")
                 log("sync: post-trade shutdown drain")
-                peer_shutdown_sync(ready_sync_id=5, release_sync_id=6)
+                peer_shutdown_sync(ready_sync_id=5)
                 log("sync: post-trade shutdown barrier complete")
         elif args.goal == "battle":
             log("sync: link_menu battle barrier")
@@ -2279,7 +2444,26 @@ def _run_peer(trace=None) -> int:
             session.press("a", duration=4)
             # Do not advance based on the input event alone.  Both ROMs must
             # return with their own native directional LinkMenu evidence.
-            wait_for_link_menu_selection_exchange(label="battle")
+            next_battle_input_tick = session.current_tick() + 12
+
+            def retry_battle_selection_input() -> None:
+                nonlocal next_battle_input_tick
+                if session.current_tick() < next_battle_input_tick:
+                    return
+                if not menu_fields_ready(
+                    min_item=1,
+                    max_item=1,
+                    expected_max=link_menu_max,
+                    required_keys=0x01,
+                ):
+                    return
+                session.press("a", duration=4)
+                next_battle_input_tick = session.current_tick() + 12
+
+            wait_for_link_menu_selection_exchange(
+                label="battle",
+                input_retry=retry_battle_selection_input,
+            )
             shot("02_battle_menu")
 
             COLOSSEUM = 0xF0
@@ -2325,6 +2509,9 @@ def _run_peer(trace=None) -> int:
                 )
             log("battle Colosseum warp complete on both peers")
             shot("03_colosseum")
+            if args.version == "yellow" and peer_rom_version == "yellow":
+                link.set_network_frame_barrier(True)
+                log("enabled Yellow frame barrier at Colosseum boundary")
             session.step(120)
 
             conn_status = session._pyboy.memory[session.symbols.addr_of("hSerialConnectionStatus")]
@@ -2495,6 +2682,7 @@ def _run_peer(trace=None) -> int:
                 service_pending_edges=lambda: link._network_backend.service_pending_edges(
                     max_edges=1
                 ),
+                progress_callback=lambda: session.step(1),
             )
             # Match the in-process acceptance driver: after the rendezvous,
             # give both ROMs a short input-free window to finish entering
@@ -2564,6 +2752,7 @@ def _run_peer(trace=None) -> int:
                 service_pending_edges=lambda: link._network_backend.service_pending_edges(
                     max_edges=1
                 ),
+                progress_callback=lambda: session.step(1),
             )
             session.step(4)
             selected_move_id = choose_first_usable_battle_move()
@@ -2621,7 +2810,7 @@ def _run_peer(trace=None) -> int:
                     session.press("a", duration=4)
                     session.step(20)
                 log("sync: post-battle shutdown drain")
-                peer_shutdown_sync(ready_sync_id=21, release_sync_id=22)
+                peer_shutdown_sync(ready_sync_id=21)
                 log("sync: post-battle shutdown barrier complete")
             if not peer_battle_turn_ready:
                 log(
@@ -2682,6 +2871,9 @@ def _run_peer(trace=None) -> int:
             goal_complete = (
                 link_menu_announced
                 and peer_link_menu_ready
+                and link_menu_exchange_announced
+                and peer_link_menu_exchange_ready
+                and counters["LinkMenu.doneChoosingMenuSelection"][0] > 0
             )
         elif args.goal == "trade":
             goal_complete = counters["_AddEnemyMonToPlayerParty"][0] > 0

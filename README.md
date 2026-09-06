@@ -23,6 +23,30 @@ Remote TCP transport and diagnostics are implemented, loopback-only, and
 unauthenticated. No current-head, complete remote trade or battle acceptance
 result exists, so neither operation is supported as a production claim.
 
+### Current working-tree validation (2026-09-06)
+
+The current isolated working tree has source-runtime real-ROM evidence using
+the pinned
+vendored PyBoy source runtime (`PYBOY_NO_CYTHON=1`) with the operator-supplied
+ROM, symbol, and fixture roots:
+
+- The complete source-runtime strict trade tier passed `19/19` rows. This
+  covers all nine local version pairs, all nine TCP role pairs, and the
+  additional strict Red/Yellow party-record trade assertion.
+- Blue-color ↔ Blue-color completed LinkMenu, a full trade, and one battle
+  turn. Native edge traffic was balanced, with the negotiated frame barrier
+  completing without owner or reader errors.
+- Blue-color ↔ Yellow completed LinkMenu, a full party-record trade, and one
+  battle turn. Cross-family traffic used the native edge transport without
+  the frame barrier; both peers reached the ROM-owned trade/battle milestones.
+- The affected source regression slice passed `258` tests with `19` expected
+  asset-gated skips, and Ruff passed for the touched files.
+
+The strict trade tier is complete for the pinned source runtime, but the
+strict battle tier, compiled-runtime gameplay, MCP-facing starter/trade/battle
+workflows, and broader host/platform coverage remain open before a full
+production claim.
+
 ### Historical experimental evidence
 
 At historical revision `656917ba95843decf4a33d98158be0049ef7a22e`, a hosted

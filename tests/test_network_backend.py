@@ -97,6 +97,54 @@ def test_external_service_does_not_hold_dispatch_while_waiting_for_serial_gate()
         b.stop()
 
 
+def test_frame_barrier_round_trip_keeps_turns_and_acknowledgements_bounded():
+    """The negotiated owner-frame control path completes without edge traffic."""
+    leader, follower = NetworkBackend.pair()
+    leader.start_receiver(local_core=None)
+    follower.start_receiver(local_core=None)
+    errors: list[BaseException] = []
+
+    def run_leader() -> None:
+        try:
+            for _ in range(3):
+                leader.begin_frame_turn(leader=True)
+                leader.finish_frame_turn(leader=True)
+        except BaseException as exc:  # noqa: BLE001 - assert worker failures below
+            errors.append(exc)
+
+    def run_follower() -> None:
+        try:
+            for _ in range(3):
+                follower.begin_frame_turn(leader=False)
+                follower.finish_frame_turn(leader=False, progress_callback=lambda: None)
+        except BaseException as exc:  # noqa: BLE001 - assert worker failures below
+            errors.append(exc)
+
+    leader_thread = threading.Thread(target=run_leader, daemon=True)
+    follower_thread = threading.Thread(target=run_follower, daemon=True)
+    try:
+        leader_thread.start()
+        follower_thread.start()
+        leader_thread.join(timeout=2.0)
+        follower_thread.join(timeout=2.0)
+        assert not leader_thread.is_alive()
+        assert not follower_thread.is_alive()
+        assert errors == []
+        leader_stats = leader.debug_snapshot()
+        follower_stats = follower.debug_snapshot()
+        assert leader_stats["frame_ticks_sent"] == 3
+        assert leader_stats["frame_dones_sent"] == 3
+        assert leader_stats["frame_acks_received"] == 3
+        assert follower_stats["frame_ticks_received"] == 3
+        assert follower_stats["frame_dones_received"] == 3
+        assert follower_stats["frame_acks_sent"] == 3
+        assert leader_stats["edge_req_sent"] == 0
+        assert follower_stats["edge_req_sent"] == 0
+    finally:
+        leader.stop()
+        follower.stop()
+
+
 @pytest.mark.parametrize("lock_name", ["_edge_call_lock", "_edge_response_lock"])
 @pytest.mark.parametrize("acquired", [False, True], ids=["timeout", "scheduler-overshoot"])
 def test_edge_admission_expiry_preserves_active_response(monkeypatch, lock_name, acquired):
