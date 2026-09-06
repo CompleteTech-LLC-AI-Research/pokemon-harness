@@ -611,6 +611,7 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
     record_property("runtime_modules", repr(paths))
     ready = threading.Barrier(3, timeout=BOUND)
     complete = threading.Barrier(2, timeout=BOUND)
+    starts = [queue.Queue(), queue.Queue()]
     completions = [queue.Queue(), queue.Queue()]
     left, right = socket.socketpair()
 
@@ -629,6 +630,7 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
                 def recording_tick(count=1, render=True, sound=True):
                     calls.append((count, render, sound, session.current_tick()))
                     start_frame, started = game.frame_count, time.monotonic()
+                    starts[index].put(started)
                     result = original_tick(count, render=render, sound=sound)
                     pending_events.append([int(event) for event in game.events])
                     completions[index].put(
@@ -673,13 +675,19 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
     try:
         ready.wait()
         # Three known whole calls retain the same BOUND+1 watchdog EACH.
-        # The finite sequence cap replaces an incorrect single-call watchdog
-        # over all five frames; emulator/wire deadlines and work are unchanged.
+        # Each completion's watchdog begins at its actual owner call, rather
+        # than when this parent happens to read that owner's independent
+        # queue. The finite sequence cap still bounds all six reports;
+        # emulator/wire deadlines and work are unchanged.
         expected_counts = (2, 2, 1)
-        sequence_deadline = time.monotonic() + len(expected_counts) * (BOUND + 1)
+        sequence_deadline = time.monotonic() + len(expected_counts) * len(completions) * (BOUND + 1)
         for expected in expected_counts:
-            call_deadline = min(sequence_deadline, time.monotonic() + BOUND + 1)
-            for completed in completions:
+            for started_queue, completed in zip(starts, completions, strict=True):
+                # The worker records started before endpoint.tick. If it has
+                # already completed, queue.get returns immediately; otherwise
+                # this remains that owner's BOUND+1 watchdog.
+                started = started_queue.get(timeout=max(0, sequence_deadline - time.monotonic()))
+                call_deadline = min(sequence_deadline, started + BOUND + 1)
                 count, actual_frames, elapsed = completed.get(
                     timeout=max(0, call_deadline - time.monotonic())
                 )
