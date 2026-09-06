@@ -17,7 +17,11 @@ from pokered_harness.mcp_timed_owner import TimedOwner, TimedOwnerError, TimedOw
 from pokered_harness.session import Session, SessionError
 from pokered_harness.symbols.loader import load_sym_text
 
-BOUND = 5.0
+# A single source-runtime PyBoy frame in the paired timed fixture takes about
+# five seconds on the supported Linux runner.  Keep the test's owner deadline
+# above that measured normal work so it diagnoses lifecycle behavior instead
+# of cancelling a healthy pair at the boundary.
+BOUND = 12.0
 POLICY = {
     "rearm_budget": 32,
     "rearm_instruction_cap": 16,
@@ -27,7 +31,7 @@ POLICY = {
     "max_wait_attempts": 10000,
     "inbound_capacity": 1024,
     "queue_capacity": 2,
-    "request_timeout": 5.0,
+    "request_timeout": 12.0,
     "lock_timeout": 1.0,
     "close_timeout": 2.0,
 }
