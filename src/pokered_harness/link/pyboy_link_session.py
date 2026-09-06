@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import threading
 from functools import wraps
+from operator import index
 from typing import Protocol, runtime_checkable
 
 from pokered_harness.link.network_backend import NetworkBackend
@@ -479,9 +480,17 @@ class PyBoyLinkSession:
         def _snapshot() -> dict[str, int]:
             result: dict[str, int] = {}
             cpu = getattr(getattr(pyboy, "mb", None), "cpu", None)
-            pc = getattr(cpu, "PC", None)
-            if type(pc) is int:
-                result["cpu_pc"] = pc
+            pc = getattr(cpu, "pc", None)
+            if pc is None:
+                # PyBoy's Cython and source runtimes expose the program
+                # counter under different spellings. Keep the legacy alias
+                # for fakes and the source runtime.
+                pc = getattr(cpu, "PC", None)
+            if not isinstance(pc, bool):
+                try:
+                    result["cpu_pc"] = index(pc)
+                except TypeError:
+                    pass
             memory = getattr(pyboy, "memory", None)
             if memory is not None:
                 try:
