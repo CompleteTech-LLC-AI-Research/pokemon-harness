@@ -421,6 +421,8 @@ class _PreLinkMenuHistory:
 
 _TRADE_DIAG_SYMBOLS = (
     "CableClubNPC",
+    "YesNoChoice",
+    "HandleMenuInput",
     "SaveGameData",
     "Serial_SyncAndExchangeNybble",
     "LinkMenu",
@@ -572,6 +574,30 @@ def _link_menu_has_real_selection_exchange(history):
     gameplay advances.  All data remains an observation, never a menu write.
     """
     return bool({"sent", "received"} & history.first_decisive.keys())
+
+
+def _is_cable_club_save_choice_ready(counters, menu):
+    """Return whether Cable Club is awaiting its native save confirmation.
+
+    ``YesNoChoice`` is the last non-serial boundary in ``CableClubNPC``:
+    after ``HandleMenuInput`` returns with ``wCurrentMenuItem == 0`` the
+    cartridge calls ``SaveGameData`` and then its nybble handshake. Require
+    that observed control-flow sequence as well as the ROM-owned two-choice,
+    A-watching menu so a generic overworld menu cannot authorize the real A
+    input.
+    """
+    return bool(
+        counters["CableClubNPC"][0] > 0
+        and counters["YesNoChoice"][0] > 0
+        and counters["HandleMenuInput"][0] > 0
+        and counters["SaveGameData"][0] == 0
+        and counters["Serial_SyncAndExchangeNybble"][0] == 0
+        and counters["LinkMenu"][0] == 0
+        and counters["CloseLinkConnection"][0] == 0
+        and menu.get("wCurrentMenuItem") == 0
+        and menu.get("wMaxMenuItem") == 1
+        and menu.get("wMenuWatchedKeys", 0) & 0x01 == 0x01
+    )
 
 
 def _read_link_menu_fields(session, *, include_map=False, on_error=None):
@@ -1760,6 +1786,10 @@ def _run_peer(trace=None) -> int:
         last_progress = time.monotonic()
         serial_phase_ticks = 0
         peer_link_menu_ready = False
+        save_choice_announced = False
+        peer_save_choice_ready = False
+        save_choice_released = False
+        close_count_at_save_choice_release = 0
         while time.monotonic() < deadline:
             # TCP listener/connector is not a Game Boy clock-role contract.
             # Cable Club may invert clock ownership while either ROM remains
@@ -1781,6 +1811,55 @@ def _run_peer(trace=None) -> int:
                     break
                 session.step(1)
                 continue
+            if (
+                save_choice_released
+                and counters["CloseLinkConnection"][0] > close_count_at_save_choice_release
+            ):
+                nonzero_counters = {
+                    name: count[0] for name, count in counters.items() if count[0]
+                }
+                raise RuntimeError(
+                    "Cable Club closed before LinkMenu after synchronized save choice: "
+                    f"close_count_before={close_count_at_save_choice_release} "
+                    f"close_count_after={counters['CloseLinkConnection'][0]} "
+                    f"counters={nonzero_counters} "
+                    f"menu={menu_snapshot()} state={state_snapshot()} "
+                    f"cpu={cpu_snapshot()} backend={backend_snapshot()} "
+                    f"pre_link_menu={pre_link_menu_history.snapshot() if pre_link_menu_history else {}}"
+                )
+            if not save_choice_released:
+                # Do not let either process send the confirmation A while the
+                # other is still consuming the receptionist text. Yellow's
+                # post-save sync has a narrower overlap window than the Color
+                # pair, so synchronize at the native Yes/No input boundary,
+                # not after one ROM has already entered SaveGameData.
+                if not save_choice_announced and _is_cable_club_save_choice_ready(
+                    counters, menu_snapshot()
+                ):
+                    link._network_backend.announce_sync(sync_id=122)
+                    save_choice_announced = True
+                    log("phase 1 native Cable Club save choice ready")
+                if save_choice_announced and not peer_save_choice_ready:
+                    peer_save_choice_ready = link._network_backend.poll_peer_sync(sync_id=122)
+                if save_choice_announced and peer_save_choice_ready:
+                    # This is a control-plane rendezvous only. It advances a
+                    # single real frame while waiting so a legitimate final
+                    # cable edge can be serviced, but no menu/RAM state is
+                    # written and neither TCP role is treated as clock owner.
+                    cooperative_sync(sync_id=123, timeout=60.0, step_frames=1)
+                    close_count_at_save_choice_release = counters["CloseLinkConnection"][0]
+                    session.press("a", duration=1)
+                    session.step(2)
+                    save_choice_released = True
+                    log("phase 1 synchronized native Cable Club save choice released")
+                    continue
+                # One-frame public input pulses advance the dialogue without
+                # retaining A across the newly-created Yes/No menu. The next
+                # iteration observes that menu before another input can be
+                # queued.
+                session.press("a", duration=1)
+                session.step(2)
+                continue
             in_serial_phase = (
                 counters["SaveGameData"][0] > 0 or counters["Serial_SyncAndExchangeNybble"][0] > 0
             )
@@ -1792,7 +1871,7 @@ def _run_peer(trace=None) -> int:
                 # network edge/response protocol already provides the
                 # per-byte synchronization; explicit barriers are reserved
                 # for safe UI/phase boundaries below.
-                session.step(4)
+                session.step(2)
                 serial_phase_ticks += 1
                 if (
                     counters["LinkMenu.waitForInputLoop"][0] > 0
@@ -1825,8 +1904,10 @@ def _run_peer(trace=None) -> int:
                     shot("01_link_menu")
                     link._network_backend.announce_sync(sync_id=121)
                     log("phase 1 LinkMenu readiness sent")
-                session.press("a", duration=4)
-                session.step(40)
+                # The save confirmation was issued exactly once above. From
+                # here the cartridge owns the save/serial phase; keep it
+                # moving in short slices and never inject a second A.
+                session.step(2)
             if time.monotonic() - last_progress > 10.0:
                 log(
                     f"phase 1 progress: "
