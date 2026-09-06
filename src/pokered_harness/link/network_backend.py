@@ -107,6 +107,7 @@ _ACTIVE_EXCHANGE_GRACE_SECONDS = 1.000
 _ACTIVE_EXCHANGE_EDGE_THRESHOLD = 64
 _ACTIVE_EXCHANGE_REARM_WAIT_SECONDS = 5.0
 _MAX_SERIAL_TRANSCRIPT_ENTRIES = 4096
+_MAX_SERIAL_TRANSCRIPT_FIRST_RECORDS = 64
 
 
 class NetworkBackendError(RuntimeError):
@@ -518,6 +519,12 @@ class NetworkBackend:
         self._serial_transcript_lock = threading.Lock()
         self._serial_transcript: deque[dict[str, object]] | None = None
         self._serial_transcript_capacity = 0
+        # The tail ring necessarily evicts the earliest events under a busy
+        # link. Keep a separate, fixed-size prefix so a later snapshot can
+        # still show how the observed serial sequence started. This is also
+        # diagnostic-only and is allocated only with the opt-in transcript.
+        self._serial_transcript_first_records: deque[dict[str, object]] | None = None
+        self._serial_transcript_first_records_capacity = 0
         self._serial_transcript_dropped = 0
         self._serial_transcript_sequence = 0
 
@@ -1066,6 +1073,12 @@ class NetworkBackend:
         with self._serial_transcript_lock:
             self._serial_transcript = deque(maxlen=max_entries)
             self._serial_transcript_capacity = max_entries
+            self._serial_transcript_first_records_capacity = min(
+                max_entries, _MAX_SERIAL_TRANSCRIPT_FIRST_RECORDS
+            )
+            self._serial_transcript_first_records = deque(
+                maxlen=self._serial_transcript_first_records_capacity
+            )
             self._serial_transcript_dropped = 0
             self._serial_transcript_sequence = 0
 
@@ -1095,6 +1108,8 @@ class NetworkBackend:
         with self._serial_transcript_lock:
             self._serial_transcript = None
             self._serial_transcript_capacity = 0
+            self._serial_transcript_first_records = None
+            self._serial_transcript_first_records_capacity = 0
             self._serial_transcript_dropped = 0
             self._serial_transcript_sequence = 0
 
@@ -1117,25 +1132,26 @@ class NetworkBackend:
                         "records": [],
                     }
                 }
-            records: list[dict[str, object]] = []
-            for record in transcript:
-                copied = dict(record)
-                for key in ("local_state_before", "local_state_after"):
-                    value = copied.get(key)
-                    if isinstance(value, dict):
-                        copied[key] = dict(value)
-                completion_context = copied.get("completion_context")
-                if isinstance(completion_context, dict):
-                    copied["completion_context"] = json.loads(json.dumps(completion_context))
-                records.append(copied)
+            records = [self._copy_serial_transcript_record(record) for record in transcript]
+            first_records = [
+                self._copy_serial_transcript_record(record)
+                for record in self._serial_transcript_first_records or ()
+            ]
             return {
                 "serial_transcript": {
                     "enabled": True,
                     "capacity": self._serial_transcript_capacity,
+                    "first_records_capacity": self._serial_transcript_first_records_capacity,
+                    "first_records": first_records,
                     "dropped": self._serial_transcript_dropped,
                     "records": records,
                 }
             }
+
+    @staticmethod
+    def _copy_serial_transcript_record(record: dict[str, object]) -> dict[str, object]:
+        """Return a JSON-safe independent diagnostic record copy."""
+        return json.loads(json.dumps(record, sort_keys=True, separators=(",", ":")))
 
     def _record_serial_event(self, event: str, **fields: object) -> None:
         """Append one local diagnostic record when the opt-in ring is live."""
@@ -1156,6 +1172,9 @@ class NetworkBackend:
             self._serial_transcript_sequence += 1
             record["sequence"] = self._serial_transcript_sequence
             transcript.append(record)
+            first_records = self._serial_transcript_first_records
+            if first_records is not None and len(first_records) < first_records.maxlen:
+                first_records.append(record)
 
     def wait_for_wire_idle(
         self,
