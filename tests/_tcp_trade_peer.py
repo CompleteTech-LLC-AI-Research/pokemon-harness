@@ -1077,12 +1077,27 @@ def _run_peer(trace=None) -> int:
             "(requires --serial-transcript-entries)."
         ),
     )
+    ap.add_argument(
+        "--reset-serial-transcript-before-cable-club-sync",
+        action="store_true",
+        default=False,
+        help=(
+            "Diagnostic-only: reset the enabled bounded serial transcript "
+            "after the synchronized native Cable Club save-choice release and "
+            "before serial synchronization begins (requires --serial-transcript-entries)."
+        ),
+    )
     ap.add_argument("--label", default="")
     ap.add_argument("--repo-root", type=Path, required=True)
     args = ap.parse_args()
 
     if args.reset_serial_transcript_before_link_menu and not args.serial_transcript_entries:
         ap.error("--reset-serial-transcript-before-link-menu requires --serial-transcript-entries")
+    if args.reset_serial_transcript_before_cable_club_sync and not args.serial_transcript_entries:
+        ap.error(
+            "--reset-serial-transcript-before-cable-club-sync requires "
+            "--serial-transcript-entries"
+        )
 
     # Establish the one process-wide cutoff before any ROM, TCP, or handshake
     # work. The existing gameplay code below continues to use this value.
@@ -1882,6 +1897,20 @@ def _run_peer(trace=None) -> int:
                     cooperative_sync(sync_id=123, timeout=60.0, step_frames=1)
                     close_count_at_save_choice_release = counters["CloseLinkConnection"][0]
                     session.press("a", duration=1)
+                    if args.reset_serial_transcript_before_cable_club_sync:
+                        # ``press`` queues a public input event but does not
+                        # advance the emulator. Reset at this native Cable
+                        # Club boundary so the next step captures only the
+                        # save-to-serial-sync transition and everything that
+                        # follows; this must remain observation-only.
+                        link._network_backend.enable_serial_transcript(
+                            max_entries=args.serial_transcript_entries
+                        )
+                        log(
+                            "serial transcript reset after synchronized native "
+                            "Cable Club save-choice release before serial sync: "
+                            f"{args.serial_transcript_entries} bounded local records"
+                        )
                     session.step(2)
                     save_choice_released = True
                     log("phase 1 synchronized native Cable Club save choice released")
