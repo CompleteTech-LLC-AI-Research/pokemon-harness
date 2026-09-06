@@ -611,21 +611,17 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
     record_property("runtime_modules", repr(paths))
     calls_per_owner, owner_count = 3, 2
     work_capacity_s = owner_count * calls_per_owner * (BOUND + 1)
-    # Either owner can finish its own three calls while the other still has
-    # the complete paired workload ahead of it.  The closure rendezvous must
-    # therefore use the same finite, known workload capacity—not a single
-    # public-call budget—or a valid peer can be torn down mid-route.
     completion_capacity_s = work_capacity_s
     paired_capacity_s = work_capacity_s + completion_capacity_s
     # This only aligns owners before paired CPU work. Socket setup and timed
     # routing retain their own protocol deadlines; the capacity bound covers
     # the known two-owner, six-call workload without measuring GIL throughput.
     ready = threading.Barrier(3, timeout=paired_capacity_s)
-    # A completed owner must keep its endpoint alive while its peer routes the
-    # final public frame. This is intentionally a two-owner rendezvous: it is
-    # not a main-thread join, so neither owner may close early. The peer has
-    # the bounded paired-workload budget to reach this point.
-    complete = threading.Barrier(owner_count, timeout=completion_capacity_s)
+    # Owners cannot close their endpoints independently: the parent receives
+    # both semantic-completion signals under the finite paired-workload bound,
+    # validates them, then releases both owners into teardown together.
+    complete = queue.Queue()
+    teardown_release = threading.Event()
     left, right = socket.socketpair()
 
     def owner(sock, index):
@@ -677,7 +673,11 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
                 session.step(1, render=True)
                 assert game.frame_count == frames + 1
                 assert len(calls) == 3
-                complete.wait()
+                complete.put(index)
+                assert teardown_release.wait(paired_capacity_s), (
+                    "parent did not release paired endpoint teardown within "
+                    f"{paired_capacity_s:g}s capacity"
+                )
                 return game.mb.cpu.retired_instructions
             finally:
                 if endpoint is not None:
@@ -687,13 +687,30 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
     try:
         ready.wait()
         capacity_deadline = time.monotonic() + paired_capacity_s
+        completed_owners = []
+        while len(completed_owners) < owner_count:
+            remaining = capacity_deadline - time.monotonic()
+            assert remaining > 0, (
+                f"paired owners did not complete semantic work within "
+                f"{paired_capacity_s:g}s capacity"
+            )
+            try:
+                completed_owners.append(complete.get(timeout=remaining))
+            except queue.Empty as exc:
+                raise AssertionError(
+                    f"paired owners did not complete semantic work within "
+                    f"{paired_capacity_s:g}s capacity"
+                ) from exc
+        assert sorted(completed_owners) == list(range(owner_count))
+        teardown_release.set()
         for worker in workers:
             worker.thread.join(max(0, capacity_deadline - time.monotonic()))
         assert all(not worker.thread.is_alive() for worker in workers), (
-            f"paired timed route exceeded {paired_capacity_s:g}s workload-and-completion capacity"
+            f"paired timed route exceeded {paired_capacity_s:g}s workload capacity"
         )
         assert all(result > 0 for result in owner_results(workers))
     finally:
+        teardown_release.set()
         left.close()
         right.close()
         for worker in workers:
