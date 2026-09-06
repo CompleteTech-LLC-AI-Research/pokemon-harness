@@ -780,6 +780,123 @@ def test_two_serialcores_exchange_byte_via_network_backend():
         bb.stop()
 
 
+def test_serial_transcript_is_disabled_by_default_and_validates_capacity():
+    """Transcript diagnostics are opt-in and have a deliberately small API."""
+    backend, peer = NetworkBackend.pair()
+    try:
+        expected_disabled = {
+            "enabled": False,
+            "capacity": 0,
+            "dropped": 0,
+            "records": [],
+        }
+        assert backend.snapshot_stats()["serial_transcript"] == expected_disabled
+        assert backend.debug_snapshot()["serial_transcript"] == expected_disabled
+
+        with pytest.raises(ValueError, match="between 1 and"):
+            backend.enable_serial_transcript(max_entries=0)
+        with pytest.raises(ValueError, match="between 1 and"):
+            backend.enable_serial_transcript(max_entries=4097)
+        assert backend.snapshot_stats()["serial_transcript"] == expected_disabled
+    finally:
+        backend.stop()
+        peer.stop()
+
+
+def test_serial_transcript_ring_drops_oldest_records_in_sequence_order():
+    """A small transcript remains bounded while preserving local event order."""
+    backend, peer_backend = NetworkBackend.pair()
+    backend.enable_serial_transcript(max_entries=2)
+
+    def reply_once() -> None:
+        frame = peer_backend._recv_exactly(2)
+        assert frame == struct.pack(">BB", _OP_EDGE_REQ, 1)
+        peer_backend._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, 0))
+
+    peer = threading.Thread(target=reply_once, daemon=True)
+    peer.start()
+    backend.start_receiver(local_core=None)
+    try:
+        assert backend.on_edge(our_bit=1, our_role=1) == 0
+        peer.join(timeout=1.0)
+        assert not peer.is_alive()
+
+        transcript = backend.snapshot_stats()["serial_transcript"]
+        records = transcript["records"]
+        assert transcript["enabled"] is True
+        assert transcript["capacity"] == 2
+        assert transcript["dropped"] == 1
+        assert [record["sequence"] for record in records] == [2, 3]
+        assert [record["event"] for record in records] == [
+            "edge_resp_received",
+            "edge_resp_consumed",
+        ]
+        timestamps = [record["monotonic_s"] for record in records]
+        assert timestamps == sorted(timestamps)
+
+        backend.disable_serial_transcript()
+        assert backend.snapshot_stats()["serial_transcript"] == {
+            "enabled": False,
+            "capacity": 0,
+            "dropped": 0,
+            "records": [],
+        }
+    finally:
+        peer.join(timeout=1.0)
+        backend.stop()
+        peer_backend.stop()
+
+
+def test_serial_transcript_copies_worker_edge_byte_completion_and_irq_outcome():
+    """Snapshots retain a local, immutable copy of worker-side edge evidence."""
+    master_backend, slave_backend = NetworkBackend.pair()
+    slave_core = _CompletingSlaveCore()
+    slave_irqs: list[int] = []
+    master_backend.enable_serial_transcript(max_entries=16)
+    slave_backend.enable_serial_transcript(max_entries=16)
+    master_backend.start_receiver(local_core=None)
+    slave_backend.start_receiver(
+        local_core=slave_core,
+        irq_callback=lambda: slave_irqs.append(1),
+    )
+    try:
+        assert master_backend.on_edge(our_bit=1, our_role=1) == 0
+        slave_backend.wait_for_wire_idle(timeout=1.0)
+        assert slave_irqs == [1]
+
+        records = slave_backend.snapshot_stats()["serial_transcript"]["records"]
+        worker_edge = next(record for record in records if record["event"] == "worker_edge_applied")
+        assert worker_edge["direction"] == "peer_to_local"
+        assert worker_edge["edge_bit"] == 1
+        assert worker_edge["response_bit"] == 0
+        assert worker_edge["byte_complete"] is True
+        assert worker_edge["local_state_before"] == {
+            "core_present": True,
+            "type": "_CompletingSlaveCore",
+            "transfer_enabled": 1,
+            "internal_clock": 0,
+            "SB": 0,
+            "SC": 0x80,
+        }
+        assert worker_edge["local_state_after"]["transfer_enabled"] == 0
+        assert worker_edge["local_state_after"]["SB"] == 1
+        assert any(
+            record["event"] == "irq_callback" and record["outcome"] == "success"
+            for record in records
+        )
+
+        # The public snapshot owns both outer records and nested core state.
+        worker_edge["local_state_before"]["SB"] = 99
+        fresh_records = slave_backend.snapshot_stats()["serial_transcript"]["records"]
+        fresh_worker_edge = next(
+            record for record in fresh_records if record["event"] == "worker_edge_applied"
+        )
+        assert fresh_worker_edge["local_state_before"]["SB"] == 0
+    finally:
+        master_backend.stop()
+        slave_backend.stop()
+
+
 def test_multiple_bytes_exchange():
     """Two cores exchange three bytes in a row via the reader-thread
     model. Proves the backend works across multiple transfers without
