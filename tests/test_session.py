@@ -491,6 +491,37 @@ def test_close_is_idempotent_and_rejects_new_actions():
         s.step()
 
 
+def test_close_retries_after_stop_worker_start_failure(monkeypatch):
+    s, pb, _ = _session()
+    original_start = threading.Thread.start
+    starts = 0
+
+    def fail_first_start(worker):
+        nonlocal starts
+        if worker.name == "pokered-session-stop":
+            starts += 1
+            if starts == 1:
+                raise RuntimeError("start-failed")
+        return original_start(worker)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_first_start)
+
+    with pytest.raises(RuntimeError, match="start-failed"):
+        s.close(timeout_s=0.1)
+
+    assert s.closed
+    assert not s._stopped
+    assert s._stop_thread is None
+    assert s._close_owner is None
+    assert s._close_done.is_set()
+
+    s.close(timeout_s=0.5)
+
+    assert starts == 2
+    assert s._stopped
+    assert pb.stopped
+
+
 def test_late_operation_during_close_never_touches_emulator():
     """A call arriving after close publishes must fail before lock admission."""
     s, pb, _ = _session()

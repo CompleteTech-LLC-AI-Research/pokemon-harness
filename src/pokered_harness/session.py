@@ -419,7 +419,18 @@ class Session:
             with self._lifecycle_lock:
                 self._stop_thread = worker
                 self._close_owner = None
-            worker.start()
+            try:
+                worker.start()
+            except BaseException:
+                # ``Thread.start`` can fail before the worker has a chance to
+                # publish completion. Do not leave a never-started worker as
+                # the lifecycle owner: a later close must be able to retry.
+                with self._lifecycle_lock:
+                    if self._stop_thread is worker:
+                        self._stop_thread = None
+                        self._close_owner = None
+                        self._close_done.set()
+                raise
             if not self._close_done.wait(
                 timeout=max(0.0, stop_deadline - time.monotonic())
             ):
