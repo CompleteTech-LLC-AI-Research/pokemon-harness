@@ -611,7 +611,11 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
     record_property("runtime_modules", repr(paths))
     calls_per_owner, owner_count = 3, 2
     work_capacity_s = owner_count * calls_per_owner * (BOUND + 1)
-    completion_capacity_s = BOUND + 1
+    # Either owner can finish its own three calls while the other still has
+    # the complete paired workload ahead of it.  The closure rendezvous must
+    # therefore use the same finite, known workload capacity—not a single
+    # public-call budget—or a valid peer can be torn down mid-route.
+    completion_capacity_s = work_capacity_s
     paired_capacity_s = work_capacity_s + completion_capacity_s
     # This only aligns owners before paired CPU work. Socket setup and timed
     # routing retain their own protocol deadlines; the capacity bound covers
@@ -620,7 +624,7 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
     # A completed owner must keep its endpoint alive while its peer routes the
     # final public frame. This is intentionally a two-owner rendezvous: it is
     # not a main-thread join, so neither owner may close early. The peer has
-    # exactly one public-call budget to reach this point.
+    # the bounded paired-workload budget to reach this point.
     complete = threading.Barrier(owner_count, timeout=completion_capacity_s)
     left, right = socket.socketpair()
 
