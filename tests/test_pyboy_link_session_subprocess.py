@@ -1563,9 +1563,9 @@ def test_strict_acceptance_rejects_missing_native_edge_req(goal: str):
 
 
 class _ShutdownBackend:
-    """Delay each ack until owner work is serviced, including the final ack."""
+    """Require an owner drain before the teardown marker can be acknowledged."""
 
-    def __init__(self, *, fail_at=None, missing_done=False):
+    def __init__(self, *, fail_at=None, missing_ready=False):
         from pokered_harness.link.network_backend import NetworkBackendError
 
         self.trace = []
@@ -1574,7 +1574,7 @@ class _ShutdownBackend:
         self.drains = 0
         self.fail_at = fail_at
         self.failure = NetworkBackendError("backend shutdown failure")
-        self.missing_done = missing_done
+        self.missing_ready = missing_ready
 
     def record(self, *event):
         self.trace.append(event)
@@ -1588,10 +1588,9 @@ class _ShutdownBackend:
     def poll_peer_sync(self, *, sync_id):
         self.record("poll", sync_id)
         self.polls[sync_id] = self.polls.get(sync_id, 0) + 1
-        if sync_id == 126 and self.missing_done:
+        if self.missing_ready:
             return False
-        # Completion is deliberately later than release and final drain ack.
-        return self.polls[sync_id] > (3 if sync_id == 126 else 1)
+        return self.polls[sync_id] > 1
 
     def service_pending_edges(self, *, max_edges):
         assert max_edges == 1
@@ -1600,14 +1599,14 @@ class _ShutdownBackend:
 
     def wait_for_wire_idle(self, *, timeout, progress_callback, stable_checks):
         assert timeout == 10.0
-        assert stable_checks == 4
+        assert stable_checks == 8
         self.drains += 1
         self.record("drain", self.drains)
         progress_callback()
         self.record("idle", self.drains)
 
     def step(self, frames):
-        # Release is the hard boundary: even a late done ack cannot tick.
+        # The first drain owns real emulator progress before any marker exists.
         assert self.marker is None
         assert frames == 1
         self.record("step", frames)
@@ -1617,17 +1616,14 @@ class _ShutdownBackend:
         self.record("ready", sync_id)
         self.step(step_frames)
 
-
 def _run_fake_shutdown(backend):
     from tests._tcp_trade_peer import _peer_shutdown_sync
 
     clock = iter(range(1000))
     _peer_shutdown_sync(
         backend,
-        ready_sync_id=123,
-        release_sync_id=124,
+        ready_sync_id=124,
         timeout=10.0,
-        cooperative_sync=backend.cooperative_sync,
         step=backend.step,
         backend_snapshot=dict,
         monotonic=lambda: next(clock) * 0.1,
@@ -1635,37 +1631,28 @@ def _run_fake_shutdown(backend):
     )
 
 
-def test_peer_shutdown_protocol_drains_and_waits_for_late_done_without_ticks():
+def test_peer_shutdown_drains_live_serial_work_before_starting_teardown_marker():
+    """LinkMenu is not wire-idle until owner-driven drain proves it."""
     backend = _ShutdownBackend()
     _run_fake_shutdown(backend)
     assert [
         event
         for event in backend.trace
-        if event[0] in ("ready", "step", "drain", "idle", "announce")
+        if event[0] in ("step", "drain", "idle", "announce")
     ] == [
-        ("ready", 123),
-        ("step", 1),
         ("drain", 1),
         ("step", 1),
         ("idle", 1),
         ("announce", 124),
         ("drain", 2),
         ("idle", 2),
-        ("announce", 125),
-        ("drain", 3),
-        ("idle", 3),
-        ("announce", 126),
     ]
-    assert backend.polls == {124: 2, 125: 2, 126: 4}
-    assert backend.trace[-1] == ("poll", 126)
+    assert backend.polls == {124: 2}
+    assert backend.trace[-1] == ("idle", 2)
+    assert backend.trace.index(("announce", 124)) > backend.trace.index(("idle", 1))
     assert [event for event in backend.trace if event[0] == "service"] == [
         ("service", 124),
         ("service", 124),
-        ("service", 125),
-        ("service", 125),
-        ("service", 126),
-        ("service", 126),
-        ("service", 126),
     ]
 
 
@@ -1677,8 +1664,6 @@ def test_peer_shutdown_protocol_drains_and_waits_for_late_done_without_ticks():
         ("poll", 124),
         ("service", 124),
         ("drain", 2),
-        ("drain", 3),
-        ("service", 126),
     ],
 )
 def test_peer_shutdown_protocol_propagates_backend_errors(failure):
@@ -1691,37 +1676,27 @@ def test_peer_shutdown_protocol_propagates_backend_errors(failure):
     assert backend.trace[-1] == failure
 
 
-def test_peer_shutdown_protocol_missing_done_times_out_without_ticks():
-    backend = _ShutdownBackend(missing_done=True)
-    with pytest.raises(RuntimeError, match="peer shutdown sync 126 did not converge"):
+def test_peer_shutdown_ready_marker_times_out_without_post_marker_ticks():
+    backend = _ShutdownBackend(missing_ready=True)
+    with pytest.raises(RuntimeError, match="peer shutdown sync 124 did not converge"):
         _run_fake_shutdown(backend)
-    assert backend.drains == 3
-    assert backend.marker == 126
-    assert 90 <= backend.polls[126] <= 100
+    assert backend.drains == 1
+    assert backend.marker == 124
+    assert 90 <= backend.polls[124] <= 100
     release = backend.trace.index(("announce", 124))
     assert not any(event[0] == "step" for event in backend.trace[release:])
-    assert ("service", 126) in backend.trace[release:]
+    assert ("service", 124) in backend.trace[release:]
 
 
 @pytest.mark.parametrize("goal", ["link_menu", "trade", "battle"])
-def test_peer_shutdown_protocol_phase_dispatch_preserves_continued_gameplay(goal):
-    from tests._tcp_trade_peer import _finish_link_menu_phase, _peer_shutdown_sync
+def test_link_menu_finish_starts_teardown_only_through_draining_helper(goal):
+    from tests._tcp_trade_peer import _finish_link_menu_phase
 
     backend = _ShutdownBackend()
     shutdown_calls = []
 
     def shutdown(**kwargs):
         shutdown_calls.append(kwargs)
-        clock = iter(range(1000))
-        _peer_shutdown_sync(
-            backend,
-            **kwargs,
-            cooperative_sync=backend.cooperative_sync,
-            step=backend.step,
-            backend_snapshot=dict,
-            monotonic=lambda: next(clock) * 0.01,
-            sleep=lambda _seconds: None,
-        )
 
     _finish_link_menu_phase(
         goal,
@@ -1729,13 +1704,12 @@ def test_peer_shutdown_protocol_phase_dispatch_preserves_continued_gameplay(goal
         peer_shutdown_sync=shutdown,
     )
     if goal == "link_menu":
-        assert shutdown_calls == [{"ready_sync_id": 123, "release_sync_id": 124, "timeout": 10.0}]
-        assert backend.trace[-1] == ("poll", 126)
-        assert backend.drains == 3
+        assert shutdown_calls == [{"ready_sync_id": 126, "timeout": 10.0}]
+        assert backend.trace == []
     else:
         assert shutdown_calls == []
+        # Gameplay continuations retain their existing bounded rendezvous.
         assert backend.trace == [("ready", 123), ("step", 1)]
-        backend.step(1)  # The continuation still owns an active emulator.
 
 
 def test_hold_at_sync_boundary_does_not_tick_past_ready_marker():

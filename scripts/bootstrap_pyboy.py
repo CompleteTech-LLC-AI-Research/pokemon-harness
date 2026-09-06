@@ -64,8 +64,12 @@ RUNTIME_MODULES = (
     "pyboy.utils",
     "pyboy.core.mb",
     "pyboy.core.serial",
+    "pyboy.link",
 )
-CYTHON_MODULES = tuple(name for name in RUNTIME_MODULES if name != "pyboy")
+# The link transport is bundled Python source in both runtime modes.  Cython
+# mode validates its import and provenance through RUNTIME_MODULES, but must
+# not require it to be an extension module.
+CYTHON_MODULES = tuple(name for name in RUNTIME_MODULES if name not in {"pyboy", "pyboy.link"})
 
 
 def _process_group_options() -> dict[str, object]:

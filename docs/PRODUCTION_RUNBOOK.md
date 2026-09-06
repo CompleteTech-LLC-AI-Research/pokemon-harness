@@ -35,6 +35,25 @@ The original dual unit gate at `02a8e85` failed native timing at `64/65`, and
 a gate bug lost failed test identity and iteration output. Subsequent verified test races
 were corrected before the dual `1f19707` pass; preserve that older failure.
 
+### Current working-tree validation (2026-09-06)
+
+The isolated working tree has source-runtime real-ROM evidence using
+the pinned vendored PyBoy source runtime (`PYBOY_NO_CYTHON=1`) and the
+operator-supplied ROM, symbol, and fixture roots:
+
+| Scope | Result | Evidence boundary |
+|---|---|---|
+| Strict source-runtime trade tier | `19/19` passed | All nine local version pairs, all nine TCP role pairs, and the additional strict Red/Yellow party-record assertion passed. Compiled-runtime, MCP, and host/platform claims remain separate. |
+| Blue-color ↔ Blue-color | LinkMenu, full trade, and one battle turn passed | Native edge traffic balanced; same-family frame barrier completed without owner or reader errors. Representative replay only. |
+| Blue-color ↔ Yellow | LinkMenu, full party-record trade, and one battle turn passed | Cross-family native edge transport completed without frame-barrier traffic, owner errors, or reader errors. Representative replay only. |
+| Affected source regression slice | `258` passed, `19` expected asset-gated skips | Vendored/source runtime; no strict full matrix, compiled-runtime, or MCP gameplay claim. Ruff passed for touched files. |
+
+The family-specific frame policy is intentional: identical ROM families use a
+bounded owner-frame barrier, while Yellow↔Red/Blue keeps the native edge path
+because the cartridges expose different polling windows. This working-tree
+evidence closes the source-runtime trade tier but does not replace the
+required strict battle tier, compiled-runtime, MCP, or host/platform evidence.
+
 ### Retained historical results
 
 The historical full source snapshot at

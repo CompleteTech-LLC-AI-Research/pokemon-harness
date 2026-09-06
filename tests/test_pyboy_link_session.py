@@ -437,23 +437,33 @@ def test_network_attach_arms_native_role_handshake(
 
 
 @pytest.mark.parametrize(
-    ("local_version", "peer_version", "default_internal", "expected_internal"),
+    (
+        "local_version",
+        "peer_version",
+        "default_internal",
+        "expected_internal",
+        "expected_frame_barrier",
+    ),
     [
-        ("yellow", "red", True, False),
-        ("red", "yellow", False, True),
-        ("yellow", "blue", True, False),
-        ("blue", "yellow", False, True),
-        ("yellow", "yellow", True, True),
-        ("red", "red", True, True),
-        ("red", "red", False, False),
-        ("red", "blue", False, True),
-        ("blue", "red", True, False),
-        ("blue", "blue", True, True),
-        ("blue", "blue", False, False),
+        ("yellow", "red", True, False, False),
+        ("red", "yellow", False, True, False),
+        ("yellow", "blue", True, False, False),
+        ("blue", "yellow", False, True, False),
+        ("yellow", "yellow", True, True, False),
+        ("red", "red", True, True, True),
+        ("red", "red", False, False, True),
+        ("red", "blue", False, True, True),
+        ("blue", "red", True, False, True),
+        ("blue", "blue", True, True, True),
+        ("blue", "blue", False, False, True),
     ],
 )
 def test_network_clock_negotiation_selects_compatible_native_role(
-    local_version, peer_version, default_internal, expected_internal
+    local_version,
+    peer_version,
+    default_internal,
+    expected_internal,
+    expected_frame_barrier,
 ):
     """Startup role selection only changes native registers."""
     backend, peer = _versioned_backend_pair(local_version, peer_version)
@@ -470,6 +480,7 @@ def test_network_clock_negotiation_selects_compatible_native_role(
         link.attach(pyboy)
         selected = link.negotiate_network_clock_role(peer_version)
         assert selected is expected_internal
+        assert link._network_frame_barrier is expected_frame_barrier
         assert serial.internal_clock == int(expected_internal)
         assert serial.SB == (0x01 if expected_internal else 0x02)
         assert pyboy.memory[0xFFAA] == 0xFF

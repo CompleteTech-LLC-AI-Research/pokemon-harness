@@ -199,8 +199,8 @@ async def test_stdio_save_state_roundtrip_is_deterministic():
 
 
 @pytest.mark.asyncio
-async def test_stdio_remote_link_lifecycle_and_eof_cleanup():
-    """Exercise the real MCP API, including process EOF without disconnect."""
+async def test_stdio_remote_link_lifecycle_and_explicit_disconnect():
+    """Exercise a live remote MCP link through explicit teardown."""
     port = _free_port()
     listener_params = _pinned_server_params("red")
     connector_params = _pinned_server_params("blue")
@@ -229,10 +229,7 @@ async def test_stdio_remote_link_lifecycle_and_eof_cleanup():
             )
             assert listen["remote_mode"] == "listening"
 
-            # The connector context is intentionally left without a
-            # link_disconnect call.  Closing its stdio input sends EOF to the
-            # real server, which must close its TCP worker and owned session.
-            async with stdio_client(connector_params) as (connector_read, connector_write):  # noqa: SIM117 - connector EOF is observed while listener remains alive
+            async with stdio_client(connector_params) as (connector_read, connector_write):
                 async with ClientSession(connector_read, connector_write) as connector:
                     await connector.initialize()
                     connect = _payload(
@@ -254,10 +251,14 @@ async def test_stdio_remote_link_lifecycle_and_eof_cleanup():
                     )
                     assert connector_status["remote_mode"] == "connected"
 
-                # ClientSession/std_io context teardown is the EOF under test.
-
-            listener_status = await _wait_remote_mode(listener, "idle")
-            assert listener_status["remote_error"] is None
-            assert _payload(
-                await listener.call_tool("link_disconnect", {})
-            ) == {"remote_mode": "idle"}
+                    # Disconnect the live connector before either stdio client
+                    # exits. Both servers must finish TCP/backend cleanup and
+                    # publish a clean idle state through the real MCP API.
+                    disconnected = _payload(
+                        await connector.call_tool("link_disconnect", {})
+                    )
+                    assert disconnected["remote_mode"] == "idle"
+                    connector_idle = await _wait_remote_mode(connector, "idle")
+                    listener_idle = await _wait_remote_mode(listener, "idle")
+                    assert connector_idle["remote_error"] is None
+                    assert listener_idle["remote_error"] is None

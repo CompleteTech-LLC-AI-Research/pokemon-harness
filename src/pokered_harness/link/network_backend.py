@@ -73,6 +73,9 @@ from pokered_harness.link.serial_coordinator import SerialOperationGate
 #   EDGE_REQ  = master → slave: "here's my outgoing bit"
 #   EDGE_RESP = slave → master: "here's my outgoing bit, bit just applied"
 #   SYNC      = "I've reached checkpoint <id>; waiting for peer's SYNC <id>"
+#   FRAME_TICK = leader → follower: begin one emulation frame
+#   FRAME_DONE = leader → follower: leader frame and its serial work ended
+#   FRAME_ACK  = follower → leader: owner-side work for that frame is done
 #
 # Using distinct opcodes lets a reader thread on each side demux
 # incoming frames without knowing the current role — peers can
@@ -84,9 +87,12 @@ _OP_EDGE_REQ: int = 0x10
 _OP_EDGE_RESP: int = 0x11
 _OP_SYNC: int = 0x20
 _OP_EXCHANGE: int = 0x30
+_OP_FRAME_TICK: int = 0x40
+_OP_FRAME_ACK: int = 0x41
+_OP_FRAME_DONE: int = 0x42
 _OP_HELLO: int = 0x01
 
-_PROTOCOL_VERSION: int = 1
+_PROTOCOL_VERSION: int = 2
 _ROM_VERSION_CODES: dict[str, int] = {"red": 1, "blue": 2, "yellow": 3}
 _ROM_VERSION_NAMES: dict[int, str] = {value: key for key, value in _ROM_VERSION_CODES.items()}
 
@@ -360,6 +366,13 @@ class NetworkBackend:
         self._edge_inflight = False
         # Responses from peer (when we're master) land here.
         self._resp_queue: queue.Queue[int] = queue.Queue(maxsize=1)
+        # Negotiated frame barrier queues. They are enabled by the session
+        # only after the versioned native clock role is selected.
+        self._frame_tick_queue: queue.Queue[None] = queue.Queue(maxsize=1)
+        self._frame_done_queue: queue.Queue[None] = queue.Queue(maxsize=1)
+        self._frame_ack_queue: queue.Queue[None] = queue.Queue(maxsize=1)
+        self._frame_turn_lock = threading.Lock()
+        self._leader_frame_inflight = False
         # Keep edge application ordered, but do not let a slow slave
         # re-arm wait block the reader from consuming control frames such
         # as SYNC or HELLO. The master sends one EDGE_REQ at a time, so a
@@ -440,6 +453,12 @@ class NetworkBackend:
             "edge_req_received": 0,
             "edge_resp_sent": 0,
             "edge_resp_received": 0,
+            "frame_ticks_sent": 0,
+            "frame_ticks_received": 0,
+            "frame_dones_sent": 0,
+            "frame_dones_received": 0,
+            "frame_acks_sent": 0,
+            "frame_acks_received": 0,
             "sync_sent": 0,
             "sync_received": 0,
             "sync_poll_hits": 0,
@@ -820,6 +839,144 @@ class NetworkBackend:
             yield
         finally:
             lock.release()
+
+    # --- negotiated frame barrier -----------------------------------
+
+    def begin_frame_turn(self, *, leader: bool) -> None:
+        """Start one bounded owner-frame turn after clock negotiation."""
+        if not isinstance(leader, bool):
+            raise TypeError("leader must be a bool")
+        if leader:
+            with self._frame_turn_lock:
+                if self._leader_frame_inflight:
+                    raise NetworkBackendError("previous FRAME_TICK is still in flight")
+                self._leader_frame_inflight = True
+            try:
+                with self._write_guard(
+                    timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                    operation="FRAME_TICK",
+                ) as write_deadline:
+                    self._send_frame(
+                        _FRAME.pack(_OP_FRAME_TICK, 0),
+                        timeout=max(0.0, write_deadline - time.monotonic()),
+                        operation="FRAME_TICK",
+                    )
+                self._stats["frame_ticks_sent"] = int(self._stats["frame_ticks_sent"]) + 1
+            except (OSError, NetworkBackendError) as exc:
+                self._clear_leader_frame_inflight()
+                error = (
+                    exc
+                    if isinstance(exc, NetworkBackendError)
+                    else NetworkBackendError(f"failed to send FRAME_TICK: {exc}")
+                )
+                self._mark_closed(error)
+                raise error from exc
+            return
+        try:
+            self._queue_get(
+                self._frame_tick_queue,
+                timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                timeout_message=(
+                    f"no FRAME_TICK from peer within {_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
+                ),
+            )
+        except NetworkBackendError as exc:
+            if not self._closed_event.is_set():
+                self._mark_closed(exc)
+            raise
+
+    def finish_frame_turn(
+        self,
+        *,
+        leader: bool,
+        progress_callback: Callable[[], object] | None = None,
+    ) -> None:
+        """Finish a frame, servicing deferred owner edges before ACK."""
+        if not isinstance(leader, bool):
+            raise TypeError("leader must be a bool")
+        if leader:
+            try:
+                with self._write_guard(
+                    timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                    operation="FRAME_DONE",
+                ) as write_deadline:
+                    self._send_frame(
+                        _FRAME.pack(_OP_FRAME_DONE, 0),
+                        timeout=max(0.0, write_deadline - time.monotonic()),
+                        operation="FRAME_DONE",
+                    )
+                self._stats["frame_dones_sent"] = int(self._stats["frame_dones_sent"]) + 1
+                self._queue_get(
+                    self._frame_ack_queue,
+                    timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                    timeout_message=(
+                        f"no FRAME_ACK from peer within {_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
+                    ),
+                )
+            except NetworkBackendError as exc:
+                if not self._closed_event.is_set():
+                    self._mark_closed(exc)
+                raise
+            finally:
+                self._clear_leader_frame_inflight()
+            return
+        if progress_callback is None:
+            raise TypeError("follower frame completion requires progress_callback")
+        deadline = time.monotonic() + _EDGE_RESPONSE_TIMEOUT_SECONDS
+        try:
+            while True:
+                progress_callback()
+                try:
+                    self._frame_done_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    with self._edge_pending_condition:
+                        if self._edge_pending == 0:
+                            break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise NetworkBackendError(
+                        f"no FRAME_DONE from peer within {_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
+                    )
+                with self._edge_pending_condition:
+                    self._edge_pending_condition.wait(
+                        timeout=min(_SEND_POLL_SECONDS, remaining)
+                    )
+        except NetworkBackendError as exc:
+            if not self._closed_event.is_set():
+                self._mark_closed(exc)
+            raise
+        try:
+            with self._write_guard(
+                timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
+                operation="FRAME_ACK",
+            ) as write_deadline:
+                self._send_frame(
+                    _FRAME.pack(_OP_FRAME_ACK, 0),
+                    timeout=max(0.0, write_deadline - time.monotonic()),
+                    operation="FRAME_ACK",
+                )
+            self._stats["frame_acks_sent"] = int(self._stats["frame_acks_sent"]) + 1
+        except (OSError, NetworkBackendError) as exc:
+            error = (
+                exc
+                if isinstance(exc, NetworkBackendError)
+                else NetworkBackendError(f"failed to send FRAME_ACK: {exc}")
+            )
+            self._mark_closed(error)
+            raise error from exc
+
+    def abort_frame_turn(self, *, leader: bool) -> None:
+        if not isinstance(leader, bool):
+            raise TypeError("leader must be a bool")
+        if leader:
+            self._clear_leader_frame_inflight()
+        self._mark_closed(NetworkBackendError("emulator frame aborted during frame barrier"))
+
+    def _clear_leader_frame_inflight(self) -> None:
+        with self._frame_turn_lock:
+            self._leader_frame_inflight = False
 
     # --- out-of-band rendezvous ---------------------------------------
 
@@ -1436,6 +1593,43 @@ class NetworkBackend:
                         direction="peer_to_local",
                         edge_bit=payload & 1,
                     )
+                elif opcode == _OP_FRAME_TICK:
+                    if payload != 0:
+                        raise NetworkBackendError("invalid FRAME_TICK payload")
+                    try:
+                        self._frame_tick_queue.put_nowait(None)
+                    except queue.Full as exc:
+                        raise NetworkBackendError("duplicate FRAME_TICK") from exc
+                    self._stats["frame_ticks_received"] = int(
+                        self._stats["frame_ticks_received"]
+                    ) + 1
+                    with self._edge_pending_condition:
+                        self._edge_pending_condition.notify_all()
+                elif opcode == _OP_FRAME_DONE:
+                    if payload != 0:
+                        raise NetworkBackendError("invalid FRAME_DONE payload")
+                    try:
+                        self._frame_done_queue.put_nowait(None)
+                    except queue.Full as exc:
+                        raise NetworkBackendError("duplicate FRAME_DONE") from exc
+                    self._stats["frame_dones_received"] = int(
+                        self._stats["frame_dones_received"]
+                    ) + 1
+                    with self._edge_pending_condition:
+                        self._edge_pending_condition.notify_all()
+                elif opcode == _OP_FRAME_ACK:
+                    if payload != 0:
+                        raise NetworkBackendError("invalid FRAME_ACK payload")
+                    with self._frame_turn_lock:
+                        if not self._leader_frame_inflight:
+                            raise NetworkBackendError("unsolicited FRAME_ACK")
+                    try:
+                        self._frame_ack_queue.put_nowait(None)
+                    except queue.Full as exc:
+                        raise NetworkBackendError("duplicate FRAME_ACK") from exc
+                    self._stats["frame_acks_received"] = int(
+                        self._stats["frame_acks_received"]
+                    ) + 1
                 elif opcode == _OP_SYNC:
                     with self._sync_lock:
                         if payload in self._sync_pending:
@@ -1720,32 +1914,51 @@ class NetworkBackend:
         )
         if completed:
             self._stats["last_slave_byte_complete_at"] = time.monotonic()
-            if self._irq_callback is None:
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="not_configured",
-                )
-            else:
-                self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
-                try:
-                    self._irq_callback()
-                except Exception as exc:
-                    self._record_serial_event(
-                        "irq_callback",
-                        direction="local",
-                        byte_complete=True,
-                        outcome="error",
-                        error_type=type(exc).__name__,
-                    )
-                    raise
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="success",
-                )
+            self._notify_completed_slave_irq(isolate_callback_errors=False)
+
+    def _notify_completed_slave_irq(self, *, isolate_callback_errors: bool) -> None:
+        """Expose the serial IRQ caused by an already-completed eighth edge.
+
+        Hardware completion (SB latch plus SC bit-7 clear) and the IRQ are
+        consequences of the same external clock edge. The transport response
+        may release the remote master later, but must never delay this local
+        event. Owner dispatch propagates a callback error because it runs on
+        the emulator owner; the legacy worker preserves its historical
+        callback-error isolation.
+        """
+        if self._irq_callback is None:
+            self._record_serial_event(
+                "irq_callback",
+                direction="local",
+                byte_complete=True,
+                outcome="not_configured",
+            )
+            return
+        self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
+        try:
+            self._irq_callback()
+        except Exception as exc:
+            if isolate_callback_errors:
+                self._stats["irq_callback_errors"] = int(
+                    self._stats["irq_callback_errors"]
+                ) + 1
+                self._stats["last_irq_callback_error"] = type(exc).__name__
+            self._record_serial_event(
+                "irq_callback",
+                direction="local",
+                byte_complete=True,
+                outcome="error",
+                error_type=type(exc).__name__,
+            )
+            if not isolate_callback_errors:
+                raise
+        else:
+            self._record_serial_event(
+                "irq_callback",
+                direction="local",
+                byte_complete=True,
+                outcome="success",
+            )
 
     def _serial_completion_context(self) -> dict[str, object] | None:
         """Capture a bounded, JSON-safe owner diagnostic without side effects."""
@@ -2004,6 +2217,10 @@ class NetworkBackend:
                         self._core_state_snapshot(core) if keepalive_state is not None else None
                     ),
                 )
+        # The completed edge is local hardware state; EDGE_RESP only releases
+        # the remote master and can block or fail independently.
+        if completed:
+            self._notify_completed_slave_irq(isolate_callback_errors=True)
         try:
             with self._write_guard(
                 timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
@@ -2034,37 +2251,6 @@ class NetworkBackend:
             byte_complete=completed,
             outcome="success" if not self._closed else "not_sent_closed",
         )
-        if completed and self._irq_callback is not None:
-            try:
-                self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
-                self._irq_callback()
-            except Exception as exc:  # noqa: BLE001 - isolate optional callback
-                # IRQ callback errors shouldn't kill the reader thread. Keep a
-                # compact diagnostic so callers can inspect failures through
-                # debug_snapshot() without changing transport behavior.
-                self._stats["irq_callback_errors"] = int(self._stats["irq_callback_errors"]) + 1
-                self._stats["last_irq_callback_error"] = type(exc).__name__
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="error",
-                    error_type=type(exc).__name__,
-                )
-            else:
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="success",
-                )
-        elif completed:
-            self._record_serial_event(
-                "irq_callback",
-                direction="local",
-                byte_complete=True,
-                outcome="not_configured",
-            )
 
     @staticmethod
     def _core_state_snapshot(core: object | None) -> dict[str, object]:

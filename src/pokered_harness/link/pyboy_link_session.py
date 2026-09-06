@@ -161,6 +161,7 @@ class PyBoyLinkSession:
         # only state still owned by this session.
         self._previous_owner_dispatch: list[tuple[object | None, object, object] | None] = []
         self._network_is_internal_clock = network_is_internal_clock
+        self._network_frame_barrier = False
         self._local_rom_version = local_rom_version
         # When True, per-frame stepping keeps the LCD renderer on and calls
         # each PyBoy's _post_tick (via pyboy.tick(0, True, False)) so the
@@ -533,13 +534,49 @@ class PyBoyLinkSession:
         @wraps(original_tick)
         def owned_frame(*args, **kwargs):
             with self._serial_gate:
-                if getattr(backend, "_dispatch_to_owner", False):
-                    backend.service_pending_edges()
+                pacing_leader = self._network_is_internal_clock
+                frame_barrier = self._network_frame_barrier and pacing_leader is not None
+                if frame_barrier:
+                    backend.begin_frame_turn(leader=bool(pacing_leader))
+
+                def progress_follower() -> None:
+                    pending_before = int(backend.debug_snapshot().get("pending_edge_requests", 0))
+                    applied = backend.service_pending_edges(max_edges=1)
+                    # A deferred request means the ROM's serial IRQ has not
+                    # re-armed yet. Advance only this owner thread until that
+                    # native re-arm is observable; do not run speculative
+                    # follower frames while no edge is admitted.
+                    if (
+                        applied == 0
+                        and pending_before > 0
+                        and getattr(backend, "_local_core", None) is not None
+                        and not bool(getattr(backend._local_core, "transfer_enabled", 0))
+                    ):
+                        original_tick(*args, **kwargs)
+
                 try:
-                    return original_tick(*args, **kwargs)
+                    if getattr(backend, "_dispatch_to_owner", False):
+                        backend.service_pending_edges()
+                    result = original_tick(*args, **kwargs)
+                except BaseException:
+                    if frame_barrier:
+                        backend.abort_frame_turn(leader=bool(pacing_leader))
+                    raise
                 finally:
                     if getattr(backend, "_dispatch_to_owner", False):
                         backend.service_pending_edges()
+                if frame_barrier:
+                    try:
+                        backend.finish_frame_turn(
+                            leader=bool(pacing_leader),
+                            progress_callback=(
+                                progress_follower if not pacing_leader else None
+                            ),
+                        )
+                    except BaseException:
+                        backend.abort_frame_turn(leader=bool(pacing_leader))
+                        raise
+                return result
 
         try:
             setattr(pyboy, owner_attribute, owned_frame)
@@ -777,7 +814,31 @@ class PyBoyLinkSession:
             self._network_is_internal_clock = selected_internal
             for core in self._cores:
                 self._initialize_network_clock_role(core)
+        # Identical Color Red/Blue families can use the bounded frame barrier
+        # immediately. Yellow's input-sensitive preamble needs native edge
+        # transport until both peers reach a ROM-owned boundary; the
+        # coordinator can then call set_network_frame_barrier(True). Cross-
+        # family pairs likewise remain on native edge transport because their
+        # polling windows differ.
+        self._network_frame_barrier = not cross_family and not (
+            local == "yellow" and peer == "yellow"
+        )
         return selected_internal
+
+    def set_network_frame_barrier(self, enabled: bool) -> None:
+        """Enable or disable frame pacing at an agreed ROM boundary.
+
+        Clock-role negotiation chooses the native serial owner; it cannot
+        safely guess when a cartridge has finished its input-sensitive
+        preamble. Coordinators may therefore switch the bounded frame
+        barrier at a mutually agreed boundary after both peers have reached
+        the same ROM-owned phase. Callers must make the same change on both
+        endpoints while no frame is in flight.
+        """
+        if type(enabled) is not bool:
+            raise TypeError("enabled must be a bool")
+        with self._lifecycle_lock:
+            self._network_frame_barrier = enabled
 
     def detach(self, pyboy: _PyBoyLike) -> None:
         """Restore ``pyboy.mb.serial.backend`` and (if paired) tear
