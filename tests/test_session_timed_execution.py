@@ -668,16 +668,16 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
                 assert pending_events == [[], [WindowEvent.RELEASE_BUTTON_A], []]
                 assert game.mb.lcd.disable_renderer is True
                 assert game.tick == raw_tick  # No PyBoy monkeypatch, including native mode.
-                session.unbind_timed_execution(endpoint)
-                frames = game.frame_count
-                session.step(1, render=True)
-                assert game.frame_count == frames + 1
-                assert len(calls) == 3
                 complete.put(index)
                 assert teardown_release.wait(paired_capacity_s), (
                     "parent did not release paired endpoint teardown within "
                     f"{paired_capacity_s:g}s capacity"
                 )
+                session.unbind_timed_execution(endpoint)
+                frames = game.frame_count
+                session.step(1, render=True)
+                assert game.frame_count == frames + 1
+                assert len(calls) == 3
                 return game.mb.cpu.retired_instructions
             finally:
                 if endpoint is not None:
