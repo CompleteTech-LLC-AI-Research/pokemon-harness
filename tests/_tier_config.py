@@ -77,6 +77,7 @@ UNIT_MODULES = frozenset(
         "test_native_execution_governor.py",
         "test_native_hook_exceptions.py",
         "test_network_backend.py",
+        "test_pre_linkmenu_observation.py",
         "test_probe_timed_rom_pair.py",
         "test_probe_owner_phases.py",
         "test_probe_timed_battle_pair.py",

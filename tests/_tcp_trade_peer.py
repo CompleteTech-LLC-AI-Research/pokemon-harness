@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import hashlib
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import time
@@ -28,6 +30,391 @@ from collections import deque
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
+from threading import get_ident
+from typing import NamedTuple
+
+# Opt-in diagnostic contract only; hook installation is a separate increment.
+_PRE_LINK_MENU_SCHEMA_VERSION = 1
+_PRE_LINK_MENU_HISTORY_LIMIT = 32
+_PRE_LINK_MENU_ERROR_LIMIT = 8
+_PRE_LINK_MENU_FIELDS = (
+    ("hSerialConnectionStatus", 1), ("hSerialSendData", 1),
+    ("hSerialReceiveData", 1), ("hSerialReceivedNewData", 1),
+    ("wSerialExchangeNybbleSendData", 1), ("wSerialExchangeNybbleTempReceiveData", 1),
+    ("wSerialExchangeNybbleReceiveData", 1), ("wSerialSyncAndExchangeNybbleReceiveData", 1),
+    ("wUnknownSerialCounter", 2), ("wUnknownSerialCounter2", 2),
+    ("wLinkTimeoutCounter", 1),
+)
+_PRE_LINK_MENU_REPORT_FIELDS = (
+    "schema_version", "enabled", "available", "reason", "role", "version",
+    "pins", "observed_pins", "sites", "limit", "total", "counts", "first",
+    "recent", "recent_dropped", "recent_truncated", "hooks", "cleanup_pending",
+    "error_limit", "error_count", "errors", "errors_dropped", "errors_truncated",
+)
+
+# Local pinned ROM/SYM bytes, interpreted against pret's
+# engine/link/cable_club_npc.asm and home/serial.asm. CALL return sites are
+# instruction boundaries, not proof of the subsequent conditional outcome.
+_PRE_LINK_MENU_PROFILES = {
+    ("listen", "blue_color"): (
+        "5f4b05725a860e04077045462176d3e2771c5022",
+        "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6",
+        0x71C5, 0x7263, 0x227F, 0x223F, 0x72A8, 1, 0x5C0A, 0x72D7,
+    ),
+    ("connect", "yellow"): (
+        "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+        "7c4205723943e7722230dcf014e5e8a2012474aa",
+        0x7035, 0x70D8, 0x20DB, 0x209B, 0x711D, 0x3D, 0x580C, 0x71AC,
+    ),
+}
+
+
+def _resolve_pre_link_menu(*, enabled, role, version, rom_bytes, symbol_bytes):
+    """Resolve immutable input bytes only; never access an emulator or install hooks.
+
+    Even fully verified sites remain unavailable until a later installation
+    stage succeeds. Unsupported/disabled configurations do not inspect assets.
+    """
+    history = _PreLinkMenuHistory(enabled=enabled, role=role, version=version)
+    if not enabled:
+        return history
+    profile = _PRE_LINK_MENU_PROFILES.get((role, version))
+    if profile is None:
+        history.reason = "unsupported_role_version"
+        return history
+    rom_pin, sym_pin, npc, call, sync, timeout, connected, menu_bank, menu, close = profile
+    pins = (("rom_sha1", rom_pin), ("symbol_sha1", sym_pin))
+    if type(rom_bytes) is not bytes or type(symbol_bytes) is not bytes:
+        history = _PreLinkMenuHistory(enabled=True, role=role, version=version, pins=pins)
+        history.reason = "invalid_asset_bytes"
+        return history
+    observed = (("rom_sha1", hashlib.sha1(rom_bytes).hexdigest()),
+                ("symbol_sha1", hashlib.sha1(symbol_bytes).hexdigest()))
+    history = _PreLinkMenuHistory(
+        enabled=True, role=role, version=version, pins=pins, observed_pins=observed,
+    )
+    if history.reason.startswith("pin_mismatch:"):
+        return history
+    symbols = {}
+    try:
+        for line in symbol_bytes.decode("ascii").splitlines():
+            # Match symbols.loader's address-line grammar; RGBDS also emits
+            # valid non-address constants, which are deliberately ignored.
+            match = re.match(
+                r"^\s*([0-9A-Fa-f]{1,4}):([0-9A-Fa-f]{4})\s+(\S+)\s*(?:;.*)?$",
+                line,
+            )
+            if match is None:
+                continue
+            bank_text, address_text, name = match.groups()
+            if name in symbols:
+                history.reason = "duplicate_symbol:" + name
+                return history
+            symbols[name] = (int(bank_text, 16), int(address_text, 16))
+    except (UnicodeError, ValueError, IndexError):
+        history.reason = "invalid_symbol_format"
+        return history
+    anchors = (
+        ("CableClubNPC", (1, npc)),
+        ("Serial_SyncAndExchangeNybble", (0, sync)),
+        ("SetUnknownCounterToFFFF", (0, timeout)),
+        ("CableClubNPC.connected", (1, connected)),
+        ("LinkMenu", (menu_bank, menu)),
+        ("CloseLinkConnection", (1, close)),
+        ("CableClubNPC.choseNo", (1, call + 44)),
+    )
+    for name, address in anchors:
+        if name not in symbols:
+            history.reason = "missing_symbol:" + name
+            return history
+        if symbols[name] != address:
+            history.reason = "symbol_address_mismatch:" + name
+            return history
+    # The caller's full CALL + counter read + both JR NZ instructions. Their
+    # relative targets must independently land at the pinned connected label.
+    caller_signature = bytes((0xCD, sync & 0xFF, sync >> 8)) + bytes.fromhex(
+        "2147cc2a3c203b7e3c2037060a"
+    )
+    specs = (
+        ("CableClubNPC.beforeSync", 1, call, caller_signature),
+        ("CableClubNPC.afterSync", 1, call + 3, bytes.fromhex("2147cc")),
+        ("CableClubNPC.counterBranch1", 1, call + 8, bytes.fromhex("203b")),
+        ("CableClubNPC.counterBranch2", 1, call + 12, bytes.fromhex("2037")),
+        ("CableClubNPC.counterExpired", 1, call + 14, bytes.fromhex("060a")),
+        ("CableClubNPC.connected", 1, connected, bytes.fromhex("af3277")),
+        ("Serial_SyncAndExchangeNybble", 0, sync, bytes.fromhex("3effea3ecc")),
+        ("Serial_SyncAndExchangeNybble.timeoutJump", 0, sync + 0x1C,
+         bytes((0xAF, 0xC3, timeout & 0xFF, timeout >> 8))),
+        ("Serial_SyncAndExchangeNybble.return", 0, sync + 0x43, b"\xc9"),
+        ("Serial_SyncAndExchangeNybble.publish60", 0, sync + 0x4A, bytes.fromhex("c660")),
+        ("Serial_SyncAndExchangeNybble.receiveCompare", 0, sync + 0x5F,
+         bytes.fromhex("fe60c0")),
+        ("CableClubNPC.inactivityCloseCall", 1, call + 25,
+         bytes((0xCD, close & 0xFF, close >> 8))),
+        ("CableClubNPC.inactivityCloseReturn", 1, call + 28,
+         bytes((0x21, (close - 15) & 0xFF, (close - 15) >> 8))),
+        ("CableClubNPC.choseNoCloseCall", 1, call + 44,
+         bytes((0xCD, close & 0xFF, close >> 8))),
+        ("CableClubNPC.choseNoCloseReturn", 1, call + 47,
+         bytes((0x21, (close - 10) & 0xFF, (close - 10) >> 8))),
+        ("SetUnknownCounterToFFFF", 0, timeout, bytes.fromhex("3dea47ccea48ccc9")),
+        ("LinkMenu", menu_bank, menu,
+         bytes.fromhex("afea58" if version == "blue_color" else "afea57")),
+    )
+    for event, bank, address, signature in specs:
+        valid = (bank == 0 and 0 <= address < 0x4000) or (
+            bank > 0 and 0x4000 <= address < 0x8000
+        )
+        bank_end = 0x4000 if bank == 0 else 0x8000
+        if not valid or address + len(signature) > bank_end:
+            history.reason = "invalid_site:" + event
+            return history
+        offset = address if bank == 0 else bank * 0x4000 + address - 0x4000
+        if rom_bytes[offset:offset + len(signature)] != signature:
+            history.reason = "signature_mismatch:" + event
+            return history
+    if any(call + offset + 2 + displacement != connected
+           for offset, displacement in ((8, 0x3B), (12, 0x37))):
+        history.reason = "branch_target_mismatch"
+        return history
+    return _PreLinkMenuHistory(
+        enabled=True, role=role, version=version, pins=pins, observed_pins=observed,
+        sites=tuple((event, bank, address) for event, bank, address, _ in specs),
+    )
+
+
+class _PreLinkMenuConfig(NamedTuple):
+    enabled: bool
+    role: str
+    version: str
+    pins: tuple[tuple[str, str], ...]
+    observed_pins: tuple[tuple[str, str], ...]
+    sites: tuple[tuple[str, int, int], ...]
+    limit: int
+
+
+class _PreLinkMenuHistory:
+    """Owner-thread observations with bounded retention and owned-hook cleanup."""
+
+    def __init__(self, *, enabled, role, version, pins=(), observed_pins=(),
+                 sites=(), limit=_PRE_LINK_MENU_HISTORY_LIMIT):
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be a bool")
+        if type(limit) is not int or limit != _PRE_LINK_MENU_HISTORY_LIMIT:
+            raise ValueError("limit must be exactly 32")
+        if type(role) is not str or type(version) is not str:
+            raise ValueError("role and version must be strings")
+
+        def freeze_pins(values):
+            rows = tuple(values)
+            if any(type(row) not in (tuple, list) for row in rows):
+                raise ValueError("pin rows must be tuples or lists")
+            rows = tuple(tuple(row) for row in rows)
+            if any(len(row) != 2 or any(type(v) is not str for v in row) for row in rows):
+                raise ValueError("pins must contain name/digest string pairs")
+            if len({row[0] for row in rows}) != len(rows):
+                raise ValueError("duplicate pin name")
+            return tuple(sorted(rows))
+
+        site_rows = tuple(sites)
+        if any(type(row) not in (tuple, list) for row in site_rows):
+            raise ValueError("site rows must be tuples or lists")
+        frozen_sites = tuple(tuple(row) for row in site_rows)
+        if any(
+            len(row) != 3 or type(row[0]) is not str
+            or type(row[1]) is not int or type(row[2]) is not int
+            or row[1] < 0 or not 0 <= row[2] <= 0xFFFF
+            for row in frozen_sites
+        ):
+            raise ValueError("sites must contain event/bank/address triples")
+        if len({row[0] for row in frozen_sites}) != len(frozen_sites):
+            raise ValueError("duplicate site event")
+        self.config = _PreLinkMenuConfig(
+            enabled, role, version, freeze_pins(pins), freeze_pins(observed_pins),
+            frozen_sites, limit,
+        )
+        self.available = False
+        expected = dict(self.config.pins)
+        observed = dict(self.config.observed_pins)
+        mismatch = next((name for name in sorted(expected.keys() | observed.keys())
+                         if expected.get(name) != observed.get(name)), None)
+        self.reason = (
+            "disabled" if not enabled else
+            f"pin_mismatch:{mismatch}" if mismatch is not None else
+            "pins_unverified" if not expected else "hooks_not_installed"
+        )
+        self.total = 0
+        self.counts = dict.fromkeys((row[0] for row in frozen_sites), 0)
+        self.first = {}
+        self.recent = deque(maxlen=limit)
+        self.hooks = {}
+        self.cleanup_pending = []
+        self.error_count = 0
+        self.errors = deque(maxlen=_PRE_LINK_MENU_ERROR_LIMIT)
+        self._session = None
+        self._owner = None
+        self._owned = []
+        self._field_addresses = {}
+        self._attempted = False
+
+    def _error(self, event, stage, exc):
+        self.error_count += 1
+        self.errors.append({"event": event, "stage": stage,
+                            "error": type(exc).__name__[:128]})
+
+    def _read(self, event, name, getter, maximum):
+        try:
+            value = getter()
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ValueError("invalid observed integer")
+            return value
+        except BaseException as exc:  # noqa: BLE001
+            self._error(event, name, exc)
+            return None
+
+    def _observe(self, event):
+        if get_ident() != self._owner:
+            self._error(event, "owner_thread", RuntimeError())
+            return
+        self.total += 1
+        self.counts[event] += 1
+        sample = {"event": event, "sequence": self.total, "frame": None,
+                  "cpu_cycles": None, "registers": {}, "fields": {}}
+        sample["frame"] = self._read(event, "frame", self._session.current_tick, (1 << 63) - 1)
+        sample["cpu_cycles"] = self._read(
+            event, "cpu_cycles", lambda: self._session._pyboy.mb.cpu.cycles, (1 << 63) - 1,
+        )
+        for name in ("PC", "SP", "A", "F"):
+            sample["registers"][name] = self._read(
+                event, name, lambda name=name: getattr(self._session._pyboy.mb.cpu, name),
+                0xFFFF if name in ("PC", "SP") else 0xFF,
+            )
+        for name, length in _PRE_LINK_MENU_FIELDS:
+            address = self._field_addresses[name]
+            values = [self._read(
+                event, f"{name}[{index}]",
+                lambda address=address, index=index: self._session._pyboy.memory[address + index],
+                0xFF,
+            ) for index in range(length)]
+            sample["fields"][name] = values[0] if length == 1 else values
+        self.first.setdefault(event, sample)
+        self.recent.append(sample)
+
+    def install(self, session):
+        if self._attempted or not self.config.enabled or self.reason != "hooks_not_installed":
+            return
+        self._owner = get_ident()
+        self._session = session
+        self._attempted = True
+        sites = tuple(row for row in self.config.sites
+                      if row[0] not in ("LinkMenu", "Serial_SyncAndExchangeNybble"))
+        self.hooks = {event: {"bank": bank, "address": address, "status": "pending"}
+                      for event, bank, address in sites}
+        self.hooks["LinkMenu"] = {"status": "external_owner"}
+        self.hooks["Serial_SyncAndExchangeNybble"] = {"status": "external_pending"}
+        try:
+            if len(sites) != 15 or len({(b, a) for _, b, a in sites}) != 15:
+                raise ValueError("expected fifteen distinct owned sites")
+            for name, length in _PRE_LINK_MENU_FIELDS:
+                bank, address = session.symbols.bank_addr(name)
+                if type(bank) is not int or bank != 0 or type(address) is not int:
+                    raise ValueError("invalid field address")
+                if not (0xC000 <= address and address + length <= 0xE000
+                        or 0xFF80 <= address and address + length <= 0xFFFF):
+                    raise ValueError("field is outside WRAM/HRAM")
+                self._field_addresses[name] = address
+        except BaseException as exc:  # noqa: BLE001
+            self.reason = "site_or_field_resolution_error:" + type(exc).__name__[:128]
+            self._error("install", "resolve", exc)
+            return
+        for event, bank, address in sites:
+            def callback(_context, event=event):
+                try:
+                    self._observe(event)
+                except BaseException as exc:  # noqa: BLE001
+                    self._error(event, "callback", exc)
+            try:
+                session._pyboy.hook_register(bank, address, callback, None)
+            except BaseException as exc:  # noqa: BLE001
+                self.hooks[event]["status"] = "registration_failed"
+                self._error(event, "register", exc)
+                self.reason = "hook_registration_error:" + event
+                self._cleanup()
+                return
+            self._owned.append((event, bank, address))
+            self.hooks[event]["status"] = "registered"
+        self.reason = "external_pending"
+
+    def external_registered(self):
+        if get_ident() != self._owner or self.reason != "external_pending":
+            return
+        self.hooks["Serial_SyncAndExchangeNybble"]["status"] = "external_registered"
+        self.available = len(self._owned) == 15
+        self.reason = None if self.available else "owned_hooks_incomplete"
+
+    def external_failed(self, exc):
+        if get_ident() != self._owner or self.reason != "external_pending":
+            return
+        self.hooks["Serial_SyncAndExchangeNybble"]["status"] = "external_failed"
+        self._error("Serial_SyncAndExchangeNybble", "external_register", exc)
+        self.reason = "external_registration_failed"
+        self._cleanup()
+
+    def _cleanup(self):
+        self.available = False
+        if self._session is None or not self._owned:
+            self.cleanup_pending = [event for event, _, _ in self._owned]
+            return
+        pending = []
+        for event, bank, address in reversed(self._owned):
+            try:
+                self._session._pyboy.hook_deregister(bank, address)
+            except BaseException as exc:  # noqa: BLE001
+                self.hooks[event]["status"] = "cleanup_pending"
+                self._error(event, "deregister", exc)
+                pending.append((event, bank, address))
+            else:
+                self.hooks[event]["status"] = "removed"
+        self._owned = list(reversed(pending))
+        self.cleanup_pending = [event for event, _, _ in self._owned]
+
+    def close(self):
+        self.available = False
+        if self._owner is not None and get_ident() != self._owner:
+            self._error("close", "owner_thread", RuntimeError())
+            self.cleanup_pending = [event for event, _, _ in self._owned]
+            self.reason = "cleanup_wrong_thread"
+            return
+        self._cleanup()
+        self.reason = "cleanup_pending" if self.cleanup_pending else "closed"
+
+    def snapshot(self):
+        return deepcopy({
+            "schema_version": _PRE_LINK_MENU_SCHEMA_VERSION,
+            "enabled": self.config.enabled,
+            "available": self.available,
+            "reason": self.reason,
+            "role": self.config.role,
+            "version": self.config.version,
+            "pins": dict(self.config.pins),
+            "observed_pins": dict(self.config.observed_pins),
+            "sites": {event: {"bank": bank, "address": address}
+                      for event, bank, address in self.config.sites},
+            "limit": self.config.limit,
+            "total": self.total,
+            "counts": self.counts,
+            "first": self.first,
+            "recent": list(self.recent),
+            "recent_dropped": max(0, self.total - len(self.recent)),
+            "recent_truncated": self.total > len(self.recent),
+            "hooks": self.hooks,
+            "cleanup_pending": self.cleanup_pending,
+            "error_limit": _PRE_LINK_MENU_ERROR_LIMIT,
+            "error_count": self.error_count,
+            "errors": list(self.errors),
+            "errors_dropped": max(0, self.error_count - len(self.errors)),
+            "errors_truncated": self.error_count > len(self.errors),
+        })
 
 _TRADE_DIAG_SYMBOLS = (
     "CableClubNPC",
@@ -276,10 +663,11 @@ class _LinkMenuHistory:
                 self.first_decisive.setdefault(direction, sample)
         self.recent.append(sample)
 
-    def install(self, buckets):
+    def install(self, buckets, observers_by_address=None):
         if self._installed:
             return
         self._installed = True
+        observers_by_address = observers_by_address or {}
         # Resolve every address before instrumentation changes any ROM opcode.
         addresses = {}
         for event in dict.fromkeys((*_TRADE_DIAG_SYMBOLS, *_LINK_MENU_HISTORY_EVENTS)):
@@ -299,8 +687,11 @@ class _LinkMenuHistory:
         for event, address in addresses.items():
             grouped.setdefault(address, []).append(event)
         for (bank, addr), events in grouped.items():
+            # Only the already-owned serial entry supports optional fanout.
+            observer = (observers_by_address.get((bank, addr))
+                        if "Serial_SyncAndExchangeNybble" in events else None)
 
-            def callback(_ctx, events=tuple(events)):
+            def callback(_ctx, events=tuple(events), observer=observer):
                 for event in events:
                     try:
                         if event in buckets:
@@ -312,15 +703,29 @@ class _LinkMenuHistory:
                             self._observe(event)
                     except BaseException as exc:  # noqa: BLE001
                         self._error(event, "callback", exc)
+                if observer is not None and observer.available:
+                    try:
+                        observer._observe("Serial_SyncAndExchangeNybble")
+                    except BaseException as exc:  # noqa: BLE001
+                        observer._error("Serial_SyncAndExchangeNybble", "callback", exc)
 
             try:
                 self.session._pyboy.hook_register(bank, addr, callback, None)
                 for event in events:
                     self.hooks[event] = {"available": True, "bank": bank, "address": addr}
+                if observer is not None:
+                    observer.external_registered()
             except BaseException as exc:  # noqa: BLE001
                 for event in events:
                     self._error(event, "register", exc)
                     self.hooks[event] = {"available": False, "reason": self.errors[-1]["error"]}
+                if observer is not None:
+                    observer.external_failed(exc)
+        # A failed symbol resolution never reached grouped registration.
+        registered_addresses = set(grouped)
+        for address, observer in observers_by_address.items():
+            if address not in registered_addresses:
+                observer.external_failed(ValueError("serial entry did not resolve"))
 
     def snapshot(self):
         return deepcopy(
@@ -602,6 +1007,12 @@ def _run_peer(trace=None) -> int:
         default="yellow",
     )
     ap.add_argument("--record-dir", type=Path)
+    ap.add_argument(
+        "--observe-pre-link-menu",
+        action="store_true",
+        default=False,
+        help="Include bounded pre-LinkMenu diagnostics and their availability status.",
+    )
     ap.add_argument("--label", default="")
     ap.add_argument("--repo-root", type=Path, required=True)
     args = ap.parse_args()
@@ -620,6 +1031,10 @@ def _run_peer(trace=None) -> int:
     final_cpu: dict[str, object] = {}
     link_menu_state: dict[str, object] = {}
     link_menu_history = _LinkMenuHistory(None, role=args.role, version=args.version)
+    pre_link_menu_history = (
+        _PreLinkMenuHistory(enabled=True, role=args.role, version=args.version)
+        if args.observe_pre_link_menu else None
+    )
     counters = {s: [0] for s in _TRADE_DIAG_SYMBOLS}
     shots: list[str] = []
     select_mon_announced = False
@@ -685,6 +1100,8 @@ def _run_peer(trace=None) -> int:
         result["_final_cpu"] = final_cpu
         result["_link_menu_state"] = {} if setup_failed else link_menu_state
         result["_link_menu_history"] = link_menu_history.snapshot()
+        if pre_link_menu_history is not None:
+            result["_pre_link_menu_history"] = pre_link_menu_history.snapshot()
         result["_shots"] = shots
         result["_backend_stats"] = backend_snapshot()
         result["_drive_status"] = drive_status
@@ -727,7 +1144,7 @@ def _run_peer(trace=None) -> int:
         log(f"shot {phase}: {path}")
 
     def setup() -> None:
-        nonlocal link, link_menu_max, party_before, session
+        nonlocal link, link_menu_max, party_before, session, pre_link_menu_history
 
         if not math.isfinite(args.deadline_seconds) or args.deadline_seconds <= 0:
             raise ValueError("deadline-seconds must be finite and positive")
@@ -784,6 +1201,20 @@ def _run_peer(trace=None) -> int:
             ),
         }
         rom, sym, fixture_version, trade_fixture_name, battle_fixture_name = rom_paths[args.version]
+        if pre_link_menu_history is not None:
+            try:
+                observer_rom_bytes = rom.read_bytes()
+                observer_symbol_bytes = sym.read_bytes()
+            except Exception as exc:  # noqa: BLE001 - Optional diagnostics must not fail gameplay.
+                pre_link_menu_history.reason = f"asset_read_error:{type(exc).__name__}"[:128]
+            else:
+                pre_link_menu_history = _resolve_pre_link_menu(
+                    enabled=True,
+                    role=args.role,
+                    version=args.version,
+                    rom_bytes=observer_rom_bytes,
+                    symbol_bytes=observer_symbol_bytes,
+                )
         # The color Red/Blue Cable Club menu has three choices (0..2), while
         # Yellow adds a fourth (0..3). Keep the readiness predicate ROM-aware;
         # a hard-coded bound can otherwise leave a valid peer spinning until the
