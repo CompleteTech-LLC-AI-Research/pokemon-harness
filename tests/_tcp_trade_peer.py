@@ -52,6 +52,15 @@ _PRE_LINK_MENU_REPORT_FIELDS = (
     "error_limit", "error_count", "errors", "errors_dropped", "errors_truncated",
 )
 
+# These control-plane markers are deliberately disjoint from the gameplay
+# milestones below.  They coordinate *emulation credit*, not the Game Boy
+# clock: a TCP listener can legitimately become the external-clock ROM and
+# vice versa while Cable Club negotiates its own serial state.
+_PRE_LINK_MENU_QUANTUM_READY_SYNC = 126
+_PRE_LINK_MENU_QUANTUM_COMPLETE_SYNC = 127
+_PRE_LINK_MENU_FAILURE_SYNC = 128
+_PRE_LINK_MENU_FAILURE_ACK_SYNC = 129
+
 # Local pinned ROM/SYM bytes, interpreted against pret's
 # engine/link/cable_club_npc.asm and home/serial.asm. CALL return sites are
 # instruction boundaries, not proof of the subsequent conditional outcome.
@@ -1538,6 +1547,149 @@ def _run_peer(trace=None) -> int:
             timeout=timeout,
         )
 
+    pre_link_failure_announced = False
+
+    def pre_link_failure_snapshot() -> dict[str, object]:
+        """Capture the bounded local evidence shared by either failure path."""
+        return {
+            "counters": {name: count[0] for name, count in counters.items() if count[0]},
+            "menu": menu_snapshot(),
+            "state": state_snapshot(),
+            "cpu": cpu_snapshot(),
+            "backend": backend_snapshot(),
+            "pre_link_menu": (
+                pre_link_menu_history.snapshot() if pre_link_menu_history else {}
+            ),
+        }
+
+    def service_pre_link_edge() -> int:
+        """Service one admitted peer edge before any pre-menu control wait."""
+        return link._network_backend.service_pending_edges(max_edges=1)
+
+    def raise_pre_link_failure(*, origin: str) -> None:
+        """Fail both owners promptly when Cable Club closes before LinkMenu.
+
+        OP_SYNC has an intentionally tiny payload, so it carries only the
+        terminal fact.  Each subprocess records its own ROM/serial snapshot;
+        the parent already retains both JSON results.  The acknowledgement is
+        still valuable: it proves the healthy-looking peer consumed the
+        terminal marker instead of silently spending the outer 720-second
+        gameplay allowance in LinkMenu.
+        """
+        nonlocal pre_link_failure_announced
+        backend = link._network_backend
+        if origin == "local_close" and not pre_link_failure_announced:
+            backend.announce_sync(sync_id=_PRE_LINK_MENU_FAILURE_SYNC)
+            pre_link_failure_announced = True
+
+        acknowledged = origin == "peer_close"
+        peer_failure_seen = origin == "peer_close"
+        if origin == "peer_close":
+            backend.announce_sync(sync_id=_PRE_LINK_MENU_FAILURE_ACK_SYNC)
+
+        acknowledgement_deadline = min(deadline, time.monotonic() + 5.0)
+        while origin == "local_close" and time.monotonic() < acknowledgement_deadline:
+            # A byte can be outstanding precisely when the cartridge gives
+            # up. Drain it before examining control-plane progress; this is
+            # transport service, not a fabricated serial result.
+            service_pre_link_edge()
+            if not peer_failure_seen and backend.poll_peer_sync(
+                sync_id=_PRE_LINK_MENU_FAILURE_SYNC
+            ):
+                peer_failure_seen = True
+                backend.announce_sync(sync_id=_PRE_LINK_MENU_FAILURE_ACK_SYNC)
+            if backend.poll_peer_sync(sync_id=_PRE_LINK_MENU_FAILURE_ACK_SYNC):
+                acknowledged = True
+                break
+            time.sleep(0.001)
+
+        raise RuntimeError(
+            "Cable Club closed before LinkMenu: "
+            f"origin={origin} peer_failure_seen={peer_failure_seen} "
+            f"peer_acknowledged={acknowledged} evidence={pre_link_failure_snapshot()}"
+        )
+
+    def check_pre_link_failure(*, close_count_before_release: int, save_released: bool) -> None:
+        """Propagate a terminal pre-LinkMenu cartridge outcome in bounded time."""
+        backend = link._network_backend
+        # Service an already-admitted edge before observing a peer marker. A
+        # native external-clock ROM can need this final IRQ even while the
+        # other cartridge has already concluded that Cable Club failed.
+        service_pre_link_edge()
+        if backend.poll_peer_sync(sync_id=_PRE_LINK_MENU_FAILURE_SYNC):
+            raise_pre_link_failure(origin="peer_close")
+        if (
+            save_released
+            and counters["LinkMenu"][0] == 0
+            and counters["CloseLinkConnection"][0] > close_count_before_release
+        ):
+            raise_pre_link_failure(origin="local_close")
+
+    def post_save_lockstep_quantum(
+        *, close_count_before_release: int, save_released: bool
+    ) -> None:
+        """Grant exactly one authentic post-save frame to each ROM.
+
+        Cable Club's save and nybble work differs between Yellow and the
+        Color ROMs.  After the shared confirmation A, free-running two-frame
+        slices can let one cartridge enter LinkMenu and send $D0 votes while
+        the other still expects its $60-class pre-menu byte.  This two-marker
+        credit makes every next frame conditional on both owners completing
+        the prior frame.  It deliberately does not derive any rule from the
+        TCP role or mutate RAM/menu state.
+        """
+        backend = link._network_backend
+        quantum_deadline = min(deadline, time.monotonic() + 10.0)
+
+        def await_peer(marker: int, *, phase: str) -> None:
+            while time.monotonic() < quantum_deadline:
+                check_pre_link_failure(
+                    close_count_before_release=close_count_before_release,
+                    save_released=save_released,
+                )
+                # Required before every wait/poll: an in-flight serial edge
+                # belongs to authentic ROM progress and must not be held by
+                # the control plane.
+                service_pre_link_edge()
+                if backend.poll_peer_sync(sync_id=marker):
+                    return
+                time.sleep(0.001)
+            raise RuntimeError(
+                f"post-save lockstep {phase} did not converge: "
+                f"evidence={pre_link_failure_snapshot()}"
+            )
+
+        backend.announce_sync(sync_id=_PRE_LINK_MENU_QUANTUM_READY_SYNC)
+        await_peer(_PRE_LINK_MENU_QUANTUM_READY_SYNC, phase="ready")
+        check_pre_link_failure(
+            close_count_before_release=close_count_before_release,
+            save_released=save_released,
+        )
+        service_pre_link_edge()
+        session.step(1)
+        service_pre_link_edge()
+        backend.announce_sync(sync_id=_PRE_LINK_MENU_QUANTUM_COMPLETE_SYNC)
+        await_peer(_PRE_LINK_MENU_QUANTUM_COMPLETE_SYNC, phase="complete")
+
+    def announce_link_menu_wait_loop_if_ready() -> None:
+        """Advertise only the ROM-owned LinkMenu input-loop milestone."""
+        nonlocal link_menu_announced
+        if (
+            counters["LinkMenu.waitForInputLoop"][0] > 0
+            and menu_fields_ready(
+                min_item=0,
+                max_item=link_menu_max,
+                expected_max=link_menu_max,
+                required_keys=0x01,
+            )
+            and not link_menu_announced
+        ):
+            link_menu_announced = True
+            log("phase 1 local LinkMenu waitForInputLoop fired")
+            shot("01_link_menu")
+            link._network_backend.announce_sync(sync_id=121)
+            log("phase 1 LinkMenu waitForInputLoop readiness sent")
+
     def current_menu_item() -> int | None:
         try:
             return session._pyboy.memory[session.symbols.addr_of("wCurrentMenuItem")]
@@ -1798,35 +1950,6 @@ def _run_peer(trace=None) -> int:
             # independently observes that same entry.  Do not wait for wire
             # quietness here: the next legitimate transfer can be the peer's
             # final pre-menu edge.
-            if link_menu_announced:
-                if not peer_link_menu_ready:
-                    peer_link_menu_ready = link._network_backend.poll_peer_sync(sync_id=121)
-                if peer_link_menu_ready:
-                    _finish_link_menu_phase(
-                        args.goal,
-                        cooperative_sync=cooperative_sync,
-                        peer_shutdown_sync=peer_shutdown_sync,
-                    )
-                    log("phase 1 done: LinkMenu fired on both peers")
-                    break
-                session.step(1)
-                continue
-            if (
-                save_choice_released
-                and counters["CloseLinkConnection"][0] > close_count_at_save_choice_release
-            ):
-                nonzero_counters = {
-                    name: count[0] for name, count in counters.items() if count[0]
-                }
-                raise RuntimeError(
-                    "Cable Club closed before LinkMenu after synchronized save choice: "
-                    f"close_count_before={close_count_at_save_choice_release} "
-                    f"close_count_after={counters['CloseLinkConnection'][0]} "
-                    f"counters={nonzero_counters} "
-                    f"menu={menu_snapshot()} state={state_snapshot()} "
-                    f"cpu={cpu_snapshot()} backend={backend_snapshot()} "
-                    f"pre_link_menu={pre_link_menu_history.snapshot() if pre_link_menu_history else {}}"
-                )
             if not save_choice_released:
                 # Do not let either process send the confirmation A while the
                 # other is still consuming the receptionist text. Yellow's
@@ -1860,54 +1983,33 @@ def _run_peer(trace=None) -> int:
                 session.press("a", duration=1)
                 session.step(2)
                 continue
-            in_serial_phase = (
-                counters["SaveGameData"][0] > 0 or counters["Serial_SyncAndExchangeNybble"][0] > 0
+            # From the real save confirmation onward, neither owner is
+            # allowed to accumulate uncredited emulation. This remains true
+            # after the faster ROM reaches LinkMenu: it must not emit menu
+            # votes while its peer is still in the cartridge's $60-class
+            # pre-menu handshake. Marker 121 is therefore sent only after
+            # the local ROM has reached LinkMenu.waitForInputLoop, and phase
+            # 1 ends only after the peer has independently done the same.
+            check_pre_link_failure(
+                close_count_before_release=close_count_at_save_choice_release,
+                save_released=True,
             )
-            if in_serial_phase:
-                # Do not block on a phase barrier while either emulator is
-                # inside a serial transfer. The slave's main thread must be
-                # allowed to run its serial IRQ handler and re-arm SC while
-                # the peer's NetworkBackend is waiting for this edge. The
-                # network edge/response protocol already provides the
-                # per-byte synchronization; explicit barriers are reserved
-                # for safe UI/phase boundaries below.
-                session.step(2)
-                serial_phase_ticks += 1
-                if (
-                    counters["LinkMenu.waitForInputLoop"][0] > 0
-                    and menu_fields_ready(
-                        min_item=0,
-                        max_item=link_menu_max,
-                        expected_max=link_menu_max,
-                        required_keys=0x01,
-                    )
-                    and not link_menu_announced
-                ):
-                    link_menu_announced = True
-                    log("phase 1 local LinkMenu fired")
-                    shot("01_link_menu")
-                    link._network_backend.announce_sync(sync_id=121)
-                    log("phase 1 LinkMenu readiness sent")
-            else:
-                if (
-                    counters["LinkMenu.waitForInputLoop"][0] > 0
-                    and menu_fields_ready(
-                        min_item=0,
-                        max_item=link_menu_max,
-                        expected_max=link_menu_max,
-                        required_keys=0x01,
-                    )
-                    and not link_menu_announced
-                ):
-                    link_menu_announced = True
-                    log("phase 1 local LinkMenu fired")
-                    shot("01_link_menu")
-                    link._network_backend.announce_sync(sync_id=121)
-                    log("phase 1 LinkMenu readiness sent")
-                # The save confirmation was issued exactly once above. From
-                # here the cartridge owns the save/serial phase; keep it
-                # moving in short slices and never inject a second A.
-                session.step(2)
+            announce_link_menu_wait_loop_if_ready()
+            if link_menu_announced and not peer_link_menu_ready:
+                peer_link_menu_ready = link._network_backend.poll_peer_sync(sync_id=121)
+            if link_menu_announced and peer_link_menu_ready:
+                _finish_link_menu_phase(
+                    args.goal,
+                    cooperative_sync=cooperative_sync,
+                    peer_shutdown_sync=peer_shutdown_sync,
+                )
+                log("phase 1 done: both LinkMenu waitForInputLoop hooks fired")
+                break
+            post_save_lockstep_quantum(
+                close_count_before_release=close_count_at_save_choice_release,
+                save_released=True,
+            )
+            serial_phase_ticks += 1
             if time.monotonic() - last_progress > 10.0:
                 log(
                     f"phase 1 progress: "
