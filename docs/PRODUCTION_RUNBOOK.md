@@ -6,11 +6,12 @@ ROMs, symbols, save states, and sanitized evidence remain operator-managed.
 
 ## Current evidence and release decision
 
-**Release status: `PARTIAL`, not `PRODUCTION-READY`.** Candidate `1f19707`
-passed the dual source/native unit-and-timing gate and canonical boot checks.
-No clean full source/native gameplay qualification is established.
+**Release status: `PARTIAL`, not `PRODUCTION-READY`.** The retained baseline
+candidate `1f19707` passed the dual source/native unit-and-timing gate and
+canonical boot checks. The current source-runtime trade follow-up is recorded
+below; no clean full source/native gameplay qualification is established.
 
-| Latest scope at `1f19707` | Recorded result | Evidence boundary |
+| Retained baseline scope at `1f19707` | Recorded result | Evidence boundary |
 |---|---|---|
 | Source and native unit/timing | Each runtime: `1,176/1,176` unit and `65/65` total timing (`13` cases × five repetitions) | `1,320` collected in each runtime; zero failures, skips, xfails, xpasses, or errors. All `19/19` trade and `19/19` battle entrypoints declared, but not executed by this unit gate. |
 | Canonical boot/state/save/load | Source `3/3` in `6.74s`; native `3/3` in `1.89s` | Zero failures, skips, or errors; one SDL warning each. Color Red, color Blue, and Yellow run 120 frames, then state and save/load checks. Not intro completion, MCP, or gameplay acceptance. |
@@ -43,16 +44,19 @@ operator-supplied ROM, symbol, and fixture roots:
 
 | Scope | Result | Evidence boundary |
 |---|---|---|
-| Strict source-runtime trade tier | `19/19` passed | All nine local version pairs, all nine TCP role pairs, and the additional strict Red/Yellow party-record assertion passed. Compiled-runtime, MCP, and host/platform claims remain separate. |
+| Strict source-runtime trade tier | `19/19` passed in `914.3s` with four workers | All nine local version pairs, all nine TCP role pairs, and the additional strict Red/Yellow party-record assertion passed. Compiled-runtime, MCP, and host/platform claims remain separate. |
 | Blue-color ↔ Blue-color | LinkMenu, full trade, and one battle turn passed | Native edge traffic balanced; same-family frame barrier completed without owner or reader errors. Representative replay only. |
-| Blue-color ↔ Yellow | LinkMenu, full party-record trade, and one battle turn passed | Cross-family native edge transport completed without frame-barrier traffic, owner errors, or reader errors. Representative replay only. |
-| Affected source regression slice | `258` passed, `19` expected asset-gated skips | Vendored/source runtime; no strict full matrix, compiled-runtime, or MCP gameplay claim. Ruff passed for touched files. |
+| Blue-color ↔ Yellow | LinkMenu, full party-record trade, and one battle turn passed | The affected non-Yellow-listener/Yellow-connector ordering uses a short bounded frame-paced walk rendezvous, then native edge pacing for the serial exchange; the reverse ordering remains native. Representative replay only. |
+| Focused source regression slice | `54` non-ROM subprocess-helper tests passed | Vendored/source runtime; no compiled-runtime, MCP, or host/platform claim. Ruff passed for the touched driver. |
 
 The family-specific frame policy is intentional: identical ROM families use a
-bounded owner-frame barrier, while Yellow↔Red/Blue keeps the native edge path
-because the cartridges expose different polling windows. This working-tree
-evidence closes the source-runtime trade tier but does not replace the
-required strict battle tier, compiled-runtime, MCP, or host/platform evidence.
+bounded owner-frame barrier. For cross-family pairs, only the ordered
+non-Yellow-listener/Yellow-connector walk boundary receives a short frame-paced
+rendezvous; the serial-heavy exchange then returns to native edge pacing, while
+the reverse ordering stays on its established native path because the
+cartridges expose different polling windows. This working-tree evidence closes
+the source-runtime trade tier but does not replace the required strict battle
+tier, compiled-runtime, MCP, or host/platform evidence.
 
 ### Retained historical results
 
@@ -114,8 +118,10 @@ this candidate.
 
 ## Capability boundary
 
-Source strict battle has the recorded 19/19 result above. Full source release
-acceptance remains pending; the recorded four-worker trade matrix failed.
+The current source-runtime trade follow-up above passes 19/19. The retained
+source strict battle result is 19/19, but full source release acceptance
+remains pending until the candidate's complete required scope is rerun and
+compiled-runtime, MCP, and platform evidence are established.
 Native gameplay, MCP starter/trade/battle, vanilla fixture provenance,
 broad-suite/platform/load coverage,
 and independent release review remain open. Six canonical fixture entries have
@@ -569,9 +575,10 @@ uses a legal derived three-mon fixture and requires both sides to reach move
 exchange and turn execution. It does not require the optional damage
 calculation hook. Neither case writes party or battle state during acceptance.
 These selectors and their declaration are not live evidence by themselves.
-The recorded source strict battle result covers all 19 local/TCP entrypoints;
-the recorded four-worker strict trade matrix failed at 18/19. Every required
-row must execute and pass without failures or skips for release acceptance.
+The retained source strict battle result covers all 19 local/TCP entrypoints;
+the current working-tree source trade result covers all 19 strict entrypoints.
+Every required row must execute and pass without failures or skips for release
+acceptance.
 Retain the tested commit, runtime, assets, roles, deadlines, and teardown;
 historical source-local 9/9 and native results do not qualify another runtime.
 
@@ -610,12 +617,13 @@ compare complete party-mon records or execute a battle turn, and are
 parametrized over all nine ordered canonical listener/connector pairs. Both
 payloads travel through native bit-level serial traffic, and the tests reject
 the out-of-band exchange counter. A declaration or collection result does not
-execute these gameplay assertions. The recorded source
-strict battle matrix passed 19/19, while strict trade failed 18/19 with four
-workers. These are separate from transport/lifecycle checks and from MCP-driven
-gameplay. A complete passing source release gate and compiled-runtime gameplay
-qualification remain open. Record both child traces and exact deadlines when
-investigating a regression.
+execute these gameplay assertions. The current working-tree source strict trade
+gate passed 19/19; the retained source strict battle matrix passed 19/19,
+while the historical trade gate below failed 18/19 with four workers. These are
+separate from transport/lifecycle checks and from MCP-driven gameplay. A
+complete source release gate and compiled-runtime gameplay qualification remain
+open. Record both child traces and exact deadlines when investigating a
+regression.
 
 For opt-in subprocess-peer Python stack diagnostics, set
 `POKERED_PEER_TRACE_AFTER_SECONDS` to a positive finite number. Optionally set
@@ -663,11 +671,12 @@ listener/connector rows, and one dedicated Red/Yellow assertion: 19 total.
 Listener/connector order matters, and stock-ROM rows and LinkMenu-only
 milestones are outside this strict claim.
 
-The recorded source results are battle `PASS` at 19/19 and four-worker trade
-`FAIL` at 18/19. The failed trade row is Red-color listener to Blue-color
-connector. No clean full gate is established for `1f19707`. Rerun affected tiers
-after runtime changes and retain complete results; diagnostic retries and
-historical native results do not replace a passing matrix.
+The current working-tree source trade result is `PASS` at 19/19. The retained
+historical source results include battle `PASS` at 19/19 and trade `FAIL` at
+18/19; its failed row was Red-color listener to Blue-color connector. No clean
+full gate is established for the current candidate. Rerun affected tiers after
+runtime changes and retain complete results; diagnostic retries and historical
+native results do not replace a passing matrix.
 
 ## 5. Generate link fixtures safely
 
@@ -812,10 +821,10 @@ transport or LinkMenu milestone as a completed trade or battle.
 
 ## 8. Current sign-off blockers
 
-Release status remains `PARTIAL`. Before sign-off, retain a completed full
-source gate for the candidate under review, including a passing strict trade
-matrix. The recorded source battle 19/19 pass is scoped acceptance, not a
-full-gate result. Also establish compiled-runtime gameplay qualification,
+Release status remains `PARTIAL`. The current source strict trade follow-up
+passes 19/19, but before sign-off retain a completed full source gate for the
+candidate under review. The recorded source battle 19/19 pass is scoped
+acceptance, not a full-gate result. Also establish compiled-runtime gameplay,
 current MCP startup/state/action/lifecycle checks, required concurrency and
 cleanup regressions, and independent release review. The standard-library
 editable-install path has the scoped passing evidence recorded above; retain
