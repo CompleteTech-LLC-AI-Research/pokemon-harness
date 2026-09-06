@@ -31,9 +31,11 @@ Slave IRQ
 ---------
 
 When the owner-side dispatch path completes the 8th edge on the local slave
-core, it fires the optional ``irq_callback`` so halted code wakes up
-(Pokemon's ``halt; wait for serial IRQ`` idiom). Wire this to
-``pyboy.mb.cpu.set_interruptflag(INTR_SERIAL)`` on attach.
+core, it queues the optional ``irq_callback`` until the response worker has
+written the matching ``EDGE_RESP``. The emulator owner delivers that pending
+IRQ at its next dispatch boundary so halted code wakes up (Pokemon's ``halt;
+wait for serial IRQ`` idiom) only after the peer can complete its byte. Wire
+this to ``pyboy.mb.cpu.set_interruptflag(INTR_SERIAL)`` on attach.
 
 Threading model
 ---------------
@@ -369,6 +371,11 @@ class NetworkBackend:
         # native serial object.
         self._edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(maxsize=256)
         self._completed_edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(maxsize=256)
+        # Completed slave bytes cannot raise their serial IRQ until the
+        # matching EDGE_RESP has reached the socket.  The response worker
+        # only enqueues this owner-thread work; service_pending_edges() is
+        # the sole delivery point for callbacks that may touch PyBoy state.
+        self._pending_owner_irq_queue: queue.Queue[_InboundEdge] = queue.Queue(maxsize=256)
         # Counts EDGE_REQ frames from enqueue until their response has been
         # written.  A phase barrier can therefore wait for the wire work
         # already admitted by the reader without mistaking an armed-but-idle
@@ -670,15 +677,16 @@ class NetworkBackend:
         :meth:`service_pending_edges`. The latter is the production
         PyBoy path: the caller that owns the emulator tick applies the
         bit to ``local_core`` via ``apply_external_edge``, reads
-        ``peek_out_bit()``, and invokes ``irq_callback`` while holding
-        ``serial_gate``. No network thread touches emulator state.
+        ``peek_out_bit()``, and delivers any already-sent completion IRQs
+        while holding ``serial_gate``. No network thread touches emulator
+        state.
 
         ``dispatch_to_owner=True`` requires a shared ``serial_gate``. The
         PyBoy tick wrapper and this owner-side dispatch must use the same
         gate so a native ``Serial.tick`` cannot overlap an external edge.
         If ``apply_external_edge`` returns True (8th-edge completion) and
-        ``irq_callback`` is provided, the callback fires on the owner
-        thread.
+        ``irq_callback`` is provided, the response worker queues the callback
+        only after writing ``EDGE_RESP``; a subsequent owner dispatch fires it.
 
         ``EDGE_RESP`` frames (responses to our own master-side
         ``on_edge`` requests) are put on the response queue for the
@@ -1523,7 +1531,9 @@ class NetworkBackend:
                 return
             try:
                 if not self._closed:
-                    self._send_edge_response(request)
+                    response_sent = self._send_edge_response(request)
+                    if response_sent and request.completed:
+                        self._queue_owner_completion_irq(request)
             except Exception as exc:  # noqa: BLE001
                 self._mark_closed(exc)
                 return
@@ -1562,6 +1572,7 @@ class NetworkBackend:
 
     def _service_pending_edges_locked(self, *, max_edges: int | None) -> int:
         """Drain ready requests while the caller holds the serial gate."""
+        self._deliver_sent_owner_irqs()
         applied = 0
         while max_edges is None or applied < max_edges:
             try:
@@ -1720,32 +1731,6 @@ class NetworkBackend:
         )
         if completed:
             self._stats["last_slave_byte_complete_at"] = time.monotonic()
-            if self._irq_callback is None:
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="not_configured",
-                )
-            else:
-                self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
-                try:
-                    self._irq_callback()
-                except Exception as exc:
-                    self._record_serial_event(
-                        "irq_callback",
-                        direction="local",
-                        byte_complete=True,
-                        outcome="error",
-                        error_type=type(exc).__name__,
-                    )
-                    raise
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="success",
-                )
 
     def _serial_completion_context(self) -> dict[str, object] | None:
         """Capture a bounded, JSON-safe owner diagnostic without side effects."""
@@ -1776,7 +1761,7 @@ class NetworkBackend:
                 truncated = True
         return {"status": "ok", "truncated": truncated, "value": value}
 
-    def _send_edge_response(self, request: _InboundEdge) -> None:
+    def _send_edge_response(self, request: _InboundEdge) -> bool:
         """Send an owner-produced response without touching emulator state."""
         if request.error is not None:
             raise NetworkBackendError(
@@ -1797,7 +1782,7 @@ class NetworkBackend:
                         byte_complete=request.completed,
                         outcome="not_sent_closed",
                     )
-                    return
+                    return False
                 self._send_frame(
                     _FRAME.pack(_OP_EDGE_RESP, request.response_bit),
                     timeout=max(0.0, write_deadline - time.monotonic()),
@@ -1821,6 +1806,50 @@ class NetworkBackend:
             byte_complete=request.completed,
             outcome="success",
         )
+        return True
+
+    def _queue_owner_completion_irq(self, request: _InboundEdge) -> None:
+        """Queue a sent byte-completion IRQ without touching emulator state."""
+        try:
+            self._pending_owner_irq_queue.put_nowait(request)
+        except queue.Full as exc:
+            raise NetworkBackendError("sent EDGE_RESP IRQ queue is full") from exc
+
+    def _deliver_sent_owner_irqs(self) -> None:
+        """Deliver sent completion IRQs on the emulator-owner thread only."""
+        while True:
+            try:
+                self._pending_owner_irq_queue.get_nowait()
+            except queue.Empty:
+                return
+            if self._closed:
+                continue
+            if self._irq_callback is None:
+                self._record_serial_event(
+                    "irq_callback",
+                    direction="local",
+                    byte_complete=True,
+                    outcome="not_configured",
+                )
+                continue
+            self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
+            try:
+                self._irq_callback()
+            except Exception as exc:
+                self._record_serial_event(
+                    "irq_callback",
+                    direction="local",
+                    byte_complete=True,
+                    outcome="error",
+                    error_type=type(exc).__name__,
+                )
+                raise
+            self._record_serial_event(
+                "irq_callback",
+                direction="local",
+                byte_complete=True,
+                outcome="success",
+            )
 
     def _signal_edge_worker_stop(self) -> None:
         target_queue = self._completed_edge_queue if self._dispatch_to_owner else self._edge_queue
