@@ -60,6 +60,7 @@ _PRE_LINK_MENU_QUANTUM_READY_SYNC = 126
 _PRE_LINK_MENU_QUANTUM_COMPLETE_SYNC = 127
 _PRE_LINK_MENU_FAILURE_SYNC = 128
 _PRE_LINK_MENU_FAILURE_ACK_SYNC = 129
+_PRE_LINK_MENU_SAVE_ENTRY_SYNC = 130
 
 # Local pinned ROM/SYM bytes, interpreted against pret's
 # engine/link/cable_club_npc.asm and home/serial.asm. CALL return sites are
@@ -1690,6 +1691,22 @@ def _run_peer(trace=None) -> int:
             link._network_backend.announce_sync(sync_id=121)
             log("phase 1 LinkMenu waitForInputLoop readiness sent")
 
+    def announce_save_game_data_if_ready(*, already_announced: bool) -> bool:
+        """Advertise an independently observed native post-save entry.
+
+        A synchronized confirmation input is not proof that both ROMs have
+        completed their different dialog/save paths.  The SaveGameData hook
+        is the first shared ROM-owned post-input boundary.  This call never
+        waits for a peer: until both markers exist, each owner must continue
+        short authentic slices so a pending serial edge cannot starve the
+        slower cartridge before it reaches the same boundary.
+        """
+        if already_announced or counters["SaveGameData"][0] == 0:
+            return already_announced
+        link._network_backend.announce_sync(sync_id=_PRE_LINK_MENU_SAVE_ENTRY_SYNC)
+        log("phase 1 local SaveGameData entry observed")
+        return True
+
     def current_menu_item() -> int | None:
         try:
             return session._pyboy.memory[session.symbols.addr_of("wCurrentMenuItem")]
@@ -1942,6 +1959,8 @@ def _run_peer(trace=None) -> int:
         peer_save_choice_ready = False
         save_choice_released = False
         close_count_at_save_choice_release = 0
+        save_entry_announced = False
+        peer_save_entry_ready = False
         while time.monotonic() < deadline:
             # TCP listener/connector is not a Game Boy clock-role contract.
             # Cable Club may invert clock ownership while either ROM remains
@@ -1983,8 +2002,8 @@ def _run_peer(trace=None) -> int:
                 session.press("a", duration=1)
                 session.step(2)
                 continue
-            # From the real save confirmation onward, neither owner is
-            # allowed to accumulate uncredited emulation. This remains true
+            # After each ROM has independently entered SaveGameData, neither
+            # owner may accumulate uncredited emulation. This remains true
             # after the faster ROM reaches LinkMenu: it must not emit menu
             # votes while its peer is still in the cartridge's $60-class
             # pre-menu handshake. Marker 121 is therefore sent only after
@@ -1994,6 +2013,27 @@ def _run_peer(trace=None) -> int:
                 close_count_before_release=close_count_at_save_choice_release,
                 save_released=True,
             )
+            save_entry_announced = announce_save_game_data_if_ready(
+                already_announced=save_entry_announced
+            )
+            if save_entry_announced and not peer_save_entry_ready:
+                # This is deliberately a nonblocking poll. The peer can
+                # still be completing its own SaveGameData call or servicing
+                # an admitted serial edge, so a control-plane barrier here
+                # would recreate the starvation seen in the first revision.
+                peer_save_entry_ready = link._network_backend.poll_peer_sync(
+                    sync_id=_PRE_LINK_MENU_SAVE_ENTRY_SYNC
+                )
+            if not (save_entry_announced and peer_save_entry_ready):
+                # Both ROMs retain their authentic post-confirmation pace
+                # until their independently observed SaveGameData entries
+                # are known. Service a pending owner-dispatch edge before
+                # each short slice; no RAM/menu state and no TCP clock-role
+                # policy is involved.
+                service_pre_link_edge()
+                session.step(1)
+                service_pre_link_edge()
+                continue
             announce_link_menu_wait_loop_if_ready()
             if link_menu_announced and not peer_link_menu_ready:
                 peer_link_menu_ready = link._network_backend.poll_peer_sync(sync_id=121)
