@@ -804,8 +804,8 @@ def test_serial_transcript_is_disabled_by_default_and_validates_capacity():
         peer.stop()
 
 
-def test_serial_transcript_ring_drops_oldest_records_in_sequence_order():
-    """A small transcript remains bounded while preserving local event order."""
+def test_serial_transcript_ring_retains_initial_record_while_evicting_tail():
+    """A bounded transcript keeps its diagnostic starting point under pressure."""
     backend, peer_backend = NetworkBackend.pair()
     backend.enable_serial_transcript(max_entries=2)
 
@@ -824,13 +824,17 @@ def test_serial_transcript_ring_drops_oldest_records_in_sequence_order():
 
         transcript = backend.snapshot_stats()["serial_transcript"]
         records = transcript["records"]
+        first_records = transcript["first_records"]
         assert transcript["enabled"] is True
         assert transcript["capacity"] == 2
         assert transcript["dropped"] == 1
+        # ``records`` remains the legacy tail ring; the bounded prefix mirror
+        # preserves the diagnostic starting point independently.
         assert [record["sequence"] for record in records] == [2, 3]
-        assert [record["event"] for record in records] == [
+        assert [record["sequence"] for record in first_records] == [1, 2]
+        assert [record["event"] for record in first_records] == [
+            "edge_req_sent",
             "edge_resp_received",
-            "edge_resp_consumed",
         ]
         timestamps = [record["monotonic_s"] for record in records]
         assert timestamps == sorted(timestamps)
@@ -846,6 +850,58 @@ def test_serial_transcript_ring_drops_oldest_records_in_sequence_order():
         peer.join(timeout=1.0)
         backend.stop()
         peer_backend.stop()
+
+
+def test_serial_transcript_is_opt_in_and_resets_initial_retention_on_reenable():
+    """Enable/disable bounds one attempt and never leaks prior initial records."""
+    backend, peer = NetworkBackend.pair()
+    disabled = {
+        "enabled": False,
+        "capacity": 0,
+        "dropped": 0,
+        "records": [],
+    }
+    try:
+        # Recording is a no-op unless the caller explicitly enables it.
+        backend._record_serial_event("before_enable")
+        assert backend.snapshot_stats()["serial_transcript"] == disabled
+
+        backend.enable_serial_transcript(max_entries=3)
+        for event in ("initial", "middle", "tail", "latest"):
+            backend._record_serial_event(event)
+        first_attempt = backend.snapshot_stats()["serial_transcript"]
+        assert first_attempt["capacity"] == 3
+        assert first_attempt["dropped"] == 1
+        assert [record["sequence"] for record in first_attempt["records"]] == [2, 3, 4]
+        assert [record["event"] for record in first_attempt["records"]] == [
+            "middle",
+            "tail",
+            "latest",
+        ]
+        assert [record["sequence"] for record in first_attempt["first_records"]] == [1, 2, 3]
+        assert [record["event"] for record in first_attempt["first_records"]] == [
+            "initial",
+            "middle",
+            "tail",
+        ]
+
+        backend.disable_serial_transcript()
+        backend._record_serial_event("while_disabled")
+        assert backend.snapshot_stats()["serial_transcript"] == disabled
+
+        backend.enable_serial_transcript(max_entries=2)
+        backend._record_serial_event("new_initial")
+        second_attempt = backend.snapshot_stats()["serial_transcript"]
+        assert second_attempt["enabled"] is True
+        assert second_attempt["capacity"] == 2
+        assert second_attempt["dropped"] == 0
+        assert [
+            (record["sequence"], record["event"])
+            for record in second_attempt["records"]
+        ] == [(1, "new_initial")]
+    finally:
+        backend.stop()
+        peer.stop()
 
 
 def test_serial_transcript_copies_worker_edge_byte_completion_and_irq_outcome():
