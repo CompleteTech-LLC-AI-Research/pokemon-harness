@@ -898,6 +898,231 @@ def test_serial_transcript_copies_worker_edge_byte_completion_and_irq_outcome():
         slave_backend.stop()
 
 
+def test_worker_slave_completion_irq_precedes_delayed_edge_response_write(monkeypatch):
+    """The eighth slave edge completes locally before its TCP reply can unblock.
+
+    A response write is transport acknowledgement, not emulated hardware.
+    Holding it proves the compatibility worker exposes the completed SB/SC
+    state and serial IRQ before the master is allowed to continue.
+    """
+    master_backend, slave_backend = NetworkBackend.pair()
+    slave_core = _CompletingSlaveCore()
+    irq_fired = threading.Event()
+    response_write_entered = threading.Event()
+    release_response_write = threading.Event()
+    result: list[object] = []
+    order: list[str] = []
+    original_send_frame = slave_backend._send_frame
+
+    def delayed_response_write(frame, *, timeout, operation, cancel_event=None):
+        if frame[0] == _OP_EDGE_RESP:
+            order.append("response_write")
+            response_write_entered.set()
+            assert release_response_write.wait(timeout=1.0)
+        return original_send_frame(
+            frame,
+            timeout=timeout,
+            operation=operation,
+            cancel_event=cancel_event,
+        )
+
+    def irq_callback() -> None:
+        order.append("irq")
+        irq_fired.set()
+
+    def send_master_edge() -> None:
+        try:
+            result.append(master_backend.on_edge(our_bit=1, our_role=1))
+        except BaseException as exc:  # noqa: BLE001 - assert on the owning test thread
+            result.append(exc)
+
+    monkeypatch.setattr(slave_backend, "_send_frame", delayed_response_write)
+    master_backend.start_receiver(local_core=None)
+    slave_backend.start_receiver(local_core=slave_core, irq_callback=irq_callback)
+    sender = threading.Thread(target=send_master_edge, daemon=True)
+    try:
+        sender.start()
+        assert response_write_entered.wait(timeout=1.0)
+        assert irq_fired.is_set(), "slave IRQ waited for EDGE_RESP TCP write"
+        assert order == ["irq", "response_write"]
+        assert slave_core.transfer_enabled == 0
+        assert slave_core.SB == 1
+
+        release_response_write.set()
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert result == [0]
+        assert slave_backend.debug_snapshot()["irq_callbacks"] == 1
+    finally:
+        release_response_write.set()
+        sender.join(timeout=1.0)
+        master_backend.stop()
+        slave_backend.stop()
+
+
+def test_owner_dispatch_completion_irq_precedes_delayed_edge_response_write(monkeypatch):
+    """The production owner path has the same eighth-edge ordering contract."""
+    master_backend, slave_backend = NetworkBackend.pair()
+    slave_core = _CompletingSlaveCore()
+    irq_fired = threading.Event()
+    response_write_entered = threading.Event()
+    release_response_write = threading.Event()
+    result: list[object] = []
+    order: list[str] = []
+    original_send_frame = slave_backend._send_frame
+
+    def delayed_response_write(frame, *, timeout, operation, cancel_event=None):
+        if frame[0] == _OP_EDGE_RESP:
+            order.append("response_write")
+            response_write_entered.set()
+            assert release_response_write.wait(timeout=1.0)
+        return original_send_frame(
+            frame,
+            timeout=timeout,
+            operation=operation,
+            cancel_event=cancel_event,
+        )
+
+    def irq_callback() -> None:
+        order.append("irq")
+        irq_fired.set()
+
+    def send_master_edge() -> None:
+        try:
+            result.append(master_backend.on_edge(our_bit=1, our_role=1))
+        except BaseException as exc:  # noqa: BLE001 - assert on the owning test thread
+            result.append(exc)
+
+    monkeypatch.setattr(slave_backend, "_send_frame", delayed_response_write)
+    master_backend.start_receiver(local_core=None)
+    slave_backend.start_receiver(
+        local_core=slave_core,
+        irq_callback=irq_callback,
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    sender = threading.Thread(target=send_master_edge, daemon=True)
+    try:
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while slave_backend.debug_snapshot()["pending_edge_requests"] == 0:
+            assert time.monotonic() < deadline, "owner dispatch never received EDGE_REQ"
+            time.sleep(0.001)
+        assert slave_backend.service_pending_edges() == 1
+        assert response_write_entered.wait(timeout=1.0)
+        assert irq_fired.is_set(), "owner IRQ waited for EDGE_RESP TCP write"
+        assert order == ["irq", "response_write"]
+        assert slave_core.transfer_enabled == 0
+        assert slave_core.SB == 1
+
+        release_response_write.set()
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert result == [0]
+        assert slave_backend.debug_snapshot()["irq_callbacks"] == 1
+    finally:
+        release_response_write.set()
+        sender.join(timeout=1.0)
+        master_backend.stop()
+        slave_backend.stop()
+
+
+def test_worker_response_write_failure_closes_after_local_completion_irq(monkeypatch):
+    """A failed EDGE_RESP remains terminal after the authentic local IRQ."""
+    master_backend, slave_backend = NetworkBackend.pair()
+    slave_core = _CompletingSlaveCore()
+    irq_fired = threading.Event()
+    result: list[object] = []
+    original_send_frame = slave_backend._send_frame
+
+    def failed_response_write(frame, *, timeout, operation, cancel_event=None):
+        if frame[0] == _OP_EDGE_RESP:
+            raise OSError("forced EDGE_RESP write failure")
+        return original_send_frame(
+            frame,
+            timeout=timeout,
+            operation=operation,
+            cancel_event=cancel_event,
+        )
+
+    def send_master_edge() -> None:
+        try:
+            result.append(master_backend.on_edge(our_bit=1, our_role=1))
+        except BaseException as exc:  # noqa: BLE001 - assert on the owning test thread
+            result.append(exc)
+
+    monkeypatch.setattr(slave_backend, "_send_frame", failed_response_write)
+    master_backend.start_receiver(local_core=None)
+    slave_backend.start_receiver(local_core=slave_core, irq_callback=irq_fired.set)
+    sender = threading.Thread(target=send_master_edge, daemon=True)
+    try:
+        sender.start()
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert irq_fired.is_set()
+        assert slave_core.transfer_enabled == 0
+        assert result and isinstance(result[0], NetworkBackendError)
+        assert not slave_backend.connected
+        assert slave_backend.debug_snapshot()["edge_resp_sent"] == 0
+    finally:
+        sender.join(timeout=1.0)
+        master_backend.stop()
+        slave_backend.stop()
+
+
+def test_owner_response_write_failure_closes_after_local_completion_irq(monkeypatch):
+    """Production owner completion survives a terminal response-worker failure."""
+    master_backend, slave_backend = NetworkBackend.pair()
+    slave_core = _CompletingSlaveCore()
+    irq_fired = threading.Event()
+    result: list[object] = []
+    original_send_frame = slave_backend._send_frame
+
+    def failed_response_write(frame, *, timeout, operation, cancel_event=None):
+        if frame[0] == _OP_EDGE_RESP:
+            raise OSError("forced owner EDGE_RESP write failure")
+        return original_send_frame(
+            frame,
+            timeout=timeout,
+            operation=operation,
+            cancel_event=cancel_event,
+        )
+
+    def send_master_edge() -> None:
+        try:
+            result.append(master_backend.on_edge(our_bit=1, our_role=1))
+        except BaseException as exc:  # noqa: BLE001 - assert on the owning test thread
+            result.append(exc)
+
+    monkeypatch.setattr(slave_backend, "_send_frame", failed_response_write)
+    master_backend.start_receiver(local_core=None)
+    slave_backend.start_receiver(
+        local_core=slave_core,
+        irq_callback=irq_fired.set,
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    sender = threading.Thread(target=send_master_edge, daemon=True)
+    try:
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while slave_backend.debug_snapshot()["pending_edge_requests"] == 0:
+            assert time.monotonic() < deadline, "owner dispatch never received EDGE_REQ"
+            time.sleep(0.001)
+        assert slave_backend.service_pending_edges() == 1
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert irq_fired.is_set()
+        assert slave_core.transfer_enabled == 0
+        assert result and isinstance(result[0], NetworkBackendError)
+        assert not slave_backend.connected
+        assert slave_backend.debug_snapshot()["edge_resp_sent"] == 0
+    finally:
+        sender.join(timeout=1.0)
+        master_backend.stop()
+        slave_backend.stop()
+
+
 def _complete_worker_edge_with_transcript_context(
     provider,
     *,

@@ -1720,32 +1720,51 @@ class NetworkBackend:
         )
         if completed:
             self._stats["last_slave_byte_complete_at"] = time.monotonic()
-            if self._irq_callback is None:
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="not_configured",
-                )
-            else:
-                self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
-                try:
-                    self._irq_callback()
-                except Exception as exc:
-                    self._record_serial_event(
-                        "irq_callback",
-                        direction="local",
-                        byte_complete=True,
-                        outcome="error",
-                        error_type=type(exc).__name__,
-                    )
-                    raise
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="success",
-                )
+            self._notify_completed_slave_irq(isolate_callback_errors=False)
+
+    def _notify_completed_slave_irq(self, *, isolate_callback_errors: bool) -> None:
+        """Expose the serial IRQ caused by an already-completed eighth edge.
+
+        Hardware completion (SB latch plus SC bit-7 clear) and the IRQ are
+        consequences of the same external clock edge. The transport response
+        may release the remote master later, but must never delay this local
+        event. Owner dispatch propagates a callback error because it runs on
+        the emulator owner; the legacy worker preserves its historical
+        callback-error isolation.
+        """
+        if self._irq_callback is None:
+            self._record_serial_event(
+                "irq_callback",
+                direction="local",
+                byte_complete=True,
+                outcome="not_configured",
+            )
+            return
+        self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
+        try:
+            self._irq_callback()
+        except Exception as exc:
+            if isolate_callback_errors:
+                self._stats["irq_callback_errors"] = int(
+                    self._stats["irq_callback_errors"]
+                ) + 1
+                self._stats["last_irq_callback_error"] = type(exc).__name__
+            self._record_serial_event(
+                "irq_callback",
+                direction="local",
+                byte_complete=True,
+                outcome="error",
+                error_type=type(exc).__name__,
+            )
+            if not isolate_callback_errors:
+                raise
+        else:
+            self._record_serial_event(
+                "irq_callback",
+                direction="local",
+                byte_complete=True,
+                outcome="success",
+            )
 
     def _serial_completion_context(self) -> dict[str, object] | None:
         """Capture a bounded, JSON-safe owner diagnostic without side effects."""
@@ -2004,6 +2023,10 @@ class NetworkBackend:
                         self._core_state_snapshot(core) if keepalive_state is not None else None
                     ),
                 )
+        # The completed edge is local hardware state; EDGE_RESP only releases
+        # the remote master and can block or fail independently.
+        if completed:
+            self._notify_completed_slave_irq(isolate_callback_errors=True)
         try:
             with self._write_guard(
                 timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
@@ -2034,37 +2057,6 @@ class NetworkBackend:
             byte_complete=completed,
             outcome="success" if not self._closed else "not_sent_closed",
         )
-        if completed and self._irq_callback is not None:
-            try:
-                self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
-                self._irq_callback()
-            except Exception as exc:  # noqa: BLE001 - isolate optional callback
-                # IRQ callback errors shouldn't kill the reader thread. Keep a
-                # compact diagnostic so callers can inspect failures through
-                # debug_snapshot() without changing transport behavior.
-                self._stats["irq_callback_errors"] = int(self._stats["irq_callback_errors"]) + 1
-                self._stats["last_irq_callback_error"] = type(exc).__name__
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="error",
-                    error_type=type(exc).__name__,
-                )
-            else:
-                self._record_serial_event(
-                    "irq_callback",
-                    direction="local",
-                    byte_complete=True,
-                    outcome="success",
-                )
-        elif completed:
-            self._record_serial_event(
-                "irq_callback",
-                direction="local",
-                byte_complete=True,
-                outcome="not_configured",
-            )
 
     @staticmethod
     def _core_state_snapshot(core: object | None) -> dict[str, object]:
