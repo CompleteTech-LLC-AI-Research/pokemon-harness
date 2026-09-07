@@ -216,6 +216,29 @@ def test_tcp_peer_close_causes_closed_error():
     client.close()
 
 
+def test_tcp_close_wakes_inflight_exchange():
+    """Closing a peer must release an exchange waiter before its deadline."""
+    server, client = _make_tcp_pair()
+    outcome = []
+
+    def exchange_worker():
+        try:
+            client.exchange("inflight", b"x", timeout_ms=5000)
+        except Exception as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    worker = threading.Thread(target=exchange_worker)
+    worker.start()
+    time.sleep(0.05)
+    server.close()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], SerialLinkClosed)
+    client.close()
+
+
 def test_tcp_rejects_malformed_frame():
     """Hand-craft a bogus frame and confirm the reader thread raises."""
     server, client = _make_tcp_pair()
