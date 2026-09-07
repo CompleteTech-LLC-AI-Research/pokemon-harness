@@ -136,15 +136,23 @@ def run_phase_intro(drv: WalkthroughDriver) -> None:
     # Alternating DOWN+A is safe on both dialog (DOWN no-op) and
     # preset menus (DOWN selects RED/BLUE). 300-iter cap with the
     # "actually-moved" probe as escape.
+    bedroom_probe_count = 0
     for _ in range(300):
         # Quick motion probe to detect control.
         gs_before = drv.session.read_game_state()
         if gs_before.overworld.map_id == MAP_REDS_HOUSE_2F and not drv.input_locked():
-            drv.press("down", note="bedroom: probe", step_ticks=20)
+            bedroom_probe_count += 1
+            drv.press("left", note="bedroom: probe", step_ticks=20)
             gs = drv.session.read_game_state()
             if (gs.overworld.x, gs.overworld.y) != (gs_before.overworld.x, gs_before.overworld.y):
+                drv.press("right", note="bedroom: restore", step_ticks=20)
                 drv.idle(16, render=False)
                 return
+            if bedroom_probe_count % 10 == 0:
+                drv.press("start", note="bedroom/name: confirm", step_ticks=60)
+                continue
+            drv.press("a", note="bedroom: finish text", step_ticks=30)
+            continue
         if drv.input_locked():
             drv.idle(60, render=False)
             continue

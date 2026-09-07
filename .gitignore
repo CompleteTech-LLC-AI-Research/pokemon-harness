@@ -25,12 +25,46 @@ venv/
 walkthrough_output/
 walkthrough_*/
 
+# Production-gate reports and ROM-derived diagnostics
+.production-gate/
+production_gate_output/
+artifacts/
+
 # Tooling
 .idea/
 .vscode/
 *.swp
 .DS_Store
 
-# Non-Cython PyBoy venv + vendor source (see test_pyboy_link_session_roms.py)
+# Non-Cython PyBoy venv.
 .venv-noncython/
-vendor/
+
+# The harness ships the exact patched PyBoy source used by the link runtime.
+# Keep generated/vendor extras out of the source distribution.
+vendor/*
+!vendor/
+!vendor/pyboy-src/
+!vendor/pyboy-src/**/
+!vendor/pyboy-src/**/
+!vendor/pyboy-src/*.py
+!vendor/pyboy-src/*.txt
+!vendor/pyboy-src/*.md
+!vendor/pyboy-src/*.in
+!vendor/pyboy-src/pyproject.toml
+!vendor/pyboy-src/pyboy/
+!vendor/pyboy-src/pyboy/**/*.py
+!vendor/pyboy-src/pyboy/**/*.pxd
+!vendor/pyboy-src/pyboy/**/*.pyx
+!vendor/pyboy-src/pyboy/**/*.bin
+!vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION
+
+# Keep PyBoy-generated build products and bundled sample ROMs ignored even
+# though the source tree above is allow-listed.
+vendor/pyboy-src/**/*.c
+vendor/pyboy-src/**/*.h
+vendor/pyboy-src/**/*.so
+vendor/pyboy-src/**/*.pyd
+vendor/pyboy-src/**/*.gb
+vendor/pyboy-src/**/*.gbc
+vendor/pyboy-src/**/__pycache__/
+vendor/pyboy-src/**/.benchmarks/

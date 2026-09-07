@@ -264,7 +264,7 @@ def _walk_up_until_battle(drv: BrockDriver, max_steps: int, label: str) -> bool:
             return True
         if gs.progress.badges_raw & 0x01:
             return False
-        if drv.joy_locked():
+        if drv.joy_locked() or gs.text.dest_in_vram_tilemap:
             drv.press("a")
             continue
         before = (gs.overworld.x, gs.overworld.y)
@@ -275,6 +275,12 @@ def _walk_up_until_battle(drv: BrockDriver, max_steps: int, label: str) -> bool:
                  f"({now.overworld.x},{now.overworld.y})")
             return True
         if (now.overworld.x, now.overworld.y) == before:
+            for _ in range(4):
+                if drv.gs().battle.active:
+                    return True
+                if not drv.gs().text.dest_in_vram_tilemap and not drv.joy_locked():
+                    break
+                drv.press("a")
             # Wall/NPC — try a small left-right wiggle.
             drv.press("left")
             drv.press("up")
@@ -303,7 +309,7 @@ def _walk_to_brock_line(drv: BrockDriver) -> bool:
             return True
         if gs.progress.badges_raw & 0x01:
             return False
-        if drv.joy_locked():
+        if drv.joy_locked() or gs.text.dest_in_vram_tilemap:
             drv.press("a")
             continue
         cx, cy = gs.overworld.x, gs.overworld.y
@@ -322,6 +328,12 @@ def _walk_to_brock_line(drv: BrockDriver) -> bool:
         if now.battle.active:
             return True
         if (now.overworld.x, now.overworld.y) == before:
+            for _ in range(4):
+                if drv.gs().battle.active:
+                    return True
+                if not drv.gs().text.dest_in_vram_tilemap and not drv.joy_locked():
+                    break
+                drv.press("a")
             # Blocked — drift right or left and retry.
             drv.press("right")
             drv.press("up")

@@ -1,0 +1,4 @@
+include VERSIONS.md
+include .mcp.json
+include tests/__init__.py
+include vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION

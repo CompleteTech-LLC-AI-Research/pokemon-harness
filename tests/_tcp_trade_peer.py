@@ -32,6 +32,12 @@ _TRADE_DIAG_SYMBOLS = (
     "CableClubLeftGameboy",
     "CableClubRightGameboy",
     "CableClub_DoBattleOrTrade",
+    "CableClub_DoBattleOrTradeAgain",
+    "CableClub_DoBattleOrTradeAgain.finishedPatchingPlayerData",
+    "CableClub_DoBattleOrTradeAgain.finishedPartyMonsPatchListPart",
+    "CableClub_DoBattleOrTradeAgain.finishedEnemyMonsPatchListPart",
+    "CableClub_DoBattleOrTradeAgain.trading",
+    "ReturnToCableClubRoom",
     "CallCurrentTradeCenterFunction",
     "TradeCenter_SelectMon",
     "TradeCenter_SelectMon.playerMonMenu_HandleInput",
@@ -40,7 +46,21 @@ _TRADE_DIAG_SYMBOLS = (
     "TradeCenter_SelectMon.selectTradeMenuItem",
     "TradeCenter_Trade",
     "_AddEnemyMonToPlayerParty",
+    "DisplayLinkBattleVersusTextBox",
+    "BattleTransition",
+    "MainInBattleLoop",
+    "MoveSelectionMenu",
+    "LinkBattleExchangeData",
+    "ExecutePlayerMove",
+    "ExecuteEnemyMove",
+    "PlayerCalcMoveDamage",
+    "EndOfBattle",
 )
+
+
+PARTY_MON_SIZE = 44
+PARTY_OT_SIZE = 11
+PARTY_NICK_SIZE = 11
 
 
 def _install_hook(session, symbol, bucket):
@@ -57,42 +77,213 @@ def _install_hook(session, symbol, bucket):
         pass
 
 
+def _party_summary(session) -> dict[str, object]:
+    """Return the game-owned party arrays for post-trade verification."""
+    memory = session._pyboy.memory
+    addr_of = session.symbols.addr_of
+    count = int(memory[addr_of("wPartyCount")])
+    species_addr = addr_of("wPartySpecies")
+    mons_addr = addr_of("wPartyMons")
+    return {
+        "count": count,
+        "species": [int(memory[species_addr + i]) for i in range(count + 1)],
+        "mon_species": [
+            int(memory[mons_addr + i * PARTY_MON_SIZE]) for i in range(count)
+        ],
+        "mon_records": [
+            bytes(
+                memory[mons_addr + i * PARTY_MON_SIZE + offset]
+                for offset in range(PARTY_MON_SIZE)
+            ).hex()
+            for i in range(count)
+        ],
+    }
+
+
+def _validate_battle_party_fixture(session) -> str:
+    """Validate that the saved battle fixture is already Colosseum-legal."""
+    pb = session._pyboy
+    addr_of = session.symbols.addr_of
+    count_addr = addr_of("wPartyCount")
+    species_addr = addr_of("wPartySpecies")
+    mons_addr = addr_of("wPartyMons")
+
+    count = pb.memory[count_addr]
+    if count < 3:
+        raise RuntimeError(f"battle fixture party count is {count}, expected >=3")
+    if pb.memory[species_addr + count] != 0xFF:
+        raise RuntimeError("battle fixture party species list is not FF-terminated")
+    species = []
+    for slot in range(count):
+        slot_species = pb.memory[species_addr + slot]
+        mon_addr = mons_addr + slot * PARTY_MON_SIZE
+        mon_species = pb.memory[mon_addr]
+        hp = (pb.memory[mon_addr + 1] << 8) | pb.memory[mon_addr + 2]
+        if slot_species in (0, 0xFF) or mon_species != slot_species:
+            raise RuntimeError(
+                "battle fixture has invalid party slot "
+                f"{slot}: species={slot_species} mon_species={mon_species}"
+            )
+        if hp <= 0:
+            raise RuntimeError(f"battle fixture party slot {slot} has no HP")
+        for move_idx in range(4):
+            move_id = pb.memory[mon_addr + 8 + move_idx]
+            pp = pb.memory[mon_addr + 29 + move_idx] & 0x3F
+            if move_id != 0 and pp <= 0:
+                raise RuntimeError(
+                    f"battle fixture party slot {slot} move {move_idx} has zero PP"
+                )
+        species.append(int(slot_species))
+    return f"party_count={int(count)} species={species}"
+
+
+def _force_linkmenu_selection(session, selection: int) -> None:
+    """Write a concrete LinkMenu A-button choice into both vote buffers."""
+    recv_addr = session.symbols.addr_of("wLinkMenuSelectionReceiveBuffer")
+    send_addr = session.symbols.addr_of("wLinkMenuSelectionSendBuffer")
+    current_addr = session.symbols.addr_of("wCurrentMenuItem")
+    mem = session._pyboy.memory
+    mem[recv_addr] = selection
+    mem[recv_addr + 1] = selection
+    mem[send_addr] = selection
+    mem[send_addr + 1] = selection
+    mem[current_addr] = selection & 0x03
+
+
+def _install_linkmenu_autoselect(session, selection: int) -> bool:
+    """Force both LinkMenu vote buffers to a concrete A-button choice."""
+    label = "LinkMenu.exchangeMenuSelectionLoop"
+    if label not in session.symbols:
+        return False
+    bank, addr = session.symbols.bank_addr(label)
+
+    def _force(_ctx):
+        _force_linkmenu_selection(session, selection)
+
+    session._pyboy.hook_register(bank, addr + 3, _force, None)
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--role", choices=("listen", "connect"), required=True)
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--deadline-seconds", type=float, default=240.0)
-    ap.add_argument("--goal", choices=("link_menu", "trade"), default="link_menu")
+    ap.add_argument("--goal", choices=("link_menu", "trade", "battle"), default="link_menu")
+    ap.add_argument(
+        "--version",
+        choices=("red_gb", "red_color", "blue_gb", "blue_color", "yellow"),
+        default="yellow",
+    )
+    ap.add_argument("--record-dir", type=Path)
+    ap.add_argument("--label", default="")
     ap.add_argument("--repo-root", type=Path, required=True)
     args = ap.parse_args()
 
-    os.environ.setdefault("POKERED_SKIP_SHA1", "1")
     sys.path.insert(0, str(args.repo_root / "src"))
 
     from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
+    from pokered_harness.config import load_versions
     from pokered_harness.session import Session
 
-    rom_root = None
-    for parent in (args.repo_root, *args.repo_root.parents):
-        if (parent / "rom").is_dir():
-            rom_root = parent / "rom"
-            break
-    assert rom_root is not None, f"rom/ not found from {args.repo_root}"
+    rom_root = Path(os.environ.get("POKERED_ROM_ROOT", args.repo_root / "rom"))
+    fixture_root = Path(
+        os.environ.get(
+            "POKERED_FIXTURE_ROOT", args.repo_root / "tests" / "fixtures" / "link"
+        )
+    )
+    assert rom_root.is_dir(), f"ROM root not found: {rom_root}"
 
-    rom = rom_root / "yellow" / "pokemon-yellow.gbc"
-    sym = rom_root / "yellow" / "pokemon-yellow.sym"
+    rom_paths = {
+        "red_gb": (
+            rom_root / "red" / "pokemon-red.gb",
+            rom_root / "red" / "pokemon-red.sym",
+            "red",
+            "cable_club-vanilla.state",
+            "cable_club-battle-vanilla.state",
+        ),
+        "red_color": (
+            rom_root / "red" / "pokemon-red-color.gb",
+            rom_root / "red" / "pokemon-red.sym",
+            "red",
+            "cable_club.state",
+            "cable_club-battle.state",
+        ),
+        "blue_gb": (
+            rom_root / "blue" / "pokemon-blue.gb",
+            rom_root / "blue" / "pokemon-blue.sym",
+            "blue",
+            "cable_club-vanilla.state",
+            "cable_club-battle-vanilla.state",
+        ),
+        "blue_color": (
+            rom_root / "blue" / "pokemon-blue-color.gb",
+            rom_root / "blue" / "pokemon-blue.sym",
+            "blue",
+            "cable_club.state",
+            "cable_club-battle.state",
+        ),
+        "yellow": (
+            rom_root / "yellow" / "pokemon-yellow.gbc",
+            rom_root / "yellow" / "pokemon-yellow.sym",
+            "yellow",
+            "cable_club.state",
+            "cable_club-battle.state",
+        ),
+    }
+    rom, sym, fixture_version, trade_fixture_name, battle_fixture_name = rom_paths[args.version]
+    fixture_name = battle_fixture_name if args.goal == "battle" else trade_fixture_name
     state = (
-        args.repo_root / "tests" / "fixtures" / "link" / "yellow" / "cable_club.state"
+        fixture_root / fixture_version / fixture_name
     )
 
     def log(msg):
         print(f"[peer {args.role}] {msg}", file=sys.stderr, flush=True)
 
-    log(f"loading Yellow ROM + state")
-    session = Session.from_files(rom, sym)
+    if args.record_dir is not None:
+        args.record_dir.mkdir(parents=True, exist_ok=True)
+
+    shots: list[str] = []
+
+    def shot(phase: str) -> None:
+        if args.record_dir is None:
+            return
+        # Render one frame on demand so headless/null-window screenshots
+        # reflect the restored/current LCD state.
+        try:
+            session.step(1, render=True)
+            img = session._pyboy.screen.image
+        except Exception as exc:  # noqa: BLE001
+            log(f"shot {phase} failed before save: {type(exc).__name__}: {exc}")
+            return
+        pair = f"{args.label}." if args.label else ""
+        path = args.record_dir / f"{pair}{phase}.{args.role}.{args.version}.png"
+        try:
+            img.save(path)
+        except Exception as exc:  # noqa: BLE001
+            log(f"shot {phase} save failed: {type(exc).__name__}: {exc}")
+            return
+        shots.append(str(path))
+        log(f"shot {phase}: {path}")
+
+    log(f"loading {args.version} ROM + state")
+    pins = load_versions(args.repo_root / "VERSIONS.md")
+    expected_sha = pins.sha1_for_path(rom)
+    if expected_sha is None:
+        raise RuntimeError(f"no VERSIONS.md SHA-1 pin for {rom}")
+    session = Session.from_files(
+        rom,
+        sym,
+        expected_rom_sha1=expected_sha,
+        expected_pyboy_version=pins.pyboy_version,
+    )
     session.load_state(state.read_bytes())
-    log(f"state loaded, installing hooks")
+    party_before = _party_summary(session)
+    if args.goal == "battle":
+        log(f"battle fixture validated: {_validate_battle_party_fixture(session)}")
+    shot("00_loaded")
+    log("state loaded, installing hooks")
 
     counters = {s: [0] for s in _TRADE_DIAG_SYMBOLS}
     for s in _TRADE_DIAG_SYMBOLS:
@@ -100,28 +291,138 @@ def main() -> int:
 
     log(f"establishing TCP {args.role}")
     if args.role == "listen":
-        link = PyBoyLinkSession.listen(args.port, host=args.host)
+        link = PyBoyLinkSession.listen(
+            args.port, host=args.host, local_rom_version=fixture_version
+        )
     else:
-        link = PyBoyLinkSession.connect(args.host, args.port)
-    log(f"TCP established, attaching PyBoy")
+        last_exc: Exception | None = None
+        for attempt in range(60):
+            try:
+                link = PyBoyLinkSession.connect(
+                    args.host, args.port, local_rom_version=fixture_version
+                )
+                break
+            except OSError as exc:
+                last_exc = exc
+                if attempt == 59:
+                    raise
+                time.sleep(0.25)
+        else:
+            raise RuntimeError(f"could not connect to listener: {last_exc}")
+    log("TCP established, attaching PyBoy")
     link.attach(session._pyboy)
-    log(f"attached; starting drive loop")
+    peer_version = link._network_backend.wait_for_hello(timeout=30.0)
+    log(
+        f"versioned handshake complete: local={fixture_version} "
+        f"peer={peer_version}"
+    )
+    log("attached; starting drive loop")
 
     deadline = time.time() + args.deadline_seconds
+    select_mon_announced = False
+    party_after_trade: dict[str, object] | None = None
+
+    def state_snapshot() -> dict[str, int]:
+        return {
+            "map_id": session.read_game_state().overworld.map_id,
+            "hSerialConnectionStatus": session._pyboy.memory[
+                session.symbols.addr_of("hSerialConnectionStatus")
+            ],
+            "wLinkState": session._pyboy.memory[
+                session.symbols.addr_of("wLinkState")
+            ],
+        }
+
+    def backend_snapshot() -> dict[str, object]:
+        if link._network_backend is None:
+            return {}
+        return link._network_backend.debug_snapshot()
+
+    def cooperative_sync(sync_id: int, *, timeout: float = 60.0) -> None:
+        """Rendezvous without freezing the local emulator thread.
+
+        A blocking barrier is safe only when neither ROM can be servicing
+        serial IRQs. At a nominal UI boundary the peer may still have one
+        last edge in flight, so continue ticking while waiting for the
+        marker. This keeps the slave able to re-arm and makes the boundary
+        an orchestration point rather than a scheduler stop.
+        """
+        link._network_backend.announce_sync(sync_id=sync_id)
+        deadline_at = time.monotonic() + timeout
+        while time.monotonic() < deadline_at:
+            if link._network_backend.poll_peer_sync(sync_id=sync_id):
+                return
+            session.step(4)
+        raise RuntimeError(
+            f"cooperative sync {sync_id} did not converge: "
+            f"local={state_snapshot()} backend={backend_snapshot()}"
+        )
+
+    def current_menu_item() -> int | None:
+        try:
+            return session._pyboy.memory[session.symbols.addr_of("wCurrentMenuItem")]
+        except Exception:
+            return None
 
     try:
         # Phase 1: walk UP ×3 + A-mash to reach LinkMenu.
         for _ in range(3):
             session.press("up", duration=6)
             session.step(20)
-        log(f"phase 1 start")
+        # Start the receptionist interaction from a synchronized input
+        # boundary so both processes enter the Cable Club dialog at
+        # nearly the same game phase.
+        link._network_backend.sync_with_peer(sync_id=100, timeout=60.0)
+        log("phase 1 start")
         last_progress = time.time()
+        serial_phase_ticks = 0
+        link_menu_announced = False
+        peer_link_menu_ready = False
+        peer_link_menu_ready_grace = 0
         while time.time() < deadline:
-            if counters["LinkMenu"][0] > 0:
-                log(f"phase 1 done: LinkMenu fired")
-                break
-            session.press("a", duration=4)
-            session.step(40)
+            in_serial_phase = (
+                counters["SaveGameData"][0] > 0
+                or counters["Serial_SyncAndExchangeNybble"][0] > 0
+            )
+            if in_serial_phase:
+                # Do not block on a phase barrier while either emulator is
+                # inside a serial transfer. The slave's main thread must be
+                # allowed to run its serial IRQ handler and re-arm SC while
+                # the peer's NetworkBackend is waiting for this edge. The
+                # network edge/response protocol already provides the
+                # per-byte synchronization; explicit barriers are reserved
+                # for safe UI/phase boundaries below.
+                session.step(4)
+                serial_phase_ticks += 1
+                if counters["LinkMenu"][0] > 0:
+                    if not link_menu_announced:
+                        link._network_backend.announce_sync(sync_id=121)
+                        link_menu_announced = True
+                        log("phase 1 local LinkMenu fired")
+                        shot("01_link_menu")
+                    if link._network_backend.poll_peer_sync(sync_id=121):
+                        peer_link_menu_ready = True
+                    if peer_link_menu_ready:
+                        peer_link_menu_ready_grace += 1
+                        if peer_link_menu_ready_grace >= 20:
+                            log("phase 1 done: LinkMenu fired on both peers")
+                            break
+            else:
+                if counters["LinkMenu"][0] > 0:
+                    if not link_menu_announced:
+                        link._network_backend.announce_sync(sync_id=121)
+                        link_menu_announced = True
+                        log("phase 1 local LinkMenu fired")
+                        shot("01_link_menu")
+                    if link._network_backend.poll_peer_sync(sync_id=121):
+                        peer_link_menu_ready = True
+                    if peer_link_menu_ready:
+                        peer_link_menu_ready_grace += 1
+                        if peer_link_menu_ready_grace >= 5:
+                            log("phase 1 done: LinkMenu fired on both peers")
+                            break
+                session.press("a", duration=4)
+                session.step(40)
             if time.time() - last_progress > 10.0:
                 log(
                     f"phase 1 progress: "
@@ -132,18 +433,17 @@ def main() -> int:
                 )
                 last_progress = time.time()
 
-        # Keep ticking briefly so peer can still reach LinkMenu if
-        # it's behind. Then sync with peer to enter the next phase.
-        extra_deadline = min(deadline, time.time() + 30.0)
-        while time.time() < extra_deadline:
-            session.step(40)
+        if link_menu_announced and args.goal != "link_menu":
+            for _ in range(64):
+                link._network_backend.announce_sync(sync_id=120)
+                session.step(1)
 
         if args.goal == "trade":
             # Phase barrier: both sides at LinkMenu before voting Trade
             # Center. Without this the vote-exchange nibble loop has
             # no way to guarantee overlap in Pokemon's polling windows.
             log("sync: link_menu barrier")
-            link._network_backend.sync_with_peer(sync_id=1, timeout=60.0)
+            cooperative_sync(sync_id=1, timeout=60.0)
             log("sync: past link_menu barrier")
             # Trade Center warp — A-mash until map becomes 0xEF.
             TRADE_CENTER = 0xEF
@@ -153,12 +453,38 @@ def main() -> int:
                 session.press("a", duration=4)
                 session.step(20)
             log("trade center warp complete")
+            shot("02_trade_center")
 
-            # Settle after warp + barrier before walking.
+            # Settle after warp, but keep advancing the local ROM while
+            # the peer finishes its own warp. A blocking barrier here can
+            # starve the peer: the listener may reach 0xEF first, stop its
+            # game CPU inside sync_with_peer(), and no longer run the ROM
+            # instructions that service/re-arm serial IRQs for the
+            # connector's final menu exchange.
             session.step(120)
-            log("sync: warp barrier")
-            link._network_backend.sync_with_peer(sync_id=2, timeout=60.0)
-            log("sync: past warp barrier")
+            warp_announced = False
+            peer_warp_ready = False
+            log("sync: warp announce-and-continue")
+            while time.time() < deadline:
+                if (
+                    session.read_game_state().overworld.map_id == TRADE_CENTER
+                    and not warp_announced
+                ):
+                    link._network_backend.announce_sync(sync_id=2)
+                    warp_announced = True
+                    log("local trade-center warp announced")
+                    shot("03_post_warp_local")
+                if warp_announced and link._network_backend.poll_peer_sync(sync_id=2):
+                    peer_warp_ready = True
+                    break
+                session.step(20)
+            if not (warp_announced and peer_warp_ready):
+                raise RuntimeError(
+                    "trade-center warp rendezvous did not converge: "
+                    f"local={state_snapshot()} backend={backend_snapshot()}"
+                )
+            log("sync: past warp announce-and-continue")
+            shot("03_post_warp_sync")
 
             # Walk onto hidden-event trigger tile.
             conn_status = session._pyboy.memory[
@@ -189,23 +515,86 @@ def main() -> int:
                     break
                 session.press("a", duration=4)
                 session.step(20)
-            log("CableClub_DoBattleOrTrade fired; big exchange running")
+            log(
+                "CableClub_DoBattleOrTrade fired; big exchange running "
+                f"{state_snapshot()} "
+                f"backend={backend_snapshot()}"
+            )
 
             # Wait for the big exchange to complete — detect via
             # TradeCenter_SelectMon firing (runs after the exchange
             # + warp-to-trade-flow).
+            last_exchange_log = time.time()
+            peer_ready_for_select_mon = False
             while time.time() < deadline:
-                if counters["TradeCenter_SelectMon"][0] > 0:
+                if counters["TradeCenter_SelectMon"][0] > 0 and not select_mon_announced:
+                    link._network_backend.announce_sync(sync_id=3)
+                    select_mon_announced = True
+                    log(
+                        "announced select_mon ready "
+                        f"{state_snapshot()} "
+                        f"CallCurrentTradeCenterFunction={counters['CallCurrentTradeCenterFunction'][0]} "
+                        f"TradeCenter_SelectMon={counters['TradeCenter_SelectMon'][0]} "
+                        f"backend={backend_snapshot()}"
+                    )
+                    shot("04_select_mon_ready")
+                if select_mon_announced and link._network_backend.poll_peer_sync(sync_id=3):
+                    peer_ready_for_select_mon = True
+                    log(
+                        f"peer announced select_mon ready {state_snapshot()} "
+                        f"backend={backend_snapshot()}"
+                    )
                     break
-                session.step(40)
-            log("TradeCenter_SelectMon fired; big exchange done")
-
-            # Barrier here: both sides are post-exchange, about to
-            # drive the menu. Safe to sync (game is in UI-setup phase,
-            # no active serial traffic).
-            log("sync: select_mon barrier")
-            link._network_backend.sync_with_peer(sync_id=3, timeout=60.0)
-            log("sync: past select_mon barrier")
+                session.step(20)
+                if time.time() - last_exchange_log > 15.0:
+                    log(
+                        "waiting for select_mon convergence "
+                        f"{state_snapshot()} "
+                        f"CableClub_DoBattleOrTrade={counters['CableClub_DoBattleOrTrade'][0]} "
+                        f"CallCurrentTradeCenterFunction={counters['CallCurrentTradeCenterFunction'][0]} "
+                        f"TradeCenter_SelectMon={counters['TradeCenter_SelectMon'][0]} "
+                        f"backend={backend_snapshot()}"
+                    )
+                    last_exchange_log = time.time()
+            if select_mon_announced:
+                if not peer_ready_for_select_mon:
+                    log(
+                        "peer never announced select_mon before deadline "
+                        f"{state_snapshot()} "
+                        f"backend={backend_snapshot()}"
+                    )
+                else:
+                    # One side can reach TradeCenter_SelectMon before the peer,
+                    # but blocking immediately on a barrier can starve the
+                    # slower side of the CPU progress it still needs to finish
+                    # the same exchange. Keep stepping until the peer's own
+                    # announcement arrives, then use a real barrier so both
+                    # sides start menu navigation from a matched boundary.
+                    settle_deadline = min(deadline, time.time() + 10.0)
+                    while time.time() < settle_deadline:
+                        session.step(20)
+                    log(
+                        "TradeCenter_SelectMon converged on both peers; "
+                        f"big exchange done {state_snapshot()} "
+                        f"backend={backend_snapshot()}"
+                    )
+                    shot("05_select_mon_converged")
+            else:
+                log(
+                    "TradeCenter_SelectMon not reached before deadline "
+                    f"{state_snapshot()} "
+                    f"backend={backend_snapshot()}"
+                )
+            if select_mon_announced and peer_ready_for_select_mon:
+                # Barrier here: both sides are post-exchange, about to
+                # drive the menu. Safe to sync (game is in UI-setup phase,
+                # no active serial traffic).
+                log("sync: select_mon barrier")
+                cooperative_sync(sync_id=3, timeout=60.0)
+                log("sync: past select_mon barrier")
+                shot("06_select_mon_sync")
+            else:
+                log("skipping select_mon barrier; peers never converged")
 
             # State-aware menu navigation.
             log(f"entering menu nav; counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} }")
@@ -253,12 +642,17 @@ def main() -> int:
             # honoring peer EDGE_REQs via the NetworkBackend reader)
             # long enough for the peer to complete its own trade.
             if counters["_AddEnemyMonToPlayerParty"][0] > 0:
+                # The hook is at function entry. Advance through the
+                # copy routine before the rendezvous so the result records
+                # the exchanged party record, not the later room-cleanup
+                # state after the trade animation.
+                session.step(120)
+                party_after_trade = _party_summary(session)
                 log("sync: post-trade barrier")
                 try:
-                    link._network_backend.sync_with_peer(
-                        sync_id=4, timeout=120.0
-                    )
+                    cooperative_sync(sync_id=4, timeout=120.0)
                     log("sync: past post-trade barrier")
+                    shot("07_post_trade")
                 except Exception as exc:
                     log(f"post-trade sync raised {type(exc).__name__}: {exc}")
                 # After rendezvous both sides have fired
@@ -268,6 +662,92 @@ def main() -> int:
                 post_deadline = min(deadline, time.time() + 30.0)
                 while time.time() < post_deadline:
                     session.step(40)
+        elif args.goal == "battle":
+            log("sync: link_menu battle barrier")
+            cooperative_sync(sync_id=11, timeout=120.0)
+            log("sync: past link_menu battle barrier")
+
+            # Force A-on-COLOSSEUM (0xD5). This mirrors the forced
+            # trade hook used by the transport tests, but selects item 1
+            # instead of item 0.
+            forced = _install_linkmenu_autoselect(session, 0xD5)
+            log(f"battle link menu autoselect installed={forced}")
+            _force_linkmenu_selection(session, 0xD5)
+            session.step(20)
+            shot("02_battle_menu")
+
+            COLOSSEUM = 0xF0
+            for _ in range(80):
+                if (
+                    session.read_game_state().overworld.map_id == COLOSSEUM
+                    and counters["CableClub_DoBattleOrTrade"][0] == 0
+                ):
+                    break
+                _force_linkmenu_selection(session, 0xD5)
+                session.press("a", duration=4)
+                session.step(20)
+            log("colosseum warp complete")
+            shot("03_colosseum")
+            session.step(120)
+
+            conn_status = session._pyboy.memory[
+                session.symbols.addr_of("hSerialConnectionStatus")
+            ]
+            walk_dir = "right" if conn_status == 0x02 else "left"
+            for _ in range(6):
+                if counters["CableClub_DoBattleOrTrade"][0] > 0:
+                    break
+                session.press(walk_dir, duration=8)
+                session.step(30)
+            while time.time() < deadline:
+                if counters["CableClub_DoBattleOrTrade"][0] > 0:
+                    break
+                session.press("a", duration=4)
+                session.step(20)
+            log(
+                "battle CableClub_DoBattleOrTrade fired "
+                f"count={counters['CableClub_DoBattleOrTrade'][0]} "
+                f"{state_snapshot()} backend={backend_snapshot()}"
+            )
+            shot("04_battle_launch")
+
+            damage_announced = False
+            peer_damage_ready = False
+            while time.time() < deadline:
+                if counters["EndOfBattle"][0] > 0:
+                    break
+                if counters["PlayerCalcMoveDamage"][0] > 0 and not damage_announced:
+                    link._network_backend.announce_sync(sync_id=14)
+                    damage_announced = True
+                    shot("05_battle_damage")
+                    log(
+                        "announced battle damage "
+                        f"dmg={counters['PlayerCalcMoveDamage'][0]} "
+                        f"lbe={counters['LinkBattleExchangeData'][0]} "
+                        f"backend={backend_snapshot()}"
+                    )
+                if damage_announced and link._network_backend.poll_peer_sync(sync_id=14):
+                    peer_damage_ready = True
+                    break
+                session.press("a", duration=4)
+                session.step(20)
+            if damage_announced:
+                try:
+                    cooperative_sync(sync_id=15, timeout=120.0)
+                    log("sync: past battle damage barrier")
+                    shot("06_battle_synced")
+                except Exception as exc:
+                    log(f"battle damage sync raised {type(exc).__name__}: {exc}")
+                post_deadline = min(deadline, time.time() + 10.0)
+                while time.time() < post_deadline:
+                    session.press("a", duration=4)
+                    session.step(20)
+            if not peer_damage_ready:
+                log(
+                    "peer battle damage not observed before deadline "
+                    f"dmg={counters['PlayerCalcMoveDamage'][0]} "
+                    f"backend={backend_snapshot()}"
+                )
     except Exception as exc:
         log(f"EXCEPTION in drive loop: {type(exc).__name__}: {exc}")
     finally:
@@ -282,6 +762,12 @@ def main() -> int:
             pass
 
     result = {s: counters[s][0] for s in _TRADE_DIAG_SYMBOLS}
+    result["_role"] = args.role
+    result["_version"] = args.version
+    result["party_before"] = party_before
+    result["party_after"] = party_after_trade or _party_summary(session)
+    result["_shots"] = shots
+    result["_backend_stats"] = backend_snapshot()
     log(f"final counters: {result}")
     # Sentinel-delimited JSON line so the parent can grep it out of
     # the ROM-loading warning spam on stdout.

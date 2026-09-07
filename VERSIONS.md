@@ -5,63 +5,42 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Status: `PARTIAL` at merged head
-`daa1d72f2cc559a6424067a9088dfae1b7b5f7bb` (2026-09-03). Earlier PR #35
-introduced remote serial-edge dispatch at an explicit native instruction-batch
-boundary. The current candidate also contains serial save-state, bootstrap
-ownership and build-metadata cleanup, MCP teardown, gate-accounting, and
-partial-initialization cleanup changes. This is a `PARTIAL` publication
-candidate, not a `PRODUCTION-READY` release.
+Status: `PARTIAL` for the current integration candidate. The candidate is based
+on `d8060be232dbbb75798fa1ff93e49c2f84747b9f` (2026-09-03) with additional
+runtime, packaging, lifecycle, and test changes that are not yet a release
+commit. A hash or dependency pin records an input; it does not certify the
+candidate.
 
-Current controlled evidence is scoped as follows. The focused source and Cython
-transport/serial/PyBoy-link suite passes 110/110 in each runtime. An
-asset-backed source trade gate recorded 19/19 ordered local and remote party
-swaps. The historical native Cython strict-trade gate recorded 18/19. Exact-row
-follow-ups have both passed and failed, including exact party-record exchange,
-a party-record mismatch, and phase stalls, so native strict-trade reliability
-is unproven. Timing-altered diagnostics are not acceptance evidence. The
-latest native remote-battle acceptance lane exercised 3/9 direct strict rows
-under a bounded 155-second pair deadline: one PASS for
-Blue-color↔Blue-color, two FAIL results for Red-color↔Yellow and
-Yellow↔Red-color, and six rows remain unrun. No test-only bypasses were used;
-the full 19-entrypoint battle set remains unqualified.
-The source run was a trade-tier run whose supervisor started before PR #35 was
-published; its child runs loaded the current implementation, but it is not a
-clean post-merge all-tier sign-off.
+The latest bounded candidate unit gate ran with the bundled source PyBoy
+runtime and passed 360/360 unit tests and 35/35 timing tests in each of five
+repetitions. Current asset preflight matched all five pinned ROMs, three symbol
+files, and six required ordinary/battle Cable Club fixtures. This is still scoped evidence,
+not release sign-off: the strict trade gate timed out in its remote
+Red-color↔Blue-color row at the 600-second bound, and no current battle result
+is recorded. A clean current trade or battle result still must be recorded
+before either capability can be advertised.
 
-The current-head verified candidate used the dual `--unit-only --repeat-timing
-5` gate on 2026-09-03 with separate source and Cython interpreters
-(`--python` plus `--cython-python`). It collected 771 tests in each mode. Both
-passed unit 626/626 and timing 50/50 in all five repetitions; source reported
-`python-source` and Cython reported `cython/native-extension`. The clone had no
-ROM, symbol, or save-state assets, so fixture schema and matrix declaration
-were checked but ROM gameplay was not run. Serial/link hardening did not add
-gameplay acceptance. An earlier environment-specific
-585/586 ownership result is superseded for these isolated environments. Fresh
-uv-managed source and native environments installed the candidate;
-`uv pip check` passed in both,
-and the native bootstrap verified both `pyboy` and `pokered-harness` package
-owners. The vendored source PyBoy runtime remains the documented release
-default; Cython is an optional diagnostic build. The host's bare `python3` still
-lacks `ensurepip`,
-so that alternate standard-library venv path remains open.
+A separate bounded remote diagnostic completed one Blue-color↔Blue-color trade
+row (`1/1`) with balanced `6,528` serial edges per direction and no unknown
+opcodes. Both peers used the same fixture; retain this as a diagnostic only,
+not strict party-swap acceptance or full-matrix evidence.
 
-The current post-hardening asset-backed gate is scoped to the pinned
-ROM/SYM/fixtures and separate source/native interpreters: source local 47/47 in
-758.1s and native local 47/47 in 38.1s; source remote 16/16 in 75.0s and
-native remote 16/16 in 28.8s. This scoped result leaves the release `PARTIAL`;
-the existing strict trade/battle, provenance, security, and platform blockers
-remain.
+No current candidate strict trade or battle matrix result is recorded in this
+file. Dated results further below are historical or scoped follow-ups; they
+must not be presented as acceptance for this candidate. Remote TCP remains
+loopback-only, unauthenticated, and unencrypted, so cross-host use is not
+supported.
 
-Prior integrated source and Cython transport slices passed remote 15/15 and
-the Cython local/session slice passed 47/47. Those are scoped follow-up
-results, not proof of current full native trade or battle parity. Vanilla
-fixture provenance, real-ROM concurrent load, full native-platform
-qualification, reproducible clean-install verification, independent review,
-and authenticated/encrypted cross-host TCP remain open, so the release decision
-remains `PARTIAL`. Remote TCP is enforced as loopback-only and is
-unauthenticated and unencrypted; cross-host use is not supported until a secure
-transport is added.
+The repository does retain the source/runtime contract needed for a clean
+reproduction: Python `>=3.11`, `mcp==1.29.1`, and bundled PyBoy `2.7.0` at the
+fork revision recorded below. The selected environment must pass dependency,
+bootstrap, and package-owner checks before it is used as MCP or gate runtime.
+
+## Historical and scoped evidence
+
+The following records are retained for traceability. They describe earlier
+heads, separate worktrees, or narrower tiers and do not override the current
+candidate status above.
 
 Historical PR #17 evidence collected 698 tests and passed unit 554/554, local
 real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19, strict battle
@@ -78,21 +57,23 @@ PR #22 adds bounded MCP stdio unpair cleanup and fresh remote lifecycle
 generation tracking. Its release-hygiene workflow passed; the full strict
 post-change gameplay matrices remain open.
 
-Symbol hashes and fixture byte/provenance records are recorded below and in
-[`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json).
+Symbol hashes and fixture byte/provenance records are recorded below. The
+fixture manifest used by any acceptance run is operator-managed external
+evidence; it is not distributed by this repository and must be retained with
+the run's sanitized evidence bundle.
 The remaining release decision is `PARTIAL` because a clean full current
 strict matrix has not been recorded for both runtimes, vanilla source
 provenance, broad-suite coverage, full native-platform qualification, real-ROM
 load evidence, independent review, and authenticated / encrypted cross-host
-TCP remain incomplete. `ruff check .` is clean only for the
-configured product boundary; the broad legacy tree is not silently
-reformatted.
+TCP remain incomplete. No broad `ruff check .` result is claimed for this
+dirty legacy tree; any lint evidence must name its exact scoped file list and
+runtime.
 
 ## Runtime
 
 | Component | Pin | Source of truth |
 |---|---|---|
-| Python | `>=3.12` | `pyproject.toml` |
+| Python | `>=3.11` | `pyproject.toml` |
 | PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `vendor/pyboy-src/pyboy/__init__.py` |
 | MCP | `1.29.1` | `pyproject.toml` and `uv.lock` |
 
@@ -258,12 +239,10 @@ loads the resulting immutable bytes without preparing or mutating party state
 at runtime. This is deterministic fixture preparation, not proof of a human
 captured battle state.
 
-The tracked
-[`release-evidence/fixture-manifest.json`](release-evidence/fixture-manifest.json)
-is the source of truth for fixture sizes, SHA-1/SHA-256 values, expected ROM
-and symbol pins, source-state hashes, runtime identity, and capture command
-templates. The states remain operator-managed, ignored, and outside the
-repository. Its current entries are:
+An operator-managed fixture manifest is the source of truth for fixture sizes,
+SHA-1/SHA-256 values, expected ROM and symbol pins, source-state hashes,
+runtime identity, and capture command templates. The states and manifest
+remain ignored and outside the repository. The last recorded entries were:
 
 | Fixture | Observed SHA-1 | Provenance boundary |
 |---|---|---|
@@ -286,12 +265,12 @@ release rows. Manifest byte validation still requires every listed entry when
 the manifest is checked with `--fixture-root`.
 
 The repository has strict local and remote entry points for every canonical
-Red/Blue/Yellow ordered pair. The current source trade gate recorded 19/19
+Red/Blue/Yellow ordered pair. A prior source trade gate recorded 19/19
 rows (9 local and 9 remote, plus the dedicated assertion). The native strict-
 trade matrix has a historical 18/19 result, but exact-row follow-ups both
 passed and failed, including a party-record mismatch and phase stalls, so its
-reliability is unproven. The current native battle matrix has not been
-qualified, and the current source battle matrix was not rerun as a complete
+reliability is unproven. The native battle matrix has not been qualified, and
+the source battle matrix was not rerun as a complete
 post-PR #35 gate. The PR #17 source-runtime 19/19 trade and 19/19 battle
 results remain historical baseline evidence. Consult the test-surface table in
 the [README](README.md) and run the required tiers in the [production runbook](docs/PRODUCTION_RUNBOOK.md)

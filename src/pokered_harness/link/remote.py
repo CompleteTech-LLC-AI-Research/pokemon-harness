@@ -103,6 +103,8 @@ class RemoteLinkEndpoint:
         self._link = serial_link
         self._is_internal_clock = is_internal_clock
         self._installed = False
+        self._handshake_seen = False
+        self._status_addr: int | None = None
 
     # --- construction -------------------------------------------------
 
@@ -159,10 +161,11 @@ class RemoteLinkEndpoint:
         local — no peer interaction."""
         mem = self._session._pyboy.memory
         sc = mem[_RSC_ADDR]
-        if not (sc & _SC_START):
-            return
-        mem[_RSC_ADDR] = sc & ~_SC_START
-        mem[_IF_ADDR] = mem[_IF_ADDR] | _IF_SERIAL
+        if sc & _SC_START:
+            mem[_RSC_ADDR] = sc & ~_SC_START
+            mem[_IF_ADDR] = mem[_IF_ADDR] | _IF_SERIAL
+        if self._handshake_seen and self._status_addr is not None:
+            mem[self._status_addr] = self.clock_status_byte
 
     # --- hook installers ----------------------------------------------
 
@@ -173,11 +176,15 @@ class RemoteLinkEndpoint:
         if "Serial_TryEstablishingExternallyClockedConnection" not in session.symbols:
             return
         status_addr = session.symbols.addr_of("hSerialConnectionStatus")
+        self._status_addr = status_addr
         my_status = self.clock_status_byte
         mem = session._pyboy.memory
+        mem[status_addr] = my_status
+        self._handshake_seen = True
 
         def _cb(_ctx) -> None:
             mem[status_addr] = my_status
+            self._handshake_seen = True
 
         try:
             session.serial_hook(

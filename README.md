@@ -9,15 +9,24 @@ symbol files, save states, or other ROM-derived artifacts.
 
 ## Release status
 
-The clean baseline at commit `e219fb5` was not production-certified. This
-working tree contains the productionization changes and live gate evidence
-described below, but it is still uncommitted and therefore is not a release
-artifact. The distinction matters:
+The release status is `PARTIAL`; this repository is not production-certified.
+The integration candidate is based on `d8060be232dbbb75798fa1ff93e49c2f84747b9f`
+and may contain uncommitted runtime, test, and packaging changes. An
+uncommitted worktree is not a release artifact.
 
-The current release status is `PARTIAL`: source and Cython packaging/runtime
-gates pass, but the full current trade and battle matrices, authentic gameplay
-semantics, cross-host security, and fixture provenance remain open. This is
-not a production-ready release.
+The latest bounded candidate unit check used the bundled source PyBoy runtime
+and passed 360/360 unit tests plus 35/35 timing tests across five repetitions.
+The current checkout's asset preflight also matched all five pinned ROMs, three
+symbol files, and six required ordinary/battle Cable Club fixtures. This remains a scoped
+check, not release sign-off: the strict trade gate timed out in its remote
+Red-color↔Blue-color subprocess row at the 600-second bound, and no current
+battle acceptance result is recorded here. Historical results retained below
+are dated context, not current release sign-off.
+
+A separate bounded remote diagnostic completed one Blue-color↔Blue-color trade
+row (`1/1`) with balanced `6,528` serial edges per direction and no unknown
+opcodes. Both peers used the same fixture, so this is a transport/game-flow
+diagnostic, not strict party-swap acceptance or full-matrix evidence.
 
 Recent production-hardening changes make lifecycle failures bounded and
 recoverable: serial cleanup ownership is explicit; remote disconnects and
@@ -30,12 +39,12 @@ gameplay semantics.
 
 | Capability | Current status | Evidence boundary |
 |---|---|---|
-| Single-session loading, input, state parsing, and save/load | Implemented; gate evidence available | The unit and real-session tiers require the pinned runtime plus local ROM and symbol files. |
-| MCP stdio server for one session | Implemented; gate evidence available | `tests/test_mcp_stdio_integration.py` is real-ROM and dependency gated. |
-| In-process `LinkPair` | Implemented; canonical local acceptance passed | Red/Yellow strict trade and battle acceptance pass with untouched, ROM-matched fixtures; the broader variant matrix remains diagnostic. |
-| Remote TCP transport and MCP lifecycle | Implemented; strict trade/battle gate evidence available | Native MCP attach/HELLO, two-process LinkMenu, Red/Blue full-trade, and Red/Blue battle-turn checks run on the bundled runtime. |
-| Remote full trade | Implemented; strict acceptance passed | The independent Red/Blue subprocess test completes a natural trade and compares both full 44-byte party-mon records against the peer's original record. |
-| Link battle | Local and remote canonical acceptance passed | Red/Yellow resolves a real move turn locally; independent Red/Blue subprocesses resolve a real battle turn over native TCP serial traffic. |
+| Single-session loading, input, state parsing, and save/load | Implemented; scoped gate passes | The latest candidate source unit/timing gate passed 360/360 and 35/35 × 5 without ROM assets. Real-ROM checks require the pinned runtime plus local ROM and symbol files. |
+| MCP stdio server for one session | Implemented; fixture-gated | `tests/test_mcp_stdio_integration.py` requires real-ROM assets. Current MCP behavior must be rerun with the pinned `mcp` dependency and matching BYO inputs. |
+| In-process `LinkPair` | Implemented; acceptance unqualified | Focused and fixture-gated tests exercise the path; no current candidate full local trade/battle acceptance result is recorded. |
+| Remote TCP transport and MCP lifecycle | Implemented; gameplay unqualified | Transport and lifecycle tests do not establish a real-game trade or battle. The remote API is loopback-only. |
+| Remote full trade | Unqualified for this candidate | A release claim requires a current strict result with matching ROMs, fixtures, runtime identity, bounded deadlines, and clean teardown. |
+| Link battle | Unqualified for this candidate | A release claim requires a current strict result for the advertised matrix; historical or representative rows are insufficient. |
 | Boot-to-Boulder-Badge walkthroughs | Experimental diagnostics | The scripts contain fallback RAM writes and are not a release acceptance suite. |
 
 The release commit must include the explicit `tests/__init__.py` package
@@ -55,16 +64,16 @@ The intended release inputs are the exact ROM variants listed in
 | Game | Input | Status |
 |---|---|---|
 | Pokémon Red (UE) | Stock `.gb` plus `pokered.sym` | Candidate; hash and real-ROM gate required |
-| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Canonical local Red/Yellow link acceptance passed; broader matrix pending |
+| Pokémon Red (UE) color variant | `pokemon-red-color.gb` plus the matching Red symbols | Candidate input; current strict link acceptance remains unqualified |
 | Pokémon Blue (UE) | Stock `.gb` plus `pokeblue.sym` | Candidate; hash and real-ROM gate required |
-| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Strict remote Red/Blue trade acceptance passed; broader matrix pending |
-| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Canonical local Red/Yellow link acceptance passed; broader matrix pending |
+| Pokémon Blue (UE) color variant | `pokemon-blue-color.gb` plus the matching Blue symbols | Candidate input; current strict link acceptance remains unqualified |
+| Pokémon Yellow (UE) | Native CGB `.gbc` plus `pokeyellow.sym` | Candidate input; current strict link acceptance remains unqualified |
 | Other localisations and ROM hacks | — | Out of scope |
 
 “Candidate” means that the file layout and code paths exist. The current
-stateful acceptance scope is the local Red/Yellow pair and the independent-
-process Red/Blue remote trade and battle, using the bundled source-runtime
-build. It does not imply that every listed variant or remote pairing has a
+stateful tests include a local Red/Yellow pair and independent-process Red/Blue
+diagnostics, but their strict trade/battle results are not qualified for this
+candidate. It does not imply that every listed variant or remote pairing has a
 repeatable, green, release-gate result.
 
 ## Requirements and clean install
@@ -74,7 +83,7 @@ Requirements:
 - Python 3.11 or newer.
 - The bundled PyBoy runtime (`2.7.0`, harness revision
   `c565df66c3731fad2856169a90f6bbec99925915`).
-- `mcp`, which is a runtime dependency of the package.
+- `mcp==1.29.1`, which is a runtime dependency of the package.
 - A legally obtained ROM and a matching debug symbol file for any real-ROM
   run.
 
@@ -169,9 +178,10 @@ documented display option, or construct `Session(view=True)`, when a visible
 session is needed.
 
 The committed `.mcp.json` uses the canonical `rom/red/` layout, an explicit
-color-ROM hash, and no machine-local `PYTHONPATH`. It is suitable for a
-workspace whose MCP client expands `${PWD}` and whose installed interpreter
-is the package environment.
+color-ROM hash, `${PWD}/VERSIONS.md`, and no machine-local `PYTHONPATH`. It is
+portable when the MCP client expands `${PWD}` to the workspace root and the
+selected `python` is the environment where this package is installed. The
+template does not include ROMs or symbols; those remain BYO files.
 
 ## MCP surface
 
@@ -233,10 +243,10 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_protocol.py` | ROM-free Pokémon serial constants and synthetic exchange behavior | Emulator or game compatibility |
 | `tests/test_link_transport.py` and `tests/test_network_backend.py` | In-process queues and TCP edge/response primitives | A real game trade or battle |
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
-| `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
+| `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior or a current acceptance result |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Two-process LinkMenu smoke plus strict Red/Blue trade and battle acceptance | Unclaimed ROM/variant rows |
-| `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus strict local Red/Yellow trade and battle acceptance | Full Red/Blue/Yellow coverage or a release result from a skipped, RAM-mutated, or unpinned path |
+| `tests/test_pyboy_link_session_subprocess.py` | Two-process and strict acceptance entry points | A release result until the current candidate runs the rows with pinned assets |
+| `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix and strict acceptance entry points | Full Red/Blue/Yellow coverage or a result from a skipped, RAM-mutated, or unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
 battle needs an acceptance result from the actual release runtime, matching

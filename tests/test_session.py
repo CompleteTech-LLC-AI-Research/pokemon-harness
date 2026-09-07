@@ -7,6 +7,7 @@ import pytest
 from pokered_harness.events import EventBus
 from pokered_harness.input import Button
 from pokered_harness.session import (
+    SessionClosedError,
     Session,
     VersionMismatch,
     _default_pyboy_factory,
@@ -230,6 +231,7 @@ def test_sha1_helper_and_mismatch_path(tmp_path):
         rom,
         sym,
         expected_rom_sha1=expected,
+        expected_symbol_sha1=hashlib.sha1(sym.read_bytes()).hexdigest(),
         pyboy_factory=lambda path: FakePyBoy(DictMemory()),
     )
     assert s.symbols["wCurMap"].addr == 0xD35E
@@ -240,6 +242,32 @@ def test_sha1_helper_and_mismatch_path(tmp_path):
             rom,
             sym,
             expected_rom_sha1="0" * 40,
+            pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+        )
+
+    with pytest.raises(VersionMismatch, match="symbol SHA-1"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_symbol_sha1="0" * 40,
+            pyboy_factory=lambda path: FakePyBoy(DictMemory()),
+        )
+
+
+def test_expected_pyboy_version_rejects_unmarked_runtime(tmp_path, monkeypatch):
+    import pyboy
+
+    rom = tmp_path / "fake.gb"
+    rom.write_bytes(b"not a real rom")
+    sym = tmp_path / "fake.sym"
+    sym.write_text("00:D35E wCurMap\n", encoding="utf-8")
+    monkeypatch.delattr(pyboy, "__pokered_harness_revision__", raising=False)
+
+    with pytest.raises(VersionMismatch, match="pinned pokered-harness"):
+        Session.from_files(
+            rom,
+            sym,
+            expected_pyboy_version="2.7.0",
             pyboy_factory=lambda path: FakePyBoy(DictMemory()),
         )
 
@@ -373,6 +401,27 @@ def test_close_stops_pyboy():
     s, pb, _ = _session()
     s.close()
     assert pb.stopped is True
+
+
+def test_close_is_idempotent_and_rejects_new_actions():
+    s, pb, _ = _session()
+    s.close()
+    s.close()
+    assert pb.stopped is True
+    with pytest.raises(SessionClosedError, match="session is closed"):
+        s.step()
+
+
+def test_step_rolls_back_tick_when_pyboy_fails():
+    s, pb, _ = _session()
+
+    def fail_tick(*_args, **_kwargs):
+        raise RuntimeError("emulator failure")
+
+    pb.tick = fail_tick  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="emulator failure"):
+        s.step(3)
+    assert s.current_tick() == 0
 
 
 def test_session_context_manager_closes_on_exit():

@@ -14,6 +14,8 @@ actually walk around in.
 from __future__ import annotations
 
 import sys
+import argparse
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -22,15 +24,59 @@ from pokered_harness.session import Session
 import run_to_brock as rtb
 
 
-ROM = "C:/Users/timot/Documents/projects/pokemon/rom/blue/pokemon-blue-color.gb"
-SYM = "C:/Users/timot/Documents/projects/pokemon/rom/blue/pokemon-blue.sym"
-SHA = "5f4b05725a860e04077045462176d3e2771c5022"
-IN_STATE = Path("C:/Users/timot/Documents/projects/pokemon/walkthrough_blue/milestones/after_brock.state")
-OUT_STATE = Path("C:/Users/timot/Documents/projects/pokemon/walkthrough_blue/milestones/cable_club.state")
-FIXTURE = Path("tests/fixtures/link/blue/cable_club.state")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_ROM = REPO_ROOT / "rom/blue/pokemon-blue-color.gb"
+DEFAULT_SYM = REPO_ROOT / "rom/blue/pokemon-blue.sym"
+DEFAULT_SHA = "5f4b05725a860e04077045462176d3e2771c5022"
+DEFAULT_FIXTURE = REPO_ROOT / "tests/fixtures/link/blue/cable_club.state"
 
 CERULEAN_CITY = 0x03
 CERULEAN_POKECENTER = 0x40
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--rom",
+        type=Path,
+        default=Path(os.environ.get("POKERED_ROM_PATH", DEFAULT_ROM)),
+    )
+    parser.add_argument(
+        "--sym",
+        type=Path,
+        default=Path(os.environ.get("POKERED_SYM_PATH", DEFAULT_SYM)),
+    )
+    parser.add_argument(
+        "--sha",
+        default=os.environ.get("POKERED_ROM_SHA1", DEFAULT_SHA),
+    )
+    parser.add_argument(
+        "--in-state",
+        type=Path,
+        default=(
+            Path(os.environ["POKERED_INPUT_STATE"])
+            if os.environ.get("POKERED_INPUT_STATE")
+            else None
+        ),
+        required=False,
+        help="source save state; also settable via POKERED_INPUT_STATE",
+    )
+    parser.add_argument(
+        "--out-state",
+        type=Path,
+        default=DEFAULT_FIXTURE,
+        help="generated state path (defaults to the ignored fixture path)",
+    )
+    parser.add_argument(
+        "--fixture",
+        type=Path,
+        default=DEFAULT_FIXTURE,
+        help="fixture copy path (defaults to the ignored fixture path)",
+    )
+    args = parser.parse_args()
+    if args.in_state is None:
+        parser.error("--in-state or POKERED_INPUT_STATE is required")
+    return args
 
 
 def add_second_party_mon(s: Session) -> None:
@@ -54,8 +100,9 @@ def add_second_party_mon(s: Session) -> None:
 
 
 def main() -> int:
-    s = Session.from_files(ROM, SYM, expected_rom_sha1=SHA)
-    s.load_state(IN_STATE.read_bytes())
+    args = parse_args()
+    s = Session.from_files(args.rom, args.sym, expected_rom_sha1=args.sha)
+    s.load_state(args.in_state.read_bytes())
     mem = s._pyboy.memory
     sym = s.symbols
     pb = s._pyboy
@@ -190,14 +237,15 @@ def main() -> int:
     gs = drv.gs()
     print(f"party: count={gs.party.count} mon0_hp={gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}")
 
-    OUT_STATE.write_bytes(s.save_state())
-    FIXTURE.parent.mkdir(parents=True, exist_ok=True)
-    FIXTURE.write_bytes(OUT_STATE.read_bytes())
+    args.out_state.parent.mkdir(parents=True, exist_ok=True)
+    args.out_state.write_bytes(s.save_state())
+    args.fixture.parent.mkdir(parents=True, exist_ok=True)
+    args.fixture.write_bytes(args.out_state.read_bytes())
 
     gs = drv.gs()
     print(f"FINAL: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) party={gs.party.count}")
-    print(f"saved {OUT_STATE}")
-    print(f"fixture {FIXTURE}")
+    print(f"saved {args.out_state}")
+    print(f"fixture {args.fixture}")
     s.close()
     return 0
 

@@ -101,6 +101,13 @@ class SerialLinkProtocolError(SerialLinkError):
     """Received a malformed frame or an unexpected opcode."""
 
 
+class _ClosedSignal:
+    """Private queue marker used to wake exchanges during link teardown."""
+
+
+_CLOSED_SIGNAL = _ClosedSignal()
+
+
 # --- Protocol --------------------------------------------------------------
 
 
@@ -208,7 +215,7 @@ class TcpSerialLink:
         self._write_lock = threading.Lock()
         # Per-kind inbound queue; created lazily when first message of
         # that kind arrives or is awaited.
-        self._inbound: dict[str, queue.Queue[bytes]] = defaultdict(queue.Queue)
+        self._inbound: dict[str, queue.Queue[bytes | _ClosedSignal]] = defaultdict(queue.Queue)
         self._inbound_lock = threading.Lock()
         self._reader_exc: Exception | None = None
         self._hello_received = threading.Event()
@@ -285,22 +292,27 @@ class TcpSerialLink:
         with self._inbound_lock:
             q = self._inbound[kind]
         try:
-            return q.get(timeout=timeout_ms / 1000.0)
+            payload = q.get(timeout=timeout_ms / 1000.0)
         except queue.Empty as exc:
             self._raise_if_reader_failed()
             raise SerialLinkTimeout(
                 f"no peer EXCHANGE for kind={kind!r} within {timeout_ms}ms"
             ) from exc
+        if payload is _CLOSED_SIGNAL:
+            self._raise_if_reader_failed()
+            raise SerialLinkClosed(f"link closed while waiting for kind={kind!r}")
+        return payload
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        # Best-effort BYE; peer may already be gone.
-        try:
-            self._send_frame(bytes([OP_BYE]))
-        except Exception:
-            pass
+        with self._write_lock:
+            if self._closed:
+                return
+            try:
+                self._send_frame_locked(bytes([OP_BYE]))
+            except Exception:
+                pass
+            self._closed = True
+        self._wake_inbound_waiters()
         try:
             self._sock.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -329,16 +341,8 @@ class TcpSerialLink:
         except Exception as exc:  # noqa: BLE001
             self._reader_exc = exc
             self._closed = True
-            # Unblock any waiters with a protocol error.
-            with self._inbound_lock:
-                for q in self._inbound.values():
-                    # Sentinel empty-bytes unblock; callers check
-                    # _reader_exc and raise.
-                    try:
-                        q.put_nowait(b"")
-                    except queue.Full:
-                        pass
         finally:
+            self._wake_inbound_waiters()
             self._hello_received.set()  # unblock peer_rom_version waiters
 
     def _dispatch(self, body: memoryview) -> None:
@@ -355,24 +359,26 @@ class TcpSerialLink:
             q.put(payload)
         elif opcode == OP_BYE:
             self._closed = True
-            # Unblock any waiters.
-            with self._inbound_lock:
-                for q in self._inbound.values():
-                    try:
-                        q.put_nowait(b"")
-                    except queue.Full:
-                        pass
+            self._wake_inbound_waiters()
         else:
             raise SerialLinkProtocolError(f"unknown opcode 0x{opcode:02x}")
 
     # --- helpers --------------------------------------------------------
 
     def _send_frame(self, payload: bytes) -> None:
-        header = struct.pack(">I", len(payload))
         with self._write_lock:
-            if self._closed:
-                raise SerialLinkClosed("link is closed")
-            self._sock.sendall(header + payload)
+            self._send_frame_locked(payload)
+
+    def _send_frame_locked(self, payload: bytes) -> None:
+        if self._closed:
+            raise SerialLinkClosed("link is closed")
+        header = struct.pack(">I", len(payload))
+        self._sock.sendall(header + payload)
+
+    def _wake_inbound_waiters(self) -> None:
+        with self._inbound_lock:
+            for q in self._inbound.values():
+                q.put_nowait(_CLOSED_SIGNAL)
 
     def _raise_if_reader_failed(self) -> None:
         if self._reader_exc is not None:

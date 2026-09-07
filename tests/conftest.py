@@ -6,6 +6,43 @@ import pytest
 
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
 
+try:
+    from tests._tier_config import MARKERS, classify_test
+except ModuleNotFoundError:  # pragma: no cover - direct conftest loading
+    from _tier_config import MARKERS, classify_test
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the production-gate markers for direct pytest users."""
+
+    descriptions = {
+        "unit": "ROM-free deterministic tests",
+        "real_rom": "requires a BYO ROM and symbol file",
+        "local_link": "real-ROM in-process link tests",
+        "remote_link": "real-ROM TCP or subprocess link tests",
+        "mcp_stdio": "real-ROM MCP stdio integration tests",
+        "acceptance": "optional real-ROM trade or battle acceptance",
+        "trade": "optional real-ROM trade coverage",
+        "trade_acceptance": "strict real-ROM party-swap acceptance",
+        "battle": "optional real-ROM battle coverage",
+        "battle_acceptance": "strict real-ROM battle-turn acceptance",
+        "battle_diagnostic": "remote battle diagnostic with controlled menu setup",
+        "timing_sensitive": "repeatable scheduling-sensitive regression",
+    }
+    for marker in MARKERS:
+        config.addinivalue_line("markers", f"{marker}: {descriptions[marker]}")
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Assign every collected test to an explicit ROM-free or ROM tier."""
+
+    del config
+    for item in items:
+        filename = str(item.fspath)
+        test_name = getattr(item, "originalname", None) or item.name.split("[", 1)[0]
+        for marker in classify_test(filename, test_name):
+            item.add_marker(getattr(pytest.mark, marker))
+
 
 class DictMemory:
     """Sparse dict-backed MemoryLike — defaults to 0 for unset addresses."""

@@ -38,11 +38,17 @@ def run_pathfinder(state_path: Path, goal: str, out_path: Path,
     """Invoke path_from_tiles.py and return the computed path string."""
     script = Path(__file__).parent / "path_from_tiles.py"
     env = dict(os.environ)
+    src_path = str(Path(__file__).parent.parent / "src")
+    existing_pythonpath = env.get("PYTHONPATH")
+    pythonpath = (
+        src_path if not existing_pythonpath
+        else src_path + os.pathsep + existing_pythonpath
+    )
     env.update(
         POKERED_ROM_PATH=rom,
         POKERED_SYM_PATH=sym,
         POKERED_ROM_SHA1=sha1,
-        PYTHONPATH=str(Path(__file__).parent.parent / "src"),
+        PYTHONPATH=pythonpath,
         PYTHONIOENCODING="utf-8",
     )
     kw = ["--state", str(state_path), "--save-path-to", str(out_path)]
@@ -370,6 +376,17 @@ def main() -> int:
         "start", "viridian", "grind", "forest", "pewter", "brock"
     ], default="start", help="resume from a specific phase")
     p.add_argument(
+        "--start-state",
+        default=None,
+        help="optional .state snapshot to load before the selected phase",
+    )
+    p.add_argument("--stop-after", choices=[
+        "intro", "exit_house", "oak_intercept", "pick_starter",
+        "rival_battle", "pallet_to_viridian", "viridian_to_route2",
+        "grind_complete", "route2_to_forest", "forest_entry",
+        "forest_exit", "pewter_entry", "after_brock",
+    ], default=None, help="stop after saving the named milestone")
+    p.add_argument(
         "--legacy-grind", action="store_true",
         help="Use the old level_up.py grinder instead of the heal-loop "
              "grinder in grind.py (diagnostic fallback).",
@@ -394,6 +411,10 @@ def main() -> int:
 
     session = Session.from_files(rom, sym, expected_rom_sha1=sha1)
     register_default_hooks(session)
+    if args.start_state:
+        start_state = Path(args.start_state)
+        print(f"loading start state {start_state}", flush=True)
+        session.load_state(start_state.read_bytes())
 
     # Phase 1: use walkthrough.py + run_to_brock's verified phases to
     # reach Viridian and get onto Route 2.
@@ -423,6 +444,8 @@ def main() -> int:
             print(f"\n=== phase: {name} ===", flush=True)
             fn()
             save_milestone(session, outdir, name)
+            if args.stop_after == name:
+                return 0
 
     # Phase 2: grind Bulba to Lv 13 with periodic heals.
     if args.skip_to in ("start", "viridian", "grind"):
@@ -480,6 +503,8 @@ def main() -> int:
                 session.press("a"); session.step(30, render=True)
             _option_b_topup(session)
         save_milestone(session, outdir, "grind_complete")
+        if args.stop_after == "grind_complete":
+            return 0
 
     # Phase 3: Route 2 → Forest South Gate.
     if args.skip_to in ("start", "viridian", "grind", "forest"):
@@ -539,6 +564,8 @@ def main() -> int:
                 break
             drv.press("up")
         save_milestone(session, outdir, "route2_to_forest")
+        if args.stop_after == "route2_to_forest":
+            return 0
 
         # Through the south gate (map 0x32). Both gates in Viridian
         # Forest have a quirk where UP from (4, 1) bumps the wall
@@ -563,6 +590,8 @@ def main() -> int:
                     break
                 drv.press("up")
         forest_entry = save_milestone(session, outdir, "forest_entry")
+        if args.stop_after == "forest_entry":
+            return 0
 
         # Path through forest using A*, recomputing after battles desync us.
         # Step UP off the forest's own warp row (y=47) first — A*'s first
@@ -614,6 +643,8 @@ def main() -> int:
             attempts += 1
 
         save_milestone(session, outdir, "forest_exit")
+        if args.stop_after == "forest_exit":
+            return 0
 
     # Phase 4: Pewter City → Gym.
     if args.skip_to in ("start", "viridian", "grind", "forest", "pewter"):
@@ -656,6 +687,8 @@ def main() -> int:
                     break
                 drv.press("up")
         save_milestone(session, outdir, "pewter_entry")
+        if args.stop_after == "pewter_entry":
+            return 0
         # Walk to Pewter Gym door via A*.
         if drv.gs().overworld.map_id == 0x02:
             session.step(60, render=True)
@@ -679,6 +712,8 @@ def main() -> int:
     print("\n=== phase: brock_badge ===", flush=True)
     got_badge = bg.run_pewter_to_brock_badge(session, driver=drv)
     save_milestone(session, outdir, "after_brock")
+    if args.stop_after == "after_brock":
+        return 0
 
     gs = session.read_game_state()
     print(f"\n=== FINAL ===", flush=True)

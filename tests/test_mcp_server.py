@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import socket as _socket
+import time as _time
 
 import pytest
 
@@ -10,6 +13,8 @@ from pokered_harness.link.pair import LinkPair
 from pokered_harness.mcp_server import (
     DEFAULT_HOOKS,
     LinkState,
+    McpHarnessError,
+    build_server,
     dispatch_tool,
     read_resource,
     register_default_hooks,
@@ -379,10 +384,6 @@ def test_link_transport_resource_reflects_transport_state():
 # nothing.
 
 
-import socket as _socket
-import time as _time
-
-
 def _free_port() -> int:
     s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     try:
@@ -510,31 +511,19 @@ def test_link_connect_refuses_when_pair_active():
         )
 
 
-def test_link_listen_surfaces_bind_failure_via_status():
-    """Binding to a port we know can't succeed (port 0 with a
-    host that rejects outright) ends up with the listener thread
-    storing the exception; link_status surfaces it.
-
-    We reach this by passing an invalid host. Using a non-loopback
-    address like ``1.2.3.4`` guarantees bind() raises OSError on every
-    platform, whereas the "bind same port twice" trick depends on
-    SO_REUSEADDR semantics which differ by OS.
-    """
+def test_link_listen_rejects_non_loopback_host():
+    """Remote TCP is deliberately constrained to the unauthenticated
+    localhost-only contract until an authenticated transport exists."""
     s, _ = _endpoint_session()
     link = LinkState()
-    dispatch_tool(
-        s,
-        "link_listen",
-        {"port": _free_port(), "host": "1.2.3.4"},
-        link=link,
-    )
-    for _ in range(200):
-        status = dispatch_tool(s, "link_status", {}, link=link)
-        if status["remote_error"] is not None:
-            break
-        _time.sleep(0.01)
-    assert status["remote_error"] is not None
-    assert status["remote_mode"] == "idle"
+    with pytest.raises(McpHarnessError, match="localhost-only"):
+        dispatch_tool(
+            s,
+            "link_listen",
+            {"port": _free_port(), "host": "1.2.3.4"},
+            link=link,
+        )
+    assert link.remote_mode == "idle"
 
 
 def test_link_disconnect_is_idempotent():
@@ -543,6 +532,35 @@ def test_link_disconnect_is_idempotent():
     # No link set up → disconnect should be a safe no-op.
     result = dispatch_tool(s, "link_disconnect", {}, link=link)
     assert result == {"remote_mode": "idle"}
+
+
+def test_link_disconnect_stops_listener_worker():
+    s, _ = _endpoint_session()
+    link = LinkState()
+    dispatch_tool(s, "link_listen", {"port": _free_port()}, link=link)
+    worker = link._listener_thread
+    assert worker is not None
+    dispatch_tool(s, "link_disconnect", {}, link=link)
+    assert not worker.is_alive()
+    assert link.remote_mode == "idle"
+    assert link._listener_thread is None
+
+
+def test_mcp_handler_returns_structured_client_error():
+    """The actual low-level MCP handler preserves a stable error envelope."""
+    import mcp.types as mcp_types
+
+    s, _ = _endpoint_session()
+    server = build_server(s)
+    handler = server.request_handlers[mcp_types.CallToolRequest]
+    request = mcp_types.CallToolRequest(
+        params=mcp_types.CallToolRequestParams(name="link_pair", arguments={})
+    )
+    response = asyncio.run(handler(request))
+    payload = response.root.structuredContent
+    assert response.root.isError is True
+    assert payload is not None
+    assert payload["error"]["code"] == "peer_not_configured"
 
 
 def test_link_status_resource_returns_same_shape_as_tool():
