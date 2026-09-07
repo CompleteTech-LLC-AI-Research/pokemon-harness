@@ -71,6 +71,10 @@ _OP_EDGE_RESP: int = 0x11
 _OP_SYNC: int = 0x20
 
 _FRAME = struct.Struct(">BB")  # opcode, payload (1-byte id for SYNC)
+_REARM_WAIT_SECONDS = 0.100
+_POST_BYTE_REARM_GRACE_SECONDS = 1.500
+_ACTIVE_EXCHANGE_GRACE_SECONDS = 1.000
+_ACTIVE_EXCHANGE_EDGE_THRESHOLD = 64
 
 
 class NetworkBackendError(RuntimeError):
@@ -113,6 +117,33 @@ class NetworkBackend:
         # through its still-running exchange until our side catches up
         # and re-arms its slave core.
         self._keepalive_bit_idx: int = 0
+        self._stats: dict[str, object] = {
+            "edge_req_sent": 0,
+            "edge_req_received": 0,
+            "edge_resp_sent": 0,
+            "edge_resp_received": 0,
+            "sync_sent": 0,
+            "sync_received": 0,
+            "sync_poll_hits": 0,
+            "unknown_opcode_count": 0,
+            "slave_rearm_waits": 0,
+            "slave_rearm_successes": 0,
+            "slave_idle_rearm_waits": 0,
+            "slave_active_rearm_waits": 0,
+            "slave_post_byte_rearm_waits": 0,
+            "slave_post_byte_rearm_successes": 0,
+            "keepalive_after_post_byte_waits": 0,
+            "slave_armed_edges": 0,
+            "keepalive_bits_sent": 0,
+            "keepalive_bytes_started": 0,
+            "irq_callbacks": 0,
+            "last_keepalive_state": None,
+            "last_slave_byte_complete_at": None,
+            "last_slave_rearm_at": None,
+        }
+        self._active_exchange_until: float = 0.0
+        self._consecutive_armed_edges: int = 0
+        self._post_byte_rearm_until: float = 0.0
 
     @classmethod
     def listen(
@@ -193,6 +224,7 @@ class NetworkBackend:
         must call :meth:`start_receiver` before master-mode transfers.
         """
         frame_out = _FRAME.pack(_OP_EDGE_REQ, our_bit & 1)
+        self._stats["edge_req_sent"] = int(self._stats["edge_req_sent"]) + 1
         try:
             with self._write_lock:
                 if self._closed:
@@ -203,7 +235,11 @@ class NetworkBackend:
                 f"failed to send EDGE_REQ: {exc}"
             ) from exc
         try:
-            return self._resp_queue.get(timeout=10.0)
+            bit = self._resp_queue.get(timeout=10.0)
+            self._stats["edge_resp_received"] = (
+                int(self._stats["edge_resp_received"]) + 1
+            )
+            return bit
         except queue.Empty as exc:
             raise NetworkBackendError(
                 "no EDGE_RESP from peer within 10s"
@@ -223,13 +259,63 @@ class NetworkBackend:
         Raises :class:`NetworkBackendError` if the peer's SYNC doesn't
         arrive within ``timeout`` seconds.
         """
+        q = self._sync_queue(sync_id)
+        self._send_sync(sync_id)
+        try:
+            q.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise NetworkBackendError(
+                f"no peer OP_SYNC({sync_id}) within {timeout}s"
+            ) from exc
+
+    def announce_sync(self, sync_id: int = 0) -> None:
+        """Send an ``OP_SYNC`` marker without waiting for the peer.
+
+        Higher-level drivers can use this to advertise that the local
+        process reached a state boundary while continuing to step its
+        CPU until the peer catches up.
+        """
+        self._sync_queue(sync_id)
+        self._send_sync(sync_id)
+
+    def poll_peer_sync(self, sync_id: int = 0) -> bool:
+        """Return True if a peer ``OP_SYNC`` for ``sync_id`` is pending.
+
+        Consumes one queued peer SYNC if present; otherwise returns
+        False immediately.
+        """
+        q = self._sync_queue(sync_id)
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            return False
+        self._stats["sync_poll_hits"] = int(self._stats["sync_poll_hits"]) + 1
+        return True
+
+    def debug_snapshot(self) -> dict[str, object]:
+        """Return a shallow, JSON-serializable diagnostic snapshot."""
+        snap = dict(self._stats)
+        last_keepalive = snap.get("last_keepalive_state")
+        if isinstance(last_keepalive, dict):
+            snap["last_keepalive_state"] = dict(last_keepalive)
+        snap["closed"] = self._closed
+        snap["reader_started"] = self._reader is not None
+        snap["active_exchange"] = time.time() < self._active_exchange_until
+        snap["post_byte_rearm_grace"] = time.time() < self._post_byte_rearm_until
+        snap["consecutive_armed_edges"] = self._consecutive_armed_edges
+        return snap
+
+    def _sync_queue(self, sync_id: int) -> queue.Queue[int]:
         if not 0 <= sync_id <= 255:
             raise ValueError(f"sync_id must fit in uint8, got {sync_id}")
         # Make sure we have a queue ready before we send, so the
         # reader thread can deposit an incoming SYNC even if we
         # haven't started waiting yet.
         with self._sync_lock:
-            q = self._sync_queues.setdefault(sync_id, queue.Queue())
+            return self._sync_queues.setdefault(sync_id, queue.Queue())
+
+    def _send_sync(self, sync_id: int) -> None:
+        self._stats["sync_sent"] = int(self._stats["sync_sent"]) + 1
         try:
             with self._write_lock:
                 if self._closed:
@@ -238,12 +324,6 @@ class NetworkBackend:
         except OSError as exc:
             raise NetworkBackendError(
                 f"failed to send OP_SYNC({sync_id}): {exc}"
-            ) from exc
-        try:
-            q.get(timeout=timeout)
-        except queue.Empty as exc:
-            raise NetworkBackendError(
-                f"no peer OP_SYNC({sync_id}) within {timeout}s"
             ) from exc
 
     # --- lifecycle ----------------------------------------------------
@@ -274,6 +354,7 @@ class NetworkBackend:
                 elif opcode == _OP_EDGE_RESP:
                     self._resp_queue.put(payload & 1)
                 elif opcode == _OP_SYNC:
+                    self._stats["sync_received"] = int(self._stats["sync_received"]) + 1
                     with self._sync_lock:
                         q = self._sync_queues.setdefault(payload, queue.Queue())
                     q.put(payload)
@@ -281,6 +362,9 @@ class NetworkBackend:
                     # Unknown opcode — drop. A strict implementation
                     # would raise and tear down; we log-and-continue
                     # to keep the trade robust to transient noise.
+                    self._stats["unknown_opcode_count"] = (
+                        int(self._stats["unknown_opcode_count"]) + 1
+                    )
                     continue
         except NetworkBackendError:
             # Peer closed or malformed frame. Surface via closed flag;
@@ -307,6 +391,7 @@ class NetworkBackend:
         armed, fall back to the keep-alive stream.
         """
         core = self._local_core
+        self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
 
         def armed() -> bool:
             return (
@@ -316,6 +401,21 @@ class NetworkBackend:
             )
 
         if not armed():
+            self._stats["slave_rearm_waits"] = int(self._stats["slave_rearm_waits"]) + 1
+            active_exchange = time.time() < self._active_exchange_until
+            post_byte_rearm = time.time() < self._post_byte_rearm_until
+            if post_byte_rearm:
+                self._stats["slave_post_byte_rearm_waits"] = (
+                    int(self._stats["slave_post_byte_rearm_waits"]) + 1
+                )
+            if active_exchange:
+                self._stats["slave_active_rearm_waits"] = (
+                    int(self._stats["slave_active_rearm_waits"]) + 1
+                )
+            else:
+                self._stats["slave_idle_rearm_waits"] = (
+                    int(self._stats["slave_idle_rearm_waits"]) + 1
+                )
             # Spin-wait with short sleeps. Deadline sized to cover
             # the slowest realistic re-arm window in pokered (serial
             # IRQ handler → SB/SC re-arm ≲ 100 CPU cycles of game
@@ -325,24 +425,66 @@ class NetworkBackend:
             # subprocess is getting more CPU share). Longer than the
             # deadline and we fall back to keep-alive rather than
             # stalling the peer's on_edge forever.
-            deadline = time.time() + 0.100  # 100 ms
+            deadline = time.time() + _REARM_WAIT_SECONDS
+            if post_byte_rearm:
+                # A fresh slave-byte completion means the peer is still
+                # actively clocking the next byte while our main thread
+                # runs the serial IRQ handler and re-arms SC. Treat the
+                # full post-byte grace window as one continuous chance to
+                # re-arm; clearing it after the first miss causes a long
+                # 0xFE run that corrupts fixed-length block exchanges.
+                deadline = max(deadline, self._post_byte_rearm_until)
             while time.time() < deadline and not self._closed:
                 if armed():
+                    self._stats["slave_rearm_successes"] = (
+                        int(self._stats["slave_rearm_successes"]) + 1
+                    )
+                    if post_byte_rearm:
+                        self._stats["slave_post_byte_rearm_successes"] = (
+                            int(self._stats["slave_post_byte_rearm_successes"]) + 1
+                        )
+                        self._post_byte_rearm_until = 0.0
+                    self._stats["last_slave_rearm_at"] = time.time()
                     break
                 time.sleep(0.0005)
 
         if armed():
+            slave_armed_edges = int(self._stats["slave_armed_edges"]) + 1
+            self._stats["slave_armed_edges"] = slave_armed_edges
+            self._consecutive_armed_edges += 1
+            if slave_armed_edges >= _ACTIVE_EXCHANGE_EDGE_THRESHOLD:
+                self._active_exchange_until = (
+                    time.time() + _ACTIVE_EXCHANGE_GRACE_SECONDS
+                )
             our_bit = core.peek_out_bit()
             completed = core.apply_external_edge(peer_bit)
+            if completed:
+                self._stats["last_slave_byte_complete_at"] = time.time()
+                self._post_byte_rearm_until = (
+                    time.time() + _POST_BYTE_REARM_GRACE_SECONDS
+                )
             # Reset keep-alive counter so the next idle stretch starts
             # fresh at the top of a 0xFE byte boundary rather than
             # mid-byte.
             self._keepalive_bit_idx = 0
         else:
+            self._consecutive_armed_edges = 0
+            if post_byte_rearm:
+                self._stats["keepalive_after_post_byte_waits"] = (
+                    int(self._stats["keepalive_after_post_byte_waits"]) + 1
+                )
             # Still not armed after the re-arm wait — stream the bits
             # of SERIAL_NO_DATA_BYTE (0xFE) MSB-first. Wraps every 8
             # edges so successive idle bytes all come out as 0xFE.
             # First 7 bits are 1, last is 0.
+            if self._keepalive_bit_idx == 0:
+                self._stats["keepalive_bytes_started"] = (
+                    int(self._stats["keepalive_bytes_started"]) + 1
+                )
+            self._stats["keepalive_bits_sent"] = (
+                int(self._stats["keepalive_bits_sent"]) + 1
+            )
+            self._stats["last_keepalive_state"] = self._core_state_snapshot(core)
             our_bit = 0 if self._keepalive_bit_idx == 7 else 1
             self._keepalive_bit_idx = (self._keepalive_bit_idx + 1) & 7
             completed = False
@@ -350,15 +492,42 @@ class NetworkBackend:
             with self._write_lock:
                 if not self._closed:
                     self._sock.sendall(_FRAME.pack(_OP_EDGE_RESP, our_bit & 1))
+                    self._stats["edge_resp_sent"] = (
+                        int(self._stats["edge_resp_sent"]) + 1
+                    )
         except OSError:
             self._closed = True
             return
         if completed and self._irq_callback is not None:
             try:
+                self._stats["irq_callbacks"] = int(self._stats["irq_callbacks"]) + 1
                 self._irq_callback()
             except Exception:
                 # IRQ callback errors shouldn't kill the reader thread.
                 pass
+
+    @staticmethod
+    def _core_state_snapshot(core: object | None) -> dict[str, object]:
+        if core is None:
+            return {"core_present": False}
+        snap: dict[str, object] = {
+            "core_present": True,
+            "type": type(core).__name__,
+        }
+        for attr in (
+            "transfer_enabled",
+            "internal_clock",
+            "SB",
+            "SC",
+            "clock",
+            "last_cycles",
+        ):
+            if hasattr(core, attr):
+                value = getattr(core, attr)
+                if isinstance(value, bool):
+                    value = int(value)
+                snap[attr] = value
+        return snap
 
     def _recv_exactly(self, n: int) -> bytes:
         buf = bytearray()

@@ -9,9 +9,9 @@ ROMs by:
 
 1. Loading two Yellow sessions at the Cable Club receptionist state
    (produced by ``scripts/produce_cable_club_fixture.py``).
-2. Pairing them under :class:`PyBoyLinkSession.local`, which swaps
-   ``pyboy.mb.serial`` for a :class:`SerialCore` and wires the two
-   cores via :class:`LockstepCoordinator`.
+2. Pairing them under :class:`PyBoyLinkSession.local`, which wires the
+   two motherboard serial cores together via
+   :class:`LockstepCoordinator`.
 3. Pressing A on both sides to initiate the receptionist dialogue,
    which eventually leads to ``CableClub_DoBattleOrTradeAgain``
    emitting the trade preamble.
@@ -203,25 +203,35 @@ pytestmark = pytest.mark.skipif(
 
 
 class _CountingBackend:
-    """Wraps an existing :class:`SerialBackend` and counts edges.
+    """Wraps an existing :class:`SerialBackend` and counts link activity.
 
-    Installed on a :class:`SerialCore` after its coordinator backend is
-    wired, so we can observe real-ROM serial activity without changing
-    the coordinator API.
+    ``on_edge`` only fires on the side currently acting as master. To
+    observe the peer's slave-side progress too, a wrapper can point at a
+    peer counter and increment the peer's receive counters each time it
+    drives an external edge into that peer.
     """
 
     def __init__(self, wrapped) -> None:
         self.wrapped = wrapped
-        self.edges = 0
-        self.bytes_complete = 0
-        self._bit_index = 0
+        self.peer_counter: "_CountingBackend | None" = None
+        self.master_edges = 0
+        self.slave_edges = 0
+        self.bytes_sent_complete = 0
+        self.bytes_received_complete = 0
+
+    @property
+    def total_edges(self) -> int:
+        return self.master_edges + self.slave_edges
 
     def on_edge(self, our_bit: int, our_role: int) -> int:
         peer_bit = self.wrapped.on_edge(our_bit, our_role)
-        self.edges += 1
-        self._bit_index += 1
-        if self._bit_index % 8 == 0:
-            self.bytes_complete += 1
+        self.master_edges += 1
+        if self.master_edges % 8 == 0:
+            self.bytes_sent_complete += 1
+        if self.peer_counter is not None:
+            self.peer_counter.slave_edges += 1
+            if self.peer_counter.slave_edges % 8 == 0:
+                self.peer_counter.bytes_received_complete += 1
         return peer_bit
 
 
@@ -298,6 +308,8 @@ def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
         # can observe real serial activity.
         counter_a = _CountingBackend(core_a.backend)
         counter_b = _CountingBackend(core_b.backend)
+        counter_a.peer_counter = counter_b
+        counter_b.peer_counter = counter_a
         core_a.backend = counter_a
         core_b.backend = counter_b
 
@@ -318,17 +330,23 @@ def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
         # The meaningful assertion: at least *some* serial activity
         # happened. Pokémon's Cable Club state includes the master
         # probe; we should see many edges on both sides.
-        assert counter_a.edges > 0, (
-            "A-side SerialCore saw zero edges after 600 frames — "
+        assert counter_a.total_edges > 0, (
+            "A-side SerialCore saw zero activity after 600 frames — "
             "the ROM isn't driving our serial path"
         )
-        assert counter_b.edges > 0, (
-            "B-side SerialCore saw zero edges after 600 frames — "
+        assert counter_b.total_edges > 0, (
+            "B-side SerialCore saw zero activity after 600 frames — "
             "the ROM isn't driving our serial path"
         )
-        # And at least one full byte should have completed.
-        assert counter_a.bytes_complete >= 1
-        assert counter_b.bytes_complete >= 1
+        # And at least one full byte should have completed somewhere on
+        # the link. The side acting as slave may receive bytes without
+        # ever becoming master during this short receptionist phase.
+        assert (
+            counter_a.bytes_sent_complete
+            + counter_a.bytes_received_complete
+            + counter_b.bytes_sent_complete
+            + counter_b.bytes_received_complete
+        ) >= 1
     finally:
         a.close()
         b.close()

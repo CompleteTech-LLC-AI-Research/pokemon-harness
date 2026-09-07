@@ -64,7 +64,7 @@ from typing import Protocol, runtime_checkable
 
 from pokered_harness.link.network_backend import NetworkBackend
 from pokered_harness.link.serial_coordinator import LockstepCoordinator
-from pokered_harness.link.serial_core import NullBackend
+from pokered_harness.link.serial_core import NullBackend, SerialCore
 
 
 @runtime_checkable
@@ -87,11 +87,15 @@ class PyBoyLinkSession:
 
     #: Max attached instances. Gen I Pokémon is strictly 2-player.
     MAX_ATTACHED: int = 2
+    _HRAM_SERIAL_CONNECTION_STATUS: int = 0xFFAA
+    _STATUS_EXTERNAL: int = 0x01
+    _STATUS_INTERNAL: int = 0x02
 
     def __init__(
         self,
         network_backend: NetworkBackend | None = None,
         *,
+        network_is_internal_clock: bool | None = None,
         view: bool = False,
     ) -> None:
         self._pyboys: list[object] = []
@@ -102,8 +106,13 @@ class PyBoyLinkSession:
         # Per-attach backend we installed; saved so detach() can restore
         # whatever was on ``mb.serial.backend`` before we touched it.
         self._prev_backends: list[object] = []
+        # When attaching to a legacy/no-backend serial object, we promote
+        # it to a SerialCore and keep the original here so detach() can put
+        # the motherboard back exactly as it was.
+        self._prev_serials: list[object | None] = []
         self._coord: LockstepCoordinator | None = None
         self._network_backend: NetworkBackend | None = network_backend
+        self._network_is_internal_clock = network_is_internal_clock
         # When True, per-frame stepping keeps the LCD renderer on and calls
         # each PyBoy's _post_tick (via pyboy.tick(0, True, False)) so the
         # SDL2 window actually flips and pumps events. Without this the
@@ -141,7 +150,7 @@ class PyBoyLinkSession:
             _listener.close()
         except OSError:
             pass
-        return cls(network_backend=backend)
+        return cls(network_backend=backend, network_is_internal_clock=True)
 
     @classmethod
     def connect(
@@ -154,7 +163,7 @@ class PyBoyLinkSession:
         local PyBoy's ``mb.serial.backend``.
         """
         backend = NetworkBackend.connect(host, port, timeout_s=timeout_s)
-        return cls(network_backend=backend)
+        return cls(network_backend=backend, network_is_internal_clock=False)
 
     # --- attach / detach -----------------------------------------------
 
@@ -187,21 +196,29 @@ class PyBoyLinkSession:
             )
 
         mb = pyboy.mb
-        core = mb.serial  # reuse the existing PyBoy Serial instance
+        core = mb.serial  # prefer reusing the existing PyBoy Serial instance
         # Save whatever backend the serial currently has so detach()
         # can restore it. On a freshly constructed PyBoy this is
         # ``NullBackend``; mid-game attaches preserve whatever was set.
         prev_backend = getattr(core, "backend", None)
+        prev_serial = None
+        if not hasattr(core, "backend"):
+            prev_serial = core
+            core = self._promote_legacy_serial(core)
+            mb.serial = core
+            prev_backend = getattr(core, "backend", None)
 
         self._pyboys.append(pyboy)
         self._cores.append(core)
         self._prev_backends.append(prev_backend)
+        self._prev_serials.append(prev_serial)
 
         if self._network_backend is not None:
             # Network-mode: hook the local core up to the TCP backend
             # and fire the slave-IRQ via this pyboy's CPU flag register
             # when peer-driven edges complete our transfer.
             core.backend = self._network_backend
+            self._seed_network_role_status(pyboy)
             self._network_backend.start_receiver(
                 local_core=core,
                 irq_callback=self._make_serial_irq_raiser(pyboy),
@@ -225,6 +242,29 @@ class PyBoyLinkSession:
         return core
 
     @staticmethod
+    def _promote_legacy_serial(serial: object) -> object:
+        """Best-effort compatibility path for pre-backend serial objects.
+
+        Older tests and partial PyBoy integrations may still expose a
+        serial object without a runtime-settable ``backend`` attribute.
+        Promote that object to a ``SerialCore`` while preserving the
+        visible register state we can observe from Python.
+        """
+        if SerialCore is None:
+            raise RuntimeError("SerialCore is unavailable; can't promote legacy serial")
+        core = SerialCore(getattr(serial, "cgb_mode", False))
+        if hasattr(serial, "SB"):
+            core.set_SB(getattr(serial, "SB"))
+        if hasattr(serial, "SC"):
+            raw_sc = getattr(serial, "SC")
+            core.set_SC(raw_sc)
+            core.SC = raw_sc
+        for attr in ("last_cycles", "clock"):
+            if hasattr(serial, attr):
+                setattr(core, attr, getattr(serial, attr))
+        return core
+
+    @staticmethod
     def _make_serial_irq_raiser(pyboy):
         """Return a zero-arg closure that raises INTR_SERIAL on
         ``pyboy``'s CPU. Looked up lazily per call so nothing breaks
@@ -244,6 +284,29 @@ class PyBoyLinkSession:
 
         return _raise
 
+    def _seed_network_role_status(self, pyboy: _PyBoyLike) -> None:
+        """Best-effort role seed for two-process sessions.
+
+        The old remote endpoint wrote ``hSerialConnectionStatus`` as part
+        of its clock-role handshake. The TCP-backed SerialCore path still
+        benefits from the same role hint so the game enters the Cable Club
+        flow with consistent listener/master vs connector/slave state.
+        """
+        if self._network_is_internal_clock is None:
+            return
+        memory = getattr(pyboy, "memory", None)
+        if memory is None:
+            return
+        status = (
+            self._STATUS_INTERNAL
+            if self._network_is_internal_clock
+            else self._STATUS_EXTERNAL
+        )
+        try:
+            memory[self._HRAM_SERIAL_CONNECTION_STATUS] = status
+        except Exception:
+            pass
+
     def detach(self, pyboy: _PyBoyLike) -> None:
         """Restore ``pyboy.mb.serial.backend`` and (if paired) tear
         down the coordinator. No-op if ``pyboy`` isn't attached."""
@@ -257,18 +320,23 @@ class PyBoyLinkSession:
             self._coord = None
         idx = self._pyboys.index(pyboy)
         prev_backend = self._prev_backends[idx]
+        prev_serial = self._prev_serials[idx]
         core = self._cores[idx]
-        # Restore whatever backend the serial had before we touched it
-        # (NullBackend by default on a fresh PyBoy).
-        try:
-            core.backend = prev_backend if prev_backend is not None else NullBackend()
-        except AttributeError:
-            # If PyBoy's Serial doesn't expose a settable ``backend``
-            # yet (partial Agent-A merge), there's nothing to restore.
-            pass
+        if prev_serial is not None:
+            pyboy.mb.serial = prev_serial
+        else:
+            # Restore whatever backend the serial had before we touched it
+            # (NullBackend by default on a fresh PyBoy).
+            try:
+                core.backend = prev_backend if prev_backend is not None else NullBackend()
+            except AttributeError:
+                # If PyBoy's Serial doesn't expose a settable ``backend``
+                # yet (partial Agent-A merge), there's nothing to restore.
+                pass
         self._pyboys.pop(idx)
         self._cores.pop(idx)
         self._prev_backends.pop(idx)
+        self._prev_serials.pop(idx)
 
     def detach_all(self) -> None:
         """Detach every attached PyBoy in reverse order."""

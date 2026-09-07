@@ -108,20 +108,65 @@ def main() -> int:
     log(f"attached; starting drive loop")
 
     deadline = time.time() + args.deadline_seconds
+    select_mon_announced = False
+
+    def state_snapshot() -> dict[str, int]:
+        return {
+            "map_id": session.read_game_state().overworld.map_id,
+            "hSerialConnectionStatus": session._pyboy.memory[
+                session.symbols.addr_of("hSerialConnectionStatus")
+            ],
+            "wLinkState": session._pyboy.memory[
+                session.symbols.addr_of("wLinkState")
+            ],
+        }
+
+    def backend_snapshot() -> dict[str, object]:
+        if link._network_backend is None:
+            return {}
+        return link._network_backend.debug_snapshot()
 
     try:
         # Phase 1: walk UP ×3 + A-mash to reach LinkMenu.
         for _ in range(3):
             session.press("up", duration=6)
             session.step(20)
+        # Start the receptionist interaction from a synchronized input
+        # boundary so both processes enter the Cable Club dialog at
+        # nearly the same game phase.
+        link._network_backend.sync_with_peer(sync_id=100, timeout=60.0)
         log(f"phase 1 start")
         last_progress = time.time()
+        post_link_menu_ticks = 0
+        serial_phase_ticks = 0
         while time.time() < deadline:
-            if counters["LinkMenu"][0] > 0:
-                log(f"phase 1 done: LinkMenu fired")
-                break
-            session.press("a", duration=4)
-            session.step(40)
+            in_serial_phase = (
+                counters["SaveGameData"][0] > 0
+                or counters["Serial_SyncAndExchangeNybble"][0] > 0
+            )
+            if in_serial_phase:
+                # Once the serial handshake starts, keep both subprocesses
+                # aligned at every small step so the nibble-sync loop stays
+                # fresh on both sides. Reusing the same sync_id is fine: the
+                # NetworkBackend keeps a FIFO queue per id.
+                link._network_backend.sync_with_peer(sync_id=120, timeout=60.0)
+                session.step(4)
+                serial_phase_ticks += 1
+                if args.goal == "trade" and serial_phase_ticks >= 100:
+                    log("phase 1 done: LinkMenu fired")
+                    break
+                if args.goal != "trade" and counters["LinkMenu"][0] > 0:
+                    post_link_menu_ticks += 1
+                    grace_ticks = 20
+                    if post_link_menu_ticks >= grace_ticks:
+                        log("phase 1 done: LinkMenu fired")
+                        break
+            else:
+                if counters["LinkMenu"][0] > 0:
+                    log("phase 1 done: LinkMenu fired")
+                    break
+                session.press("a", duration=4)
+                session.step(40)
             if time.time() - last_progress > 10.0:
                 log(
                     f"phase 1 progress: "
@@ -132,11 +177,13 @@ def main() -> int:
                 )
                 last_progress = time.time()
 
-        # Keep ticking briefly so peer can still reach LinkMenu if
-        # it's behind. Then sync with peer to enter the next phase.
-        extra_deadline = min(deadline, time.time() + 30.0)
-        while time.time() < extra_deadline:
-            session.step(40)
+        # For the LinkMenu-only goal we keep ticking briefly so the peer can
+        # still settle into the menu before the process exits. The trade path
+        # stays in the synchronized serial-phase loop above instead.
+        if args.goal != "trade":
+            extra_deadline = min(deadline, time.time() + 30.0)
+            while time.time() < extra_deadline:
+                session.step(40)
 
         if args.goal == "trade":
             # Phase barrier: both sides at LinkMenu before voting Trade
@@ -189,23 +236,83 @@ def main() -> int:
                     break
                 session.press("a", duration=4)
                 session.step(20)
-            log("CableClub_DoBattleOrTrade fired; big exchange running")
+            log(
+                "CableClub_DoBattleOrTrade fired; big exchange running "
+                f"{state_snapshot()} "
+                f"backend={backend_snapshot()}"
+            )
 
             # Wait for the big exchange to complete — detect via
             # TradeCenter_SelectMon firing (runs after the exchange
             # + warp-to-trade-flow).
+            last_exchange_log = time.time()
+            peer_ready_for_select_mon = False
             while time.time() < deadline:
-                if counters["TradeCenter_SelectMon"][0] > 0:
+                if counters["TradeCenter_SelectMon"][0] > 0 and not select_mon_announced:
+                    link._network_backend.announce_sync(sync_id=3)
+                    select_mon_announced = True
+                    log(
+                        "announced select_mon ready "
+                        f"{state_snapshot()} "
+                        f"CallCurrentTradeCenterFunction={counters['CallCurrentTradeCenterFunction'][0]} "
+                        f"TradeCenter_SelectMon={counters['TradeCenter_SelectMon'][0]} "
+                        f"backend={backend_snapshot()}"
+                    )
+                if select_mon_announced and link._network_backend.poll_peer_sync(sync_id=3):
+                    peer_ready_for_select_mon = True
+                    log(
+                        f"peer announced select_mon ready {state_snapshot()} "
+                        f"backend={backend_snapshot()}"
+                    )
                     break
-                session.step(40)
-            log("TradeCenter_SelectMon fired; big exchange done")
-
-            # Barrier here: both sides are post-exchange, about to
-            # drive the menu. Safe to sync (game is in UI-setup phase,
-            # no active serial traffic).
-            log("sync: select_mon barrier")
-            link._network_backend.sync_with_peer(sync_id=3, timeout=60.0)
-            log("sync: past select_mon barrier")
+                session.step(20)
+                if time.time() - last_exchange_log > 15.0:
+                    log(
+                        "waiting for select_mon convergence "
+                        f"{state_snapshot()} "
+                        f"CableClub_DoBattleOrTrade={counters['CableClub_DoBattleOrTrade'][0]} "
+                        f"CallCurrentTradeCenterFunction={counters['CallCurrentTradeCenterFunction'][0]} "
+                        f"TradeCenter_SelectMon={counters['TradeCenter_SelectMon'][0]} "
+                        f"backend={backend_snapshot()}"
+                    )
+                    last_exchange_log = time.time()
+            if select_mon_announced:
+                if not peer_ready_for_select_mon:
+                    log(
+                        "peer never announced select_mon before deadline "
+                        f"{state_snapshot()} "
+                        f"backend={backend_snapshot()}"
+                    )
+                else:
+                    # One side can reach TradeCenter_SelectMon before the peer,
+                    # but blocking immediately on a barrier can starve the
+                    # slower side of the CPU progress it still needs to finish
+                    # the same exchange. Keep stepping until the peer's own
+                    # announcement arrives, then use a real barrier so both
+                    # sides start menu navigation from a matched boundary.
+                    settle_deadline = min(deadline, time.time() + 10.0)
+                    while time.time() < settle_deadline:
+                        session.step(20)
+                    log(
+                        "TradeCenter_SelectMon converged on both peers; "
+                        f"big exchange done {state_snapshot()} "
+                        f"backend={backend_snapshot()}"
+                    )
+            else:
+                log(
+                    "TradeCenter_SelectMon not reached before deadline "
+                    f"{state_snapshot()} "
+                    f"backend={backend_snapshot()}"
+                )
+            if select_mon_announced and peer_ready_for_select_mon:
+                # Barrier here: both sides are post-exchange, about to
+                # drive the menu. Safe to sync (game is in UI-setup phase,
+                # no active serial traffic).
+                log("sync: select_mon barrier")
+                link._network_backend.sync_with_peer(sync_id=3, timeout=60.0)
+                log("sync: past select_mon barrier")
+            else:
+                log("skipping select_mon barrier; peers never converged")
 
             # State-aware menu navigation.
             log(f"entering menu nav; counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} }")
@@ -282,6 +389,7 @@ def main() -> int:
             pass
 
     result = {s: counters[s][0] for s in _TRADE_DIAG_SYMBOLS}
+    result["_backend_stats"] = backend_snapshot()
     log(f"final counters: {result}")
     # Sentinel-delimited JSON line so the parent can grep it out of
     # the ROM-loading warning spam on stdout.
