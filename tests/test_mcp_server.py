@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import socket as _socket
+import threading
+import time as _time
 
 import pytest
 
 from pokered_harness.events import EventBus
 from pokered_harness.link.pair import LinkPair
+import pokered_harness.mcp_server as mcp_server
 from pokered_harness.mcp_server import (
     DEFAULT_HOOKS,
     LinkState,
+    McpHarnessError,
+    build_server,
     dispatch_tool,
     read_resource,
     register_default_hooks,
@@ -379,10 +386,6 @@ def test_link_transport_resource_reflects_transport_state():
 # nothing.
 
 
-import socket as _socket
-import time as _time
-
-
 def _free_port() -> int:
     s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     try:
@@ -510,31 +513,19 @@ def test_link_connect_refuses_when_pair_active():
         )
 
 
-def test_link_listen_surfaces_bind_failure_via_status():
-    """Binding to a port we know can't succeed (port 0 with a
-    host that rejects outright) ends up with the listener thread
-    storing the exception; link_status surfaces it.
-
-    We reach this by passing an invalid host. Using a non-loopback
-    address like ``1.2.3.4`` guarantees bind() raises OSError on every
-    platform, whereas the "bind same port twice" trick depends on
-    SO_REUSEADDR semantics which differ by OS.
-    """
+def test_link_listen_rejects_non_loopback_host():
+    """Remote TCP is deliberately constrained to the unauthenticated
+    localhost-only contract until an authenticated transport exists."""
     s, _ = _endpoint_session()
     link = LinkState()
-    dispatch_tool(
-        s,
-        "link_listen",
-        {"port": _free_port(), "host": "1.2.3.4"},
-        link=link,
-    )
-    for _ in range(200):
-        status = dispatch_tool(s, "link_status", {}, link=link)
-        if status["remote_error"] is not None:
-            break
-        _time.sleep(0.01)
-    assert status["remote_error"] is not None
-    assert status["remote_mode"] == "idle"
+    with pytest.raises(McpHarnessError, match="localhost-only"):
+        dispatch_tool(
+            s,
+            "link_listen",
+            {"port": _free_port(), "host": "1.2.3.4"},
+            link=link,
+        )
+    assert link.remote_mode == "idle"
 
 
 def test_link_disconnect_is_idempotent():
@@ -543,6 +534,108 @@ def test_link_disconnect_is_idempotent():
     # No link set up → disconnect should be a safe no-op.
     result = dispatch_tool(s, "link_disconnect", {}, link=link)
     assert result == {"remote_mode": "idle"}
+
+
+def test_link_disconnect_stops_listener_worker():
+    s, _ = _endpoint_session()
+    link = LinkState()
+    dispatch_tool(s, "link_listen", {"port": _free_port()}, link=link)
+    worker = link._listener_thread
+    assert worker is not None
+    dispatch_tool(s, "link_disconnect", {}, link=link)
+    assert not worker.is_alive()
+    assert link.remote_mode == "idle"
+    assert link._listener_thread is None
+
+
+def test_link_connect_cancellation_closes_partial_network_transport(monkeypatch):
+    """A disconnect racing the network HELLO must not leak its transport."""
+    s, _ = _endpoint_session()
+    link = LinkState()
+
+    class FakeTransport:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    class FakeNetworkSession:
+        def __init__(self):
+            self.detach_calls = 0
+
+        def detach_all(self):
+            self.detach_calls += 1
+
+    transport = FakeTransport()
+    network_session = FakeNetworkSession()
+    hello_waiting = threading.Event()
+
+    monkeypatch.setattr(
+        mcp_server, "_supports_bit_accurate_network", lambda _session: True
+    )
+    monkeypatch.setattr(
+        mcp_server.NetworkBackend,
+        "connect",
+        lambda *args, **kwargs: transport,
+    )
+    monkeypatch.setattr(
+        mcp_server,
+        "_attach_network_backend",
+        lambda *args, **kwargs: network_session,
+    )
+
+    def wait_for_hello(_transport, cancel, _timeout):
+        hello_waiting.set()
+        while not cancel.is_set():
+            _time.sleep(0.001)
+        raise mcp_server._ListenerCancelled()
+
+    monkeypatch.setattr(mcp_server, "_wait_for_network_hello", wait_for_hello)
+
+    outcome = []
+
+    def connect_worker():
+        try:
+            dispatch_tool(
+                s,
+                "link_connect",
+                {"host": "127.0.0.1", "port": 1234},
+                link=link,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    worker = threading.Thread(target=connect_worker)
+    worker.start()
+    assert hello_waiting.wait(1.0)
+    mcp_server._disconnect_remote(link, s)
+    worker.join(1.0)
+
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], McpHarnessError)
+    assert outcome[0].code == "link_cancelled"
+    assert transport.close_calls == 1
+    assert network_session.detach_calls == 1
+    assert link.remote_mode == "idle"
+
+
+def test_mcp_handler_returns_structured_client_error():
+    """The actual low-level MCP handler preserves a stable error envelope."""
+    import mcp.types as mcp_types
+
+    s, _ = _endpoint_session()
+    server = build_server(s)
+    handler = server.request_handlers[mcp_types.CallToolRequest]
+    request = mcp_types.CallToolRequest(
+        params=mcp_types.CallToolRequestParams(name="link_pair", arguments={})
+    )
+    response = asyncio.run(handler(request))
+    payload = response.root.structuredContent
+    assert response.root.isError is True
+    assert payload is not None
+    assert payload["error"]["code"] == "peer_not_configured"
 
 
 def test_link_status_resource_returns_same_shape_as_tool():
