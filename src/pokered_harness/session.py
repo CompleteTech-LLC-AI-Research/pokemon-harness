@@ -98,7 +98,13 @@ class Session:
         self._tick: int = 0
         self._lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
+        # ``close`` marks the session closed before calling into PyBoy so a
+        # callback blocked in a serial exchange can unwind. Keep stopping
+        # serialized and separately tracked so a transient ``stop`` failure
+        # does not make the emulator impossible to clean up on retry.
+        self._stop_lock = threading.Lock()
         self._closed = False
+        self._stop_complete = False
         self._serial_hooks: list[tuple[_HookState, int, int, str]] = []
         # ``view`` is stashed for introspection; the actual wiring into the
         # PyBoy factory happens in ``from_files`` where the ROM is loaded.
@@ -193,12 +199,23 @@ class Session:
         # tick lock is held; teardown must still make guarded callbacks no-op
         # and return promptly instead of waiting behind that exchange.
         with self._lifecycle_lock:
-            if self._closed:
+            if self._stop_complete:
                 return
-            self._closed = True
-            for state, _bank, _addr, _symbol_name in self._serial_hooks:
-                state.active = False
-        self._pyboy.stop(save=save)
+            if not self._closed:
+                self._closed = True
+                for state, _bank, _addr, _symbol_name in self._serial_hooks:
+                    state.active = False
+        # Do not hold ``_lifecycle_lock`` while stopping: PyBoy shutdown may
+        # wait on work that is concurrently observing the lifecycle flag.
+        # The separate lock prevents concurrent callers from invoking PyBoy's
+        # stop routine at the same time and permits a later retry if it fails.
+        with self._stop_lock:
+            with self._lifecycle_lock:
+                if self._stop_complete:
+                    return
+            self._pyboy.stop(save=save)
+            with self._lifecycle_lock:
+                self._stop_complete = True
 
     @property
     def closed(self) -> bool:

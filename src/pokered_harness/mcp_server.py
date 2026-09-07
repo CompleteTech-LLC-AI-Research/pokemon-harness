@@ -816,6 +816,24 @@ def _dispatch_link_tool(
                 link.remote_role = "connector"
                 link.remote_bind_port = None
                 link._remote_error = None
+        except _ListenerCancelled as exc:
+            # ``_wait_for_network_hello`` uses this internal sentinel when
+            # link_disconnect wins a concurrent connect attempt. Treat it as
+            # a normal, structured cancellation and release every resource
+            # created before the handshake completed. Without this branch the
+            # sentinel escaped as an unhandled worker error, leaking the
+            # socket and leaving the PyBoy backend attached.
+            if network_session is not None:
+                try:
+                    network_session.detach_all()
+                except Exception:
+                    pass
+            if transport is not None:
+                _close_serial_link(transport)
+            _deactivate_link_hooks(session)
+            raise McpHarnessError(
+                "link_cancelled", "remote connection cancelled"
+            ) from exc
         except McpHarnessError:
             if network_session is not None:
                 network_session.detach_all()

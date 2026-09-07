@@ -403,6 +403,29 @@ def test_close_is_idempotent_and_rejects_new_actions():
         s.step()
 
 
+def test_close_can_retry_after_pyboy_stop_failure():
+    s, pb, _ = _session()
+    stop_calls = 0
+
+    def flaky_stop(save=False):
+        nonlocal stop_calls
+        stop_calls += 1
+        if stop_calls == 1:
+            raise RuntimeError("transient stop failure")
+        pb.stopped = True
+
+    pb.stop = flaky_stop  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="transient stop failure"):
+        s.close()
+    assert s.closed is True
+    assert pb.stopped is False
+
+    # A failed first attempt must not turn cleanup into a permanent no-op.
+    s.close()
+    assert stop_calls == 2
+    assert pb.stopped is True
+
+
 def test_step_rolls_back_tick_when_pyboy_fails():
     s, pb, _ = _session()
 

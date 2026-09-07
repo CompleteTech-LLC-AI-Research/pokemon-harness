@@ -4,10 +4,12 @@ import asyncio
 import base64
 import json
 import socket as _socket
+import threading
 import time as _time
 
 import pytest
 
+from pokered_harness import mcp_server
 from pokered_harness.events import EventBus
 from pokered_harness.link.pair import LinkPair
 from pokered_harness.mcp_server import (
@@ -544,6 +546,79 @@ def test_link_disconnect_stops_listener_worker():
     assert not worker.is_alive()
     assert link.remote_mode == "idle"
     assert link._listener_thread is None
+
+
+def test_link_connect_cancellation_closes_partial_network_transport(monkeypatch):
+    """A disconnect racing the network HELLO must not leak its transport."""
+    s, _ = _endpoint_session()
+    link = LinkState()
+
+    class FakeTransport:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    class FakeNetworkSession:
+        def __init__(self):
+            self.detach_calls = 0
+
+        def detach_all(self):
+            self.detach_calls += 1
+
+    transport = FakeTransport()
+    network_session = FakeNetworkSession()
+    hello_waiting = threading.Event()
+
+    monkeypatch.setattr(
+        mcp_server, "_supports_bit_accurate_network", lambda _session: True
+    )
+    monkeypatch.setattr(
+        mcp_server.NetworkBackend,
+        "connect",
+        lambda *args, **kwargs: transport,
+    )
+    monkeypatch.setattr(
+        mcp_server,
+        "_attach_network_backend",
+        lambda *args, **kwargs: network_session,
+    )
+
+    def wait_for_hello(_transport, cancel, _timeout):
+        hello_waiting.set()
+        while not cancel.is_set():
+            _time.sleep(0.001)
+        raise mcp_server._ListenerCancelled()
+
+    monkeypatch.setattr(mcp_server, "_wait_for_network_hello", wait_for_hello)
+
+    outcome = []
+
+    def connect_worker():
+        try:
+            dispatch_tool(
+                s,
+                "link_connect",
+                {"host": "127.0.0.1", "port": 1234},
+                link=link,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    worker = threading.Thread(target=connect_worker)
+    worker.start()
+    assert hello_waiting.wait(1.0)
+    mcp_server._disconnect_remote(link, s)
+    worker.join(1.0)
+
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], McpHarnessError)
+    assert outcome[0].code == "link_cancelled"
+    assert transport.close_calls == 1
+    assert network_session.detach_calls == 1
+    assert link.remote_mode == "idle"
 
 
 def test_mcp_handler_returns_structured_client_error():
