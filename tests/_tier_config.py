@@ -32,6 +32,7 @@ MARKERS = (
 REAL_ROM_MODULES = frozenset(
     {
         "test_golden_paths.py",
+        "test_rom_boot_matrix.py",
         "test_link_integration.py",
         "test_link_integration_remote.py",
         "test_mcp_real_link.py",
@@ -147,6 +148,7 @@ BATTLE_ACCEPTANCE_TESTS = frozenset(
 # lane, whose exact name is owned by that lane.
 TIMING_SENSITIVE_TESTS = frozenset(
     {
+        ("test_bootstrap_pyboy.py", "test_timeout_stops_build_descendants"),
         ("test_network_backend.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
         (
             "test_network_backend.py",
