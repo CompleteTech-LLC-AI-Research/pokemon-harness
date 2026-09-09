@@ -20,6 +20,20 @@ def _arm_pair() -> tuple[SerialCore, SerialCore]:
     return master, slave
 
 
+def test_idle_detach_accepts_zero_timeout() -> None:
+    """An already-idle coordinator can detach without a positive budget."""
+    master, slave = _arm_pair()
+    coordinator = LockstepCoordinator(master, slave)
+    master_backend = master.backend
+    slave_backend = slave.backend
+
+    coordinator.detach(timeout_s=0.0)
+
+    assert coordinator.attached is False
+    assert master.backend is not master_backend
+    assert slave.backend is not slave_backend
+
+
 def test_detach_waits_for_completion_callback_without_coordinator_deadlock() -> None:
     """A callback may re-enter the coordinator while detach waits for it."""
     callback_started = threading.Event()

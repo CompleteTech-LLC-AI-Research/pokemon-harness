@@ -333,7 +333,7 @@ class LockstepCoordinator:
         a.set_SB(0xAA); b.set_SB(0x55)
         a.set_SC(0x81)    # master
         b.set_SC(0x80)    # slave
-        a.tick(1024)      # 8 edges — full byte exchanged
+        a.tick(4096)      # 8 edges at 512 T-cycles — full byte exchanged
         assert a.SB == 0x55 and b.SB == 0xAA
 
     :meth:`detach` restores :class:`NullBackend` on both cores so they
@@ -482,12 +482,9 @@ class LockstepCoordinator:
             for backend in backends:
                 if backend is not None:
                     remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "coordinator callbacks did not drain before the teardown "
-                            "deadline; retry teardown"
-                        )
-                    backend.wait_for_completion_callbacks(timeout_s=remaining)
+                    backend.wait_for_completion_callbacks(
+                        timeout_s=max(0.0, remaining)
+                    )
 
             with self._lifecycle_lock:
                 errors: list[Exception] = []
