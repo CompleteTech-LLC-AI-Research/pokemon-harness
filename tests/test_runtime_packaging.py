@@ -28,6 +28,12 @@ def test_project_bundles_the_pinned_pyboy_source() -> None:
     assert marker == EXPECTED_PYBOY_REVISION
 
 
+def test_pinned_pyboy_gitlink_has_portable_submodule_metadata() -> None:
+    metadata = (ROOT / ".gitmodules").read_text(encoding="utf-8")
+    assert 'path = vendor/pyboy-src' in metadata
+    assert "https://github.com/CompleteDotTech/pyboy-link-cable-fork.git" in metadata
+
+
 def test_dev_extra_contains_matrix_screenshot_dependency() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dev_requirements = project["project"]["optional-dependencies"]["dev"]

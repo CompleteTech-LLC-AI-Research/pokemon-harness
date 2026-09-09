@@ -37,6 +37,186 @@ def test_defaults_match_legacy_pyboy_serial():
     assert s.clock_target == MAX_CYCLES
 
 
+@pytest.mark.parametrize("cgb_mode", [False, True])
+def test_normal_serial_uses_literal_t_cycle_deadlines(cgb_mode):
+    """4,194,304 T/s / 8192 bit/s = 512 T/bit, independently of exports."""
+    edges = []
+
+    class RecordingBackend:
+        def on_edge(self, bit, role):
+            edges.append((bit, role))
+            return 1
+
+    serial = SerialCore(cgb_mode, backend=RecordingBackend())
+    serial.set_SB(0x00)
+    serial.set_SC(0x81)  # Normal clock on both DMG and CGB; no fast-clock request.
+    assert serial.clock_target == 512
+    assert serial.tick(511) is False
+    assert edges == []
+    assert serial.tick(512) is False
+    assert len(edges) == 1
+    assert serial.tick(4095) is False
+    assert len(edges) == 7
+    assert serial.SC & 0x80
+    assert serial.tick(4096) is True
+    assert len(edges) == 8
+    assert serial.SB == 0xFF
+    assert serial.SC & 0x80 == 0
+    assert serial.tick(4096) is False
+    assert serial.tick(8192) is False
+    assert len(edges) == 8
+
+
+def test_normal_serial_constants_use_t_cycles_not_machine_cycles():
+    from pyboy.core.serial import CYCLES_8192HZ
+
+    assert CYCLES_PER_EDGE_DMG == 512
+    assert CYCLES_PER_BYTE_DMG == 4096
+    assert CYCLES_8192HZ == 512
+
+
+@pytest.mark.parametrize("cgb_mode", [False, True])
+def test_normal_serial_restart_has_fresh_literal_edge_phase(cgb_mode):
+    """A restart schedules its first bit relative to that SC write's clock."""
+    edges = []
+
+    class RecordingBackend:
+        def on_edge(self, bit, role):
+            edges.append(bit)
+            return 0
+
+    serial = SerialCore(cgb_mode, backend=RecordingBackend())
+    serial.tick(100)
+    serial.set_SB(0x80)
+    serial.set_SC(0x81)
+    assert serial.clock_target == 612
+    assert serial.tick(611) is False
+    assert edges == []
+    assert serial.tick(612) is False
+    assert edges == [1]
+    serial.tick(700)
+    serial.set_SB(0x40)
+    serial.set_SC(0x81)
+    assert serial.clock_target == 1212
+    assert serial.tick(1211) is False
+    assert edges == [1]
+    assert serial.tick(1212) is False
+    assert edges == [1, 0]
+    assert serial.tick(4795) is False
+    assert serial.SC & 0x80
+    assert serial.tick(4796) is True
+    assert edges[1:] == [0, 1, 0, 0, 0, 0, 0, 0]
+    assert serial.tick(5308) is False
+
+
+def test_normal_serial_cancel_does_not_emit_pending_edge_or_irq():
+    edges = []
+
+    class RecordingBackend:
+        def on_edge(self, bit, role):
+            edges.append(bit)
+            return 1
+
+    serial = SerialCore(False, backend=RecordingBackend())
+    serial.set_SC(0x81)
+    serial.tick(511)
+    serial.set_SC(0x01)
+    assert serial.tick(4096) is False
+    assert edges == []
+    assert serial.transfer_enabled == 0
+    serial.set_SC(0x81)
+    assert serial.clock_target == 4608
+    assert serial.tick(4607) is False
+    assert edges == []
+    assert serial.tick(4608) is False
+    assert len(edges) == 1
+    assert serial.tick(8192) is True
+
+
+@pytest.mark.parametrize("cgb_mode", [False, True])
+@pytest.mark.parametrize("control", [0x00, 0x80])
+def test_large_absolute_clock_has_no_internal_deadline_when_not_master(cgb_mode, control):
+    base = 1 << 40  # Longer-running fixtures already exceed the 2**31 sentinel.
+    edges = []
+
+    class RecordingBackend:
+        def on_edge(self, bit, role):
+            edges.append(bit)
+            return 1
+
+    serial = SerialCore(cgb_mode, backend=RecordingBackend())
+    assert serial.tick(base) is False
+    serial.set_SC(control)
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+    for elapsed in (base + 1, base + 4096, base + 8192):
+        assert serial.tick(elapsed) is False
+        assert serial._cycles_to_interrupt == MAX_CYCLES
+    assert edges == []
+    assert bool(serial.transfer_enabled) == bool(control & 0x80)
+
+
+@pytest.mark.parametrize("cgb_mode", [False, True])
+def test_large_absolute_clock_master_completion_removes_internal_deadline(cgb_mode):
+    base = 1 << 40
+    serial = SerialCore(cgb_mode)
+    serial.tick(base)
+    serial.set_SB(0x00)
+    serial.set_SC(0x81)
+    assert serial._cycles_to_interrupt == 512
+    assert serial.tick(base + 4095) is False
+    assert serial._cycles_to_interrupt == 1
+    assert serial.tick(base + 4096) is True
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+    assert serial.tick(base + 8192) is False
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+
+
+@pytest.mark.parametrize("cgb_mode", [False, True])
+def test_large_absolute_clock_external_completion_has_no_later_irq(cgb_mode):
+    base = 1 << 40
+    serial = SerialCore(cgb_mode)
+    serial.tick(base)
+    serial.set_SC(0x80)
+    for bit in range(8):
+        assert serial.apply_external_edge(1) is (bit == 7)
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+    assert serial.tick(base + 4096) is False
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+
+
+def test_large_absolute_clock_cancel_removes_internal_deadline():
+    base = 1 << 40
+    serial = SerialCore(False)
+    serial.tick(base)
+    serial.set_SC(0x81)
+    serial.tick(base + 100)
+    serial.set_SC(0x01)
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+    assert serial.tick(base + 4096) is False
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+
+
+@pytest.mark.parametrize("control", [0x00, 0x80])
+def test_large_absolute_clock_load_repairs_cached_nonmaster_deadline(control):
+    base = 1 << 40
+    original = SerialCore(False)
+    original.tick(base)
+    original.set_SB(0x02)
+    original.set_SC(control)
+    # Prior saves can cache zero after comparing absolute clock to MAX_CYCLES.
+    original._cycles_to_interrupt = 0
+    stream = _FakeStream()
+    original.save_state(stream)
+    restored = SerialCore(False)
+    restored.load_state(stream, SerialCore.STATE_VERSION)
+    assert restored._cycles_to_interrupt == MAX_CYCLES
+    assert restored.clock == base
+    assert restored.SB == original.SB and restored.SC == original.SC
+    assert restored._bits_remaining == original._bits_remaining
+    assert restored.tick(base) is False
+    assert restored._cycles_to_interrupt == MAX_CYCLES
+
+
 def test_set_SB_preserves_byte_unlike_legacy():
     """Pan Docs says SB holds the outgoing byte. Legacy PyBoy overwrote
     with 0xFF; the bit-accurate core must preserve."""
@@ -119,7 +299,7 @@ def test_master_edge_by_edge_progresses_one_bit_per_period():
     s.set_SB(0xAA)
     s.set_SC(0x81)
 
-    # After each 128-cycle edge, one more bit has been shifted.
+    # After each 512-T-cycle bit event, one more bit has been shifted.
     for edge in range(1, 8):
         cycles = CYCLES_PER_EDGE_DMG * edge
         irq = s.tick(cycles)

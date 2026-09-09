@@ -101,6 +101,34 @@ def test_master_tick_drives_full_byte_exchange():
     assert b.SC & 0x80 == 0
 
 
+@pytest.mark.parametrize("cgb_mode", [False, True])
+def test_coordinator_normal_clock_waits_4096_literal_t_cycles(cgb_mode):
+    master = SerialCore(cgb_mode)
+    slave = SerialCore(cgb_mode)
+    coordinator = LockstepCoordinator(master, slave)
+    try:
+        master.set_SB(0xA5)
+        slave.set_SB(0x3C)
+        master.set_SC(0x81)
+        slave.set_SC(0x80)
+        assert master.tick(511) is False
+        assert master.backend.edge_count == 0
+        assert master.tick(512) is False
+        assert master.backend.edge_count == 1
+        assert master.tick(4095) is False
+        assert master.transfer_enabled and slave.transfer_enabled
+        assert master.backend.edge_count == 7
+        assert master.tick(4096) is True
+        assert master.backend.edge_count == 8
+        assert master.SB == 0x3C
+        assert slave.SB == 0xA5
+        assert not master.transfer_enabled and not slave.transfer_enabled
+        assert master.tick(4608) is False
+        assert master.backend.edge_count == 8
+    finally:
+        coordinator.detach()
+
+
 def test_either_side_can_be_master():
     """B-as-master / A-as-slave works symmetrically."""
     a = SerialCore()
@@ -119,7 +147,7 @@ def test_either_side_can_be_master():
 
 
 def test_edge_by_edge_progression_under_coordinator():
-    """Each 128-cycle quantum advances both sides by exactly one bit."""
+    """Each 512-T-cycle quantum advances both sides by exactly one bit."""
     a = SerialCore()
     b = SerialCore()
     LockstepCoordinator(a, b)

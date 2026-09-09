@@ -1,0 +1,4 @@
+[submodule "vendor/pyboy-src"]
+	path = vendor/pyboy-src
+	url = https://github.com/CompleteDotTech/pyboy-link-cable-fork.git
+	branch = poke-harness/link-cable-bit-accurate-serial

@@ -28,7 +28,7 @@ from typing import Protocol
 # Local fallback constants — match the PyBoy values exactly. Used when
 # PyBoy isn't importable (e.g. sdist-only unit tests) and shadowed by
 # the PyBoy-side constants below when it is.
-CYCLES_PER_EDGE_DMG: int = 128
+CYCLES_PER_EDGE_DMG: int = 512
 CYCLES_PER_BYTE_DMG: int = 8 * CYCLES_PER_EDGE_DMG
 SC_TRANSFER_ENABLE: int = 0x80
 SC_CLOCK_SPEED: int = 0x02

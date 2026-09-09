@@ -430,9 +430,9 @@ def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive():
         assert first_reply == 0
 
         core.rearm_after(0.150, next_out_bit=0)
-        started = time.time()
+        started = time.monotonic()
         second_reply = a.on_edge(our_bit=0, our_role=1)
-        elapsed = time.time() - started
+        elapsed = time.monotonic() - started
 
         assert second_reply == 0
         assert elapsed >= 0.140
