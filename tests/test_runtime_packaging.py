@@ -28,11 +28,14 @@ EXPECTED_PYBOY_REVISION = "c565df66c3731fad2856169a90f6bbec99925915"
 EXPECTED_RUNTIME_DEPENDENCIES = {
     "mcp": "==1.29.1",
     "cython": "==3.0.12",
-    "numpy": "==2.5.2",
     "pydantic": "==2.13.5",
     "pysdl2": "==0.9.17",
     "pysdl2-dll": "==2.32.10",
 }
+EXPECTED_NUMPY_DEPENDENCIES = (
+    ("==2.4.6", "python_version < '3.12'"),
+    ("==2.5.2", "python_version >= '3.12'"),
+)
 EXPECTED_DEV_DEPENDENCIES = {
     "pytest": "==9.1.1",
     "pytest-asyncio": "==1.4.0",
@@ -41,11 +44,29 @@ EXPECTED_DEV_DEPENDENCIES = {
 }
 
 
-def _split_exact_requirement(requirement: str) -> tuple[str, str]:
+def _split_exact_requirement(requirement: str) -> tuple[str, str, str | None]:
+    requirement, separator_marker, marker = requirement.partition(";")
     name, separator, version = requirement.partition("==")
     assert separator == "==", requirement
     assert name and version, requirement
-    return name.lower(), f"=={version}"
+    return name.lower(), f"=={version}", marker.strip() if separator_marker else None
+
+
+def _normalise_marker(marker: str | None) -> str | None:
+    """Keep uv's full-version spelling comparable with project markers."""
+    if marker is None:
+        return None
+    return marker.replace("python_full_version", "python_version")
+
+
+def _expected_runtime_requirements() -> list[tuple[str, str, str | None]]:
+    requirements = [
+        (name, specifier, None) for name, specifier in EXPECTED_RUNTIME_DEPENDENCIES.items()
+    ]
+    requirements.extend(
+        ("numpy", specifier, marker) for specifier, marker in EXPECTED_NUMPY_DEPENDENCIES
+    )
+    return sorted(requirements)
 
 
 def test_project_bundles_the_pinned_pyboy_source() -> None:
@@ -356,13 +377,18 @@ def test_project_exposes_the_installed_mcp_entrypoint_and_explicit_package_data(
 
 def test_project_direct_dependencies_are_exactly_pinned() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    dependencies = dict(_split_exact_requirement(req) for req in project["project"]["dependencies"])
-    dev_dependencies = dict(
+    assert project["project"]["requires-python"] == ">=3.11"
+    dependencies = sorted(
+        _split_exact_requirement(req) for req in project["project"]["dependencies"]
+    )
+    dev_dependencies = sorted(
         _split_exact_requirement(req) for req in project["project"]["optional-dependencies"]["dev"]
     )
 
-    assert dependencies == EXPECTED_RUNTIME_DEPENDENCIES
-    assert dev_dependencies == EXPECTED_DEV_DEPENDENCIES
+    assert dependencies == _expected_runtime_requirements()
+    assert dev_dependencies == sorted(
+        (name, specifier, None) for name, specifier in EXPECTED_DEV_DEPENDENCIES.items()
+    )
 
 
 def test_project_exposes_stable_mcp_entrypoints() -> None:
@@ -378,19 +404,30 @@ def test_project_exposes_stable_mcp_entrypoints() -> None:
 
 def test_lockfile_records_the_same_exact_project_requirements() -> None:
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    assert lock["requires-python"] == ">=3.11"
     project = next(package for package in lock["package"] if package["name"] == "pokered-harness")
-    locked_requirements = {
-        item["name"].lower(): item["specifier"]
+    locked_requirements = sorted(
+        (
+            item["name"].lower(),
+            item["specifier"],
+            _normalise_marker(item.get("marker")),
+        )
         for item in project["metadata"]["requires-dist"]
-        if "marker" not in item
-    }
-    locked_dev_requirements = {
-        item["name"].lower(): item["specifier"]
+        if not item.get("marker", "").startswith("extra ==")
+    )
+    locked_dev_requirements = sorted(
+        (
+            item["name"].lower(),
+            item["specifier"],
+            _normalise_marker(item.get("marker")),
+        )
         for item in project["metadata"]["requires-dist"]
         if item.get("marker") == "extra == 'dev'"
-    }
-    assert locked_requirements == EXPECTED_RUNTIME_DEPENDENCIES
-    assert locked_dev_requirements == EXPECTED_DEV_DEPENDENCIES
+    )
+    assert locked_requirements == _expected_runtime_requirements()
+    assert locked_dev_requirements == sorted(
+        (name, specifier, "extra == 'dev'") for name, specifier in EXPECTED_DEV_DEPENDENCIES.items()
+    )
 
 
 def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
@@ -416,8 +453,10 @@ def test_bootstrap_pins_build_dependencies_and_disables_implicit_resolution() ->
         "setuptools==77.0.3",
         "wheel==0.45.1",
         "cython==3.0.12",
-        "numpy==2.5.2",
+        module._numpy_requirement(),
     )
+    assert module._numpy_requirement((3, 11)) == "numpy==2.4.6"
+    assert module._numpy_requirement((3, 12)) == "numpy==2.5.2"
 
 
 def _load_bootstrap():

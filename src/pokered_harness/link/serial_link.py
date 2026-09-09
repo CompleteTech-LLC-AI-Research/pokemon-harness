@@ -495,6 +495,14 @@ class TcpSerialLink:
         self._closed = False
         self._closed_event = threading.Event()
         self._close_lock = threading.Lock()
+        # Serialize the complete terminal transition separately from
+        # ``_close_lock``.  ``close()`` holds the latter while it acquires
+        # ``_write_lock`` for the BYE frame; making _mark_closed use that
+        # same lock would allow a writer holding _write_lock to deadlock
+        # against close().  Keeping one publication lock here also prevents
+        # _reader_exc from becoming visible before inbound counters have
+        # been drained.
+        self._terminal_lock = threading.Lock()
         self._state_lock = threading.Lock()
 
         self._write_lock = threading.Lock()
@@ -818,25 +826,31 @@ class TcpSerialLink:
         return q
 
     def _mark_closed(self, error: Exception | None = None) -> None:
-        with self._state_lock:
-            if self._closed:
-                if error is not None and self._reader_exc is None:
-                    self._reader_exc = error
-                return
+        with self._terminal_lock:
+            with self._state_lock:
+                if self._closed:
+                    if error is not None and self._reader_exc is None:
+                        self._reader_exc = error
+                    return
+                self._closed = True
+                self._closed_event.set()
+                self._hello_received.set()
+            with self._inbound_lock:
+                for q in self._inbound.values():
+                    while True:
+                        try:
+                            q.get_nowait()
+                        except queue.Empty:
+                            break
+                self._inbound_frame_count = 0
+                self._inbound_byte_count = 0
+            # Publish the reader failure only after all terminal queue and
+            # budget state is coherent. Readers that need the exception take
+            # _terminal_lock in _raise_if_reader_failed(), while diagnostic
+            # callers observing _reader_exc cannot see a half-cleaned state.
             if error is not None:
-                self._reader_exc = error
-            self._closed = True
-            self._closed_event.set()
-            self._hello_received.set()
-        with self._inbound_lock:
-            for q in self._inbound.values():
-                while True:
-                    try:
-                        q.get_nowait()
-                    except queue.Empty:
-                        break
-            self._inbound_frame_count = 0
-            self._inbound_byte_count = 0
+                with self._state_lock:
+                    self._reader_exc = error
         try:
             self._sock.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -951,7 +965,7 @@ class TcpSerialLink:
         self._reader.join(timeout=_READER_JOIN_TIMEOUT_S)
 
     def _raise_if_reader_failed(self) -> None:
-        with self._state_lock:
+        with self._terminal_lock, self._state_lock:
             reader_exc = self._reader_exc
         if reader_exc is not None:
             raise SerialLinkError(

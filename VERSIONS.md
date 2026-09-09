@@ -253,7 +253,8 @@ reformatted.
 
 | Component | Pin | Source of truth |
 |---|---|---|
-| Python | `>=3.12` | `pyproject.toml` |
+| Python | `>=3.11` | `pyproject.toml` |
+| NumPy | `2.4.6` on Python 3.11; `2.5.2` on Python 3.12+ | `pyproject.toml`, `uv.lock`, and `scripts/bootstrap_pyboy.py` |
 | PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `vendor/pyboy-src/pyboy/__init__.py` |
 | MCP | `1.29.1` | `pyproject.toml` and `uv.lock` |
 

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pokered-harness"
 version = "0.1.0"
 description = "Memory-first automation harness for Pokémon Red via PyBoy, exposed over MCP."
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 readme = "README.md"
 license = "LGPL-3.0-only"
 license-files = ["vendor/pyboy-src/LICENSE.md"]
@@ -16,7 +16,8 @@ dependencies = [
     # or MCP contract on a clean install.
     "mcp==1.29.1",
     "cython==3.0.12",
-    "numpy==2.5.2",
+    "numpy==2.4.6; python_version < '3.12'",
+    "numpy==2.5.2; python_version >= '3.12'",
     "pydantic==2.13.5",
     "pysdl2==0.9.17",
     "pysdl2-dll==2.32.10",

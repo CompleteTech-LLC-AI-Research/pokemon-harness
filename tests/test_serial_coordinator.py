@@ -191,6 +191,7 @@ def test_completion_callback_does_not_deadlock_detach():
     callback_started = threading.Event()
     detach_entered_backend = threading.Event()
     errors: list[BaseException] = []
+    callback_detach_errors: list[RuntimeError] = []
 
     coordinator: LockstepCoordinator
 
@@ -201,6 +202,10 @@ def test_completion_callback_does_not_deadlock_detach():
             return
         try:
             coordinator.detach()
+        except RuntimeError as exc:
+            # A callback cannot synchronously drain itself.  Its retryable
+            # rejection must not prevent the outer teardown from finishing.
+            callback_detach_errors.append(exc)
         except BaseException as exc:  # noqa: BLE001 - surface thread failures
             errors.append(exc)
 
@@ -247,6 +252,9 @@ def test_completion_callback_does_not_deadlock_detach():
     assert not edge_thread.is_alive()
     assert not detach_thread.is_alive()
     assert not errors
+    assert len(callback_detach_errors) == 1
+    assert "retry after the callback returns" in str(callback_detach_errors[0])
+    assert not coordinator.attached
     assert coordinator.attached is False
     assert a.backend is not backend
 

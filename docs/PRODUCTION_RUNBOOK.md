@@ -36,9 +36,35 @@ The original dual unit gate at `02a8e85` failed native timing at `64/65`, and
 a gate bug lost failed test identity and iteration output. Subsequent verified test races
 were corrected before the dual `1f19707` pass; preserve that older failure.
 
-### Current working-tree validation (2026-09-06)
+### Reconciliation candidate (2026-09-09)
 
-The isolated working tree has source-runtime real-ROM evidence using
+The candidate based on `ae057bcd` remains `PARTIAL`. Retain the external
+bundle `poke-native-source-gate-pr65-A1qh6p` (`gate-report.json` and
+`gate-report.txt`) as a failed pre-packaging-update source gate, not as
+current-head qualification:
+
+- Both collection entrypoints found the same 4,243 tests.
+- The unit tier completed 3,123 of 4,090 selected tests before its 900-second
+  deadline: 3,097 passed, 25 failed, and one skipped.
+- All five timing repetitions completed: 1,236 passed and 59 failed across
+  1,295 executions, with no skips or errors.
+- The interpreter lacked `ensurepip` and Python headers. Wheel setup failed,
+  and the Cython translation check skipped. Other failures included bounded
+  owner, subprocess, and session progress; the observed host was heavily
+  loaded. A timed-owner failure reproduced on clean `ae057bcd` as well as the
+  candidate, but this does not establish the cause of every failed case.
+- This unit-only invocation did not execute any real-ROM acceptance tier.
+
+The subsequent Python 3.11 dependency/CI update and explicit Cython serial
+local type passed 155 focused tests on CPython 3.11.15: 37 packaging,
+113 serial-core, and five serial-rearm tests. This includes translation and
+C compilation of the serial module, not a full native extension build.
+The complete gate and strict source/native trade/battle matrix still require
+fresh passing evidence for the final clean candidate.
+
+### Historical working-tree validation (2026-09-06)
+
+The recorded isolated working tree had source-runtime real-ROM evidence using
 the pinned vendored PyBoy source runtime (`PYBOY_NO_CYTHON=1`) and the
 operator-supplied ROM, symbol, and fixture roots:
 
@@ -54,8 +80,8 @@ bounded owner-frame barrier. For cross-family pairs, only the ordered
 non-Yellow-listener/Yellow-connector walk boundary receives a short frame-paced
 rendezvous; the serial-heavy exchange then returns to native edge pacing, while
 the reverse ordering stays on its established native path because the
-cartridges expose different polling windows. This working-tree evidence closes
-the source-runtime trade tier but does not replace the required strict battle
+cartridges expose different polling windows. This historical working-tree evidence
+does not qualify a changed candidate or replace the required strict battle
 tier, compiled-runtime, MCP, or host/platform evidence.
 
 ### Retained historical results
@@ -163,7 +189,9 @@ runtime or test changes over the historical result. The working tree should
 be clean; ignored BYO assets may be present outside the tracked source. Use
 the same activated interpreter for installation, tests, the gate, and MCP.
 
-The required Python version is 3.12 or newer. On Windows PowerShell, create
+The required Python version is 3.11 or newer. NumPy is pinned to 2.4.6 on
+Python 3.11 and 2.5.2 on Python 3.12+, including the Cython build dependencies.
+On Windows PowerShell, create
 the same environment with `py -3 -m venv .venv`, activate with
 `.venv\Scripts\Activate.ps1`, and use `python -m pip` for the remaining
 commands. Run the tests and the MCP server with the same interpreter.
@@ -581,6 +609,33 @@ Every required row must execute and pass without failures or skips for release
 acceptance.
 Retain the tested commit, runtime, assets, roles, deadlines, and teardown;
 historical source-local 9/9 and native results do not qualify another runtime.
+
+### Inspection-only paired checkpoints
+
+Use an empty output directory outside the checkout to retain paired states:
+
+```bash
+python scripts/diagnose_pair_trade.py \
+  --output-dir /tmp/pokered-trade-inspection-unique \
+  --capture-frame 200,800,1600 \
+  --max-captures 4 --deadline-seconds 600
+```
+
+Frame zero counts toward the capture limit. The driver preserves input order
+and advances one public scheduler quantum per owner call, checking its deadline
+between calls. Local paired stepping uses cumulative physical-time horizons;
+LCD display completion does not stop one CPU while its peer continues.
+
+Each checkpoint includes two state blobs and a manifest with hashes, runtime
+metadata, input history, and hook counters. These are inspection-only artifacts,
+not trade/battle acceptance or resumable linked sessions. State files omit the
+coordinator and Python input queues; never load them into an attached pair.
+
+`terminal.json` is first written with `cleanup_pending=true` before teardown,
+then replaced with final cleanup results. SIGINT/SIGTERM are handled cooperatively.
+A hard kill or native call that never yields may still prevent reporting or
+cleanup; use an outer process deadline and do not treat a missing or provisional
+terminal record as verified cleanup.
 
 ### Tier E: remote transport and subprocess acceptance/diagnostics
 

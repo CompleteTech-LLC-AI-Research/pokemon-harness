@@ -24,6 +24,7 @@ from pyboy.utils cimport IntIOInterface, WindowEvent
 cdef Logger logger
 
 cdef int64_t MAX_CYCLES
+cdef uint64_t PHYSICAL_CLOCK_MAX
 cdef uint16_t STAT, LY, LYC
 cdef int INTR_TIMER, INTR_SERIAL, INTR_HIGHTOLOW
 cdef uint16_t OPCODE_BRK
@@ -52,6 +53,9 @@ cdef class Motherboard:
     cdef uint8_t key0, key1, wram_select
     cdef uint8_t[4] cgb_undocumented
     cdef readonly bint double_speed
+    cdef uint64_t _physical_clock, _physical_last_cycles, _physical_clock_epoch
+    cdef bint _physical_clock_fault, _physical_load_incomplete
+    cdef object _serial_time_segments, _serial_raw_offset
     cdef readonly bint cgb, cgb_mode
 
     # Optional execution governor; callbacks are installed only by the setter.
@@ -90,6 +94,11 @@ cdef class Motherboard:
     cpdef bint tick(self) except * with gil
 
     cdef void switch_speed(self) noexcept nogil
+    @cython.locals(cycles=uint64_t, delta=uint64_t, rate=uint64_t)
+    cdef void _sync_physical_clock(self) noexcept nogil
+    cpdef void _prune_serial_time_segments(self) with gil
+    cpdef tuple _map_serial_boundary_time(self, int, uint64_t, uint64_t) with gil
+    cpdef tuple get_physical_clock(self) with gil
 
     cdef uint8_t getitem(self, uint16_t) except * nogil
     @final

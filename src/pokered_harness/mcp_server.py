@@ -61,6 +61,10 @@ from pokered_harness.link.timed_wire import (
     WireError,
 )
 from pokered_harness.mcp_timed_owner import TimedOwner, TimedOwnerPolicy
+from pokered_harness.ownership import (
+    EmulatorOwnershipError,
+    assert_no_emulator_scope,
+)
 from pokered_harness.serialize import to_jsonable
 from pokered_harness.session import (
     InvalidStateError,
@@ -68,6 +72,7 @@ from pokered_harness.session import (
     SessionClosedError,
     SessionConfigurationError,
     VersionMismatch,
+    locked_sessions,
 )
 
 
@@ -230,6 +235,7 @@ class LinkState:
         semantics.  Shutdown callers can provide a finite timeout so an
         in-flight request cannot strand stdio teardown behind this guard.
         """
+        assert_no_emulator_scope("mutating link operation")
         timeout: float | None = None
         if timeout_s is None:
             acquired = self._operation_lock.acquire()
@@ -563,6 +569,8 @@ def _error_code(exc: Exception) -> str:
     declared_code = getattr(exc, "code", None)
     if isinstance(declared_code, str) and declared_code:
         return declared_code
+    if isinstance(exc, EmulatorOwnershipError):
+        return "emulator_ownership_error"
     for error_type, code in (
         (Cancelled, "timed_cancelled"),
         (DeadlineExceeded, "timed_deadline_exceeded"),
@@ -833,20 +841,28 @@ def _dispatch_link_tool(
             )
         if pair is None and primary_supports_native and peer_supports_native:
             local_link_session = PyBoyLinkSession.local()
+            lock_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
             try:
                 # Use a stable lock order; both sessions are owned by this
                 # MCP server and no callback is invoked while attaching.
-                lock_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
                 with (
+                    locked_sessions(
+                        session,
+                        peer,
+                        timeout_s=_remaining(lock_deadline),
+                    ),
                     link._pair_lock,
-                    session.locked(timeout_s=_remaining(lock_deadline)),
-                    peer.locked(timeout_s=_remaining(lock_deadline)),
                 ):
                     local_link_session.attach(session._pyboy)
                     local_link_session.attach(peer._pyboy)
             except Exception:
                 try:
-                    _detach_local_link_session(link, session, local_link_session)
+                    _detach_local_link_session(
+                        link,
+                        session,
+                        local_link_session,
+                        timeout_s=_remaining(lock_deadline),
+                    )
                 except Exception:  # noqa: BLE001, S110 - preserve attach failure
                     # Preserve the attach failure; the caller still gets a
                     # deterministic failure and the session close path can
@@ -871,14 +887,26 @@ def _dispatch_link_tool(
             with link.state():
                 link.pair = pair
         try:
-            with link._pair_lock:
+            pair_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+            with (
+                locked_sessions(
+                    session,
+                    peer,
+                    timeout_s=_remaining(pair_deadline),
+                ),
+                link._pair_lock,
+            ):
                 pair.pair()
         except Exception:
             if created:
                 with link.state():
                     if link.pair is pair:
                         link.pair = None
-            _deactivate_link_hooks(session, peer)
+            _deactivate_link_hooks(
+                session,
+                peer,
+                timeout_s=_remaining(pair_deadline),
+            )
             raise
         return {
             "paired": True,
@@ -894,13 +922,12 @@ def _dispatch_link_tool(
         cleanup_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
         if local_link_session is not None:
             try:
-                with link._pair_lock:
-                    _detach_local_link_session(
-                        link,
-                        session,
-                        local_link_session,
-                        timeout_s=_remaining(cleanup_deadline),
-                    )
+                _detach_local_link_session(
+                    link,
+                    session,
+                    local_link_session,
+                    timeout_s=_remaining(cleanup_deadline),
+                )
             except Exception as exc:  # noqa: BLE001
                 cleanup_errors.append(exc)
             else:
@@ -909,7 +936,16 @@ def _dispatch_link_tool(
                         link.local_link_session = None
         if pair is not None and pair.paired:
             try:
-                with link._pair_lock:
+                peer = _require_peer(link)
+                with (
+                    locked_sessions(
+                        session,
+                        peer,
+                        allow_closed=True,
+                        timeout_s=_remaining(cleanup_deadline),
+                    ),
+                    link._pair_lock,
+                ):
                     pair.unpair()
             except Exception as exc:  # noqa: BLE001
                 cleanup_errors.append(exc)
@@ -920,7 +956,11 @@ def _dispatch_link_tool(
             finally:
                 # Even a partially failing pair teardown must not leave raw
                 # callbacks able to reach a discarded bridge.
-                _deactivate_link_hooks(session, pair.peer)
+                _deactivate_link_hooks(
+                    session,
+                    pair.peer,
+                    timeout_s=_remaining(cleanup_deadline),
+                )
         elif pair is not None:
             with link.state():
                 if link.pair is pair:
@@ -962,37 +1002,48 @@ def _dispatch_link_tool(
                 )
             return {"primary_tick": session.current_tick(), "peer_tick": None}
         if local_link_session is not None:
-            with link._pair_lock:
-                peer = _require_peer(link)
-                # The interleaved path drives PyBoy directly rather than
-                # through Session.step(), so acquire both Session locks
-                # explicitly. This prevents an ordinary MCP
-                # step/save/load/resource call from mutating either
-                # motherboard concurrently with link stepping.
-                lock_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
-                with (
-                    session.locked(timeout_s=_remaining(lock_deadline)),
-                    peer.locked(timeout_s=_remaining(lock_deadline)),
-                ):
-                    local_link_session.step_interleaved(
-                        count, render=bool(arguments.get("render", False))
-                    )
-                    # PyBoyLinkSession drives the underlying emulators
-                    # directly; keep Session-level bookkeeping aligned with
-                    # the same frame count.
-                    session.reset_tick(session.current_tick() + count)
-                    peer.reset_tick(peer.current_tick() + count)
-                    return {
-                        "primary_tick": session.current_tick(),
-                        "peer_tick": peer.current_tick(),
-                    }
+            peer = _require_peer(link)
+            # The interleaved path drives PyBoy directly rather than through
+            # Session.step(), so retain both canonical owner locks through
+            # provider work and bookkeeping.  The provider lock is acquired
+            # only after those owner locks to keep one global order.
+            lock_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+            with (
+                locked_sessions(
+                    session,
+                    peer,
+                    timeout_s=_remaining(lock_deadline),
+                ),
+                link._pair_lock,
+            ):
+                local_link_session.step_interleaved(
+                    count, render=bool(arguments.get("render", False))
+                )
+                # PyBoyLinkSession drives the underlying emulators
+                # directly; keep Session-level bookkeeping aligned with
+                # the same frame count.
+                session.reset_tick(session.current_tick() + count)
+                peer.reset_tick(peer.current_tick() + count)
+                return {
+                    "primary_tick": session.current_tick(),
+                    "peer_tick": peer.current_tick(),
+                }
         if remote_mode != "idle" or remote_link is not None or remote_error is not None:
             raise McpHarnessError(
                 "remote_not_connected",
                 f"remote link is not ready for stepping (mode={remote_mode!r})",
             )
         pair = _require_pair(link)
-        with link._pair_lock:
+        peer = _require_peer(link)
+        lock_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+        with (
+            locked_sessions(
+                session,
+                peer,
+                timeout_s=_remaining(lock_deadline),
+            ),
+            link._pair_lock,
+        ):
             pair.step(count, render=bool(arguments.get("render", False)))
         return {
             "primary_tick": session.current_tick(),
@@ -2153,13 +2204,18 @@ def _detach_local_link_session(
 ) -> None:
     """Detach a local native link while both owned emulators are locked."""
     peer = link.peer_session
-    lock_deadline = time.monotonic() + max(0.0, timeout_s)
-    with session.locked(timeout_s=_remaining(lock_deadline)):
-        if peer is not None and peer is not session:
-            with peer.locked(timeout_s=_remaining(lock_deadline)):
-                local_link_session.detach_all()
-        else:
-            local_link_session.detach_all()
+    # Acquire emulator owners before the provider/pair lock.  This keeps
+    # local stepping, detach, and raw provider callbacks on one order even
+    # when the primary/peer objects were supplied in reverse identity order.
+    targets = [session]
+    if peer is not None and peer is not session:
+        targets.append(peer)
+    with locked_sessions(
+        *targets,
+        allow_closed=True,
+        timeout_s=max(0.0, timeout_s),
+    ), link._pair_lock:
+        local_link_session.detach_all()
 
 
 def _deactivate_link_hooks(
@@ -2174,15 +2230,17 @@ def _deactivate_link_hooks(
     sessions: list[Session] = [session]
     if peer is not None and peer is not session:
         sessions.append(peer)
-    for target in sessions:
-        try:
-            # Take one bounded lock acquisition per owned session. The
-            # nested calls are re-entrant and therefore cannot restart the
-            # timeout for every symbol. Teardown must work after the Session
-            # has published ``closed`` as well.
-            with target.locked(
-                timeout_s=_remaining(deadline), allow_closed=True
-            ):
+    try:
+        # Acquire all emulator owners canonically before deactivating any
+        # provider hook.  Nested Session calls are re-entrant, so this single
+        # deadline also prevents primary/peer cleanup from observing a half
+        # detached pair.
+        with locked_sessions(
+            *sessions,
+            allow_closed=True,
+            timeout_s=_remaining(deadline),
+        ):
+            for target in sessions:
                 try:
                     target.deactivate_serial_hooks(timeout_s=0.0)
                 except Exception as exc:  # noqa: BLE001
@@ -2198,8 +2256,8 @@ def _deactivate_link_hooks(
                         )
                     except Exception as exc:  # noqa: BLE001
                         errors.append(exc)
-        except Exception as exc:  # noqa: BLE001 - cleanup is best effort
-            errors.append(exc)
+    except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+        errors.append(exc)
     return errors
 
 

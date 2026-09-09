@@ -39,7 +39,16 @@ EXPECTED_REVISION = "c565df66c3731fad2856169a90f6bbec99925915"
 CYTHON_REQUIREMENT = "cython==3.0.12"
 SETUPTOOLS_REQUIREMENT = "setuptools==77.0.3"
 WHEEL_REQUIREMENT = "wheel==0.45.1"
-NUMPY_REQUIREMENT = "numpy==2.5.2"
+NUMPY_311_REQUIREMENT = "numpy==2.4.6"
+NUMPY_312_REQUIREMENT = "numpy==2.5.2"
+
+
+def _numpy_requirement(python_version: tuple[int, int] = sys.version_info[:2]) -> str:
+    """Return the pinned NumPy build dependency for *python_version*."""
+    return NUMPY_311_REQUIREMENT if python_version < (3, 12) else NUMPY_312_REQUIREMENT
+
+
+NUMPY_REQUIREMENT = _numpy_requirement()
 BUILD_REQUIREMENTS = (
     SETUPTOOLS_REQUIREMENT,
     WHEEL_REQUIREMENT,

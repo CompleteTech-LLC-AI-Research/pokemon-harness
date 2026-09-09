@@ -23,6 +23,11 @@ from typing import Self
 
 from pokered_harness.events.hooks import EventBus, GameEvent, HookRegistration
 from pokered_harness.input import Button, validate_button
+from pokered_harness.ownership import (
+    EmulatorOwnershipError,
+    owner_for,
+    owner_group,
+)
 from pokered_harness.pyboy_protocol import PyBoyLike
 from pokered_harness.state import GameState, parse_game_state
 from pokered_harness.symbols.loader import SymbolTable, load_sym_file
@@ -40,7 +45,7 @@ class SessionClosedError(SessionError):
     code = "session_closed"
 
 
-class SessionCloseTimeout(SessionError):
+class SessionCloseTimeout(SessionError, TimeoutError):
     """Raised when shutdown cannot complete before its deadline."""
 
     code = "session_close_timeout"
@@ -50,6 +55,12 @@ class SessionCloseError(SessionError):
     """Raised when the emulator rejects a shutdown attempt."""
 
     code = "session_close_failed"
+
+
+# Compatibility spelling used by the earlier ownership API.  Keep the main
+# typed timeout class as the canonical public exception while allowing raw
+# provider integrations to share their existing import contract.
+SessionCleanupTimeoutError = SessionCloseTimeout
 
 
 class SessionLockTimeout(SessionError):
@@ -144,7 +155,12 @@ class Session:
         # bus is falsy and ``event_bus or EventBus()`` would drop it.
         self._events = event_bus if event_bus is not None else EventBus()
         self._tick: int = 0
-        self._lock = threading.RLock()
+        # The owner registry is shared with raw link providers.  Keep the
+        # Session-facing ``_lock`` property below for compatibility with
+        # existing tests/instrumentation, but make the owner lock the one
+        # canonical re-entrant mutex used by both APIs.
+        self._owner = owner_for(pyboy)
+        self._execution = self._owner.execution
         self._lifecycle_lock = threading.Lock()
         self._close_done = threading.Event()
         self._close_done.set()
@@ -161,6 +177,52 @@ class Session:
         self._timed_endpoint = None
         self._timed_attachment = None
         self._timed_executing = False
+        self._owner.bind_session(self, SessionClosedError)
+
+    @property
+    def _lock(self):
+        """Compatibility view of the canonical emulator ownership lock."""
+        return self._owner.lock
+
+    @_lock.setter
+    def _lock(self, value):
+        self._owner.lock = value
+
+    @contextmanager
+    def _emulator_access(
+        self,
+        *,
+        timeout_s: float | None = None,
+        allow_closed: bool = False,
+    ) -> Iterator[None]:
+        """Enter the shared owner scope and optional native backend scope.
+
+        The native backend may expose an owner-pump scope of its own.  It is
+        entered only after the Python owner lock, preserving the canonical
+        owner -> backend/session ordering and preventing a raw callback from
+        re-entering the MCP operation lock in reverse.
+        """
+        owner_scope = self._owner.access(timeout=timeout_s)
+        try:
+            owner_scope.__enter__()
+        except TimeoutError as exc:
+            timeout = timeout_s if timeout_s is not None else 0.0
+            raise SessionLockTimeout(
+                "could not acquire the emulator lock before the "
+                f"{timeout:g}s deadline"
+            ) from exc
+        try:
+            if not allow_closed:
+                self._ensure_open()
+            core = getattr(getattr(self._pyboy, "mb", None), "serial", None)
+            scope = getattr(getattr(core, "backend", None), "owner_scope", None)
+            if callable(scope):
+                with scope():
+                    yield
+            else:
+                yield
+        finally:
+            owner_scope.__exit__(None, None, None)
 
     # --- construction --------------------------------------------------
 
@@ -330,6 +392,7 @@ class Session:
                 owned_by_current_thread = self._close_owner == current_thread_id
             else:
                 self._closed = True
+                self._owner.closed = True
                 self._close_owner = current_thread_id
                 self._close_done.clear()
                 self._stop_error = None
@@ -338,13 +401,42 @@ class Session:
                 close_done = None
                 owned_by_current_thread = True
 
+        # A raw provider callback or a canonical multi-session scope may call
+        # close re-entrantly.  Publishing ``closed`` above is intentional so
+        # callbacks fail closed, but stopping must wait until the outer owner
+        # scope exits; otherwise PyBoy.stop could run halfway through a tick.
+        if getattr(self._execution, "depth", 0):
+            with self._lifecycle_lock:
+                if (
+                    self._close_owner == current_thread_id
+                    and self._stop_thread is None
+                ):
+                    self._close_owner = None
+                    self._close_done.set()
+            raise SessionCloseTimeout(
+                "cleanup deferred until the current emulator operation exits"
+            )
+        try:
+            self._owner.assert_lock_order()
+        except EmulatorOwnershipError as exc:
+            with self._lifecycle_lock:
+                if (
+                    self._close_owner == current_thread_id
+                    and self._stop_thread is None
+                ):
+                    self._close_owner = None
+                    self._close_done.set()
+            raise SessionCloseTimeout(
+                "cleanup deferred until other emulator ownership scopes exit"
+            ) from exc
+
         if close_done is not None:
             if not owned_by_current_thread and not close_done.wait(
                 timeout=max(0.0, stop_deadline - time.monotonic())
             ):
                 raise SessionCloseTimeout(
                     "another session close is still in progress before the "
-                    f"{timeout_s:g}s shutdown deadline"
+                    f"{timeout_s:g}s shutdown deadline (cleanup deadline)"
                 )
             with self._lifecycle_lock:
                 if self._stopped:
@@ -375,7 +467,7 @@ class Session:
             ):
                 raise SessionCloseTimeout(
                     "an emulator operation is still active after "
-                    f"the {timeout_s:g}s shutdown deadline"
+                    f"the {timeout_s:g}s shutdown deadline (cleanup deadline)"
                 )
             lock_acquired = True
             if self._timed_endpoint is not None:
@@ -399,7 +491,8 @@ class Session:
                     )
                 else:
                     try:
-                        self._pyboy.stop(save=save)
+                        with self._owner.access():
+                            self._pyboy.stop(save=save)
                     except BaseException as exc:  # noqa: BLE001 - publish exact failure
                         error = exc
                     finally:
@@ -425,7 +518,7 @@ class Session:
             ):
                 raise SessionCloseTimeout(
                     "PyBoy.stop did not return before the "
-                    f"{timeout_s:g}s shutdown deadline"
+                    f"{timeout_s:g}s shutdown deadline (cleanup deadline)"
                 )
             with self._lifecycle_lock:
                 if self._stopped:
@@ -436,7 +529,7 @@ class Session:
                     ) from self._stop_error
                 raise SessionCloseTimeout(
                     "emulator shutdown did not complete before the "
-                    f"{timeout_s:g}s shutdown deadline"
+                    f"{timeout_s:g}s shutdown deadline (cleanup deadline)"
                 )
         finally:
             if lock_acquired:
@@ -474,18 +567,11 @@ class Session:
         timeout = _validate_timeout(timeout_s, "timeout_s")
         if not allow_closed:
             self._ensure_open()
-        acquired = self._lock.acquire(timeout=timeout)
-        if not acquired:
-            raise SessionLockTimeout(
-                "could not acquire the emulator lock before the "
-                f"{timeout:g}s deadline"
-            )
-        try:
-            if not allow_closed:
-                self._ensure_open()
+        with self._emulator_access(
+            timeout_s=timeout,
+            allow_closed=allow_closed,
+        ):
             yield self
-        finally:
-            self._lock.release()
 
     def __enter__(self) -> Self:
         return self
@@ -496,7 +582,9 @@ class Session:
     # --- clock / events ------------------------------------------------
 
     def current_tick(self) -> int:
-        with self._lock:
+        # Tick bookkeeping remains inspectable after close; this was the
+        # historical status-path contract and does not touch native state.
+        with self._emulator_access(allow_closed=True):
             return self._tick
 
     @property
@@ -512,7 +600,7 @@ class Session:
         events with the current tick. Encapsulates the ``EventBus``
         interaction so callers don't reach into ``_pyboy``."""
         self._ensure_open()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             bank, addr = self._symbols.bank_addr(symbol_name)
 
@@ -547,7 +635,7 @@ class Session:
         registration and avoids duplicate physical PyBoy breakpoints.
         """
         self._ensure_open()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             bank, addr = self._symbols.bank_addr(symbol_name)
             return self._register_event_hook_at_locked(
@@ -570,7 +658,7 @@ class Session:
     ) -> HookRegistration:
         """Register a session-serialized callback at a raw address."""
         self._ensure_open()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             return self._register_event_hook_at_locked(
                 bank,
@@ -597,7 +685,7 @@ class Session:
             # so callbacks arriving concurrently with teardown fail closed.
             if self._closed:
                 return
-            with self._lock:
+            with self._emulator_access():
                 if self._closed:
                     return
                 callback(ctx)
@@ -638,7 +726,7 @@ class Session:
         Used by the link-cable bridge to mutate emulator memory when serial
         routines fire. For plain event emission prefer :meth:`register_hook`."""
         self._ensure_open()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             bank, addr = self._symbols.bank_addr(symbol_name)
             state = _HookState()
@@ -649,7 +737,7 @@ class Session:
                 # while another thread is blocked in a remote exchange.
                 if not state.active or self._closed:
                     return
-                with self._lock:
+                with self._emulator_access():
                     if not state.active or self._closed:
                         return
                     callback(ctx)
@@ -670,20 +758,19 @@ class Session:
         deactivated.
         """
         timeout = _validate_timeout(timeout_s, "timeout_s")
-        if not self._lock.acquire(timeout=timeout):
+        try:
+            with self._emulator_access(timeout_s=timeout, allow_closed=True):
+                count = 0
+                for state, _bank, _addr, _symbol_name in self._serial_hooks:
+                    if state.active:
+                        state.active = False
+                        count += 1
+                return count
+        except SessionLockTimeout as exc:
             raise SessionLockTimeout(
                 "could not acquire the emulator lock before the "
                 f"{timeout:g}s deactivation deadline"
-            )
-        try:
-            count = 0
-            for state, _bank, _addr, _symbol_name in self._serial_hooks:
-                if state.active:
-                    state.active = False
-                    count += 1
-            return count
-        finally:
-            self._lock.release()
+            ) from exc
 
     def deactivate_hooks_at(
         self,
@@ -700,27 +787,26 @@ class Session:
         session is already closed and only hook teardown remains.
         """
         timeout = _validate_timeout(timeout_s, "timeout_s")
-        if not self._lock.acquire(timeout=timeout):
+        try:
+            with self._emulator_access(timeout_s=timeout, allow_closed=True):
+                symbol = self._symbols.get(symbol_name)
+                if symbol is None:
+                    return
+                bank, addr = symbol.bank, symbol.addr
+                for state, hook_bank, hook_addr, _hook_symbol in self._serial_hooks:
+                    if hook_bank == bank and hook_addr == addr:
+                        state.active = False
+                self._events.deactivate_at(self._pyboy, bank, addr)
+                self._serial_hooks[:] = [
+                    record
+                    for record in self._serial_hooks
+                    if record[1] != bank or record[2] != addr
+                ]
+        except SessionLockTimeout as exc:
             raise SessionLockTimeout(
                 "could not acquire the emulator lock before the "
                 f"{timeout:g}s deactivation deadline"
-            )
-        try:
-            symbol = self._symbols.get(symbol_name)
-            if symbol is None:
-                return
-            bank, addr = symbol.bank, symbol.addr
-            for state, hook_bank, hook_addr, _hook_symbol in self._serial_hooks:
-                if hook_bank == bank and hook_addr == addr:
-                    state.active = False
-            self._events.deactivate_at(self._pyboy, bank, addr)
-            self._serial_hooks[:] = [
-                record
-                for record in self._serial_hooks
-                if record[1] != bank or record[2] != addr
-            ]
-        finally:
-            self._lock.release()
+            ) from exc
 
     # --- actions -------------------------------------------------------
 
@@ -844,7 +930,7 @@ class Session:
         _validate_positive_int(count, "count")
         self._ensure_open()
         self._check_timed_owner()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             self._step_locked(count, render=render)
 
@@ -865,6 +951,7 @@ class Session:
         # successful return while paused or quitting and an interrupted frame.
         # Ordinary execution retains its historical exception rollback.
         self._admit_timed_execution()
+        self._validate_link_operation("step")
         endpoint = self._timed_endpoint
         start_frame = self._pyboy.frame_count if endpoint is not None else None
         old_tick = self._tick
@@ -892,7 +979,7 @@ class Session:
         _validate_positive_int(duration, "duration")
         self._ensure_open()
         self._check_timed_owner()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             self._admit_timed_execution()
             name = validate_button(str(button)).value
@@ -901,7 +988,7 @@ class Session:
     def hold(self, button: str | Button) -> None:
         self._ensure_open()
         self._check_timed_owner()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             self._admit_timed_execution()
             name = validate_button(str(button)).value
@@ -910,7 +997,7 @@ class Session:
     def release(self, button: str | Button) -> None:
         self._ensure_open()
         self._check_timed_owner()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             self._admit_timed_execution()
             name = validate_button(str(button)).value
@@ -920,14 +1007,14 @@ class Session:
 
     def read_game_state(self) -> GameState:
         self._ensure_open()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             return parse_game_state(self._pyboy.memory, self._symbols)
 
     def event_snapshot(self) -> list[GameEvent]:
         """Return a consistent copy of the current event log."""
         self._ensure_open()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             return list(self._events)
 
@@ -935,7 +1022,7 @@ class Session:
 
     def save_state(self) -> bytes:
         self._ensure_open()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             buf = BytesIO()
             self._pyboy.save_state(buf)
@@ -953,10 +1040,11 @@ class Session:
         if not payload:
             raise InvalidStateError("save-state must not be empty")
         self._ensure_open()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             if self._timed_endpoint is not None:
                 raise SessionError("cannot load state during a bound timed epoch")
+            self._validate_link_operation("load_state")
             self._pyboy.load_state(BytesIO(payload))
             # After load_state the emulated clock has been restored, but our
             # external tick counter is just bookkeeping — callers can reset
@@ -972,7 +1060,7 @@ class Session:
         if value < 0:
             raise ValueError(f"tick must be non-negative, got {value}")
         self._ensure_open()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
             if self._timed_endpoint is not None:
                 raise SessionError("cannot reset tick during a bound timed epoch")
@@ -1004,8 +1092,9 @@ class Session:
 
         self._ensure_open()
         self._check_timed_owner()
-        with self._lock:
+        with self._emulator_access():
             self._ensure_open()
+            self._validate_link_operation("run_until_event")
             start_tick = self._tick
             deadline = start_tick + max_ticks
 
@@ -1035,6 +1124,44 @@ class Session:
     def _ensure_open(self) -> None:
         if self._closed:
             raise SessionClosedError("session is closed")
+        self._owner.ensure_open()
+
+    def _validate_link_operation(self, operation: str) -> None:
+        """Let an attached serial backend reject independently-owned work."""
+        motherboard = getattr(self._pyboy, "mb", None)
+        serial = getattr(motherboard, "serial", None)
+        backend = getattr(serial, "backend", None)
+        validate = getattr(backend, "validate_session_operation", None)
+        if callable(validate):
+            validate(operation)
+
+
+@contextmanager
+def locked_sessions(
+    *sessions: Session,
+    allow_closed: bool = False,
+    timeout_s: float | None = None,
+) -> Iterator[None]:
+    """Acquire one or more Session owners in canonical identity order.
+
+    Pair operations must enter this group before touching provider/network
+    locks.  The ordered owner scope rejects reverse single-owner acquisition
+    before it can become a two-thread deadlock; cleanup may opt into closed
+    sessions while still waiting for active emulator work to finish.
+    """
+    with owner_group(
+        (session._owner for session in sessions),
+        allow_closed=allow_closed,
+        timeout=(
+            None
+            if timeout_s is None
+            else _validate_timeout(timeout_s, "timeout_s")
+        ),
+    ):
+        if not allow_closed:
+            for session in sessions:
+                session._ensure_open()
+        yield
 
 
 def sha1_of_file(path: str | Path, *, chunk_size: int = 1 << 20) -> str:

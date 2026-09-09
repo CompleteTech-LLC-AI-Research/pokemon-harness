@@ -181,22 +181,20 @@ def _pyboy_mb_swappable() -> bool:
         return False
 
 
-_pyboy_swappable = _fixtures_ready and _pyboy_mb_swappable()
-
-
-pytestmark = pytest.mark.skipif(
-    not _pyboy_swappable,
-    reason=(
-        "PyBoy.mb is not Python-accessible; PyBoyLinkSession.attach requires "
-        "the runtime to expose mb.serial. Install the bundled runtime or a "
-        "compatible PyBoy build, then this test will run."
-        if _fixtures_ready
-        else (
+@pytest.fixture(scope="module", autouse=True)
+def _require_real_rom_link_runtime():
+    # Diagnostic helper imports must not create an emulator as a side effect.
+    # Probe only when this module's asset-dependent tests actually execute.
+    if not _fixtures_ready:
+        pytest.skip(
             "Yellow ROM or Cable Club state fixture missing — regenerate "
             "with scripts/produce_cable_club_fixture.py --version yellow"
         )
-    ),
-)
+    if not _pyboy_mb_swappable():
+        pytest.skip(
+            "PyBoy.mb is not Python-accessible; local attachment requires "
+            "a source or native runtime exposing mb.serial"
+        )
 
 
 class _CountingBackend:

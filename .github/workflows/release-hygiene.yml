@@ -10,9 +10,12 @@ permissions:
 
 jobs:
   unit-and-manifest:
-    name: Unit tests and fixture-manifest schema
+    name: Unit tests and fixture-manifest schema (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -62,7 +65,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install development dependencies

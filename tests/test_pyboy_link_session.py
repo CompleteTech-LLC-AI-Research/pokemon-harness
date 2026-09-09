@@ -23,10 +23,36 @@ from pokered_harness.link.serial_core import (
 
 
 class _FakeMB:
-    """Stand-in for ``pyboy.mb`` — just needs a swappable ``serial``."""
+    """Explicit four-cycle instruction clock for the local scheduler."""
 
-    def __init__(self, serial):
+    def __init__(self, serial, owner):
         self.serial = serial
+        self.owner = owner
+        # The production scheduler requires runtime speed metadata even for
+        # fixed-speed DMG doubles.  With no CGB transition, serial.clock is
+        # mapped into the physical half-T-cycle domain by the owner.
+        self.cgb_mode = False
+        self.lcd = SimpleNamespace(frame_done=False, disable_renderer=True)
+        self.sound = SimpleNamespace(
+            disable_sampling=True,
+            clear_buffer=lambda: None,
+        )
+        self.breakpoint_singlestep = 0
+        self.breakpoint_singlestep_latch = 0
+
+    def tick(self):
+        self.owner._cycles += 4
+        self.serial.tick(self.owner._cycles)
+        self.lcd.frame_done = (
+            self.owner._cycles - self.owner._frame_start >= CYCLES_PER_BYTE_DMG
+        )
+        return True
+
+    def breakpoint_reinject(self):
+        pass
+
+    def breakpoint_reached(self):
+        return (-1, -1, -1)
 
 
 class _FakePyBoy:
@@ -39,8 +65,21 @@ class _FakePyBoy:
     """
 
     def __init__(self, serial=None):
-        self.mb = _FakeMB(serial or _LegacySerialStub())
-        self._cycles = 0
+        serial = serial or _LegacySerialStub()
+        self._cycles = serial.last_cycles
+        self._frame_start = self._cycles
+        self.mb = _FakeMB(serial, self)
+        self.events = []
+        self.frame_count = 0
+
+    def _handle_events(self, events):
+        self._frame_start = self._cycles
+
+    def _post_handle_events(self):
+        pass
+
+    def _handle_hooks(self):
+        pass
 
     def tick(self, count: int = 1, render: bool = False, sound: bool = False) -> bool:
         self._cycles += count * CYCLES_PER_BYTE_DMG
@@ -88,6 +127,8 @@ class _BackendSerialStub:
     """Serial double whose backend setter can fail during pair attach."""
 
     def __init__(self, *, fail_assignment: bool = False):
+        self.last_cycles = 0
+        self.clock = 0
         self._backend = object()
         self._fail_assignment = fail_assignment
 
@@ -154,6 +195,23 @@ def test_listen_can_be_cancelled_before_a_peer_connects():
     assert not worker.is_alive()
     assert result
     assert "cancelled" in str(result[0]).lower()
+
+
+@pytest.mark.parametrize("network", [False, True])
+def test_attach_rejects_stopped_endpoint_without_claiming_provider(network):
+    from pokered_harness.ownership import EmulatorOwnershipError, owner_for
+
+    endpoint = _FakePyBoy()
+    endpoint.stopped = True
+    owner = owner_for(endpoint)
+    link = PyBoyLinkSession.local()
+    if network:
+        # Admission must fail before a network backend can start workers.
+        link._network_backend = object()
+    with pytest.raises(EmulatorOwnershipError, match="closed"):
+        link.attach(endpoint)
+    assert link._pyboys == []
+    assert owner._provider is None
 
 
 def test_attach_preserves_register_state_from_legacy_serial():
@@ -318,10 +376,38 @@ def test_detach_all_stops_session_network_backend_workers():
         assert backend._reader is not None and not backend._reader.is_alive()
         assert backend._edge_worker is not None and not backend._edge_worker.is_alive()
         assert link.attached == ()
+        assert backend._local_core is None
+        assert backend._irq_callback is None
+        assert backend._serial_transcript_context_provider is None
     finally:
         # The peer is not owned by this session; clean up the test fixture
         # explicitly just as a direct NetworkBackend caller must.
         backend.stop()
+        peer.stop()
+
+
+def test_network_attach_failure_releases_emulator_references(monkeypatch):
+    backend, peer = NetworkBackend.pair()
+    endpoint = _FakePyBoy()
+    original_serial = endpoint.mb.serial
+    link = PyBoyLinkSession(network_backend=backend)
+
+    def fail_install(_endpoint):
+        raise RuntimeError("injected tick owner installation failure")
+
+    monkeypatch.setattr(link, "_install_network_tick_owner", fail_install)
+    try:
+        with pytest.raises(RuntimeError, match="injected tick owner"):
+            link.attach(endpoint)
+        assert link.attached == ()
+        assert endpoint.mb.serial is original_serial
+        assert backend._local_core is None
+        assert backend._irq_callback is None
+        assert backend._serial_transcript_context_provider is None
+        assert backend._reader is not None and not backend._reader.is_alive()
+        assert backend._edge_worker is not None and not backend._edge_worker.is_alive()
+    finally:
+        link.detach_all()
         peer.stop()
 
 
@@ -651,6 +737,8 @@ class _FrameBoundaryDouble:
         stalled: bool = False,
         speed_shift: int = 0,
     ):
+        self.cgb_mode = bool(speed_shift)
+        self.speed_shift = speed_shift
         self._frame_boundary = start_cycles + frame_boundary
         self._next_frame_boundary = self._frame_boundary
         self._stalled = stalled
@@ -664,7 +752,9 @@ class _FrameBoundaryDouble:
             disable_sampling=False,
             clear_buffer=lambda: None,
         )
-        self.serial = SimpleNamespace(internal_clock=False)
+        self.serial = SerialCore()
+        self.serial.last_cycles = start_cycles
+        self.serial.clock = start_cycles
         self.breakpoint_singlestep = 0
         self.ticks_after_boundary = 0
 
@@ -677,7 +767,17 @@ class _FrameBoundaryDouble:
         if self.cpu.cycles >= self._next_frame_boundary:
             self.lcd.frame_done = True
             self._next_frame_boundary += 1000
+        self.serial.tick(self.cpu.cycles)
         return False
+
+    def get_physical_clock(self):
+        # PyBoy's scheduler clock uses half-normal-speed T-cycles: normal
+        # speed consumes two units per CPU cycle, while CGB double speed
+        # consumes one.  The tests use small physical quanta below so the
+        # scheduler behavior remains observable without a large instruction
+        # budget.
+        rate = 1 if self.speed_shift else 2
+        return (0, self.cpu.cycles * rate)
 
 
 class _FrameBoundaryPyBoy:
@@ -711,12 +811,17 @@ def test_interleaved_frame_crosses_early_lcd_boundary_to_shared_horizon():
     b_start = 20_000_000
     a = _FrameBoundaryPyBoy(20, start_cycles=a_start)
     b = _FrameBoundaryPyBoy(32, start_cycles=b_start)
+    link = PyBoyLinkSession.local()
+    link.PHYSICAL_QUANTUM = 64
+    link.attach(a)
+    link.attach(b)
 
-    PyBoyLinkSession._interleave_one_frame(a, b, chunk_cycles=8)
+    link.step()
 
     assert a.mb.cpu.cycles - a_start == b.mb.cpu.cycles - b_start == 32
     assert a.mb.ticks_after_boundary > 0
     assert a.frame_count == b.frame_count == 1
+    link.detach_all()
 
 
 def test_interleaved_frame_normalizes_cgb_double_speed_cycles():
@@ -735,19 +840,29 @@ def test_interleaved_frame_normalizes_cgb_double_speed_cycles():
     b = _FrameBoundaryPyBoy(
         20, start_cycles=b_start, speed_shift=0
     )
+    link = PyBoyLinkSession.local()
+    link.PHYSICAL_QUANTUM = 40
+    link.attach(a)
+    link.attach(b)
 
-    PyBoyLinkSession._interleave_one_frame(a, b, chunk_cycles=8)
+    link.step()
 
     assert a.mb.cpu.cycles - a_start == 40
     assert b.mb.cpu.cycles - b_start == 20
     assert a.frame_count == b.frame_count == 1
+    link.detach_all()
 
 
 def test_interleaved_frame_timeout_is_bounded_and_clears_singlestep():
     a = _FrameBoundaryPyBoy(8, stalled=True)
     b = _FrameBoundaryPyBoy(8, stalled=True)
+    link = PyBoyLinkSession.local()
+    link.PHYSICAL_QUANTUM = 16
+    link.attach(a)
+    link.attach(b)
 
-    with pytest.raises(TimeoutError, match="shared LCD cycle horizon"):
-        PyBoyLinkSession._interleave_one_frame(a, b, chunk_cycles=4)
+    with pytest.raises(RuntimeError, match="instruction stepping made no clock progress"):
+        link.step()
 
     assert a.mb.breakpoint_singlestep == b.mb.breakpoint_singlestep == 0
+    link.detach_all()

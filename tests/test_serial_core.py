@@ -702,7 +702,7 @@ def test_loading_legacy_state_drops_in_flight_transfer():
 
 
 def test_loading_pre_timing_extension_retimes_in_flight_transfer():
-    """The old ten-field harness state is migrated to 512/16-cycle timing."""
+    """Known 128-cycle provenance explicitly opts into timing migration."""
     original = SerialCore(cgb_mode=False, backend=NullBackend())
     original.set_SB(0x42)
     original.set_SC(0x81)
@@ -717,7 +717,7 @@ def test_loading_pre_timing_extension_retimes_in_flight_transfer():
     stream._buf[7] = ("u64", 128)
 
     restored = SerialCore(cgb_mode=False, backend=NullBackend())
-    restored.load_state(stream, SerialCore.STATE_VERSION)
+    restored.load_state(stream, SerialCore.STATE_VERSION, legacy_timing=128)
 
     assert restored.transfer_enabled == 1
     assert restored._bits_remaining == 8
@@ -725,6 +725,25 @@ def test_loading_pre_timing_extension_retimes_in_flight_transfer():
     # 64 old cycles remaining represents 256 cycles in the corrected domain.
     assert restored.clock_target == 320
     assert restored._cycles_to_interrupt == 256
+
+
+@pytest.mark.parametrize("sc, period", [(0x81, 512), (0x83, 16)])
+def test_untagged_hardware_cadence_state_preserves_deadline_without_provenance(sc, period):
+    original = SerialCore(cgb_mode=True)
+    original.set_SB(0x42)
+    original.set_SC(sc)
+    original.tick(3 * period + period // 2)
+    stream = _FakeStream()
+    original.save_state(stream)
+    stream._buf = stream._buf[:10]
+
+    restored = SerialCore(cgb_mode=True)
+    restored.load_state(stream, SerialCore.STATE_VERSION)
+
+    assert restored.clock_target == original.clock_target
+    assert restored._cycles_to_interrupt == original._cycles_to_interrupt
+    assert restored._bits_remaining == original._bits_remaining
+    assert restored._shift_register == original._shift_register
 
 
 def test_loading_current_timing_extension_preserves_deadline():
@@ -828,7 +847,9 @@ def test_restored_internal_large_clock_transfer_keeps_cadence(
     restored = SerialCore(cgb_mode=True)
     # CPU speed belongs to the motherboard, not the serial state stream.
     restored.cpu_speed_shift = cpu_speed_shift
-    restored.load_state(stream, SerialCore.STATE_VERSION)
+    restored.load_state(
+        stream, SerialCore.STATE_VERSION, legacy_timing=128 if legacy else None
+    )
     assert restored.clock == original.clock
     assert restored.last_cycles == original.last_cycles
     assert restored._bits_remaining == 5

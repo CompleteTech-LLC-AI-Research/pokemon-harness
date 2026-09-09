@@ -426,6 +426,19 @@ class NetworkBackend:
         # Slave-mode config — set by start_receiver.
         self._local_core: object | None = None
         self._irq_callback: Callable[[], None] | None = None
+        # Every path which can touch ``_local_core`` enters this admission
+        # barrier before reading the reference.  Detach uses it as a small
+        # quiescence barrier: once ``_local_core_detaching`` is published,
+        # no new worker/owner operation can acquire a core reference, while
+        # an operation already admitted is allowed to finish within the
+        # caller's bounded deadline.  This is deliberately separate from
+        # ``_serial_gate`` because that gate is an externally-owned RLock and
+        # cannot be acquired with a timeout.
+        self._local_core_condition = threading.Condition()
+        self._local_core_users = 0
+        self._local_core_detaching = False
+        self._local_core_detached = False
+        self._local_core_access_state = threading.local()
         # Optional owner-thread context sampled only for enabled transcript
         # byte completions.  It is deliberately observational: a provider
         # failure is recorded in the transcript and never changes transport
@@ -705,14 +718,53 @@ class NetworkBackend:
 
         """
         with self._receiver_start_lock:
-            if self._reader is not None:
-                raise RuntimeError("receiver already started")
             if self._closed:
                 raise NetworkBackendError("backend closed")
+            if self._reader is not None:
+                # A successful detach intentionally leaves the transport and
+                # its reader/response workers alive so a session can attach a
+                # fresh emulator endpoint without reconnecting. Rebinding is
+                # allowed only for the same worker mode, with live workers and
+                # no queued edge work that could belong to the old core.
+                with self._local_core_condition:
+                    if not self._local_core_detached:
+                        raise RuntimeError("receiver already started")
+                    if self._local_core_detaching:
+                        raise NetworkBackendError("local serial core detach is still in progress")
+                    edge_worker = self._edge_worker
+                    reader = self._reader
+                    if not all(
+                        isinstance(worker, threading.Thread) and worker.is_alive()
+                        for worker in (edge_worker, reader)
+                    ):
+                        raise NetworkBackendError(
+                            "receiver workers have stopped; reconnect before rebinding"
+                        )
+                    if dispatch_to_owner != self._dispatch_to_owner:
+                        raise ValueError("receiver dispatch mode cannot change while rebinding")
+                    if serial_gate is not None and serial_gate is not self._serial_gate:
+                        raise ValueError("receiver serial gate cannot change while rebinding")
+                    with self._edge_pending_condition:
+                        if self._edge_pending or not self._edge_queue.empty():
+                            raise NetworkBackendError(
+                                "cannot rebind while edge work is pending; reconnect instead"
+                            )
+                        if self._dispatch_to_owner and not self._completed_edge_queue.empty():
+                            raise NetworkBackendError(
+                                "cannot rebind while edge responses are pending; reconnect instead"
+                            )
+                        self._local_core = local_core
+                        self._irq_callback = irq_callback
+                        self._local_core_detached = False
+                        self._local_core_condition.notify_all()
+                return
             if dispatch_to_owner and serial_gate is None:
                 raise ValueError("dispatch_to_owner=True requires a shared serial_gate")
-            self._local_core = local_core
-            self._irq_callback = irq_callback
+            with self._local_core_condition:
+                if self._local_core_detached:
+                    raise NetworkBackendError("local serial core has been detached")
+                self._local_core = local_core
+                self._irq_callback = irq_callback
             if serial_gate is not None:
                 self._serial_gate = serial_gate
             self._dispatch_to_owner = dispatch_to_owner
@@ -1185,8 +1237,48 @@ class NetworkBackend:
             or not 1 <= max_bytes <= 4096
         ):
             raise ValueError("max_bytes must be between 1 and 4096")
-        self._serial_transcript_context_provider = provider
-        self._serial_transcript_context_max_bytes = max_bytes
+        with self._local_core_condition:
+            if self._local_core_detaching:
+                raise NetworkBackendError("local serial core detach is still in progress")
+            # A provider can be staged between a successful detach and a
+            # guarded same-transport start_receiver rebinding. It does not
+            # become reachable until a new local core is published.
+            self._serial_transcript_context_provider = provider
+            self._serial_transcript_context_max_bytes = max_bytes
+
+    @contextmanager
+    def _local_core_access(self, *, allow_none: bool = False) -> Iterator[object | None]:
+        """Admit one operation that may access the attached local core.
+
+        The returned reference remains valid until the context exits.  The
+        detach path waits for this count to reach zero before clearing any
+        core-related callback/reference, so no worker can continue using a
+        detached emulator after cleanup reports success.
+        """
+        depth = int(getattr(self._local_core_access_state, "depth", 0))
+        with self._local_core_condition:
+            # A nested callback is part of the already-admitted owner/worker
+            # operation. Detach may publish its freeze flag while that
+            # operation is running; rejecting the nested admission would
+            # turn a safe quiescence wait into a spurious core failure.
+            if depth == 0 and (self._local_core_detaching or self._local_core_detached):
+                raise NetworkBackendError("local serial core has been detached")
+            core = self._local_core
+            if core is None and not allow_none:
+                raise NetworkBackendError("local serial core is not configured")
+            self._local_core_users += 1
+            self._local_core_access_state.depth = depth + 1
+        try:
+            yield core
+        finally:
+            with self._local_core_condition:
+                self._local_core_users -= 1
+                self._local_core_users = max(0, self._local_core_users)
+                self._local_core_condition.notify_all()
+                if depth:
+                    self._local_core_access_state.depth = depth
+                else:
+                    del self._local_core_access_state.depth
 
     def disable_serial_transcript(self) -> None:
         """Disable and discard serial transcript records immediately."""
@@ -1437,9 +1529,36 @@ class NetworkBackend:
 
     # --- lifecycle ----------------------------------------------------
 
-    def _mark_closed(self, error: Exception | None = None) -> None:
-        with self._owner_dispatch_lock:
-            self._mark_closed_locked(error)
+    def _mark_closed(
+        self,
+        error: Exception | None = None,
+        *,
+        deadline: float | None = None,
+    ) -> bool:
+        """Publish terminal transport state without exceeding ``deadline``.
+
+        Normal protocol failures still serialize terminal publication with
+        owner dispatch.  Lifecycle teardown has a finite deadline, however:
+        an owner may be inside native serial code while ``stop()`` needs to
+        close the socket and wake its waiters.  If the owner lock cannot be
+        acquired by that deadline, the close state is published through the
+        close lock without claiming that owner quiescence completed.  The
+        caller receives ``False`` and may retry after the owner operation
+        releases the lock.
+        """
+        if deadline is None:
+            with self._owner_dispatch_lock:
+                self._mark_closed_locked(error)
+            return True
+        remaining = max(0.0, deadline - time.monotonic())
+        if self._owner_dispatch_lock.acquire(timeout=remaining):
+            try:
+                self._mark_closed_locked(error)
+            finally:
+                self._owner_dispatch_lock.release()
+            return True
+        self._mark_closed_uncoordinated(error)
+        return False
 
     def _mark_closed_locked(self, error: Exception | None = None) -> None:
         """Fail closed and wake all waiters after a transport error.
@@ -1449,6 +1568,14 @@ class NetworkBackend:
         makes that state terminal and lets both the reader and edge worker
         unwind; a later call to :meth:`stop` remains idempotent.
         """
+        self._mark_closed_common(error)
+
+    def _mark_closed_uncoordinated(self, error: Exception | None = None) -> None:
+        """Publish terminal transport state without waiting for owner work."""
+        self._mark_closed_common(error)
+
+    def _mark_closed_common(self, error: Exception | None = None) -> None:
+        """Close shared transport state; caller may or may not own dispatch."""
         with self._close_lock:
             if self._closed:
                 return
@@ -1496,20 +1623,94 @@ class NetworkBackend:
     def close(self, *, timeout_s: float = 2.0) -> bool:
         return self.stop(timeout_s=timeout_s)
 
+    def detach_local_core(self, *, timeout_s: float = 2.0) -> bool:
+        """Detach emulator-owned references after bounded quiescence.
+
+        This is the lifecycle boundary used when a session restores a PyBoy
+        serial backend while the network transport itself may remain alive
+        until a later terminal cleanup.  It clears the local serial core,
+        IRQ callback, and transcript-context provider only after all admitted
+        worker/owner operations have returned.  A timeout returns ``False``
+        and leaves every reference intact, so the caller can release its
+        emulator-side operation and retry without losing ownership state.
+
+        The transport is intentionally not stopped here. Once successful,
+        incoming edges are rejected until a guarded ``start_receiver``
+        rebinding publishes a new core; a peer edge during that detached
+        window closes the transport to avoid cross-session ambiguity. The
+        owning session should stop the backend when its transport lifecycle
+        ends if it does not rebind.
+        """
+        timeout_s = _require_timeout(timeout_s, "timeout_s")
+        deadline = time.monotonic() + timeout_s
+
+        # Serialize this transition with start_receiver publication.  The
+        # lock is acquired with the same total deadline as the quiescence
+        # wait, making a concurrent receiver setup bounded and retryable.
+        remaining = max(0.0, deadline - time.monotonic())
+        if not self._receiver_start_lock.acquire(timeout=remaining):
+            return False
+        try:
+            with self._local_core_condition:
+                if self._local_core_detached:
+                    # A caller may stage transcript context while detached
+                    # before attempting a guarded same-transport rebind.
+                    # If that rebind fails, cleanup is intentionally
+                    # idempotent; it must still discard every staged
+                    # emulator-owned closure rather than retaining the old
+                    # session through a second detach call.
+                    self._local_core = None
+                    self._irq_callback = None
+                    self._serial_transcript_context_provider = None
+                    self._serial_transcript_context_max_bytes = 1024
+                    return True
+                self._local_core_detaching = True
+                while self._local_core_users:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._local_core_detaching = False
+                        self._local_core_condition.notify_all()
+                        return False
+                    self._local_core_condition.wait(timeout=remaining)
+
+                # No admitted operation can retain any of these references
+                # past this point.  Keep the transport's reader/response
+                # worker objects alive, but make their next core admission
+                # fail closed without exposing the detached emulator.
+                self._local_core = None
+                self._irq_callback = None
+                self._serial_transcript_context_provider = None
+                self._serial_transcript_context_max_bytes = 1024
+                self._local_core_detached = True
+                self._local_core_detaching = False
+                self._local_core_condition.notify_all()
+                return True
+        finally:
+            self._receiver_start_lock.release()
+
     def stop(self, *, timeout_s: float = 2.0) -> bool:
         timeout_s = _require_timeout(timeout_s, "timeout_s")
         deadline = time.monotonic() + timeout_s
         # Serialize lifecycle teardown with receiver setup so stop cannot
         # observe a half-published worker pair and return before the newly
         # started threads are signalled and joined.
-        with self._receiver_start_lock:
+        remaining = max(0.0, deadline - time.monotonic())
+        if not self._receiver_start_lock.acquire(timeout=remaining):
+            # A concurrent bounded detach/rebind owns this lock.  Do not
+            # turn stop's finite timeout into an unbounded wait for that
+            # lifecycle operation; the caller can retry after it releases
+            # the lock, just as it retries after an admitted owner edge.
+            return False
+        try:
             # Wake the mode-specific edge worker and close the socket before
             # joining either thread. In owner-dispatch mode queued requests
             # are terminal emulator work and must not be applied after close;
             # _mark_closed clears their pending accounting.
-            self._mark_closed()
+            closed_coordinated = self._mark_closed(deadline=deadline)
             edge_worker = self._edge_worker
             reader = self._reader
+        finally:
+            self._receiver_start_lock.release()
         if (
             isinstance(edge_worker, threading.Thread)
             and edge_worker is not threading.current_thread()
@@ -1518,12 +1719,13 @@ class NetworkBackend:
 
         if isinstance(reader, threading.Thread) and reader is not threading.current_thread():
             reader.join(timeout=max(0.0, deadline - time.monotonic()))
-        return not any(
+        workers_stopped = not any(
             isinstance(worker, threading.Thread)
             and worker is not threading.current_thread()
             and worker.is_alive()
             for worker in (edge_worker, reader)
         )
+        return closed_coordinated and workers_stopped
 
     # --- internals ----------------------------------------------------
 
@@ -1552,11 +1754,20 @@ class NetworkBackend:
                 elif opcode == _OP_EDGE_REQ:
                     if payload > 1:
                         raise NetworkBackendError(f"invalid EDGE_REQ bit payload {payload}")
-                    with self._edge_pending_condition:
-                        if self._closed:
-                            continue
-                        self._edge_pending += 1
-                        self._edge_pending_condition.notify_all()
+                    # A detached transport has no emulator owner to service
+                    # an incoming edge. Fail closed rather than queueing work
+                    # that could be mistaken for the next session after a
+                    # same-transport rebind.
+                    with self._local_core_condition:
+                        if self._local_core_detaching or self._local_core_detached:
+                            raise NetworkBackendError(
+                                "received EDGE_REQ while local serial core is detached"
+                            )
+                        with self._edge_pending_condition:
+                            if self._closed:
+                                continue
+                            self._edge_pending += 1
+                            self._edge_pending_condition.notify_all()
                     request = _InboundEdge(payload & 1)
                     self._record_serial_event(
                         "edge_req_received",
@@ -1748,10 +1959,17 @@ class NetworkBackend:
             if max_edges <= 0:
                 raise ValueError("max_edges must be a positive integer or None")
 
+        # Wait for the externally-owned serial gate before admitting a core
+        # operation.  A lifecycle detach is called under that same gate by
+        # the owner, so a dispatcher queued behind it must not keep the core
+        # admission count non-zero and force detach to time out. Once the
+        # gate is held, admission and native application are one critical
+        # section; a dispatcher which wakes after a successful detach fails
+        # closed before it can read the cleared reference.
         # Serialize dequeue as well as application: a competing dispatcher
         # must not take an older request and then wait while the tick owner
         # applies a later one. This matches the tick wrapper's lock order.
-        with self._serial_gate:
+        with self._serial_gate, self._local_core_access():
             return self._service_pending_edges_locked(max_edges=max_edges)
 
     def _service_pending_edges_locked(self, *, max_edges: int | None) -> int:
@@ -1787,6 +2005,13 @@ class NetworkBackend:
                     )
                     self._decrement_edge_pending()
                     break
+                if self._closed:
+                    # A deadline-aware stop may publish terminal state while
+                    # this owner operation was inside native code. Do not
+                    # enqueue a response for a worker that has already been
+                    # cancelled; release the admitted edge accounting here.
+                    self._decrement_edge_pending()
+                    break
                 if not ready:
                     # There is at most one in-flight master edge per peer, but
                     # preserving FIFO here also makes malformed/busy callers
@@ -1815,6 +2040,11 @@ class NetworkBackend:
         a concurrent lifecycle or emulator operation therefore cannot change
         the serial role between the check and ``apply_external_edge``.
         """
+        # ``service_pending_edges`` owns the admission barrier for this
+        # dispatch. Keeping this helper single-admission is important: a
+        # detach may publish its freeze flag while the outer call is still
+        # active, and a nested admission would reject the already-admitted
+        # operation instead of allowing it to quiesce.
         core = self._local_core
         if core is None:
             raise NetworkBackendError("owner dispatch requires a local serial core")
@@ -1822,12 +2052,13 @@ class NetworkBackend:
             transfer_enabled = bool(getattr(core, "transfer_enabled", 0))
             internal_clock = bool(getattr(core, "internal_clock", 0))
             if internal_clock:
-                # The ROM can switch clock source while an EDGE_REQ from the
-                # previous role is already queued. The existing serial
-                # protocol uses the connected/no-data byte for this brief
-                # transition; emit its next bit without touching the native
-                # core rather than closing the link or waiting for a role
-                # that cannot service the request while it is internal-clock.
+                # The ROM can switch clock source while an EDGE_REQ from
+                # the previous role is already queued. The existing
+                # serial protocol uses the connected/no-data byte for
+                # this brief transition; emit its next bit without
+                # touching the native core rather than closing the link
+                # or waiting for a role that cannot service the request
+                # while it is internal-clock.
                 self._apply_owner_keepalive(request, core)
                 return True
             if not transfer_enabled:
@@ -1843,7 +2074,7 @@ class NetworkBackend:
                     ),
                 )
                 return False
-            self._apply_owner_edge(request)
+            self._apply_owner_edge(request, core)
             return True
 
     def _apply_owner_keepalive(self, request: _InboundEdge, core: object) -> None:
@@ -1877,11 +2108,8 @@ class NetworkBackend:
             ),
         )
 
-    def _apply_owner_edge(self, request: _InboundEdge) -> None:
+    def _apply_owner_edge(self, request: _InboundEdge, core: object) -> None:
         """Perform one authentic external edge under the shared gate."""
-        core = self._local_core
-        if core is None:
-            raise NetworkBackendError("owner dispatch requires a local serial core")
         if not bool(getattr(core, "transfer_enabled", 0)):
             raise NetworkBackendError("serial core became unarmed before EDGE_REQ dispatch")
         if bool(getattr(core, "internal_clock", 0)):
@@ -1917,6 +2145,13 @@ class NetworkBackend:
             self._notify_completed_slave_irq(isolate_callback_errors=False)
 
     def _notify_completed_slave_irq(self, *, isolate_callback_errors: bool) -> None:
+        """Run the completion callback under local-core admission."""
+        with self._local_core_access(allow_none=True):
+            self._notify_completed_slave_irq_impl(
+                isolate_callback_errors=isolate_callback_errors
+            )
+
+    def _notify_completed_slave_irq_impl(self, *, isolate_callback_errors: bool) -> None:
         """Expose the serial IRQ caused by an already-completed eighth edge.
 
         Hardware completion (SB latch plus SC bit-7 clear) and the IRQ are
@@ -1961,6 +2196,11 @@ class NetworkBackend:
             )
 
     def _serial_completion_context(self) -> dict[str, object] | None:
+        """Capture completion context while retaining the local-core lease."""
+        with self._local_core_access(allow_none=True):
+            return self._serial_completion_context_impl()
+
+    def _serial_completion_context_impl(self) -> dict[str, object] | None:
         """Capture a bounded, JSON-safe owner diagnostic without side effects."""
         if self._serial_transcript is None:
             return None
@@ -2052,6 +2292,14 @@ class NetworkBackend:
             self._edge_pending_condition.notify_all()
 
     def _handle_edge_req(self, peer_bit: int) -> None:
+        """Run one compatibility-worker edge under core admission."""
+        # A legacy receiver with no local core intentionally emits the
+        # historical keep-alive stream. It still enters the admission barrier
+        # so detach cannot race the worker's phase bookkeeping.
+        with self._local_core_access(allow_none=True):
+            self._handle_edge_req_impl(peer_bit)
+
+    def _handle_edge_req_impl(self, peer_bit: int) -> None:
         """Peer is master, we are slave. Apply edge to local_core,
         respond with our bit.
 
@@ -2068,6 +2316,10 @@ class NetworkBackend:
         If the re-arm wait expires without the local core becoming
         armed, fall back to the keep-alive stream.
         """
+        # The public wrapper holds ``_local_core_access`` for this entire
+        # method, including the bounded re-arm wait and serial gate section.
+        # Detach therefore cannot clear the reference while this worker is
+        # between readiness checks and native calls.
         core = self._local_core
         self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
 
