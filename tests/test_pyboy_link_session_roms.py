@@ -186,24 +186,20 @@ def _pyboy_mb_swappable() -> bool:
         return False
 
 
-_pyboy_swappable = _fixtures_ready and _pyboy_mb_swappable()
-
-
-pytestmark = pytest.mark.skipif(
-    not _pyboy_swappable,
-    reason=(
-        "PyBoy is Cython-compiled (mb / mb.serial are cdef attributes "
-        "not exposed to Python) so PyBoyLinkSession.attach can't swap "
-        "in SerialCore from outside the C extension. Install the bundled "
-        "source-compatible runtime, or use a fork that bakes SerialCore "
-        "into the motherboard, then this test will run."
-        if _fixtures_ready
-        else (
+@pytest.fixture(scope="module", autouse=True)
+def _require_real_rom_link_runtime():
+    # Importing the driver helpers for ROM-free tests must not open a ROM
+    # or create an emulator. Probe only when this module's ROM tests run.
+    if not _fixtures_ready:
+        pytest.skip(
             "Yellow ROM or Cable Club state fixture missing — regenerate "
             "with scripts/produce_cable_club_fixture.py --version yellow"
         )
-    ),
-)
+    if not _pyboy_mb_swappable():
+        pytest.skip(
+            "PyBoy does not expose mb / mb.serial; install the bundled "
+            "source-compatible runtime for local link tests"
+        )
 
 
 class _CountingBackend:

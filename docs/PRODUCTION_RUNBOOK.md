@@ -495,6 +495,33 @@ dedicated Red-color/Blue-color subprocess assertion for each operation. Run
 the commands above, and the complete remote matrix below, separately when
 establishing full matrix evidence; a green narrow gate is not a nine-row pass.
 
+### Inspection-only paired checkpoints
+
+Use an empty output directory outside the checkout to retain paired states:
+
+```bash
+python scripts/diagnose_pair_trade.py \
+  --output-dir /tmp/pokered-trade-inspection-unique \
+  --capture-frame 200,800,1600 \
+  --max-captures 4 --deadline-seconds 600
+```
+
+Frame zero counts toward the capture limit. The driver preserves input order
+and advances one public scheduler quantum per owner call, checking its deadline
+between calls. Local paired stepping uses cumulative physical-time horizons;
+LCD display completion does not stop one CPU while its peer continues.
+
+Each checkpoint includes two state blobs and a manifest with hashes, runtime
+metadata, input history, and hook counters. These are inspection-only artifacts,
+not trade/battle acceptance or resumable linked sessions. State files omit the
+coordinator and Python input queues; never load them into an attached pair.
+
+`terminal.json` is first written with `cleanup_pending=true` before teardown,
+then replaced with final cleanup results. SIGINT/SIGTERM are handled cooperatively.
+A hard kill or native call that never yields may still prevent reporting or
+cleanup; use an outer process deadline and do not treat a missing or provisional
+terminal record as verified cleanup.
+
 ### Tier E: remote transport and subprocess acceptance/diagnostics
 
 First run the transport/serial milestones:
