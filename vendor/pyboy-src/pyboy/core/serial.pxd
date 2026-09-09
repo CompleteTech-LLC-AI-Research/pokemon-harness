@@ -24,6 +24,8 @@ cdef class Serial:
     cdef public int64_t _cycles_to_interrupt
     cdef public uint64_t last_cycles, clock, clock_target
     cdef public bint transfer_enabled, double_speed, internal_clock
+    # Compatibility field used by motherboard state migration and older
+    # integrations.  New deadlines remain in raw CPU-cycle units.
     cdef public uint8_t cpu_speed_shift
 
     # Bit-accurate shift-register state.
@@ -33,22 +35,36 @@ cdef class Serial:
     # Peer-side coupling. Default is NullBackend (disconnected cable);
     # the link-cable harness swaps in a NetworkBackend after start.
     cdef public object backend
-
-    # Optional owner-thread pump installed by the link harness. The network
-    # reader only queues work; Motherboard invokes this callback at a safe
-    # instruction-batch boundary while an external transfer is armed, so
-    # applying an incoming edge cannot re-enter serial register access.
+    # Compatibility surface retained for the original PyBoy link owner.
+    # New owner-pump APIs remain available alongside these fields.
     cdef public object owner_dispatch_callback
     cdef public bint owner_dispatch_enabled
-
-    # Called by Motherboard after its CPU instruction batch, never from the
-    # serial tick/register access path itself.
+    cdef readonly bint backend_failed
+    cdef object _backend_error
+    cpdef void check_error(self) except *
+    cdef object _owner_pump, _pump_thread
+    cdef object _owner_pump_claim, _pump_binding_lock
+    cdef object _owner_pre_metadata, _owner_post, _owner_time_mapper
+    cdef object _owner_callback_thread, _owner_boundary_pending
+    cdef readonly bint owner_pump_active
+    cdef readonly bint owner_poll_enabled
+    cdef readonly uint64_t _boundary_seq
+    cdef readonly uint64_t transfer_generation
+    cpdef void latch_backend_error(self, object) except *
+    cpdef void set_owner_pump(self, object, bint poll=*) except *
+    cpdef object claim_owner_pump(self, object, bint poll=*)
+    cpdef void release_owner_pump(self, object) except *
     cpdef void dispatch_owner(self) except *
+    cpdef void check_execution_allowed(self) except *
+    cpdef void set_owner_boundary_callbacks(self, object pre_metadata=*, object post=*) except *
+    cpdef void set_owner_time_mapper(self, object mapper=*) except *
+    cpdef object _owner_pending_edge_deadlines(self) with gil
+    cdef bint owner_boundary(self, int, uint64_t, int, int) noexcept nogil
+    cdef bint owner_boundary_post(self, uint64_t, bint committed=*) noexcept nogil
+    cdef bint owner_boundary_abort(self, uint64_t) noexcept nogil
 
-    # Cython 3.0.12 emits cpdef vtable slots for ``unsigned long long``.
-    # Using the spelling it uses for the callable ABI avoids a platform
-    # typedef mismatch (uint64_t is unsigned long on LP64) while preserving
-    # the 64-bit cycle value at the Python/C boundary.
+    # Keep the exception edge through native owner/backend callbacks. Spell
+    # the argument as unsigned long long for Cython 3's cpdef ABI on LP64.
     cpdef bint tick(self, unsigned long long) except * nogil
 
     cpdef void set_SB(self, uint8_t) noexcept nogil
@@ -66,4 +82,4 @@ cdef class Serial:
     # ``tests/test_serial_core.py::_FakeStream``). mb.py always passes
     # the real ``IntIOWrapper``, so there's no runtime cost.
     cpdef int save_state(self, object) except -1
-    cpdef int load_state(self, object, int) except -1
+    cpdef int load_state(self, object, int, object legacy_timing=*) except -1

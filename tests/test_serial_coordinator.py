@@ -191,6 +191,7 @@ def test_completion_callback_does_not_deadlock_detach():
     callback_started = threading.Event()
     detach_entered_backend = threading.Event()
     errors: list[BaseException] = []
+    callback_detach_errors: list[RuntimeError] = []
 
     coordinator: LockstepCoordinator
 
@@ -201,6 +202,10 @@ def test_completion_callback_does_not_deadlock_detach():
             return
         try:
             coordinator.detach()
+        except RuntimeError as exc:
+            # A callback cannot synchronously drain itself.  Its retryable
+            # rejection must not prevent the outer teardown from finishing.
+            callback_detach_errors.append(exc)
         except BaseException as exc:  # noqa: BLE001 - surface thread failures
             errors.append(exc)
 
@@ -247,6 +252,9 @@ def test_completion_callback_does_not_deadlock_detach():
     assert not edge_thread.is_alive()
     assert not detach_thread.is_alive()
     assert not errors
+    assert len(callback_detach_errors) == 1
+    assert "retry after the callback returns" in str(callback_detach_errors[0])
+    assert not coordinator.attached
     assert coordinator.attached is False
     assert a.backend is not backend
 
@@ -279,6 +287,34 @@ def test_master_tick_drives_full_byte_exchange():
     assert b.SC & 0x80 == 0
 
 
+@pytest.mark.parametrize("cgb_mode", [False, True])
+def test_coordinator_normal_clock_waits_4096_literal_t_cycles(cgb_mode):
+    master = SerialCore(cgb_mode)
+    slave = SerialCore(cgb_mode)
+    coordinator = LockstepCoordinator(master, slave)
+    try:
+        master.set_SB(0xA5)
+        slave.set_SB(0x3C)
+        master.set_SC(0x81)
+        slave.set_SC(0x80)
+        assert master.tick(511) is False
+        assert master.backend.edge_count == 0
+        assert master.tick(512) is False
+        assert master.backend.edge_count == 1
+        assert master.tick(4095) is False
+        assert master.transfer_enabled and slave.transfer_enabled
+        assert master.backend.edge_count == 7
+        assert master.tick(4096) is True
+        assert master.backend.edge_count == 8
+        assert master.SB == 0x3C
+        assert slave.SB == 0xA5
+        assert not master.transfer_enabled and not slave.transfer_enabled
+        assert master.tick(4608) is False
+        assert master.backend.edge_count == 8
+    finally:
+        coordinator.detach()
+
+
 def test_either_side_can_be_master():
     """B-as-master / A-as-slave works symmetrically."""
     a = SerialCore()
@@ -297,7 +333,7 @@ def test_either_side_can_be_master():
 
 
 def test_edge_by_edge_progression_under_coordinator():
-    """Each 128-cycle quantum advances both sides by exactly one bit."""
+    """Each 512-T-cycle quantum advances both sides by exactly one bit."""
     a = SerialCore()
     b = SerialCore()
     LockstepCoordinator(a, b)

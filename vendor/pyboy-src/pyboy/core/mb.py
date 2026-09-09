@@ -6,6 +6,7 @@
 from array import array
 
 import pyboy
+import cython
 from pyboy.utils import (
     STATE_VERSION,
     PyBoyException,
@@ -21,6 +22,19 @@ from pyboy.utils import (
 from . import bootrom, cartridge, cpu, interaction, lcd, ram, serial, sound, timer
 
 logger = pyboy.logging.get_logger(__name__)
+PHYSICAL_CLOCK_MAX = 0xFFFFFFFFFFFFFFFF
+
+
+def _serial_check_error(serial_device):
+    callback = getattr(serial_device, "check_error", None)
+    if callback is not None:
+        callback()
+
+
+def _serial_check_execution_allowed(serial_device):
+    callback = getattr(serial_device, "check_execution_allowed", None)
+    if callback is not None:
+        callback()
 
 
 class Motherboard:
@@ -89,6 +103,23 @@ class Motherboard:
         self.speed_transition_count = 0
         self.speed_transition_clock = 0
         self.speed_transition_double_speed = False
+        # Scheduler time is independent of LCD wrapping and CPU speed. One
+        # unit is half a normal-speed T-cycle; raw serial time stays CPU T.
+        self._physical_clock = 0
+        self._physical_last_cycles = self.cpu.cycles
+        self._physical_clock_epoch = 0
+        self._physical_clock_fault = False
+        self._physical_load_incomplete = False
+        # Serial raw deadlines use their own clock domain.  Keep a compact
+        # piecewise mapping to the monotonic physical clock so owner-boundary
+        # metadata never treats ``clock_target`` as CPU or physical time.
+        self._serial_time_segments = [(0, 0, 2)]
+        serial_clock = getattr(self.serial, "clock", 0)
+        serial_last_cycles = getattr(self.serial, "last_cycles", 0)
+        self._serial_raw_offset = int(serial_clock) - int(serial_last_cycles)
+        set_owner_time_mapper = getattr(self.serial, "set_owner_time_mapper", None)
+        if set_owner_time_mapper is not None:
+            set_owner_time_mapper(self._map_serial_boundary_time)
 
         if self.cgb:
             self.hdma = HDMA()
@@ -106,17 +137,163 @@ class Motherboard:
 
     def switch_speed(self):
         if self.key1 & 0b1:
-            self.double_speed = not self.double_speed
-            self.speed_transition_count += 1
-            self.speed_transition_clock = self.cpu.cycles
-            self.speed_transition_double_speed = self.double_speed
+            self._sync_physical_clock()
+            with cython.gil:
+                self._align_serial_time_offset()
+                raw_at_switch = self.cpu.cycles + self._serial_raw_offset
+                old_rate = 1 if self.double_speed else 2
+                # Native PyBoy builds disable Cython wraparound; spell out
+                # the final element instead of using ``[-1]`` here.
+                latest_segment = self._serial_time_segments[len(self._serial_time_segments) - 1]
+                if latest_segment != (raw_at_switch, self._physical_clock, old_rate):
+                    self._serial_time_segments.append((raw_at_switch, self._physical_clock, old_rate))
+                self.double_speed = not self.double_speed
+                self.speed_transition_count += 1
+                self.speed_transition_clock = self.cpu.cycles
+                self.speed_transition_double_speed = self.double_speed
+                new_rate = 1 if self.double_speed else 2
+                self._serial_time_segments.append((raw_at_switch, self._physical_clock, new_rate))
+                self._prune_serial_time_segments()
             self.lcd.tick(self.cpu.cycles)
             self.lcd.speed_shift = 1 if self.double_speed else 0
             self.sound.tick(self.cpu.cycles)
             self.sound.speed_shift = 1 if self.double_speed else 0
+            # Keep the legacy serial speed-domain hint synchronized for
+            # untagged save-state migration and native integrations.
             self.serial.cpu_speed_shift = 1 if self.double_speed else 0
             logger.debug("CGB double speed is now: %d", self.double_speed)
             self.key1 ^= 0b10000001
+
+    def _align_serial_time_offset(self):
+        """Rebase raw serial coordinates when a state/load owner does so."""
+        offset = int(getattr(self.serial, "clock", 0)) - int(getattr(self.serial, "last_cycles", 0))
+        if offset == self._serial_raw_offset:
+            return
+        delta = offset - self._serial_raw_offset
+        self._serial_time_segments = [
+            (raw + delta, physical, rate)
+            for raw, physical, rate in self._serial_time_segments
+        ]
+        self._serial_raw_offset = offset
+
+    def _prune_serial_time_segments(self):
+        """Retain mappings needed until the next overdue interval is serviced.
+
+        A catch-up ``serial.tick`` can service several overdue edges in one
+        call.  Keeping only the segment that anchors the earliest deadline is
+        insufficient: later overdue deadlines may fall after one or more
+        speed-switch segments and need each intermediate rate.  When an edge
+        is overdue, retain the complete suffix from its anchor through the
+        current segment.  Once all deadlines are in the future, the current
+        segment alone maps every future deadline and older history can be
+        discarded.  This keeps retention bounded by the unserviced overdue
+        interval rather than by the lifetime of the emulator.
+        """
+        segments = self._serial_time_segments
+        if len(segments) <= 1:
+            return
+        pending_edge_deadlines = getattr(self.serial, "_owner_pending_edge_deadlines", None)
+        deadlines = list(pending_edge_deadlines()) if pending_edge_deadlines is not None else []
+        # A scheduled master edge exists before its pre-boundary callback is
+        # entered.  Keep its historical mapping anchor across a CGB speed
+        # switch as well; otherwise an overdue deadline (for example 512 after
+        # the CPU has advanced to 600) predates the newly retained segment and
+        # fails closed instead of being serviced.  Slave transfers have no
+        # CPU-time deadline and are intentionally excluded.
+        if (
+            getattr(self.serial, "transfer_enabled", False)
+            and getattr(self.serial, "internal_clock", False)
+            and getattr(self.serial, "_bits_remaining", 0) > 0
+        ):
+            deadlines.append(self.serial.clock_target)
+        if not deadlines:
+            self._serial_time_segments = [segments[len(segments) - 1]]
+            return
+
+        # CPU cycles plus this offset is the current raw serial coordinate.
+        # ``serial.clock`` can lag while the CPU is executing a long slice;
+        # those are precisely the slices that can accumulate multiple
+        # overdue edge deadlines before the next serial tick.
+        current_raw = int(self.cpu.cycles) + int(self._serial_raw_offset)
+        overdue = [deadline for deadline in deadlines if deadline <= current_raw]
+        if not overdue:
+            self._serial_time_segments = [segments[len(segments) - 1]]
+            return
+
+        earliest = min(overdue)
+        anchor = 0
+        for index, segment in enumerate(segments):
+            if earliest >= segment[0]:
+                anchor = index
+            else:
+                break
+        # Keep every intermediate segment through the current one.  A single
+        # catch-up may visit every raw deadline in this interval.
+        self._serial_time_segments = segments[anchor:]
+
+    def _map_serial_boundary_time(self, kind, observed_cycles, effective_cycles):
+        """Map one boundary's serial-domain time to ``(epoch, physical)``."""
+        self._sync_physical_clock()
+        if self._physical_clock_fault:
+            raise RuntimeError("physical clock regressed or overflowed; recreate runtime")
+        if self._physical_load_incomplete:
+            raise RuntimeError("physical clock state load is incomplete")
+        self._align_serial_time_offset()
+        if kind != 3:
+            if observed_cycles != self.cpu.cycles:
+                raise RuntimeError("owner boundary CPU time is not current")
+            return (self._physical_clock_epoch, self._physical_clock)
+        raw_target = int(effective_cycles)
+        for raw_origin, physical_origin, rate in reversed(self._serial_time_segments):
+            if raw_target >= raw_origin:
+                if (
+                    raw_origin < 0
+                    or physical_origin < 0
+                    or rate <= 0
+                    or physical_origin > PHYSICAL_CLOCK_MAX
+                    or raw_target - raw_origin
+                    > (PHYSICAL_CLOCK_MAX - physical_origin) // rate
+                ):
+                    self._physical_clock_fault = True
+                    raise RuntimeError("serial physical-time mapping overflowed")
+                return (
+                    self._physical_clock_epoch,
+                    physical_origin + (raw_target - raw_origin) * rate,
+                )
+        raise RuntimeError("serial deadline predates the physical mapping")
+
+    def _sync_physical_clock(self):
+        if self._physical_clock_fault or self._physical_load_incomplete:
+            return
+        if self.cpu.cycles < 0:
+            self._physical_clock_fault = True
+            return
+        cycles = self.cpu.cycles
+        if cycles < self._physical_last_cycles:
+            self._physical_clock_fault = True
+            return
+        delta = cycles - self._physical_last_cycles
+        rate = 1 if self.double_speed else 2
+        if delta > (PHYSICAL_CLOCK_MAX - self._physical_clock) // rate:
+            self._physical_clock_fault = True
+            return
+        self._physical_clock += delta * rate
+        self._physical_last_cycles = cycles
+
+    def get_physical_clock(self):
+        """Return (load epoch, monotonic half-normal-T elapsed time).
+
+        Lazy synchronization also makes this exact inside a pre-MMIO or
+        serial owner callback. KEY1's writable bits are not the speed source.
+        State loads preserve elapsed time but change epoch and rebase CPU time;
+        this metadata is intentionally not part of the save-state format.
+        """
+        self._sync_physical_clock()
+        if self._physical_clock_fault:
+            raise RuntimeError("physical clock regressed or overflowed; recreate runtime")
+        if self._physical_load_incomplete:
+            raise RuntimeError("physical clock state load is incomplete")
+        return (self._physical_clock_epoch, self._physical_clock)
 
     def breakpoint_add(self, bank, addr):
         # Replace instruction at address with OPCODE_BRK and save original opcode
@@ -246,6 +423,7 @@ class Motherboard:
             self.cartridge.stop(ram_file, rtc_file)
 
     def save_state(self, f):
+        _serial_check_error(self.serial)
         logger.debug("Saving state...")
         f.write(STATE_VERSION)
         f.write(self.bootrom_enabled)
@@ -269,8 +447,17 @@ class Motherboard:
         logger.debug("State saved.")
 
     def load_state(self, f):
+        _serial_check_error(self.serial)
         if self._execution_governor_enabled or self._execution_governor_active:
             raise PyBoyInvalidOperationException("Detach execution governor before loading state and establish a new epoch")
+        if self._physical_clock_epoch >= PHYSICAL_CLOCK_MAX:
+            self._physical_clock_fault = True
+            raise RuntimeError("physical clock load epoch exhausted")
+        self._sync_physical_clock()
+        if self._physical_clock_fault:
+            raise RuntimeError("physical clock regressed or overflowed; recreate runtime")
+        self._physical_clock_epoch += 1
+        self._physical_load_incomplete = True
         logger.debug("Loading state...")
         state_version = f.read()
         if state_version >= 2:
@@ -334,12 +521,18 @@ class Motherboard:
         self.cartridge.load_state(f, state_version)
         self.interaction.load_state(f, state_version)
         if state_version >= 15:
-            # Serial state migration needs the motherboard's CPU-speed
-            # domain before it retimes a legacy in-flight transfer.
+            # Legacy serial blocks need the motherboard's restored CPU-speed
+            # domain before they can retime an untagged in-flight transfer.
             self.serial.cpu_speed_shift = 1 if self.double_speed else 0
             self.serial.load_state(f, state_version)
         f.flush()
         logger.debug("State loaded.")
+        self._physical_last_cycles = self.cpu.cycles
+        self._physical_load_incomplete = False
+        self._serial_raw_offset = int(getattr(self.serial, "clock", 0)) - int(getattr(self.serial, "last_cycles", 0))
+        self._serial_time_segments = [
+            (int(getattr(self.serial, "clock", 0)), self._physical_clock, 1 if self.double_speed else 2)
+        ]
 
     ###################################################################
     # Coordinator
@@ -481,7 +674,12 @@ class Motherboard:
     def tick(self):
         if self._execution_governor_active:
             raise PyBoyInvalidOperationException("Recursive motherboard tick during execution callback pair")
+        _serial_check_execution_allowed(self.serial)
+        _serial_check_error(self.serial)
         while not self.lcd.frame_done:
+            if getattr(self.serial, "owner_poll_enabled", False):
+                if not self.serial.owner_boundary(4, self.cpu.cycles, -1, -1):
+                    _serial_check_error(self.serial)
             if self._execution_governor_enabled:
                 self._execution_step()
             elif (
@@ -519,22 +717,24 @@ class Motherboard:
                 if self.breakpoint_singlestep:
                     cycles_target = 4
                 self.cpu.tick(cycles_target)
+                _serial_check_error(self.serial)
+
+            # Preserve the original link-owner callback contract.  This is
+            # a safe post-instruction boundary; the b443 owner-pump path is
+            # still serviced separately by serial.owner_boundary/tick.
+            self.serial.dispatch_owner()
 
             # TODO: Support General Purpose DMA
             # https://gbdev.io/pandocs/CGB_Registers.html#bit-7--0---general-purpose-dma
 
-            # Dispatch only after the CPU has completed its instruction
-            # batch. This is the first safe native boundary: a queued peer
-            # edge cannot re-enter a serial register read/write or mutate
-            # Serial while Serial.tick is active. Doing this before the
-            # motherboard's time-source ticks also lets the current frame's
-            # serial bookkeeping observe the newly completed edge.
-            self.serial.dispatch_owner()
-
+            self._sync_physical_clock()
             self.sound.tick(self.cpu.cycles)
 
-            if self.serial.tick(self.cpu.cycles):
+            serial_interrupt = self.serial.tick(self.cpu.cycles)
+            self._prune_serial_time_segments()
+            if serial_interrupt:
                 self.cpu.set_interruptflag(INTR_SERIAL)
+            _serial_check_error(self.serial)
 
             if self.timer.tick(self.cpu.cycles):
                 self.cpu.set_interruptflag(INTR_TIMER)
@@ -587,12 +787,26 @@ class Motherboard:
     def getitem_io_ports(self, i):
         if 0xFF00 <= i < 0xFF4C:  # I/O ports
             if 0xFF01 <= i <= 0xFF02:
-                if self.serial.tick(self.cpu.cycles):
+                if not self.serial.owner_boundary(1, self.cpu.cycles, i, -1):
+                    self.cpu.bail = True
+                    return 0xFF
+                boundary_seq = self.serial._boundary_seq
+                serial_interrupt = self.serial.tick(self.cpu.cycles)
+                self._prune_serial_time_segments()
+                if serial_interrupt:
                     self.cpu.set_interruptflag(INTR_SERIAL)
+                if self.serial.backend_failed:
+                    self.serial.owner_boundary_abort(boundary_seq)
+                    self.cpu.bail = True
+                    return 0xFF
                 if i == 0xFF01:
-                    return self.serial.SB
+                    value = self.serial.SB
                 elif i == 0xFF02:
-                    return self.serial.SC
+                    value = self.serial.SC
+                if not self.serial.owner_boundary_post(boundary_seq, True):
+                    self.cpu.bail = True
+                    return 0xFF
+                return value
             elif i == 0xFF03:
                 # Undocumented register
                 return 0xFF
@@ -739,8 +953,18 @@ class Motherboard:
             if i == 0xFF00:
                 self.ram.io_ports[i - 0xFF00] = self.interaction.pull(value)
             elif 0xFF01 <= i <= 0xFF02:
-                if self.serial.tick(self.cpu.cycles):
+                if not self.serial.owner_boundary(2, self.cpu.cycles, i, value):
+                    self.cpu.bail = True
+                    return
+                boundary_seq = self.serial._boundary_seq
+                serial_interrupt = self.serial.tick(self.cpu.cycles)
+                self._prune_serial_time_segments()
+                if serial_interrupt:
                     self.cpu.set_interruptflag(INTR_SERIAL)
+                if self.serial.backend_failed:
+                    self.serial.owner_boundary_abort(boundary_seq)
+                    self.cpu.bail = True
+                    return
                 if i == 0xFF01:
                     self.serialbuffer[self.serialbuffer_count] = value
                     self.serialbuffer_count += 1
@@ -748,6 +972,9 @@ class Motherboard:
                     self.serial.set_SB(value)
                 elif i == 0xFF02:
                     self.serial.set_SC(value)
+                if not self.serial.owner_boundary_post(boundary_seq, True):
+                    self.cpu.bail = True
+                    return
             elif 0xFF04 <= i <= 0xFF07:
                 if self.timer.tick(self.cpu.cycles):
                     self.cpu.set_interruptflag(INTR_TIMER)

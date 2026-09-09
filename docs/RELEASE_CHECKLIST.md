@@ -18,7 +18,16 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-**Release decision: `PARTIAL`, not production-ready.** At `1f19707`, the
+**Release decision: `PARTIAL`, not production-ready.** The 2026-09-09
+reconciliation candidate retains a failed source gate and a later completed
+pre-commit source unit run with 4,416 passes and five failures. A full native
+extension build and focused source/native checks passed, but no complete
+candidate gate or gameplay qualification is inferred from them. See the
+[candidate evidence record](PRODUCTION_RUNBOOK.md#reconciliation-candidate-2026-09-09).
+
+### Historical baseline
+
+At `1f19707`, the
 dual source/native unit gate passed `1176/1176` unit tests and `65/65` total
 timing checks per runtime (`13` cases in each of five repetitions), with zero
 failures, skips, xfails, xpasses, or errors. Each runtime collected `1320`
@@ -259,7 +268,9 @@ release readiness.
 
 ## Runtime and dependency identity
 
-- [x] Python requirement is `>=3.12`.
+- [x] Python requirement is `>=3.11`; NumPy is pinned separately for Python
+  3.11 and 3.12+. Historical Python 3.12 gate results do not establish a
+  complete Python 3.11 release gate.
 - [x] The distribution bundles source PyBoy `2.7.0` at fork revision
   `c565df66c3731fad2856169a90f6bbec99925915`.
 - [x] `mcp==1.29.1` is pinned in `pyproject.toml`.

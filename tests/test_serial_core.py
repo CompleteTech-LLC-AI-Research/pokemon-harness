@@ -11,6 +11,7 @@ locally-bridged cores.
 from __future__ import annotations
 
 import pytest
+from pyboy.core.serial import SerialBackendError
 
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
@@ -25,6 +26,81 @@ from pokered_harness.link.serial_core import (
 # ---------------------------------------------------------------------------
 # Defaults & arming behavior
 # ---------------------------------------------------------------------------
+
+
+def test_latch_backend_error_preserves_first_cause_and_rejects_nonexception():
+    serial = SerialCore()
+    with pytest.raises(TypeError, match="BaseException"):
+        serial.latch_backend_error("not an exception")
+    assert serial.backend_failed is False
+
+    first = ValueError("first owner failure")
+    serial.latch_backend_error(first)
+
+    assert serial.backend_failed is True
+    with pytest.raises(SerialBackendError) as raised:
+        serial.check_error()
+    assert raised.value.__cause__ is first
+
+    second = RuntimeError("later transport failure")
+    serial.latch_backend_error(second)
+    with pytest.raises(SerialBackendError) as repeated:
+        serial.check_error()
+    assert repeated.value.__cause__ is first
+
+
+def test_latched_backend_error_fail_closes_serial_operations_and_allows_release():
+    serial = SerialCore()
+    serial.set_SB(0xA5)
+    serial.set_SC(0x81)
+    before = (
+        serial.SB,
+        serial.SC,
+        serial._shift_register,
+        serial._bits_remaining,
+        serial.transfer_enabled,
+        serial.clock,
+        serial.last_cycles,
+        serial.clock_target,
+    )
+    token = serial.claim_owner_pump(lambda _event: None, poll=True)
+    serial.latch_backend_error(ValueError("owner failure"))
+
+    assert serial.tick(serial.clock_target + CYCLES_PER_EDGE_DMG) is False
+    assert (
+        serial.SB,
+        serial.SC,
+        serial._shift_register,
+        serial._bits_remaining,
+        serial.transfer_enabled,
+        serial.clock,
+        serial.last_cycles,
+        serial.clock_target,
+    ) == before
+    serial.set_SB(0)
+    serial.set_SC(0)
+    assert (
+        serial.SB,
+        serial.SC,
+        serial._shift_register,
+        serial._bits_remaining,
+        serial.transfer_enabled,
+        serial.clock,
+        serial.last_cycles,
+        serial.clock_target,
+    ) == before
+    for operation in (
+        lambda: serial.apply_external_edge(1),
+        lambda: serial.save_state(None),
+        lambda: serial.load_state(None, SerialCore.STATE_VERSION),
+        serial.check_error,
+    ):
+        with pytest.raises(SerialBackendError):
+            operation()
+
+    serial.release_owner_pump(token)
+    assert serial.owner_poll_enabled is False
+    assert serial.backend_failed is True
 
 
 def test_defaults_match_legacy_pyboy_serial():
@@ -702,7 +778,7 @@ def test_loading_legacy_state_drops_in_flight_transfer():
 
 
 def test_loading_pre_timing_extension_retimes_in_flight_transfer():
-    """The old ten-field harness state is migrated to 512/16-cycle timing."""
+    """Known 128-cycle provenance explicitly opts into timing migration."""
     original = SerialCore(cgb_mode=False, backend=NullBackend())
     original.set_SB(0x42)
     original.set_SC(0x81)
@@ -717,7 +793,7 @@ def test_loading_pre_timing_extension_retimes_in_flight_transfer():
     stream._buf[7] = ("u64", 128)
 
     restored = SerialCore(cgb_mode=False, backend=NullBackend())
-    restored.load_state(stream, SerialCore.STATE_VERSION)
+    restored.load_state(stream, SerialCore.STATE_VERSION, legacy_timing=128)
 
     assert restored.transfer_enabled == 1
     assert restored._bits_remaining == 8
@@ -725,6 +801,25 @@ def test_loading_pre_timing_extension_retimes_in_flight_transfer():
     # 64 old cycles remaining represents 256 cycles in the corrected domain.
     assert restored.clock_target == 320
     assert restored._cycles_to_interrupt == 256
+
+
+@pytest.mark.parametrize("sc, period", [(0x81, 512), (0x83, 16)])
+def test_untagged_hardware_cadence_state_preserves_deadline_without_provenance(sc, period):
+    original = SerialCore(cgb_mode=True)
+    original.set_SB(0x42)
+    original.set_SC(sc)
+    original.tick(3 * period + period // 2)
+    stream = _FakeStream()
+    original.save_state(stream)
+    stream._buf = stream._buf[:10]
+
+    restored = SerialCore(cgb_mode=True)
+    restored.load_state(stream, SerialCore.STATE_VERSION)
+
+    assert restored.clock_target == original.clock_target
+    assert restored._cycles_to_interrupt == original._cycles_to_interrupt
+    assert restored._bits_remaining == original._bits_remaining
+    assert restored._shift_register == original._shift_register
 
 
 def test_loading_current_timing_extension_preserves_deadline():
@@ -828,7 +923,9 @@ def test_restored_internal_large_clock_transfer_keeps_cadence(
     restored = SerialCore(cgb_mode=True)
     # CPU speed belongs to the motherboard, not the serial state stream.
     restored.cpu_speed_shift = cpu_speed_shift
-    restored.load_state(stream, SerialCore.STATE_VERSION)
+    restored.load_state(
+        stream, SerialCore.STATE_VERSION, legacy_timing=128 if legacy else None
+    )
     assert restored.clock == original.clock
     assert restored.last_cycles == original.last_cycles
     assert restored._bits_remaining == 5

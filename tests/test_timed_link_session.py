@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pyboy.core.serial import SerialBackendError
 
 from pokered_harness.link.timed_wire import (
     Cancelled,
@@ -30,6 +31,7 @@ from pokered_harness.link.timed_wire import (
     FenceAck,
     Frame,
     Progress,
+    ProtocolError,
     Sync,
     TimedWireChannel,
     encode_frame,
@@ -327,6 +329,76 @@ def test_control_failure_after_successful_public_execution_cleans_up(session_typ
         assert game.mb.execution_before is None
         assert game.mb.execution_after is None
         assert game.mb.serial.backend is backend
+
+
+def test_cancel_does_not_mask_unrelated_native_backend_failure(session_type, game):
+    external = threading.Event()
+    channel = ScriptedChannel(revision=3)
+    marker = RuntimeError("unrelated native backend fault")
+    with attached(session_type, game, channel, cancel_event=external) as (session, _):
+        core = game.mb.serial
+        core.latch_backend_error(marker)
+        external.set()
+        with pytest.raises(SerialBackendError) as caught:
+            core.check_error()
+
+        normalized = session._normalize_failure(caught.value)
+        assert normalized is caught.value
+        assert normalized.__cause__ is marker
+        assert core.backend_failed
+        with pytest.raises(SerialBackendError) as retained:
+            core.check_error()
+        assert retained.value.__cause__ is marker
+
+
+def test_cancelled_native_wrapper_preserves_protocol_error_and_cause(session_type, game):
+    external = threading.Event()
+    channel = ScriptedChannel(revision=3)
+    original = Cancelled("owner cancellation")
+    protocol = ProtocolError("malformed peer frame")
+    wrapped_error = None
+    with attached(session_type, game, channel, cancel_event=external) as (session, _):
+        channel.error = protocol
+        try:
+            raise original
+        except Cancelled as cause:
+            try:
+                raise SerialBackendError("serial backend failed") from cause
+            except SerialBackendError as wrapped:
+                wrapped_error = wrapped
+                external.set()
+                normalized = session._normalize_failure(wrapped)
+
+        assert normalized is protocol
+        assert wrapped_error is not None
+        assert wrapped_error.__cause__ is original
+        assert original.__cause__ is None
+
+
+def test_cancelled_native_wrapper_normalizes_without_cause_cycle(session_type, game):
+    external = threading.Event()
+    channel = ScriptedChannel(revision=3)
+    original = Cancelled("owner cancellation")
+    wrapped_error = None
+    with attached(session_type, game, channel, cancel_event=external) as (session, _):
+        try:
+            raise original
+        except Cancelled as cause:
+            try:
+                raise SerialBackendError("serial backend failed") from cause
+            except SerialBackendError as wrapped:
+                wrapped_error = wrapped
+                external.set()
+                normalized = session._normalize_failure(wrapped)
+
+        assert isinstance(normalized, Cancelled)
+        assert normalized is not original
+        assert wrapped_error is not None
+        with pytest.raises(Cancelled) as raised:
+            raise normalized from wrapped_error
+        assert raised.value.__cause__ is wrapped_error
+        assert wrapped_error.__cause__ is original
+        assert original.__cause__ is None
 
 
 def test_control_cancel_before_tick_prevents_cpu_execution(session_type, game):
@@ -1275,9 +1347,14 @@ def test_external_cancel_at_real_execution_boundary(session_type, game, boundary
         if boundary == "zero-work-return":
             assert game.mb.cpu.retired_instructions == game.mb.cpu.cycles == 0
         elif boundary == "edge-wait":
-            assert game.mb.cpu.retired_instructions == 129
-            assert game.mb.cpu.cycles == 544
-            assert session.snapshot().raw_cpu_clock == 544
+            # The failure is latched inside LDH's MMIO at raw 544. The native
+            # fault boundary returns to the instruction boundary before it
+            # raises: LDH finishes at raw 552 with 130 retired instructions.
+            # Account that executed suffix; never roll CPU progress back to
+            # the failed serial edge's earlier deadline.
+            assert game.mb.cpu.retired_instructions == 130
+            assert game.mb.cpu.cycles == 552
+            assert session.snapshot().raw_cpu_clock == 552
         else:
             assert game.mb.cpu.retired_instructions == 1
             assert game.mb.cpu.cycles == 12
@@ -1368,8 +1445,8 @@ def test_real_v3_external_cancel_interrupts_active_receive(session_type, game, b
             worker.join(2)
             assert not worker.is_alive() and not failures
             assert entered.is_set()
-            assert game.mb.cpu.retired_instructions == (1 if boundary == "credit-wait" else 129)
-            assert game.mb.cpu.cycles == (12 if boundary == "credit-wait" else 544)
+            assert game.mb.cpu.retired_instructions == (1 if boundary == "credit-wait" else 130)
+            assert game.mb.cpu.cycles == (12 if boundary == "credit-wait" else 552)
             assert session.snapshot().cancelled
             assert channel.closed
             assert game.mb.serial.backend is original_backend

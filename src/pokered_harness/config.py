@@ -52,6 +52,10 @@ class VersionsConfig:
         """
         return _sha1_for_path(self.symbol_sha1_by_path, path)
 
+    def sha1_for_symbol_path(self, path: str | Path) -> str | None:
+        """Compatibility spelling retained for published diagnostic clients."""
+        return self.symbol_sha1_for_path(path)
+
 
 _SHA1_ROW = re.compile(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|", re.MULTILINE)
 _PYBOY_ROW = re.compile(

@@ -15,7 +15,7 @@ from mcp.shared.exceptions import McpError
 from pokered_harness.events import EventBus
 from pokered_harness.link.network_backend import NetworkBackend, NetworkBackendError
 from pokered_harness.link.pair import LinkPair
-from pokered_harness.link.serial_link import TcpSerialLink
+from pokered_harness.link.serial_core import SerialCore
 from pokered_harness.mcp_server import (
     DEFAULT_HOOKS,
     LinkState,
@@ -702,9 +702,9 @@ def test_link_transport_resource_serializes_with_pair_mutation():
 # a background accept on a local port; link_connect from another "session"
 # attaches; link_status reports the transitions; link_disconnect tears down.
 #
-# We use real localhost sockets via TcpSerialLink, because the whole point
-# of the tool is to wire up a socket — stubbing it out would prove
-# nothing.
+# We use real localhost sockets via NetworkBackend, because the whole point
+# of the tool is to wire up a native serial backend — stubbing it out would
+# prove nothing.
 
 
 def _free_port() -> int:
@@ -729,8 +729,7 @@ def _wait_remote_mode(link: LinkState, mode: str, timeout: float = 2.0) -> None:
 
 
 def _endpoint_sym() -> str:
-    """Symbols required by RemoteLinkEndpoint.install(). Addresses are
-    synthetic; the MCP test only needs the install() call to succeed."""
+    """Synthetic symbols retained for the endpoint-session test fixture."""
     return """
         00:22FA Serial_TryEstablishingExternallyClockedConnection
         00:216F Serial_ExchangeBytes
@@ -751,6 +750,15 @@ def _endpoint_sym() -> str:
 def _endpoint_session():
     mem = DictMemory()
     pb = FakePyBoy(mem)
+    # The remote MCP tools deliberately reject semantic-only fakes. Give
+    # these endpoint sessions the same native serial shape as the bundled
+    # PyBoy runtime while retaining FakePyBoy's deterministic tick/memory
+    # behavior for the rest of this ROM-free test module.
+    assert SerialCore is not None
+    pb.mb = SimpleNamespace(
+        serial=SerialCore(False),
+        cpu=SimpleNamespace(set_interruptflag=lambda _flag: None),
+    )
     sym = load_sym_text(_endpoint_sym())
     return Session(pyboy=pb, symbols=sym, event_bus=EventBus()), pb
 
@@ -795,16 +803,17 @@ def test_link_listen_then_connect_updates_status():
     assert status_l["remote_peer_rom_version"] == "yellow"
     assert status_c["remote_mode"] == "connected"
     assert status_c["remote_peer_rom_version"] == "blue"
-    endpoint_l = link_l.remote_endpoint
-    endpoint_c = link_c.remote_endpoint
-    assert endpoint_l is not None
-    assert endpoint_c is not None
+    network_l = link_l.network_session
+    network_c = link_c.network_session
+    assert network_l is not None
+    assert network_c is not None
 
     # Cleanup in the proper order — connector first drops the cable,
     # then listener notices.
     dispatch_tool(s_connector, "link_disconnect", {}, link=link_c)
     assert link_c.remote_mode == "idle"
-    assert endpoint_c.installed is False
+    assert link_c.network_session is None
+    assert network_c._pyboys == []
     assert s_connector._serial_hooks == []
     # Listener sees its link drop on the next status poll.
     for _ in range(100):
@@ -813,7 +822,8 @@ def test_link_listen_then_connect_updates_status():
             break
         _time.sleep(0.01)
     assert status_l["remote_mode"] == "idle"
-    assert endpoint_l.installed is False
+    assert link_l.network_session is None
+    assert network_l._pyboys == []
     assert s_listener._serial_hooks == []
     dispatch_tool(s_listener, "link_disconnect", {}, link=link_l)
 
@@ -832,7 +842,15 @@ def test_listener_rejects_bad_peer_and_accepts_next_peer():
             _time.sleep(0.01)
         assert link.remote_mode == "listening"
 
-        good = TcpSerialLink.connect("127.0.0.1", port, "yellow")
+        good = NetworkBackend.connect(
+            "127.0.0.1", port, local_rom_version="yellow"
+        )
+        # A raw NetworkBackend peer still needs its reader to consume the
+        # listener's versioned HELLO; no emulator attachment is needed for
+        # this handshake-only adversarial peer.
+        assert SerialCore is not None
+        good.start_receiver(SerialCore(False))
+        assert good.wait_for_hello(timeout=1.0) == "blue"
         try:
             for _ in range(100):
                 if link.remote_mode == "connected":
@@ -846,37 +864,19 @@ def test_listener_rejects_bad_peer_and_accepts_next_peer():
         dispatch_tool(s_listener, "link_disconnect", {}, link=link)
 
 
-def test_listener_cleans_semantic_hooks_when_endpoint_install_fails(monkeypatch):
+def test_listener_cleans_native_hooks_when_adapter_install_fails(monkeypatch):
     s, _ = _endpoint_session()
     link = LinkState(primary_version="red")
     install_entered = threading.Event()
     deactivated: list[Session] = []
 
-    class FakeTransport:
-        def __init__(self, sock, _rom_version):
-            self._sock = sock
-            self._hello_received = threading.Event()
-            self._hello_received.set()
-            self._reader_exc = None
-            self.peer_rom_version = "yellow"
-            self.connected = True
+    def failing_native_attach(*_args, **_kwargs):
+        install_entered.set()
+        raise RuntimeError("native adapter install failed")
 
-        def close(self):
-            self.connected = False
-            self._sock.close()
-
-    class FailingEndpoint:
-        @classmethod
-        def as_listener(cls, _session, _transport):
-            return cls()
-
-        def install(self):
-            install_entered.set()
-            raise RuntimeError("endpoint install failed")
-
-    monkeypatch.setattr("pokered_harness.mcp_server.TcpSerialLink", FakeTransport)
     monkeypatch.setattr(
-        "pokered_harness.mcp_server.RemoteLinkEndpoint", FailingEndpoint
+        "pokered_harness.mcp_server._attach_network_backend",
+        failing_native_attach,
     )
     monkeypatch.setattr(
         "pokered_harness.mcp_server._deactivate_link_hooks",
@@ -1061,7 +1061,7 @@ def test_link_disconnect_cancels_in_progress_connect(monkeypatch):
         raise NetworkBackendError("connection cancelled")
 
     monkeypatch.setattr(
-        "pokered_harness.mcp_server.TcpSerialLink.connect", blocked_connect
+        "pokered_harness.mcp_server.NetworkBackend.connect", blocked_connect
     )
 
     def connect() -> None:
@@ -1229,7 +1229,7 @@ def test_link_listen_reservation_survives_disconnect_race(monkeypatch):
         raise NetworkBackendError("reconnect should wait for listener teardown")
 
     monkeypatch.setattr(
-        "pokered_harness.mcp_server.TcpSerialLink.connect", blocked_reconnect
+        "pokered_harness.mcp_server.NetworkBackend.connect", blocked_reconnect
     )
 
     def listen() -> None:
@@ -1338,7 +1338,7 @@ def test_link_status_serializes_dead_remote_cleanup_before_reconnect(monkeypatch
     assert not reconnect_worker.is_alive()
     assert reconnect_result
     assert isinstance(reconnect_result[0], McpHarnessError)
-    assert reconnect_result[0].code == "remote_busy"
+    assert reconnect_result[0].code == "link_busy"
 
     release_cleanup.set()
     status_worker.join(timeout=2.0)
@@ -1409,28 +1409,25 @@ def test_link_status_does_not_publish_stale_error_after_reconnect(monkeypatch):
 def test_link_connect_reservation_survives_disconnect_race(monkeypatch):
     s, _ = _endpoint_session()
     link = LinkState(primary_version="red")
-    host_validation_entered = threading.Event()
-    release_host_validation = threading.Event()
+    connect_entered = threading.Event()
+    release_connect = threading.Event()
     connect_result: list[Exception] = []
     disconnect_result: list[Exception] = []
 
-    def blocked_host(value):
-        host_validation_entered.set()
-        assert release_host_validation.wait(timeout=2.0)
-        return value
-
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server._validate_remote_host", blocked_host
-    )
-
     def blocked_connect(*_args, cancel_event=None, **_kwargs):
+        connect_entered.set()
         assert cancel_event is not None
         while not cancel_event.is_set():
             _time.sleep(0.01)
+        # Hold the cancelled adapter long enough for link_disconnect to prove
+        # it waits for the reserved operation to unwind before publishing
+        # idle. This models a bounded native adapter teardown, not a socket
+        # timeout or an unbounded production wait.
+        assert release_connect.wait(timeout=2.0)
         raise NetworkBackendError("connection cancelled")
 
     monkeypatch.setattr(
-        "pokered_harness.mcp_server.TcpSerialLink.connect", blocked_connect
+        "pokered_harness.mcp_server.NetworkBackend.connect", blocked_connect
     )
 
     def connect() -> None:
@@ -1446,7 +1443,7 @@ def test_link_connect_reservation_survives_disconnect_race(monkeypatch):
 
     connect_worker = threading.Thread(target=connect)
     connect_worker.start()
-    assert host_validation_entered.wait(timeout=1.0)
+    assert connect_entered.wait(timeout=1.0)
 
     disconnect_done = threading.Event()
 
@@ -1460,11 +1457,11 @@ def test_link_connect_reservation_survives_disconnect_race(monkeypatch):
 
     disconnect_worker = threading.Thread(target=disconnect)
     disconnect_worker.start()
-    # The connect reservation is held while validation is in progress, so a
-    # disconnect cannot incorrectly return from an idle snapshot.
+    # The connect reservation is held while the native adapter is unwinding,
+    # so disconnect cannot incorrectly return from an idle snapshot.
     assert not disconnect_done.wait(timeout=0.05)
 
-    release_host_validation.set()
+    release_connect.set()
     connect_worker.join(timeout=2.0)
     disconnect_worker.join(timeout=2.0)
     assert not connect_worker.is_alive()
@@ -1618,7 +1615,7 @@ def test_link_disconnect_closes_accepted_transport_during_handshake():
     before = {
         id(thread)
         for thread in threading.enumerate()
-        if thread.name == "TcpSerialLink.reader" and thread.is_alive()
+        if thread.name == "NetworkBackend.reader" and thread.is_alive()
     }
     peer = None
     accepted_readers = []
@@ -1634,7 +1631,7 @@ def test_link_disconnect_closes_accepted_transport_during_handshake():
                 thread
                 for thread in threading.enumerate()
                 if (
-                    thread.name == "TcpSerialLink.reader"
+                    thread.name == "NetworkBackend.reader"
                     and thread.is_alive()
                     and id(thread) not in before
                 )

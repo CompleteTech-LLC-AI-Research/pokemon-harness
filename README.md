@@ -7,9 +7,22 @@ typed `Session` API, and can serve that session over MCP.
 This repository is a source tree. It does not distribute commercial ROMs,
 symbol files, save states, or other ROM-derived artifacts.
 
+Hosted checks run only for public repositories on standard free runners.
+Private copies run the same checks locally; the workflow remains available
+for reuse. See [CI policy and local commands](docs/CI_POLICY.md).
+
 ## Release status
 
 **Status: `PARTIAL` — `origin/master` is not production-ready.**
+
+The 2026-09-09 reconciliation candidate has not passed its full gate. Its
+pre-packaging-update source gate timed out with 3,097 unit passes, 25 failures,
+and one skip; five timing repetitions recorded 1,236 passes and 59 failures.
+After restoring Python 3.11 support, a later pre-commit source unit run
+completed with 4,416 passes and five failures. A full native extension build
+and focused source/native lifecycle and CPU checks also passed. These scoped
+checks do not qualify the remaining failures or real-ROM gameplay. See the
+[candidate evidence record](docs/PRODUCTION_RUNBOOK.md#reconciliation-candidate-2026-09-09).
 
 At `766eaa6aafecad039d5b10934ec36f8ec933645e`, the hosted
 [release-hygiene workflow](https://github.com/CompleteDotTech/pokemon/actions/runs/34028627290)
@@ -20,13 +33,13 @@ installed stock PyBoy wheel. The optional Cython build remains a distinct
 explicit runtime mode.
 
 Remote TCP transport and diagnostics are implemented, loopback-only, and
-unauthenticated. The current source-runtime validation below passes all nine
+unauthenticated. The historical source-runtime validation below passed all nine
 ordered TCP trade pairs; compiled-runtime, MCP-facing, cross-host, and strict
 battle acceptance remain unqualified.
 
-### Current working-tree validation (2026-09-06)
+### Historical working-tree validation (2026-09-06)
 
-The current isolated working tree has source-runtime real-ROM evidence using
+The recorded isolated working tree had source-runtime real-ROM evidence using
 the pinned
 vendored PyBoy source runtime (`PYBOY_NO_CYTHON=1`) with the operator-supplied
 ROM, symbol, and fixture roots:
@@ -45,7 +58,7 @@ ROM, symbol, and fixture roots:
 - Focused non-ROM subprocess-helper checks passed `54` tests, and Ruff passed
   for the touched driver.
 
-The strict trade tier is complete for the pinned source runtime, but the
+That strict trade tier completed for the recorded source runtime, but the
 strict battle tier, compiled-runtime gameplay, MCP-facing starter/trade/battle
 workflows, and broader host/platform coverage remain open before a full
 production claim.
@@ -419,7 +432,7 @@ fixture provenance is partial.
 
 Requirements:
 
-- Python 3.12 or newer.
+- Python 3.11 or newer.
 - The bundled PyBoy runtime (`2.7.0`, harness revision
   `c565df66c3731fad2856169a90f6bbec99925915`).
 - `mcp==1.29.1`, the certified runtime API used by the server.

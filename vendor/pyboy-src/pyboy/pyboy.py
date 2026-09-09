@@ -610,6 +610,8 @@ class PyBoy:
             False if emulation has ended otherwise True
         """
 
+        self.mb.serial.check_execution_allowed()
+        self.mb.serial.check_error()
         _count = count
         running = False
         t_start = time.perf_counter_ns()
@@ -1806,6 +1808,7 @@ class PyBoyMemoryView:
             return self.__getitem(addr, 0, 1, bank, is_single, is_bank)
 
     def __getitem(self, start, stop, step, bank, is_single, is_bank):
+        self.mb.serial.check_error()
         slice_length = (stop - start) // step
         if is_bank:
             # Reading a specific bank
@@ -1907,10 +1910,13 @@ class PyBoyMemoryView:
             mem_slice = [0] * slice_length
             for x in range(start, stop, step):
                 mem_slice[(x - start) // step] = self.mb.getitem(x)
+                self.mb.serial.check_error()
             return mem_slice
         else:
             # Reading specific address of memory space
-            return self.mb.getitem(start)
+            value = self.mb.getitem(start)
+            self.mb.serial.check_error()
+            return value
 
     def __setitem__(self, addr, v):
         is_bank = isinstance(addr, tuple)
@@ -1937,6 +1943,7 @@ class PyBoyMemoryView:
             self.__setitem(addr, 0, 0, v, bank, is_single, is_bank)
 
     def __setitem(self, start, stop, step, v, bank, is_single, is_bank):
+        self.mb.serial.check_error()
         if is_bank:
             # Writing a specific bank
             if start < 0x8000:
@@ -2093,9 +2100,12 @@ class PyBoyMemoryView:
                 _v = iter(v)
                 for x in range(start, stop, step):
                     self.mb.setitem(x, next(_v))
+                    self.mb.serial.check_error()
             else:
                 for x in range(start, stop, step):
                     self.mb.setitem(x, v)
+                    self.mb.serial.check_error()
         else:
             # Writing specific address of memory space
             self.mb.setitem(start, v)
+            self.mb.serial.check_error()

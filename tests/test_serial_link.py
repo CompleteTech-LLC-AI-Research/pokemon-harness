@@ -702,6 +702,50 @@ def test_tcp_inbound_exchange_frame_budget_fails_closed_across_kinds():
         client.close()
 
 
+def test_tcp_terminal_error_publishes_after_inbound_budget_cleanup():
+    """Reader failure publication cannot expose stale inbound counters."""
+    server, client = _make_tcp_pair()
+    closer = threading.Thread(
+        target=server._mark_closed,
+        args=(SerialLinkProtocolError("forced terminal cleanup"),),
+        daemon=True,
+    )
+
+    def body_for(index: int) -> memoryview:
+        return memoryview(
+            bytes([serial_link_module.OP_EXCHANGE])
+            + serial_link_module._pack_lp_str(f"forced-{index}")
+            + serial_link_module._pack_lp_bytes(b"x")
+        )
+    try:
+        assert server.peer_rom_version == "blue"
+        for index in range(serial_link_module._MAX_INBOUND_FRAMES):
+            server._dispatch(body_for(index))
+        assert server._inbound_frame_count == serial_link_module._MAX_INBOUND_FRAMES
+
+        # Hold the queue lock after the terminal state is announced. Before
+        # the fix this made _reader_exc visible while the frame/byte budgets
+        # still contained all queued frames.
+        assert server._inbound_lock.acquire(timeout=1.0)
+        closer.start()
+        assert server._closed_event.wait(timeout=1.0)
+        assert server._reader_exc is None
+        assert server._inbound_frame_count == serial_link_module._MAX_INBOUND_FRAMES
+        server._inbound_lock.release()
+
+        closer.join(timeout=1.0)
+        assert not closer.is_alive()
+        assert isinstance(server._reader_exc, SerialLinkProtocolError)
+        assert server._inbound_frame_count == 0
+        assert server._inbound_byte_count == 0
+    finally:
+        if server._inbound_lock.locked():
+            server._inbound_lock.release()
+        closer.join(timeout=1.0)
+        server.close()
+        client.close()
+
+
 def test_tcp_close_sends_bye_before_shutdown():
     local, peer = socket.socketpair()
     link = TcpSerialLink(local, "blue")
