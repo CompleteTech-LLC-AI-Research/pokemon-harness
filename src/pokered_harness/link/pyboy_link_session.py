@@ -118,6 +118,11 @@ class PyBoyLinkSession:
 
     #: Max attached instances. Gen I Pokémon is strictly 2-player.
     MAX_ATTACHED: int = 2
+    # A normal DMG LCD frame is 70,224 CPU T-cycles.  The runtime physical
+    # clock is measured in half-normal-speed T units, so one public scheduler
+    # quantum is 140,448 units for both normal- and double-speed endpoints.
+    # LCD markers are sampled inside this quantum and never define its stop.
+    PHYSICAL_QUANTUM = 70_224 * 2
     MAX_FRAME_INSTRUCTIONS = 200_000
     MAX_FRAME_SECONDS = 30.0
     MAX_STALLED_INSTRUCTIONS = 32
@@ -159,6 +164,14 @@ class PyBoyLinkSession:
         self._scheduler_fault: str | None = None
         self._step_active = False
         self._peer_progress_active = False
+        self._active_instruction_endpoint: object | None = None
+        # Display completion is a per-endpoint notification.  It is kept
+        # separate from the public scheduler quantum so an LCD phase reset
+        # cannot freeze that endpoint's CPU/serial state.
+        self._active_lcd_markers: list[int] | None = None
+        self._active_physical_targets: tuple[int, int] | None = None
+        self._last_lcd_markers: tuple[int, int] = (0, 0)
+        self._scheduler_quantum_count = 0
         self._operation_lock = threading.RLock()
         # When True, per-frame stepping keeps the LCD renderer on and calls
         # each PyBoy's _post_tick (via pyboy.tick(0, True, False)) so the
@@ -585,6 +598,11 @@ class PyBoyLinkSession:
         self._physical_origins = self._physical_expected = self._physical_now = None
         self._physical_generations = None
         self._scheduler_fault = None
+        self._active_lcd_markers = None
+        self._active_physical_targets = None
+        self._active_instruction_endpoint = None
+        self._last_lcd_markers = (0, 0)
+        self._scheduler_quantum_count = 0
 
     def validate_session_operation(self, operation: str) -> None:
         """Optional managed-Session hook; independent attached loads cannot resume a pair."""
@@ -681,17 +699,45 @@ class PyBoyLinkSession:
                 if not self._step_active or self._peer_progress_active:
                     self._latch_fault("unowned or recursive peer progress")
                     return False
-                if p.mb.lcd.frame_done:
-                    # The peer has reached this owner's LCD boundary. Do not
-                    # execute its next frame inside a serial callback. An
-                    # unavailable rearm leaves the line pulled up; the next
-                    # owner frame resumes normal execution. Unowned and
-                    # recursive callbacks still fault before this case.
+                # A native callback is allowed to run only inside the active
+                # physical quantum.  Outside that scope there is no bounded
+                # owner horizon against which a one-instruction rearm can be
+                # judged, so report the line idle without touching the peer.
+                if self._active_physical_targets is None:
                     return False
                 self._check_epoch()
+                try:
+                    index = self._pyboys.index(p)
+                    owner_index = self._pyboys.index(self._active_instruction_endpoint)
+                except ValueError:
+                    self._latch_fault("peer endpoint is no longer attached")
+                    return False
+                if index == owner_index:
+                    self._latch_fault("peer progress selected the active owner")
+                    return False
+                peer_elapsed = self._physical_now[index] - self._physical_origins[index]
+                owner_elapsed = (
+                    self._physical_now[owner_index]
+                    - self._physical_origins[owner_index]
+                )
+                if peer_elapsed >= owner_elapsed:
+                    # Never advance a peer beyond the active owner's
+                    # post-sync physical frontier from a native callback.
+                    # The next scheduler selection owns any remaining work.
+                    return False
+                if self._physical_now[index] >= self._active_physical_targets[index]:
+                    # Do not let a native serial callback start the next
+                    # public quantum. The owner scheduler will service that
+                    # endpoint on the next request.
+                    return False
                 before = int(p.mb.serial.clock)
                 self._peer_progress_active = True
                 result = progress()
+                # A bounded peer instruction may itself cross an LCD
+                # boundary. Consume that notification before returning to the
+                # native serial callback; never leave a display marker as a
+                # hidden CPU barrier.
+                self._consume_lcd_marker(p)
                 if int(p.mb.serial.clock) < before:
                     self._latch_fault("peer clock moved backwards")
                 self._check_epoch()
@@ -703,6 +749,27 @@ class PyBoyLinkSession:
                 self._peer_progress_active = previous_progress
 
         return owned_progress
+
+    def _consume_lcd_marker(self, p: object) -> bool:
+        """Consume one endpoint LCD marker without advancing its CPU.
+
+        ``frame_done`` is a presentation boundary emitted by PyBoy's LCD,
+        not a serial-safe stop condition.  The active local quantum records
+        the marker separately and clears the one-shot flag so instruction
+        ownership remains governed by the common physical frontier.
+        """
+        lcd = getattr(getattr(p, "mb", None), "lcd", None)
+        if lcd is None or not bool(getattr(lcd, "frame_done", False)):
+            return False
+        lcd.frame_done = False
+        if self._active_lcd_markers is not None:
+            try:
+                index = self._pyboys.index(p)
+            except ValueError:
+                self._latch_fault("LCD marker endpoint is no longer attached")
+            else:
+                self._active_lcd_markers[index] += 1
+        return True
 
     @staticmethod
     def _positive_count(value, name: str) -> None:
@@ -794,6 +861,20 @@ class PyBoyLinkSession:
         previous_stepping = [p.mb.breakpoint_singlestep for p in pair]
         frame_started = time.monotonic()
         iterations = stalled = 0
+        lcd_markers = [0, 0]
+        quantum = int(self.PHYSICAL_QUANTUM)
+        if quantum <= 0:
+            raise ValueError("PHYSICAL_QUANTUM must be positive")
+        # Each public frame advances one fixed quantum from the persistent
+        # epoch origin.  Using the current clock directly would make a
+        # faster endpoint's instruction overrun redefine the next frame's
+        # horizon and would let cumulative phase drift grow without bound.
+        quantum_index = self._scheduler_quantum_count + 1
+        physical_targets = tuple(
+            origin + quantum_index * quantum for origin in self._physical_origins
+        )
+        self._active_lcd_markers = lcd_markers
+        self._active_physical_targets = physical_targets
         try:
             for p in pair:
                 p._handle_events(p.events)
@@ -804,9 +885,15 @@ class PyBoyLinkSession:
             clocks = self._check_epoch()
             while True:
                 self._raise_fault()
-                # The opposite CPU may advance inside an existing rearm callback.
-                done_a, done_b = bool(a.mb.lcd.frame_done), bool(b.mb.lcd.frame_done)
-                if done_a and done_b:
+                # LCD completion is a marker, not a stop flag. Consume both
+                # endpoints before selecting the next owner; this is what
+                # permits an endpoint whose LCD was reset early to continue
+                # toward the same physical-time frontier as its peer.
+                self._consume_lcd_marker(a)
+                self._consume_lcd_marker(b)
+                reached_a = self._physical_now[0] >= physical_targets[0]
+                reached_b = self._physical_now[1] >= physical_targets[1]
+                if reached_a and reached_b:
                     if time.monotonic() - frame_started > self.MAX_FRAME_SECONDS:
                         raise RuntimeError("local frame wall deadline exhausted")
                     break
@@ -814,29 +901,55 @@ class PyBoyLinkSession:
                     raise RuntimeError("local frame instruction budget exhausted")
                 if iterations % 1024 == 0 and time.monotonic() - frame_started > self.MAX_FRAME_SECONDS:
                     raise RuntimeError("local frame wall deadline exhausted")
-                if done_a:
+                # Always select the endpoint with the smaller elapsed
+                # physical time. A side that has already emitted one or more
+                # display markers remains eligible until the common horizon;
+                # no side is frozen at frame_done.
+                elapsed_a = self._physical_now[0] - self._physical_origins[0]
+                elapsed_b = self._physical_now[1] - self._physical_origins[1]
+                if reached_a:
                     selected = b
-                elif done_b:
+                elif reached_b or elapsed_a < elapsed_b:
                     selected = a
+                elif elapsed_b < elapsed_a:
+                    selected = b
                 else:
-                    elapsed_a = self._physical_now[0] - self._physical_origins[0]
-                    elapsed_b = self._physical_now[1] - self._physical_origins[1]
-                    selected = a if elapsed_a <= elapsed_b else b
+                    # Resolve an equal-time tie by serial role without
+                    # requiring endpoints to be hashable or value-comparable.
+                    selected = self._serial_step_order(a, b)[0]
                 before = clocks
-                self._instruction(selected)
+                previous_instruction_endpoint = self._active_instruction_endpoint
+                self._active_instruction_endpoint = selected
+                try:
+                    self._instruction(selected)
+                finally:
+                    self._active_instruction_endpoint = previous_instruction_endpoint
                 clocks = self._check_epoch()
                 if any(after < prior for after, prior in zip(clocks, before)):
                     raise RuntimeError("local clock moved backwards during instruction")
                 stalled = stalled + 1 if clocks == before else 0
                 if stalled >= self.MAX_STALLED_INSTRUCTIONS:
                     raise RuntimeError("instruction stepping made no clock progress")
+                # Clear a marker generated by this instruction before another
+                # endpoint can drive a serial edge.  Peer progressors perform
+                # the same bounded cleanup for nested instructions.
+                self._consume_lcd_marker(selected)
                 iterations += 1
+            self._last_lcd_markers = tuple(lcd_markers)
+            self._scheduler_quantum_count += 1
             for p in pair:
+                # Preserve the historical one-shot presentation signal at
+                # the public step boundary.  This compatibility signal is not
+                # included in ``_last_lcd_markers``; the next quantum clears
+                # it before any CPU/serial scheduling decision.
+                p.mb.lcd.frame_done = True
                 p.frame_count += 1
                 p._post_handle_events()
                 if view:
                     p.tick(0, True, False)
         finally:
+            self._active_lcd_markers = None
+            self._active_physical_targets = None
             for p, prior in zip(pair, previous_stepping):
                 p.mb.breakpoint_singlestep = prior
 

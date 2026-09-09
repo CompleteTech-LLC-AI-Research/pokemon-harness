@@ -61,6 +61,9 @@ def pair(**kwargs):
     link = PyBoyLinkSession.local()
     link.attach(a)
     link.attach(b)
+    # The production quantum is one normal LCD frame in physical units;
+    # these tiny instruction fakes use a reduced deterministic horizon.
+    link.PHYSICAL_QUANTUM = 16
     return link, a, b, trace
 
 
@@ -140,16 +143,23 @@ def test_completed_frame_peer_rearm_is_line_idle_without_next_frame_tick():
     results = []
     b.on_instruction = lambda: results.append(progress())
     link.step()
-    assert results == [False]
-    assert trace == [("a", 0), ("b", 0)]
-    assert a.progress == b.progress == 1
+    # LCD markers no longer stop the endpoint at one instruction.  Both
+    # sides reach the reduced common physical horizon (16 units) before the
+    # public boundary, and the peer callback remains bounded at that frontier.
+    assert results == [False, False]
+    assert trace == [("a", 0), ("b", 0), ("a", 4), ("b", 4)]
+    assert a.progress == b.progress == 2
     assert a.frame_count == b.frame_count == 1
     assert a.mb.lcd.frame_done is True
     assert b.mb.lcd.frame_done is True
-    # Only the next owner call may resume the completed peer.
+    # The next public quantum continues both endpoints from the new physical
+    # frontier; it does not re-run the first quantum's work.
     link.step()
-    assert results == [False, False]
-    assert trace == [("a", 0), ("b", 0), ("a", 4), ("b", 4)]
+    assert results == [False, False, False, False]
+    assert trace == [
+        ("a", 0), ("b", 0), ("a", 4), ("b", 4),
+        ("a", 8), ("b", 8), ("a", 12), ("b", 12),
+    ]
     assert a.frame_count == b.frame_count == 2
     assert a.setup == a.finalize == b.setup == b.finalize == 2
 
@@ -195,9 +205,9 @@ def test_rearm_progress_accounted_and_both_flags_reread():
     a.on_instruction = advance_peer_once
     link.step()
     assert called == [True]
-    assert a.progress == b.progress == 3
-    assert a.mb.serial.clock == b.mb.serial.clock == 12
-    assert len(trace) == 6
+    assert a.progress == b.progress == 2
+    assert a.mb.serial.clock == b.mb.serial.clock == 8
+    assert len(trace) == 4
 
 
 def test_nonadvancing_clock_fault_and_instruction_budget():
