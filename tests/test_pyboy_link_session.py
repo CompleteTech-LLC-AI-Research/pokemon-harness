@@ -411,6 +411,77 @@ def test_network_attach_failure_releases_emulator_references(monkeypatch):
         peer.stop()
 
 
+@pytest.mark.parametrize("hook_name", ["stop", "detach_local_core"])
+@pytest.mark.parametrize("bad_signature", ["positional_only", "extra_required"])
+def test_network_attach_rejects_uncallable_timeout_signature(hook_name, bad_signature):
+    backend, peer = NetworkBackend.pair()
+    endpoint = _FakePyBoy(serial=SerialCore())
+    link = PyBoyLinkSession(network_backend=backend)
+    original_hook = getattr(backend, hook_name)
+    previous_backend = endpoint.mb.serial.backend
+    calls = []
+
+    def positional_only(timeout_s, /):
+        calls.append(timeout_s)
+        return True
+
+    def extra_required(required, *, timeout_s):
+        calls.append((required, timeout_s))
+        return True
+
+    replacement = positional_only if bad_signature == "positional_only" else extra_required
+    setattr(backend, hook_name, replacement)
+    try:
+        with pytest.raises(TypeError, match=hook_name):
+            link.attach(endpoint)
+        assert calls == []
+        assert link.attached == ()
+        assert endpoint.mb.serial.backend is previous_backend
+        assert backend._local_core is None
+        assert backend._irq_callback is None
+        assert backend._serial_transcript_context_provider is None
+        assert backend.connected
+    finally:
+        setattr(backend, hook_name, original_hook)
+        try:
+            link.detach_all()
+        finally:
+            peer.stop()
+
+
+def test_network_detach_missing_bounded_hook_preserves_attachment_references():
+    """A missing timeout-aware detach hook must fail before mutating state."""
+    backend, peer = NetworkBackend.pair()
+    endpoint = _FakePyBoy()
+    link = PyBoyLinkSession(network_backend=backend)
+
+    try:
+        link.attach(endpoint)
+        local_core = backend._local_core
+        irq_callback = backend._irq_callback
+        context_provider = backend._serial_transcript_context_provider
+        original_detach = backend.detach_local_core
+        backend.detach_local_core = None
+
+        with pytest.raises(TypeError, match="detach_local_core"):
+            link.detach(endpoint)
+
+        assert link.attached == (endpoint,)
+        assert backend.connected
+        assert backend._local_core is local_core
+        assert backend._irq_callback is irq_callback
+        assert backend._serial_transcript_context_provider is context_provider
+    finally:
+        # Restore the adapter contract before terminal cleanup; the failed
+        # detach intentionally left every reference in place for retry.
+        if "original_detach" in locals():
+            backend.detach_local_core = original_detach
+        try:
+            link.detach_all()
+        finally:
+            peer.stop()
+
+
 def test_serial_completion_context_provider_reads_cpu_and_hram():
     """The diagnostic snapshot identifies the ROM's serial receive phase."""
     pyboy = _FakePyBoy()

@@ -1,0 +1,13 @@
+# /goal
+Use this as the active goal runner for the poke-harness project.
+
+Primary goal text is:
+prompts/goal.md (relative to the repository root)
+
+Meta instructions are:
+prompts/meta.md (relative to the repository root)
+
+When this goal is invoked:
+- First load and apply the primary goal prompt.
+- Then apply the meta prompt as operating constraints.
+- Follow the completion policy in meta.md before reporting done.

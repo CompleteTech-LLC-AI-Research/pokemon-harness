@@ -59,6 +59,7 @@ of a second local core.
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from contextlib import contextmanager
@@ -67,7 +68,6 @@ from operator import index
 from typing import Protocol, runtime_checkable
 
 from pokered_harness.link.network_backend import NetworkBackend
-from pokered_harness.ownership import EmulatorOwnershipError, owner_for, owner_group
 from pokered_harness.link.serial_coordinator import (
     LockstepCoordinator,
     SerialOperationGate,
@@ -78,6 +78,7 @@ from pokered_harness.link.serial_core import (
     NullBackend,
     SerialCore,
 )
+from pokered_harness.ownership import EmulatorOwnershipError, owner_for, owner_group
 
 
 @runtime_checkable
@@ -121,6 +122,29 @@ def _bounded_provider_lock(lock, deadline):
         lock.release()
 
 
+def _call_with_timeout(function, timeout_s: float):
+    """Call a lifecycle hook only when it accepts a bounded deadline.
+
+    Network teardown is a safety boundary: a no-argument ``stop`` or
+    ``detach_local_core`` cannot prove that cleanup will return.  The native
+    NetworkBackend exposes ``timeout_s`` on both hooks, and adapters must
+    implement that same bounded contract before an emulator is attached.
+    """
+    if not _accepts_timeout(function):
+        raise TypeError("network lifecycle hook must expose timeout_s")
+    return function(timeout_s=timeout_s)
+
+
+def _accepts_timeout(function) -> bool:
+    try:
+        # Bind the exact call shape: a positional-only timeout parameter or
+        # another required argument is not a usable bounded lifecycle hook.
+        inspect.signature(function).bind(timeout_s=0.0)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _serialized_local_operation(function):
     @wraps(function)
     def call(self, *args, **kwargs):
@@ -136,23 +160,58 @@ def _serialized_local_operation(function):
         deadline = previous_deadline
         if cleanup and deadline is None:
             deadline = time.monotonic() + 2.0
+        network_generation = (
+            self._network_cancellation_generation()
+            if self._network_backend is not None
+            else None
+        )
+        previous_network_cancelled = getattr(
+            self._cleanup_state, "network_cancelled", False
+        )
         try:
             if cleanup:
                 self._cleanup_state.deadline = deadline
+                if self._network_backend is not None:
+                    # Validate before publishing transport cancellation.  If
+                    # an adapter was replaced or lost its bounded detach
+                    # hook, teardown must leave both transport and emulator
+                    # references untouched for a later repair/retry.
+                    self._require_network_lifecycle_contract()
+                if (
+                    self._network_backend is not None
+                    and not previous_network_cancelled
+                ):
+                    # Transport cancellation is deliberately outside the
+                    # emulator owner group.  A raw network tick can be
+                    # blocked in native serial code while holding that
+                    # owner; stopping the transport is the wake-up that lets
+                    # it unwind before backend/core restoration.
+                    self._cancel_network_transport(deadline)
+                    self._cleanup_state.network_cancelled = True
             with owner_group(
                 (owner_for(endpoint) for endpoint in endpoints),
                 allow_closed=cleanup,
                 timeout=None if deadline is None else max(0.0, deadline - time.monotonic()),
-            ):
-                with _bounded_provider_lock(self._operation_lock, deadline):
-                    if len(members) != len(self._pyboys) or any(
-                        before is not after for before, after in zip(members, self._pyboys)
-                    ):
-                        raise EmulatorOwnershipError("provider membership changed; retry the operation")
-                    return function(self, *args, **kwargs)
+            ), _bounded_provider_lock(self._operation_lock, deadline):
+                if len(members) != len(self._pyboys) or any(
+                    before is not after for before, after in zip(members, self._pyboys)
+                ):
+                    raise EmulatorOwnershipError("provider membership changed; retry the operation")
+                result = function(self, *args, **kwargs)
+                if (
+                    network_generation is not None
+                    and function.__name__ in {"step", "step_interleaved"}
+                    and network_generation
+                    != self._network_cancellation_generation()
+                ):
+                    raise EmulatorOwnershipError(
+                        "network emulator operation was cancelled by cleanup"
+                    )
+                return result
         finally:
             if cleanup:
                 self._cleanup_state.deadline = previous_deadline
+                self._cleanup_state.network_cancelled = previous_network_cancelled
     return call
 
 
@@ -214,6 +273,13 @@ class PyBoyLinkSession:
         self._lifecycle_lock = threading.RLock()
         self._operation_lock = self._lifecycle_lock
         self._cleanup_state = threading.local()
+        # Cleanup must be able to publish a cancellation while a network
+        # frame owns the provider/lifecycle lock.  This tiny independent
+        # generation lock carries that signal without waiting on emulator
+        # ownership; the active operation checks it when its native call
+        # returns and fails closed before publishing a successful result.
+        self._network_cancel_lock = threading.Lock()
+        self._network_cancel_generation = 0
         self._network_tick_active = False
         self._owners = []
         self._step_active = False
@@ -356,6 +422,13 @@ class PyBoyLinkSession:
         owner.ensure_open()
         owner.claim_provider(self)
         try:
+            # Validate the complete bounded lifecycle contract only after the
+            # metadata-only provider claim.  A competing provider must still
+            # receive the ownership error before an unrelated adapter-shape
+            # error, and a failed validation releases this temporary claim
+            # without touching the native serial graph.
+            if self._network_backend is not None:
+                self._require_network_lifecycle_contract()
             result = self._attach_claimed(pyboy)
         except BaseException as error:
             if pyboy in self._pyboys:
@@ -371,6 +444,19 @@ class PyBoyLinkSession:
             raise
         self._owners.append(owner)
         return result
+
+    def _require_network_lifecycle_contract(self) -> None:
+        """Reject an unbounded network adapter before touching an emulator."""
+        backend = self._network_backend
+        if backend is None:
+            return
+        for name in ("stop", "detach_local_core"):
+            hook = getattr(backend, name, None)
+            if not callable(hook) or not _accepts_timeout(hook):
+                raise TypeError(
+                    "network backend requires a bounded timeout_s "
+                    f"{name}() lifecycle hook before attach"
+                )
 
     def _attach_claimed(self, pyboy: _PyBoyLike) -> object:
         # Caller holds the lifecycle lock.
@@ -414,9 +500,15 @@ class PyBoyLinkSession:
             try:
                 with self._serial_gate:
                     self._initialize_network_clock_role(core)
-                self._network_backend.set_serial_transcript_context_provider(
-                    self._make_serial_completion_context_provider(pyboy)
+                set_context_provider = getattr(
+                    self._network_backend,
+                    "set_serial_transcript_context_provider",
+                    None,
                 )
+                if callable(set_context_provider):
+                    set_context_provider(
+                        self._make_serial_completion_context_provider(pyboy)
+                    )
                 self._network_backend.start_receiver(
                     local_core=core,
                     irq_callback=self._make_serial_irq_raiser(pyboy),
@@ -452,9 +544,12 @@ class PyBoyLinkSession:
                 # Dropping these records here would hide a failed cleanup
                 # and retain emulator closures in the external backend.
                 try:
-                    if not self._network_backend.stop(timeout_s=2.0):
+                    stopped = _call_with_timeout(
+                        self._network_backend.stop, 2.0
+                    )
+                    if stopped is False:
                         attach_error.add_note("network workers remain active after attach failure")
-                except BaseException as stop_error:
+                except BaseException as stop_error:  # noqa: BLE001 - retain attach and teardown failures
                     attach_error.add_note(f"network cancellation also failed: {stop_error!r}")
                 raise
         elif len(self._cores) == 2:
@@ -951,6 +1046,11 @@ class PyBoyLinkSession:
             return
         if self._step_active or self._network_tick_active:
             raise RuntimeError("cannot detach during emulator execution")
+        if self._network_backend is not None:
+            # Re-check in case an adapter was monkeypatched after attach;
+            # never release the core/IRQ records without proving bounded
+            # detach capability first.
+            self._require_network_lifecycle_contract()
         self._clear_local_epoch()
         # Tearing down the coordinator first ensures neither remaining
         # core keeps a stale CoordinatedBackend pointing at the
@@ -964,8 +1064,11 @@ class PyBoyLinkSession:
         previous_owner_dispatch = self._previous_owner_dispatch[idx]
         core = self._cores[idx]
         if self._network_backend is not None:
-            if not self._network_backend.detach_local_core(
-                timeout_s=self._remaining_cleanup_time()
+            detach_local_core = getattr(
+                self._network_backend, "detach_local_core", None
+            )
+            if not _call_with_timeout(
+                detach_local_core, self._remaining_cleanup_time()
             ):
                 raise RuntimeError(
                     "network core operations did not drain before cleanup deadline"
@@ -1020,8 +1123,11 @@ class PyBoyLinkSession:
             if self._network_backend is not None:
                 stop_error: BaseException | None = None
                 try:
-                    stopped = self._network_backend.stop(timeout_s=self._remaining_cleanup_time())
-                    if not stopped:
+                    stopped = _call_with_timeout(
+                        self._network_backend.stop,
+                        self._remaining_cleanup_time(),
+                    )
+                    if stopped is False:
                         stop_error = RuntimeError(
                             "network backend workers did not stop before cleanup deadline"
                         )
@@ -1042,6 +1148,29 @@ class PyBoyLinkSession:
     def _remaining_cleanup_time(self) -> float:
         deadline = getattr(self._cleanup_state, "deadline", None)
         return 2.0 if deadline is None else max(0.0, deadline - time.monotonic())
+
+    def _network_cancellation_generation(self) -> int:
+        with self._network_cancel_lock:
+            return self._network_cancel_generation
+
+    def _cancel_network_transport(self, deadline: float | None) -> None:
+        """Wake an active network owner before taking emulator locks.
+
+        ``detach_all`` is terminal for the transport, so closing the socket
+        is the only reliable way to interrupt a peer wait or a native serial
+        edge.  The generation is published first so a just-returned raw
+        frame cannot be reported as a successful operation after cleanup has
+        begun.  Every attached network backend must expose a bounded
+        ``stop(timeout_s=...)`` hook.
+        """
+        with self._network_cancel_lock:
+            self._network_cancel_generation += 1
+        backend = self._network_backend
+        stop = getattr(backend, "stop", None)
+        if not callable(stop):
+            return
+        timeout = 2.0 if deadline is None else max(0.0, deadline - time.monotonic())
+        _call_with_timeout(stop, timeout)
 
     # --- accessors -----------------------------------------------------
 
@@ -1113,7 +1242,7 @@ class PyBoyLinkSession:
         for p in self._pyboys:
             self._read_physical_clock(p)
             if not callable(getattr(p.mb, "tick", None)):
-                raise RuntimeError("local scheduler requires instruction stepping")
+                raise RuntimeError("local scheduler requires instruction stepping")  # noqa: TRY004 - runtime capability contract
         self._epoch_mbs = tuple(p.mb for p in self._pyboys)
         self._epoch_serials = tuple(p.mb.serial for p in self._pyboys)
         self._epoch_origins = tuple(int(s.clock) for s in self._epoch_serials)
@@ -1145,7 +1274,7 @@ class PyBoyLinkSession:
                 self._raise_fault()
         try:
             physical = tuple(self._read_physical_clock(p) for p in self._pyboys)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - latch any failed runtime clock observation
             self._latch_fault(str(error))
             self._raise_fault()
         if tuple(value[0] for value in physical) != self._physical_generations:
@@ -1221,7 +1350,7 @@ class PyBoyLinkSession:
                     self._latch_fault("peer clock moved backwards")
                 self._check_epoch()
                 return bool(result) and self._scheduler_fault is None
-            except BaseException as error:
+            except BaseException as error:  # noqa: BLE001 - native callback must latch every failure
                 self._latch_fault("peer progress failed: " + repr(error))
                 return False
             finally:
@@ -1271,11 +1400,19 @@ class PyBoyLinkSession:
                 raise RuntimeError("network step() requires one attached instance")
             endpoint = members[0]
             owner = owner_for(endpoint)
+            cancellation_generation = self._network_cancellation_generation()
             # Cancellation deliberately bypasses ownership: stop() must wake a
             # blocked tick. Snapshot the endpoint, and reject a detached member
             # before starting another frame; receiver mutation is not covered.
             with owner.access():
                 for _ in range(frames):
+                    if (
+                        cancellation_generation
+                        != self._network_cancellation_generation()
+                    ):
+                        raise EmulatorOwnershipError(
+                            "network emulator operation was cancelled by cleanup"
+                        )
                     owner.ensure_open()
                     current = tuple(self._pyboys)
                     if len(current) != 1 or current[0] is not endpoint:

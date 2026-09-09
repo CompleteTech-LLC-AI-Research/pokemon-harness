@@ -45,7 +45,10 @@ from pokered_harness.link.network_backend import (
     validate_loopback_host,
 )
 from pokered_harness.link.pair import LinkPair
-from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
+from pokered_harness.link.pyboy_link_session import (
+    PairedSessionOperationError,
+    PyBoyLinkSession,
+)
 from pokered_harness.link.remote import RemoteLinkEndpoint
 from pokered_harness.link.serial_link import (
     SerialLink,
@@ -60,7 +63,11 @@ from pokered_harness.link.timed_wire import (
     ProtocolError,
     WireError,
 )
-from pokered_harness.mcp_timed_owner import TimedOwner, TimedOwnerPolicy
+from pokered_harness.mcp_timed_owner import (
+    TimedOwner,
+    TimedOwnerError,
+    TimedOwnerPolicy,
+)
 from pokered_harness.ownership import (
     EmulatorOwnershipError,
     assert_no_emulator_scope,
@@ -68,12 +75,30 @@ from pokered_harness.ownership import (
 from pokered_harness.serialize import to_jsonable
 from pokered_harness.session import (
     InvalidStateError,
+    RomHashMismatch,
+    RomNotFoundError,
     Session,
     SessionClosedError,
+    SessionCloseError,
+    SessionCloseTimeout,
     SessionConfigurationError,
+    SessionError,
+    SessionLockTimeout,
+    SymbolHashMismatch,
+    SymbolNotFoundError,
     VersionMismatch,
     locked_sessions,
 )
+
+try:
+    from pyboy.core.serial import SerialBackendError as _SerialBackendError
+except ImportError:
+    # The optional latched backend-failure type was added by the bundled
+    # runtime.  Keep source imports compatible with older PyBoy forks while
+    # retaining the stable code when the type is available.
+    _SERIAL_BACKEND_ERRORS: tuple[type[Exception], ...] = ()
+else:
+    _SERIAL_BACKEND_ERRORS = (_SerialBackendError,)
 
 
 class McpHarnessError(ValueError):
@@ -103,6 +128,18 @@ _DIRECT_LINK_HOOKS = (
     "Serial_ExchangeNybble",
     "Serial_ExchangeLinkMenuSelection",
     "Serial_TryEstablishingExternallyClockedConnection",
+)
+_TIMED_OWNER_ERROR_CODES = frozenset(
+    {
+        "timed_cancelled",
+        "timed_deadline",
+        "timed_busy",
+        "timed_owner_closed",
+        "timed_queue_full",
+        "timed_stale_generation",
+        "timed_peer_mismatch",
+        "timed_cleanup_failed",
+    }
 )
 _LOCAL_LINK_TOOL_NAMES = frozenset(
     {
@@ -186,6 +223,11 @@ class LinkState:
         self.peer_version = peer_version
         self.pair: LinkPair | None = None
         self.local_link_session: PyBoyLinkSession | None = None
+        # A native provider is published here before attach begins so a
+        # failed/cancelled setup cannot lose the only cleanup handle.  It is
+        # moved to ``local_link_session`` only after the generation check and
+        # rollback boundary have both settled.
+        self._pending_local_link_session: PyBoyLinkSession | None = None
         # Remote (two-process) state.
         self.remote_link: SerialLink | None = None
         self.remote_endpoint: RemoteLinkEndpoint | None = None
@@ -226,6 +268,15 @@ class LinkState:
         self._pair_lock = threading.RLock()
         self._disconnecting = False
         self._generation = 0
+        # Local attach/pair setup has no transport socket for a concurrent
+        # ``link_disconnect`` to wake.  Keep a separate generation token so
+        # disconnect can cancel setup without dismantling an already
+        # published local pair.
+        self._local_generation = 0
+        self._local_pair_in_progress = False
+        self._local_setup_deadline: float | None = None
+        self._local_setup_done = threading.Event()
+        self._local_setup_done.set()
 
     @contextmanager
     def operation(self, *, timeout_s: float | None = None) -> Iterator[None]:
@@ -563,14 +614,32 @@ def _error_reply(exc: Exception) -> mcp_types.CallToolResult:
 def _error_code(exc: Exception) -> str:
     if isinstance(exc, McpHarnessError):
         return exc.code
-    # Session boundary exceptions carry their stable wire code.  Keep this
-    # lookup before the broad ValueError/OSError branches so missing assets
-    # and distinct ROM/SYM hash failures retain actionable MCP semantics.
-    declared_code = getattr(exc, "code", None)
-    if isinstance(declared_code, str) and declared_code:
-        return declared_code
+    if isinstance(exc, TimedOwnerError):
+        # TimedOwnerError is the typed boundary for the persistent timed
+        # owner. Only its published protocol codes may cross MCP; do not
+        # trust an arbitrary ``.code`` attribute on another RuntimeError.
+        if exc.code in _TIMED_OWNER_ERROR_CODES:
+            return exc.code
+        return "internal_error"
+    if isinstance(exc, PairedSessionOperationError):
+        return "paired_session_operation"
+    if isinstance(exc, _SERIAL_BACKEND_ERRORS):
+        return "serial_backend_error"
     if isinstance(exc, EmulatorOwnershipError):
         return "emulator_ownership_error"
+    if isinstance(exc, SessionClosedError):
+        return "session_closed"
+    for error_type, code in (
+        (RomNotFoundError, "rom_not_found"),
+        (SymbolNotFoundError, "symbol_not_found"),
+        (RomHashMismatch, "rom_hash_mismatch"),
+        (SymbolHashMismatch, "symbol_hash_mismatch"),
+        (SessionCloseTimeout, "session_close_timeout"),
+        (SessionCloseError, "session_close_failed"),
+        (SessionLockTimeout, "session_lock_timeout"),
+    ):
+        if isinstance(exc, error_type):
+            return code
     for error_type, code in (
         (Cancelled, "timed_cancelled"),
         (DeadlineExceeded, "timed_deadline_exceeded"),
@@ -582,14 +651,14 @@ def _error_code(exc: Exception) -> str:
     ):
         if isinstance(exc, error_type):
             return code
-    if isinstance(exc, SessionClosedError):
-        return "session_closed"
     if isinstance(exc, VersionMismatch):
         return "version_mismatch"
     if isinstance(exc, SessionConfigurationError):
         return "invalid_session_configuration"
     if isinstance(exc, InvalidStateError):
         return "invalid_state"
+    if isinstance(exc, SessionError):
+        return "session_error"
     if isinstance(exc, (SerialLinkTimeout, TimeoutError)):
         return "timeout"
     if isinstance(exc, NetworkBackendError):
@@ -811,6 +880,15 @@ def _dispatch_link_tool(
         peer = _require_peer(link)
         with link.state():
             _require_remote_idle_locked(link)
+            if (
+                link._local_pair_in_progress
+                or link._pending_local_link_session is not None
+            ):
+                raise McpHarnessError(
+                    "link_busy",
+                    "local setup cleanup is pending; call link_disconnect "
+                    "before starting another pair",
+                )
             if link.pair is not None and link.pair.paired:
                 raise McpHarnessError(
                     "already_paired", "already paired; call link_unpair first"
@@ -839,10 +917,26 @@ def _dispatch_link_tool(
                 supported=peer_supports_native,
                 role="peer",
             )
+        else:
+            _reject_semantic_pair_on_native_runtime(pair, session, peer)
+
+        # Reserve a local setup generation only after all admission checks.
+        # ``link_disconnect`` can then cancel attach/pair setup without
+        # acquiring the operation lock or touching a completed local pair.
+        with link.state():
+            local_generation = link._local_generation + 1
+            link._local_generation = local_generation
+            link._local_pair_in_progress = True
+            link._local_setup_done.clear()
+
         if pair is None and primary_supports_native and peer_supports_native:
-            local_link_session = PyBoyLinkSession.local()
+            local_link_session: PyBoyLinkSession | None = None
             lock_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
             try:
+                local_link_session = PyBoyLinkSession.local()
+                with link.state():
+                    link._pending_local_link_session = local_link_session
+                    link._local_setup_deadline = lock_deadline
                 # Use a stable lock order; both sessions are owned by this
                 # MCP server and no callback is invoked while attaching.
                 with (
@@ -855,7 +949,72 @@ def _dispatch_link_tool(
                 ):
                     local_link_session.attach(session._pyboy)
                     local_link_session.attach(peer._pyboy)
-            except Exception:
+                    if link._local_generation != local_generation:
+                        raise McpHarnessError(
+                            "link_cancelled", "local link pairing cancelled"
+                        )
+            except Exception as exc:
+                cleanup_errors: list[Exception] = []
+                if local_link_session is not None:
+                    try:
+                        _detach_local_link_session(
+                            link,
+                            session,
+                            local_link_session,
+                            timeout_s=_remaining(lock_deadline),
+                        )
+                    except Exception as cleanup_error:  # noqa: BLE001
+                        cleanup_errors.append(cleanup_error)
+                        # Preserve the attach failure; a later unpair/close
+                        # can retry if restoration itself was interrupted.
+                        exc.add_note(
+                            f"local attach cleanup failed: {cleanup_error!r}"
+                        )
+                try:
+                    hook_errors = _deactivate_link_hooks(
+                        session,
+                        peer,
+                        timeout_s=_remaining(lock_deadline),
+                    )
+                    cleanup_errors.extend(hook_errors)
+                except Exception as cleanup_error:  # noqa: BLE001
+                    cleanup_errors.append(cleanup_error)
+                    exc.add_note(
+                        f"local hook cleanup failed: {cleanup_error!r}"
+                    )
+                if cleanup_errors:
+                    with link.state():
+                        # Keep ownership visible when restoration failed; the
+                        # provider remains inspectable for a bounded retry.
+                        link._pending_local_link_session = local_link_session
+                        link._local_pair_in_progress = False
+                        link._local_setup_deadline = None
+                else:
+                    with link.state():
+                        if link._pending_local_link_session is local_link_session:
+                            link._pending_local_link_session = None
+                        if link._local_pair_in_progress:
+                            link._local_pair_in_progress = False
+                        if link._local_setup_deadline == lock_deadline:
+                            link._local_setup_deadline = None
+                link._local_setup_done.set()
+                raise
+            assert local_link_session is not None
+            with link.state():
+                if link._local_generation != local_generation:
+                    cancelled = True
+                else:
+                    cancelled = False
+                    link.local_link_session = local_link_session
+                    if link._pending_local_link_session is local_link_session:
+                        link._pending_local_link_session = None
+                    if link._local_pair_in_progress:
+                        link._local_pair_in_progress = False
+                    if link._local_setup_deadline == lock_deadline:
+                        link._local_setup_deadline = None
+                    link._local_setup_done.set()
+            if cancelled:
+                cleanup_errors: list[Exception] = []
                 try:
                     _detach_local_link_session(
                         link,
@@ -863,31 +1022,57 @@ def _dispatch_link_tool(
                         local_link_session,
                         timeout_s=_remaining(lock_deadline),
                     )
-                except Exception:  # noqa: BLE001, S110 - preserve attach failure
-                    # Preserve the attach failure; the caller still gets a
-                    # deterministic failure and the session close path can
-                    # make a second cleanup attempt.
-                    pass
-                raise
-            with link.state():
-                link.local_link_session = local_link_session
+                except Exception as cleanup_error:  # noqa: BLE001
+                    cleanup_errors.append(cleanup_error)
+                finally:
+                    try:
+                        cleanup_errors.extend(
+                            _deactivate_link_hooks(
+                                session,
+                                peer,
+                                timeout_s=_remaining(lock_deadline),
+                            )
+                        )
+                    except Exception as cleanup_error:  # noqa: BLE001
+                        cleanup_errors.append(cleanup_error)
+                with link.state():
+                    if not cleanup_errors:
+                        if link._pending_local_link_session is local_link_session:
+                            link._pending_local_link_session = None
+                        if link.local_link_session is local_link_session:
+                            link.local_link_session = None
+                        if link._local_pair_in_progress:
+                            link._local_pair_in_progress = False
+                        if link._local_setup_deadline == lock_deadline:
+                            link._local_setup_deadline = None
+                    else:
+                        # Keep the provider published for a later bounded
+                        # retry; disconnect must not report idle while
+                        # attached cores remain.
+                        link._pending_local_link_session = local_link_session
+                        link._local_pair_in_progress = False
+                        link._local_setup_deadline = None
+                link._local_setup_done.set()
+                raise McpHarnessError(
+                    "link_cancelled", "local link pairing cancelled"
+                )
             return {
                 "paired": True,
                 "primary_version": link.primary_version,
                 "peer_version": link.peer_version,
             }
 
-        if pair is None:
-            pair = LinkPair(
-                session,
-                peer,
-                version_primary=link.primary_version,
-                version_peer=link.peer_version,
-            )
-            with link.state():
-                link.pair = pair
+        pair_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
         try:
-            pair_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+            if pair is None:
+                pair = LinkPair(
+                    session,
+                    peer,
+                    version_primary=link.primary_version,
+                    version_peer=link.peer_version,
+                )
+                with link.state():
+                    link.pair = pair
             with (
                 locked_sessions(
                     session,
@@ -896,11 +1081,41 @@ def _dispatch_link_tool(
                 ),
                 link._pair_lock,
             ):
+                assert pair is not None
                 pair.pair()
-        except Exception:
+                if link._local_generation != local_generation:
+                    raise McpHarnessError(
+                        "link_cancelled", "local link pairing cancelled"
+                    )
+            # Lock release can run integration callbacks or admit a racing
+            # disconnect. Publish completion atomically with the final token
+            # check, just as the native provider path does above.
+            with link.state():
+                if link._local_generation != local_generation:
+                    raise McpHarnessError(
+                        "link_cancelled", "local link pairing cancelled"
+                    )
+                link._local_pair_in_progress = False
+        except Exception as exc:
+            try:
+                if pair is not None and pair.paired:
+                    with (
+                        locked_sessions(
+                            session,
+                            peer,
+                            allow_closed=True,
+                            timeout_s=_remaining(pair_deadline),
+                        ),
+                        link._pair_lock,
+                    ):
+                        pair.unpair()
+            except Exception as cleanup_error:  # noqa: BLE001
+                # Preserve the operation/cancellation error. The normal
+                # unpair path remains available for a later retry.
+                exc.add_note(f"local pair rollback failed: {cleanup_error!r}")
             if created:
                 with link.state():
-                    if link.pair is pair:
+                    if pair is not None and link.pair is pair:
                         link.pair = None
             _deactivate_link_hooks(
                 session,
@@ -908,6 +1123,10 @@ def _dispatch_link_tool(
                 timeout_s=_remaining(pair_deadline),
             )
             raise
+        finally:
+            with link.state():
+                if link._local_pair_in_progress:
+                    link._local_pair_in_progress = False
         return {
             "paired": True,
             "primary_version": link.primary_version,
@@ -916,8 +1135,14 @@ def _dispatch_link_tool(
 
     if name == "link_unpair":
         with link.state():
+            if link._local_pair_in_progress:
+                raise McpHarnessError(
+                    "link_busy", "local setup is still unwinding; retry cleanup after it finishes"
+                )
             pair = link.pair
-            local_link_session = link.local_link_session
+            local_link_session = (
+                link.local_link_session or link._pending_local_link_session
+            )
         cleanup_errors: list[Exception] = []
         cleanup_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
         if local_link_session is not None:
@@ -934,6 +1159,10 @@ def _dispatch_link_tool(
                 with link.state():
                     if link.local_link_session is local_link_session:
                         link.local_link_session = None
+                    if link._pending_local_link_session is local_link_session:
+                        link._pending_local_link_session = None
+                    link._local_setup_deadline = None
+                    link._local_setup_done.set()
         if pair is not None and pair.paired:
             try:
                 peer = _require_peer(link)
@@ -1120,6 +1349,21 @@ def _dispatch_link_tool(
         }
 
     if name == "link_listen":
+        # Validate the complete request and prove native serial capability
+        # before reserving lifecycle state or binding a socket.  An
+        # unsupported runtime must be observationally inert.
+        port = _positive_port(arguments.get("port"))
+        host = _validate_remote_host(str(arguments.get("host", "127.0.0.1")))
+        rom_version = _validate_rom_version(
+            str(arguments.get("rom_version") or link.primary_version)
+        )
+        _require_primary_rom_version(link, rom_version)
+        timeout_s = _validate_timeout(
+            arguments.get("timeout_s", _DEFAULT_REMOTE_HELLO_TIMEOUT_S)
+        )
+        expected_peer_version = _optional_rom_version(
+            arguments.get("peer_rom_version")
+        )
         cancel = threading.Event()
         start_owner = threading.get_ident()
         with link.state():
@@ -1129,19 +1373,11 @@ def _dispatch_link_tool(
             # never had a chance to cancel.
             _require_remote_idle_locked(link)
             _require_pair_inactive_locked(link)
-            port = _positive_port(arguments.get("port"))
-            host = _validate_remote_host(
-                str(arguments.get("host", "127.0.0.1"))
-            )
-            rom_version = _validate_rom_version(
-                str(arguments.get("rom_version") or link.primary_version)
-            )
-            _require_primary_rom_version(link, rom_version)
-            timeout_s = _validate_timeout(
-                arguments.get("timeout_s", _DEFAULT_REMOTE_HELLO_TIMEOUT_S)
-            )
-            expected_peer_version = _optional_rom_version(
-                arguments.get("peer_rom_version")
+            native_supports = _supports_bit_accurate_network(session)
+            _require_native_network_contract(
+                session,
+                supported=native_supports,
+                role="primary",
             )
 
             # Every new remote attempt gets its own generation.  A status
@@ -1249,20 +1485,28 @@ def _dispatch_link_tool(
                     link._listener_start_owner = None
 
     if name == "link_connect":
+        # Perform all argument and native-runtime validation before lifecycle
+        # reservation, transport construction, or any socket I/O.
+        host = _validate_remote_host(str(arguments["host"]))
+        port = _positive_port(arguments.get("port"))
+        rom_version = _validate_rom_version(
+            str(arguments.get("rom_version") or link.primary_version)
+        )
+        _require_primary_rom_version(link, rom_version)
+        timeout_s = _validate_timeout(arguments.get("timeout_s", 10.0))
+        expected_peer_version = _optional_rom_version(
+            arguments.get("peer_rom_version")
+        )
         with link.state():
             # Claim the remote lifecycle before releasing the state lock so
             # a concurrent disconnect cannot miss an in-progress connect.
             _require_remote_idle_locked(link)
             _require_pair_inactive_locked(link)
-            host = _validate_remote_host(str(arguments["host"]))
-            port = _positive_port(arguments.get("port"))
-            rom_version = _validate_rom_version(
-                str(arguments.get("rom_version") or link.primary_version)
-            )
-            _require_primary_rom_version(link, rom_version)
-            timeout_s = _validate_timeout(arguments.get("timeout_s", 10.0))
-            expected_peer_version = _optional_rom_version(
-                arguments.get("peer_rom_version")
+            native_supports = _supports_bit_accurate_network(session)
+            _require_native_network_contract(
+                session,
+                supported=native_supports,
+                role="primary",
             )
             # Reserve a fresh token for this attempt so a racing status
             # cleanup cannot attach an older reader failure to its result.
@@ -1283,7 +1527,7 @@ def _dispatch_link_tool(
         peer_version: str | None = None
         deadline = time.monotonic() + timeout_s
         try:
-            if _supports_bit_accurate_network(session):
+            if native_supports:
                 transport = NetworkBackend.connect(
                     host,
                     port,
@@ -1316,43 +1560,12 @@ def _dispatch_link_tool(
                     peer_version,
                     timeout_s=_remaining(deadline),
                 )
-            else:
-                _require_native_network_contract(
-                    session,
-                    supported=False,
-                    role="primary",
+            else:  # pragma: no cover - admission above is fail-closed
+                raise McpHarnessError(
+                    "unsupported_runtime",
+                    "primary PyBoy lost the pinned serial contract during "
+                    "remote connection setup",
                 )
-                # Keep the semantic adapter available for lightweight test
-                # doubles that intentionally do not model a PyBoy
-                # motherboard. It is never a production runtime fallback.
-                transport = TcpSerialLink.connect(
-                    host,
-                    port,
-                    rom_version,
-                    timeout_s=timeout_s,
-                    cancel_event=connect_cancel,
-                )
-                _track_unpublished_remote_resource(
-                    link, generation, transport=transport
-                )
-                _wait_for_remote_hello(
-                    transport, connect_cancel, _remaining(deadline)
-                )
-                peer_version = transport.peer_rom_version
-                if (
-                    expected_peer_version is not None
-                    and peer_version != expected_peer_version
-                ):
-                    raise McpHarnessError(
-                        "link_handshake_failed",
-                        f"peer ROM version {peer_version!r} does not match "
-                        f"expected {expected_peer_version!r}",
-                )
-                endpoint = RemoteLinkEndpoint.as_connector(session, transport)
-                _track_unpublished_remote_resource(
-                    link, generation, endpoint=endpoint
-                )
-                endpoint.install()
             with link.state():
                 if (
                     connect_cancel.is_set()
@@ -1461,12 +1674,16 @@ def _dispatch_link_tool(
 def _require_remote_idle_locked(link: LinkState) -> None:
     """Validate the remote lifecycle while ``link.state()`` is held."""
     listener_thread = link._listener_thread
-    if listener_thread is not None and not listener_thread.is_alive():
+    if isinstance(listener_thread, threading.Thread) and not listener_thread.is_alive():
         link._listener_thread = None
         listener_thread = None
+    if link._disconnecting:
+        raise McpHarnessError(
+            "link_busy",
+            "link teardown is in progress; retry after disconnect completes",
+        )
     if (
         link.remote_mode != "idle"
-        or link._disconnecting
         or link._connect_in_progress
         or link._listener_socket is not None
         or link.remote_link is not None
@@ -1506,6 +1723,8 @@ def _require_pair_inactive_locked(link: LinkState) -> None:
     with link._pair_lock:
         if (link.pair is not None and link.pair.paired) or (
             link.local_link_session is not None
+        ) or link._local_pair_in_progress or (
+            link._pending_local_link_session is not None
         ):
             raise McpHarnessError(
                 "pair_active",
@@ -1646,9 +1865,10 @@ def _supports_bit_accurate_network(session: Session) -> bool:
     """Return whether a session exposes the pinned PyBoy serial contract."""
     pyboy = getattr(session, "_pyboy", None)
     serial = getattr(getattr(pyboy, "mb", None), "serial", None)
-    return serial is not None and all(
-        hasattr(serial, name)
-        for name in ("backend", "apply_external_edge", "peek_out_bit")
+    if serial is None or getattr(serial, "backend", None) is None:
+        return False
+    return callable(getattr(serial, "apply_external_edge", None)) and callable(
+        getattr(serial, "peek_out_bit", None)
     )
 
 
@@ -1661,14 +1881,46 @@ def _is_real_pyboy_instance(session: Session) -> bool:
 def _require_native_network_contract(
     session: Session, *, supported: bool, role: str
 ) -> None:
-    """Fail closed instead of silently switching real PyBoy to semantics."""
-    if supported or not _is_real_pyboy_instance(session):
+    """Fail closed before an implicit link can mutate or open transport."""
+    if supported:
         return
     raise McpHarnessError(
         "unsupported_runtime",
         f"{role} PyBoy does not expose the pinned bit-accurate serial "
         "contract; install the bundled PyBoy source runtime",
     )
+
+
+def _reject_semantic_pair_on_native_runtime(
+    pair: LinkPair,
+    session: Session,
+    peer: Session,
+) -> None:
+    """Keep injected semantic pairs out of native-capable endpoints.
+
+    A pre-built ``LinkPair`` is intentionally retained as a deterministic
+    compatibility seam for tiny fake sessions.  It must not, however, take
+    ownership of a real or native-capable endpoint: that would silently
+    replace ROM-generated serial edges with semantic hook writes.
+    """
+    candidates: list[tuple[Session, str]] = [
+        (session, "primary"),
+        (peer, "peer"),
+    ]
+    for endpoint, role in (("primary", "primary"), ("peer", "peer")):
+        candidate = getattr(pair, endpoint, None)
+        if candidate is not None and candidate is not session and candidate is not peer:
+            candidates.append((candidate, role))
+    for candidate, role in candidates:
+        if _supports_bit_accurate_network(candidate) or _is_real_pyboy_instance(
+            candidate
+        ):
+            raise McpHarnessError(
+                "unsupported_runtime",
+                f"{role} PyBoy requires the pinned bit-accurate serial "
+                "runtime; semantic link pairs are only available for "
+                "explicit non-native test doubles",
+            )
 
 
 def _attach_network_backend(
@@ -1909,32 +2161,12 @@ def _accept_remote(
                         transport.peer_rom_version,
                         timeout_s=timeout_s,
                     )
-                else:
-                    _require_native_network_contract(
-                        session,
-                        supported=False,
-                        role="primary",
+                else:  # pragma: no cover - dispatcher admission is fail-closed
+                    raise McpHarnessError(
+                        "unsupported_runtime",
+                        "primary PyBoy lost the pinned serial contract while "
+                        "accepting a remote connection",
                     )
-                    transport = TcpSerialLink(accepted_conn, rom_version)
-                    accepted_conn = None
-                    _track_unpublished_remote_resource(
-                        link, generation, transport=transport
-                    )
-                    _wait_for_remote_hello(transport, cancel, timeout_s)
-                    peer_version = transport.peer_rom_version
-                    if (
-                        expected_peer_rom_version is not None
-                        and peer_version != expected_peer_rom_version
-                    ):
-                        raise NetworkBackendError(
-                            f"peer ROM version {peer_version!r} does not match "
-                            f"expected {expected_peer_rom_version!r}"
-                    )
-                    endpoint = RemoteLinkEndpoint.as_listener(session, transport)
-                    _track_unpublished_remote_resource(
-                        link, generation, endpoint=endpoint
-                    )
-                    endpoint.install()
                 with link.state():
                     if (
                         cancel.is_set()
@@ -2270,18 +2502,44 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
     can retry it and reconnect cannot overlap a live worker or socket.
     """
     current_thread_id = threading.get_ident()
+    cancel_local_setup = False
+    retry_local_cleanup = False
+    pending_local: PyBoyLinkSession | None = None
+    local_peer: Session | None = None
     with link.state():
-        if link._disconnecting:
+        if link._local_pair_in_progress:
+            if not link._local_setup_done.is_set():
+                # Local setup is owned by the pairing worker and may be
+                # holding both emulator locks. Advance its generation and
+                # return so the worker performs exactly-once rollback; never
+                # dismantle a completed local pair from this path.
+                link._local_generation += 1
+                cancel_local_setup = True
+            elif link._pending_local_link_session is not None:
+                # A worker which already returned after a failed rollback
+                # leaves its provider published for an explicit retry.
+                retry_local_cleanup = True
+                pending_local = link._pending_local_link_session
+            local_peer = link.peer_session
+        elif link._pending_local_link_session is not None:
+            retry_local_cleanup = True
+            pending_local = link._pending_local_link_session
+            local_peer = link.peer_session
+        if cancel_local_setup or retry_local_cleanup:
+            pass
+        elif link._disconnecting:
             done = link._disconnect_done
             owned_by_current_thread = link._disconnect_owner == current_thread_id
         else:
             done = None
             owned_by_current_thread = False
         listener_thread = link._listener_thread
-        if listener_thread is not None and not listener_thread.is_alive():
+        if isinstance(listener_thread, threading.Thread) and not listener_thread.is_alive():
             link._listener_thread = None
             listener_thread = None
-        if link._disconnecting:
+        if cancel_local_setup or retry_local_cleanup:
+            pass
+        elif link._disconnecting:
             # A second disconnect should not report success while the first
             # caller is still tearing down sockets and callbacks. A
             # re-entrant call from the owner must return to avoid deadlock.
@@ -2296,6 +2554,7 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             or link._pending_remote_endpoint is not None
             or link._pending_network_session is not None
             or link._pending_listener_socket is not None
+            or link._pending_local_link_session is not None
             or link._connect_in_progress
             or link._listener_start_in_progress
             or listener_thread is not None
@@ -2342,6 +2601,60 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
             link.remote_mode = "disconnecting"
             link.remote_role = None
             link.remote_bind_port = None
+
+    if cancel_local_setup:
+        # Signal cancellation before attempting hook cleanup.  The pairing
+        # worker may currently hold both owner locks; this call is bounded by
+        # the normal cleanup contract and does not dismantle a published
+        # local pair because setup has not completed yet.
+        with link.state():
+            setup_deadline = link._local_setup_deadline
+        hook_timeout = (
+            _remaining(setup_deadline)
+            if setup_deadline is not None
+            else _DEFAULT_CLEANUP_TIMEOUT_S
+        )
+        _deactivate_link_hooks(session, local_peer, timeout_s=hook_timeout)
+        return
+
+    if retry_local_cleanup:
+        assert pending_local is not None
+        cleanup_deadline = time.monotonic() + _DEFAULT_CLEANUP_TIMEOUT_S
+        cleanup_errors: list[Exception] = []
+        try:
+            _detach_local_link_session(
+                link,
+                session,
+                pending_local,
+                timeout_s=_remaining(cleanup_deadline),
+            )
+        except Exception as exc:  # noqa: BLE001
+            cleanup_errors.append(exc)
+        try:
+            cleanup_errors.extend(
+                _deactivate_link_hooks(
+                    session,
+                    local_peer,
+                    timeout_s=_remaining(cleanup_deadline),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            cleanup_errors.append(exc)
+        with link.state():
+            if cleanup_errors:
+                link._pending_local_link_session = pending_local
+            else:
+                if link._pending_local_link_session is pending_local:
+                    link._pending_local_link_session = None
+            link._local_pair_in_progress = False
+            link._local_setup_deadline = None
+            link._local_setup_done.set()
+        if cleanup_errors:
+            details = "; ".join(
+                f"{type(exc).__name__}: {exc}" for exc in cleanup_errors
+            )
+            raise McpHarnessError("link_teardown_failed", details)
+        return
 
     if done is not None:
         if not owned_by_current_thread:
@@ -2952,6 +3265,8 @@ def build_server(
         link.remote_mode != "idle"
         or link.pair is not None
         or link.local_link_session is not None
+        or link._pending_local_link_session is not None
+        or link._local_pair_in_progress
         or link.remote_link is not None
         or link.remote_endpoint is not None
         or link.network_session is not None

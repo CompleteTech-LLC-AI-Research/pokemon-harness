@@ -81,6 +81,7 @@ def find_pret_root() -> Path:
     """Locate the pret/pokered disassembly to read .bst files from."""
     candidates = [
         os.environ.get("POKERED_PRET_ROOT"),
+        Path(__file__).resolve().parents[1] / "vendor" / "pokered",
     ]
     for c in candidates:
         if c and Path(c).is_dir():

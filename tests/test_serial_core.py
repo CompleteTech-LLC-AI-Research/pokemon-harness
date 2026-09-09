@@ -11,6 +11,7 @@ locally-bridged cores.
 from __future__ import annotations
 
 import pytest
+from pyboy.core.serial import SerialBackendError
 
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
@@ -25,6 +26,81 @@ from pokered_harness.link.serial_core import (
 # ---------------------------------------------------------------------------
 # Defaults & arming behavior
 # ---------------------------------------------------------------------------
+
+
+def test_latch_backend_error_preserves_first_cause_and_rejects_nonexception():
+    serial = SerialCore()
+    with pytest.raises(TypeError, match="BaseException"):
+        serial.latch_backend_error("not an exception")
+    assert serial.backend_failed is False
+
+    first = ValueError("first owner failure")
+    serial.latch_backend_error(first)
+
+    assert serial.backend_failed is True
+    with pytest.raises(SerialBackendError) as raised:
+        serial.check_error()
+    assert raised.value.__cause__ is first
+
+    second = RuntimeError("later transport failure")
+    serial.latch_backend_error(second)
+    with pytest.raises(SerialBackendError) as repeated:
+        serial.check_error()
+    assert repeated.value.__cause__ is first
+
+
+def test_latched_backend_error_fail_closes_serial_operations_and_allows_release():
+    serial = SerialCore()
+    serial.set_SB(0xA5)
+    serial.set_SC(0x81)
+    before = (
+        serial.SB,
+        serial.SC,
+        serial._shift_register,
+        serial._bits_remaining,
+        serial.transfer_enabled,
+        serial.clock,
+        serial.last_cycles,
+        serial.clock_target,
+    )
+    token = serial.claim_owner_pump(lambda _event: None, poll=True)
+    serial.latch_backend_error(ValueError("owner failure"))
+
+    assert serial.tick(serial.clock_target + CYCLES_PER_EDGE_DMG) is False
+    assert (
+        serial.SB,
+        serial.SC,
+        serial._shift_register,
+        serial._bits_remaining,
+        serial.transfer_enabled,
+        serial.clock,
+        serial.last_cycles,
+        serial.clock_target,
+    ) == before
+    serial.set_SB(0)
+    serial.set_SC(0)
+    assert (
+        serial.SB,
+        serial.SC,
+        serial._shift_register,
+        serial._bits_remaining,
+        serial.transfer_enabled,
+        serial.clock,
+        serial.last_cycles,
+        serial.clock_target,
+    ) == before
+    for operation in (
+        lambda: serial.apply_external_edge(1),
+        lambda: serial.save_state(None),
+        lambda: serial.load_state(None, SerialCore.STATE_VERSION),
+        serial.check_error,
+    ):
+        with pytest.raises(SerialBackendError):
+            operation()
+
+    serial.release_owner_pump(token)
+    assert serial.owner_poll_enabled is False
+    assert serial.backend_failed is True
 
 
 def test_defaults_match_legacy_pyboy_serial():

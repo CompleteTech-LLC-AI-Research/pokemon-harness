@@ -1,6 +1,6 @@
 """Adversarial instruction-owner tests, without ROM assets."""
-from types import SimpleNamespace
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -87,7 +87,7 @@ def test_persistent_origins_and_both_public_methods():
 
 @pytest.mark.parametrize("change", ["clock", "serial", "motherboard"])
 def test_boundary_identity_and_external_advance_fault_requires_detach(change):
-    link, a, b, _ = pair()
+    link, a, _b, _ = pair()
     if change == "clock":
         a.mb.serial.clock += 4
     elif change == "serial":
@@ -165,7 +165,7 @@ def test_completed_frame_peer_rearm_is_line_idle_without_next_frame_tick():
 
 
 def test_completed_frame_peer_rearm_without_scheduler_owner_still_faults():
-    link, a, b, _ = pair(instructions=1)
+    link, a, _b, _ = pair(instructions=1)
     progress = link._make_owned_peer_progressor(a)
     a.mb.lcd.frame_done = True
     assert progress() is False
@@ -211,12 +211,12 @@ def test_rearm_progress_accounted_and_both_flags_reread():
 
 
 def test_nonadvancing_clock_fault_and_instruction_budget():
-    link, a, b, _ = pair(cycles=0, instructions=1000)
+    link, _a, _b, _ = pair(cycles=0, instructions=1000)
     link.MAX_STALLED_INSTRUCTIONS = 3
     with pytest.raises(RuntimeError, match="no clock progress"):
         link.step()
     link.detach_all()
-    link, a, b, _ = pair(instructions=1000)
+    link, _a, _b, _ = pair(instructions=1000)
     link.MAX_FRAME_INSTRUCTIONS = 3
     with pytest.raises(RuntimeError, match="instruction budget"):
         link.step()
@@ -250,7 +250,7 @@ def test_peer_exception_is_deferred_until_native_tick_returns():
 
 
 def test_callback_outside_owner_faults_without_advancing_peer():
-    link, a, b, trace = pair()
+    link, _a, b, trace = pair()
     assert link._make_owned_peer_progressor(b)() is False
     assert trace == []
     with pytest.raises(RuntimeError, match="unowned"):
@@ -258,7 +258,7 @@ def test_callback_outside_owner_faults_without_advancing_peer():
 
 
 def test_backwards_clock_faults_before_next_instruction():
-    link, a, b, trace = pair(origin=100)
+    link, a, _b, trace = pair(origin=100)
     a.on_instruction = lambda: setattr(a.mb.serial, "clock", 99)
     with pytest.raises(RuntimeError, match="backwards"):
         link.step()
@@ -302,7 +302,7 @@ def test_public_boundary_validation_is_inside_operation_lock():
             if second:
                 attempted.set()
             link.step()
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - capture thread failure
             errors.append(error)
     t1 = threading.Thread(target=run)
     t2 = threading.Thread(target=run, args=(True,))
@@ -324,7 +324,7 @@ def test_public_boundary_validation_is_inside_operation_lock():
 
 
 def test_recursive_public_step_is_rejected_without_deadlock():
-    link, a, b, _ = pair()
+    link, a, _b, _ = pair()
     a.on_instruction = lambda: link.step()
     with pytest.raises(RuntimeError, match="already executing"):
         link.step()

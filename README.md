@@ -14,9 +14,10 @@ symbol files, save states, or other ROM-derived artifacts.
 The 2026-09-09 reconciliation candidate has not passed its full gate. Its
 pre-packaging-update source gate timed out with 3,097 unit passes, 25 failures,
 and one skip; five timing repetitions recorded 1,236 passes and 59 failures.
-After restoring Python 3.11 support and correcting a Cython local type,
-155 focused packaging/serial tests passed on Python 3.11. These checks do not
-qualify the remaining unit tests or real-ROM gameplay. See the
+After restoring Python 3.11 support, a later pre-commit source unit run
+completed with 4,416 passes and five failures. A full native extension build
+and focused source/native lifecycle and CPU checks also passed. These scoped
+checks do not qualify the remaining failures or real-ROM gameplay. See the
 [candidate evidence record](docs/PRODUCTION_RUNBOOK.md#reconciliation-candidate-2026-09-09).
 
 At `766eaa6aafecad039d5b10934ec36f8ec933645e`, the hosted

@@ -50,6 +50,7 @@ cdef class Serial:
     cdef readonly bint owner_poll_enabled
     cdef readonly uint64_t _boundary_seq
     cdef readonly uint64_t transfer_generation
+    cpdef void latch_backend_error(self, object) except *
     cpdef void set_owner_pump(self, object, bint poll=*) except *
     cpdef object claim_owner_pump(self, object, bint poll=*)
     cpdef void release_owner_pump(self, object) except *

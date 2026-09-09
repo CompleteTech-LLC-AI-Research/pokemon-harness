@@ -105,15 +105,17 @@ def test_repo_versions_selects_hash_by_rom_path():
     assert cfg.sha1_for_path("rom/unknown/custom.gb") is None
 
 
-def test_repo_versions_selects_symbol_hash_by_symbol_path():
+@pytest.mark.parametrize("lookup_name", ["symbol_sha1_for_path", "sha1_for_symbol_path"])
+def test_repo_versions_selects_symbol_hash_by_symbol_path(lookup_name):
     cfg = load_versions("VERSIONS.md")
-    assert cfg.symbol_sha1_for_path("rom/red/pokemon-red.sym") == (
+    lookup = getattr(cfg, lookup_name)
+    assert lookup("rom/red/pokemon-red.sym") == (
         "03783c86a42588bd77f73bd7814cf8d70e590118"
     )
-    assert cfg.symbol_sha1_for_path(
+    assert lookup(
         r"C:\isolated\worktree\rom\yellow\pokemon-yellow.sym"
     ) == "7c4205723943e7722230dcf014e5e8a2012474aa"
-    assert cfg.symbol_sha1_for_path("rom/unknown/custom.sym") is None
+    assert lookup("rom/unknown/custom.sym") is None
 
 
 # -- per-session env vars --------------------------------------------------

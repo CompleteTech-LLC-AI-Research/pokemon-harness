@@ -97,6 +97,32 @@ def test_external_service_does_not_hold_dispatch_while_waiting_for_serial_gate()
         b.stop()
 
 
+def test_deferred_edge_queue_refill_fails_closed_without_blocking(monkeypatch):
+    """A malicious refill cannot block a deferred owner's bounded requeue."""
+    a, b = NetworkBackend.pair()
+    b._dispatch_to_owner = True
+    b._local_core = _CompletingSlaveCore()
+    b._edge_queue.put_nowait(network_module._InboundEdge(1))
+    b._edge_pending = 1
+
+    def refill_before_deferring(_request):
+        for _ in range(b._edge_queue.maxsize):
+            b._edge_queue.put_nowait(network_module._InboundEdge(0))
+        return False
+
+    monkeypatch.setattr(b, "_apply_owner_edge_if_ready", refill_before_deferring)
+    try:
+        with pytest.raises(NetworkBackendError, match="queue is full while deferring"):
+            b.service_pending_edges(max_edges=1)
+        assert not b.connected
+        assert b._edge_pending == 0
+        assert b._stats["owner_edge_applied"] == 0
+        assert b._completed_edge_queue.empty() or b._completed_edge_queue.get_nowait() is None
+    finally:
+        a.stop()
+        b.stop()
+
+
 def test_frame_barrier_round_trip_keeps_turns_and_acknowledgements_bounded():
     """The negotiated owner-frame control path completes without edge traffic."""
     leader, follower = NetworkBackend.pair()
@@ -426,6 +452,136 @@ def test_frame_send_deadline_does_not_block_on_silent_peer():
     finally:
         backend.stop()
         b_sock.close()
+
+
+@pytest.mark.parametrize("public_operation", [False, True], ids=["frame-helper", "edge"])
+def test_zero_byte_send_fails_without_retry_or_poll(monkeypatch, public_operation):
+    a, b = NetworkBackend.pair()
+    calls = []
+
+    class ClosedWriter:
+        def send(self, data):
+            calls.append(bytes(data))
+            return 0
+
+        def __getattr__(self, name):
+            return getattr(real_socket, name)
+
+    def forbidden_poll(*_args):
+        pytest.fail("zero-byte send must not poll a closed stream")
+
+    real_socket = a._sock
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(a, "_sock", ClosedWriter())
+            patch.setattr(network_module.select, "select", forbidden_poll)
+            with pytest.raises(NetworkBackendError, match="socket closed while sending"):
+                if public_operation:
+                    a.on_edge(our_bit=1, our_role=1)
+                else:
+                    a._send_frame(b"test", timeout=1.0, operation="TEST")
+            assert len(calls) == 1
+            if public_operation:
+                assert not a.connected
+                assert a._closed_event.is_set()
+    finally:
+        a.stop()
+        b.stop()
+
+
+@pytest.mark.parametrize("interrupt_poll", [False, True])
+def test_would_block_send_polls_then_resumes_partial_write(monkeypatch, interrupt_poll):
+    a, b = NetworkBackend.pair()
+    calls = []
+    polls = []
+
+    class BackpressuredWriter:
+        def send(self, data):
+            calls.append(bytes(data))
+            if len(calls) == 1:
+                raise BlockingIOError()
+            return 1 if len(calls) == 2 else len(data)
+
+    def ready_to_write(readable, writable, exceptional, timeout):
+        polls.append(timeout)
+        if interrupt_poll and len(polls) == 1:
+            raise InterruptedError()
+        return [], writable, []
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(a, "_sock", BackpressuredWriter())
+            patch.setattr(network_module.select, "select", ready_to_write)
+            a._send_frame(b"abc", timeout=1.0, operation="TEST")
+            assert calls == [b"abc", b"abc", b"bc"]
+            assert len(polls) == 1
+            assert 0 < polls[0] <= network_module._SEND_POLL_SECONDS
+            assert a.connected
+    finally:
+        a.stop()
+        b.stop()
+
+
+def test_interrupted_write_poll_does_not_reset_send_deadline(monkeypatch):
+    a, b = NetworkBackend.pair()
+    now = [100.0]
+    sends = []
+
+    class BackpressuredWriter:
+        def send(self, data):
+            sends.append(bytes(data))
+            raise BlockingIOError()
+
+    def interrupted_poll(*_args):
+        now[0] += 1.0
+        raise InterruptedError()
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(a, "_sock", BackpressuredWriter())
+            patch.setattr(network_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+            patch.setattr(network_module.select, "select", interrupted_poll)
+            with pytest.raises(NetworkBackendError, match="send timed out after 1s"):
+                a._send_frame(b"test", timeout=1.0, operation="TEST")
+            assert sends == [b"test"]
+    finally:
+        a.stop()
+        b.stop()
+
+
+@pytest.mark.parametrize("expire_deadline", [False, True], ids=["retry", "deadline"])
+def test_interrupted_read_poll_preserves_partial_frame_and_deadline(monkeypatch, expire_deadline):
+    a, b = NetworkBackend.pair()
+    now = [100.0]
+    calls = []
+    original_select = network_module.select.select
+    b._sock.send(b"a")
+
+    def interrupted_poll(readable, writable, exceptional, timeout):
+        calls.append(timeout)
+        if len(calls) == 2:
+            if expire_deadline:
+                now[0] += 1.0
+            else:
+                b._sock.send(b"bc")
+            raise InterruptedError()
+        return original_select(readable, writable, exceptional, timeout)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(network_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+            patch.setattr(network_module, "_FRAME_READ_TIMEOUT_SECONDS", 1.0)
+            patch.setattr(network_module.select, "select", interrupted_poll)
+            if expire_deadline:
+                with pytest.raises(NetworkBackendError, match="peer frame timed out"):
+                    a._recv_exactly(3)
+                assert len(calls) == 2
+            else:
+                assert a._recv_exactly(3) == b"abc"
+                assert len(calls) == 3
+    finally:
+        a.stop()
+        b.stop()
 
 
 def test_stop_wakes_blocked_edge_waiter():

@@ -128,6 +128,21 @@ class _InboundEdge:
     error: BaseException | None = None
 
 
+class _InboundEdgeQueue(queue.Queue):
+    """Retry a deferred owner request before later wire requests.
+
+    ``Queue`` calls ``_put`` while holding its mutex, including capacity
+    checking and reader notification. The owner still dequeues before native
+    application, so a reentrant service cannot apply the same edge twice.
+    """
+
+    def _put(self, item) -> None:
+        if isinstance(item, _InboundEdge) and item.deferred:
+            self.queue.appendleft(item)
+        else:
+            super()._put(item)
+
+
 def _validate_id(value: int, name: str) -> int:
     """Validate a one-byte protocol identifier without bool coercion."""
     if not isinstance(value, int) or isinstance(value, bool):
@@ -380,7 +395,7 @@ class NetworkBackend:
         # owner-dispatch mode this queue contains requests which only the
         # emulator owner may execute; the network threads never touch the
         # native serial object.
-        self._edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(maxsize=256)
+        self._edge_queue: queue.Queue[_InboundEdge | None] = _InboundEdgeQueue(maxsize=256)
         self._completed_edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(maxsize=256)
         # Counts EDGE_REQ frames from enqueue until their response has been
         # written.  A phase barrier can therefore wait for the wire work
@@ -1997,14 +2012,25 @@ class NetworkBackend:
                     break
                 try:
                     ready = self._apply_owner_edge_if_ready(request)
-                except Exception as exc:  # noqa: BLE001 - fail the link closed
+                except BaseException as exc:
                     request.error = exc
                     self._stats["owner_edge_errors"] = int(self._stats["owner_edge_errors"]) + 1
-                    self._mark_closed(
-                        NetworkBackendError(f"owner failed to apply incoming EDGE_REQ: {exc}")
+                    # The eighth edge may already have committed native SB/SC
+                    # before its IRQ callback fails. Preserve that prefix,
+                    # but latch the failure so later native ticks/MMIO/state
+                    # calls cannot silently continue with a lost interrupt.
+                    try:
+                        latch_error = getattr(self._local_core, "latch_backend_error", None)
+                        if callable(latch_error):
+                            latch_error(exc)
+                    except BaseException as latch_error:  # noqa: BLE001
+                        exc.add_note(f"serial failure latching also failed: {latch_error!r}")
+                    error = NetworkBackendError(
+                        f"owner failed to apply incoming EDGE_REQ: {exc}"
                     )
+                    self._mark_closed(error)
                     self._decrement_edge_pending()
-                    break
+                    raise error from exc
                 if self._closed:
                     # A deadline-aware stop may publish terminal state while
                     # this owner operation was inside native code. Do not
@@ -2015,11 +2041,20 @@ class NetworkBackend:
                 if not ready:
                     # There is at most one in-flight master edge per peer, but
                     # preserving FIFO here also makes malformed/busy callers
-                    # deterministic. The queue has a free slot immediately after
-                    # this get, so this put cannot block.
+                    # deterministic. The queue restores a deferred request at
+                    # its head. A malformed peer may refill the freed slot
+                    # meanwhile; fail closed instead of blocking or losing it.
                     request.deferred = True
                     self._stats["owner_edge_deferred"] = int(self._stats["owner_edge_deferred"]) + 1
-                    self._edge_queue.put_nowait(request)
+                    try:
+                        self._edge_queue.put_nowait(request)
+                    except queue.Full as exc:
+                        error = NetworkBackendError(
+                            "incoming EDGE_REQ queue is full while deferring owner request"
+                        )
+                        self._mark_closed(error)
+                        self._decrement_edge_pending()
+                        raise error from exc
                     break
                 self._stats["owner_edge_applied"] = int(self._stats["owner_edge_applied"]) + 1
                 try:
@@ -2555,6 +2590,8 @@ class NetworkBackend:
                 readable, _writable, exceptional = select.select(
                     [self._sock], [], [self._sock], wait_timeout
                 )
+            except InterruptedError:
+                continue
             except (OSError, ValueError) as exc:
                 if self._closed_event.is_set():
                     raise NetworkBackendError("backend closed") from exc
@@ -2644,12 +2681,16 @@ class NetworkBackend:
             try:
                 sent = self._sock.send(view[offset:])
             except BlockingIOError:
-                sent = 0
+                pass
             except InterruptedError:
                 continue
             except OSError as exc:
                 raise NetworkBackendError(f"failed to send {operation}: {exc}") from exc
-            if sent > 0:
+            else:
+                # A successful zero-byte write is terminal, unlike EAGAIN:
+                # polling cannot make progress on a closed stream.
+                if sent == 0:
+                    raise NetworkBackendError(f"socket closed while sending {operation}")
                 offset += sent
                 continue
             try:
@@ -2659,6 +2700,8 @@ class NetworkBackend:
                     [self._sock],
                     min(_SEND_POLL_SECONDS, remaining),
                 )
+            except InterruptedError:
+                continue
             except (OSError, ValueError) as exc:
                 if self._closed or self._closed_event.is_set():
                     raise NetworkBackendError(f"{operation}: backend closed") from exc

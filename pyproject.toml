@@ -78,6 +78,8 @@ markers = [
     "acceptance: real-ROM trade or battle acceptance",
     "trade: real-ROM trade coverage",
     "battle: real-ROM battle coverage",
+    "battle_acceptance: strict real-ROM battle-turn acceptance",
+    "battle_diagnostic: remote battle diagnostic with controlled menu setup",
     "timing_sensitive: repeatable scheduling-sensitive regression",
 ]
 

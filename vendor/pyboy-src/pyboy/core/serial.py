@@ -691,6 +691,21 @@ class Serial:
         if self.backend_failed:
             raise SerialBackendError("serial backend failed; recreate session before resuming") from self._backend_error
 
+    def latch_backend_error(self, error):
+        """Quarantine the core with the first backend/owner failure.
+
+        Native owner paths cannot assign the private ``_backend_error`` field
+        from Python, while the public ``backend_failed`` flag is read-only.
+        Keep this small bridge exception-capable and first-failure-only so a
+        later teardown or transport error cannot hide the original cause.
+        """
+        if not isinstance(error, BaseException):
+            raise TypeError("backend error must be a BaseException")
+        with self._pump_binding_lock:
+            if not self.backend_failed:
+                self._backend_error = error
+                self.backend_failed = True
+
     # --- register writes ------------------------------------------------
 
     def set_SB(self, value):

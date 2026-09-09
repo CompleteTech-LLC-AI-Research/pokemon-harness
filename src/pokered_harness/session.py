@@ -133,6 +133,24 @@ class _HookState:
         self.active = True
 
 
+class _StopAttempt:
+    """Immutable identity for one asynchronous ``PyBoy.stop`` attempt.
+
+    The lifecycle fields on :class:`Session` are reused by a retry.  Keeping
+    the completion event and result on this per-attempt record means an older
+    caller cannot accidentally wait on, or read the result from, a later
+    retry that replaced the session's current attempt.
+    """
+
+    __slots__ = ("done", "error", "owner_id", "stopped")
+
+    def __init__(self, owner_id: int) -> None:
+        self.owner_id = owner_id
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+        self.stopped = False
+
+
 class Session:
     """Owns one PyBoy instance, a loaded symbol table, and an event bus.
 
@@ -167,6 +185,7 @@ class Session:
         self._close_owner: int | None = None
         self._stop_thread: threading.Thread | None = None
         self._stop_error: BaseException | None = None
+        self._stop_attempt: _StopAttempt | None = None
         self._stopped = False
         self._closed = False
         self._event_hooks: list[HookRegistration] = []
@@ -373,7 +392,13 @@ class Session:
         completion, failure, or another bounded timeout; it never starts a
         second concurrent stop.
         """
-        timeout_s = min(_validate_timeout(timeout_s, "timeout_s"), threading.TIMEOUT_MAX)
+        # ``close`` is a terminal lifecycle boundary.  A zero deadline is
+        # not useful here (there is always at least a lock hand-off), and
+        # accepting strings or arbitrarily large integers makes the public
+        # contract depend on the platform's float conversion.  Keep the
+        # more permissive non-negative validator for ordinary owner scopes,
+        # but make shutdown's deadline strictly positive and bounded.
+        timeout_s = _validate_close_timeout(timeout_s)
         stop_deadline = time.monotonic() + timeout_s
         current_thread_id = threading.get_ident()
         endpoint = self._timed_endpoint
@@ -384,67 +409,152 @@ class Session:
             self.unbind_timed_execution(
                 endpoint, timeout_s=max(0.0, stop_deadline - time.monotonic())
             )
+        attempt: _StopAttempt | None = None
         with self._lifecycle_lock:
             if self._stopped:
                 return
-            if self._stop_thread is not None or self._close_owner is not None:
-                close_done = self._close_done
+            current_attempt = self._stop_attempt
+            if current_attempt is not None and current_attempt.done.is_set():
+                # A completed failed attempt is retryable.  Drop only the
+                # session's pointer; callers already waiting on the old
+                # attempt retain its immutable event/result object.
+                self._stop_attempt = None
+                self._stop_error = None
+                current_attempt = None
+            if current_attempt is not None:
+                attempt = current_attempt
+                close_done = attempt.done
+                # An attempt's owner is the caller that launched the worker,
+                # not a lock lease.  Even that same caller must wait when a
+                # previous close timed out while ``stop`` remained active;
+                # only the worker itself is handled by the recursive guard
+                # below.
+                owned_by_current_thread = False
+            elif self._close_owner is not None:
+                # The first closer is still in the bounded lock phase.  Its
+                # attempt is published before it waits for the emulator lock
+                # so observers retain this identity if a retry replaces the
+                # session's current attempt later.
+                attempt = _StopAttempt(self._close_owner)
+                self._stop_attempt = attempt
+                close_done = attempt.done
                 owned_by_current_thread = self._close_owner == current_thread_id
             else:
+                # Publish the per-attempt identity before claiming the
+                # lifecycle boundary.  A concurrent close can then wait on
+                # this exact result even while the owner is still acquiring
+                # the emulator lock.
+                attempt = _StopAttempt(current_thread_id)
                 self._closed = True
                 self._owner.closed = True
                 self._close_owner = current_thread_id
                 self._close_done.clear()
                 self._stop_error = None
+                self._stop_attempt = attempt
                 for state, _bank, _addr, _symbol_name in self._serial_hooks:
                     state.active = False
                 close_done = None
                 owned_by_current_thread = True
+
+        # ``PyBoy.stop`` runs in a daemon worker so a broken runtime cannot
+        # pin the request thread.  If that worker recursively calls
+        # ``Session.close`` (some faulted native runtimes do), waiting on its
+        # own completion event would deadlock until the outer deadline.  Fail
+        # the recursive cleanup immediately; the outer worker publishes this
+        # typed failure and a later close can retry.
+        if (
+            close_done is not None
+            and self._stop_thread is threading.current_thread()
+        ):
+            raise SessionCloseTimeout(
+                "recursive emulator shutdown cannot wait for its own stop worker"
+            )
 
         # A raw provider callback or a canonical multi-session scope may call
         # close re-entrantly.  Publishing ``closed`` above is intentional so
         # callbacks fail closed, but stopping must wait until the outer owner
         # scope exits; otherwise PyBoy.stop could run halfway through a tick.
         if getattr(self._execution, "depth", 0):
+            error = SessionCloseTimeout(
+                "cleanup deferred until the current emulator operation exits"
+            )
             with self._lifecycle_lock:
                 if (
                     self._close_owner == current_thread_id
                     and self._stop_thread is None
                 ):
+                    self._stop_error = error
+                    if attempt is not None and not attempt.done.is_set():
+                        attempt.error = error
+                        attempt.stopped = False
+                        attempt.done.set()
                     self._close_owner = None
                     self._close_done.set()
-            raise SessionCloseTimeout(
-                "cleanup deferred until the current emulator operation exits"
-            )
+            raise error
         try:
             self._owner.assert_lock_order()
         except EmulatorOwnershipError as exc:
+            error = SessionCloseTimeout(
+                "cleanup deferred until other emulator ownership scopes exit"
+            )
             with self._lifecycle_lock:
                 if (
                     self._close_owner == current_thread_id
                     and self._stop_thread is None
                 ):
+                    self._stop_error = error
+                    if attempt is not None and not attempt.done.is_set():
+                        attempt.error = error
+                        attempt.stopped = False
+                        attempt.done.set()
                     self._close_owner = None
                     self._close_done.set()
-            raise SessionCloseTimeout(
-                "cleanup deferred until other emulator ownership scopes exit"
-            ) from exc
+            raise error from exc
 
         if close_done is not None:
-            if not owned_by_current_thread and not close_done.wait(
-                timeout=max(0.0, stop_deadline - time.monotonic())
-            ):
-                raise SessionCloseTimeout(
-                    "another session close is still in progress before the "
-                    f"{timeout_s:g}s shutdown deadline (cleanup deadline)"
+            if not owned_by_current_thread:
+                # A concurrent closer observes the same canonical emulator
+                # lock as the stop worker.  The short probe keeps teardown
+                # ordering explicit (and lets instrumented locks observe the
+                # bounded hand-off) without ever running a second ``stop``.
+                remaining = max(0.0, stop_deadline - time.monotonic())
+                acquired = self._lock.acquire(
+                    timeout=min(remaining, 0.01)
                 )
+                if not acquired:
+                    # The stop worker may legitimately hold the lock for the
+                    # whole runtime-defined cleanup interval.  The immutable
+                    # attempt event below remains the authoritative wait;
+                    # this probe is diagnostic/ordering evidence only.
+                    pass
+                else:
+                    self._lock.release()
+                if not close_done.wait(
+                    timeout=max(0.0, stop_deadline - time.monotonic())
+                ):
+                    raise SessionCloseTimeout(
+                        "another session close is still in progress before the "
+                        f"{timeout_s:g}s shutdown deadline (cleanup deadline)"
+                    )
             with self._lifecycle_lock:
+                if attempt is None:
+                    attempt = self._stop_attempt
+                if attempt is not None:
+                    if not attempt.done.is_set():
+                        raise SessionCloseTimeout(
+                            "emulator shutdown is still in progress after the "
+                            f"{timeout_s:g}s shutdown deadline"
+                        )
+                    if attempt.stopped:
+                        return
+                    if attempt.error is not None:
+                        # Read the result from this caller's captured attempt,
+                        # never from the mutable session-wide retry fields.
+                        raise attempt.error
                 if self._stopped:
                     return
                 if self._stop_error is not None:
-                    raise SessionCloseError(
-                        f"PyBoy.stop failed: {self._stop_error}"
-                    ) from self._stop_error
+                    raise self._stop_error
                 if self._stop_thread is not None or self._close_owner is not None:
                     if self._close_done.is_set():
                         return
@@ -457,10 +567,13 @@ class Session:
                 # the session as successfully closed.
                 self._close_owner = current_thread_id
                 self._close_done.clear()
+                attempt = _StopAttempt(current_thread_id)
+                self._stop_attempt = attempt
                 close_done = None
                 owned_by_current_thread = True
 
         lock_acquired = False
+        close_failure: BaseException | None = None
         try:
             if not self._lock.acquire(
                 timeout=max(0.0, stop_deadline - time.monotonic())
@@ -501,6 +614,15 @@ class Session:
                     self._stop_error = error
                     if error is None:
                         self._stopped = True
+                    if attempt is not None:
+                        attempt.error = error
+                        attempt.stopped = error is None
+                        attempt.done.set()
+                    # The worker's result is now committed.  Keeping the
+                    # Thread object here made every later close look like an
+                    # in-flight shutdown and prevented a failed stop from
+                    # ever being retried.
+                    self._stop_thread = None
                     self._close_owner = None
                     self._close_done.set()
 
@@ -510,31 +632,72 @@ class Session:
                 daemon=True,
             )
             with self._lifecycle_lock:
+                if attempt is None:
+                    attempt = _StopAttempt(current_thread_id)
+                self._stop_attempt = attempt
                 self._stop_thread = worker
                 self._close_owner = None
-            worker.start()
-            if not self._close_done.wait(
+            try:
+                worker.start()
+            except BaseException as exc:
+                with self._lifecycle_lock:
+                    if self._stop_thread is worker:
+                        self._stop_thread = None
+                    if (
+                        self._stop_attempt is attempt
+                        and attempt is not None
+                        and not attempt.done.is_set()
+                    ):
+                        self._stop_error = exc
+                        attempt.error = exc
+                        attempt.stopped = False
+                        attempt.done.set()
+                    self._close_owner = None
+                    self._close_done.set()
+                raise
+            if not attempt.done.wait(
                 timeout=max(0.0, stop_deadline - time.monotonic())
             ):
                 raise SessionCloseTimeout(
                     "PyBoy.stop did not return before the "
                     f"{timeout_s:g}s shutdown deadline (cleanup deadline)"
                 )
+            # Keep the historical completion event observable for teardown
+            # instrumentation, while taking the actual result from the
+            # immutable attempt record.  A later retry may clear this shared
+            # event; that cannot change the result captured above.
+            self._close_done.wait(timeout=0)
             with self._lifecycle_lock:
+                if attempt.error is not None:
+                    raise attempt.error
+                if attempt.stopped:
+                    return
+                # This branch is reachable only for a pre-attempt lifecycle
+                # hand-off that was completed by another closer.
                 if self._stopped:
                     return
-                if self._stop_error is not None:
-                    raise SessionCloseError(
-                        f"PyBoy.stop failed: {self._stop_error}"
-                    ) from self._stop_error
                 raise SessionCloseTimeout(
                     "emulator shutdown did not complete before the "
                     f"{timeout_s:g}s shutdown deadline (cleanup deadline)"
                 )
+        except BaseException as exc:
+            close_failure = exc
+            raise
         finally:
             if lock_acquired:
                 self._lock.release()
             with self._lifecycle_lock:
+                if (
+                    close_failure is not None
+                    and attempt is not None
+                    and self._stop_thread is None
+                    and self._stop_attempt is attempt
+                    and not attempt.done.is_set()
+                ):
+                    self._stop_error = close_failure
+                    attempt.error = close_failure
+                    attempt.stopped = False
+                    attempt.done.set()
                 if self._close_owner == current_thread_id:
                     self._close_owner = None
                     # No stop worker was launched, so another close may retry
@@ -545,6 +708,17 @@ class Session:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def _stop_complete(self) -> bool:
+        """Compatibility view of the committed native stop state.
+
+        Older integrations inspect this private flag when deciding whether a
+        failed cleanup may be retried.  Keep it derived from the lifecycle
+        state so an in-flight or failed stop can never be mistaken for a
+        successful shutdown.
+        """
+        return self._stopped
 
     @contextmanager
     def locked(
@@ -1086,15 +1260,19 @@ class Session:
         _validate_positive_int(max_ticks, "max_ticks")
         _validate_positive_int(chunk, "chunk")
 
-        wanted = {event_names} if isinstance(event_names, str) else set(event_names)
-        if not wanted:
-            raise ValueError("event_names must be non-empty")
-
         self._ensure_open()
         self._check_timed_owner()
         with self._emulator_access():
             self._ensure_open()
             self._validate_link_operation("run_until_event")
+            # Consume an arbitrary iterable only after the optional backend
+            # ownership guard has admitted the operation.  Generators can
+            # have observable side effects, so validation order is part of
+            # the public boundary: numeric payload validation happens first,
+            # then owner admission, then event-name materialization.
+            wanted = {event_names} if isinstance(event_names, str) else set(event_names)
+            if not wanted:
+                raise ValueError("event_names must be non-empty")
             start_tick = self._tick
             deadline = start_tick + max_ticks
 
@@ -1188,6 +1366,29 @@ def _validate_timeout(value: float, name: str) -> float:
     if not math.isfinite(candidate) or candidate < 0:
         raise ValueError(f"{name} must be finite and non-negative")
     return candidate
+
+
+def _validate_close_timeout(value: float) -> float:
+    """Validate the strict positive deadline used by :meth:`Session.close`."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(  # noqa: TRY004 - preserve close() ValueError contract
+            "timeout_s must be finite and positive, at most threading.TIMEOUT_MAX"
+        )
+    try:
+        candidate = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "timeout_s must be finite and positive, at most threading.TIMEOUT_MAX"
+        ) from exc
+    if not math.isfinite(candidate) or candidate <= 0:
+        raise ValueError(
+            "timeout_s must be finite and positive, at most threading.TIMEOUT_MAX"
+        )
+    # ``threading.Lock.acquire`` rejects values above TIMEOUT_MAX even though
+    # a caller may legitimately use a very large finite deadline.  Preserve
+    # that public contract by clamping after validation; integer conversion
+    # overflow remains a rejected input above.
+    return min(candidate, threading.TIMEOUT_MAX)
 
 
 def _normalise_sha1(value: str, *, label: str = "ROM SHA-1") -> str:

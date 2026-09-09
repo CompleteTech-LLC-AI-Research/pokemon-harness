@@ -19,9 +19,10 @@ runtime evidence required by the capability being advertised.
 ## Current audit snapshot
 
 **Release decision: `PARTIAL`, not production-ready.** The 2026-09-09
-reconciliation candidate has a failed full source gate and a subsequent
-155-test focused Python 3.11 pass. No full-gate or gameplay qualification is
-inferred from that focused result. See the
+reconciliation candidate retains a failed source gate and a later completed
+pre-commit source unit run with 4,416 passes and five failures. A full native
+extension build and focused source/native checks passed, but no complete
+candidate gate or gameplay qualification is inferred from them. See the
 [candidate evidence record](PRODUCTION_RUNBOOK.md#reconciliation-candidate-2026-09-09).
 
 ### Historical baseline

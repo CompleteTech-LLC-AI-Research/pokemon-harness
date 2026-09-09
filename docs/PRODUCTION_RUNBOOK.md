@@ -59,8 +59,28 @@ The subsequent Python 3.11 dependency/CI update and explicit Cython serial
 local type passed 155 focused tests on CPython 3.11.15: 37 packaging,
 113 serial-core, and five serial-rearm tests. This includes translation and
 C compilation of the serial module, not a full native extension build.
+The later pre-commit reconciliation run used that fresh CPython 3.11 source
+environment and completed all selected unit tests: **4,416 passed, five
+failed, zero skipped**, with 158 non-unit tests deselected, in 242.86 seconds.
+Retain `reconcile-all-unit-precommit-20260909.xml` as a failed integration
+result. Its five failures concern timed-peer error classification, the local
+pair cleanup deadline, large finite close timeouts, and two native-wrapped
+cancellation cases. Subsequent corrections require a fresh complete run;
+individual passing replays do not replace this result.
+
+The reconciled serial runtime also built a complete isolated CPython 3.12
+Cython wheel (SHA-256
+`8591142c8c6ce8dc77c7f4e9817752635caac78ae1529634deee27fc49567cf1`).
+The compiled-module origin and bootstrap contract passed. Focused native
+network/serial checks passed 299 tests, and a later shared lifecycle/CPU suite
+passed 57 tests in each runtime. The CPU cases use authored synthetic programs
+to verify actual serial interrupts and HALT wake-up; they are not Pokémon
+gameplay evidence. The native build uses matching serial inputs from the
+working reconciliation candidate, not a final clean-commit qualification.
+
 The complete gate and strict source/native trade/battle matrix still require
-fresh passing evidence for the final clean candidate.
+fresh passing evidence for the final clean candidate. All prior failures
+above remain retained even after their individual causes are corrected.
 
 ### Historical working-tree validation (2026-09-06)
 

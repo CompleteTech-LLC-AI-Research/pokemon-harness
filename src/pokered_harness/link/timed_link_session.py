@@ -16,6 +16,15 @@ import time
 from collections import deque
 from contextlib import contextmanager
 
+try:
+    from pyboy.core.serial import SerialBackendError as _SerialBackendError
+except ImportError:
+    # Older external PyBoy forks do not expose the latched backend wrapper.
+    # The source/runtime contract remains usable without recognizing it.
+    _SERIAL_BACKEND_ERRORS: tuple[type[Exception], ...] = ()
+else:
+    _SERIAL_BACKEND_ERRORS = (_SerialBackendError,)
+
 from .emulated_time import CoordinatorClosed, EmulatedTimeCoordinator, EmulatedTimeError
 from .execution_adapter import ExecutionGovernorAdapter
 from .timed_wire import (
@@ -924,16 +933,32 @@ class TimedLinkSession:
         """Expose cancellation consistently across wire/governor close races.
 
         Do this before recording failure or cleanup: both close the channel.
-        Unrelated native/caller failures keep their original exception object.
+        The native serial core may quarantine a typed cancellation by wrapping
+        it in ``SerialBackendError``.  Recognize only that exact wrapper and a
+        typed cause; unrelated native/caller failures keep their original
+        exception object.  Never clear the core's terminal latch here.
         """
+        native_cause = None
+        if _SERIAL_BACKEND_ERRORS and isinstance(exc, _SERIAL_BACKEND_ERRORS):
+            candidate = exc.__cause__
+            if isinstance(
+                candidate, (Cancelled, ChannelClosed, DeadlineExceeded, CoordinatorClosed)
+            ):
+                native_cause = candidate
+        effective = native_cause if native_cause is not None else exc
         if self._cancel_view.is_set() and isinstance(
-            exc, (Cancelled, ChannelClosed, DeadlineExceeded, CoordinatorClosed)
+            effective, (Cancelled, ChannelClosed, DeadlineExceeded, CoordinatorClosed)
         ):
             first_wire_error = self.channel.error
             if isinstance(first_wire_error, ProtocolError):
                 return first_wire_error
-            if not isinstance(exc, Cancelled):
+            if isinstance(effective, Cancelled) and native_cause is None:
+                return effective
+            if isinstance(effective, Cancelled):
+                # Do not reuse the cause: raising it from its wrapper would
+                # create a cyclic exception chain (cause -> wrapper -> cause).
                 return Cancelled("timed session cancelled")
+            return Cancelled("timed session cancelled")
         return exc
 
     def _fail(self, exc):
