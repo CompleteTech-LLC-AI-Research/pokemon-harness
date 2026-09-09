@@ -18,6 +18,20 @@ from tests.test_session import _session
 
 pytestmark = pytest.mark.timing_sensitive
 
+# These tests use the tiny asset-free Endpoint model below: four serial
+# cycles per instruction and an LCD marker every four instructions.  Keep the
+# production scheduler's normal 140,448-unit physical quantum unchanged, but
+# use four fake instructions (4 serial cycles each, 2 physical units per cycle)
+# per logical frame. Ownership assertions then exercise the concurrency
+# contract with the original fixture workload, rather than 17,556 instructions.
+_FAKE_PHYSICAL_QUANTUM = 4 * 4 * 2
+
+
+def _fake_local_provider():
+    provider = PyBoyLinkSession.local()
+    provider.PHYSICAL_QUANTUM = _FAKE_PHYSICAL_QUANTUM
+    return provider
+
 
 def test_owner_held_dispatch_rejected_before_outer_operation_lock_wait():
     from pokered_harness.ownership import EmulatorOwnershipError
@@ -164,7 +178,7 @@ def _pair():
     symbols = _session()[0].symbols
     a, b = _endpoint("a"), _endpoint("b")
     primary, peer = Session(pyboy=a, symbols=symbols), Session(pyboy=b, symbols=symbols)
-    provider = PyBoyLinkSession.local()
+    provider = _fake_local_provider()
     provider.attach(a)
     provider.attach(b)
     return provider, primary, peer, a, b
@@ -382,7 +396,7 @@ def test_owner_registry_does_not_keep_session_or_emulator_alive():
 def test_provider_retains_owner_until_detached_without_a_registry_leak():
     from pokered_harness.ownership import owner_for
 
-    provider = PyBoyLinkSession.local()
+    provider = _fake_local_provider()
     emulator = _endpoint("a")
     provider.attach(emulator)
     owner_ref = weakref.ref(owner_for(emulator))
@@ -419,7 +433,7 @@ def test_concurrent_session_registration_accepts_exactly_one_wrapper():
 def test_session_registration_inside_raw_callback_is_rejected_without_state_change():
     from pokered_harness.ownership import EmulatorOwnershipError
 
-    provider = PyBoyLinkSession.local()
+    provider = _fake_local_provider()
     a, b = _endpoint("a"), _endpoint("b")
     symbols = _session()[0].symbols
     provider.attach(a)
@@ -441,7 +455,7 @@ def test_session_registration_inside_raw_callback_is_rejected_without_state_chan
 def test_session_created_after_raw_attachment_adopts_the_existing_owner():
     from pokered_harness.ownership import owner_for
 
-    provider = PyBoyLinkSession.local()
+    provider = _fake_local_provider()
     a, b = _endpoint("a"), _endpoint("b")
     provider.attach(a)
     provider.attach(b)
@@ -459,7 +473,7 @@ def test_competing_provider_attachment_has_one_owner_and_detach_releases_claim()
     from pokered_harness.ownership import EmulatorOwnershipError
 
     a = _endpoint("a")
-    providers = [PyBoyLinkSession.local(), PyBoyLinkSession.local()]
+    providers = [_fake_local_provider(), _fake_local_provider()]
     barrier = threading.Barrier(3)
 
     def attach(provider):
@@ -484,7 +498,7 @@ def test_competing_provider_attachment_has_one_owner_and_detach_releases_claim()
 def test_cross_provider_pair_attempts_fail_without_lock_cycles_or_claim_loss():
     from pokered_harness.ownership import EmulatorOwnershipError
 
-    first, second = PyBoyLinkSession.local(), PyBoyLinkSession.local()
+    first, second = _fake_local_provider(), _fake_local_provider()
     a, b = _endpoint("a"), _endpoint("b")
     first.attach(a)
     second.attach(b)
@@ -527,7 +541,7 @@ def test_rejected_provider_claim_does_not_write_backend_or_stop_transport():
     endpoint = _endpoint("a")
     core = Core()
     endpoint.mb.serial = core
-    first = PyBoyLinkSession.local()
+    first = _fake_local_provider()
     stopped = []
     network = SimpleNamespace(start_receiver=lambda **kwargs: None, stop=lambda: stopped.append(True))
     second = PyBoyLinkSession(network_backend=network)
