@@ -7,6 +7,10 @@ typed `Session` API, and can serve that session over MCP.
 This repository is a source tree. It does not distribute commercial ROMs,
 symbol files, save states, or other ROM-derived artifacts.
 
+Hosted checks run only for public repositories on standard free runners.
+Private copies run the same checks locally; the workflow remains available
+for reuse. See [CI policy and local commands](docs/CI_POLICY.md).
+
 ## Release status
 
 **Status: `PARTIAL` — `origin/master` is not production-ready.**

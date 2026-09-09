@@ -110,6 +110,7 @@ UNIT_MODULES = frozenset(
         "test_pyboy_link_session.py",
         "test_remote_endpoint.py",
         "test_runtime_packaging.py",
+        "test_local_ci_policy.py",
         "test_scheduler_lcd_phase.py",
         "test_scheduler_physical_time.py",
         "test_serial_coordinator.py",
