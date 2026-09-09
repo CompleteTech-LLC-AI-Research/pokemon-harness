@@ -8,21 +8,43 @@ end-to-end byte exchange without loading a real ROM.
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 
+from pokered_harness.link import pyboy_link_session as pyboy_link_session_module
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
+from pokered_harness.link.network_backend import NetworkBackend, NetworkBackendError
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
     NullBackend,
     SerialCore,
 )
 from pokered_harness.link.serial_coordinator import CoordinatedBackend
+from pokered_harness.ownership import owner_for
 
 
 class _FakeMB:
-    """Stand-in for ``pyboy.mb`` — just needs a swappable ``serial``."""
+    """Explicit four-cycle instruction clock; one fake frame is one byte period."""
 
-    def __init__(self, serial):
+    def __init__(self, serial, owner):
         self.serial = serial
+        self.owner = owner
+        self.cgb_mode = False
+        self.lcd = SimpleNamespace(frame_done=False, disable_renderer=True)
+        self.sound = SimpleNamespace(disable_sampling=True, clear_buffer=lambda: None)
+        self.breakpoint_singlestep = 0
+        self.breakpoint_singlestep_latch = 0
+
+    def tick(self):
+        self.owner._cycles += 4
+        self.serial.tick(self.owner._cycles)
+        self.lcd.frame_done = self.owner._cycles - self.owner._frame_start >= CYCLES_PER_BYTE_DMG
+        return True
+
+    def breakpoint_reinject(self):
+        pass
+
+    def breakpoint_reached(self):
+        return (-1, -1, -1)
 
 
 class _FakePyBoy:
@@ -35,8 +57,21 @@ class _FakePyBoy:
     """
 
     def __init__(self, serial=None):
-        self.mb = _FakeMB(serial or _LegacySerialStub())
-        self._cycles = 0
+        serial = serial or _LegacySerialStub()
+        self._cycles = serial.last_cycles
+        self._frame_start = self._cycles
+        self.mb = _FakeMB(serial, self)
+        self.events = []
+        self.frame_count = 0
+
+    def _handle_events(self, events):
+        self._frame_start = self._cycles
+
+    def _post_handle_events(self):
+        pass
+
+    def _handle_hooks(self):
+        pass
 
     def tick(self, count: int = 1, render: bool = False, sound: bool = False) -> bool:
         self._cycles += count * CYCLES_PER_BYTE_DMG
@@ -44,6 +79,14 @@ class _FakePyBoy:
         if hasattr(ser, "tick"):
             ser.tick(self._cycles)
         return True
+
+
+class _RecordingMemory:
+    def __init__(self):
+        self.writes = []
+
+    def __setitem__(self, address, value):
+        self.writes.append((address, value))
 
 
 class _LegacySerialStub:
@@ -63,6 +106,53 @@ class _LegacySerialStub:
 
     def set_SC(self, value):
         self.SC = value & 0xFF
+
+
+class _BackendSetterCountingCore:
+    """Valid owner-claim surface with observable backend assignment."""
+
+    backend_failed = False
+
+    def __init__(self):
+        self.last_cycles = 0
+        self.clock = 0
+        self._backend = NullBackend()
+        self.backend_writes = []
+        self._owner_callback = None
+        self._owner_token = None
+
+    @property
+    def backend(self):
+        return self._backend
+
+    @backend.setter
+    def backend(self, value):
+        self.backend_writes.append(value)
+        self._backend = value
+
+    def set_owner_pump(self, callback, poll=False):
+        if self._owner_token is not None:
+            raise RuntimeError("serial owner pump is exclusively claimed")
+        self._owner_callback = callback
+
+    def claim_owner_pump(self, callback, poll=False):
+        if self._owner_callback is not None or self._owner_token is not None:
+            raise RuntimeError("serial owner pump already installed or claimed")
+        self._owner_token = object()
+        self._owner_callback = callback
+        return self._owner_token
+
+    def release_owner_pump(self, token):
+        if token is not self._owner_token:
+            raise RuntimeError("invalid serial owner pump claim token")
+        self._owner_token = None
+        self._owner_callback = None
+
+
+class _ProviderSentinel:
+    """Weak-referenceable provider used to verify owner release."""
+
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +206,31 @@ def test_attach_same_pyboy_twice_raises():
     link.attach(a)
     with pytest.raises(RuntimeError, match="already attached"):
         link.attach(a)
+
+
+def test_attach_rolls_back_local_coordinator_failure(monkeypatch):
+    first_legacy = _LegacySerialStub()
+    second_legacy = _LegacySerialStub()
+    first = _FakePyBoy(serial=first_legacy)
+    second = _FakePyBoy(serial=second_legacy)
+    link = PyBoyLinkSession.local()
+    link.attach(first)
+
+    def fail_coordinator(*_args, **_kwargs):
+        raise RuntimeError("synthetic coordinator failure")
+
+    monkeypatch.setattr(
+        pyboy_link_session_module,
+        "LockstepCoordinator",
+        fail_coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic coordinator"):
+        link.attach(second)
+
+    assert link.attached == (first,)
+    assert second.mb.serial is second_legacy
+    assert link.coordinator is None
 
 
 def test_attach_overflow_raises():
@@ -172,6 +287,187 @@ def test_detach_all_restores_every_instance():
     assert a.mb.serial is legacy_a
     assert b.mb.serial is legacy_b
     assert link.attached == ()
+
+
+def test_network_step_advances_single_attached_pyboy():
+    backend, peer = NetworkBackend.pair()
+    pyboy = _FakePyBoy(serial=SerialCore())
+    link = PyBoyLinkSession(network_backend=backend)
+
+    try:
+        link.attach(pyboy)
+        link.step(frames=3)
+
+        assert pyboy._cycles == 3 * CYCLES_PER_BYTE_DMG
+    finally:
+        link.close()
+        peer.stop()
+
+
+@pytest.mark.parametrize("network_is_internal_clock", [False, True])
+def test_network_attach_detach_never_writes_role_status(network_is_internal_clock):
+    backend, peer = NetworkBackend.pair()
+    pyboy = _FakePyBoy(serial=SerialCore())
+    pyboy.memory = _RecordingMemory()
+    link = PyBoyLinkSession(
+        network_backend=backend,
+        network_is_internal_clock=network_is_internal_clock,
+    )
+
+    try:
+        link.attach(pyboy)
+        assert pyboy.memory.writes == []
+
+        link.detach(pyboy)
+        assert pyboy.memory.writes == []
+        link.close()
+        assert pyboy.memory.writes == []
+    finally:
+        link.close()
+        peer.stop()
+
+
+def test_network_attach_rejects_stale_provider_before_backend_or_tick_mutation():
+    calls = []
+    backend = SimpleNamespace(
+        start_receiver=lambda **kwargs: calls.append(("start_receiver", kwargs)),
+        stop=lambda: calls.append(("stop", {})),
+    )
+    core = SerialCore()
+    pyboy = _FakePyBoy(serial=core)
+    ticks = []
+    pyboy.tick = lambda *args, **kwargs: ticks.append((args, kwargs))
+    link = PyBoyLinkSession(network_backend=backend)
+    prior_backend = core.backend
+
+    try:
+        with pytest.raises(NetworkBackendError, match="owner scope"):
+            link.attach(pyboy)
+        assert link.attached == ()
+        assert core.backend is prior_backend
+        assert [name for name, _ in calls if name == "start_receiver"] == []
+        assert ticks == []
+    finally:
+        link.close()
+
+
+@pytest.mark.parametrize("has_scope", [False, True])
+def test_network_attach_rejects_legacy_before_promotion_or_backend_write(monkeypatch, has_scope):
+    calls = []
+    backend = SimpleNamespace(
+        start_receiver=lambda **kwargs: calls.append(("start_receiver", kwargs)),
+        stop=lambda: calls.append(("stop", {})),
+    )
+    if has_scope:
+        backend.owner_scope = lambda: None
+    legacy = _LegacySerialStub()
+    pyboy = _FakePyBoy(serial=legacy)
+    link = PyBoyLinkSession(network_backend=backend)
+    owner = owner_for(pyboy)
+    promoted = []
+    promote = link._promote_legacy_serial
+
+    def track_promotion(serial):
+        promoted.append(serial)
+        return promote(serial)
+
+    monkeypatch.setattr(link, "_promote_legacy_serial", track_promotion)
+
+    try:
+        message = "exclusive owner pump" if has_scope else "owner scope"
+        with pytest.raises(NetworkBackendError, match=message):
+            link.attach(pyboy)
+
+        assert link.attached == ()
+        assert pyboy.mb.serial is legacy
+        assert promoted == []
+        assert not hasattr(legacy, "backend")
+        assert [name for name, _ in calls if name == "start_receiver"] == []
+
+        replacement = _ProviderSentinel()
+        owner.claim_provider(replacement)
+        owner.release_provider(replacement)
+    finally:
+        link.close()
+
+
+def test_network_attach_rejection_does_not_write_valid_core_backend(monkeypatch):
+    calls = []
+    backend = SimpleNamespace(
+        start_receiver=lambda **kwargs: calls.append(("start_receiver", kwargs)),
+        stop=lambda: calls.append(("stop", {})),
+    )
+    core = _BackendSetterCountingCore()
+    pyboy = _FakePyBoy(serial=core)
+    ticks = []
+    pyboy.tick = lambda *args, **kwargs: ticks.append((args, kwargs))
+    link = PyBoyLinkSession(network_backend=backend)
+    owner = owner_for(pyboy)
+    prior_backend = core.backend
+
+    try:
+        with pytest.raises(NetworkBackendError, match="owner scope"):
+            link.attach(pyboy)
+
+        assert link.attached == ()
+        assert core.backend is prior_backend
+        assert core.backend_writes == []
+        assert [name for name, _ in calls if name == "start_receiver"] == []
+        assert ticks == []
+
+        replacement = _ProviderSentinel()
+        owner.claim_provider(replacement)
+        owner.release_provider(replacement)
+    finally:
+        link.close()
+
+
+def test_network_detach_all_stops_backend_workers():
+    backend, peer = NetworkBackend.pair()
+    pyboy = _FakePyBoy(serial=SerialCore())
+    link = PyBoyLinkSession(network_backend=backend)
+
+    try:
+        link.attach(pyboy)
+        assert backend._reader is not None and backend._reader.is_alive()
+        assert backend._edge_worker is not None and backend._edge_worker.is_alive()
+        reader, edge_worker = backend._reader, backend._edge_worker
+
+        link.detach_all()
+
+        assert not backend.connected
+        assert not reader.is_alive()
+        assert not edge_worker.is_alive()
+        assert backend._reader is None and backend._edge_worker is None
+        assert backend._local_core is None and backend._irq_callback is None
+        assert link.attached == ()
+    finally:
+        link.close()
+        peer.stop()
+
+
+def test_attach_rolls_back_network_setup_failure(monkeypatch):
+    backend, peer = NetworkBackend.pair()
+    core = SerialCore()
+    pyboy = _FakePyBoy(serial=core)
+    prior_backend = core.backend
+    link = PyBoyLinkSession(network_backend=backend)
+
+    def fail_receiver(*_args, **_kwargs):
+        raise RuntimeError("synthetic receiver failure")
+
+    monkeypatch.setattr(backend, "start_receiver", fail_receiver)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic receiver"):
+            link.attach(pyboy)
+
+        assert link.attached == ()
+        assert pyboy.mb.serial is core
+        assert core.backend is prior_backend
+        assert not backend.connected
+    finally:
+        link.close()
+        peer.stop()
 
 
 # ---------------------------------------------------------------------------

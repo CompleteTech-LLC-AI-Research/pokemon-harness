@@ -17,9 +17,11 @@ import socket as _socket
 import struct
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
+import pokered_harness.link.network_backend as network_backend_module
 from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
@@ -28,6 +30,35 @@ from pokered_harness.link.network_backend import (
 
 _OP_EDGE_REQ = 0x10
 _OP_EDGE_RESP = 0x11
+
+
+@contextmanager
+def _receiver_owner(backend, *, progress=None, allow_closed=False):
+    """Standalone core tests explicitly run the receiver's execution owner."""
+    ready, finish = threading.Event(), threading.Event()
+    errors = []
+    def receive():
+        try:
+            with backend.owner_scope():
+                ready.set()
+                while not finish.is_set():
+                    backend.owner_poll()
+                    if progress is not None:
+                        progress()
+                    finish.wait(.0005)
+        except BaseException as error:
+            errors.append(error)
+    owner = threading.Thread(target=receive, name="test-receiver-owner", daemon=True)
+    owner.start()
+    try:
+        assert ready.wait(2)
+        yield
+    finally:
+        finish.set()
+        owner.join(2)
+        assert not owner.is_alive()
+        assert errors == [] or (allow_closed and backend._closed and
+                               all(isinstance(error, NetworkBackendError) for error in errors))
 
 
 # ---------------------------------------------------------------------------
@@ -138,21 +169,57 @@ def test_on_edge_with_peer_hangup_raises():
     a.stop()
 
 
+def test_edge_timeout_closes_transport_and_rejects_reuse(monkeypatch):
+    """An admitted edge timeout must not leave an ambiguous socket alive."""
+    monkeypatch.setattr(network_backend_module, "_EDGE_CALL_TIMEOUT_SECONDS", 0.05)
+    a, b = NetworkBackend.pair()
+    # B deliberately has no receiver, so A's request cannot get a response.
+    a.start_receiver(local_core=None)
+    try:
+        with pytest.raises(NetworkBackendError, match="no EDGE_RESP"):
+            a.on_edge(our_bit=1, our_role=1)
+        assert a.connected is False
+        started = time.monotonic()
+        with pytest.raises(NetworkBackendError, match="backend closed"):
+            a.on_edge(our_bit=0, our_role=1)
+        assert time.monotonic() - started < 0.2
+    finally:
+        a.stop()
+        b.stop()
+
+
+@pytest.mark.parametrize("response_count", [1, 2])
+def test_unsolicited_edge_response_fails_closed(response_count):
+    """A late/duplicate response cannot be retained for a future edge."""
+    a, b = NetworkBackend.pair()
+    a.start_receiver(local_core=None)
+    try:
+        b._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, 1) * response_count)
+        assert a._closed_event.wait(timeout=1.0)
+        assert a.connected is False
+        assert isinstance(a._reader_exc, NetworkBackendError)
+        assert "duplicate" in str(a._reader_exc)
+        with pytest.raises(NetworkBackendError, match="backend closed"):
+            a.on_edge(0, 1)
+        assert a.debug_snapshot()["edge_req_sent"] == 0
+    finally:
+        a.stop()
+        b.stop()
+
+
 def test_unknown_opcode_is_ignored():
     """The reader tolerates unknown opcodes (drops them) rather than
     hard-erroring. This keeps real-ROM runs robust to spurious noise.
     """
     a, b = NetworkBackend.pair()
     a.start_receiver(local_core=None)
-    # Peer sends garbage opcode then a valid RESP.
+    # Peer sends garbage opcode then a valid control frame. An unsolicited
+    # response is an error independently of unknown-opcode compatibility.
     b._sock.sendall(struct.pack(">BB", 0xFF, 0))
-    b._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, 1))
+    b._sock.sendall(struct.pack(">BB", 0x20, 1))
 
-    # Send a REQ from us — the peer side's reader won't fire because
-    # the "peer" here is just raw socket writes. Put a RESP by hand
-    # to unblock our on_edge.
     try:
-        reply = a._resp_queue.get(timeout=2.0)  # pop the queued RESP
+        reply = a._sync_queue(1).get(timeout=2.0)
         assert reply == 1
     finally:
         a.stop()
@@ -197,7 +264,8 @@ def test_two_serialcores_exchange_byte_via_network_backend():
     bb.start_receiver(local_core=slave, irq_callback=slave_irq)
 
     try:
-        irq = master.tick(CYCLES_PER_BYTE_DMG)
+        with ba.owner_scope(), _receiver_owner(bb):
+            irq = master.tick(CYCLES_PER_BYTE_DMG)
         assert irq is True, "master didn't complete transfer"
 
         # Give bb's reader a moment to finish its final edge send.
@@ -232,7 +300,8 @@ def test_multiple_bytes_exchange():
             slave.set_SB(slave_byte)
             master.set_SC(0x81)
             slave.set_SC(0x80)
-            master.tick(master.last_cycles + CYCLES_PER_BYTE_DMG)
+            with ba.owner_scope(), _receiver_owner(bb):
+                master.tick(master.last_cycles + CYCLES_PER_BYTE_DMG)
             time.sleep(0.05)
             assert master.SB == slave_byte, (
                 f"master expected 0x{slave_byte:02x}, got 0x{master.SB:02x}"
@@ -284,6 +353,34 @@ def test_sync_with_peer_rendezvous():
     finally:
         ta.join(timeout=1.0)
         tb.join(timeout=1.0)
+        a.stop()
+        b.stop()
+
+
+def test_slave_response_send_failure_closes_socket_and_wakes_peer(monkeypatch):
+    a, b = NetworkBackend.pair()
+    original_socket = a._sock
+
+    class FailingResponseSocket:
+        def send(self, frame):
+            raise OSError("response send failed")
+
+        def shutdown(self, how):
+            original_socket.shutdown(how)
+
+        def close(self):
+            original_socket.close()
+
+    monkeypatch.setattr(a, "_sock", FailingResponseSocket())
+    monkeypatch.setattr(network_backend_module, "_REARM_WAIT_SECONDS", 0.0)
+    b._sock.settimeout(1.0)
+    try:
+        a._handle_edge_req(1)
+        assert not a.connected
+        assert original_socket.fileno() == -1
+        assert b._sock.recv(1) == b""
+        assert str(a._reader_exc) == "response send failed"
+    finally:
         a.stop()
         b.stop()
 
@@ -348,8 +445,39 @@ def test_keepalive_fallback_is_visible_in_debug_snapshot():
         b.stop()
 
 
-class _CompletingSlaveCore:
+class _OwnerClaimTestDouble:
+    """Explicit test-only owner binding for non-native core behavior doubles."""
+
     def __init__(self) -> None:
+        self.owner_poll_enabled = False
+        self._owner_callback = None
+        self._owner_token = None
+
+    def set_owner_pump(self, callback, poll=False):
+        if self._owner_token is not None:
+            raise RuntimeError("serial owner pump is exclusively claimed")
+        self._owner_callback = callback
+        self.owner_poll_enabled = callback is not None and poll
+
+    def claim_owner_pump(self, callback, poll=False):
+        if self._owner_callback is not None or self._owner_token is not None:
+            raise RuntimeError("serial owner pump already installed or claimed")
+        self._owner_token = object()
+        self._owner_callback = callback
+        self.owner_poll_enabled = poll
+        return self._owner_token
+
+    def release_owner_pump(self, token):
+        if token is not self._owner_token:
+            raise RuntimeError("invalid serial owner pump claim token")
+        self._owner_token = None
+        self._owner_callback = None
+        self.owner_poll_enabled = False
+
+
+class _CompletingSlaveCore(_OwnerClaimTestDouble):
+    def __init__(self) -> None:
+        super().__init__()
         self.transfer_enabled = 1
         self.internal_clock = 0
         self.SB = 0
@@ -364,38 +492,49 @@ class _CompletingSlaveCore:
         return True
 
 
-def test_post_byte_fallback_is_visible_in_debug_snapshot():
-    """A keep-alive immediately after a completed byte is tagged separately."""
+def test_post_byte_missing_rearm_fails_without_fabricating_payload(monkeypatch):
+    """An attached core cannot synthesize a response while it is unarmed."""
+    monkeypatch.setattr(network_backend_module, "_EDGE_CALL_TIMEOUT_SECONDS", .08)
     a, b = NetworkBackend.pair()
     core = _CompletingSlaveCore()
     a.start_receiver(local_core=None)
     b.start_receiver(local_core=core)
     try:
-        first_reply = a.on_edge(our_bit=1, our_role=1)
-        assert first_reply == 0
-        second_reply = a.on_edge(our_bit=0, our_role=1)
-        assert second_reply == 1
-        deadline = time.time() + 1.0
+        with _receiver_owner(b, allow_closed=True):
+            first_reply = a.on_edge(our_bit=1, our_role=1)
+            assert first_reply == 0
+            with pytest.raises(NetworkBackendError):
+                a.on_edge(our_bit=0, our_role=1)
         snap = b.debug_snapshot()
-        while time.time() < deadline and snap["keepalive_after_post_byte_waits"] == 0:
-            time.sleep(0.01)
-            snap = b.debug_snapshot()
         assert snap["slave_post_byte_rearm_waits"] >= 1
-        assert snap["keepalive_after_post_byte_waits"] >= 1
+        assert snap["keepalive_after_post_byte_waits"] == 0
+        assert snap["keepalive_bits_sent"] == 0
         assert snap["last_slave_byte_complete_at"] is not None
     finally:
         a.stop()
         b.stop()
 
 
-class _LateRearmingSlaveCore:
+class _LateRearmingSlaveCore(_OwnerClaimTestDouble):
     def __init__(self) -> None:
-        self.transfer_enabled = 1
+        super().__init__()
+        self._transfer_enabled = 1
+        self._unarmed_observed = threading.Event()
         self.internal_clock = 0
         self.SB = 0
         self.SC = 0x80
         self._next_out_bit = 0
         self._byte_index = 0
+
+    @property
+    def transfer_enabled(self) -> int:
+        if not self._transfer_enabled:
+            self._unarmed_observed.set()
+        return self._transfer_enabled
+
+    @transfer_enabled.setter
+    def transfer_enabled(self, enabled: int) -> None:
+        self._transfer_enabled = enabled
 
     def peek_out_bit(self) -> int:
         return self._next_out_bit
@@ -409,13 +548,32 @@ class _LateRearmingSlaveCore:
         self._byte_index += 1
         return False
 
-    def rearm_after(self, delay_s: float, *, next_out_bit: int) -> None:
+    def rearm_after(self, delay_s: float, *, next_out_bit: int) -> threading.Thread:
         def _rearm() -> None:
+            # Begin the simulated IRQ delay only after the backend observes
+            # the next request's unarmed core. A paused test thread must not
+            # let this worker rearm before that request is even admitted.
+            if not self._unarmed_observed.wait(timeout=2.0):
+                return
             time.sleep(delay_s)
             self._next_out_bit = next_out_bit & 1
             self.transfer_enabled = 1
 
-        threading.Thread(target=_rearm, daemon=True).start()
+        worker = threading.Thread(target=_rearm, daemon=True)
+        worker.start()
+        return worker
+
+    def owner_rearm_after(self, delay_s: float, *, next_out_bit: int):
+        deadline = None
+        def progress():
+            nonlocal deadline
+            if self._unarmed_observed.is_set():
+                if deadline is None:
+                    deadline = time.monotonic() + delay_s
+                if time.monotonic() >= deadline:
+                    self._next_out_bit = next_out_bit & 1
+                    self.transfer_enabled = 1
+        return progress
 
 
 def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive():
@@ -425,14 +583,14 @@ def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive():
     core = _LateRearmingSlaveCore()
     a.start_receiver(local_core=None)
     b.start_receiver(local_core=core)
+    rearm_worker = None
     try:
-        first_reply = a.on_edge(our_bit=1, our_role=1)
-        assert first_reply == 0
-
-        core.rearm_after(0.150, next_out_bit=0)
-        started = time.monotonic()
-        second_reply = a.on_edge(our_bit=0, our_role=1)
-        elapsed = time.monotonic() - started
+        with _receiver_owner(b, progress=core.owner_rearm_after(.150, next_out_bit=0)):
+            first_reply = a.on_edge(our_bit=1, our_role=1)
+            assert first_reply == 0
+            started = time.monotonic()
+            second_reply = a.on_edge(our_bit=0, our_role=1)
+            elapsed = time.monotonic() - started
 
         assert second_reply == 0
         assert elapsed >= 0.140
@@ -445,6 +603,9 @@ def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive():
     finally:
         a.stop()
         b.stop()
+        if rearm_worker is not None:
+            rearm_worker.join(timeout=2.0)
+            assert not rearm_worker.is_alive(), "late-rearm worker did not stop"
 
 
 def test_listen_and_connect_over_loopback_exchange_byte():
@@ -477,7 +638,11 @@ def test_listen_and_connect_over_loopback_exchange_byte():
         backend.start_receiver(local_core=core)
         server_holder["core"] = core
         ready.set()
-        time.sleep(2.0)
+        with backend.owner_scope():
+            deadline = time.monotonic() + 2.0
+            while core.transfer_enabled and time.monotonic() < deadline:
+                backend.owner_poll()
+                time.sleep(.0005)
 
     t = threading.Thread(target=server, daemon=True)
     t.start()
@@ -489,7 +654,8 @@ def test_listen_and_connect_over_loopback_exchange_byte():
     client_core.set_SC(0x81)
     client_backend.start_receiver(local_core=client_core)
     try:
-        client_core.tick(CYCLES_PER_BYTE_DMG)
+        with client_backend.owner_scope():
+            client_core.tick(CYCLES_PER_BYTE_DMG)
         time.sleep(0.2)
         assert client_core.SB == 0x33
         assert server_holder["core"].SB == 0xCC

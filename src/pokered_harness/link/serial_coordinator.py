@@ -115,7 +115,10 @@ class CoordinatedBackend:
         if self._on_peer_unarmed is None:
             return False
         for _ in range(256):
-            if peer.transfer_enabled or peer.internal_clock:
+            # SC retains clock-select after a completed/cancelled transfer.
+            # Only an armed transfer establishes the peer's current role;
+            # otherwise let its CPU execute the next SC write.
+            if peer.transfer_enabled:
                 break
             self.peer_rearm_attempts += 1
             if not self._on_peer_unarmed():
@@ -167,7 +170,7 @@ class LockstepCoordinator:
         a.set_SB(0xAA); b.set_SB(0x55)
         a.set_SC(0x81)    # master
         b.set_SC(0x80)    # slave
-        a.tick(1024)      # 8 edges — full byte exchanged
+        a.tick(4096)      # 8 bits at 512 T-cycles — full byte exchanged
         assert a.SB == 0x55 and b.SB == 0xAA
 
     :meth:`detach` restores :class:`NullBackend` on both cores so they
