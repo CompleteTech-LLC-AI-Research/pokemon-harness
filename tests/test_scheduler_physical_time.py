@@ -24,6 +24,8 @@ def attach(a, b):
     link = PyBoyLinkSession.local()
     link.attach(a)
     link.attach(b)
+    # Tiny fakes should not execute a production-sized LCD quantum.
+    link.PHYSICAL_QUANTUM = 32
     return link
 
 
@@ -70,7 +72,9 @@ def test_transition_inside_instruction_uses_runtime_split_accounting(double):
     a.mb.tick = transition
     link = attach(a, b)
     link.step()
-    assert a.physical == 6 + 7 * 4 * (1 if a.double else 2)
+    # The quantum ends at physical time 32; the final instruction is allowed
+    # to cross that horizon, and its split-rate accounting must remain exact.
+    assert a.physical == (34 if not double else 38)
     link.detach_all()
 
 
@@ -84,8 +88,11 @@ def test_nested_peer_progress_is_accounted_once_at_mixed_speed():
     a.on_instruction = lambda: called.append(progress()) if not called else None
     link.step()
     assert called == [True]
-    assert a.physical == 32 and b.physical == 16
-    assert a.progress == b.progress == 4
+    # Both endpoints advance to the same physical horizon even when their CPU
+    # rates differ; nested progress is one bounded instruction, not a second
+    # public frame.
+    assert a.physical == 32 and b.physical == 32
+    assert a.progress == 4 and b.progress == 8
     link.detach_all()
 
 
