@@ -18,12 +18,25 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-**Release decision: `PARTIAL`, not production-ready.** The 2026-09-09
-reconciliation candidate retains a failed source gate and a later completed
-pre-commit source unit run with 4,416 passes and five failures. A full native
-extension build and focused source/native checks passed, but no complete
-candidate gate or gameplay qualification is inferred from them. See the
-[candidate evidence record](PRODUCTION_RUNBOOK.md#reconciliation-candidate-2026-09-09).
+**Release decision: `PARTIAL`, not production-ready.** On 2026-09-11, the
+resumed candidate at `3c96537` passed the isolated dual-runtime unit-only gate:
+source and native/Cython each completed `4508/4508` unit tests and
+`1910/1910` timing cases (five repetitions), with zero failures, skips,
+xfails, xpasses, or errors. The gate report is retained outside the checkout as
+`dual-unit-final-20260911/gate-report.txt` (SHA-256
+`58e8e34efc28e4af0df6af742153a7b03eee1aeb8ca3cc94dac9e07dc11dcf2d`). It
+also audited the declared `9/9` local and `9/9` remote matrix rows and the
+`19/19` strict trade/battle entrypoints, but did not execute gameplay.
+
+The same isolated environments passed six real-ROM MCP stdio/lifecycle
+integration checks and four Red golden-path checks in each runtime. Stock Red,
+Blue, and Yellow assets were available for the run. Both color ROMs and all
+ten external link fixtures remain absent, so the validator and the full
+asset-backed source/native trade and battle gate have not run. Those missing
+inputs prevent production qualification; unit, timing, MCP lifecycle, and
+golden-path evidence do not establish Cable Club gameplay. See
+[`VERSIONS.md`](../VERSIONS.md#current-linux-isolated-runtime-evidence) for
+the exact runtime and asset record.
 
 ### Historical baseline
 
