@@ -653,9 +653,10 @@ session with an incomplete serial contract fails closed instead of silently
 switching to semantic exchange.
 
 Native attach only installs the serial backend and its transport callbacks. It
-does not write Pokémon HRAM such as `hSerialConnectionStatus` or install
-symbol-level exchange hooks: the ROM's own serial ISR must establish the role
-from native serial traffic. The semantic bridge is therefore not production
+does not write native serial registers (`SB`/`SC`, `FF01`/`FF02`), Pokémon HRAM
+such as `hSerialConnectionStatus`, or install symbol-level exchange hooks. The
+ROM controls its clock source and establishes its connection status from native
+serial traffic. The semantic bridge is therefore not production
 evidence for `link_pair`, `link_listen`, or `link_connect`.
 
 ### In-process pair
@@ -681,14 +682,13 @@ The exact fixture, runtime, and game-flow requirements are in the runbook.
 ### Remote TCP pair
 
 Two independent MCP servers can use `link_listen` and `link_connect`. The
-listener starts with the internal-clock role and the connector starts with the
-external-clock role. After the versioned HELLO, native PyBoy sessions
-negotiate the compatible startup role: for Red/Blue pairs, Red provides the
-initial internal clock and Blue waits as the external-clock endpoint; for
-Yellow cross-family pairs, the non-Yellow endpoint provides the initial
-internal clock. Same-family pairs retain their caller-provided orientation.
-This register-level policy does not establish full TCP trade acceptance. The
-ROM still owns its connection-status byte and any later role changes. Poll
+listener defaults to the frame-pacing leader and the connector to the follower.
+After the versioned HELLO, Red leads a differing Red/Blue pair and the non-Yellow
+endpoint leads a Yellow cross-family pair. Same-version pairs retain their
+caller-provided pacing orientation. These roles are transport metadata, not an
+assignment of the cartridges' hardware clocks: attach and negotiation leave
+native serial registers and ROM-owned connection status untouched. Pacing
+negotiation alone does not establish full TCP trade or battle acceptance. Poll
 `link_status` until it reports `remote_mode` as `connected`, then call
 `link_disconnect` at teardown.
 
