@@ -1288,7 +1288,9 @@ def _run_peer(trace=None) -> int:
         log(f"shot {phase}: {path}")
 
     def setup() -> None:
-        nonlocal cable_club_confirmation, link, link_menu_max, native_internal_clock, party_before, session, pre_link_menu_history, peer_rom_version
+        nonlocal battle_observer, cable_club_confirmation, link, link_menu_max
+        nonlocal native_internal_clock, party_before, peer_rom_version
+        nonlocal pre_link_menu_history, session
 
         if not math.isfinite(args.deadline_seconds) or args.deadline_seconds <= 0:
             raise ValueError("deadline-seconds must be finite and positive")
