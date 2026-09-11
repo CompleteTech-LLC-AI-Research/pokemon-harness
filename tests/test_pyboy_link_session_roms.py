@@ -15,8 +15,8 @@ ROMs by:
 3. Pressing A on both sides to initiate the receptionist dialogue,
    which eventually leads to ``CableClub_DoBattleOrTradeAgain``
    emitting the trade preamble.
-4. Stepping both sides in per-frame lockstep and counting edges via a
-   backend wrapper.
+4. Stepping the attached pair through the public pair owner in per-frame
+   lockstep and counting edges via a backend wrapper.
 5. Asserting the count is non-zero — proof that the real ROM *did*
    drive serial transfers through our new core.
 
@@ -67,6 +67,7 @@ _YELLOW_STATE = fixture_path("yellow")
 # the existing default for normal runs; production acceptance can opt into
 # a tighter cooperative schedule without changing emulator semantics.
 _LINK_CHUNK_CYCLES = int(os.environ.get("POKERED_LINK_CHUNK_CYCLES", "256"))
+_RECEPTIONIST_A_STAGGER_FRAMES = 4
 
 _ROM_PATHS = {
     # Red uses the color-patched ROM so it matches the walkthrough
@@ -259,16 +260,63 @@ def _open_session(version: str, *, state_path=None):
     return session
 
 
+def _open_session_pair(open_a, open_b):
+    """Open two sessions transactionally, preserving a second-open error.
+
+    The real-ROM tests perform their pair setup inside a later ``try`` block,
+    so a failure while constructing the second endpoint would otherwise leave
+    the first emulator unclosed. Factories keep this helper usable for the
+    normal and variant fixtures without changing their construction paths.
+    """
+    first = open_a()
+    try:
+        second = open_b()
+    except BaseException as error:
+        try:
+            first.close()
+        except BaseException as cleanup_error:  # noqa: BLE001 - retain both failures
+            error.add_note(f"first session cleanup failed: {cleanup_error!r}")
+        raise
+    return first, second
+
+
 def _fixtures_available(version: str) -> bool:
     rom, sym = _ROM_PATHS[version]
     return rom.is_file() and sym.is_file() and _state_path(version).is_file()
 
 
+def _close_linked_pair(link, *sessions) -> None:
+    """Detach the pair owner before closing its two emulator sessions.
+
+    A locally paired :class:`PyBoyLinkSession` owns both native serial cores;
+    closing a Session first would leave a stopped emulator retained by the
+    coordinator. Teardown attempts every cleanup step and re-raises the first
+    failure after all sessions have had a close attempt.
+    """
+    errors: list[BaseException] = []
+    if link is not None:
+        try:
+            link.detach_all()
+            if link.attached:
+                raise RuntimeError("local pair remained attached after detach_all")
+        except BaseException as exc:  # noqa: BLE001 - preserve cleanup failures
+            errors.append(exc)
+    for session in sessions:
+        try:
+            session.close()
+        except BaseException as exc:  # noqa: BLE001 - attempt every session cleanup
+            errors.append(exc)
+    if errors:
+        first = errors[0]
+        for extra in errors[1:]:
+            first.add_note(f"additional linked-session cleanup failure: {extra!r}")
+        raise first
+
+
 def test_yellow_pair_installs_serial_core():
     """Attach installs :class:`SerialCore` on both motherboards and
     wires the coordinator once both sides are in."""
-    a = _open_yellow_session()
-    b = _open_yellow_session()
+    a, b = _open_session_pair(_open_yellow_session, _open_yellow_session)
     try:
         link = PyBoyLinkSession.local()
 
@@ -285,8 +333,7 @@ def test_yellow_pair_installs_serial_core():
         assert isinstance(core_a.backend, CoordinatedBackend)
         assert isinstance(core_b.backend, CoordinatedBackend)
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
@@ -300,8 +347,7 @@ def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
     down the serial connection several times as it probes, so even
     a few seconds of game-time produces many edges.
     """
-    a = _open_yellow_session()
-    b = _open_yellow_session()
+    a, b = _open_session_pair(_open_yellow_session, _open_yellow_session)
     try:
         link = PyBoyLinkSession.local()
         core_a = link.attach(a._pyboy)
@@ -327,8 +373,9 @@ def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
         total_frames = 600
         step_chunk = 4
         for _ in range(total_frames // step_chunk):
-            a.step(step_chunk)
-            b.step(step_chunk)
+            link.step_interleaved(
+                step_chunk, chunk_cycles=_LINK_CHUNK_CYCLES
+            )
 
         # The meaningful assertion: at least *some* serial activity
         # happened. Pokémon's Cable Club state includes the master
@@ -351,8 +398,7 @@ def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
             + counter_b.bytes_received_complete
         ) >= 1
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +445,16 @@ def _drive_two_sessions_to_link_menu(
     ``CableClubNPC`` → ``CableClub_DoBattleOrTradeAgain`` → preamble
     handshake → ``SaveGameData`` → nibble sync → ``LinkMenu``.
     """
+    if (
+        isinstance(frames_per_attempt, bool)
+        or not isinstance(frames_per_attempt, int)
+        or frames_per_attempt <= _RECEPTIONIST_A_STAGGER_FRAMES
+    ):
+        raise ValueError(
+            "frames_per_attempt must be an integer leaving a post-B frame after the "
+            f"{_RECEPTIONIST_A_STAGGER_FRAMES}-frame A stagger"
+        )
+
     counters = {
         "CableClubNPC": [0, 0],
         "SaveGameData": [0, 0],
@@ -411,11 +467,14 @@ def _drive_two_sessions_to_link_menu(
             _install_hook_counter(sess, sym, bucket, idx)
 
     def tick_both_coarse(frames: int) -> None:
-        """Per-frame alternation. Fine for overworld / dialog phases
-        that don't stress serial sync."""
-        for _ in range(frames):
-            a.step(1)
-            b.step(1)
+        """Use the pair owner for overworld/dialog phases.
+
+        ``step`` and ``step_interleaved`` share the same all-phase
+        instruction scheduler; this helper only names the less serial-heavy
+        part of the ROM flow. It must never advance either attached Session
+        independently while the pair is owned by ``link``.
+        """
+        link.step(frames)
 
     def tick_both_fine(frames: int) -> None:
         """Sub-frame interleaved via :meth:`PyBoyLinkSession.step_interleaved`.
@@ -434,23 +493,35 @@ def _drive_two_sessions_to_link_menu(
 
     # Press A and advance. Once Serial_SyncAndExchangeNybble fires on
     # both sides, switch to fine-grained interleaving so the game's
-    # tight master/slave-alternation loop can synchronize.
+    # tight master/slave-alternation loop can synchronize. Keep this
+    # choice fixed for the whole attempt: changing scheduler modes
+    # between the two halves would make the public-input skew itself
+    # affect the serial scheduler.
     attempts = (total_frames - frames_used) // frames_per_attempt
     for _attempt in range(attempts):
         if counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0:
             break
-        a.press("a", duration=4)
-        b.press("a", duration=4)
-        # Use fine-grained interleaving once either side has saved
-        # (which marks entry into the serial-heavy handshake). Coarse
-        # is fine for dialog navigation and ~10x faster.
+
+        # Select the phase before injecting either A press and reuse the
+        # result for both pair-owner advances below.
         in_serial_phase = (
             counters["SaveGameData"][0] > 0 or counters["SaveGameData"][1] > 0
         )
+
+        # Deliberately stagger only the ordinary public input. Endpoint A
+        # receives A, then the attached pair owner advances four frames;
+        # endpoint B receives A, then the owner advances the remaining
+        # sixteen frames of the existing 20-frame attempt.
+        a.press("a", duration=4)
         if in_serial_phase:
-            tick_both_fine(frames_per_attempt)
+            tick_both_fine(_RECEPTIONIST_A_STAGGER_FRAMES)
         else:
-            tick_both_coarse(frames_per_attempt)
+            tick_both_coarse(_RECEPTIONIST_A_STAGGER_FRAMES)
+        b.press("a", duration=4)
+        if in_serial_phase:
+            tick_both_fine(frames_per_attempt - _RECEPTIONIST_A_STAGGER_FRAMES)
+        else:
+            tick_both_coarse(frames_per_attempt - _RECEPTIONIST_A_STAGGER_FRAMES)
         frames_used += frames_per_attempt
 
     return {"counters": counters, "frames_used": frames_used}
@@ -629,8 +700,10 @@ def test_pair_reaches_link_menu_via_pyboy_link_session(version_a, version_b):
             f"produce with scripts/produce_cable_club_fixture.py"
         )
 
-    a = _open_session(version_a)
-    b = _open_session(version_b)
+    a, b = _open_session_pair(
+        lambda: _open_session(version_a),
+        lambda: _open_session(version_b),
+    )
     try:
         link = PyBoyLinkSession.local()
         link.attach(a._pyboy)
@@ -656,8 +729,7 @@ def test_pair_reaches_link_menu_via_pyboy_link_session(version_a, version_b):
             f"Preamble converged but nibble-sync did not."
         )
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 # ---------------------------------------------------------------------------
@@ -781,13 +853,11 @@ def _drive_complete_trade(
         link.step_interleaved(frames, chunk_cycles=_LINK_CHUNK_CYCLES)
 
     def tick_per_frame(frames: int) -> None:
-        """Per-frame via session.step — for overworld/menu navigation
+        """Per-frame via the paired owner — for overworld/menu navigation
         where input handling is what matters, not byte-level serial
         sync. The coordinator still handles any incidental serial
         transfers via its CoordinatedBackend."""
-        for _ in range(frames):
-            a.step(1)
-            b.step(1)
+        link.step(frames)
 
     # After warp, both players must walk onto their hidden-event
     # trigger tiles to flip wLinkState = LINK_STATE_START_TRADE and
@@ -963,8 +1033,10 @@ def test_pair_completes_trade_end_to_end(version_a, version_b):
             f"Cable Club fixture(s) missing for {version_a}/{version_b}"
         )
 
-    a = _open_session(version_a)
-    b = _open_session(version_b)
+    a, b = _open_session_pair(
+        lambda: _open_session(version_a),
+        lambda: _open_session(version_b),
+    )
     try:
         link = PyBoyLinkSession.local()
         link.attach(a._pyboy)
@@ -1056,8 +1128,7 @@ def test_pair_completes_trade_end_to_end(version_a, version_b):
         assert after_a_raw["mon_records"][0] == before_b_raw["mon_records"][0]
         assert after_b_raw["mon_records"][0] == before_a_raw["mon_records"][0]
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 def test_red_yellow_trade_swaps_real_party_records():
@@ -1072,8 +1143,10 @@ def test_red_yellow_trade_swaps_real_party_records():
     if not (_fixtures_available("red") and _fixtures_available("yellow")):
         pytest.skip("Red and Yellow Cable Club fixtures are required")
 
-    a = _open_session("red")
-    b = _open_session("yellow")
+    a, b = _open_session_pair(
+        lambda: _open_session("red"),
+        lambda: _open_session("yellow"),
+    )
     try:
         before_a = _party_raw_summary(a)
         before_b = _party_raw_summary(b)
@@ -1109,8 +1182,7 @@ def test_red_yellow_trade_swaps_real_party_records():
         assert after_a["species"][-1] == 0xFF
         assert after_b["species"][-1] == 0xFF
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 def test_yellow_pair_warps_to_trade_center():
@@ -1125,8 +1197,10 @@ def test_yellow_pair_warps_to_trade_center():
     if not _fixtures_available("yellow"):
         pytest.skip("Yellow Cable Club fixture missing")
 
-    a = _open_session("yellow")
-    b = _open_session("yellow")
+    a, b = _open_session_pair(
+        lambda: _open_session("yellow"),
+        lambda: _open_session("yellow"),
+    )
     try:
         link = PyBoyLinkSession.local()
         link.attach(a._pyboy)
@@ -1152,8 +1226,7 @@ def test_yellow_pair_warps_to_trade_center():
             f"final_map_b=0x{diag['final_map_b']:02x}"
         )
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 # ---------------------------------------------------------------------------
@@ -1179,6 +1252,13 @@ _BATTLE_DIAG_SYMBOLS = (
 )
 
 
+_LINK_MENU_TARGET_ITEM = 1  # COLOSSEUM; TRADE_CENTER is item 0.
+_LINK_MENU_SETTLE_FRAMES = 60
+_LINK_MENU_CURSOR_BUDGET_FRAMES = 40
+_LINK_MENU_MAX_ITEM = 3  # Yellow has four entries; Red/Blue have fewer.
+_LINK_MENU_REQUIRED_KEYS = 0x01  # A is one of the ROM's watched keys.
+
+
 def _install_battle_diag_counters(a, b) -> dict:
     counters = {sym: [0, 0] for sym in _BATTLE_DIAG_SYMBOLS}
     for idx, sess in enumerate((a, b)):
@@ -1187,11 +1267,103 @@ def _install_battle_diag_counters(a, b) -> dict:
     return counters
 
 
+def _read_link_menu_cursor(session) -> int | None:
+    """Read a ready LinkMenu cursor without changing emulator state.
+
+    The ``LinkMenu`` symbol hook runs before the ROM has initialized its menu
+    fields and before its input loop starts polling the joypad.  Treat an
+    incomplete menu snapshot as delayed readiness instead of sending an
+    input event into a transition.  All values come from ROM-owned bytes;
+    this helper never writes RAM, registers, or execution state.
+    """
+    try:
+        memory = session._pyboy.memory
+        addr_of = session.symbols.addr_of
+        current = int(memory[addr_of("wCurrentMenuItem")])
+        maximum = int(memory[addr_of("wMaxMenuItem")])
+        watched_keys = int(memory[addr_of("wMenuWatchedKeys")])
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not 0 <= current <= maximum <= _LINK_MENU_MAX_ITEM:
+        return None
+    if maximum not in (2, _LINK_MENU_MAX_ITEM):
+        return None
+    if watched_keys & _LINK_MENU_REQUIRED_KEYS != _LINK_MENU_REQUIRED_KEYS:
+        return None
+    return current
+
+
+def _validate_non_negative_frame_budget(value: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be a non-negative integer")
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _move_link_menu_cursors_to_colosseum(
+    a,
+    b,
+    link,
+    *,
+    budget_frames: int = _LINK_MENU_CURSOR_BUDGET_FRAMES,
+    frames_per_attempt: int = 20,
+) -> dict[str, int | None]:
+    """Move each ROM-owned LinkMenu cursor to COLOSSEUM with public input.
+
+    Each loop observes both endpoints before issuing any directional event.
+    A side already at item 1 receives no input, so a delayed peer cannot
+    cause that side to wrap past COLOSSEUM.  ``link`` remains the sole frame
+    owner; the last advance is clipped to the remaining budget so a caller
+    never spends more than ``budget_frames`` while waiting for readiness.
+    ``None`` is a read-only indication that the ROM menu fields are not ready
+    yet, not a reason to guess at a button press.
+    """
+    budget_frames = _validate_non_negative_frame_budget(budget_frames, "budget_frames")
+    if isinstance(frames_per_attempt, bool) or not isinstance(frames_per_attempt, int):
+        raise TypeError("frames_per_attempt must be a positive integer")
+    if frames_per_attempt <= 0:
+        raise ValueError("frames_per_attempt must be a positive integer")
+
+    frames_used = 0
+    while frames_used < budget_frames:
+        cursors = [
+            _read_link_menu_cursor(a),
+            _read_link_menu_cursor(b),
+        ]
+        if all(cursor == _LINK_MENU_TARGET_ITEM for cursor in cursors):
+            break
+
+        for session, cursor in zip((a, b), cursors, strict=True):
+            if cursor is None or cursor == _LINK_MENU_TARGET_ITEM:
+                continue
+            # Use the shortest ordinary directional path from the observed
+            # cursor.  In particular, a stale item > 1 is corrected with UP
+            # rather than another DOWN that could wrap the menu.
+            session.press(
+                "down" if cursor < _LINK_MENU_TARGET_ITEM else "up",
+                duration=12,
+            )
+
+        advance = min(frames_per_attempt, budget_frames - frames_used)
+        link.step_interleaved(advance)
+        frames_used += advance
+
+    final_cursors = [
+        _read_link_menu_cursor(a),
+        _read_link_menu_cursor(b),
+    ]
+    return {
+        "frames_used": frames_used,
+        "cursor_a": final_cursors[0],
+        "cursor_b": final_cursors[1],
+    }
+
+
 def _drive_past_link_menu_to_colosseum(
     a, b, link, *, post_link_menu_frames: int = 1800, frames_per_attempt: int = 20
 ) -> dict:
-    """Continue from ``LinkMenu`` by pressing DOWN (cursor TRADE→COLOSSEUM)
-    then A on both sides.
+    """Continue from ``LinkMenu`` by selecting COLOSSEUM with ordinary input.
 
     After both sides exchange matching selections via
     ``Serial_ExchangeLinkMenuSelection``, the game warps each player to
@@ -1206,18 +1378,23 @@ def _drive_past_link_menu_to_colosseum(
     )
 
     # LinkMenu's hook fires at function entry, before HandleMenuInput
-    # begins polling keys. Tick forward so the menu is actually waiting
-    # for input, then press DOWN once to move TRADE CENTER→COLOSSEUM.
-    # Three DOWN presses would wrap past CANCEL back to TRADE CENTER
-    # (3 items with wrap), so use a single press and verify it landed
-    # by checking wCurrentMenuItem — which LinkMenu uses directly.
-    link.step_interleaved(60)
-    a.press("down", duration=12)
-    b.press("down", duration=12)
-    link.step_interleaved(40)
-    # Sanity: both cursors should now be on item 1 (COLOSSEUM).
-    cur_a = a._pyboy.memory[a.symbols.addr_of("wCurrentMenuItem")]
-    cur_b = b._pyboy.memory[b.symbols.addr_of("wCurrentMenuItem")]
+    # begins polling keys. Preserve the existing 60-frame owner settle, then
+    # use bounded, ordinary per-endpoint input. A cross-version peer can be
+    # ready later; observe each cursor before every event and do not press a
+    # side that already reached COLOSSEUM.
+    link.step_interleaved(_LINK_MENU_SETTLE_FRAMES)
+    cursor_diag = _move_link_menu_cursors_to_colosseum(
+        a,
+        b,
+        link,
+        budget_frames=_LINK_MENU_CURSOR_BUDGET_FRAMES,
+        frames_per_attempt=frames_per_attempt,
+    )
+    cur_a = cursor_diag["cursor_a"]
+    cur_b = cursor_diag["cursor_b"]
+    # Sanity: both cursors should now be on item 1 (COLOSSEUM). Keep this
+    # strict assertion: a LinkMenu milestone without matching user-visible
+    # menu selections is not valid battle setup.
     assert cur_a == 1 and cur_b == 1, (
         f"cursor didn't land on COLOSSEUM: a={cur_a}, b={cur_b}"
     )
@@ -1237,6 +1414,7 @@ def _drive_past_link_menu_to_colosseum(
     return {
         "counters": counters,
         "frames_to_link_menu": diag["frames_used"],
+        "cursor_frames": _LINK_MENU_SETTLE_FRAMES + cursor_diag["frames_used"],
         "extra_frames": extra_frames,
         "final_map_a": a.read_game_state().overworld.map_id,
         "final_map_b": b.read_game_state().overworld.map_id,
@@ -1254,8 +1432,10 @@ def test_yellow_pair_warps_to_colosseum():
     if not _fixtures_available("yellow"):
         pytest.skip("Yellow Cable Club fixture missing")
 
-    a = _open_session("yellow", state_path=_battle_state_path("yellow"))
-    b = _open_session("yellow", state_path=_battle_state_path("yellow"))
+    a, b = _open_session_pair(
+        lambda: _open_session("yellow", state_path=_battle_state_path("yellow")),
+        lambda: _open_session("yellow", state_path=_battle_state_path("yellow")),
+    )
     try:
         _assert_battle_fixture_is_legal(a)
         _assert_battle_fixture_is_legal(b)
@@ -1284,8 +1464,7 @@ def test_yellow_pair_warps_to_colosseum():
             f"final_map_b=0x{diag['final_map_b']:02x}"
         )
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 def _drive_complete_battle_turn(
@@ -1337,9 +1516,7 @@ def _drive_complete_battle_turn(
         link.step_interleaved(frames, chunk_cycles=_LINK_CHUNK_CYCLES)
 
     def tick_per_frame(frames: int) -> None:
-        for _ in range(frames):
-            a.step(1)
-            b.step(1)
+        link.step(frames)
 
     if step_frames <= 0:
         raise ValueError("step_frames must be positive")
@@ -1649,8 +1826,10 @@ def test_yellow_pair_starts_link_battle():
     if not _fixtures_available("yellow"):
         pytest.skip("Yellow Cable Club fixture missing")
 
-    a = _open_session("yellow", state_path=_battle_state_path("yellow"))
-    b = _open_session("yellow", state_path=_battle_state_path("yellow"))
+    a, b = _open_session_pair(
+        lambda: _open_session("yellow", state_path=_battle_state_path("yellow")),
+        lambda: _open_session("yellow", state_path=_battle_state_path("yellow")),
+    )
     try:
         _assert_battle_fixture_is_legal(a)
         _assert_battle_fixture_is_legal(b)
@@ -1687,8 +1866,7 @@ def test_yellow_pair_starts_link_battle():
             f"battle didn't start. counters={counters}"
         )
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 @pytest.mark.parametrize(
@@ -1729,8 +1907,14 @@ def test_pair_completes_battle_turn(version_a, version_b):
             f"Cable Club fixture(s) missing for {version_a}/{version_b}"
         )
 
-    a = _open_session(version_a, state_path=_battle_state_path(version_a))
-    b = _open_session(version_b, state_path=_battle_state_path(version_b))
+    a, b = _open_session_pair(
+        lambda: _open_session(
+            version_a, state_path=_battle_state_path(version_a)
+        ),
+        lambda: _open_session(
+            version_b, state_path=_battle_state_path(version_b)
+        ),
+    )
     try:
         _assert_battle_fixture_is_legal(a)
         _assert_battle_fixture_is_legal(b)
@@ -1785,8 +1969,7 @@ def test_pair_completes_battle_turn(version_a, version_b):
             f"the turn didn't advance on B. counters={counters}"
         )
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 def test_red_yellow_battle_turn_is_resolved():
@@ -1794,8 +1977,12 @@ def test_red_yellow_battle_turn_is_resolved():
     if not (_fixtures_available("red") and _fixtures_available("yellow")):
         pytest.skip("Red and Yellow battle fixtures are required")
 
-    a = _open_session("red", state_path=_battle_state_path("red"))
-    b = _open_session("yellow", state_path=_battle_state_path("yellow"))
+    a, b = _open_session_pair(
+        lambda: _open_session("red", state_path=_battle_state_path("red")),
+        lambda: _open_session(
+            "yellow", state_path=_battle_state_path("yellow")
+        ),
+    )
     try:
         _assert_battle_fixture_is_legal(a)
         _assert_battle_fixture_is_legal(b)
@@ -1826,8 +2013,7 @@ def test_red_yellow_battle_turn_is_resolved():
                 f"{symbol} did not fire on both sides: counters={counters}"
             )
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)
 
 
 # ---------------------------------------------------------------------------
@@ -1901,8 +2087,10 @@ def test_same_version_variants_reach_link_menu(
             f"{missing}. Produce via scripts/produce_cable_club_fixture.py"
         )
 
-    a = _open_session_variant(version, rom_a, tag_a)
-    b = _open_session_variant(version, rom_b, tag_b)
+    a, b = _open_session_pair(
+        lambda: _open_session_variant(version, rom_a, tag_a),
+        lambda: _open_session_variant(version, rom_b, tag_b),
+    )
     try:
         link = PyBoyLinkSession.local()
         link.attach(a._pyboy)
@@ -1922,5 +2110,4 @@ def test_same_version_variants_reach_link_menu(
             f"{version} {tag_a}<->{tag_b}: LinkMenu never reached; {counters}"
         )
     finally:
-        a.close()
-        b.close()
+        _close_linked_pair(locals().get("link"), a, b)

@@ -18,6 +18,8 @@ from pokered_harness.session import Session, SessionError
 from pokered_harness.symbols.loader import load_sym_text
 
 BOUND = 5.0
+PAIR_OWNER_COUNT, PAIR_CALLS_PER_OWNER = 2, 1
+PAIR_WORK_CAPACITY_S = PAIR_OWNER_COUNT * PAIR_CALLS_PER_OWNER * (BOUND + 1)
 POLICY = {
     "rearm_budget": 32,
     "rearm_instruction_cap": 16,
@@ -79,9 +81,18 @@ def result(request):
     return request.result(timeout=BOUND)
 
 
+def result_until(request, deadline):
+    """Collect a request against one absolute workload deadline."""
+    remaining = deadline - time.monotonic()
+    return request.result(timeout=max(1e-6, remaining))
+
+
 @contextmanager
-def linked(tmp_path):
-    with owned(tmp_path, "listener") as left, owned(tmp_path, "connector") as right:
+def linked(tmp_path, **overrides):
+    with (
+        owned(tmp_path, "listener", **overrides) as left,
+        owned(tmp_path, "connector", **overrides) as right,
+    ):
         listener = left[0].listen("127.0.0.1", 0, "red")
         address = listener.ready.result(timeout=BOUND)
         assert address["state"] == "listening"
@@ -505,7 +516,13 @@ def test_real_binding_rejects_foreign_mutation(tmp_path):
 
 
 def test_queued_cancel_preserves_active_real_epoch(tmp_path):
-    with linked(tmp_path) as ((left, _, game), (right, _, peer)):
+    # Give only this authored paired workload a finite request capacity derived
+    # from its two one-call owners. The ordinary result/cleanup bounds remain
+    # BOUND; the pair's normal steps share one absolute request deadline.
+    with linked(tmp_path, request_timeout=PAIR_WORK_CAPACITY_S) as (
+        (left, _, game),
+        (right, _, peer),
+    ):
         active, release = block_owner(left)
         executed = threading.Event()
         try:
@@ -516,9 +533,11 @@ def test_queued_cancel_preserves_active_real_epoch(tmp_path):
             release.set()
         result(active)
         before = game.frame_count, peer.frame_count
-        a, b = left.submit("step", 1, render=False), right.submit("step", 1, render=False)
-        result(a)
-        result(b)
+        pair_deadline = time.monotonic() + PAIR_WORK_CAPACITY_S
+        a = left.submit("step", 1, render=False, deadline=pair_deadline)
+        b = right.submit("step", 1, render=False, deadline=pair_deadline)
+        result_until(a, pair_deadline)
+        result_until(b, pair_deadline)
         assert (game.frame_count, peer.frame_count) == (before[0] + 1, before[1] + 1)
         assert not executed.is_set()
 
@@ -548,7 +567,9 @@ def test_cleanup_failure_retains_binding_and_blocks_reconnect_until_retry(tmp_pa
 
 
 @pytest.mark.parametrize("interrupt", ["cancel", "deadline"])
-def test_real_partial_progress_active_interrupt_is_terminal(tmp_path, monkeypatch, interrupt):
+def test_real_partial_progress_active_interrupt_is_terminal(
+    tmp_path, monkeypatch, interrupt, record_property
+):
     """Real CPU progress; the owner-module clock for both owners is controlled.
 
     The unchanged two-second logical budget expires after active partial progress.
@@ -561,7 +582,15 @@ def test_real_partial_progress_active_interrupt_is_terminal(tmp_path, monkeypatc
 
     from pokered_harness import mcp_timed_owner
 
-    with linked(tmp_path) as ((left, session, game), (right, _, peer)):
+    reach_capacity_s = PAIR_WORK_CAPACITY_S
+    # This finite capacity only covers the known two-owner, one-call workload
+    # reaching the real hook. It is not cancellation-throughput evidence: the
+    # hook release, future settlement, cleanup, and logical 2s deadline retain
+    # their existing independent bounds. The cancel variant gives its two
+    # authored requests the same finite capacity; the deadline variant keeps
+    # the explicit fake two-second request deadline below.
+    link_overrides = {"request_timeout": reach_capacity_s} if interrupt == "cancel" else {}
+    with linked(tmp_path, **link_overrides) as ((left, session, game), (right, _, peer)):
         entered, release = threading.Event(), threading.Event()
         start = game.frame_count
         retired = game.mb.cpu.retired_instructions
@@ -590,11 +619,26 @@ def test_real_partial_progress_active_interrupt_is_terminal(tmp_path, monkeypatc
                 mcp_timed_owner, "time", SimpleNamespace(monotonic=lambda: clock.now)
             )
         deadline = clock.now + 2.0 if interrupt == "deadline" else None
-        active = left.submit(step, "left", game, deadline=deadline)
-        peer_work = right.submit(step, "right", peer)
+        if interrupt == "deadline":
+            assert left.policy.request_timeout == right.policy.request_timeout == POLICY[
+                "request_timeout"
+            ]
+        reach_started = time.monotonic()
+        reach_deadline = reach_started + reach_capacity_s
+        active_deadline = reach_deadline if interrupt == "cancel" else deadline
+        peer_deadline = reach_deadline if interrupt == "cancel" else None
+        active = left.submit(step, "left", game, deadline=active_deadline)
+        peer_work = right.submit(step, "right", peer, deadline=peer_deadline)
         try:
             try:
-                assert entered.wait(BOUND), "authored CPU did not enter its second frame"
+                reached = entered.wait(max(0.0, reach_deadline - time.monotonic()))
+            finally:
+                record_property("reach_duration_s", time.monotonic() - reach_started)
+            try:
+                assert reached, (
+                    "authored CPU did not enter its second frame within "
+                    f"{reach_capacity_s:g}s workload capacity"
+                )
             except AssertionError as error:
 
                 def diagnostic(owner, request, label):
@@ -617,6 +661,8 @@ def test_real_partial_progress_active_interrupt_is_terminal(tmp_path, monkeypatc
             assert game.frame_count == start + 1
             assert game.mb.cpu.retired_instructions > retired
             if interrupt == "cancel":
+                assert active.phase == "running" and not active.future.done()
+                assert not active.cancel_event.is_set()
                 active.cancel()
             else:
                 assert active.phase == "running" and not active.future.done()
@@ -633,8 +679,11 @@ def test_real_partial_progress_active_interrupt_is_terminal(tmp_path, monkeypatc
             assert not left.status()["admitting"]
         finally:
             release.set()
-        with pytest.raises(TimedOwnerError):
+        with pytest.raises(TimedOwnerError) as failure:
             result(active)
+        assert failure.value.code == (
+            "timed_cancelled" if interrupt == "cancel" else "timed_deadline"
+        )
         with pytest.raises((TimedOwnerError, Cancelled, ChannelClosed, DeadlineExceeded, OSError)):
             result(peer_work)
         result(left.disconnect())

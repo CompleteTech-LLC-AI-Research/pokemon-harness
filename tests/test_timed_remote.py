@@ -860,10 +860,21 @@ def test_invalid_ports_rejected_before_socket_creation(remote, monkeypatch, meth
 
 @pytest.mark.parametrize("abstract", [False, True])
 @pytest.mark.parametrize("accepted_side", [False, True])
-def test_named_unix_stream_rejected_before_prelude(remote, tmp_path, abstract, accepted_side):
-    address = str(tmp_path / "remote.sock")
+@pytest.mark.parametrize("long_parent_path", [False, True])
+def test_named_unix_stream_rejected_before_prelude(
+    remote, tmp_path, monkeypatch, abstract, accepted_side, long_parent_path
+):
+    if long_parent_path:
+        tmp_path = tmp_path / ("nested-" + "x" * 110)
+        tmp_path.mkdir()
+    # AF_UNIX limits the encoded socket address, not its resolved directory.
+    # Keep the real named-socket case valid even when pytest's temporary root
+    # exceeds that limit. Both endpoints use the same scoped working directory;
+    # monkeypatch restores it even when the rejection assertion fails.
+    monkeypatch.chdir(tmp_path)
+    address = "remote.sock"
     if abstract:
-        address = "\0pkth-" + hashlib.sha256(address.encode()).hexdigest()[:24]
+        address = "\0pkth-" + hashlib.sha256(str(tmp_path).encode()).hexdigest()[:24]
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(address)
         listener.listen(1)

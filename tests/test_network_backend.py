@@ -123,6 +123,51 @@ def test_deferred_edge_queue_refill_fails_closed_without_blocking(monkeypatch):
         b.stop()
 
 
+def test_frame_done_is_retained_while_response_accounting_drains(monkeypatch):
+    """A received DONE survives a later transport-worker pending decrement."""
+    leader, follower = NetworkBackend.pair()
+    monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.2)
+    follower._frame_done_queue.put_nowait(None)
+    follower._edge_pending = 1
+    polls = 0
+
+    def drain_response():
+        nonlocal polls
+        polls += 1
+        if polls == 2:
+            assert follower._frame_done_queue.empty()
+            follower._decrement_edge_pending()
+
+    try:
+        follower.finish_frame_turn(leader=False, progress_callback=drain_response)
+        assert polls == 2
+        assert follower._edge_pending == 0
+        assert follower.debug_snapshot()["frame_acks_sent"] == 1
+        assert follower.connected
+    finally:
+        leader.stop()
+        follower.stop()
+
+
+@pytest.mark.parametrize("done_received,pending", [(False, 0), (True, 1)])
+def test_follower_frame_completion_requires_done_and_drained_responses(
+    monkeypatch, done_received, pending
+):
+    leader, follower = NetworkBackend.pair()
+    monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.03)
+    if done_received:
+        follower._frame_done_queue.put_nowait(None)
+    follower._edge_pending = pending
+    try:
+        with pytest.raises(NetworkBackendError, match="no FRAME_DONE"):
+            follower.finish_frame_turn(leader=False, progress_callback=lambda: None)
+        assert follower.debug_snapshot()["frame_acks_sent"] == 0
+        assert not follower.connected
+    finally:
+        leader.stop()
+        follower.stop()
+
+
 def test_frame_barrier_round_trip_keeps_turns_and_acknowledgements_bounded():
     """The negotiated owner-frame control path completes without edge traffic."""
     leader, follower = NetworkBackend.pair()

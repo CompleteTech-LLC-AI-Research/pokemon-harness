@@ -797,8 +797,23 @@ class PyBoyLinkSession:
         the callback as an unraisable Cython exception.
         """
 
+        # The backend and its inbound queue are fixed for the lifetime of an
+        # attached owner pump.  Capture the queue once so the hot callback
+        # does not perform an attribute lookup on every native boundary.
+        edge_queue = getattr(backend, "_edge_queue", None)
+
         def _pump() -> None:
             try:
+                # Native Serial invokes this callback at every safe owner
+                # boundary, including the overwhelmingly common no-work
+                # case.  ``empty()`` is only an admission hint: a reader may
+                # enqueue immediately after this check, but that request
+                # remains queued for the next native boundary (and the
+                # unconditional post-frame owner service).  Do not dequeue
+                # here, so the existing gate/lifecycle/error handling stays
+                # exclusively in ``service_pending_edges``.
+                if edge_queue is not None and edge_queue.empty():
+                    return
                 backend.service_pending_edges()
             except BaseException as exc:  # noqa: BLE001 - fail the link closed
                 backend._mark_closed(exc)
@@ -1268,27 +1283,38 @@ class PyBoyLinkSession:
         self._raise_fault()
         if self._epoch_origins is None or len(self._pyboys) != 2:
             raise RuntimeError("local stepping requires 2 attached runtime endpoints")
-        for i, p in enumerate(self._pyboys):
-            if p.mb is not self._epoch_mbs[i] or p.mb.serial is not self._epoch_serials[i]:
-                self._latch_fault("attached motherboard or serial identity changed")
-                self._raise_fault()
+        # The local owner is a fixed two-endpoint pair for the duration of an
+        # epoch. Keep the checks explicit and in endpoint order: this is the
+        # hot path, but the live motherboard/serial identities still have to
+        # be re-read on every observation so replacement is quarantined.
+        p0, p1 = self._pyboys
+        if p0.mb is not self._epoch_mbs[0] or p0.mb.serial is not self._epoch_serials[0]:
+            self._latch_fault("attached motherboard or serial identity changed")
+            self._raise_fault()
+        if p1.mb is not self._epoch_mbs[1] or p1.mb.serial is not self._epoch_serials[1]:
+            self._latch_fault("attached motherboard or serial identity changed")
+            self._raise_fault()
         try:
-            physical = tuple(self._read_physical_clock(p) for p in self._pyboys)
+            physical0 = self._read_physical_clock(p0)
+            physical1 = self._read_physical_clock(p1)
         except Exception as error:  # noqa: BLE001 - latch any failed runtime clock observation
             self._latch_fault(str(error))
             self._raise_fault()
-        if tuple(value[0] for value in physical) != self._physical_generations:
+        if (physical0[0], physical1[0]) != self._physical_generations:
             self._latch_fault("physical clock load epoch changed; attached loads are unsupported")
             self._raise_fault()
-        now = tuple(value[1] for value in physical)
-        if any(after < before for after, before in zip(now, self._physical_now)):
+        now0, now1 = physical0[1], physical1[1]
+        previous0, previous1 = self._physical_now
+        if now0 < previous0 or now1 < previous1:
             self._latch_fault("physical clock moved backwards")
             self._raise_fault()
+        now = (now0, now1)
         if boundary and now != self._physical_expected:
             self._latch_fault("physical clock changed outside the local scheduler")
             self._raise_fault()
         self._physical_now = now
-        clocks = tuple(int(s.clock) for s in self._epoch_serials)
+        serial0, serial1 = self._epoch_serials
+        clocks = (int(serial0.clock), int(serial1.clock))
         if boundary and clocks != self._epoch_expected:
             self._latch_fault("clock changed outside the local scheduler; attached loads are unsupported")
             self._raise_fault()

@@ -990,14 +990,18 @@ class NetworkBackend:
         if progress_callback is None:
             raise TypeError("follower frame completion requires progress_callback")
         deadline = time.monotonic() + _EDGE_RESPONSE_TIMEOUT_SECONDS
+        frame_done_received = False
         try:
             while True:
                 progress_callback()
-                try:
-                    self._frame_done_queue.get_nowait()
-                except queue.Empty:
-                    pass
-                else:
+                if not frame_done_received:
+                    try:
+                        self._frame_done_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    else:
+                        frame_done_received = True
+                if frame_done_received:
                     with self._edge_pending_condition:
                         if self._edge_pending == 0:
                             break

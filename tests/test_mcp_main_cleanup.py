@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -49,6 +50,13 @@ def _configure_main(
         symbol_sha1_by_path=(("primary.sym", "3" * 40), ("peer.sym", "4" * 40)),
     )
     monkeypatch.delenv("POKERED_SKIP_SHA1", raising=False)
+    # ``main`` reads explicit symbol pins directly from ``os.environ`` rather
+    # than through the mocked config loaders.  Clear operator/gate overrides
+    # so this helper exercises the mocked per-path VersionsConfig pins below.
+    # The production entry point still accepts explicit symbol overrides; this
+    # is test-fixture isolation, not a relaxation of its strict pin checks.
+    monkeypatch.delenv("POKERED_SYM_SHA1", raising=False)
+    monkeypatch.delenv("POKERED_PEER_SYM_SHA1", raising=False)
     monkeypatch.setattr(config, "load_primary_env", lambda: primary_env)
     monkeypatch.setattr(config, "load_peer_env", lambda: peer_env)
     monkeypatch.setattr(config, "load_versions", lambda: versions)
@@ -117,6 +125,21 @@ def _assert_cleanup_result(raised, operation_error, *error_names):
             "MCP session cleanup failed" in note
             for note in getattr(raised.value, "__notes__", ())
         )
+
+
+def test_configure_main_isolates_inherited_symbol_pin_overrides(
+    monkeypatch, tmp_path
+):
+    """The fixture must not inherit unrelated primary/peer symbol pins."""
+    monkeypatch.setenv("POKERED_SYM_SHA1", "a" * 40)
+    monkeypatch.setenv("POKERED_PEER_SYM_SHA1", "b" * 40)
+
+    calls = _configure_main(monkeypatch, tmp_path, with_peer=True)
+
+    assert os.environ.get("POKERED_SYM_SHA1") is None
+    assert os.environ.get("POKERED_PEER_SYM_SHA1") is None
+    mcp_server.main()
+    assert _closes(calls) == ["close:peer", "close:primary"]
 
 
 @pytest.mark.parametrize("with_peer", [False, True])

@@ -38,8 +38,11 @@ class Job:
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
 
-    def result(self):
-        self.thread.join(BOUND + 1)
+    def result(self, *, deadline=None):
+        if deadline is None:
+            self.thread.join(BOUND + 1)
+        else:
+            self.thread.join(max(0.0, deadline - time.monotonic()))
         assert not self.thread.is_alive(), "Session routing worker exceeded its bound"
         ok, value = self.results.get_nowait()
         if not ok:
@@ -47,12 +50,15 @@ class Job:
         return value
 
 
-def owner_results(workers):
+def owner_results(workers, *, deadline=None):
     """Collect both sides before raising so peer-close cannot hide its cause."""
     results, failures = [], []
     for index, worker in enumerate(workers):
         try:
-            results.append(worker.result())
+            if deadline is None:
+                results.append(worker.result())
+            else:
+                results.append(worker.result(deadline=deadline))
         except BaseException as exc:  # noqa: BLE001 - preserve both owner tracebacks
             exc.add_note(f"authored owner index={index}")
             failures.append(exc)
@@ -721,6 +727,14 @@ def test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_even
 @pytest.mark.parametrize("cancel_owner", ["session", "endpoint"])
 def test_real_partial_public_tick_failure_counts_only_completed_frames(tmp_path, cancel_owner):
     """A real hook cancels frame two of tick(3); no completed tick/fence claim."""
+    owner_count, calls_per_owner = 2, 1
+    work_capacity_s = owner_count * calls_per_owner * (BOUND + 1)
+    completion_capacity_s = work_capacity_s
+    # Bound the parent's paired workload and completion wait separately from
+    # the unchanged wire, attach, operation, barrier, and cleanup deadlines.
+    # Each cancelled owner must still satisfy the accounting assertions,
+    # rendezvous at the finished barrier, and unbind before reporting success.
+    paired_capacity_s = work_capacity_s + completion_capacity_s
     ready = threading.Barrier(2, timeout=BOUND)
     finished = threading.Barrier(2, timeout=BOUND)
     left, right = socket.socketpair()
@@ -769,9 +783,11 @@ def test_real_partial_public_tick_failure_counts_only_completed_frames(tmp_path,
                 if endpoint is not None:
                     endpoint.close()
 
+    # Collect both workers against one budget, not a fresh wait per owner.
+    paired_deadline = time.monotonic() + paired_capacity_s
     workers = [Job(lambda: owner(left, 0)), Job(lambda: owner(right, 1))]
     try:
-        owner_results(workers)
+        owner_results(workers, deadline=paired_deadline)
     finally:
         left.close()
         right.close()

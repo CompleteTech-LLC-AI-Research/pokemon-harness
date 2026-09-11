@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -57,7 +58,15 @@ def _start_owner_pair(core, *, irq=None):
     return master, slave
 
 
-def _send_and_service(master, slave, *, service_thread=None):
+def _send_and_service(
+    master,
+    slave,
+    *,
+    service_thread=None,
+    qsize_observed=None,
+    allow_probe=None,
+    sender_ref=None,
+):
     result: list[object] = []
 
     def send() -> None:
@@ -67,20 +76,254 @@ def _send_and_service(master, slave, *, service_thread=None):
             result.append(exc)
 
     sender = threading.Thread(target=send, daemon=True)
-    sender.start()
-    deadline = time.monotonic() + 1.0
-    while slave.debug_snapshot()["pending_edge_requests"] == 0:
-        assert time.monotonic() < deadline, "owner dispatch did not receive EDGE_REQ"
+    if sender_ref is not None:
+        sender_ref.append(sender)
+    sender_started = False
+    try:
+        sender.start()
+        sender_started = True
+        deadline = time.monotonic() + 1.0
+        _wait_for_owner_queue(
+            slave,
+            deadline=deadline,
+            qsize_observed=qsize_observed,
+            allow_probe=allow_probe,
+        )
+        if service_thread is None:
+            assert slave.service_pending_edges(max_edges=1) == 1
+        else:
+            service_thread.start()
+            service_thread.join(timeout=1.0)
+            assert not service_thread.is_alive()
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        return result
+    finally:
+        # A failure while the helper is waiting for the deterministic queue
+        # probe must release that test gate before transport teardown.  This
+        # keeps an assertion in the caller from leaving the helper thread
+        # parked until its full deadline.
+        if allow_probe is not None:
+            allow_probe.set()
+        if sender_started and sender.is_alive():
+            # A wait/service assertion can leave the nested sender blocked in
+            # on_edge. Close both ends before the bounded join so cleanup
+            # wakes that sender promptly. Preserve the active assertion or
+            # transport error if either stop fails, but record every cleanup
+            # failure and an unresolved nested thread instead of silently
+            # leaking it.
+            primary_error = sys.exc_info()[1]
+            stop_failures: list[tuple[str, BaseException]] = []
+            for operation, endpoint in (
+                ("master.stop", master),
+                ("slave.stop", slave),
+            ):
+                try:
+                    stopped = endpoint.stop(timeout_s=1.0)
+                    if stopped is False:
+                        stop_failures.append(
+                            (
+                                operation,
+                                RuntimeError(
+                                    f"{operation} returned False before nested sender join"
+                                ),
+                            )
+                        )
+                except BaseException as exc:  # noqa: BLE001 - teardown is best effort
+                    stop_failures.append((operation, exc))
+            sender.join(timeout=1.0)
+            sender_alive = sender.is_alive()
+
+            if primary_error is not None:
+                for operation, error in stop_failures:
+                    primary_error.add_note(
+                        f"nested cleanup {operation} failed: "
+                        f"{type(error).__name__}: {error}"
+                    )
+            elif stop_failures:
+                # This branch is defensive: the sender should only still be
+                # alive while unwinding an active assertion, but cleanup
+                # failures must remain observable even if that invariant is
+                # changed by a future helper refactor.
+                raise BaseExceptionGroup(
+                    "nested sender cleanup failed",
+                    [error for _operation, error in stop_failures],
+                )
+
+            if sender_alive:
+                leak_note = (
+                    "nested sender remained alive after bounded cleanup join; "
+                    "transport cleanup did not prove quiescence"
+                )
+                if primary_error is not None:
+                    primary_error.add_note(leak_note)
+                for _operation, error in stop_failures:
+                    error.add_note(leak_note)
+
+
+def _wait_for_owner_queue(
+    slave,
+    *,
+    count=1,
+    deadline,
+    qsize_observed=None,
+    allow_probe=None,
+):
+    """Wait until admitted-work accounting and the owner queue agree.
+
+    ``pending_edge_requests`` is published before the reader's queue put, so
+    it is not by itself a dispatch-ready signal.  The owner queue has no
+    competing consumer in these owner-dispatch tests; once its size reaches
+    ``count``, service_pending_edges can deterministically dequeue the work.
+    """
+    while True:
+        snapshot = slave.debug_snapshot()
+        pending = snapshot["pending_edge_requests"]
+        queue_size = slave._edge_queue.qsize()
+        if pending >= count and queue_size >= count:
+            return
+        if qsize_observed is not None and pending >= count and queue_size < count:
+            qsize_observed.set()
+            if allow_probe is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not allow_probe.wait(timeout=remaining):
+                    raise AssertionError("owner queue probe was not released")
+        assert time.monotonic() < deadline, "owner dispatch did not receive queued EDGE_REQ"
         time.sleep(0.001)
-    if service_thread is None:
-        assert slave.service_pending_edges(max_edges=1) == 1
-    else:
-        service_thread.start()
-        service_thread.join(timeout=1.0)
-        assert not service_thread.is_alive()
-    sender.join(timeout=1.0)
-    assert not sender.is_alive()
-    return result
+
+
+def test_owner_dispatch_waits_for_queue_put_after_pending_publication(monkeypatch):
+    """Pending accounting alone must not let the owner helper dispatch early."""
+    core = _Core()
+    master, slave = _start_owner_pair(core)
+    put_entered = threading.Event()
+    release_put = threading.Event()
+    qsize_observed = threading.Event()
+    allow_probe = threading.Event()
+    helper_done = threading.Event()
+    outcome: list[object] = []
+    original_put_nowait = slave._edge_queue.put_nowait
+
+    def paused_put(item):
+        put_entered.set()
+        assert release_put.wait(timeout=1.0), "test queue gate was not released"
+        return original_put_nowait(item)
+
+    monkeypatch.setattr(slave._edge_queue, "put_nowait", paused_put)
+
+    def run_helper() -> None:
+        try:
+            outcome.append(
+                _send_and_service(
+                    master,
+                    slave,
+                    qsize_observed=qsize_observed,
+                    allow_probe=allow_probe,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - asserted by caller
+            outcome.append(exc)
+        finally:
+            helper_done.set()
+
+    helper = threading.Thread(target=run_helper, daemon=True)
+    helper_started = False
+    try:
+        helper.start()
+        helper_started = True
+        assert put_entered.wait(timeout=1.0)
+        assert qsize_observed.wait(timeout=1.0)
+        assert not helper_done.is_set()
+        assert slave.debug_snapshot()["pending_edge_requests"] == 1
+        assert slave._edge_queue.empty()
+
+        allow_probe.set()
+        release_put.set()
+        helper.join(timeout=1.0)
+        assert not helper.is_alive()
+        assert outcome == [[0]]
+        assert core.calls == 1
+    finally:
+        release_put.set()
+        allow_probe.set()
+        try:
+            master.stop(timeout_s=1.0)
+        finally:
+            try:
+                slave.stop(timeout_s=1.0)
+            finally:
+                if helper_started:
+                    helper.join(timeout=1.0)
+                    assert not helper.is_alive()
+
+
+def test_nested_sender_cleanup_records_stop_faults_without_masking_primary(monkeypatch) -> None:
+    """A faulted cleanup must release gates and leave no hidden sender thread."""
+    sender_entered = threading.Event()
+    release_sender = threading.Event()
+    sender_done = threading.Event()
+    allow_probe = threading.Event()
+    primary = AssertionError("owner queue wait failed")
+    sender_ref: list[threading.Thread] = []
+
+    class _BlockedMaster:
+        def on_edge(self, _our_bit, _our_role):
+            sender_entered.set()
+            try:
+                assert release_sender.wait(timeout=5.0)
+                return 0
+            finally:
+                sender_done.set()
+
+        def stop(self, *, timeout_s):
+            del timeout_s
+            raise RuntimeError("master stop fault")
+
+    class _BlockedSlave:
+        def stop(self, *, timeout_s):
+            del timeout_s
+            raise RuntimeError("slave stop fault")
+
+    master = _BlockedMaster()
+    slave = _BlockedSlave()
+
+    def fail_wait(*_args, **_kwargs):
+        assert sender_entered.wait(timeout=1.0)
+        raise primary
+
+    # pytest owns restoration even if an assertion in this regression test
+    # fails while the deliberately blocked sender is being released.
+    monkeypatch.setitem(globals(), "_wait_for_owner_queue", fail_wait)
+    try:
+        with pytest.raises(AssertionError, match="owner queue wait failed") as raised:
+            _send_and_service(
+                master,
+                slave,
+                allow_probe=allow_probe,
+                sender_ref=sender_ref,
+            )
+        assert raised.value is primary
+        notes = "\n".join(raised.value.__notes__)
+        assert "nested cleanup master.stop failed" in notes
+        assert "nested cleanup slave.stop failed" in notes
+        assert "nested sender remained alive after bounded cleanup join" in notes
+        assert allow_probe.is_set()
+
+        # The intentionally faulted stop hooks above cannot wake the blocked
+        # sender. Release its final gate explicitly, then prove the helper's
+        # daemon thread actually exits before this test returns.
+        release_sender.set()
+        assert sender_ref
+        sender_ref[0].join(timeout=1.0)
+        assert not sender_ref[0].is_alive()
+        assert sender_done.wait(timeout=1.0)
+    finally:
+        allow_probe.set()
+        release_sender.set()
+        if sender_ref:
+            sender_ref[0].join(timeout=1.0)
+            assert not sender_ref[0].is_alive()
+        assert sender_done.wait(timeout=1.0)
 
 
 def test_incoming_edge_and_completion_irq_run_on_owner_thread() -> None:
@@ -218,9 +461,7 @@ def test_owner_dispatch_irq_failure_closes_transport_without_replaying_native_ed
     sender.start()
     try:
         deadline = time.monotonic() + 1.0
-        while slave.debug_snapshot()["pending_edge_requests"] == 0:
-            assert time.monotonic() < deadline
-            time.sleep(0.001)
+        _wait_for_owner_queue(slave, deadline=deadline)
         with pytest.raises(NetworkBackendError) as owner_error:
             slave.service_pending_edges(max_edges=1)
         assert owner_error.value.__cause__ is cause
@@ -276,9 +517,7 @@ def test_public_network_step_surfaces_owner_irq_failure() -> None:
             sender = threading.Thread(target=send, daemon=True)
             sender.start()
             deadline = time.monotonic() + 1.0
-            while slave.debug_snapshot()["pending_edge_requests"] == 0:
-                assert time.monotonic() < deadline
-                time.sleep(0.001)
+            _wait_for_owner_queue(slave, deadline=deadline)
             if index == 7:
                 slave._irq_callback = lambda: (_ for _ in ()).throw(ValueError("owner IRQ"))
             if index < 7:
@@ -311,9 +550,7 @@ def test_malformed_multiple_pending_edges_preserve_fifo_after_rearm(deferrals) -
         master._sock.setblocking(True)
         master._sock.sendall(_FRAME.pack(_OP_EDGE_REQ, 1) + _FRAME.pack(_OP_EDGE_REQ, 0))
         deadline = time.monotonic() + 1.0
-        while slave.debug_snapshot()["pending_edge_requests"] < 2:
-            assert time.monotonic() < deadline
-            time.sleep(0.001)
+        _wait_for_owner_queue(slave, count=2, deadline=deadline)
         for _ in range(deferrals):
             assert slave.service_pending_edges(max_edges=1) == 0
         assert core.applied_bits == []

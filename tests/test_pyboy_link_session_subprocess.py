@@ -68,6 +68,14 @@ _REQUIRED_BACKEND_STATS = (
 )
 
 
+def _watchdog_dumps_ready(data: str, count: int) -> bool:
+    """Require a completed frame in each of the first ``count`` dumps."""
+    segments = data.split("Timeout (")[1:]
+    return len(segments) >= count and all(
+        'File "<string>"' in segment for segment in segments[:count]
+    )
+
+
 def _fixtures_ready() -> bool:
     rom = rom_path("yellow")
     sym = sym_path("yellow")
@@ -1318,10 +1326,22 @@ def test_peer_trace_watchdog(watchdog_case, monkeypatch):
     if watchdog_case == "real-output":
         # Real faulthandler runs only in this disposable Python child. No ROM
         # imports/loads, emulator, TCP connection, or repository artifacts.
+        assert not _watchdog_dumps_ready("Timeout (first)\n", 1)
+        assert not _watchdog_dumps_ready(
+            'Timeout (first)\nFile "<string>", line 1\n'
+            'File "<string>", line 2\nTimeout (second)\n',
+            2,
+        )
+        assert _watchdog_dumps_ready(
+            'Timeout (first)\nFile "<string>", line 1\n'
+            'Timeout (second)\nFile "<string>", line 2\n',
+            2,
+        )
         script = """
 import json, os, sys, time
 from pathlib import Path
 from tests import _tcp_trade_peer as peer
+from tests.test_pyboy_link_session_subprocess import _watchdog_dumps_ready
 
 directory = Path(sys.argv[1])
 os.environ['POKERED_PEER_TRACE_AFTER_SECONDS'] = '0.05'
@@ -1336,9 +1356,13 @@ try:
     assert path.name.startswith(f'peer-trace-{os.getpid()}-')
     def wait_for_dumps(count):
         cutoff = time.monotonic() + 5.0
+        data = ""
         while time.monotonic() < cutoff:
             data = path.read_text(errors='replace')
-            if data.count('Timeout (') >= count:
+            # faulthandler writes each dump incrementally.  The timeout
+            # header can be visible before the frame lines that make the
+            # dump useful (and that the assertions below require).
+            if _watchdog_dumps_ready(data, count):
                 return data
             time.sleep(0.01)
         raise AssertionError('watchdog did not emit expected dump: ' + data)

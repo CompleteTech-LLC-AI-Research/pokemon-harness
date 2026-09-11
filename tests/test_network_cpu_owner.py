@@ -338,3 +338,146 @@ def test_network_pyboy_external_clock_dispatch_wakes_halted_cpu(_emulator_fixtur
 def test_network_pyboy_internal_clock_dispatch_completes_halted_cpu(_emulator_fixture):  # noqa: F811
     """The owner-thread PyBoy master completes a real HALT serial transfer."""
     _run_cpu_case(_emulator_fixture, internal_clock=True)
+
+
+class _PumpBackend:
+    """Small queue-backed double for the private native owner pump."""
+
+    def __init__(
+        self,
+        edge_queue: queue.Queue,
+        *,
+        service_error: BaseException | None = None,
+        closed: bool = False,
+    ):
+        self._edge_queue = edge_queue
+        self._service_error = service_error
+        self._closed = closed
+        self.service_calls = 0
+        self.serviced: list[object] = []
+        self.closed_errors: list[BaseException] = []
+
+    def service_pending_edges(self) -> int:
+        self.service_calls += 1
+        if self._service_error is not None:
+            raise self._service_error
+        try:
+            self.serviced.append(self._edge_queue.get_nowait())
+        except queue.Empty:
+            return 0
+        return 1
+
+    def _mark_closed(self, error: BaseException) -> None:
+        self._closed = True
+        self.closed_errors.append(error)
+
+
+class _ArrivesAfterEmpty(queue.Queue):
+    """Inject one request after the optimistic empty observation."""
+
+    def __init__(self, item: object):
+        super().__init__()
+        self._item = item
+        self._injected = False
+
+    def empty(self) -> bool:
+        was_empty = super().empty()
+        if was_empty and not self._injected:
+            self._injected = True
+            self.put_nowait(self._item)
+        return was_empty
+
+
+class _NoQueuePumpBackend:
+    """Legacy-like backend that does not expose an inbound queue attribute."""
+
+    def __init__(self):
+        self.service_calls = 0
+        self.closed_errors: list[BaseException] = []
+
+    def service_pending_edges(self) -> int:
+        self.service_calls += 1
+        return 0
+
+    def _mark_closed(self, error: BaseException) -> None:
+        self.closed_errors.append(error)
+
+
+class _BrokenEmptyQueue:
+    """Queue probe double used to exercise the pump's fail-closed boundary."""
+
+    def __init__(self, error: BaseException):
+        self._error = error
+
+    def empty(self) -> bool:
+        raise self._error
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_network_owner_pump_skips_empty_queue_and_closed_idle_backend(closed: bool) -> None:
+    """Idle native boundaries do not enter the backend service path."""
+    backend = _PumpBackend(queue.Queue(), closed=closed)
+    pump = PyBoyLinkSession._make_network_owner_pump(backend)
+
+    pump()
+
+    assert backend.service_calls == 0
+    assert backend.serviced == []
+    assert backend.closed_errors == []
+    assert backend._closed is closed
+
+
+def test_network_owner_pump_late_queue_arrival_is_deferred_to_next_boundary() -> None:
+    """The empty hint cannot consume or lose a request arriving concurrently."""
+    backend = _PumpBackend(_ArrivesAfterEmpty("late-edge"))
+    pump = PyBoyLinkSession._make_network_owner_pump(backend)
+
+    # The queue inserts the request after returning the optimistic ``True``
+    # result.  The first callback therefore skips service, while the next
+    # callback must still observe and apply the retained request.
+    pump()
+    assert backend.service_calls == 0
+    assert backend.serviced == []
+
+    pump()
+    assert backend.service_calls == 1
+    assert backend.serviced == ["late-edge"]
+    assert backend.closed_errors == []
+
+
+def test_network_owner_pump_fail_closed_on_nonempty_service_error() -> None:
+    """A queued request still uses the existing noexcept fail-closed path."""
+    error = RuntimeError("owner service failed")
+    edge_queue: queue.Queue[object] = queue.Queue()
+    edge_queue.put_nowait("edge")
+    backend = _PumpBackend(edge_queue, service_error=error)
+    pump = PyBoyLinkSession._make_network_owner_pump(backend)
+
+    pump()
+
+    assert backend.service_calls == 1
+    assert backend.closed_errors == [error]
+
+
+def test_network_owner_pump_without_queue_uses_legacy_service_fallback() -> None:
+    """Backends without the private queue attribute retain old behavior."""
+    backend = _NoQueuePumpBackend()
+    pump = PyBoyLinkSession._make_network_owner_pump(backend)
+
+    pump()
+
+    assert backend.service_calls == 1
+    assert backend.closed_errors == []
+
+
+def test_network_owner_pump_empty_probe_error_fails_closed() -> None:
+    """A queue-probe failure cannot escape a native noexcept callback."""
+    error = RuntimeError("queue probe failed")
+    backend = _PumpBackend(_BrokenEmptyQueue(error))
+    pump = PyBoyLinkSession._make_network_owner_pump(backend)
+
+    pump()
+
+    assert backend.service_calls == 0
+    assert backend.closed_errors == [error]
+    assert backend._closed is True

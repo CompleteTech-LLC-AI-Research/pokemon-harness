@@ -137,6 +137,21 @@ def test_reported_physical_clock_regression_detected_after_single_instruction():
     assert a.mb.breakpoint_singlestep == b.mb.breakpoint_singlestep == 7
 
 
+def test_epoch_check_reads_pair_in_stable_order(monkeypatch):
+    link, _a, _b, _ = pair()
+    calls = []
+
+    def read_physical_clock(endpoint):
+        calls.append(endpoint.name)
+        return (0, endpoint.mb.serial.clock * 2)
+
+    monkeypatch.setattr(link, "_read_physical_clock", read_physical_clock)
+
+    assert link._check_epoch() == (0, 0)
+    assert calls == ["a", "b"]
+    assert link._physical_now == (0, 0)
+
+
 def test_completed_frame_peer_rearm_is_line_idle_without_next_frame_tick():
     link, a, b, trace = pair(instructions=1)
     progress = link._make_owned_peer_progressor(a)

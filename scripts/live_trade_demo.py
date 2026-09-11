@@ -520,15 +520,118 @@ def _open_session(version: str, view: bool = False, window_pos: tuple[int, int] 
             sound_emulated=False,
         )
 
-    session = Session.from_files(rom, sym, view=view, pyboy_factory=_factory)
-    session.load_state(_state_path(version).read_bytes())
-    # ``load_state`` restores RAM + registers but the LCD framebuffer it
-    # repaints can lag the restored map by one or two frames (when the
-    # state was saved mid-transition). Tick a dozen frames with rendering
-    # on so the first screenshot reflects the *current* map, not a stale
-    # pre-save one.
-    session.step(12, render=True)
-    return session
+    session = None
+    try:
+        session = Session.from_files(rom, sym, view=view, pyboy_factory=_factory)
+        session.load_state(_state_path(version).read_bytes())
+        # ``load_state`` restores RAM + registers but the LCD framebuffer it
+        # repaints can lag the restored map by one or two frames (when the
+        # state was saved mid-transition). Tick a dozen frames with rendering
+        # on so the first screenshot reflects the *current* map, not a stale
+        # pre-save one.
+        session.step(12, render=True)
+        return session
+    except BaseException as exc:
+        _cleanup_pair(None, session, None, active_error=exc)
+        raise
+
+
+def _cleanup_pair(
+    link,
+    a,
+    b,
+    *,
+    active_error: BaseException | None = None,
+) -> None:
+    """Detach a pair owner, then close both sessions.
+
+    Every cleanup operation is attempted, including when one raises a
+    ``BaseException``. An active operation error remains primary: cleanup
+    failures are attached as notes and never replace it. With no active
+    error, cleanup failures are raised as a group so successful work cannot
+    be reported after an incomplete teardown.
+    """
+    failures: list[tuple[str, BaseException]] = []
+    if link is not None:
+        try:
+            link.detach_all()
+        except BaseException as exc:  # noqa: BLE001 - teardown must continue
+            failures.append(("link.detach_all", exc))
+    for label, session in (("A", a), ("B", b)):
+        if session is None:
+            continue
+        try:
+            session.close()
+        except BaseException as exc:  # noqa: BLE001 - teardown must continue
+            failures.append((f"session {label}.close", exc))
+
+    if not failures:
+        return
+
+    if active_error is not None:
+        active_error.add_note("pair cleanup failures:")
+        for operation, error in failures:
+            active_error.add_note(
+                f"  {operation}: {type(error).__name__}: {error}"
+            )
+        return
+
+    for operation, error in failures:
+        error.add_note(f"pair cleanup operation: {operation}")
+    raise BaseExceptionGroup(
+        "pair cleanup failed",
+        [error for _operation, error in failures],
+    )
+
+
+def _open_pair_sessions(
+    version_a: str,
+    version_b: str,
+    *,
+    view: bool,
+):
+    """Open both sessions and roll back a partial startup on any failure."""
+    a = b = None
+    try:
+        a = _open_session(version_a, view=view, window_pos=(80, 120))
+        b = _open_session(version_b, view=view, window_pos=(640, 120))
+
+        pyboy_hwnds: list[int] = []
+        if view:
+            # Force both windows onto the primary monitor, side-by-side. The
+            # primary monitor on this machine is 2560x1440 at (0,0) — these
+            # coords leave the windows comfortably centered and visible.
+            if _force_move_pyboy_windows([(200, 300), (1200, 300)]):
+                print(
+                    "[info] moved PyBoy windows to (200,300) and (1200,300) "
+                    "on primary monitor",
+                    flush=True,
+                )
+            else:
+                print(
+                    "[warn] could not locate both PyBoy windows to move them; "
+                    "they may be on a secondary monitor",
+                    flush=True,
+                )
+            pyboy_hwnds = _find_pyboy_hwnds()
+            if len(pyboy_hwnds) >= 2:
+                print(
+                    f"[info] PyBoy window handles: red={pyboy_hwnds[0]}, "
+                    f"blue={pyboy_hwnds[1]} — natural-mode captures will use "
+                    "Win32 screen-grab so dialogs are included",
+                    flush=True,
+                )
+            else:
+                pyboy_hwnds = []
+                print(
+                    "[warn] could not resolve both PyBoy window handles; "
+                    "natural-mode captures will fall back to framebuffer reads",
+                    flush=True,
+                )
+        return a, b, pyboy_hwnds
+    except BaseException as exc:
+        _cleanup_pair(None, a, b, active_error=exc)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -567,9 +670,7 @@ def _drive_two_sessions_to_link_menu(
             _install_hook_counter(sess, sym, bucket, idx)
 
     def tick_both_coarse(frames: int) -> None:
-        for _ in range(frames):
-            a.step(1)
-            b.step(1)
+        link.step_interleaved(frames)
         if dwell_s > 0:
             time.sleep(dwell_s)
 
@@ -717,9 +818,7 @@ def _drive_complete_trade(
             time.sleep(dwell_s)
 
     def tick_per_frame(frames: int) -> None:
-        for _ in range(frames):
-            a.step(1)
-            b.step(1)
+        link.step_interleaved(frames)
         if dwell_s > 0:
             time.sleep(dwell_s)
 
@@ -1063,36 +1162,17 @@ def main() -> int:
 
     t_all_start = time.perf_counter()
 
-    # Side-by-side on the primary monitor: Red on the left, Blue on the right.
-    # Game Boy screen is 160x144; SDL2 default 3x scale is ~480x432 plus
-    # window chrome. Spacing ~520px apart keeps both fully visible.
-    # Primary monitor is queried at runtime — we can't assume (0,0) spans
-    # it on multi-monitor setups (secondary monitors with negative X exist).
-    # SDL_VIDEO_WINDOW_POS is unreliable on Windows under those setups too,
-    # so we open the windows, then force-move them via Win32 below.
-    a = _open_session(version_a, view=args.view, window_pos=(80, 120))
-    b = _open_session(version_b, view=args.view, window_pos=(640, 120))
+    a = b = None
+    link = None
+    active_error: BaseException | None = None
+    try:
+        # Side-by-side on the primary monitor: Red on the left, Blue on the right.
+        # Opening and window setup are transactional so a failed second session
+        # cannot strand the first emulator.
+        a, b, _pyboy_hwnds = _open_pair_sessions(
+            version_a, version_b, view=args.view
+        )
 
-    if args.view:
-        # Force both windows onto the primary monitor, side-by-side. The
-        # primary monitor on this machine is 2560x1440 at (0,0) — these
-        # coords leave the windows comfortably centered and visible.
-        if _force_move_pyboy_windows([(200, 300), (1200, 300)]):
-            print("[info] moved PyBoy windows to (200,300) and (1200,300) "
-                  "on primary monitor", flush=True)
-        else:
-            print("[warn] could not locate both PyBoy windows to move them; "
-                  "they may be on a secondary monitor", flush=True)
-        _pyboy_hwnds = _find_pyboy_hwnds()
-        if len(_pyboy_hwnds) >= 2:
-            print(f"[info] PyBoy window handles: red={_pyboy_hwnds[0]}, "
-                  f"blue={_pyboy_hwnds[1]} — natural-mode captures will use "
-                  f"Win32 screen-grab so dialogs are included", flush=True)
-        else:
-            _pyboy_hwnds = []
-            print("[warn] could not resolve both PyBoy window handles; "
-                  "natural-mode captures will fall back to framebuffer reads",
-                  flush=True)
         # PyBoy's Cython ``set_emulation_speed`` is declared ``int`` in the
         # .pxd, so fractional values silently truncate to 0 (unlimited —
         # the opposite of what we want). Instead, translate ``--speed`` into
@@ -1100,13 +1180,12 @@ def main() -> int:
         # each menu state stays on-screen long enough to watch.
         # 20 frames/iter @ 60fps = 0.333s emulated. At speed=0.5 we want
         # each iter to take ~0.666s wall — so dwell ~= 0.333s.
-    _iter_s = 20.0 / 60.0
-    _dwell_s = max(0.0, (_iter_s / max(args.speed, 1e-3)) - _iter_s) \
-        if args.view else 0.0
-    if args.view and _dwell_s > 0:
-        print(f"[info] dwell per driver iteration: {_dwell_s*1000:.0f}ms "
-              f"(target speed {args.speed}x)", flush=True)
-    try:
+        _iter_s = 20.0 / 60.0
+        _dwell_s = max(0.0, (_iter_s / max(args.speed, 1e-3)) - _iter_s) \
+            if args.view else 0.0
+        if args.view and _dwell_s > 0:
+            print(f"[info] dwell per driver iteration: {_dwell_s*1000:.0f}ms "
+                  f"(target speed {args.speed}x)", flush=True)
         # Phase A: pair + start.
         t0 = time.perf_counter()
         link = PyBoyLinkSession.local(view=args.view)
@@ -1282,13 +1361,9 @@ def main() -> int:
         # "Take good care of <mon>!" dialog. Hold on it so the viewer
         # sees the line before we tick forward to verify the party swap.
         if args.natural:
-            for _ in range(60):   # ~1s — let the dialog render
-                a.step(1)
-                b.step(1)
+            link.step_interleaved(60)  # ~1s — let the dialog render
             _nat_shot("nat_07_take_good_care")
-            for _ in range(120):  # ~2s — remainder of the dwell
-                a.step(1)
-                b.step(1)
+            link.step_interleaved(120)  # ~2s — remainder of the dwell
         # Let a few extra frames tick so the party reflects the swap.
         link.step_interleaved(30)
 
@@ -1325,9 +1400,7 @@ def main() -> int:
                 "phase_12_tc_idle_a",
                 "phase_13_tc_idle_b",
             ]):
-                for _ in range(180):  # 3 seconds
-                    a.step(1)
-                    b.step(1)
+                link.step_interleaved(180)  # 3 seconds
                 try:
                     paths = shoot.shoot_pair(a, b, tag)
                     for p in paths:
@@ -1344,9 +1417,8 @@ def main() -> int:
             hold_s = args.hold_after_s
             print(f"[info] post-trade idle hold for {hold_s}s — watch the "
                   f"windows, they'll close on their own.", flush=True)
-            for _ in range(hold_s * 60):
-                a.step(1)
-                b.step(1)
+            if hold_s > 0:
+                link.step_interleaved(hold_s * 60)
 
         t_total = time.perf_counter() - t_all_start
         print(f"[total wall-clock] {t_total:.2f}s", flush=True)
@@ -1386,23 +1458,34 @@ def main() -> int:
             flush=True,
         )
 
+        result = 0
         if not trade_happened:
             print(
                 "[error] trade did not complete end-to-end. See diag "
                 "counters above and the PNGs under the outdir.",
                 flush=True,
             )
-            return 1
-        return 0
+            result = 1
+        # Keep the result outside the try/finally return path.  A return from
+        # inside the try block makes it too easy for a future try/except/else
+        # refactor to skip the success-path bookkeeping while teardown is
+        # still running.  The finally block must always see the real active
+        # exception (if any), and the caller receives the status only after
+        # pair cleanup has completed.
+        return_code = result
+    except BaseException as exc:
+        active_error = exc
+        raise
+    else:
+        # This branch runs for both the successful and unsuccessful trade
+        # result.  Keep ``active_error`` explicitly clear before ``finally``
+        # so cleanup failures are reported as teardown failures rather than
+        # being mistaken for a failure from the trade operation itself.
+        active_error = None
     finally:
-        try:
-            a.close()
-        except Exception:  # noqa: BLE001, S110 - cleanup must attempt both sessions
-            pass
-        try:
-            b.close()
-        except Exception:  # noqa: BLE001, S110 - cleanup must attempt both sessions
-            pass
+        _cleanup_pair(link, a, b, active_error=active_error)
+
+    return return_code
 
 
 if __name__ == "__main__":
