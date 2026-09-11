@@ -325,8 +325,22 @@ def test_simultaneous_owner_masters_exchange_sampled_bits_without_core_access(mo
     left, right = NetworkBackend.pair()
     monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.5)
     start = threading.Barrier(2)
+    edge_send_start = threading.Barrier(2)
     results: list[tuple[str, int]] = []
     errors: list[BaseException] = []
+
+    def gate_edge_send(original):
+        def send(frame, *, timeout, operation, cancel_event=None):
+            if operation == "EDGE_REQ":
+                edge_send_start.wait(timeout=1.0)
+            return original(
+                frame,
+                timeout=timeout,
+                operation=operation,
+                cancel_event=cancel_event,
+            )
+
+        return send
 
     def clock(backend: NetworkBackend, label: str, bit: int) -> None:
         try:
@@ -348,6 +362,8 @@ def test_simultaneous_owner_masters_exchange_sampled_bits_without_core_access(mo
             serial_gate=SerialOperationGate(),
             dispatch_to_owner=True,
         )
+        left._send_frame = gate_edge_send(left._send_frame)
+        right._send_frame = gate_edge_send(right._send_frame)
         left_thread.start()
         right_thread.start()
         left_thread.join(timeout=2.0)
