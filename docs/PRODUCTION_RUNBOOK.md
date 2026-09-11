@@ -619,9 +619,11 @@ python -m pytest -q \
 They require the pinned source-compatible PyBoy runtime, ROM-specific Cable
 Club fixtures, and matching symbols. The trade case compares the complete
 game-owned party-mon records before and after the exchange; the battle case
-uses a legal derived three-mon fixture and requires both sides to reach move
-exchange and turn execution. It does not require the optional damage
-calculation hook. Neither case writes party or battle state during acceptance.
+uses a legal derived three-mon fixture and requires both sides to retain a
+read-only, settled snapshot after move exchange. The snapshot cross-checks
+active combatants, exchanged slots and moves, PP consumption, execution paths,
+and every observed damage application before either peer can pass. Neither case
+writes party or battle state during acceptance.
 These selectors and their declaration are not live evidence by themselves.
 The retained source strict battle result covers all 19 local/TCP entrypoints;
 the current working-tree source trade result covers all 19 strict entrypoints.
@@ -688,7 +690,8 @@ python -m pytest -q -ra \
 
 The LinkMenu test is a transport smoke test. The strict subprocess trade and
 battle tests are acceptance selectors: they use cooperative phase rendezvous,
-compare complete party-mon records or execute a battle turn, and are
+compare complete party-mon records or validate a settled, cross-peer battle
+turn snapshot, and are
 parametrized over all nine ordered canonical listener/connector pairs. Both
 payloads travel through native bit-level serial traffic, and the tests reject
 the out-of-band exchange counter. A declaration or collection result does not

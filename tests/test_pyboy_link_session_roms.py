@@ -48,6 +48,12 @@ import pytest
 
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_core import SerialCore
+from tests._battle_turn_evidence import (
+    EVIDENCE_EVENTS,
+    BattleTurnObserver,
+    install_continuation_hooks,
+    verify_battle_turns,
+)
 from tests._rom_assets import fixture_path, rom_path, sym_path
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -406,7 +412,13 @@ def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
 # ---------------------------------------------------------------------------
 
 
-def _install_hook_counter(session, symbol: str, bucket: list, slot: int) -> None:
+def _install_hook_counter(
+    session,
+    symbol: str,
+    bucket: list,
+    slot: int,
+    observer: BattleTurnObserver | None = None,
+) -> None:
     """Copy of the counter-hook pattern from test_link_integration_remote.
 
     Installs a PyBoy execution hook at ``symbol``; each time the
@@ -420,6 +432,8 @@ def _install_hook_counter(session, symbol: str, bucket: list, slot: int) -> None
 
     def _cb(_ctx: object) -> None:
         bucket[slot] += 1
+        if observer is not None:
+            observer.observe(symbol)
 
     try:
         session._pyboy.hook_register(bank, addr, _cb, None)
@@ -1259,12 +1273,40 @@ _LINK_MENU_MAX_ITEM = 3  # Yellow has four entries; Red/Blue have fewer.
 _LINK_MENU_REQUIRED_KEYS = 0x01  # A is one of the ROM's watched keys.
 
 
-def _install_battle_diag_counters(a, b) -> dict:
-    counters = {sym: [0, 0] for sym in _BATTLE_DIAG_SYMBOLS}
-    for idx, sess in enumerate((a, b)):
+def _install_battle_diag_counters(
+    a, b, *, versions: tuple[str, str] = ("yellow", "yellow")
+) -> dict:
+    """Install existing counters and read-only settled-turn observers."""
+    symbols = tuple(dict.fromkeys((*_BATTLE_DIAG_SYMBOLS, *EVIDENCE_EVENTS)))
+    counters = {sym: [0, 0] for sym in symbols}
+    observers = []
+    for idx, (sess, version) in enumerate(zip((a, b), versions, strict=True)):
+        observer = BattleTurnObserver(sess, role=f"local-{idx}", version=version)
+        observers.append(observer)
         for sym, bucket in counters.items():
-            _install_hook_counter(sess, sym, bucket, idx)
+            _install_hook_counter(sess, sym, bucket, idx, observer)
+        install_continuation_hooks(sess, observer, version=version)
+    counters["_battle_evidence"] = observers
     return counters
+
+
+def _assert_settled_battle_evidence(counters: dict) -> None:
+    observers = counters.get("_battle_evidence")
+    assert isinstance(observers, list) and len(observers) == 2
+    rows = [observer.snapshot() for observer in observers]
+    errors = verify_battle_turns(rows)
+    assert not errors, f"battle settlement evidence failed: {errors}; rows={rows}"
+
+
+def _wait_for_settled_battle_evidence(link, counters: dict, *, budget_frames: int = 600) -> None:
+    """Let the ROM pass the exchange into an immutable later-turn boundary."""
+    observers = counters.get("_battle_evidence")
+    assert isinstance(observers, list) and len(observers) == 2
+    for _ in range(0, budget_frames, 20):
+        if all(observer.snapshot()["settled"] for observer in observers):
+            break
+        link.step_interleaved(20, chunk_cycles=_LINK_CHUNK_CYCLES)
+    _assert_settled_battle_evidence(counters)
 
 
 def _read_link_menu_cursor(session) -> int | None:
@@ -1923,7 +1965,7 @@ def test_pair_completes_battle_turn(version_a, version_b):
         link.attach(a._pyboy)
         link.attach(b._pyboy)
 
-        counters = _install_battle_diag_counters(a, b)
+        counters = _install_battle_diag_counters(a, b, versions=(version_a, version_b))
         warp = _drive_past_link_menu_to_colosseum(a, b, link)
         assert warp["final_map_a"] == COLOSSEUM_MAP_ID
         assert warp["final_map_b"] == COLOSSEUM_MAP_ID
@@ -1968,6 +2010,7 @@ def test_pair_completes_battle_turn(version_a, version_b):
             f"Side B never fired ExecutePlayerMove or ExecuteEnemyMove; "
             f"the turn didn't advance on B. counters={counters}"
         )
+        _wait_for_settled_battle_evidence(link, counters)
     finally:
         _close_linked_pair(locals().get("link"), a, b)
 
@@ -1990,7 +2033,7 @@ def test_red_yellow_battle_turn_is_resolved():
         link = PyBoyLinkSession.local()
         link.attach(a._pyboy)
         link.attach(b._pyboy)
-        counters = _install_battle_diag_counters(a, b)
+        counters = _install_battle_diag_counters(a, b, versions=("red", "yellow"))
         warp = _drive_past_link_menu_to_colosseum(a, b, link)
         assert warp["final_map_a"] == COLOSSEUM_MAP_ID
         assert warp["final_map_b"] == COLOSSEUM_MAP_ID
@@ -2012,6 +2055,7 @@ def test_red_yellow_battle_turn_is_resolved():
             assert counters[symbol][0] > 0 and counters[symbol][1] > 0, (
                 f"{symbol} did not fire on both sides: counters={counters}"
             )
+        _wait_for_settled_battle_evidence(link, counters)
     finally:
         _close_linked_pair(locals().get("link"), a, b)
 

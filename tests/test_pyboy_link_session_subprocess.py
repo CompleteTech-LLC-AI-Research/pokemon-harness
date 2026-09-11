@@ -35,6 +35,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._battle_turn_evidence import verify_battle_turns
 from tests._rom_assets import fixture_path, rom_path, sym_path
 from tests._tcp_trade_peer import _TRADE_DIAG_SYMBOLS, _hold_at_sync_boundary
 
@@ -563,6 +564,11 @@ def _assert_strict_peer_result(
             )
         if result["ExecutePlayerMove"] + result["ExecuteEnemyMove"] <= 0:
             raise AssertionError(f"{label} peer did not complete a battle turn; result={result}")
+        evidence = result.get("battle_turn")
+        if not isinstance(evidence, dict) or evidence.get("settled") is not True:
+            raise AssertionError(
+                f"{label} peer lacks a settled battle snapshot; result={result}"
+            )
         return
     raise ValueError(f"unsupported strict peer goal: {goal}")
 
@@ -2137,7 +2143,6 @@ def test_subprocess_pair_completes_trade_over_tcp(listener_version: str, connect
         expected_role="connect",
         expected_version=connector_version,
     )
-
     assert result_a.get("_AddEnemyMonToPlayerParty", 0) > 0, f"listener never traded; {result_a}"
     assert result_b.get("_AddEnemyMonToPlayerParty", 0) > 0, f"connector never traded; {result_b}"
     for result in (result_a, result_b):
@@ -2260,6 +2265,11 @@ def test_subprocess_pair_resolves_battle_turn_over_tcp(
         goal="battle",
         expected_role="connect",
         expected_version=connector_version,
+    )
+    evidence_errors = verify_battle_turns([result_a, result_b])
+    assert not evidence_errors, (
+        "remote battle peers disagreed on settled application evidence: "
+        f"{evidence_errors}; listener={result_a}; connector={result_b}"
     )
 
     required_hooks = (

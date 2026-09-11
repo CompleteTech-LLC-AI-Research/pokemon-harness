@@ -33,6 +33,12 @@ from pathlib import Path
 from threading import get_ident
 from typing import NamedTuple
 
+from tests._battle_turn_evidence import (
+    EVIDENCE_EVENTS,
+    BattleTurnObserver,
+    install_continuation_hooks,
+)
+
 # Opt-in diagnostic contract only; hook installation is a separate increment.
 _PRE_LINK_MENU_SCHEMA_VERSION = 1
 _PRE_LINK_MENU_HISTORY_LIMIT = 32
@@ -419,7 +425,7 @@ class _PreLinkMenuHistory:
             "errors_truncated": self.error_count > len(self.errors),
         })
 
-_TRADE_DIAG_SYMBOLS = (
+_TRADE_DIAG_SYMBOLS = tuple(dict.fromkeys((
     "CableClubNPC",
     "YesNoChoice",
     "HandleMenuInput",
@@ -463,7 +469,11 @@ _TRADE_DIAG_SYMBOLS = (
     "ExecuteEnemyMove",
     "PlayerCalcMoveDamage",
     "EndOfBattle",
-)
+    *(
+        event for event in EVIDENCE_EVENTS
+        if event not in {"post_exchange", "local_fully_paralyzed", "enemy_fully_paralyzed"}
+    ),
+)))
 
 
 PARTY_MON_SIZE = 44
@@ -741,7 +751,7 @@ class _LinkMenuHistory:
                 self.first_decisive.setdefault(direction, sample)
         self.recent.append(sample)
 
-    def install(self, buckets, observers_by_address=None):
+    def install(self, buckets, observers_by_address=None, battle_observer=None):
         if self._installed:
             return
         self._installed = True
@@ -781,6 +791,8 @@ class _LinkMenuHistory:
                             self._observe(event)
                     except BaseException as exc:  # noqa: BLE001
                         self._error(event, "callback", exc)
+                    if battle_observer is not None and event in EVIDENCE_EVENTS:
+                        battle_observer.observe(event)
                 if observer is not None and observer.available:
                     try:
                         observer._observe("Serial_SyncAndExchangeNybble")
@@ -1145,6 +1157,7 @@ def _run_peer(trace=None) -> int:
     final_cpu: dict[str, object] = {}
     link_menu_state: dict[str, object] = {}
     link_menu_history = _LinkMenuHistory(None, role=args.role, version=args.version)
+    battle_observer: BattleTurnObserver | None = None
     pre_link_menu_history = (
         _PreLinkMenuHistory(enabled=True, role=args.role, version=args.version)
         if args.observe_pre_link_menu else None
@@ -1228,6 +1241,9 @@ def _run_peer(trace=None) -> int:
             else dict(cable_club_confirmation)
         )
         result["_link_menu_history"] = link_menu_history.snapshot()
+        result["battle_turn"] = (
+            battle_observer.snapshot() if battle_observer is not None else {}
+        )
         if pre_link_menu_history is not None:
             result["_pre_link_menu_history"] = pre_link_menu_history.snapshot()
         result["_shots"] = shots
@@ -1382,8 +1398,12 @@ def _run_peer(trace=None) -> int:
 
         remaining("hook setup")
         link_menu_history.session = session
+        if args.goal == "battle":
+            battle_observer = BattleTurnObserver(
+                session, role=args.role, version=args.version, before_party=party_before
+            )
         if pre_link_menu_history is None:
-            link_menu_history.install(counters)
+            link_menu_history.install(counters, battle_observer=battle_observer)
         else:
             observers_by_address = {}
             try:
@@ -1396,7 +1416,13 @@ def _run_peer(trace=None) -> int:
                 close_pre_link_menu_observer()
                 pre_link_menu_history.reason = "observer_install_error:" + type(exc).__name__[:128]
                 pre_link_menu_history._error("install", "setup", exc)
-            link_menu_history.install(counters, observers_by_address=observers_by_address)
+            link_menu_history.install(
+                counters,
+                observers_by_address=observers_by_address,
+                battle_observer=battle_observer,
+            )
+        if battle_observer is not None:
+            install_continuation_hooks(session, battle_observer, version=args.version)
         cable_club_confirmation = _install_cable_club_confirmation_latch(session)
 
         log(f"establishing TCP {args.role}")
@@ -2801,15 +2827,16 @@ def _run_peer(trace=None) -> int:
             while time.monotonic() < deadline:
                 if counters["EndOfBattle"][0] > 0:
                     break
-                battle_turn_complete = counters["LinkBattleExchangeData"][0] > 0 and (
-                    counters["ExecutePlayerMove"][0] + counters["ExecuteEnemyMove"][0] > 0
+                battle_turn_complete = (
+                    battle_observer is not None
+                    and battle_observer.snapshot()["settled"] is True
                 )
                 if battle_turn_complete and not battle_turn_announced:
                     link._network_backend.announce_sync(sync_id=14)
                     battle_turn_announced = True
                     shot("05_battle_turn")
                     log(
-                        "announced battle turn completion "
+                        "announced settled battle turn evidence "
                         f"lbe={counters['LinkBattleExchangeData'][0]} "
                         f"execute_player={counters['ExecutePlayerMove'][0]} "
                         f"execute_enemy={counters['ExecuteEnemyMove'][0]} "
@@ -2918,7 +2945,8 @@ def _run_peer(trace=None) -> int:
                 battle_turn_announced
                 and peer_battle_turn_ready
                 and all(counters[name][0] > 0 for name in required_battle_hooks)
-                and (counters["ExecutePlayerMove"][0] + counters["ExecuteEnemyMove"][0] > 0)
+                and battle_observer is not None
+                and battle_observer.snapshot()["settled"] is True
             )
         if not goal_complete:
             drive_status = "deadline"
