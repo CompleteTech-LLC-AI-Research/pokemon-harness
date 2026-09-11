@@ -325,22 +325,31 @@ def test_simultaneous_owner_masters_exchange_sampled_bits_without_core_access(mo
     left, right = NetworkBackend.pair()
     monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.5)
     start = threading.Barrier(2)
-    edge_send_start = threading.Barrier(2)
+    send_barrier = threading.Barrier(2)
     results: list[tuple[str, int]] = []
     errors: list[BaseException] = []
 
-    def gate_edge_send(original):
-        def send(frame, *, timeout, operation, cancel_event=None):
+    for backend in (left, right):
+        original_send_frame = backend._send_frame
+
+        def synchronized_send(
+            frame,
+            *,
+            timeout,
+            operation,
+            cancel_event=None,
+            _original=original_send_frame,
+        ):
             if operation == "EDGE_REQ":
-                edge_send_start.wait(timeout=1.0)
-            return original(
+                send_barrier.wait(timeout=1.0)
+            return _original(
                 frame,
                 timeout=timeout,
                 operation=operation,
                 cancel_event=cancel_event,
             )
 
-        return send
+        backend._send_frame = synchronized_send
 
     def clock(backend: NetworkBackend, label: str, bit: int) -> None:
         try:
@@ -362,8 +371,6 @@ def test_simultaneous_owner_masters_exchange_sampled_bits_without_core_access(mo
             serial_gate=SerialOperationGate(),
             dispatch_to_owner=True,
         )
-        left._send_frame = gate_edge_send(left._send_frame)
-        right._send_frame = gate_edge_send(right._send_frame)
         left_thread.start()
         right_thread.start()
         left_thread.join(timeout=2.0)
@@ -383,6 +390,184 @@ def test_simultaneous_owner_masters_exchange_sampled_bits_without_core_access(mo
             backends=(("left", left), ("right", right)),
             threads=(("left master", left_thread), ("right master", right_thread)),
         )
+
+
+def test_versioned_simultaneous_masters_match_identified_responses(monkeypatch):
+    """HELLO peers use ids when both master edges cross on the wire."""
+    left_sock, right_sock = _socket.socketpair()
+    left = NetworkBackend(left_sock, local_rom_version="red")
+    right = NetworkBackend(right_sock, local_rom_version="blue")
+    monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.5)
+    send_barrier = threading.Barrier(2)
+    results: list[tuple[str, int]] = []
+    errors: list[BaseException] = []
+
+    for backend in (left, right):
+        original_send_frame = backend._send_frame
+
+        def synchronized_send(
+            frame,
+            *,
+            timeout,
+            operation,
+            cancel_event=None,
+            _original=original_send_frame,
+        ):
+            if operation == "EDGE_REQ":
+                send_barrier.wait(timeout=1.0)
+            return _original(
+                frame,
+                timeout=timeout,
+                operation=operation,
+                cancel_event=cancel_event,
+            )
+
+        backend._send_frame = synchronized_send
+
+    def clock(backend: NetworkBackend, label: str, bit: int) -> None:
+        try:
+            results.append((label, backend.on_edge(our_bit=bit, our_role=1)))
+        except BaseException as exc:  # noqa: BLE001 - assert worker failures below
+            errors.append(exc)
+
+    left_thread = threading.Thread(target=clock, args=(left, "left", 0), daemon=True)
+    right_thread = threading.Thread(target=clock, args=(right, "right", 1), daemon=True)
+    try:
+        left.start_receiver(local_core=None)
+        right.start_receiver(local_core=None)
+        assert left.wait_for_hello(timeout=1.0) == "blue"
+        assert right.wait_for_hello(timeout=1.0) == "red"
+        left_thread.start()
+        right_thread.start()
+        left_thread.join(timeout=2.0)
+        right_thread.join(timeout=2.0)
+        assert not left_thread.is_alive()
+        assert not right_thread.is_alive()
+        assert errors == []
+        assert sorted(results) == [("left", 1), ("right", 0)]
+        for backend in (left, right):
+            snapshot = backend.debug_snapshot()
+            assert snapshot["edge_id_req_sent"] == 1
+            assert snapshot["edge_id_req_received"] == 1
+            assert snapshot["edge_id_resp_sent"] == 1
+            assert snapshot["edge_id_resp_received"] == 1
+            assert snapshot["reciprocal_master_edges"] == 1
+            assert snapshot["pending_edge_requests"] == 0
+    finally:
+        _finish_network_test_cleanup(
+            primary=sys.exc_info()[1],
+            backends=(("left", left), ("right", right)),
+            threads=(("left master", left_thread), ("right master", right_thread)),
+        )
+
+
+def test_versioned_duplicate_edge_request_replays_without_core_application():
+    """A late identified REQ gets its prior response without a second edge."""
+    backend_sock, peer_sock = _socket.socketpair()
+    backend = NetworkBackend(backend_sock, local_rom_version="red")
+    peer_sock.settimeout(1.0)
+
+    def recv_exact(size: int) -> bytes:
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining:
+            chunk = peer_sock.recv(remaining)
+            if not chunk:
+                raise AssertionError("peer socket closed while reading test response")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    try:
+        # Drain the backend's constructor HELLO and complete the peer HELLO
+        # manually so the backend's reader is the only protocol consumer.
+        assert recv_exact(2)[0] == network_module._OP_HELLO
+        peer_sock.sendall(network_module._FRAME.pack(network_module._OP_HELLO, 0x22))
+        backend.start_receiver(local_core=None)
+        assert backend.wait_for_hello(timeout=1.0) == "blue"
+
+        request = network_module._EDGE_ID_FRAME.pack(
+            network_module._OP_EDGE_REQ_ID,
+            1,
+            7,
+        )
+        peer_sock.sendall(request)
+        first = recv_exact(network_module._EDGE_ID_FRAME.size)
+        assert network_module._EDGE_ID_FRAME.unpack(first) == (
+            network_module._OP_EDGE_RESP_ID,
+            1,
+            7,
+        )
+        peer_sock.sendall(request)
+        replay = recv_exact(network_module._EDGE_ID_FRAME.size)
+        assert network_module._EDGE_ID_FRAME.unpack(replay) == (
+            network_module._OP_EDGE_RESP_ID,
+            1,
+            7,
+        )
+        assert backend.debug_snapshot()["edge_id_duplicates_replayed"] == 1
+        assert backend.debug_snapshot()["owner_edge_applied"] == 0
+    finally:
+        try:
+            _finish_network_test_cleanup(
+                primary=sys.exc_info()[1],
+                backends=(("backend", backend),),
+            )
+        finally:
+            peer_sock.close()
+
+
+def test_versioned_late_response_id_fails_closed(monkeypatch):
+    """A response for an earlier identified edge cannot satisfy this edge."""
+    backend_sock, peer_sock = _socket.socketpair()
+    backend = NetworkBackend(backend_sock, local_rom_version="red")
+    peer_sock.settimeout(1.0)
+    monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.5)
+    result: list[BaseException] = []
+
+    try:
+        # Complete the optional handshake with a hand-rolled peer.
+        assert peer_sock.recv(2)[0] == network_module._OP_HELLO
+        peer_sock.sendall(network_module._FRAME.pack(network_module._OP_HELLO, 0x22))
+        backend.start_receiver(local_core=None)
+        assert backend.wait_for_hello(timeout=1.0) == "blue"
+
+        def run_edge() -> None:
+            try:
+                backend.on_edge(our_bit=1, our_role=1)
+            except BaseException as exc:  # noqa: BLE001 - assert worker failure below
+                result.append(exc)
+
+        worker = threading.Thread(target=run_edge, daemon=True)
+        worker.start()
+        raw_request = peer_sock.recv(network_module._EDGE_ID_FRAME.size)
+        opcode, bit, edge_id = network_module._EDGE_ID_FRAME.unpack(raw_request)
+        assert opcode == network_module._OP_EDGE_REQ_ID
+        assert bit == 1
+        peer_sock.sendall(
+            network_module._EDGE_ID_FRAME.pack(
+                network_module._OP_EDGE_RESP_ID,
+                0,
+                edge_id + 1,
+            )
+        )
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert result and isinstance(result[0], NetworkBackendError)
+        assert backend._reader_exc is not None
+        assert "does not match in-flight id" in str(backend._reader_exc)
+        assert not backend.connected
+    finally:
+        try:
+            _finish_network_test_cleanup(
+                primary=sys.exc_info()[1],
+                backends=(("backend", backend),),
+                threads=(("identified edge", locals().get("worker")),)
+                if "worker" in locals()
+                else (),
+            )
+        finally:
+            peer_sock.close()
 
 
 def test_leader_frame_ack_wait_can_be_cancelled_with_bounded_cleanup():

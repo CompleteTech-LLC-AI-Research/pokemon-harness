@@ -17,6 +17,14 @@ Byte-oriented, request/response, framed::
         uint8_t payload;  // bit value: 0 or 1
     };
 
+Versioned TCP peers (after both sides have exchanged ``HELLO``) use the
+same payload with a monotonically increasing request identifier appended:
+``0x12`` is ``EDGE_REQ_ID`` and ``0x13`` is ``EDGE_RESP_ID``.  The legacy
+two-byte frames remain available for unversioned in-process callers.  The
+identifier lets a late response be rejected rather than consumed by a later
+edge, and lets a duplicate request be replayed without applying the local
+serial core twice.
+
 Either side can be master at any moment. The master's ``on_edge`` sends
 an ``EDGE_REQ`` and waits for the peer's ``EDGE_RESP``; meanwhile a
 background reader thread on both sides demuxes incoming frames. In owner
@@ -85,6 +93,8 @@ from pokered_harness.link.serial_coordinator import SerialOperationGate
 # trade driver) uses at phase boundaries.
 _OP_EDGE_REQ: int = 0x10
 _OP_EDGE_RESP: int = 0x11
+_OP_EDGE_REQ_ID: int = 0x12
+_OP_EDGE_RESP_ID: int = 0x13
 _OP_SYNC: int = 0x20
 _OP_EXCHANGE: int = 0x30
 _OP_FRAME_TICK: int = 0x40
@@ -97,6 +107,7 @@ _ROM_VERSION_CODES: dict[str, int] = {"red": 1, "blue": 2, "yellow": 3}
 _ROM_VERSION_NAMES: dict[int, str] = {value: key for key, value in _ROM_VERSION_CODES.items()}
 
 _FRAME = struct.Struct(">BB")  # opcode, payload (1-byte id for SYNC)
+_EDGE_ID_FRAME = struct.Struct(">BBI")  # opcode, bit, non-zero request id
 _LEN = struct.Struct(">H")
 _EDGE_RESPONSE_TIMEOUT_SECONDS = 10.0
 _DEFAULT_SEND_TIMEOUT_SECONDS = 10.0
@@ -111,6 +122,8 @@ _ACTIVE_EXCHANGE_GRACE_SECONDS = 1.000
 _ACTIVE_EXCHANGE_EDGE_THRESHOLD = 64
 _ACTIVE_EXCHANGE_REARM_WAIT_SECONDS = 5.0
 _MAX_SERIAL_TRANSCRIPT_ENTRIES = 4096
+_EDGE_ID_MAX = 0xFFFFFFFF
+_EDGE_RESPONSE_HISTORY_MAX = 256
 
 
 class NetworkBackendError(RuntimeError):
@@ -126,6 +139,9 @@ class _InboundEdge:
     completed: bool = False
     deferred: bool = False
     error: BaseException | None = None
+    # ``None`` denotes the historical two-byte frame.  Keep this field last
+    # so positional construction in legacy tests retains its meaning.
+    edge_id: int | None = None
 
 
 class _InboundEdgeQueue(queue.Queue):
@@ -374,16 +390,25 @@ class NetworkBackend:
             raise
         self._write_lock = threading.Lock()
         # A Game Boy serial core has one outstanding master edge at a time.
-        # EDGE_RESP has no request id, so a late/duplicate response cannot
-        # safely be matched to a later edge.
+        # Versioned peers add an id to each edge so a late response cannot be
+        # matched to a later edge.  The old two-byte mode retains its strict
+        # single-slot response queue and fail-closed behavior.
         self._edge_call_lock = threading.Lock()
         self._edge_response_lock = threading.Lock()
         self._edge_inflight = False
+        self._edge_inflight_id: int | None = None
+        self._edge_response_seen = False
+        self._next_edge_id = 1
         # While the emulator owner is blocked in its own master edge, a peer
         # may legitimately present the reciprocal master edge. The sampled
         # output bit is sufficient to answer that wire event; the reader must
         # not inspect or mutate the serial core to do so.
         self._reciprocal_master_bit: int | None = None
+        # Only the first unique request which crosses a local master edge is
+        # answered from that sampled bit. Further requests are queued for the
+        # owner; request ids make this bounded arbitration safe even when a
+        # peer immediately starts its next edge after receiving the response.
+        self._reciprocal_master_response_sent = False
         # Responses from peer (when we're master) land here.
         self._resp_queue: queue.Queue[int] = queue.Queue(maxsize=1)
         # Negotiated frame barrier queues. They are enabled by the session
@@ -409,6 +434,14 @@ class NetworkBackend:
         # ROM SC register for an in-flight transfer.
         self._edge_pending_condition = threading.Condition()
         self._edge_pending = 0
+        # Live HELLO peers use monotonically increasing request ids. Keep a
+        # bounded replay window for late duplicate requests and a high-water
+        # mark so an evicted old id can never be mistaken for a new edge.
+        self._edge_id_lock = threading.Lock()
+        self._inbound_edge_ids_pending: set[int] = set()
+        self._inbound_edge_responses: dict[int, int] = {}
+        self._inbound_edge_response_order: deque[int] = deque()
+        self._highest_inbound_edge_id = 0
         # Peer SYNC events, indexed by sync-id. queue.Queue per id
         # lets multiple pending syncs coexist (unusual but defensively
         # modeled).
@@ -488,6 +521,11 @@ class NetworkBackend:
             "edge_resp_sent": 0,
             "edge_resp_received": 0,
             "reciprocal_master_edges": 0,
+            "edge_id_req_sent": 0,
+            "edge_id_req_received": 0,
+            "edge_id_resp_sent": 0,
+            "edge_id_resp_received": 0,
+            "edge_id_duplicates_replayed": 0,
             "frame_ticks_sent": 0,
             "frame_ticks_received": 0,
             "frame_dones_sent": 0,
@@ -835,23 +873,35 @@ class NetworkBackend:
                 if not self._resp_queue.empty():
                     stale_error = NetworkBackendError("stale EDGE_RESP before EDGE_REQ")
                 else:
+                    edge_id = self._allocate_edge_id() if self._edge_ids_enabled() else None
                     self._edge_inflight = True
+                    self._edge_inflight_id = edge_id
+                    self._edge_response_seen = False
                     self._reciprocal_master_bit = our_bit & 1
+                    self._reciprocal_master_response_sent = False
 
             if stale_error is not None:
                 self._mark_closed(stale_error)
                 raise stale_error
 
-            frame_out = _FRAME.pack(_OP_EDGE_REQ, our_bit & 1)
+            edge_id = self._edge_inflight_id
+            if edge_id is None:
+                frame_out = _FRAME.pack(_OP_EDGE_REQ, our_bit & 1)
+            else:
+                frame_out = _EDGE_ID_FRAME.pack(_OP_EDGE_REQ_ID, our_bit & 1, edge_id)
             self._stats["edge_req_sent"] = int(self._stats["edge_req_sent"]) + 1
+            if edge_id is not None:
+                self._stats["edge_id_req_sent"] = int(self._stats["edge_id_req_sent"]) + 1
             self._record_serial_event(
                 "edge_req_sent",
                 direction="local_to_peer",
                 edge_bit=our_bit & 1,
+                edge_id=edge_id,
             )
-            # EDGE_RESP has no request id, so a late response cannot be
-            # retried or matched to a later transfer. Reuse the admission
-            # deadline rather than granting send and receive fresh budgets.
+            # Reuse the admission deadline rather than granting send and
+            # receive fresh budgets. In legacy mode a timeout remains
+            # terminal because the two-byte response has no id; in the
+            # versioned mode a late response is rejected by its id.
             try:
                 with self._write_guard(
                     deadline=deadline,
@@ -870,10 +920,13 @@ class NetworkBackend:
                     ),
                 )
                 self._stats["edge_resp_received"] = int(self._stats["edge_resp_received"]) + 1
+                with self._edge_response_lock:
+                    self._edge_response_seen = True
                 self._record_serial_event(
                     "edge_resp_consumed",
                     direction="peer_to_local",
                     edge_bit=bit,
+                    edge_id=edge_id,
                 )
                 return bit
             except OSError as exc:
@@ -881,19 +934,82 @@ class NetworkBackend:
                 self._mark_closed(error)
                 raise error from exc
             except NetworkBackendError as exc:
-                # Without request ids, a timed-out edge cannot be safely
-                # retried: a delayed peer response would otherwise become
-                # the response for a future edge. Terminate the transport
-                # and require a fresh connection instead.
+                # A timed-out edge cannot be retried on this connection. In
+                # legacy mode a delayed response has no id; in versioned
+                # mode the peer may still have an outstanding request, and
+                # closing is still the safest response to a failed waiter.
                 if not self._closed_event.is_set():
                     self._mark_closed(exc)
                 raise
             finally:
                 with self._edge_response_lock:
                     self._edge_inflight = False
+                    self._edge_inflight_id = None
+                    self._edge_response_seen = False
                     self._reciprocal_master_bit = None
+                    self._reciprocal_master_response_sent = False
                 with self._edge_pending_condition:
                     self._edge_pending_condition.notify_all()
+
+    def _edge_ids_enabled(self) -> bool:
+        """Whether this transport has negotiated the live edge-id format."""
+        return self._local_rom_version is not None and self._peer_rom_version is not None
+
+    def _allocate_edge_id(self) -> int:
+        """Return the next connection-scoped id without wrapping."""
+        edge_id = self._next_edge_id
+        if edge_id > _EDGE_ID_MAX:
+            raise NetworkBackendError("EDGE_REQ id space exhausted; reconnect")
+        self._next_edge_id += 1
+        return edge_id
+
+    def _claim_inbound_edge_id(self, edge_id: int) -> int | None:
+        """Claim a new id or return the response for a safe replay.
+
+        ``None`` means that the id is new. A response bit means the request
+        was already completed and can be replayed without touching the core.
+        Pending duplicates and ids older than the high-water mark are
+        protocol errors; retaining them as new work would apply a serial edge
+        twice after the bounded replay window has evicted its response.
+        """
+        if not isinstance(edge_id, int) or isinstance(edge_id, bool):
+            raise NetworkBackendError("invalid EDGE_REQ id")
+        if not 1 <= edge_id <= _EDGE_ID_MAX:
+            raise NetworkBackendError(f"invalid EDGE_REQ id {edge_id}")
+        with self._edge_id_lock:
+            response = self._inbound_edge_responses.get(edge_id)
+            if response is not None:
+                return response
+            if edge_id in self._inbound_edge_ids_pending:
+                raise NetworkBackendError(f"duplicate pending EDGE_REQ id {edge_id}")
+            if edge_id <= self._highest_inbound_edge_id:
+                raise NetworkBackendError(f"stale EDGE_REQ id {edge_id}")
+            self._highest_inbound_edge_id = edge_id
+            self._inbound_edge_ids_pending.add(edge_id)
+        return None
+
+    def _release_inbound_edge_id(self, edge_id: int | None) -> None:
+        """Release a claimed id when queue admission fails."""
+        if edge_id is None:
+            return
+        with self._edge_id_lock:
+            self._inbound_edge_ids_pending.discard(edge_id)
+
+    def _remember_inbound_edge_response(self, edge_id: int | None, bit: int) -> None:
+        """Record a successful response for bounded duplicate replay."""
+        if edge_id is None:
+            return
+        with self._edge_id_lock:
+            self._inbound_edge_ids_pending.discard(edge_id)
+            if edge_id in self._inbound_edge_responses:
+                # A replay does not extend the replay window or duplicate
+                # its eviction marker.
+                return
+            self._inbound_edge_responses[edge_id] = bit & 1
+            self._inbound_edge_response_order.append(edge_id)
+            while len(self._inbound_edge_response_order) > _EDGE_RESPONSE_HISTORY_MAX:
+                expired = self._inbound_edge_response_order.popleft()
+                self._inbound_edge_responses.pop(expired, None)
 
     @contextmanager
     def _edge_admission_guard(self, lock: Any, deadline: float) -> Iterator[None]:
@@ -1801,6 +1917,12 @@ class NetworkBackend:
             while not self._closed:
                 frame = self._recv_exactly(2)
                 opcode, payload = _FRAME.unpack(frame)
+                edge_id: int | None = None
+                if opcode in (_OP_EDGE_REQ_ID, _OP_EDGE_RESP_ID):
+                    raw_edge_id = self._recv_exactly(4)
+                    (edge_id,) = struct.unpack(">I", raw_edge_id)
+                    if edge_id == 0:
+                        raise NetworkBackendError("invalid identified edge id 0")
                 if opcode == _OP_HELLO:
                     protocol = payload >> 4
                     version_code = payload & 0x0F
@@ -1818,10 +1940,37 @@ class NetworkBackend:
                         raise NetworkBackendError("duplicate peer HELLO")
                     self._peer_rom_version = peer_version
                     self._hello_received.set()
-                elif opcode == _OP_EDGE_REQ:
+                elif opcode in (_OP_EDGE_REQ, _OP_EDGE_REQ_ID):
                     if payload > 1:
                         raise NetworkBackendError(f"invalid EDGE_REQ bit payload {payload}")
-                    if self._send_reciprocal_master_response(payload & 1):
+                    if edge_id is not None:
+                        replay_bit = self._claim_inbound_edge_id(edge_id)
+                        if replay_bit is not None:
+                            self._stats["edge_id_duplicates_replayed"] = int(
+                                self._stats["edge_id_duplicates_replayed"]
+                            ) + 1
+                            self._record_serial_event(
+                                "edge_req_duplicate_replayed",
+                                direction="peer_to_local",
+                                edge_bit=payload & 1,
+                                edge_id=edge_id,
+                                response_bit=replay_bit,
+                            )
+                            self._send_edge_response(
+                                _InboundEdge(
+                                    peer_bit=payload & 1,
+                                    response_bit=replay_bit,
+                                    edge_id=edge_id,
+                                )
+                            )
+                            continue
+                        self._stats["edge_id_req_received"] = int(
+                            self._stats["edge_id_req_received"]
+                        ) + 1
+                    if self._send_reciprocal_master_response(
+                        payload & 1,
+                        edge_id=edge_id,
+                    ):
                         continue
                     # A detached transport has no emulator owner to service
                     # an incoming edge. Fail closed rather than queueing work
@@ -1837,11 +1986,12 @@ class NetworkBackend:
                                 continue
                             self._edge_pending += 1
                             self._edge_pending_condition.notify_all()
-                    request = _InboundEdge(payload & 1)
+                    request = _InboundEdge(peer_bit=payload & 1, edge_id=edge_id)
                     self._record_serial_event(
                         "edge_req_received",
                         direction="peer_to_local",
                         edge_bit=payload & 1,
+                        edge_id=edge_id,
                     )
                     try:
                         self._edge_queue.put_nowait(request)
@@ -1857,21 +2007,38 @@ class NetworkBackend:
                             else:
                                 self._edge_pending = 0
                             self._edge_pending_condition.notify_all()
+                        self._release_inbound_edge_id(edge_id)
                         raise NetworkBackendError("incoming EDGE_REQ queue is full") from exc
-                elif opcode == _OP_EDGE_RESP:
+                elif opcode in (_OP_EDGE_RESP, _OP_EDGE_RESP_ID):
                     if payload > 1:
                         raise NetworkBackendError(f"invalid EDGE_RESP bit payload {payload}")
                     with self._edge_response_lock:
                         if not self._edge_inflight:
                             raise NetworkBackendError("unsolicited EDGE_RESP")
+                        expected_edge_id = self._edge_inflight_id
+                        if expected_edge_id != edge_id:
+                            if expected_edge_id is None:
+                                raise NetworkBackendError(
+                                    "unexpected identified EDGE_RESP for legacy EDGE_REQ"
+                                )
+                            raise NetworkBackendError(
+                                f"EDGE_RESP id {edge_id} does not match in-flight id "
+                                f"{expected_edge_id}"
+                            )
                         try:
                             self._resp_queue.put_nowait(payload & 1)
                         except queue.Full as exc:
                             raise NetworkBackendError("duplicate or unsolicited EDGE_RESP") from exc
+                        self._edge_response_seen = True
+                    if edge_id is not None:
+                        self._stats["edge_id_resp_received"] = int(
+                            self._stats["edge_id_resp_received"]
+                        ) + 1
                     self._record_serial_event(
                         "edge_resp_received",
                         direction="peer_to_local",
                         edge_bit=payload & 1,
+                        edge_id=edge_id,
                     )
                 elif opcode == _OP_FRAME_TICK:
                     if payload != 0:
@@ -1973,7 +2140,7 @@ class NetworkBackend:
             try:
                 if self._closed:
                     return
-                self._handle_edge_req(request.peer_bit)
+                self._handle_edge_req(request)
             except Exception as exc:  # noqa: BLE001
                 self._mark_closed(exc)
                 return
@@ -2004,20 +2171,45 @@ class NetworkBackend:
             finally:
                 self._decrement_edge_pending()
 
-    def _send_reciprocal_master_response(self, peer_bit: int) -> bool:
+    def _send_reciprocal_master_response(
+        self,
+        peer_bit: int,
+        *,
+        edge_id: int | None = None,
+    ) -> bool:
         """Answer a peer edge that collides with this owner's master edge.
 
         The reader may run while the owner is blocked in ``on_edge``. In that
         narrow interval the sampled local output bit is immutable and is the
         only serial value needed for the reciprocal wire response. This path
         deliberately does not read the local core or invoke callbacks; both
-        emulators retain ownership of their own master edge.
+        emulators retain ownership of their own master edge. Identified
+        requests are admitted once per local edge; legacy requests use the
+        same crossed-edge guard and keep their historical two-byte response
+        format.
         """
         with self._edge_response_lock:
-            bit = self._reciprocal_master_bit if self._edge_inflight else None
+            # Once our own response has arrived, the local master edge is
+            # complete even if its caller has not yet cleared the admission
+            # flag. A request arriving in that small gap is the peer's next
+            # edge and must go through the owner. Identified peers also get
+            # one reciprocal response per local edge; duplicates are replayed
+            # by the reader before reaching this path.
+            if not self._edge_inflight or self._edge_response_seen or (
+                edge_id is not None and self._reciprocal_master_response_sent
+            ):
+                return False
+            bit = self._reciprocal_master_bit
+            if edge_id is not None:
+                self._reciprocal_master_response_sent = True
         if bit is None:
             return False
-        request = _InboundEdge(peer_bit=peer_bit, response_bit=bit, completed=False)
+        request = _InboundEdge(
+            peer_bit=peer_bit,
+            response_bit=bit,
+            completed=False,
+            edge_id=edge_id,
+        )
         self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
         self._stats["reciprocal_master_edges"] = (
             int(self._stats["reciprocal_master_edges"]) + 1
@@ -2027,6 +2219,7 @@ class NetworkBackend:
             direction="peer_to_local",
             edge_bit=peer_bit,
             response_bit=bit,
+            edge_id=edge_id,
         )
         self._send_edge_response(request)
         return True
@@ -2364,21 +2557,35 @@ class NetworkBackend:
                         direction="local_to_peer",
                         edge_bit=request.response_bit,
                         byte_complete=request.completed,
+                        edge_id=request.edge_id,
                         outcome="not_sent_closed",
                     )
                     return
+                if request.edge_id is None:
+                    frame = _FRAME.pack(_OP_EDGE_RESP, request.response_bit)
+                else:
+                    frame = _EDGE_ID_FRAME.pack(
+                        _OP_EDGE_RESP_ID,
+                        request.response_bit,
+                        request.edge_id,
+                    )
                 self._send_frame(
-                    _FRAME.pack(_OP_EDGE_RESP, request.response_bit),
+                    frame,
                     timeout=max(0.0, write_deadline - time.monotonic()),
                     operation="EDGE_RESP",
                 )
                 self._stats["edge_resp_sent"] = int(self._stats["edge_resp_sent"]) + 1
+                if request.edge_id is not None:
+                    self._stats["edge_id_resp_sent"] = int(
+                        self._stats["edge_id_resp_sent"]
+                    ) + 1
         except (OSError, NetworkBackendError) as exc:
             self._record_serial_event(
                 "edge_resp_send",
                 direction="local_to_peer",
                 edge_bit=request.response_bit,
                 byte_complete=request.completed,
+                edge_id=request.edge_id,
                 outcome="error",
                 error_type=type(exc).__name__,
             )
@@ -2388,8 +2595,10 @@ class NetworkBackend:
             direction="local_to_peer",
             edge_bit=request.response_bit,
             byte_complete=request.completed,
+            edge_id=request.edge_id,
             outcome="success",
         )
+        self._remember_inbound_edge_response(request.edge_id, request.response_bit)
 
     def _signal_edge_worker_stop(self) -> None:
         target_queue = self._completed_edge_queue if self._dispatch_to_owner else self._edge_queue
@@ -2407,15 +2616,23 @@ class NetworkBackend:
                 self._edge_pending = 0
             self._edge_pending_condition.notify_all()
 
-    def _handle_edge_req(self, peer_bit: int) -> None:
+    def _handle_edge_req(self, request: _InboundEdge | int) -> None:
         """Run one compatibility-worker edge under core admission."""
         # A legacy receiver with no local core intentionally emits the
         # historical keep-alive stream. It still enters the admission barrier
         # so detach cannot race the worker's phase bookkeeping.
+        if isinstance(request, _InboundEdge):
+            peer_bit = request.peer_bit
+            edge_id = request.edge_id
+        else:
+            # Keep the private helper tolerant of old test doubles which
+            # called it with the raw peer bit.
+            peer_bit = request
+            edge_id = None
         with self._local_core_access(allow_none=True):
-            self._handle_edge_req_impl(peer_bit)
+            self._handle_edge_req_impl(peer_bit, edge_id=edge_id)
 
-    def _handle_edge_req_impl(self, peer_bit: int) -> None:
+    def _handle_edge_req_impl(self, peer_bit: int, *, edge_id: int | None = None) -> None:
         """Peer is master, we are slave. Apply edge to local_core,
         respond with our bit.
 
@@ -2595,12 +2812,24 @@ class NetworkBackend:
                 operation="EDGE_RESP",
             ) as write_deadline:
                 if not self._closed:
+                    if edge_id is None:
+                        frame = _FRAME.pack(_OP_EDGE_RESP, our_bit & 1)
+                    else:
+                        frame = _EDGE_ID_FRAME.pack(
+                            _OP_EDGE_RESP_ID,
+                            our_bit & 1,
+                            edge_id,
+                        )
                     self._send_frame(
-                        _FRAME.pack(_OP_EDGE_RESP, our_bit & 1),
+                        frame,
                         timeout=max(0.0, write_deadline - time.monotonic()),
                         operation="EDGE_RESP",
                     )
                     self._stats["edge_resp_sent"] = int(self._stats["edge_resp_sent"]) + 1
+                    if edge_id is not None:
+                        self._stats["edge_id_resp_sent"] = int(
+                            self._stats["edge_id_resp_sent"]
+                        ) + 1
         except (OSError, NetworkBackendError) as exc:
             self._record_serial_event(
                 "edge_resp_send",
@@ -2612,11 +2841,13 @@ class NetworkBackend:
             )
             self._mark_closed()
             return
+        self._remember_inbound_edge_response(edge_id, our_bit & 1)
         self._record_serial_event(
             "edge_resp_send",
             direction="local_to_peer",
             edge_bit=our_bit & 1,
             byte_complete=completed,
+            edge_id=edge_id,
             outcome="success" if not self._closed else "not_sent_closed",
         )
 
