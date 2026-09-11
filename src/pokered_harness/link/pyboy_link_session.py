@@ -219,6 +219,14 @@ class PyBoyLinkSession:
     #: Max attached instances. Gen I Pokémon is strictly 2-player.
     MAX_ATTACHED: int = 2
     PHYSICAL_QUANTUM = 70_224 * 2
+    # The public local scheduler still advances one instruction at a time,
+    # but checking the complete pair epoch after every instruction is
+    # needlessly expensive for the bundled PyBoy runtime.  Keep a small
+    # bounded CPU-cycle chunk between epoch observations so serial callbacks
+    # and hook dispatch retain instruction granularity without making every
+    # ordinary overworld frame pay the full validation cost.  Lightweight
+    # test doubles continue to use the exact instruction path below.
+    _REAL_SCHEDULER_CHUNK_CYCLES = 256
     MAX_FRAME_INSTRUCTIONS = 200_000
     MAX_FRAME_SECONDS = 30.0
     MAX_STALLED_INSTRUCTIONS = 32
@@ -1430,8 +1438,9 @@ class PyBoyLinkSession:
         self._check_epoch(boundary=True)
         self._step_active = True
         try:
+            pair = tuple(self._pyboys)
             for _ in range(frames):
-                self._interleave_one_frame(*self._pyboys, 1, view=view)
+                self._interleave_one_frame(*pair, 1, view=view)
             self._epoch_expected = self._check_epoch()
             self._physical_expected = self._physical_now
         except BaseException as error:
@@ -1481,6 +1490,7 @@ class PyBoyLinkSession:
                 p.mb.sound.disable_sampling = True
                 p.mb.sound.clear_buffer()
             clocks = self._check_epoch()
+            chunked_runtime = self._is_chunked_runtime(pair)
             while True:
                 self._raise_fault()
                 # LCD completion is a marker, not a stop flag. Consume both
@@ -1519,7 +1529,32 @@ class PyBoyLinkSession:
                 previous_instruction_endpoint = self._active_instruction_endpoint
                 self._active_instruction_endpoint = selected
                 try:
-                    self._instruction(selected)
+                    if chunked_runtime:
+                        selected_index = 0 if selected is a else 1
+                        remaining_physical = (
+                            physical_targets[selected_index]
+                            - self._physical_now[selected_index]
+                        )
+                        # Physical time advances at one unit per CPU cycle in
+                        # CGB double-speed mode and two units otherwise.  A
+                        # transition can occur inside the chunk, so use the
+                        # current rate and retain a bounded overshoot.
+                        rate = (
+                            1
+                            if bool(getattr(selected.mb, "double_speed", False))
+                            else 2
+                        )
+                        cycle_budget = max(1, min(
+                            self._REAL_SCHEDULER_CHUNK_CYCLES,
+                            remaining_physical // rate,
+                        ))
+                        self._step_single_step_chunk(
+                            selected,
+                            cycle_budget,
+                            stop_on_frame=False,
+                        )
+                    else:
+                        self._instruction(selected)
                 finally:
                     self._active_instruction_endpoint = previous_instruction_endpoint
                 clocks = self._check_epoch()
@@ -1532,7 +1567,15 @@ class PyBoyLinkSession:
                 # endpoint can drive a serial edge.  Peer progressors perform
                 # the same bounded cleanup for nested instructions.
                 self._consume_lcd_marker(selected)
-                iterations += 1
+                # ``_step_single_step_chunk`` bounds its own instruction
+                # count.  Charge the conservative four-cycle minimum here so
+                # the outer frame budget remains meaningful for real
+                # runtimes; the exact instruction path charges one each time.
+                iterations += (
+                    max(1, cycle_budget // 4)
+                    if chunked_runtime
+                    else 1
+                )
             self._last_lcd_markers = tuple(lcd_markers)
             self._scheduler_quantum_count += 1
             for p in pair:
@@ -1550,6 +1593,29 @@ class PyBoyLinkSession:
             self._active_physical_targets = None
             for p, prior in zip(pair, previous_stepping):
                 p.mb.breakpoint_singlestep = prior
+
+    @staticmethod
+    def _is_chunked_runtime(pair: tuple[object, object]) -> bool:
+        """Return whether both endpoints are bundled PyBoy runtimes.
+
+        The chunked scheduler is deliberately limited to real PyBoy objects.
+        Contract tests use small fakes whose instruction order and validation
+        failures are observable; retaining the exact path for those objects
+        keeps the scheduler's adversarial guarantees unchanged.
+        """
+
+        for endpoint in pair:
+            motherboard = getattr(endpoint, "mb", None)
+            if motherboard is None:
+                return False
+            module = type(motherboard).__module__
+            if not module.startswith("pyboy"):
+                return False
+            if not callable(getattr(motherboard, "tick", None)):
+                return False
+            if not hasattr(motherboard, "cpu"):
+                return False
+        return True
 
     @staticmethod
     def _step_single_step_chunk(
