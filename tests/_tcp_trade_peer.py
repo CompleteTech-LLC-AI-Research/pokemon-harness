@@ -1894,6 +1894,12 @@ def _run_peer(trace=None) -> int:
         # other is still constructing its PyBoy can produce a
         # direction-dependent first serial exchange.
         passive_sync(ready_sync_id=99, release_sync_id=98, timeout=60.0)
+        if args.role == "listen":
+            startup_deadline = min(deadline, time.monotonic() + 60.0)
+            while int(link._network_backend.debug_snapshot().get("pending_edge_requests", 0)) == 0:
+                if time.monotonic() >= startup_deadline:
+                    raise RuntimeError("connector did not publish a startup edge")
+                time.sleep(0.001)
         # Phase 1: walk UP ×3 + A-mash to reach LinkMenu.
         for _ in range(3):
             session.press("up", duration=6)
@@ -1911,6 +1917,9 @@ def _run_peer(trace=None) -> int:
         peer_save_choice_ready = False
         save_choice_released = False
         save_choice_attempts = 0
+        save_choice_max_attempts = 32
+        save_choice_retry_interval_frames = 8
+        next_save_choice_attempt_tick = -1
         close_count_at_save_choice_release = 0
         if native_internal_clock is None:
             raise RuntimeError("native network clock role was not negotiated")
@@ -2011,6 +2020,9 @@ def _run_peer(trace=None) -> int:
                     session.press("a", duration=4)
                     session.step(2)
                     save_choice_attempts = 1
+                    next_save_choice_attempt_tick = (
+                        session.current_tick() + save_choice_retry_interval_frames
+                    )
                     save_choice_released = True
                     log("phase 1 synchronized native Cable Club save choice released")
                     continue
@@ -2041,18 +2053,22 @@ def _run_peer(trace=None) -> int:
             if (
                 save_choice_released
                 and counters["SaveGameData"][0] == 0
-                and save_choice_attempts < 4
+                and save_choice_attempts < save_choice_max_attempts
                 and _is_cable_club_save_choice_ready(
                     cable_club_confirmation, counters, menu_snapshot()
                 )
+                and session.current_tick() >= next_save_choice_attempt_tick
             ):
                 # A cross-family ROM can consume the shared boundary frame
                 # without sampling A in its first native poll. Retry only
                 # while the verified CableClubNPC YesNoChoice call is still
                 # active; once SaveGameData or the call return is observed,
                 # no further input is injected into the serial phase.
-                session.press("a", duration=4)
+                session.press("a", duration=1)
                 save_choice_attempts += 1
+                next_save_choice_attempt_tick = (
+                    session.current_tick() + save_choice_retry_interval_frames
+                )
                 log(
                     "phase 1 retrying native Cable Club save choice; "
                     f"attempt={save_choice_attempts} confirmation={cable_club_confirmation}"
