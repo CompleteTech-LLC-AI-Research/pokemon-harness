@@ -131,15 +131,27 @@ def _snapshot(pyboy) -> dict[str, int | bool]:
 def _wait_for_edge_request(
     backend: NetworkBackend, ready: threading.Event, *, timeout: float = 3.0
 ) -> None:
-    """Wait for the reader queue's event, without polling or sleeps."""
+    """Wait until the owner can observe an admitted peer edge.
+
+    The reader increments pending work immediately before publishing the queue
+    item.  Checking both values avoids losing a one-shot queue probe during a
+    scheduler handoff, while still requiring a real admitted ``EDGE_REQ``.
+    """
     deadline = time.monotonic() + timeout
-    ready.clear()
-    while backend._edge_queue.empty():
+    while True:
+        if backend.debug_snapshot()["pending_edge_requests"] > 0 and not backend._edge_queue.empty():
+            return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise AssertionError("network reader did not queue EDGE_REQ")
+            raise AssertionError(
+                "network reader did not queue EDGE_REQ; "
+                f"snapshot={backend.debug_snapshot()}"
+            )
         if not ready.wait(timeout=remaining):
-            raise AssertionError("network reader did not queue EDGE_REQ")
+            raise AssertionError(
+                "network reader did not queue EDGE_REQ; "
+                f"snapshot={backend.debug_snapshot()}"
+            )
         ready.clear()
         if backend._closed:
             raise AssertionError("network backend closed before EDGE_REQ")
@@ -237,7 +249,15 @@ def _run_cpu_case(pyboy, *, internal_clock: bool) -> dict[str, object]:
                     raise AssertionError("owner transfer handoff timed out")
 
             for _ in range(256):
-                if not internal_clock:
+                # The owner pump services each queued edge at the next normal
+                # CPU boundary. After the eighth request, native PyBoy may
+                # need one additional boundary to dispatch the serial IRQ and
+                # leave HALT, and there is no ninth EDGE_REQ to wake a queue
+                # waiter.
+                if (
+                    not internal_clock
+                    and attached_backend.debug_snapshot()["edge_req_received"] < 8
+                ):
                     _wait_for_edge_request(attached_backend, edge_queued)
                 provider.step(1)
                 state = _snapshot(pyboy)
@@ -298,6 +318,11 @@ def _run_cpu_case(pyboy, *, internal_clock: bool) -> dict[str, object]:
 
         snapshot = attached_backend.debug_snapshot()
         peer_snapshot = peer_backend.debug_snapshot()
+        if internal_clock:
+            deadline = time.monotonic() + 3.0
+            while peer_snapshot["edge_resp_sent"] < 8 and time.monotonic() < deadline:
+                time.sleep(0.005)
+                peer_snapshot = peer_backend.debug_snapshot()
         assert snapshot["owner_edge_applied"] == (0 if internal_clock else 8)
         assert snapshot["edge_req_sent"] == (8 if internal_clock else 0)
         assert snapshot["edge_resp_received"] == (8 if internal_clock else 0)

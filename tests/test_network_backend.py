@@ -2192,7 +2192,12 @@ def test_owner_real_edge_resets_keepalive_byte_boundary():
         ):
             time.sleep(0.005)
         assert b.debug_snapshot()["pending_edge_requests"] == 1
-        assert b.service_pending_edges(max_edges=1) == 1
+        applied = 0
+        while time.monotonic() < deadline and applied == 0:
+            applied = b.service_pending_edges(max_edges=1)
+            if applied == 0:
+                time.sleep(0.005)
+        assert applied == 1
         sender.join(timeout=1.0)
         assert not sender.is_alive()
         return result[0]
