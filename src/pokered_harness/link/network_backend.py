@@ -2827,6 +2827,12 @@ class NetworkBackend:
                             our_bit & 1,
                             edge_id,
                         )
+                    # Publish the completed response while the write lock is
+                    # held.  A versioned peer may send a duplicate as soon as
+                    # it receives the first response; recording only after
+                    # this send lets the reader race with the replay and
+                    # misclassify the duplicate as a second edge.
+                    self._remember_inbound_edge_response(edge_id, our_bit & 1)
                     self._send_frame(
                         frame,
                         timeout=max(0.0, write_deadline - time.monotonic()),
@@ -2848,7 +2854,6 @@ class NetworkBackend:
             )
             self._mark_closed()
             return
-        self._remember_inbound_edge_response(edge_id, our_bit & 1)
         self._record_serial_event(
             "edge_resp_send",
             direction="local_to_peer",

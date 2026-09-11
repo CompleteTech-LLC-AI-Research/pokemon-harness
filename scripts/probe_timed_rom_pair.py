@@ -1244,7 +1244,12 @@ def run_process_pair(
         # A lock-free shared byte reaches children before endpoint publication.
         # Do not acquire the barrier lock: a killed child may own it.
         cleanup_deadline = min(overall, time.monotonic() + args.cleanup_timeout)
-        graceful_deadline = max(time.monotonic(), cleanup_deadline - 0.4)
+        # Keep a short kill tail, but let an owner use almost the complete
+        # cleanup budget to publish its final report.  A child can finish the
+        # user-visible failure quickly but still need to flush its bounded
+        # stdout/stderr drainers and report pipe; reserving a fixed 400 ms
+        # tail made that report disappear under host scheduler pressure.
+        graceful_deadline = max(time.monotonic(), cleanup_deadline - 0.2)
         for process in processes:
             process.join(max(0, graceful_deadline - time.monotonic()))
         forced = set()
