@@ -5,10 +5,39 @@ pin identifies bytes or a dependency version; it is not, by itself, a release
 certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
-Current status at `766eaa6aafecad039d5b10934ec36f8ec933645e`: `PARTIAL` —
-not production-ready. The current hosted release-hygiene workflow passed the
-packaging and clean wheel-install/runtime checks. Its success does not execute
-or establish the real-ROM remote trade or battle acceptance matrix.
+Current resumed candidate status: `PARTIAL` — not production-ready. The
+historical hosted release-hygiene workflow at
+`766eaa6aafecad039d5b10934ec36f8ec933645e` passed packaging and clean
+wheel-install/runtime checks. Neither that result nor the current runtime gate
+executes or establishes the real-ROM remote trade or battle acceptance matrix.
+
+### Current Linux isolated runtime evidence
+
+At candidate `3c96537` on 2026-09-11, an unprivileged Linux mount namespace
+with a private writable `/dev/shm` completed the dual-runtime
+`production_gate.py --unit-only --repeat-timing 5` gate. Source and Cython
+each passed `4,508/4,508` unit tests and `1,910/1,910` timing checks with zero
+failures, skips, xfails, xpasses, or errors. The source runtime loaded the
+vendored Python PyBoy modules; Cython loaded compiled `pyboy` and serial
+extension modules, both at pinned revision
+`c565df66c3731fad2856169a90f6bbec99925915`.
+
+This gate used the three reproducibly built stock ROMs and symbols, but the
+two pinned color ROMs and all Cable Club fixtures were absent. The manifest
+and matrix declarations therefore passed only in schema/collection mode; no
+local, TCP, strict trade, strict battle, or MCP gameplay acceptance claim is
+made from this evidence. The release remains `PARTIAL`.
+
+With the same source and Cython interpreters, six real-ROM MCP stdio and link
+lifecycle checks passed under each runtime using the pinned stock Red, Blue,
+and Yellow inputs. They cover server initialization, tool/resource access,
+state save/load, local and loopback link attachment, and explicit teardown;
+they do not exercise a Cable Club trade or battle fixture.
+
+The four Red real-ROM golden-path checks also passed under each runtime with
+the pinned ROM and symbol bytes. Stock Yellow boot and all locally available
+symbol-resolution cases passed as part of the same current-head runtime
+validation. Color-ROM skips remain explicit missing-input results.
 
 The default packaged runtime is the bundled PyBoy `2.7.0` source fork at
 revision `c565df66c3731fad2856169a90f6bbec99925915`. Source mode is selected
