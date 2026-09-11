@@ -382,7 +382,8 @@ class NetworkBackend:
         # Responses from peer (when we're master) land here.
         self._resp_queue: queue.Queue[int] = queue.Queue(maxsize=1)
         # Negotiated frame barrier queues. They are enabled by the session
-        # only after the versioned native clock role is selected.
+        # only after the versioned network clock-role metadata is selected;
+        # the session never seeds the native serial registers.
         self._frame_tick_queue: queue.Queue[None] = queue.Queue(maxsize=1)
         self._frame_done_queue: queue.Queue[None] = queue.Queue(maxsize=1)
         self._frame_ack_queue: queue.Queue[None] = queue.Queue(maxsize=1)
@@ -909,8 +910,18 @@ class NetworkBackend:
 
     # --- negotiated frame barrier -----------------------------------
 
-    def begin_frame_turn(self, *, leader: bool) -> None:
-        """Start one bounded owner-frame turn after clock negotiation."""
+    def begin_frame_turn(
+        self,
+        *,
+        leader: bool,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        """Start one bounded owner-frame turn after clock negotiation.
+
+        Cancellation is terminal for this transport. The frame marker has no
+        request id, so a cancelled turn cannot safely be resumed on the same
+        connection.
+        """
         if not isinstance(leader, bool):
             raise TypeError("leader must be a bool")
         if leader:
@@ -922,11 +933,13 @@ class NetworkBackend:
                 with self._write_guard(
                     timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
                     operation="FRAME_TICK",
+                    cancel_event=cancel_event,
                 ) as write_deadline:
                     self._send_frame(
                         _FRAME.pack(_OP_FRAME_TICK, 0),
                         timeout=max(0.0, write_deadline - time.monotonic()),
                         operation="FRAME_TICK",
+                        cancel_event=cancel_event,
                     )
                 self._stats["frame_ticks_sent"] = int(self._stats["frame_ticks_sent"]) + 1
             except (OSError, NetworkBackendError) as exc:
@@ -946,6 +959,7 @@ class NetworkBackend:
                 timeout_message=(
                     f"no FRAME_TICK from peer within {_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
                 ),
+                cancel_event=cancel_event,
             )
         except NetworkBackendError as exc:
             if not self._closed_event.is_set():
@@ -957,8 +971,16 @@ class NetworkBackend:
         *,
         leader: bool,
         progress_callback: Callable[[], object] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
-        """Finish a frame, servicing deferred owner edges before ACK."""
+        """Finish a frame, servicing deferred owner edges before ACK.
+
+        The ACK wait has one absolute transport deadline. If an owner
+        ``progress_callback`` is supplied, it is invoked between short queue
+        polls so peer-driven edges can be applied even when the native clock
+        role differs from the negotiated pacing role. Cancellation is
+        terminal for the same reason as :meth:`begin_frame_turn`.
+        """
         if not isinstance(leader, bool):
             raise TypeError("leader must be a bool")
         if leader:
@@ -966,19 +988,31 @@ class NetworkBackend:
                 with self._write_guard(
                     timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
                     operation="FRAME_DONE",
+                    cancel_event=cancel_event,
                 ) as write_deadline:
                     self._send_frame(
                         _FRAME.pack(_OP_FRAME_DONE, 0),
                         timeout=max(0.0, write_deadline - time.monotonic()),
                         operation="FRAME_DONE",
+                        cancel_event=cancel_event,
                     )
                 self._stats["frame_dones_sent"] = int(self._stats["frame_dones_sent"]) + 1
+                # A peer may begin a native-clock transfer only after
+                # FRAME_DONE is sent. In owner-dispatch mode its EDGE_REQ is
+                # queued for this backend's owner, and the peer cannot
+                # produce FRAME_ACK until that edge is applied. Keep the
+                # transport wait bounded, while giving owner dispatch work a
+                # chance to run between polls.
+                if progress_callback is None and self._dispatch_to_owner:
+                    progress_callback = lambda: self.service_pending_edges(max_edges=1)
                 self._queue_get(
                     self._frame_ack_queue,
                     timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
                     timeout_message=(
                         f"no FRAME_ACK from peer within {_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
                     ),
+                    cancel_event=cancel_event,
+                    progress_callback=progress_callback,
                 )
             except NetworkBackendError as exc:
                 if not self._closed_event.is_set():
@@ -993,7 +1027,11 @@ class NetworkBackend:
         frame_done_received = False
         try:
             while True:
-                progress_callback()
+                if cancel_event is not None and cancel_event.is_set():
+                    raise NetworkBackendError("frame completion cancelled")
+                self._run_progress_callback(progress_callback)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise NetworkBackendError("frame completion cancelled")
                 if not frame_done_received:
                     try:
                         self._frame_done_queue.get_nowait()
@@ -1022,11 +1060,13 @@ class NetworkBackend:
             with self._write_guard(
                 timeout=_EDGE_RESPONSE_TIMEOUT_SECONDS,
                 operation="FRAME_ACK",
+                cancel_event=cancel_event,
             ) as write_deadline:
                 self._send_frame(
                     _FRAME.pack(_OP_FRAME_ACK, 0),
                     timeout=max(0.0, write_deadline - time.monotonic()),
                     operation="FRAME_ACK",
+                    cancel_event=cancel_event,
                 )
             self._stats["frame_acks_sent"] = int(self._stats["frame_acks_sent"]) + 1
         except (OSError, NetworkBackendError) as exc:
@@ -2720,8 +2760,9 @@ class NetworkBackend:
         timeout: float,
         timeout_message: str,
         cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[], object] | None = None,
     ) -> Any:
-        """Get a response while allowing :meth:`stop` to wake the waiter."""
+        """Get a response while allowing stop and owner progress to wake it."""
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
             if cancel_event is not None and cancel_event.is_set():
@@ -2739,10 +2780,44 @@ class NetworkBackend:
                 error = NetworkBackendError(timeout_message)
                 self._mark_closed(error)
                 raise error
+            if progress_callback is not None:
+                # Do not invoke owner code while holding a queue/condition
+                # lock. The callback is bounded by the caller's owner
+                # contract; the surrounding polling loop still applies the
+                # original absolute transport deadline.
+                self._run_progress_callback(progress_callback)
+                if cancel_event is not None and cancel_event.is_set():
+                    error = NetworkBackendError("operation cancelled")
+                    self._mark_closed(error)
+                    raise error
+                if self._closed_event.is_set():
+                    if self._reader_exc is not None:
+                        raise NetworkBackendError(
+                            f"backend reader stopped: {self._reader_exc}"
+                        ) from self._reader_exc
+                    raise NetworkBackendError("backend closed")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    error = NetworkBackendError(timeout_message)
+                    self._mark_closed(error)
+                    raise error
             try:
-                return q.get(timeout=min(0.25, remaining))
+                return q.get(timeout=min(_SEND_POLL_SECONDS, remaining))
             except queue.Empty:
                 continue
+
+    def _run_progress_callback(self, callback: Callable[[], object]) -> None:
+        """Run owner progress and convert callback failures to link errors."""
+        try:
+            callback()
+        except NetworkBackendError as exc:
+            if not self._closed_event.is_set():
+                self._mark_closed(exc)
+            raise
+        except BaseException as exc:
+            error = NetworkBackendError(f"owner progress callback failed: {exc}")
+            self._mark_closed(error)
+            raise error from exc
 
 
 __all__ = [

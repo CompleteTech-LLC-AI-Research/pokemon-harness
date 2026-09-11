@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import socket as _socket
 import struct
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -34,6 +35,40 @@ _OP_EDGE_REQ = 0x10
 _OP_EDGE_RESP = 0x11
 _OP_SYNC = 0x20
 _OP_EXCHANGE = 0x30
+
+
+def _finish_network_test_cleanup(
+    *,
+    primary: BaseException | None,
+    backends: tuple[tuple[str, NetworkBackend], ...] = (),
+    threads: tuple[tuple[str, threading.Thread], ...] = (),
+) -> None:
+    """Attempt every test resource cleanup and preserve a primary failure."""
+    cleanup_errors: list[tuple[str, BaseException]] = []
+    for label, backend in backends:
+        try:
+            if backend.stop(timeout_s=1.0) is False:
+                raise AssertionError(f"{label} backend workers did not stop")
+        except BaseException as exc:  # noqa: BLE001 - report cleanup failures below
+            cleanup_errors.append((label, exc))
+    for label, thread in threads:
+        # A failure before ``start`` leaves ``ident`` unset; joining such a
+        # thread raises RuntimeError and hides the actual test/cleanup result.
+        if thread.ident is None:
+            continue
+        try:
+            thread.join(timeout=1.0)
+            if thread.is_alive():
+                raise AssertionError(f"{label} thread remained alive")
+        except BaseException as exc:  # noqa: BLE001 - report cleanup failures below
+            cleanup_errors.append((label, exc))
+    if not cleanup_errors:
+        return
+    details = "; ".join(f"{label}: {error!r}" for label, error in cleanup_errors)
+    if primary is not None:
+        primary.add_note(f"test cleanup failed: {details}")
+        return
+    raise AssertionError(f"test cleanup failed: {details}") from cleanup_errors[0][1]
 
 
 def test_external_service_does_not_hold_dispatch_while_waiting_for_serial_gate():
@@ -214,6 +249,126 @@ def test_frame_barrier_round_trip_keeps_turns_and_acknowledgements_bounded():
     finally:
         leader.stop()
         follower.stop()
+
+
+def test_leader_frame_ack_wait_pumps_owner_edge_after_frame_done(monkeypatch):
+    """A reversed native clock role cannot strand a post-FRAME_DONE edge.
+
+    The frame leader is the native external-clock side here, while the peer
+    acts as the native master and starts its edge only after FRAME_DONE is on
+    the wire. The leader must keep its owner-dispatch path alive while it
+    waits for FRAME_ACK: the peer cannot send that ACK until this edge gets
+    applied and answered.
+    """
+    leader, follower = NetworkBackend.pair()
+    monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.2)
+    leader_core = _CompletingSlaveCore()
+    frame_done_sent = threading.Event()
+    follower_result: list[int] = []
+    follower_errors: list[BaseException] = []
+    original_send_frame = leader._send_frame
+
+    def observe_frame_done(frame, *, timeout, operation, cancel_event=None):
+        result = original_send_frame(
+            frame,
+            timeout=timeout,
+            operation=operation,
+            cancel_event=cancel_event,
+        )
+        if frame[0] == network_module._OP_FRAME_DONE:
+            frame_done_sent.set()
+        return result
+
+    def run_follower() -> None:
+        try:
+            follower.begin_frame_turn(leader=False)
+            assert frame_done_sent.wait(timeout=1.0)
+            # This is the native master's first EDGE_REQ. It deliberately
+            # begins after the leader has sent FRAME_DONE, reproducing the
+            # role-metadata/native-register inversion seen in production.
+            follower_result.append(follower.on_edge(our_bit=1, our_role=1))
+            follower.finish_frame_turn(leader=False, progress_callback=lambda: None)
+        except BaseException as exc:  # noqa: BLE001 - assert worker failures below
+            follower_errors.append(exc)
+
+    monkeypatch.setattr(leader, "_send_frame", observe_frame_done)
+    follower_thread = threading.Thread(target=run_follower, daemon=True)
+    try:
+        leader.start_receiver(
+            local_core=leader_core,
+            serial_gate=SerialOperationGate(),
+            dispatch_to_owner=True,
+        )
+        follower.start_receiver(local_core=None)
+        follower_thread.start()
+        leader.begin_frame_turn(leader=True)
+        leader.finish_frame_turn(leader=True)
+        follower_thread.join(timeout=1.0)
+        assert not follower_thread.is_alive()
+        assert follower_errors == []
+        assert follower_result == [0]
+        assert leader_core.SB == 1
+        assert leader_core.transfer_enabled == 0
+        snapshot = leader.debug_snapshot()
+        assert snapshot["owner_edge_applied"] == 1
+        assert snapshot["frame_acks_received"] == 1
+    finally:
+        _finish_network_test_cleanup(
+            primary=sys.exc_info()[1],
+            backends=(("leader", leader), ("follower", follower)),
+            threads=(("follower", follower_thread),),
+        )
+
+
+def test_leader_frame_ack_wait_can_be_cancelled_with_bounded_cleanup():
+    """A cancelled ACK wait closes and wakes without a long frame timeout."""
+    leader, follower = NetworkBackend.pair()
+    frame_done_sent = threading.Event()
+    cancel = threading.Event()
+    result: list[BaseException] = []
+    original_send_frame = leader._send_frame
+
+    def observe_frame_done(frame, *, timeout, operation, cancel_event=None):
+        result_frame = original_send_frame(
+            frame,
+            timeout=timeout,
+            operation=operation,
+            cancel_event=cancel_event,
+        )
+        if frame[0] == network_module._OP_FRAME_DONE:
+            frame_done_sent.set()
+        return result_frame
+
+    def wait_for_ack() -> None:
+        try:
+            leader.finish_frame_turn(leader=True, cancel_event=cancel)
+        except BaseException as exc:  # noqa: BLE001 - assert cancellation below
+            result.append(exc)
+
+    # Do not let the test's cancellation race the FRAME_DONE send itself.
+    leader._send_frame = observe_frame_done
+    worker = threading.Thread(target=wait_for_ack, daemon=True)
+    try:
+        leader.start_receiver(local_core=None)
+        follower.start_receiver(local_core=None)
+        leader.begin_frame_turn(leader=True)
+        worker.start()
+        assert frame_done_sent.wait(timeout=1.0)
+        started = time.monotonic()
+        cancel.set()
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert result and isinstance(result[0], NetworkBackendError)
+        assert "cancelled" in str(result[0]).lower()
+        assert time.monotonic() - started < 0.5
+        assert not leader.connected
+    finally:
+        cancel.set()
+        _finish_network_test_cleanup(
+            primary=sys.exc_info()[1],
+            backends=(("leader", leader), ("follower", follower)),
+            threads=(("ACK waiter", worker),),
+        )
 
 
 @pytest.mark.parametrize("lock_name", ["_edge_call_lock", "_edge_response_lock"])

@@ -18,6 +18,7 @@ from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_coordinator import CoordinatedBackend
 from pokered_harness.link.serial_core import (
     CYCLES_PER_BYTE_DMG,
+    CYCLES_PER_EDGE_DMG,
     SerialCore,
 )
 
@@ -152,6 +153,30 @@ def _versioned_backend_pair(
         NetworkBackend(local_sock, local_rom_version=local_version),
         NetworkBackend(peer_sock, local_rom_version=peer_version),
     )
+
+
+def _serial_state(serial):
+    """Capture native serial state while excluding the transport backend."""
+    return {
+        name: getattr(serial, name)
+        for name in (
+            "SB",
+            "SC",
+            "transfer_enabled",
+            "internal_clock",
+            "double_speed",
+            "cpu_speed_shift",
+            "_shift_register",
+            "_bits_remaining",
+            "_cycles_to_interrupt",
+            "last_cycles",
+            "clock",
+            "clock_target",
+            # Not a hardware register, but incrementing this generation is a
+            # reliable signal that a host-side set_SC write occurred.
+            "transfer_generation",
+        )
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -531,18 +556,23 @@ def test_serial_completion_context_provider_tolerates_missing_emulation_internal
 
 
 @pytest.mark.parametrize("is_internal_clock", [True, False])
-def test_network_attach_does_not_seed_game_role_status(is_internal_clock):
-    """Native attach leaves ROM-owned serial role state untouched.
+def test_network_attach_preserves_idle_serial_state_and_game_memory(
+    is_internal_clock,
+):
+    """Network attach leaves idle native serial state and game memory alone.
 
     ``hSerialConnectionStatus`` is populated by the ROM's serial interrupt
     handler after the native handshake. Native attach may configure the
-    serial registers for the requested wire role, but it must never prefill
-    this ROM-owned HRAM byte for either network role.
+    configured role as metadata, but it must not prefill that ROM-owned HRAM
+    byte or rewrite the idle native serial registers.
     """
     backend, peer = _versioned_backend_pair("red", "red")
     serial = SerialCore()
+    serial.set_SB(0xA5)
+    serial.set_SC(0x00)
     pyboy = _FakePyBoy(serial=serial)
-    pyboy.memory = {0xFFAA: 0xFF}
+    pyboy.memory = {0xFFAA: 0x7E, 0xFFAB: 0x01}
+    before = _serial_state(serial)
     link = PyBoyLinkSession(
         network_backend=backend,
         network_is_internal_clock=is_internal_clock,
@@ -551,29 +581,33 @@ def test_network_attach_does_not_seed_game_role_status(is_internal_clock):
 
     try:
         link.attach(pyboy)
-        assert pyboy.memory[0xFFAA] == 0xFF
+        assert _serial_state(serial) == before
+        assert pyboy.memory == {0xFFAA: 0x7E, 0xFFAB: 0x01}
         assert pyboy.mb.serial.backend is backend
-        assert serial.transfer_enabled == 1
-        assert serial.internal_clock == int(is_internal_clock)
+        assert link._network_is_internal_clock is is_internal_clock
     finally:
         link.detach_all()
         peer.stop()
 
 
 @pytest.mark.parametrize(
-    ("is_internal_clock", "expected_sb", "expected_sc_source"),
-    [(True, 0x01, 1), (False, 0x02, 0)],
+    "is_internal_clock",
+    [True, False],
 )
-def test_network_attach_arms_native_role_handshake(
-    is_internal_clock, expected_sb, expected_sc_source
+def test_network_attach_preserves_inflight_serial_state_and_game_memory(
+    is_internal_clock,
 ):
-    """Configure FF01/FF02 without touching the ROM's role-status HRAM."""
+    """A network attach cannot reset an already-running native transfer."""
     backend, peer = _versioned_backend_pair("red", "red")
     serial = SerialCore()
-    serial.set_SB(0x02)
-    serial.set_SC(0x80)
+    serial.set_SB(0xD3)
+    serial.set_SC(0x81)
+    # Leave the transfer between edges. This exercises the shift register,
+    # remaining-bit count, and native deadline rather than only FF01/FF02.
+    serial.tick(CYCLES_PER_EDGE_DMG * 2)
     pyboy = _FakePyBoy(serial=serial)
-    pyboy.memory = {0xFFAA: 0xFF}
+    pyboy.memory = {0xFFAA: 0x42, 0xFFAB: 0x00}
+    before = _serial_state(serial)
     link = PyBoyLinkSession(
         network_backend=backend,
         network_is_internal_clock=is_internal_clock,
@@ -582,12 +616,11 @@ def test_network_attach_arms_native_role_handshake(
 
     try:
         link.attach(pyboy)
-        assert serial.SB == expected_sb
-        assert serial.transfer_enabled == 1
-        assert serial.internal_clock == expected_sc_source
-        assert serial.SC & 0x80
-        assert serial.SC & 0x01 == expected_sc_source
-        assert pyboy.memory[0xFFAA] == 0xFF
+        assert before["transfer_enabled"]
+        assert before["_bits_remaining"] < 8
+        assert _serial_state(serial) == before
+        assert pyboy.memory == {0xFFAA: 0x42, 0xFFAB: 0x00}
+        assert link._network_is_internal_clock is is_internal_clock
     finally:
         link.detach_all()
         peer.stop()
@@ -615,18 +648,21 @@ def test_network_attach_arms_native_role_handshake(
         ("blue", "blue", False, False, True),
     ],
 )
-def test_network_clock_negotiation_selects_compatible_native_role(
+def test_network_clock_negotiation_selects_compatible_pacing_role(
     local_version,
     peer_version,
     default_internal,
     expected_internal,
     expected_frame_barrier,
 ):
-    """Startup role selection only changes native registers."""
+    """HELLO negotiation changes pacing metadata, never native serial state."""
     backend, peer = _versioned_backend_pair(local_version, peer_version)
     serial = SerialCore()
+    serial.set_SB(0xB7)
+    serial.set_SC(0x80)
     pyboy = _FakePyBoy(serial=serial)
-    pyboy.memory = {0xFFAA: 0xFF}
+    pyboy.memory = {0xFFAA: 0x99, 0xFFAB: 0x01}
+    before = _serial_state(serial)
     link = PyBoyLinkSession(
         network_backend=backend,
         network_is_internal_clock=default_internal,
@@ -638,19 +674,22 @@ def test_network_clock_negotiation_selects_compatible_native_role(
         selected = link.negotiate_network_clock_role(peer_version)
         assert selected is expected_internal
         assert link._network_frame_barrier is expected_frame_barrier
-        assert serial.internal_clock == int(expected_internal)
-        assert serial.SB == (0x01 if expected_internal else 0x02)
-        assert pyboy.memory[0xFFAA] == 0xFF
+        assert _serial_state(serial) == before
+        assert pyboy.memory == {0xFFAA: 0x99, 0xFFAB: 0x01}
+        assert link._network_is_internal_clock is expected_internal
     finally:
         link.detach_all()
         peer.stop()
 
 
 def test_network_attach_selects_cross_family_role_before_owner_ticks():
-    """HELLO must select Yellow external before a native tick can begin."""
+    """HELLO selects Yellow's metadata role before owner ticks can begin."""
     backend, peer = _versioned_backend_pair("yellow", "red")
     serial = SerialCore()
+    serial.set_SB(0x6C)
+    serial.set_SC(0x00)
     pyboy = _FakePyBoy(serial=serial)
+    before = _serial_state(serial)
     link = PyBoyLinkSession(
         network_backend=backend,
         network_is_internal_clock=True,
@@ -660,9 +699,8 @@ def test_network_attach_selects_cross_family_role_before_owner_ticks():
     try:
         link.attach(pyboy)
         assert pyboy._cycles == 0
-        assert serial.SB == 0x02
-        assert serial.internal_clock == 0
-        assert serial.transfer_enabled == 1
+        assert _serial_state(serial) == before
+        assert link._network_is_internal_clock is False
     finally:
         link.detach_all()
         peer.stop()
