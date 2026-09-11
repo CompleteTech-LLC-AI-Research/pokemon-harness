@@ -3,17 +3,22 @@
 Pytest's terminal summary is intended for humans and is awkward to parse
 reliably across pytest versions.  This plugin records one terminal outcome per
 test, including setup skips and xfail/xpass metadata, as JSON supplied by the
-gate through ``POKERED_GATE_REPORT``.
+gate through ``POKERED_GATE_REPORT``.  A bounded periodic checkpoint is used
+for the live progress report so a large suite does not repeatedly serialize its
+entire history on the test runner's critical path.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 _VALID_OUTCOMES = frozenset({"passed", "failed", "skipped"})
+_PROGRESS_EVERY = 32
+_PROGRESS_SECONDS = 2.0
 
 
 def pytest_configure(config: Any) -> None:
@@ -25,6 +30,9 @@ def pytest_configure(config: Any) -> None:
     _ACTIVE_COLLECTION_ERRORS.clear()
     _ACTIVE_COLLECTION_SKIPS.clear()
     _ACTIVE_COLLECTED_NODEIDS.clear()
+    global _LAST_PROGRESS_COUNT, _LAST_PROGRESS_WRITE
+    _LAST_PROGRESS_COUNT = 0
+    _LAST_PROGRESS_WRITE = time.monotonic()
     config._pokered_gate_records = {}
     config._pokered_gate_collection_errors = []
     config._pokered_gate_collection_skips = []
@@ -96,15 +104,25 @@ def pytest_collectreport(report: Any) -> None:
 def pytest_runtest_logfinish(nodeid: str, location: Any) -> None:
     """Persist terminal test progress so a killed worker remains auditable."""
 
+    global _LAST_PROGRESS_COUNT, _LAST_PROGRESS_WRITE
     del nodeid, location
     target = os.environ.get("POKERED_GATE_PROGRESS_REPORT")
     if not target:
+        return
+    now = time.monotonic()
+    count = len(_records())
+    if (
+        count - _LAST_PROGRESS_COUNT < _PROGRESS_EVERY
+        and now - _LAST_PROGRESS_WRITE < _PROGRESS_SECONDS
+    ):
         return
     _write_report(
         None,
         target_name="POKERED_GATE_PROGRESS_REPORT",
         exitstatus=-1,
     )
+    _LAST_PROGRESS_COUNT = count
+    _LAST_PROGRESS_WRITE = now
 
 
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
@@ -175,6 +193,8 @@ _ACTIVE_RECORDS: dict[str, dict[str, Any]] = {}
 _ACTIVE_COLLECTION_ERRORS: list[dict[str, str]] = []
 _ACTIVE_COLLECTION_SKIPS: list[dict[str, str]] = []
 _ACTIVE_COLLECTED_NODEIDS: list[str] = []
+_LAST_PROGRESS_COUNT = 0
+_LAST_PROGRESS_WRITE = 0.0
 
 
 def _records() -> dict[str, dict[str, Any]]:
