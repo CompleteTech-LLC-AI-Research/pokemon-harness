@@ -189,7 +189,9 @@ CPU owner, MCP lifecycle, and timed-remote tests. Then run the production gate:
 # Set these to the two fresh interpreters and private inputs on THIS machine.
 SOURCE_PYTHON="$PWD/.venv-source/bin/python"
 NATIVE_PYTHON="$PWD/.venv-native/bin/python"
-EVIDENCE_DIR="$(mktemp -d)"
+POKE_EVIDENCE_PARENT="${XDG_STATE_HOME:-$HOME/.local/state}/poke-harness-evidence"
+mkdir -p "$POKE_EVIDENCE_PARENT"
+EVIDENCE_DIR="$(mktemp -d "$POKE_EVIDENCE_PARENT/run-XXXXXX")"
 "$SOURCE_PYTHON" scripts/production_gate.py \
   --repo-root "$PWD" --rom-root "$PWD/rom" \
   --fixture-root "$PWD/tests/fixtures/link" \
