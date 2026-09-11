@@ -2167,7 +2167,7 @@ class NetworkBackend:
         with self._serial_gate:
             transfer_enabled = bool(getattr(core, "transfer_enabled", 0))
             internal_clock = bool(getattr(core, "internal_clock", 0))
-            if internal_clock:
+            if internal_clock and transfer_enabled:
                 # The ROM can switch clock source while an EDGE_REQ from
                 # the previous role is already queued. The existing
                 # serial protocol uses the connected/no-data byte for
