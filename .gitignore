@@ -22,6 +22,8 @@ htmlcov/
 dist/
 build/
 .venv/
+.venv-source/
+.venv-native/
 venv/
 
 # Walkthrough artifacts (derived from ROM — never commit)

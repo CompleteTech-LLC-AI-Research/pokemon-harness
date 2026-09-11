@@ -41,7 +41,6 @@ git clone --branch sync/linux-resume-20260911 \
   https://github.com/CompleteDotTech/pokemon.git poke-harness
 cd poke-harness
 git fetch origin
-git submodule update --init --depth 1 vendor/pyboy-src
 python3 -m venv .venv-source
 . .venv-source/bin/activate
 python -m pip install -e '.[dev]'
@@ -56,6 +55,13 @@ clean environment for native Cython; use `scripts/bootstrap_pyboy.py --mode
 cython` and its `--check` command there. Follow the runbook for build prerequisites.
 Verify actual module paths: source must use the bundled Python modules;
 native must use the installed extension modules. Record interpreter versions.
+
+The checkpoint already tracks `vendor/pyboy-src` as ordinary source files,
+not a Git submodule. No separate PyBoy checkout is needed. Native compilation
+also requires Python development headers and working POSIX semaphores on
+Linux: a read-only `/dev/shm` prevents the pinned Cython build from starting
+its compiler workers. Treat that as a host prerequisite failure, not a
+successful native installation.
 
 The Git branches contain no ROMs, symbols, saves, screenshots, or raw gameplay
 logs. Obtain legally supplied operator assets separately. Do not download ROMs,

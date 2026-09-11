@@ -362,6 +362,17 @@ The source repositories are `https://github.com/pret/pokered` and
 base-game symbols because the color patch preserves the symbol-address ABI;
 their ROM hashes remain independently pinned above.
 
+Fresh Linux builds of the two pinned source revisions with RGBDS `v1.0.1`
+and the commands above reproduce the stock Red, stock Blue, and Yellow ROM
+SHA-1 pins. Red and Blue symbol files also match directly. The pinned Yellow
+symbol file uses CRLF line endings: Linux `rgblink` emits LF bytes with SHA-1
+`39b3bd173a2ce10f8369fdf3e00c7c537562ddd5`; converting only those LF endings
+to CRLF yields the documented `7c4205723943e7722230dcf014e5e8a2012474aa` pin.
+Retain the original build output and record this normalization when
+reproducing that symbol input. This build does not produce the separately
+pinned Red/Blue color variants or any Cable Club fixtures, and establishes
+asset identity rather than gameplay acceptance.
+
 ## Hash and version enforcement
 
 `Session.from_files(..., expected_rom_sha1=...)` hashes the ROM and raises
