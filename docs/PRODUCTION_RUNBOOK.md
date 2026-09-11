@@ -6,15 +6,26 @@ ROMs, symbols, save states, and sanitized evidence remain operator-managed.
 
 ## Current evidence and release decision
 
-**Release status: `PARTIAL`, not `PRODUCTION-READY`.** The retained baseline
-candidate `1f19707` passed the dual source/native unit-and-timing gate and
-canonical boot checks. The current source-runtime trade follow-up is recorded
-below; no clean full source/native gameplay qualification is established.
+**Release status: `PARTIAL`, not `PRODUCTION-READY`.** The current Linux
+candidate ran the isolated dual-runtime unit-only gate at code commit
+`3c96537`: source and native/Cython each passed `4,508/4,508` unit tests and
+`1,910/1,910` timing checks across five repetitions, with zero failures,
+skips, xfails, xpasses, or errors. The retained report is
+`dual-unit-final-20260911/gate-report.txt` (SHA-256
+`58e8e34efc28e4af0df6af742153a7b03eee1aeb8ca3cc94dac9e07dc11dcf2d`).
 
-| Retained baseline scope at `1f19707` | Recorded result | Evidence boundary |
+| Current Linux scope | Recorded result | Evidence boundary |
 |---|---|---|
-| Source and native unit/timing | Each runtime: `1,176/1,176` unit and `65/65` total timing (`13` cases × five repetitions) | `1,320` collected in each runtime; zero failures, skips, xfails, xpasses, or errors. All `19/19` trade and `19/19` battle entrypoints declared, but not executed by this unit gate. |
-| Canonical boot/state/save/load | Source `3/3` in `6.74s`; native `3/3` in `1.89s` | Zero failures, skips, or errors; one SDL warning each. Color Red, color Blue, and Yellow run 120 frames, then state and save/load checks. Not intro completion, MCP, or gameplay acceptance. |
+| Source and native unit/timing | Each runtime: `4,508/4,508` unit and `1,910/1,910` timing | Matrix collection declared all local/remote and `19/19` strict trade/battle rows, but the unit-only gate did not execute gameplay. |
+| MCP stdio and link lifecycle | Each runtime: `6/6` real-ROM checks | Server initialization, tools/resources, save/load, local and loopback attachment, and explicit teardown using stock inputs; no Cable Club gameplay. |
+| Red golden path | Each runtime: `4/4` real-ROM checks | Stock Red ROM/symbol input only; boot/state/save/load coverage, not trade or battle. |
+| Clean source installation | `PASS` on CPython 3.11 | Fresh editable `.[dev]` install, `pip check`, source bootstrap identity, isolated imports, and clean wheel-install regression. Native clean-install evidence remains separate. |
+
+The two color ROMs and all ten external Cable Club fixtures were unavailable.
+Fixture validation and every full asset-backed local, TCP, strict-trade, and
+strict-battle tier therefore remain unexecuted. The current runtime evidence
+does not establish production gameplay qualification. The retained results
+below are historical unless explicitly identified as the current Linux run.
 
 The external unit bundle is `pokemon-qualification-dual-unit-1f19707-20260905`
 (`gate-report.json`). Native build provenance is retained in
