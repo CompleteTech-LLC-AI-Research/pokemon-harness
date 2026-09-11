@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import warnings
 from types import SimpleNamespace
 
 from pokered_harness.link.network_backend import (
@@ -249,6 +250,171 @@ class _TickProbePyBoy:
             if not self._tick(render, sound):
                 return False
         return True
+
+
+class _BarrierExternalCore:
+    """External-clock owner that must re-arm between two remote bytes."""
+
+    def __init__(self) -> None:
+        self.backend = None
+        self.transfer_enabled = 1
+        self.internal_clock = 0
+        self.SB = 0
+        self.SC = 0x80
+        self._bits = 0
+        self.completed_bytes = 0
+        self.rearm_count = 0
+
+    def peek_out_bit(self) -> int:
+        return 0
+
+    def apply_external_edge(self, peer_bit: int) -> bool:
+        self.SB = ((self.SB << 1) | (peer_bit & 1)) & 0xFF
+        self._bits += 1
+        if self._bits < 8:
+            return False
+        self._bits = 0
+        self.completed_bytes += 1
+        self.transfer_enabled = 0
+        self.SC &= ~0x80
+        return True
+
+    def owner_tick(self) -> None:
+        if not self.transfer_enabled:
+            self.SB = 0
+            self.SC = 0x80
+            self.transfer_enabled = 1
+            self.internal_clock = 0
+            self.rearm_count += 1
+
+
+class _BarrierInternalCore:
+    """Internal-clock owner that emits two bytes in one frame."""
+
+    def __init__(self) -> None:
+        self.backend = None
+        self.transfer_enabled = 1
+        self.internal_clock = 1
+        self.SB = 0
+        self.SC = 0x81
+        self._bits = 0
+        self.sent_edges = 0
+        self.completed_bytes = 0
+
+    def peek_out_bit(self) -> int:
+        return 0
+
+    def owner_tick(self) -> None:
+        for _ in range(16):
+            if not self.transfer_enabled:
+                self.SB = 0
+                self.SC = 0x81
+                self.transfer_enabled = 1
+                self.internal_clock = 1
+            received = self.backend.on_edge(our_bit=0, our_role=1)
+            self.SB = ((self.SB << 1) | (received & 1)) & 0xFF
+            self._bits += 1
+            self.sent_edges += 1
+            if self._bits == 8:
+                self._bits = 0
+                self.completed_bytes += 1
+                self.transfer_enabled = 0
+                self.SC &= ~0x80
+
+
+class _BarrierPyBoy:
+    def __init__(self, serial) -> None:
+        self.mb = SimpleNamespace(
+            serial=serial,
+            cpu=SimpleNamespace(set_interruptflag=lambda _flag: None),
+        )
+        self.tick_calls = 0
+
+    def _tick(self, render=True, sound=True):
+        del render, sound
+        self.tick_calls += 1
+        self.mb.serial.owner_tick()
+        return True
+
+    def tick(self, count=1, render=True, sound=True):
+        for _ in range(count):
+            if not self._tick(render, sound):
+                return False
+        return True
+
+
+def test_network_frame_barrier_rearms_owner_after_done_for_either_pacing_role(monkeypatch):
+    """Opposite native SC roles complete two bytes without a barrier deadlock."""
+    monkeypatch.setattr(
+        "pokered_harness.link.network_backend._EDGE_RESPONSE_TIMEOUT_SECONDS",
+        1.0,
+    )
+    leader_backend, follower_backend = NetworkBackend.pair()
+    leader_core = _BarrierExternalCore()
+    follower_core = _BarrierInternalCore()
+    leader_pyboy = _BarrierPyBoy(leader_core)
+    follower_pyboy = _BarrierPyBoy(follower_core)
+    leader_link = PyBoyLinkSession(
+        network_backend=leader_backend,
+        # Deliberately opposite to the native external-clock leader core.
+        network_is_internal_clock=True,
+    )
+    follower_link = PyBoyLinkSession(
+        network_backend=follower_backend,
+        # Deliberately opposite to the native internal-clock follower core.
+        network_is_internal_clock=False,
+    )
+    # Pair tests omit HELLO, so select the same frame-barrier mode a
+    # version-negotiated Color Red/Blue session would use.
+    leader_link._network_frame_barrier = True
+    follower_link._network_frame_barrier = True
+    errors: list[BaseException] = []
+
+    def run(pyboy) -> None:
+        try:
+            assert pyboy.tick(1, render=False, sound=False) is True
+        except BaseException as exc:  # noqa: BLE001 - assert both workers below
+            errors.append(exc)
+
+    leader_thread = threading.Thread(target=run, args=(leader_pyboy,), daemon=True)
+    follower_thread = threading.Thread(target=run, args=(follower_pyboy,), daemon=True)
+    try:
+        leader_link.attach(leader_pyboy)
+        follower_link.attach(follower_pyboy)
+        leader_thread.start()
+        follower_thread.start()
+        leader_thread.join(timeout=3.0)
+        follower_thread.join(timeout=3.0)
+        assert not leader_thread.is_alive()
+        assert not follower_thread.is_alive()
+        assert errors == []
+        assert leader_core.completed_bytes == 2
+        assert follower_core.completed_bytes == 2
+        assert follower_core.sent_edges == 16
+        assert leader_core.rearm_count >= 1
+        assert leader_pyboy.tick_calls >= 2
+        assert leader_backend.debug_snapshot()["owner_edge_applied"] == 16
+        assert leader_backend.debug_snapshot()["frame_acks_received"] == 1
+        assert follower_backend.debug_snapshot()["frame_acks_sent"] == 1
+    finally:
+        # Stop first so a failure cannot strand either owner in on_edge or
+        # FRAME_ACK; then restore the serial backends after workers unwind.
+        leader_backend.stop(timeout_s=1.0)
+        follower_backend.stop(timeout_s=1.0)
+        leader_thread.join(timeout=1.0)
+        follower_thread.join(timeout=1.0)
+        try:
+            leader_link.detach_all()
+        except Exception as exc:  # noqa: BLE001 - preserve the primary assertion
+            warnings.warn(f"leader link cleanup failed: {exc!r}", RuntimeWarning, stacklevel=2)
+        try:
+            follower_link.detach_all()
+        except Exception as exc:  # noqa: BLE001 - preserve the primary assertion
+            warnings.warn(f"follower link cleanup failed: {exc!r}", RuntimeWarning, stacklevel=2)
+        leader_backend.stop(timeout_s=1.0)
+        follower_backend.stop(timeout_s=1.0)
+        assert not leader_thread.is_alive()
+        assert not follower_thread.is_alive()
 
 
 def test_network_attach_wraps_source_pyboy_tick_and_services_owner_queue():

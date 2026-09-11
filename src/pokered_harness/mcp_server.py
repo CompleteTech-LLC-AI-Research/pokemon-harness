@@ -501,8 +501,9 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
             description=(
                 "Bind a TCP port and wait for a peer MCP server to connect. "
                 "Returns immediately; poll `link_status` until mode=='connected'. "
-                "Default role: internal-clock master (status byte 0x02); "
-                "native HELLO negotiation selects the non-Yellow master for "
+                "Default pacing role: listener leads frame turns; the ROM owns "
+                "native serial registers and connection-status bytes. HELLO "
+                "negotiation selects the non-Yellow pacing leader for "
                 "cross-family pairs."
             ),
             inputSchema={
@@ -534,9 +535,10 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
             name="link_connect",
             description=(
                 "Open a TCP connection to a peer MCP server's listener. "
-                "Blocks until HELLO completes. Default role: external-clock "
-                "slave (status byte 0x01); native HELLO negotiation selects "
-                "the non-Yellow master for cross-family pairs."
+                "Blocks until HELLO completes. Default pacing role: connector "
+                "follows frame turns; the ROM owns native serial registers "
+                "and connection-status bytes. HELLO negotiation selects the "
+                "non-Yellow pacing leader for cross-family pairs."
             ),
             inputSchema={
                 "type": "object",
@@ -1956,13 +1958,14 @@ def _negotiate_network_clock_role(
     *,
     timeout_s: float,
 ) -> bool | None:
-    """Negotiate native serial registers while owning the Session lock.
+    """Negotiate network clock-role metadata while owning the Session lock.
 
     ``PyBoyLinkSession.negotiate_network_clock_role`` intentionally owns the
-    link-session lifecycle and serial gate, but it mutates the attached
-    PyBoy serial cores directly. MCP callers must also hold the owning
-    :class:`Session` lock so a concurrent step, state operation, or teardown
-    cannot observe or modify the registers mid-negotiation.
+    link-session lifecycle and serial gate. It only updates session pacing
+    metadata; the native PyBoy serial cores and ROM-owned state are left
+    untouched. MCP callers must also hold the owning :class:`Session` lock so
+    a concurrent step, state operation, or teardown cannot observe or modify
+    the session metadata mid-negotiation.
     """
     with session.locked(timeout_s=max(0.0, timeout_s)):
         return network_session.negotiate_network_clock_role(peer_rom_version)

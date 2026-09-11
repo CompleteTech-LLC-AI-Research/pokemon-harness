@@ -73,8 +73,6 @@ from pokered_harness.link.serial_coordinator import (
     SerialOperationGate,
 )
 from pokered_harness.link.serial_core import (
-    SC_CLOCK_SOURCE,
-    SC_TRANSFER_ENABLE,
     NullBackend,
     SerialCore,
 )
@@ -235,12 +233,6 @@ class PyBoyLinkSession:
     # startup.  This is deliberately finite so attach cannot retain an
     # emulator or reader thread forever when the remote endpoint disappears.
     _NETWORK_HELLO_TIMEOUT_SECONDS: float = 10.0
-    # These are the wire markers from pret/pokered's serial_constants.asm.
-    # They are written to the native FF01/FF02 serial registers through
-    # Serial.set_SB/set_SC, never to the ROM-owned hSerialConnectionStatus.
-    _ESTABLISH_CONNECTION_WITH_INTERNAL_CLOCK: int = 0x01
-    _ESTABLISH_CONNECTION_WITH_EXTERNAL_CLOCK: int = 0x02
-
     def __init__(
         self,
         network_backend: NetworkBackend | None = None,
@@ -402,8 +394,10 @@ class PyBoyLinkSession:
         the reader thread starts so peer-driven (slave-mode) edges
         advance the local serial and fire the CPU's serial IRQ. When both
         the session and backend carry ROM labels, attach waits for the
-        bounded HELLO handshake and selects the deterministic native clock
-        role before returning to the caller.
+        bounded HELLO handshake and records the deterministic network clock
+        role as session metadata before returning to the caller. Attach does
+        not write the native serial registers; the ROM remains the owner of
+        that state.
 
         Raises ``RuntimeError`` if ``pyboy`` is already attached, the
         session is at :attr:`MAX_ATTACHED`, or a network-mode session
@@ -489,17 +483,14 @@ class PyBoyLinkSession:
             # Network-mode: hook the local core up to the TCP backend
             # and fire the slave-IRQ via this pyboy's CPU flag register
             # when peer-driven edges complete our transfer. The initial
-            # native clock role is negotiated after versioned HELLO; the ROM
-            # still owns its connection-status byte and all later role
-            # changes. Do not write that HRAM cell here; doing so would bypass
-            # the ROM protocol. The provisional listener/connector role is
-            # only a register-level bootstrap; no emulator tick is allowed
-            # until a versioned peer has selected the deterministic role.
+            # native clock role is retained as session metadata and is
+            # negotiated after versioned HELLO; the ROM owns all native
+            # serial registers, its connection-status byte, and role changes.
+            # Attaching a transport must not seed or rewrite the cartridge's
+            # idle or in-flight serial state.
             core.backend = self._network_backend
             owner_dispatch_state: tuple[object | None, object, object] | None = None
             try:
-                with self._serial_gate:
-                    self._initialize_network_clock_role(core)
                 set_context_provider = getattr(
                     self._network_backend,
                     "set_serial_transcript_context_provider",
@@ -520,11 +511,10 @@ class PyBoyLinkSession:
                     and self._network_backend.local_rom_version is not None
                 ):
                     # HELLO is emitted by NetworkBackend construction, so
-                    # both connected endpoints can identify their ROMs while
-                    # the native serial registers remain at the provisional
-                    # role. This prevents a Yellow listener/Red connector
-                    # pair from starting the connection probe in opposite
-                    # roles before negotiate_network_clock_role() runs.
+                    # both connected endpoints can identify their ROMs before
+                    # any emulator tick. Role negotiation records the
+                    # deterministic pacing metadata without writing FF01/FF02
+                    # or otherwise changing the ROM's current serial state.
                     peer_version = self._network_backend.wait_for_hello(
                         timeout=self._NETWORK_HELLO_TIMEOUT_SECONDS
                     )
@@ -722,18 +712,23 @@ class PyBoyLinkSession:
         @wraps(original_tick)
         def run_owned_frame(*args, **kwargs):
             with owner_for(pyboy).access(), self._serial_gate:
+                # This boolean is transport pacing metadata only. It is not
+                # an observation or assignment of the cartridge's hardware
+                # serial clock source; the ROM owns that state.
                 pacing_leader = self._network_is_internal_clock
                 frame_barrier = self._network_frame_barrier and pacing_leader is not None
                 if frame_barrier:
                     backend.begin_frame_turn(leader=bool(pacing_leader))
 
-                def progress_follower() -> None:
+                def progress_owner() -> None:
                     pending_before = int(backend.debug_snapshot().get("pending_edge_requests", 0))
                     applied = backend.service_pending_edges(max_edges=1)
                     # A deferred request means the ROM's serial IRQ has not
                     # re-armed yet. Advance only this owner thread until that
                     # native re-arm is observable; do not run speculative
-                    # follower frames while no edge is admitted.
+                    # frames while no edge is admitted. This callback is
+                    # supplied for either pacing role: hardware SC ownership
+                    # can legitimately be opposite the frame metadata.
                     if (
                         applied == 0
                         and pending_before > 0
@@ -757,9 +752,7 @@ class PyBoyLinkSession:
                     try:
                         backend.finish_frame_turn(
                             leader=bool(pacing_leader),
-                            progress_callback=(
-                                progress_follower if not pacing_leader else None
-                            ),
+                            progress_callback=progress_owner,
                         )
                     except BaseException:
                         backend.abort_frame_turn(leader=bool(pacing_leader))
@@ -904,67 +897,34 @@ class PyBoyLinkSession:
         return _progress
 
     def _initialize_network_clock_role(self, core: object) -> None:
-        """Arm the native serial handshake for the configured wire role.
+        """Retain a deprecated compatibility hook without mutation.
 
-        A restored Cable Club fixture has both hardware serial ports waiting
-        as external-clock slaves (``SB=0x02``, ``SC=0xFC``). Real hardware
-        needs one endpoint to present the internal-clock establishment marker
-        on ``rSB`` and start ``rSC`` as the clock source; otherwise neither
-        endpoint can generate the first edge. This is register-level cable
-        setup, not a game-state shortcut: the ROM serial ISR still receives
-        the peer marker and writes ``hSerialConnectionStatus`` itself.
-
-        The method intentionally uses only the native PyBoy serial contract.
-        It does not inspect or mutate emulator memory and does not install
-        symbol-level hooks.
+        Network role selection is transport/session metadata. The cartridge
+        must own FF01/FF02 and any in-flight transfer, so attach and public
+        negotiation intentionally do not initialize native serial registers.
+        Older integrations may still reach this private hook, so it remains a
+        no-op rather than reintroducing a host-side serial write.
         """
-        is_internal_clock = self._network_is_internal_clock
-        if is_internal_clock is None:
-            return
-        set_sb = getattr(core, "set_SB", None)
-        set_sc = getattr(core, "set_SC", None)
-        if not callable(set_sb) or not callable(set_sc):
-            raise TypeError(
-                "network role initialization requires native Serial.set_SB and Serial.set_SC"
-            )
-
-        with self._serial_gate:
-            set_sb(
-                self._ESTABLISH_CONNECTION_WITH_INTERNAL_CLOCK
-                if is_internal_clock
-                else self._ESTABLISH_CONNECTION_WITH_EXTERNAL_CLOCK
-            )
-            # Preserve the CGB fast-serial selection bit if a caller restored
-            # a state with it set, while deterministically selecting the
-            # requested clock source and re-arming the native transfer.
-            try:
-                current_sc = int(getattr(core, "SC", 0))
-            except (TypeError, ValueError, OverflowError) as exc:
-                raise RuntimeError("native Serial.SC is not an integer") from exc
-            next_sc = current_sc & 0x02
-            next_sc |= SC_TRANSFER_ENABLE
-            if is_internal_clock:
-                next_sc |= SC_CLOCK_SOURCE
-            set_sc(next_sc)
+        del core
 
     @_serialized_local_operation
     def negotiate_network_clock_role(self, peer_rom_version: str) -> bool | None:
-        """Choose the native startup clock role after the HELLO exchange.
+        """Choose the session's startup clock-role metadata after HELLO.
 
         The TCP listener/connector role is a transport concern, not a
-        Pokémon hardware rule. Color Red/Blue and Yellow use different
-        startup paths in their connection probe; for a cross-family pair the
-        color Red/Blue endpoint must provide the first internal clock while
-        Yellow waits as the external-clock endpoint. The Red/Blue family also
-        needs a stable startup orientation when it is linked over independent
-        processes: Red provides the initial clock and Blue waits as the
-        external-clock endpoint. Same-family pairs retain their
-        caller-provided orientation; full TCP trade acceptance for
-        Blue-to-Blue is not implied by this register-level policy.
+        Pokémon hardware rule. Color Red/Blue and Yellow have different ROM
+        polling paths, so cross-family peers use the non-Yellow endpoint as
+        the deterministic pacing leader. For differing Red/Blue versions,
+        Red is the pacing leader regardless of TCP direction. Same-family
+        pairs retain their caller-provided pacing orientation; this metadata
+        does not elect the cartridge's native serial clock or imply Blue-to-
+        Blue trade acceptance.
 
-        This is deliberately limited to the native FF01/FF02 serial
-        registers. The ROM still observes the resulting bytes and owns
-        ``hSerialConnectionStatus`` and all subsequent role changes.
+        The selected boolean is session metadata used for deterministic
+        network pacing. This method never writes native FF01/FF02 serial
+        registers; the ROM owns those registers, ``hSerialConnectionStatus``,
+        and all serial role changes. The ROM's eventual hardware role may
+        differ from this pacing metadata.
 
         Returns the selected role, or ``None`` when this is not a network
         session or the session was created without a default role.
@@ -972,7 +932,7 @@ class PyBoyLinkSession:
         if self._network_backend is None or self._network_is_internal_clock is None:
             return None
         if self._network_tick_active:
-            raise RuntimeError("cannot negotiate a clock role during network execution")
+            raise RuntimeError("cannot negotiate a pacing role during network execution")
         if not isinstance(peer_rom_version, str):
             raise TypeError("peer_rom_version must be a string")
         peer = peer_rom_version.strip().lower()
@@ -990,23 +950,18 @@ class PyBoyLinkSession:
         selected_internal = bool(self._network_is_internal_clock)
         cross_family = (local == "yellow") != (peer == "yellow")
         if cross_family:
-            # Red/Blue's connection probe is the compatible initial clock
-            # source when it is paired with Yellow. The ROM remains free to
-            # swap roles once the native handshake has completed.
+            # Keep the non-Yellow endpoint as the deterministic pacing leader.
+            # This does not direct either cartridge's native clock source;
+            # each ROM remains responsible for its own serial handshake.
             selected_internal = local != "yellow"
         elif local in {"red", "blue"} and peer in {"red", "blue"} and local != peer:
-            # The color Red/Blue connection probe is direction-sensitive when
-            # two independently scheduled emulators start from the restored
-            # Cable Club fixture. Keep Red as the initial clock source and
-            # Blue as the external-clock side regardless of TCP direction.
-            # This is only a native FF01/FF02 bootstrap choice; the ROM still
-            # owns hSerialConnectionStatus and all later role changes.
+            # Keep Red as the pacing leader regardless of TCP direction when
+            # the two ROM versions differ. The ROM still owns
+            # hSerialConnectionStatus and all hardware role changes.
             selected_internal = local == "red"
 
         if selected_internal != self._network_is_internal_clock:
             self._network_is_internal_clock = selected_internal
-            for core in self._cores:
-                self._initialize_network_clock_role(core)
         # Identical Color Red/Blue families can use the bounded frame barrier
         # immediately. Yellow's input-sensitive preamble needs native edge
         # transport until both peers reach a ROM-owned boundary; the
@@ -1021,12 +976,13 @@ class PyBoyLinkSession:
     def set_network_frame_barrier(self, enabled: bool) -> None:
         """Enable or disable frame pacing at an agreed ROM boundary.
 
-        Clock-role negotiation chooses the native serial owner; it cannot
-        safely guess when a cartridge has finished its input-sensitive
-        preamble. Coordinators may therefore switch the bounded frame
-        barrier at a mutually agreed boundary after both peers have reached
-        the same ROM-owned phase. Callers must make the same change on both
-        endpoints while no frame is in flight.
+        Pacing-role negotiation chooses which endpoint leads the network frame
+        barrier; it does not choose the native serial owner or hardware clock
+        source. Negotiation cannot safely guess when a cartridge has finished
+        its input-sensitive preamble. Coordinators may therefore switch the
+        bounded frame barrier at a mutually agreed boundary after both peers
+        have reached the same ROM-owned phase. Callers must make the same
+        change on both endpoints while no frame is in flight.
         """
         if type(enabled) is not bool:
             raise TypeError("enabled must be a bool")
