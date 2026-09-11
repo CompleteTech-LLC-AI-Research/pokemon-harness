@@ -722,13 +722,15 @@ is synthetic localhost evidence; real-ROM concurrent-load stability remains a
 separate release requirement.
 
 The native MCP link path only installs the pinned PyBoy serial backend and
-transport callbacks. It must not seed `hSerialConnectionStatus` (the ROM-owned
-HRAM status populated by its serial ISR) or install semantic exchange hooks.
-The listener and connector provide default native clock roles, then the
-versioned HELLO selects Red as the initial internal-clock side for a Red/Blue
-pair, or the non-Yellow endpoint for a Yellow/Red or Yellow/Blue pair. Same-
-family pairs retain their caller-provided orientation. The ROM still owns its
-connection-status byte and any later role changes. The `passive_sync()` helper
+transport callbacks. It must not write native serial registers (`SB`/`SC`,
+`FF01`/`FF02`), seed `hSerialConnectionStatus` (the ROM-owned HRAM status
+populated by its serial ISR), or install semantic exchange hooks. The listener
+defaults to the frame-pacing leader and the connector to the follower. Versioned
+HELLO selects Red as the pacing leader for a differing Red/Blue pair, or the
+non-Yellow endpoint for a Yellow/Red or Yellow/Blue pair. Same-version pairs
+retain their caller-provided pacing orientation. This is transport metadata;
+the ROM owns its hardware clock, native serial registers, and connection-status
+byte throughout. The `passive_sync()` helper
 in `tests/_tcp_trade_peer.py` is test-driver-only pre-drive coordination, not a
 production MCP synchronization guarantee or gameplay acceptance evidence. The
 semantic endpoint remains a compatibility path for non-native test doubles and
@@ -839,12 +841,13 @@ paired explicitly with `link_pair`; it is not proof of a working game flow.
 For a normal MCP lifecycle, initialize the server, list tools, and then use
 `step`, `press`, state resources, and save/load as needed. For a local pair,
 call `link_pair`, use `link_step`, and finish with `link_unpair`. For TCP,
-call `link_listen` and `link_connect` using their default roles, poll
+call `link_listen` and `link_connect` using their default pacing roles, poll
 `link_status` until `remote_mode=connected`, and call `link_disconnect` before
 closing either server. For native Red/Blue pairs, versioned HELLO selects Red
-as the initial internal-clock side; for Yellow/Red or Yellow/Blue pairs it
-selects the non-Yellow endpoint. Same-family pairs retain their
-caller-provided orientation. A teardown is complete
+as the pacing leader; for Yellow/Red or Yellow/Blue pairs it selects the non-Yellow
+endpoint. Same-version pairs retain their caller-provided pacing orientation.
+These roles do not set native serial registers or elect the ROM's clock source.
+A teardown is complete
 only when status is idle and no child peer, worker thread, socket, or callback
 remains.
 
