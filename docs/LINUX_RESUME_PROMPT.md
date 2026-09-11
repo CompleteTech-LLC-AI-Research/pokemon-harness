@@ -13,6 +13,10 @@ machine. Do not redefine success as passing unit tests or one gameplay row.
   `3684594` (six files; deliberately NOT integrated or release-qualified).
 - Pending documentation: `origin/wip/linux-resume-pacing-docs-20260911`, commit
   `56f59d7` (apply only with the matching network changes).
+- Archived unpublished regressions: `origin/archive/linux-resume-tests-20260911`,
+  commit `2dc3777`. Read `docs/ARCHIVED_TESTS_20260911.md` on that branch. Its four
+  older tests are preserved for review/porting, not integrated or qualified;
+  do not switch the production resume base to this archival branch.
 - Read `agents.md`, `VERSIONS.md`, `docs/PRODUCTION_RUNBOOK.md`, and
   `docs/RELEASE_CHECKLIST.md`. Older results in those files are historical,
   not proof for this checkpoint. The release remains PARTIAL.
