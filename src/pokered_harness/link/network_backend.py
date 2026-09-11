@@ -395,6 +395,13 @@ class NetworkBackend:
         # single-slot response queue and fail-closed behavior.
         self._edge_call_lock = threading.Lock()
         self._edge_response_lock = threading.Lock()
+        # Serialize an inbound EDGE_REQ with completion of the response for
+        # the preceding owner/worker request.  The peer is allowed to send
+        # its next edge as soon as it receives that response; keeping the
+        # pending-count decrement in this same critical section prevents the
+        # reader from admitting the next request while the worker's finally
+        # block is still catching up.
+        self._edge_wire_completion_lock = threading.Lock()
         self._edge_inflight = False
         self._edge_inflight_id: int | None = None
         self._edge_response_seen = False
@@ -1941,74 +1948,84 @@ class NetworkBackend:
                     self._peer_rom_version = peer_version
                     self._hello_received.set()
                 elif opcode in (_OP_EDGE_REQ, _OP_EDGE_REQ_ID):
-                    if payload > 1:
-                        raise NetworkBackendError(f"invalid EDGE_REQ bit payload {payload}")
-                    if edge_id is not None:
-                        replay_bit = self._claim_inbound_edge_id(edge_id)
-                        if replay_bit is not None:
-                            self._stats["edge_id_duplicates_replayed"] = int(
-                                self._stats["edge_id_duplicates_replayed"]
-                            ) + 1
-                            self._record_serial_event(
-                                "edge_req_duplicate_replayed",
-                                direction="peer_to_local",
-                                edge_bit=payload & 1,
-                                edge_id=edge_id,
-                                response_bit=replay_bit,
-                            )
-                            self._send_edge_response(
-                                _InboundEdge(
-                                    peer_bit=payload & 1,
-                                    response_bit=replay_bit,
-                                    edge_id=edge_id,
-                                )
-                            )
-                            continue
-                        self._stats["edge_id_req_received"] = int(
-                            self._stats["edge_id_req_received"]
-                        ) + 1
-                    if self._send_reciprocal_master_response(
-                        payload & 1,
-                        edge_id=edge_id,
-                    ):
-                        continue
-                    # A detached transport has no emulator owner to service
-                    # an incoming edge. Fail closed rather than queueing work
-                    # that could be mistaken for the next session after a
-                    # same-transport rebind.
-                    with self._local_core_condition:
-                        if self._local_core_detaching or self._local_core_detached:
+                    # Keep the reader behind the response worker's wire
+                    # completion point.  Otherwise a peer can receive an
+                    # EDGE_RESP, immediately send its next EDGE_REQ, and
+                    # have this branch increment _edge_pending before the
+                    # previous worker finally block decrements it.
+                    with self._edge_wire_completion_lock:
+                        if payload > 1:
                             raise NetworkBackendError(
-                                "received EDGE_REQ while local serial core is detached"
+                                f"invalid EDGE_REQ bit payload {payload}"
                             )
-                        with self._edge_pending_condition:
-                            if self._closed:
+                        if edge_id is not None:
+                            replay_bit = self._claim_inbound_edge_id(edge_id)
+                            if replay_bit is not None:
+                                self._stats["edge_id_duplicates_replayed"] = int(
+                                    self._stats["edge_id_duplicates_replayed"]
+                                ) + 1
+                                self._record_serial_event(
+                                    "edge_req_duplicate_replayed",
+                                    direction="peer_to_local",
+                                    edge_bit=payload & 1,
+                                    edge_id=edge_id,
+                                    response_bit=replay_bit,
+                                )
+                                self._send_edge_response(
+                                    _InboundEdge(
+                                        peer_bit=payload & 1,
+                                        response_bit=replay_bit,
+                                        edge_id=edge_id,
+                                    )
+                                )
                                 continue
-                            self._edge_pending += 1
-                            self._edge_pending_condition.notify_all()
-                    request = _InboundEdge(peer_bit=payload & 1, edge_id=edge_id)
-                    self._record_serial_event(
-                        "edge_req_received",
-                        direction="peer_to_local",
-                        edge_bit=payload & 1,
-                        edge_id=edge_id,
-                    )
-                    try:
-                        self._edge_queue.put_nowait(request)
-                    except queue.Full as exc:
-                        with self._edge_pending_condition:
-                            # _mark_closed() can clear the admitted-work
-                            # count while this queue operation is racing
-                            # teardown.  Keep the live diagnostic invariant
-                            # non-negative on the queue-full path as well as
-                            # in worker finalizers.
-                            if self._edge_pending > 0:
-                                self._edge_pending -= 1
-                            else:
-                                self._edge_pending = 0
-                            self._edge_pending_condition.notify_all()
-                        self._release_inbound_edge_id(edge_id)
-                        raise NetworkBackendError("incoming EDGE_REQ queue is full") from exc
+                            self._stats["edge_id_req_received"] = int(
+                                self._stats["edge_id_req_received"]
+                            ) + 1
+                        if self._send_reciprocal_master_response(
+                            payload & 1,
+                            edge_id=edge_id,
+                        ):
+                            continue
+                        # A detached transport has no emulator owner to service
+                        # an incoming edge. Fail closed rather than queueing work
+                        # that could be mistaken for the next session after a
+                        # same-transport rebind.
+                        with self._local_core_condition:
+                            if self._local_core_detaching or self._local_core_detached:
+                                raise NetworkBackendError(
+                                    "received EDGE_REQ while local serial core is detached"
+                                )
+                            with self._edge_pending_condition:
+                                if self._closed:
+                                    continue
+                                self._edge_pending += 1
+                                self._edge_pending_condition.notify_all()
+                        request = _InboundEdge(peer_bit=payload & 1, edge_id=edge_id)
+                        self._record_serial_event(
+                            "edge_req_received",
+                            direction="peer_to_local",
+                            edge_bit=payload & 1,
+                            edge_id=edge_id,
+                        )
+                        try:
+                            self._edge_queue.put_nowait(request)
+                        except queue.Full as exc:
+                            with self._edge_pending_condition:
+                                # _mark_closed() can clear the admitted-work
+                                # count while this queue operation is racing
+                                # teardown.  Keep the live diagnostic invariant
+                                # non-negative on the queue-full path as well as
+                                # in worker finalizers.
+                                if self._edge_pending > 0:
+                                    self._edge_pending -= 1
+                                else:
+                                    self._edge_pending = 0
+                                self._edge_pending_condition.notify_all()
+                            self._release_inbound_edge_id(edge_id)
+                            raise NetworkBackendError(
+                                "incoming EDGE_REQ queue is full"
+                            ) from exc
                 elif opcode in (_OP_EDGE_RESP, _OP_EDGE_RESP_ID):
                     if payload > 1:
                         raise NetworkBackendError(f"invalid EDGE_RESP bit payload {payload}")
@@ -2137,15 +2154,16 @@ class NetworkBackend:
                 continue
             if request is None:
                 return
-            try:
-                if self._closed:
+            with self._edge_wire_completion_lock:
+                try:
+                    if self._closed:
+                        return
+                    self._handle_edge_req(request)
+                except Exception as exc:  # noqa: BLE001
+                    self._mark_closed(exc)
                     return
-                self._handle_edge_req(request)
-            except Exception as exc:  # noqa: BLE001
-                self._mark_closed(exc)
-                return
-            finally:
-                self._decrement_edge_pending()
+                finally:
+                    self._decrement_edge_pending()
 
     def _owner_response_worker_loop(self) -> None:
         """Send responses produced by the emulator-owner dispatch path.
@@ -2162,14 +2180,15 @@ class NetworkBackend:
                 continue
             if request is None:
                 return
-            try:
-                if not self._closed:
-                    self._send_edge_response(request)
-            except Exception as exc:  # noqa: BLE001
-                self._mark_closed(exc)
-                return
-            finally:
-                self._decrement_edge_pending()
+            with self._edge_wire_completion_lock:
+                try:
+                    if not self._closed:
+                        self._send_edge_response(request)
+                except Exception as exc:  # noqa: BLE001
+                    self._mark_closed(exc)
+                    return
+                finally:
+                    self._decrement_edge_pending()
 
     def _send_reciprocal_master_response(
         self,

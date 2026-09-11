@@ -2147,6 +2147,104 @@ def test_owner_completion_and_irq_precede_blocked_edge_response(monkeypatch):
         slave.stop()
 
 
+def test_next_edge_waits_for_response_accounting_to_finish(monkeypatch):
+    """A peer's next edge cannot overtake the prior pending decrement."""
+    master, slave = NetworkBackend.pair()
+    core = _CompletingSlaveCore()
+    core.internal_clock = 1
+    response_decrement_entered = threading.Event()
+    response_decrement_done = threading.Event()
+    release_response_decrement = threading.Event()
+    original_decrement = slave._decrement_edge_pending
+    decrement_calls = 0
+    decrement_lock = threading.Lock()
+
+    def delayed_decrement() -> None:
+        nonlocal decrement_calls
+        with decrement_lock:
+            decrement_calls += 1
+            call_number = decrement_calls
+        if call_number == 1:
+            response_decrement_entered.set()
+            assert release_response_decrement.wait(timeout=1.0)
+        original_decrement()
+        if call_number == 1:
+            response_decrement_done.set()
+
+    monkeypatch.setattr(slave, "_decrement_edge_pending", delayed_decrement)
+    master.start_receiver(local_core=None)
+    slave.start_receiver(
+        local_core=core,
+        serial_gate=SerialOperationGate(),
+        dispatch_to_owner=True,
+    )
+    first_reply: list[int] = []
+    first_errors: list[BaseException] = []
+
+    def append_edge_result(reply: list[int], errors: list[BaseException]) -> None:
+        try:
+            reply.append(master.on_edge(our_bit=1, our_role=1))
+        except BaseException as exc:  # noqa: BLE001 - assert worker failures below
+            errors.append(exc)
+
+    first_sender = threading.Thread(
+        target=lambda: append_edge_result(first_reply, first_errors),
+        daemon=True,
+    )
+    second_reply: list[int] = []
+    second_errors: list[BaseException] = []
+    second_sender = threading.Thread(
+        target=lambda: append_edge_result(second_reply, second_errors),
+        daemon=True,
+    )
+    try:
+        first_sender.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and slave.debug_snapshot()["pending_edge_requests"] == 0:
+            time.sleep(0.005)
+        assert slave.debug_snapshot()["pending_edge_requests"] == 1
+        assert slave.service_pending_edges(max_edges=1) == 1
+        assert response_decrement_entered.wait(timeout=1.0)
+        first_sender.join(timeout=1.0)
+        assert not first_sender.is_alive()
+        assert first_errors == []
+        assert first_reply == [1]
+
+        # The first response is already on the wire, so the peer immediately
+        # starts its next edge. The worker is deliberately paused after that
+        # write; the reader must wait for its pending decrement instead of
+        # exposing two admitted requests.
+        second_sender.start()
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            assert slave.debug_snapshot()["pending_edge_requests"] == 1
+            time.sleep(0.005)
+
+        release_response_decrement.set()
+        assert response_decrement_done.wait(timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        applied = 0
+        while time.monotonic() < deadline and applied == 0:
+            applied = slave.service_pending_edges(max_edges=1)
+            if applied == 0:
+                time.sleep(0.005)
+        assert applied == 1
+        second_sender.join(timeout=1.0)
+        assert not second_sender.is_alive()
+        assert second_errors == []
+        assert second_reply == [1]
+        slave.wait_for_wire_idle(timeout=1.0)
+        assert slave.debug_snapshot()["pending_edge_requests"] == 0
+    finally:
+        release_response_decrement.set()
+        if first_sender.ident is not None:
+            first_sender.join(timeout=1.0)
+        if second_sender.ident is not None:
+            second_sender.join(timeout=1.0)
+        master.stop()
+        slave.stop()
+
+
 class _BlockingSlaveCore:
     """Pause edge application so a transport-idle timeout is observable."""
 
