@@ -2155,6 +2155,12 @@ def test_next_edge_waits_for_response_accounting_to_finish(monkeypatch):
     response_decrement_entered = threading.Event()
     response_decrement_done = threading.Event()
     release_response_decrement = threading.Event()
+    # Set when the *reader* thread reaches the inbound-EDGE_REQ admission
+    # critical section. This is the deterministic synchronization point: the
+    # reader must be provably blocked entering the gate while the previous
+    # response completion is still pending, rather than relying on a timed
+    # observation window that can pass before the next request even arrives.
+    reader_attempted_admission = threading.Event()
     original_decrement = slave._decrement_edge_pending
     decrement_calls = 0
     decrement_lock = threading.Lock()
@@ -2166,12 +2172,32 @@ def test_next_edge_waits_for_response_accounting_to_finish(monkeypatch):
             call_number = decrement_calls
         if call_number == 1:
             response_decrement_entered.set()
-            assert release_response_decrement.wait(timeout=1.0)
+            # Never assert inside this daemon worker: a load-induced timeout
+            # would fail the test through a dead worker instead of a clear
+            # assertion, and the release below is driven by the main thread.
+            release_response_decrement.wait(timeout=30.0)
         original_decrement()
         if call_number == 1:
             response_decrement_done.set()
 
     monkeypatch.setattr(slave, "_decrement_edge_pending", delayed_decrement)
+
+    real_wire_lock = slave._edge_wire_completion_lock
+
+    class _ObservedWireLock:
+        """Wire completion lock that signals the reader's admission attempt."""
+
+        def __enter__(self):
+            if threading.current_thread().name == "NetworkBackend.reader":
+                reader_attempted_admission.set()
+            real_wire_lock.acquire()
+            return self
+
+        def __exit__(self, *_exc):
+            real_wire_lock.release()
+            return False
+
+    monkeypatch.setattr(slave, "_edge_wire_completion_lock", _ObservedWireLock())
     master.start_receiver(local_core=None)
     slave.start_receiver(
         local_core=core,
@@ -2199,48 +2225,50 @@ def test_next_edge_waits_for_response_accounting_to_finish(monkeypatch):
     )
     try:
         first_sender.start()
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and slave.debug_snapshot()["pending_edge_requests"] == 0:
             time.sleep(0.005)
         assert slave.debug_snapshot()["pending_edge_requests"] == 1
         assert slave.service_pending_edges(max_edges=1) == 1
-        assert response_decrement_entered.wait(timeout=1.0)
-        first_sender.join(timeout=1.0)
+        assert response_decrement_entered.wait(timeout=10.0)
+        first_sender.join(timeout=10.0)
         assert not first_sender.is_alive()
         assert first_errors == []
         assert first_reply == [1]
 
         # The first response is already on the wire, so the peer immediately
         # starts its next edge. The worker is deliberately paused after that
-        # write; the reader must wait for its pending decrement instead of
-        # exposing two admitted requests.
+        # write. The reader must reach the admission gate and block there
+        # instead of exposing two admitted requests; wait for that attempt
+        # before asserting the pending count is still one.
+        reader_attempted_admission.clear()
         second_sender.start()
-        deadline = time.monotonic() + 0.25
-        while time.monotonic() < deadline:
-            assert slave.debug_snapshot()["pending_edge_requests"] == 1
-            time.sleep(0.005)
+        assert reader_attempted_admission.wait(
+            timeout=10.0
+        ), "reader never attempted inbound EDGE_REQ admission"
+        assert slave.debug_snapshot()["pending_edge_requests"] == 1
 
         release_response_decrement.set()
-        assert response_decrement_done.wait(timeout=1.0)
-        deadline = time.monotonic() + 1.0
+        assert response_decrement_done.wait(timeout=10.0)
+        deadline = time.monotonic() + 10.0
         applied = 0
         while time.monotonic() < deadline and applied == 0:
             applied = slave.service_pending_edges(max_edges=1)
             if applied == 0:
                 time.sleep(0.005)
         assert applied == 1
-        second_sender.join(timeout=1.0)
+        second_sender.join(timeout=10.0)
         assert not second_sender.is_alive()
         assert second_errors == []
         assert second_reply == [1]
-        slave.wait_for_wire_idle(timeout=1.0)
+        slave.wait_for_wire_idle(timeout=10.0)
         assert slave.debug_snapshot()["pending_edge_requests"] == 0
     finally:
         release_response_decrement.set()
         if first_sender.ident is not None:
-            first_sender.join(timeout=1.0)
+            first_sender.join(timeout=10.0)
         if second_sender.ident is not None:
-            second_sender.join(timeout=1.0)
+            second_sender.join(timeout=10.0)
         master.stop()
         slave.stop()
 
