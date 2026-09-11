@@ -13,16 +13,22 @@ for reuse. See [CI policy and local commands](docs/CI_POLICY.md).
 
 ## Release status
 
-**Status: `PARTIAL` — `origin/master` is not production-ready.**
+**Status: `PARTIAL` — the current candidate is not production-ready.**
 
-The 2026-09-09 reconciliation candidate has not passed its full gate. Its
-pre-packaging-update source gate timed out with 3,097 unit passes, 25 failures,
-and one skip; five timing repetitions recorded 1,236 passes and 59 failures.
-After restoring Python 3.11 support, a later pre-commit source unit run
-completed with 4,416 passes and five failures. A full native extension build
-and focused source/native lifecycle and CPU checks also passed. These scoped
-checks do not qualify the remaining failures or real-ROM gameplay. See the
-[candidate evidence record](docs/PRODUCTION_RUNBOOK.md#reconciliation-candidate-2026-09-09).
+On 2026-09-11, candidate `3c96537` passed the isolated dual-runtime unit-only
+gate: source and native/Cython each passed `4,508/4,508` unit tests and
+`1,910/1,910` timing cases over five repetitions, with zero failures, skips,
+xfails, xpasses, or errors. The same two runtimes each passed six real-ROM MCP
+stdio/lifecycle checks and four Red golden-path checks. Native verification ran
+inside an unprivileged Linux mount namespace with a private writable
+`/dev/shm`, because this host's shared-memory mount is read-only.
+
+This is current runtime and lifecycle evidence, not a gameplay qualification.
+The two required color ROMs and all ten Cable Club fixtures are absent from the
+candidate environment, so the fixture validator and full source/native local,
+TCP, strict-trade, and strict-battle tiers have not run. See the
+[current Linux evidence record](VERSIONS.md#current-linux-isolated-runtime-evidence)
+and [release checklist](docs/RELEASE_CHECKLIST.md#current-audit-snapshot).
 
 At `766eaa6aafecad039d5b10934ec36f8ec933645e`, the hosted
 [release-hygiene workflow](https://github.com/CompleteDotTech/pokemon/actions/runs/34028627290)
