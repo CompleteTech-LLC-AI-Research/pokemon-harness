@@ -39,6 +39,17 @@ the pinned ROM and symbol bytes. Stock Yellow boot and all locally available
 symbol-resolution cases passed as part of the same current-head runtime
 validation. Color-ROM skips remain explicit missing-input results.
 
+A fresh CPython 3.11 source environment at the current candidate installed
+`.[dev]` editable, passed `pip check`, and passed
+`scripts/bootstrap_pyboy.py --mode source --check`. Isolated imports resolved
+both the harness and bundled PyBoy/link modules from this checkout. The
+current wheel-install regression also passed from a clean virtual environment
+when its temporary build and dependency files were placed on the workspace
+filesystem; this host's 512 MB `/tmp` tmpfs was too small for pip's isolated
+dependency installation. This is current source packaging evidence only; it
+does not qualify a clean native install, MCP gameplay, or the fixture-backed
+acceptance matrix.
+
 The default packaged runtime is the bundled PyBoy `2.7.0` source fork at
 revision `c565df66c3731fad2856169a90f6bbec99925915`. Source mode is selected
 explicitly by `scripts/bootstrap_pyboy.py --mode source`; Cython is an optional
