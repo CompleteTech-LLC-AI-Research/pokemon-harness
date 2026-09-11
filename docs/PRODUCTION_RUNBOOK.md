@@ -19,7 +19,7 @@ skips, xfails, xpasses, or errors. The retained report is
 | Source and native unit/timing | Each runtime: `4,508/4,508` unit and `1,910/1,910` timing | Matrix collection declared all local/remote and `19/19` strict trade/battle rows, but the unit-only gate did not execute gameplay. |
 | MCP stdio and link lifecycle | Each runtime: `6/6` real-ROM checks | Server initialization, tools/resources, save/load, local and loopback attachment, and explicit teardown using stock inputs; no Cable Club gameplay. |
 | Red golden path | Each runtime: `4/4` real-ROM checks | Stock Red ROM/symbol input only; boot/state/save/load coverage, not trade or battle. |
-| Clean source installation | `PASS` on CPython 3.11 | Fresh editable `.[dev]` install, `pip check`, source bootstrap identity, isolated imports, and clean wheel-install regression. Native clean-install evidence remains separate. |
+| Clean source/native installation | `PASS` on separate CPython 3.11 environments | Fresh editable `.[dev]` installs, `pip check`, source/native bootstrap identity, isolated imports, clean wheel-install regression, and compiled native module origins. Native build used a private `/dev/shm` mount and the supplied development-header sysroot. |
 
 The two color ROMs and all ten external Cable Club fixtures were unavailable.
 Fixture validation and every full asset-backed local, TCP, strict-trade, and

@@ -46,9 +46,17 @@ both the harness and bundled PyBoy/link modules from this checkout. The
 current wheel-install regression also passed from a clean virtual environment
 when its temporary build and dependency files were placed on the workspace
 filesystem; this host's 512 MB `/tmp` tmpfs was too small for pip's isolated
-dependency installation. This is current source packaging evidence only; it
-does not qualify a clean native install, MCP gameplay, or the fixture-backed
-acceptance matrix.
+dependency installation.
+
+A separate fresh CPython 3.11 native environment installed the same project
+and built the pinned Cython fork under an unprivileged mount namespace with a
+private writable `/dev/shm`. It used the supplied Python development-header
+sysroot because the host lacks the normal development headers. `pip check` and
+`scripts/bootstrap_pyboy.py --mode cython --check` passed, and both `pyboy` and
+`pyboy.core.serial` resolved to installed extension modules. The six real-ROM
+MCP stdio/link lifecycle checks also passed in that native environment. This
+is clean native packaging and lifecycle evidence, not MCP gameplay or the
+fixture-backed acceptance matrix.
 
 The default packaged runtime is the bundled PyBoy `2.7.0` source fork at
 revision `c565df66c3731fad2856169a90f6bbec99925915`. Source mode is selected
