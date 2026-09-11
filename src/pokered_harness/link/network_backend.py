@@ -2569,6 +2569,14 @@ class NetworkBackend:
                         request.response_bit,
                         request.edge_id,
                     )
+                # Publish the completed response before releasing the write
+                # lock.  The peer may send a duplicate as soon as it has
+                # received the first response; recording only after the
+                # socket write leaves a race where the reader still sees the
+                # request id as pending and closes the connection.
+                self._remember_inbound_edge_response(
+                    request.edge_id, request.response_bit
+                )
                 self._send_frame(
                     frame,
                     timeout=max(0.0, write_deadline - time.monotonic()),
@@ -2598,7 +2606,6 @@ class NetworkBackend:
             edge_id=request.edge_id,
             outcome="success",
         )
-        self._remember_inbound_edge_response(request.edge_id, request.response_bit)
 
     def _signal_edge_worker_stop(self) -> None:
         target_queue = self._completed_edge_queue if self._dispatch_to_owner else self._edge_queue
