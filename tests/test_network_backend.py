@@ -320,6 +320,55 @@ def test_leader_frame_ack_wait_pumps_owner_edge_after_frame_done(monkeypatch):
         )
 
 
+def test_simultaneous_owner_masters_exchange_sampled_bits_without_core_access(monkeypatch):
+    """Reciprocal master edges are answered without queueing core work."""
+    left, right = NetworkBackend.pair()
+    monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.5)
+    start = threading.Barrier(2)
+    results: list[tuple[str, int]] = []
+    errors: list[BaseException] = []
+
+    def clock(backend: NetworkBackend, label: str, bit: int) -> None:
+        try:
+            start.wait(timeout=1.0)
+            results.append((label, backend.on_edge(our_bit=bit, our_role=1)))
+        except BaseException as exc:  # noqa: BLE001 - asserted by test owner
+            errors.append(exc)
+
+    left_thread = threading.Thread(target=clock, args=(left, "left", 0), daemon=True)
+    right_thread = threading.Thread(target=clock, args=(right, "right", 1), daemon=True)
+    try:
+        left.start_receiver(
+            local_core=_CompletingSlaveCore(),
+            serial_gate=SerialOperationGate(),
+            dispatch_to_owner=True,
+        )
+        right.start_receiver(
+            local_core=_CompletingSlaveCore(),
+            serial_gate=SerialOperationGate(),
+            dispatch_to_owner=True,
+        )
+        left_thread.start()
+        right_thread.start()
+        left_thread.join(timeout=2.0)
+        right_thread.join(timeout=2.0)
+        assert not left_thread.is_alive()
+        assert not right_thread.is_alive()
+        assert errors == []
+        assert sorted(results) == [("left", 1), ("right", 0)]
+        for backend in (left, right):
+            snapshot = backend.debug_snapshot()
+            assert snapshot["reciprocal_master_edges"] == 1
+            assert snapshot["owner_edge_applied"] == 0
+            assert snapshot["pending_edge_requests"] == 0
+    finally:
+        _finish_network_test_cleanup(
+            primary=sys.exc_info()[1],
+            backends=(("left", left), ("right", right)),
+            threads=(("left master", left_thread), ("right master", right_thread)),
+        )
+
+
 def test_leader_frame_ack_wait_can_be_cancelled_with_bounded_cleanup():
     """A cancelled ACK wait closes and wakes without a long frame timeout."""
     leader, follower = NetworkBackend.pair()

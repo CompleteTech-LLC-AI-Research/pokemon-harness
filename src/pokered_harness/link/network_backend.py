@@ -379,6 +379,11 @@ class NetworkBackend:
         self._edge_call_lock = threading.Lock()
         self._edge_response_lock = threading.Lock()
         self._edge_inflight = False
+        # While the emulator owner is blocked in its own master edge, a peer
+        # may legitimately present the reciprocal master edge. The sampled
+        # output bit is sufficient to answer that wire event; the reader must
+        # not inspect or mutate the serial core to do so.
+        self._reciprocal_master_bit: int | None = None
         # Responses from peer (when we're master) land here.
         self._resp_queue: queue.Queue[int] = queue.Queue(maxsize=1)
         # Negotiated frame barrier queues. They are enabled by the session
@@ -482,6 +487,7 @@ class NetworkBackend:
             "edge_req_received": 0,
             "edge_resp_sent": 0,
             "edge_resp_received": 0,
+            "reciprocal_master_edges": 0,
             "frame_ticks_sent": 0,
             "frame_ticks_received": 0,
             "frame_dones_sent": 0,
@@ -830,6 +836,7 @@ class NetworkBackend:
                     stale_error = NetworkBackendError("stale EDGE_RESP before EDGE_REQ")
                 else:
                     self._edge_inflight = True
+                    self._reciprocal_master_bit = our_bit & 1
 
             if stale_error is not None:
                 self._mark_closed(stale_error)
@@ -884,6 +891,7 @@ class NetworkBackend:
             finally:
                 with self._edge_response_lock:
                     self._edge_inflight = False
+                    self._reciprocal_master_bit = None
                 with self._edge_pending_condition:
                     self._edge_pending_condition.notify_all()
 
@@ -1813,6 +1821,8 @@ class NetworkBackend:
                 elif opcode == _OP_EDGE_REQ:
                     if payload > 1:
                         raise NetworkBackendError(f"invalid EDGE_REQ bit payload {payload}")
+                    if self._send_reciprocal_master_response(payload & 1):
+                        continue
                     # A detached transport has no emulator owner to service
                     # an incoming edge. Fail closed rather than queueing work
                     # that could be mistaken for the next session after a
@@ -1993,6 +2003,33 @@ class NetworkBackend:
                 return
             finally:
                 self._decrement_edge_pending()
+
+    def _send_reciprocal_master_response(self, peer_bit: int) -> bool:
+        """Answer a peer edge that collides with this owner's master edge.
+
+        The reader may run while the owner is blocked in ``on_edge``. In that
+        narrow interval the sampled local output bit is immutable and is the
+        only serial value needed for the reciprocal wire response. This path
+        deliberately does not read the local core or invoke callbacks; both
+        emulators retain ownership of their own master edge.
+        """
+        with self._edge_response_lock:
+            bit = self._reciprocal_master_bit if self._edge_inflight else None
+        if bit is None:
+            return False
+        request = _InboundEdge(peer_bit=peer_bit, response_bit=bit, completed=False)
+        self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
+        self._stats["reciprocal_master_edges"] = (
+            int(self._stats["reciprocal_master_edges"]) + 1
+        )
+        self._record_serial_event(
+            "reciprocal_master_edge",
+            direction="peer_to_local",
+            edge_bit=peer_bit,
+            response_bit=bit,
+        )
+        self._send_edge_response(request)
+        return True
 
     def service_pending_edges(self, *, max_edges: int | None = None) -> int:
         """Apply queued peer edges on the caller's emulator-owner thread.
