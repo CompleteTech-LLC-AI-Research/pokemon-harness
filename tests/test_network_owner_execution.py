@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import queue
 import sys
 import threading
 import time
@@ -190,6 +191,131 @@ def _wait_for_owner_queue(
                     raise AssertionError("owner queue probe was not released")
         assert time.monotonic() < deadline, "owner dispatch did not receive queued EDGE_REQ"
         time.sleep(0.001)
+
+
+@pytest.mark.parametrize("leader", [False, True], ids=["follower", "leader"])
+@pytest.mark.parametrize("publication", ["while_waiting", "before_wait"])
+def test_frame_owner_wakes_for_published_edge_without_polling(monkeypatch, leader, publication):
+    """Force publication both during a wait and after an empty owner probe."""
+    # Make polling unable to satisfy the test. Events establish the exact
+    # interleaving; bounded waits only detect failure and keep cleanup finite.
+    monkeypatch.setattr(network_module, "_SEND_POLL_SECONDS", 5.0)
+    core = _Core()
+    peer, owner = _start_owner_pair(core)
+    put_entered = threading.Event()
+    release_put = threading.Event()
+    published = threading.Event()
+    probed = threading.Event()
+    release_probe = threading.Event()
+    waiting = threading.Event()
+    applied = threading.Event()
+    cleanup = threading.Event()
+    owner_result: list[object] = []
+    edge_result: list[object] = []
+    original_put = owner._edge_queue.put_nowait
+    original_wait = owner._edge_pending_condition.wait
+    original_ack_get = owner._frame_ack_queue.get
+
+    def paused_put(item):
+        put_entered.set()
+        assert release_put.wait(timeout=2.0)
+        original_put(item)
+        published.set()
+
+    def observed_wait(timeout=None):
+        waiting.set()
+        return original_wait(timeout=timeout)
+
+    def observed_ack_get(block=True, timeout=None):
+        if block:
+            waiting.set()
+        return original_ack_get(block=block, timeout=timeout)
+
+    def progress():
+        if cleanup.is_set():
+            raise NetworkBackendError("test cleanup")
+        count = owner.service_pending_edges(max_edges=1)
+        if count:
+            applied.set()
+        if not probed.is_set():
+            probed.set()
+            if publication == "before_wait":
+                assert release_probe.wait(timeout=2.0)
+
+    def finish():
+        try:
+            owner.finish_frame_turn(leader=leader, progress_callback=progress)
+            owner_result.append(None)
+        except BaseException as exc:  # noqa: BLE001 - asserted after join
+            owner_result.append(exc)
+
+    def send():
+        try:
+            edge_result.append(peer.on_edge(1, 1))
+        except BaseException as exc:  # noqa: BLE001 - asserted after join
+            edge_result.append(exc)
+
+    monkeypatch.setattr(owner._edge_queue, "put_nowait", paused_put)
+    monkeypatch.setattr(owner._edge_pending_condition, "wait", observed_wait)
+    monkeypatch.setattr(owner._frame_ack_queue, "get", observed_ack_get)
+    finisher = threading.Thread(target=finish, daemon=True)
+    sender = threading.Thread(target=send, daemon=True)
+    started: list[threading.Thread] = []
+    try:
+        pacing_leader, follower = (owner, peer) if leader else (peer, owner)
+        pacing_leader.begin_frame_turn(leader=True)
+        follower.begin_frame_turn(leader=False)
+        if publication == "while_waiting":
+            sender.start()
+            started.append(sender)
+            assert put_entered.wait(timeout=1.0)
+            assert owner.debug_snapshot()["pending_edge_requests"] == 1
+            assert owner._edge_queue.empty()
+            finisher.start()
+            started.append(finisher)
+            assert waiting.wait(timeout=1.0)
+            release_put.set()
+        else:
+            finisher.start()
+            started.append(finisher)
+            assert probed.wait(timeout=1.0)
+            sender.start()
+            started.append(sender)
+            assert put_entered.wait(timeout=1.0)
+            release_put.set()
+            assert published.wait(timeout=1.0)
+            release_probe.set()
+
+        assert published.wait(timeout=1.0)
+        assert applied.wait(timeout=1.0), "available owner work required a polling timeout"
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert edge_result == [0]
+        peer.finish_frame_turn(leader=not leader, progress_callback=lambda: None)
+        finisher.join(timeout=1.0)
+        assert not finisher.is_alive()
+        assert owner_result == [None]
+        assert core.calls == 1
+        assert core.call_threads == [finisher.ident, finisher.ident]
+        assert owner.debug_snapshot()["pending_edge_requests"] == 0
+    finally:
+        cleanup.set()
+        release_put.set()
+        release_probe.set()
+        owner.stop(timeout_s=1.0)
+        peer.stop(timeout_s=1.0)
+        # Release the baseline's queue-only waits even on assertion failure.
+        for response_queue, value in (
+            (owner._frame_ack_queue, None),
+            (peer._resp_queue, 0),
+        ):
+            try:
+                response_queue.put_nowait(value)
+            except queue.Full:
+                pass
+        for thread in started:
+            thread.join(timeout=1.0)
+            assert not thread.is_alive(), f"test leaked {thread.name}"
 
 
 def test_owner_dispatch_waits_for_queue_put_after_pending_publication(monkeypatch):

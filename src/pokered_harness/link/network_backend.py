@@ -441,6 +441,10 @@ class NetworkBackend:
         # ROM SC register for an in-flight transfer.
         self._edge_pending_condition = threading.Condition()
         self._edge_pending = 0
+        # Queue publication, control frames, response completion, and close
+        # share a wakeup generation. Owners snapshot it before checking work
+        # outside this lock, then wait only if nothing changed in between.
+        self._transport_generation = 0
         # Live HELLO peers use monotonically increasing request ids. Keep a
         # bounded replay window for late duplicate requests and a high-water
         # mark so an evicted old id can never be mistaken for a new edge.
@@ -973,8 +977,7 @@ class NetworkBackend:
                     self._edge_response_seen = False
                     self._reciprocal_master_bit = None
                     self._reciprocal_master_response_sent = False
-                with self._edge_pending_condition:
-                    self._edge_pending_condition.notify_all()
+                self._notify_transport_change()
 
     def _edge_ids_enabled(self) -> bool:
         """Whether this transport has negotiated the live edge-id format."""
@@ -1125,10 +1128,11 @@ class NetworkBackend:
         """Finish a frame, servicing deferred owner edges before ACK.
 
         The ACK wait has one absolute transport deadline. If an owner
-        ``progress_callback`` is supplied, it is invoked between short queue
-        polls so peer-driven edges can be applied even when the native clock
-        role differs from the negotiated pacing role. Cancellation is
-        terminal for the same reason as :meth:`begin_frame_turn`.
+        ``progress_callback`` is supplied, edge publication wakes it so
+        peer-driven edges can be applied even when the native clock role
+        differs from the negotiated pacing role. Bounded polling remains for
+        cancellation and deferred work needing further CPU progress.
+        Cancellation is terminal for the same reason as :meth:`begin_frame_turn`.
         """
         if not isinstance(leader, bool):
             raise TypeError("leader must be a bool")
@@ -1151,7 +1155,7 @@ class NetworkBackend:
                 # queued for this backend's owner, and the peer cannot
                 # produce FRAME_ACK until that edge is applied. Keep the
                 # transport wait bounded, while giving owner dispatch work a
-                # chance to run between polls.
+                # chance to run when inbound work becomes available.
                 if progress_callback is None and self._dispatch_to_owner:
                     progress_callback = lambda: self.service_pending_edges(max_edges=1)
                 self._queue_get(
@@ -1176,11 +1180,17 @@ class NetworkBackend:
         frame_done_received = False
         try:
             while True:
+                with self._edge_pending_condition:
+                    generation = self._transport_generation
                 if cancel_event is not None and cancel_event.is_set():
                     raise NetworkBackendError("frame completion cancelled")
+                if self._closed_event.is_set():
+                    raise NetworkBackendError("backend closed during frame completion")
                 self._run_progress_callback(progress_callback)
                 if cancel_event is not None and cancel_event.is_set():
                     raise NetworkBackendError("frame completion cancelled")
+                if self._closed_event.is_set():
+                    raise NetworkBackendError("backend closed during frame completion")
                 if not frame_done_received:
                     try:
                         self._frame_done_queue.get_nowait()
@@ -1197,10 +1207,9 @@ class NetworkBackend:
                     raise NetworkBackendError(
                         f"no FRAME_DONE from peer within {_EDGE_RESPONSE_TIMEOUT_SECONDS:g}s"
                     )
-                with self._edge_pending_condition:
-                    self._edge_pending_condition.wait(
-                        timeout=min(_SEND_POLL_SECONDS, remaining)
-                    )
+                self._wait_for_transport_change(
+                    generation, timeout=min(_SEND_POLL_SECONDS, remaining)
+                )
         except NetworkBackendError as exc:
             if not self._closed_event.is_set():
                 self._mark_closed(exc)
@@ -1817,7 +1826,7 @@ class NetworkBackend:
                     pre_close["last_keepalive_state"] = dict(last_keepalive)
                 self._pre_close_snapshot = pre_close
                 self._edge_pending = 0
-                self._edge_pending_condition.notify_all()
+                self._notify_transport_change()
             self._signal_edge_worker_stop()
             try:
                 self._sock.shutdown(socket.SHUT_RDWR)
@@ -2018,7 +2027,6 @@ class NetworkBackend:
                                 if self._closed:
                                     continue
                                 self._edge_pending += 1
-                                self._edge_pending_condition.notify_all()
                         request = _InboundEdge(peer_bit=payload & 1, edge_id=edge_id)
                         self._record_serial_event(
                             "edge_req_received",
@@ -2039,11 +2047,14 @@ class NetworkBackend:
                                     self._edge_pending -= 1
                                 else:
                                     self._edge_pending = 0
-                                self._edge_pending_condition.notify_all()
+                                self._notify_transport_change()
                             self._release_inbound_edge_id(edge_id)
                             raise NetworkBackendError(
                                 "incoming EDGE_REQ queue is full"
                             ) from exc
+                        # Pending accounting is admission, not queue readiness.
+                        # Wake owners only after the request is dispatchable.
+                        self._notify_transport_change()
                 elif opcode in (_OP_EDGE_RESP, _OP_EDGE_RESP_ID):
                     if payload > 1:
                         raise NetworkBackendError(f"invalid EDGE_RESP bit payload {payload}")
@@ -2075,6 +2086,7 @@ class NetworkBackend:
                         edge_bit=payload & 1,
                         edge_id=edge_id,
                     )
+                    self._notify_transport_change()
                 elif opcode == _OP_FRAME_TICK:
                     if payload != 0:
                         raise NetworkBackendError("invalid FRAME_TICK payload")
@@ -2085,8 +2097,7 @@ class NetworkBackend:
                     self._stats["frame_ticks_received"] = int(
                         self._stats["frame_ticks_received"]
                     ) + 1
-                    with self._edge_pending_condition:
-                        self._edge_pending_condition.notify_all()
+                    self._notify_transport_change()
                 elif opcode == _OP_FRAME_DONE:
                     if payload != 0:
                         raise NetworkBackendError("invalid FRAME_DONE payload")
@@ -2097,8 +2108,7 @@ class NetworkBackend:
                     self._stats["frame_dones_received"] = int(
                         self._stats["frame_dones_received"]
                     ) + 1
-                    with self._edge_pending_condition:
-                        self._edge_pending_condition.notify_all()
+                    self._notify_transport_change()
                 elif opcode == _OP_FRAME_ACK:
                     if payload != 0:
                         raise NetworkBackendError("invalid FRAME_ACK payload")
@@ -2112,6 +2122,7 @@ class NetworkBackend:
                     self._stats["frame_acks_received"] = int(
                         self._stats["frame_acks_received"]
                     ) + 1
+                    self._notify_transport_change()
                 elif opcode == _OP_SYNC:
                     with self._sync_lock:
                         if payload in self._sync_pending:
@@ -2125,6 +2136,7 @@ class NetworkBackend:
                             raise NetworkBackendError(f"OP_SYNC({payload}) queue is full") from exc
                         self._sync_pending.add(payload)
                     self._stats["sync_received"] = int(self._stats["sync_received"]) + 1
+                    self._notify_transport_change()
                 elif opcode == _OP_EXCHANGE:
                     raw_len = self._recv_exactly(2)
                     (length,) = _LEN.unpack(raw_len)
@@ -2138,6 +2150,7 @@ class NetworkBackend:
                         q.put_nowait(data)
                     except queue.Full as exc:
                         raise NetworkBackendError(f"OP_EXCHANGE({payload}) queue is full") from exc
+                    self._notify_transport_change()
                 else:
                     raise NetworkBackendError(f"unknown NetworkBackend opcode 0x{opcode:02x}")
         except NetworkBackendError as exc:
@@ -2691,7 +2704,22 @@ class NetworkBackend:
                 self._edge_pending -= 1
             else:
                 self._edge_pending = 0
+            self._notify_transport_change()
+
+    def _notify_transport_change(self) -> None:
+        """Signal completed state updates without calling owner code."""
+        # The condition's default RLock also permits pending-count/close
+        # publishers to signal while already holding it. Frame/queue waiters
+        # release it before owner callbacks, queue access, or network writes.
+        with self._edge_pending_condition:
+            self._transport_generation += 1
             self._edge_pending_condition.notify_all()
+
+    def _wait_for_transport_change(self, generation: int, *, timeout: float) -> None:
+        """Do not sleep through a change since the owner's last work check."""
+        with self._edge_pending_condition:
+            if generation == self._transport_generation and not self._closed_event.is_set():
+                self._edge_pending_condition.wait(timeout=timeout)
 
     def _handle_edge_req(self, request: _InboundEdge | int) -> None:
         """Run one compatibility-worker edge under core admission."""
@@ -3115,6 +3143,8 @@ class NetworkBackend:
         """Get a response while allowing stop and owner progress to wake it."""
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
+            with self._edge_pending_condition:
+                generation = self._transport_generation
             if cancel_event is not None and cancel_event.is_set():
                 error = NetworkBackendError("operation cancelled")
                 self._mark_closed(error)
@@ -3133,7 +3163,7 @@ class NetworkBackend:
             if progress_callback is not None:
                 # Do not invoke owner code while holding a queue/condition
                 # lock. The callback is bounded by the caller's owner
-                # contract; the surrounding polling loop still applies the
+                # contract; the surrounding wait loop still applies the
                 # original absolute transport deadline.
                 self._run_progress_callback(progress_callback)
                 if cancel_event is not None and cancel_event.is_set():
@@ -3152,9 +3182,11 @@ class NetworkBackend:
                     self._mark_closed(error)
                     raise error
             try:
-                return q.get(timeout=min(_SEND_POLL_SECONDS, remaining))
+                return q.get_nowait()
             except queue.Empty:
-                continue
+                self._wait_for_transport_change(
+                    generation, timeout=min(_SEND_POLL_SECONDS, remaining)
+                )
 
     def _run_progress_callback(self, callback: Callable[[], object]) -> None:
         """Run owner progress and convert callback failures to link errors."""
