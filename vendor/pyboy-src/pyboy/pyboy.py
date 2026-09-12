@@ -527,6 +527,13 @@ class PyBoy:
         self.initialized = True
 
     def _tick(self, render, sound):
+        # Keep this one-frame seam overridable by the network owner in both
+        # runtimes. The Cython wrapper acquires the GIL for Python dispatch,
+        # then releases it again for the unchanged native frame body.
+        with cython.nogil:
+            return self._tick_frame(render, sound)
+
+    def _tick_frame(self, render, sound):
         if self.stopped:
             return False
 

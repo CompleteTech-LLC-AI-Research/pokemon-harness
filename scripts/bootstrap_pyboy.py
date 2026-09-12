@@ -511,6 +511,8 @@ def _verify_runtime(mode: str) -> None:
             "revision="
             f"{getattr(pyboy, '__pokered_harness_revision__', None)!r}, expected {EXPECTED_REVISION!r}"
         )
+    if not callable(getattr(getattr(pyboy, "PyBoy", None), "_tick", None)):
+        problems.append("PyBoy._tick frame ownership is unavailable; rebuild the bundled runtime")
 
     for name, expected_kind in expected_modules.items():
         actual_kind = _module_kind(modules[name])

@@ -40,7 +40,7 @@ cdef class PyBoyMemoryView:
 
 cdef class PyBoy:
     # Keep the public PyBoy surface compatible with the source runtime. The
-    # link harness wraps ``tick`` on each instance to serialize native serial
+    # link harness wraps ``_tick`` on each instance to serialize native serial
     # ownership at frame boundaries; extension instances need a Python
     # instance dictionary for that supported integration seam.
     cdef dict __dict__
@@ -80,8 +80,11 @@ cdef class PyBoy:
     cdef list external_input
     cdef object _palette_cycle
 
+    # Public tick(count) must dispatch the per-instance owner once per frame,
+    # while retaining its single post_tick/plugin update for the whole batch.
+    cpdef int64_t _tick(self, bint, bint) except -1 with gil
     @cython.locals(t_start=int64_t, t_pre=int64_t, t_tick=int64_t, t_post=int64_t, nsecs=int64_t)
-    cdef int64_t _tick(self, bint, bint) except -1 nogil
+    cdef int64_t _tick_frame(self, bint, bint) except -1 nogil
     @cython.locals(running=bint, _render=bint, _sound=bint)
     cpdef int64_t tick(self, int count=*, bint render=*, bint sound=*) except -1
     cpdef _quit(self)
