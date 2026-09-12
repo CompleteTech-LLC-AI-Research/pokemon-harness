@@ -440,8 +440,8 @@ def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
     assert '"-m", "ensurepip", "--upgrade"' in bootstrap
     assert '"--python", sys.executable' in bootstrap
     assert '"--no-deps"' in bootstrap
-    assert "install_target = ROOT" in bootstrap
-    assert "install_target = PYBOY_SOURCE" in bootstrap
+    assert "nullcontext(ROOT)" in bootstrap
+    assert "_native_build_source()" in bootstrap
     assert "apply_external_edge" in bootstrap
     assert "cython_compiled" in bootstrap
 
@@ -803,15 +803,27 @@ def test_bootstrap_source_mode_installs_the_harness_distribution(monkeypatch) ->
     assert kwargs["env"]["PYBOY_NO_CYTHON"] == "1"
 
 
-def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(monkeypatch) -> None:
+def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(tmp_path, monkeypatch) -> None:
     module = _load_bootstrap()
     calls: list[tuple[list[str], dict]] = []
+    staged_paths: list[Path] = []
+    monkeypatch.setattr(module, "ROOT", tmp_path)
 
     class Result:
         returncode = 0
 
     def fake_run(command, **kwargs):
         calls.append((list(command), kwargs))
+        if len(calls) == 3:
+            staged = Path(command[-1])
+            staged_paths.append(staged)
+            assert staged != module.PYBOY_SOURCE
+            assert (staged / "pyboy" / "core" / "mb.pxd").read_bytes() == (
+                module.PYBOY_SOURCE / "pyboy" / "core" / "mb.pxd"
+            ).read_bytes()
+            assert (staged / "pyboy" / "core" / "cpu.py").is_file()
+            assert not list(staged.rglob("*.c"))
+            assert not list(staged.rglob("*.so"))
         return Result()
 
     monkeypatch.setattr(module, "_validate_source", lambda: None)
@@ -852,7 +864,8 @@ def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(monkeypatch) -> 
         "--no-deps",
         "--no-build-isolation",
     ]
-    assert command[-2:] == [module.CYTHON_REQUIREMENT, str(module.PYBOY_SOURCE)]
+    assert command[-2:] == [module.CYTHON_REQUIREMENT, str(staged_paths[0])]
+    assert not staged_paths[0].exists()
     assert "PYBOY_NO_CYTHON" not in kwargs["env"]
     assert module.CYTHON_MODULES == (
         "pyboy.pyboy",
@@ -860,6 +873,82 @@ def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(monkeypatch) -> 
         "pyboy.core.mb",
         "pyboy.core.serial",
     )
+
+
+def test_native_build_snapshot_excludes_stale_outputs_and_preserves_inputs(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    module = _load_bootstrap()
+    source = tmp_path / "vendor" / "pyboy-src"
+    source.mkdir(parents=True)
+    files = {
+        "POKERED_HARNESS_PYBOY_REVISION": b"revision",
+        "setup.py": b"source setup",
+        "pyproject.toml": b"source metadata",
+        "pyboy/core/mb.py": b"new motherboard",
+        "pyboy/core/mb.pxd": b"new method table",
+        "pyboy/core/cpu.py": b"dependent module",
+        "pyboy/core/bootrom_dmg.bin": b"boot resource",
+        "pyboy/core/mb.c": b"old generated C",
+        "pyboy/core/cpu.c": b"old imported method table",
+        "pyboy/core/cpu.so": b"old extension",
+        "build/lib/pyboy/core/mb.py": b"old build copy",
+        "pyboy.egg-info/SOURCES.txt": b"old manifest",
+    }
+    for name, contents in files.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(module, "PYBOY_SOURCE", source)
+    monkeypatch.setattr(module, "REVISION_FILE", source / "POKERED_HARNESS_PYBOY_REVISION")
+    with module._native_build_source() as staged:
+        assert {
+            path.relative_to(staged).as_posix() for path in staged.rglob("*") if path.is_file()
+        } == {
+            "POKERED_HARNESS_PYBOY_REVISION",
+            "setup.py",
+            "pyproject.toml",
+            "pyboy/core/mb.py",
+            "pyboy/core/mb.pxd",
+            "pyboy/core/cpu.py",
+            "pyboy/core/bootrom_dmg.bin",
+        }
+        assert (staged / "pyboy/core/mb.pxd").read_bytes() == b"new method table"
+    first_fingerprint = capsys.readouterr().out
+    assert not staged.exists()
+    assert all((source / name).read_bytes() == contents for name, contents in files.items())
+
+    # Stale output cannot influence the fingerprint; an ABI input must.
+    (source / "pyboy/core/cpu.c").write_bytes(b"other stale output")
+    with module._native_build_source():
+        pass
+    assert capsys.readouterr().out == first_fingerprint
+    (source / "pyboy/core/mb.pxd").write_bytes(b"changed method table")
+    with module._native_build_source():
+        pass
+    assert capsys.readouterr().out != first_fingerprint
+
+
+def test_native_build_snapshot_cleans_only_its_staging_on_failure(tmp_path, monkeypatch) -> None:
+    module = _load_bootstrap()
+    source = tmp_path / "vendor"
+    source.mkdir()
+    (source / "setup.py").write_text("source")
+    preserved = tmp_path / "build" / "user-output"
+    preserved.mkdir(parents=True)
+    (preserved / "keep.txt").write_text("keep")
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(module, "PYBOY_SOURCE", source)
+    with (
+        pytest.raises(RuntimeError, match="installer failed"),
+        module._native_build_source() as staged,
+    ):
+        assert (staged / "setup.py").is_file()
+        raise RuntimeError("installer failed")
+    assert not staged.exists()
+    assert (source / "setup.py").read_text() == "source"
+    assert (preserved / "keep.txt").read_text() == "keep"
 
 
 def test_bootstrap_source_mode_rejects_a_competing_pyboy_distribution(monkeypatch) -> None:

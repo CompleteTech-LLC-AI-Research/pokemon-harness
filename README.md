@@ -508,6 +508,17 @@ python scripts/production_gate.py --runtime-mode cython --unit-only \
   --repeat-timing 5 --evidence-dir "$EVIDENCE_DIR"
 ```
 
+Native bootstrap stages the complete vendored source and resources in a fresh
+directory under ignored `build/`, excluding generated C, objects, and extension
+binaries. It prints a SHA-256 fingerprint of the staged inputs and removes the
+staging directory after installation or failure. Keep that fingerprint and the
+build output with native qualification evidence. A change to a shared `.pxd`
+requires rebuilding all dependent extensions together; copying a single rebuilt
+extension into an older installation can leave incompatible method tables.
+The `--check` command verifies imports, module origins, and the runtime contract;
+it does not prove that manually replaced binaries share a build. Run a complete
+bootstrap after vendor changes or binary replacement.
+
 To run the dual-runtime gate with independently installed environments, pass
 the source interpreter with `--python` and the native interpreter with
 `--cython-python`:
