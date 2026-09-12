@@ -69,6 +69,13 @@ def test_matching_applied_turns_pass() -> None:
     assert verify_battle_turns([_row(), _row(reverse=True)]) == []
 
 
+def test_tcp_diagnostic_wrapper_keeps_complete_settlement_envelope() -> None:
+    """The TCP peer nests a complete observer snapshot beside its counters."""
+    assert verify_battle_turns(
+        [{"battle_turn": _row()}, {"battle_turn": _row(reverse=True)}]
+    ) == []
+
+
 def test_hook_only_or_missing_settlement_fails_closed() -> None:
     row = _row()
     row["settled"] = False
@@ -95,3 +102,78 @@ def test_cleanup_requires_return_to_cable_club_state() -> None:
     bad = deepcopy(left)
     bad["cleanup"]["is_in_battle"] = 2
     assert verify_battle_turns([bad, right], require_cleanup=True)
+
+
+def _observer(monkeypatch):
+    from types import SimpleNamespace
+
+    from tests import _battle_turn_evidence as evidence
+
+    memory = {
+        "wSerialExchangeNybbleSendData": 4,
+        "wSerialExchangeNybbleReceiveData": 4,
+        "wPlayerSelectedMove": 1,
+        # Stale enemy selection must not override the newly received slot.
+        "wEnemySelectedMove": 45,
+    }
+    monkeypatch.setattr(evidence, "_read", lambda session, name: memory[name])
+    monkeypatch.setattr(evidence, "_validate_party", lambda party: 0)
+    monkeypatch.setattr(evidence, "_combatants", lambda session: deepcopy(_row()["baseline"]))
+    monkeypatch.setattr(evidence, "_move_data", lambda session, move: bytes([move, 0, 40, 100, 35, 0]))
+    session = SimpleNamespace(symbols=SimpleNamespace(addr_of=lambda name: 0))
+    observer = evidence.BattleTurnObserver(session, role="test", version="blue", before_party={})
+    observer.baseline = deepcopy(_row()["baseline"])
+    return observer, memory
+
+
+def test_exchange_entry_does_not_read_stale_wire_slots(monkeypatch) -> None:
+    observer, memory = _observer(monkeypatch)
+    observer.observe("LinkBattleExchangeData")
+    assert observer.error is None
+    assert observer.exchange is None
+    assert observer.counts["LinkBattleExchangeData"] == 1
+
+    memory["wSerialExchangeNybbleSendData"] = 0
+    memory["wSerialExchangeNybbleReceiveData"] = 0
+    observer.observe("post_exchange")
+    assert observer.error is None
+    assert observer.exchange["exchange_seq"] == 2
+    assert observer.exchange["enemy_move_id"] == 1
+
+
+def test_invalid_wire_slot_after_exchange_still_fails_closed(monkeypatch) -> None:
+    observer, memory = _observer(monkeypatch)
+    memory["wSerialExchangeNybbleSendData"] = 0
+    observer.observe("post_exchange")
+    assert "invalid receive slot: 4" in observer.error
+    assert observer.exchange is None
+
+
+def test_missing_selected_local_move_after_exchange_fails_closed(monkeypatch) -> None:
+    observer, memory = _observer(monkeypatch)
+    memory.update(wSerialExchangeNybbleSendData=0, wSerialExchangeNybbleReceiveData=0, wPlayerSelectedMove=0)
+    observer.observe("post_exchange")
+    assert "invalid local move ID: 0" in observer.error
+    assert observer.exchange is None
+
+
+def test_move_choice_uses_existing_later_supported_slot(monkeypatch) -> None:
+    from tests import _battle_turn_evidence as evidence
+
+    rows = {76: [76, 39, 120, 0, 0, 0], 45: [45, 18, 0, 0, 0, 0],
+            73: [73, 84, 0, 0, 0, 0], 22: [22, 0, 35, 0, 0, 0]}
+    monkeypatch.setattr(evidence, "_move_data", lambda session, move: rows[move])
+    moves = [(76, 10), (45, 21), (73, 10), (22, 7)]
+    before = deepcopy(moves)
+    assert evidence.choose_supported_battle_move(None, moves) == (3, 22)
+    assert moves == before
+
+
+def test_move_choice_rejects_unsupported_or_depleted_moves(monkeypatch) -> None:
+    import pytest
+
+    from tests import _battle_turn_evidence as evidence
+
+    monkeypatch.setattr(evidence, "_move_data", lambda session, move: [move, 39, 120, 0, 0, 0])
+    with pytest.raises(ValueError, match="no legal supported existing move with PP"):
+        evidence.choose_supported_battle_move(None, [(76, 10), (22, 64), (68, 20), (0, 0)])

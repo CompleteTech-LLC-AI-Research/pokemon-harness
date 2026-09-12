@@ -124,6 +124,68 @@ def test_pre_linkmenu_valid_site_and_limit_boundaries():
     assert snapshot["limit"] == 32
 
 
+def test_connection_starter_latch_releases_peer_at_native_clock_store():
+    """The startup coordinator observes the ROM instruction; it writes no GB state."""
+    class Symbols:
+        @staticmethod
+        def bank_addr(name):
+            assert name == "CableClubNPC"
+            return 1, 0x7000
+
+    class PyBoy:
+        def __init__(self):
+            class Memory(dict):
+                def __getitem__(self, key):
+                    return self.get(key, 0)
+
+            self.memory = Memory()
+            self.hooks = {}
+
+        def hook_register(self, bank, address, callback, context):
+            assert context is None
+            self.hooks[(bank, address)] = callback
+
+    class Session:
+        def __init__(self):
+            self.symbols = Symbols()
+            self._pyboy = PyBoy()
+
+    class Backend:
+        def __init__(self):
+            self.sync_ids = []
+
+        def announce_sync(self, *, sync_id):
+            self.sync_ids.append(sync_id)
+
+    session = Session()
+    backend = Backend()
+    sequence = (0x3E, 0x01, 0xE0, 0x01, 0x3E, 0x81, 0xE0, 0x02)
+    for offset, value in enumerate(sequence):
+        session._pyboy.memory[1, 0x7010 + offset] = value
+
+    state = peer._install_connection_starter_latch(session, backend, enabled=True)
+
+    assert state == {"enabled": True, "announced": False, "address": 0x7016}
+    callback = session._pyboy.hooks[(1, 0x7016)]
+    callback(None)
+    callback(None)
+    assert backend.sync_ids == [119]
+    assert state["announced"] is True
+
+
+def test_connection_starter_latch_is_inert_for_nonstarter():
+    class Session:
+        @property
+        def symbols(self):
+            raise AssertionError("nonstarter must not inspect ROM code")
+
+    assert peer._install_connection_starter_latch(Session(), object(), enabled=False) == {
+        "enabled": False,
+        "announced": False,
+        "address": None,
+    }
+
+
 @pytest.mark.parametrize("field", ["pins", "observed_pins"])
 @pytest.mark.parametrize("rows", [[("a", True)], [("a",)], [("a", "x"), ("a", "y")]])
 def test_pre_linkmenu_invalid_pin_pairs_rejected(field, rows):

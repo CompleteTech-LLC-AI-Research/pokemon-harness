@@ -909,7 +909,9 @@ class NetworkBackend:
             # receive fresh budgets. In legacy mode a timeout remains
             # terminal because the two-byte response has no id; in the
             # versioned mode a late response is rejected by its id.
+            queued_collision = None
             try:
+                queued_collision = self._reserve_queued_master_collision()
                 with self._write_guard(
                     deadline=deadline,
                     operation="EDGE_REQ",
@@ -919,6 +921,20 @@ class NetworkBackend:
                         timeout=max(0.0, write_deadline - time.monotonic()),
                         operation="EDGE_REQ",
                     )
+                if queued_collision is not None:
+                    self._stats["edge_req_received"] = int(self._stats["edge_req_received"]) + 1
+                    self._stats["reciprocal_master_edges"] = int(self._stats["reciprocal_master_edges"]) + 1
+                    self._record_serial_event(
+                        "reciprocal_master_edge",
+                        direction="peer_to_local",
+                        edge_bit=queued_collision.peer_bit,
+                        response_bit=queued_collision.response_bit,
+                        edge_id=queued_collision.edge_id,
+                    )
+                    with self._edge_wire_completion_lock:
+                        self._send_edge_response(queued_collision)
+                        self._decrement_edge_pending()
+                        queued_collision = None
                 bit = self._queue_get(
                     self._resp_queue,
                     timeout=max(0.0, deadline - time.monotonic()),
@@ -949,6 +965,8 @@ class NetworkBackend:
                     self._mark_closed(exc)
                 raise
             finally:
+                if queued_collision is not None:
+                    self._decrement_edge_pending()
                 with self._edge_response_lock:
                     self._edge_inflight = False
                     self._edge_inflight_id = None
@@ -2190,6 +2208,34 @@ class NetworkBackend:
                 finally:
                     self._decrement_edge_pending()
 
+    def _reserve_queued_master_collision(self) -> _InboundEdge | None:
+        """Answer a peer master edge admitted before this owner's edge.
+
+        The reader handles requests arriving during ``on_edge`` directly.
+        A request queued just before entry needs the same sampled-bit path:
+        the owner cannot return to its normal pump until its response arrives.
+        Reserve before sending our request; its response may arrive before
+        we answer this queued edge. The caller sends our request first.
+        """
+        if not self._dispatch_to_owner:
+            return None
+        with self._serial_gate, self._edge_wire_completion_lock:
+            try:
+                request = self._edge_queue.get_nowait()
+            except queue.Empty:
+                return None
+            if request is None:
+                self._edge_queue.put_nowait(None)
+                return None
+            with self._edge_response_lock:
+                if self._reciprocal_master_response_sent:
+                    request.deferred = True
+                    self._edge_queue.put_nowait(request)
+                    return None
+                self._reciprocal_master_response_sent = True
+                request.response_bit = self._reciprocal_master_bit
+                return request
+
     def _send_reciprocal_master_response(
         self,
         peer_bit: int,
@@ -2380,6 +2426,11 @@ class NetworkBackend:
             transfer_enabled = bool(getattr(core, "transfer_enabled", 0))
             internal_clock = bool(getattr(core, "internal_clock", 0))
             if internal_clock:
+                if transfer_enabled:
+                    # A scheduled local master edge owns a real output bit.
+                    # Keep this peer request queued until on_edge samples
+                    # that bit; emitting no-data here corrupts role election.
+                    return False
                 # The ROM can switch clock source while an EDGE_REQ from
                 # the previous role is already queued. The existing
                 # serial protocol uses the connected/no-data byte for

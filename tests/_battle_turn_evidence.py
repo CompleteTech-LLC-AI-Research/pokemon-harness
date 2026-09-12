@@ -145,6 +145,23 @@ def _move_data(session: Any, move: int) -> bytes:
     return data
 
 
+
+def choose_supported_battle_move(session: Any, active_moves: Any) -> tuple[int, int]:
+    """Choose an existing move whose single-turn outcome can be verified.
+
+    Drivers navigate to this slot using the ROM menu. Qualification never
+    changes the party, PP, selected move, or any other emulator state.
+    """
+    for slot, (move, pp) in enumerate(active_moves):
+        _integer(move, 0, 165, "move ID")
+        _integer(pp, 0, 255, "move PP")
+        if not move or not pp & 63 or move in UNSUPPORTED_MOVES:
+            continue
+        data = _move_data(session, move)
+        if move in MOVE_EFFECTS and data[1] in SUPPORTED_EFFECTS and data[2] > 0:
+            return slot, move
+    raise ValueError("no legal supported existing move with PP (effects 0, 6, 44)")
+
 def _validate_party(party: dict[str, Any]) -> int:
     count = _integer(party["count"], 1, 6, "party count")
     species = party["species"]
@@ -302,9 +319,12 @@ def validate_turn(baseline: dict[str, Any], turn: dict[str, Any]) -> None:
 def _normalise_row(row: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(row, dict):
         return None
-    evidence = row.get("battle_turn")
-    if evidence is None and "turn" in row and "baseline" in row:
-        evidence = row
+    # Local observers return the complete snapshot directly. TCP peers carry
+    # that same snapshot under ``battle_turn`` alongside their diagnostics.
+    # Do not unwrap a complete snapshot's own compatibility ``battle_turn``
+    # field: that nested value is only the turn payload and deliberately has
+    # no schema or settlement envelope.
+    evidence = row if "schema_version" in row and "turn" in row and "baseline" in row else row.get("battle_turn")
     return evidence if isinstance(evidence, dict) else None
 
 
@@ -439,11 +459,9 @@ class BattleTurnObserver:
         receive = _integer(_read(self.session, "wSerialExchangeNybbleReceiveData"), 0, 3, "receive slot")
         active = _combatants(self.session)
         local_move = _read(self.session, "wPlayerSelectedMove")
-        enemy_move = _read(self.session, "wEnemySelectedMove")
-        if not local_move:
-            local_move = active["local"]["moves"][send]
-        if not enemy_move:
-            enemy_move = active["enemy"]["moves"][receive]
+        # The verified continuation precedes SelectEnemyMove decoding the
+        # received slot into wEnemySelectedMove; that RAM byte is still stale.
+        enemy_move = active["enemy"]["moves"][receive]
         moves = {"local": _integer(local_move, 1, 165, "local move ID"), "enemy": _integer(enemy_move, 1, 165, "enemy move ID")}
         data: dict[str, list[int]] = {}
         effects: dict[str, int] = {}
@@ -515,7 +533,11 @@ class BattleTurnObserver:
             elif self.exchange is not None and self.turn is None:
                 self._capture_turn(boundary=name)
             return
-        if name in ("LinkBattleExchangeData", "post_exchange"):
+        if name == "LinkBattleExchangeData":
+            # Entry precedes initialization and exchange of both wire slots.
+            # Count it, but only the verified return continuation owns evidence.
+            return
+        if name == "post_exchange":
             self._capture_exchange()
             return
         if self.exchange is None or self.turn is not None:
@@ -630,8 +652,13 @@ class BattleTurnObserver:
 def continuation_locations(session: Any, version: str) -> tuple[tuple[str, int, int], ...]:
     """Return verified post-exchange/status branch hooks for a ROM session."""
     bank, start = session.symbols.bank_addr("SelectEnemyMove")
-    expected = 0x56E3 if version == "yellow" else 0x5571
-    if (bank, start + 13) != (15, expected):
+    # Hook the first ROM instruction after both the link exchange and the
+    # screen-buffer restore have returned.  A hook at the restore's CALL
+    # opcode is not reached reliably by the native breakpoint dispatcher
+    # when execution resumes from the nested call; this following load is a
+    # stable, executable continuation and still precedes enemy-move decode.
+    expected = 0x56E6 if version == "yellow" else 0x5574
+    if (bank, start + 16) != (15, expected):
         raise ValueError("ordinary post-exchange address mismatch")
     target_bank, target = session.symbols.bank_addr("LinkBattleExchangeData")
     load_bank, load = session.symbols.bank_addr("LoadScreenTilesFromBuffer1")
@@ -643,7 +670,7 @@ def continuation_locations(session: Any, version: str) -> tuple[tuple[str, int, 
         raise ValueError("post-exchange callsite bytes mismatch")
     text = session.symbols.addr_of("FullyParalyzedText")
     printer = session.symbols.addr_of("PrintText")
-    locations = [("post_exchange", bank, start + 13)]
+    locations = [("post_exchange", bank, start + 16)]
     for side, label in (("local", "CheckPlayerStatusConditions.MonHurtItselfOrFullyParalysed"), ("enemy", "CheckEnemyStatusConditions.monHurtItselfOrFullyParalysed")):
         branch_bank, branch = session.symbols.bank_addr(label)
         signature = b"\x21" + text.to_bytes(2, "little") + b"\xcd" + printer.to_bytes(2, "little")
@@ -668,6 +695,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "BattleTurnObserver",
     "adjudicate_pair",
+    "choose_supported_battle_move",
     "continuation_locations",
     "install_continuation_hooks",
     "validate_turn",

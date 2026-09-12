@@ -90,6 +90,35 @@ class _FakePyBoy:
         return True
 
 
+def test_native_serial_irq_services_bounded_continuation_before_response():
+    calls = []
+    cpu = SimpleNamespace(flags=[])
+    cpu.set_interruptflag = cpu.flags.append
+    pyboy = SimpleNamespace(
+        mb=SimpleNamespace(cpu=cpu, service_serial_irq=lambda limit: calls.append(limit))
+    )
+
+    PyBoyLinkSession._make_serial_irq_raiser(pyboy)()
+
+    assert cpu.flags == [0x08]
+    assert calls == [64]
+
+
+def test_source_serial_irq_keeps_private_frame_tick_as_the_owner():
+    calls = []
+    cpu = SimpleNamespace(flags=[])
+    cpu.set_interruptflag = cpu.flags.append
+    pyboy = SimpleNamespace(
+        _tick=lambda: None,
+        mb=SimpleNamespace(cpu=cpu, service_serial_irq=lambda limit: calls.append(limit)),
+    )
+
+    PyBoyLinkSession._make_serial_irq_raiser(pyboy)()
+
+    assert cpu.flags == [0x08]
+    assert calls == []
+
+
 class _LegacySerialStub:
     """Looks like PyBoy's legacy Serial for attach() to copy state from."""
 

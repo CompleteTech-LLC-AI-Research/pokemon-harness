@@ -596,6 +596,12 @@ def spawned_probe_args(tmp_path):
 
 
 def test_process_spawn_missing_assets_reports_both_child_failures(spawned_probe_args):
+    # The first missing-manifest failure cancels the pair while the second
+    # spawned interpreter may still be importing its runtime. This test
+    # requires both final reports, so give that peer bounded shutdown time;
+    # the dedicated deadline/kill tests retain the fixture's short grace.
+    spawned_probe_args.cleanup_timeout = 5
+    spawned_probe_args.overall_timeout = 10
     result = probe.run_process_pair(spawned_probe_args)
     assert result["tcp_nodelay"] == [0, 0]
     assert result["processes_alive"] == []

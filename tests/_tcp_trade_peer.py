@@ -26,6 +26,7 @@ import re
 import sys
 import tempfile
 import time
+import traceback
 from collections import deque
 from collections.abc import Callable
 from copy import deepcopy
@@ -36,6 +37,7 @@ from typing import NamedTuple
 from tests._battle_turn_evidence import (
     EVIDENCE_EVENTS,
     BattleTurnObserver,
+    choose_supported_battle_move,
     install_continuation_hooks,
 )
 
@@ -643,6 +645,48 @@ def _install_cable_club_confirmation_latch(session):
     return state
 
 
+def _install_connection_starter_latch(session, backend, *, enabled):
+    """Publish just before the starter ROM enables its first native clock.
+
+    Cable Club first tries an external-clock byte, then enables an internal
+    clock byte in the same native loop.  If both independently driven ROMs
+    reach that loop on the same frame, they can both complete the external
+    attempt and elect the external role.  The TCP listener/connector choice
+    gives us a deterministic *input* starter: let that ROM reach its own
+    internal-clock instruction, then release the peer's ordinary dialogue
+    input.  The callback observes code execution and sends a control-plane
+    marker only; it does not write FF01, FF02, HRAM, or game RAM.
+    """
+    state = {"enabled": bool(enabled), "announced": False, "address": None}
+    if not enabled:
+        return state
+    npc_bank, npc = session.symbols.bank_addr("CableClubNPC")
+    if npc_bank <= 0:
+        raise ValueError("CableClubNPC must be in a switchable bank")
+    memory = session._pyboy.memory
+    # ld a,$01 ; ldh [rSB],a ; ld a,$81 ; ldh [rSC],a
+    target = (0x3E, 0x01, 0xE0, 0x01, 0x3E, 0x81, 0xE0, 0x02)
+    candidates = []
+    for address in range(npc, min(npc + 0x100, 0x8000 - len(target))):
+        actual = tuple(int(memory[npc_bank, address + offset]) for offset in range(len(target)))
+        if actual == target:
+            candidates.append(address + 6)
+    if len(candidates) != 1:
+        raise ValueError(
+            "expected exactly one Cable Club native internal-clock store, "
+            f"found {len(candidates)}"
+        )
+    state["address"] = candidates[0]
+
+    def entered(_ctx):
+        if not state["announced"]:
+            backend.announce_sync(sync_id=119)
+            state["announced"] = True
+
+    session._pyboy.hook_register(npc_bank, candidates[0], entered, None)
+    return state
+
+
 def _read_link_menu_fields(session, *, include_map=False, on_error=None):
     """Read selection state without writes; optionally report bounded errors."""
     snapshot = {}
@@ -1151,6 +1195,7 @@ def _run_peer(trace=None) -> int:
     native_internal_clock: bool | None = None
     peer_rom_version: str | None = None
     cable_club_confirmation: dict[str, int] | None = None
+    connection_starter_latch: dict[str, object] | None = None
     party_before: dict[str, object] = {}
     party_after_trade: dict[str, object] | None = None
     final_state: dict[str, int] = {}
@@ -1288,7 +1333,7 @@ def _run_peer(trace=None) -> int:
         log(f"shot {phase}: {path}")
 
     def setup() -> None:
-        nonlocal battle_observer, cable_club_confirmation, link, link_menu_max
+        nonlocal battle_observer, cable_club_confirmation, connection_starter_latch, link, link_menu_max
         nonlocal native_internal_clock, party_before, peer_rom_version
         nonlocal pre_link_menu_history, session
 
@@ -1476,6 +1521,11 @@ def _run_peer(trace=None) -> int:
         selected_internal = link.negotiate_network_clock_role(peer_version)
         native_internal_clock = bool(selected_internal)
         remaining("network clock negotiation")
+        connection_starter_latch = _install_connection_starter_latch(
+            session,
+            backend,
+            enabled=native_internal_clock,
+        )
         log(
             f"versioned handshake complete: local={fixture_version} "
             f"peer={peer_version} native_internal_clock={selected_internal}"
@@ -1824,7 +1874,7 @@ def _run_peer(trace=None) -> int:
         )
 
     def choose_first_usable_battle_move() -> int:
-        """Navigate the real move menu to the first move with PP."""
+        """Navigate to an existing supported damaging move with PP."""
         ready = wait_for_menu_ready(
             label="battle move menu",
             min_item=1,
@@ -1836,16 +1886,11 @@ def _run_peer(trace=None) -> int:
         move_count = ready.get("wMaxMenuItem", 0) - 1
         if not 1 <= move_count <= len(active_moves):
             raise RuntimeError(f"ROM move-menu count is invalid: menu={ready} moves={active_moves}")
-        usable_slots = [
-            index
-            for index, (move_id, pp) in enumerate(active_moves[:move_count])
-            if move_id != 0 and pp > 0
-        ]
-        if not usable_slots:
-            raise RuntimeError(f"active battle mon has no usable move: moves={active_moves}")
+        target, selected_move_id = choose_supported_battle_move(
+            session, active_moves[:move_count]
+        )
         # Move-menu cursors are one-based. Let the ROM install the cursor
         # before reading it; no RAM write or test-only selection hook is used.
-        target = usable_slots[0]
         move_menu_to_item(
             target=target + 1,
             min_item=1,
@@ -1860,7 +1905,6 @@ def _run_peer(trace=None) -> int:
         prior_move_selection_phase = counters["MainInBattleLoop.selectEnemyMove"][0]
         next_move_input_tick = -1
         move_input_attempts = 0
-        selected_move_id = active_moves[target][0]
         selection_deadline = min(time.monotonic() + 30.0, deadline)
         while time.monotonic() < selection_deadline:
             if counters["MainInBattleLoop.selectEnemyMove"][0] > prior_move_selection_phase:
@@ -1894,12 +1938,6 @@ def _run_peer(trace=None) -> int:
         # other is still constructing its PyBoy can produce a
         # direction-dependent first serial exchange.
         passive_sync(ready_sync_id=99, release_sync_id=98, timeout=60.0)
-        if args.role == "listen":
-            startup_deadline = min(deadline, time.monotonic() + 60.0)
-            while int(link._network_backend.debug_snapshot().get("pending_edge_requests", 0)) == 0:
-                if time.monotonic() >= startup_deadline:
-                    raise RuntimeError("connector did not publish a startup edge")
-                time.sleep(0.001)
         # Phase 1: walk UP ×3 + A-mash to reach LinkMenu.
         for _ in range(3):
             session.press("up", duration=6)
@@ -1924,8 +1962,21 @@ def _run_peer(trace=None) -> int:
         if native_internal_clock is None:
             raise RuntimeError("native network clock role was not negotiated")
         local_is_connection_starter = native_internal_clock
+        connection_start_released = local_is_connection_starter
         local_role_announced = False
         while time.monotonic() < deadline:
+            if not connection_start_released:
+                # Keep participating in the negotiated frame cadence while
+                # the starter reaches its ROM-owned SC_INTERNAL write.  The
+                # peer may therefore acknowledge frame turns, but receives
+                # no dialogue input that could make both cartridges start
+                # their initial external-clock exchange together.
+                if link._network_backend.poll_peer_sync(sync_id=119):
+                    connection_start_released = True
+                    log("phase 1 native connection-starter marker received")
+                else:
+                    session.step(1)
+                    continue
             status = int(session._pyboy.memory[session.symbols.addr_of("hSerialConnectionStatus")])
             if (
                 local_is_connection_starter
@@ -2900,6 +2951,7 @@ def _run_peer(trace=None) -> int:
         drive_status = "error"
         drive_error = f"{type(exc).__name__}: {exc}"
         log(f"EXCEPTION in drive loop: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
 
     finally:
         if pre_link_menu_history is not None:

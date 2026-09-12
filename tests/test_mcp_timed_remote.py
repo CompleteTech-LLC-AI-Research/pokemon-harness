@@ -950,7 +950,12 @@ def test_server_rejects_prebuilt_active_legacy_link(tmp_path, mode):
 
 @pytest.mark.parametrize("operation", ["invalid_button", "load_state"])
 def test_invalid_local_input_preserves_connected_epoch(tmp_path, operation):
-    with linked(tmp_path) as ((left, _, game), (right, _, peer)):
+    # The post-rejection liveness check runs two authored owners. Use the
+    # same finite paired-work budget as the queued-cancellation regression;
+    # input rejection itself still uses the ordinary result bound.
+    with linked(tmp_path, request_timeout=PAIR_WORK_CAPACITY_S) as (
+        (left, _, game), (right, _, peer)
+    ):
         epoch = left.status()["epoch"]
         before = (game.frame_count, game.mb.cpu.retired_instructions, tuple(game.events))
         with pytest.raises((ValueError, SessionError)):
@@ -962,9 +967,11 @@ def test_invalid_local_input_preserves_connected_epoch(tmp_path, operation):
         assert left.status()["epoch"] == epoch
         assert left.status()["admitting"]
         peer_frame = peer.frame_count
-        a, b = left.submit("step", 1, render=False), right.submit("step", 1, render=False)
-        result(a)
-        result(b)
+        pair_deadline = time.monotonic() + PAIR_WORK_CAPACITY_S
+        a = left.submit("step", 1, render=False, deadline=pair_deadline)
+        b = right.submit("step", 1, render=False, deadline=pair_deadline)
+        result_until(a, pair_deadline)
+        result_until(b, pair_deadline)
         assert game.frame_count == before[0] + 1
         assert peer.frame_count == peer_frame + 1
 

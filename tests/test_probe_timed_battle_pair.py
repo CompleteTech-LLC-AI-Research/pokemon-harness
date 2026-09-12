@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import sys
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 from types import ModuleType
@@ -14,6 +15,34 @@ from scripts import probe_timed_battle_pair as battle
 
 pytestmark = pytest.mark.unit
 MOCK_PHASES = ("mock_battle_prepared", "mock_turn_settled", "mock_room_returned")
+DEFAULT_OUTPUT = None
+
+
+@pytest.fixture
+def tmp_path(tmp_path):
+    """Keep output-security tests external even with a checkout-local TMPDIR."""
+    if not any((parent / ".git").exists() for parent in (tmp_path, *tmp_path.parents)):
+        yield tmp_path
+        return
+    for root in (Path("/tmp"), Path("/var/tmp"), Path.home()):
+        root = root.resolve()
+        if not root.is_dir() or any(
+            (parent / ".git").exists() for parent in (root, *root.parents)
+        ):
+            continue
+        try:
+            directory = tempfile.TemporaryDirectory(prefix="battle-probe-tests-", dir=root)
+        except OSError:
+            continue
+        with directory:
+            yield Path(directory.name)
+        return
+    pytest.fail("battle output tests require a writable directory outside Git worktrees")
+
+
+@pytest.fixture(autouse=True)
+def isolated_default_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "DEFAULT_OUTPUT", tmp_path / "battle-report.json")
 
 
 def cli(**overrides):
@@ -29,7 +58,7 @@ def cli(**overrides):
         "rearm-budget": "4096",
         "rearm-instruction-cap": "1024",
         "max-edge-lateness": "4096",
-        "output": "/tmp/unused-mocked-battle-report.json",
+        "output": DEFAULT_OUTPUT,
     }
     options.update(overrides)
     return [f"--{key}={value}" for key, value in options.items() if value is not None]

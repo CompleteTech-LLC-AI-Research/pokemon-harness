@@ -92,6 +92,7 @@ cdef class Motherboard:
     # dispatch hook. Keep the exception edge all the way through the
     # motherboard instead of converting it into an unraisable exception.
     cpdef bint tick(self) except * with gil
+    cpdef bint service_serial_irq(self, object max_instructions) except * with gil
 
     cdef void switch_speed(self) noexcept nogil
     @cython.locals(cycles=uint64_t, delta=uint64_t, rate=uint64_t)

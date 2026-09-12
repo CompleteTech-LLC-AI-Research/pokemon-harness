@@ -392,6 +392,71 @@ def test_simultaneous_owner_masters_exchange_sampled_bits_without_core_access(mo
         )
 
 
+@pytest.mark.parametrize("identified", [False, True])
+def test_owner_master_answers_peer_edge_queued_before_local_clock(monkeypatch, identified):
+    """A slightly earlier peer clock must not strand both owner threads."""
+    sockets = _socket.socketpair()
+    left = NetworkBackend(sockets[0], local_rom_version="red" if identified else None)
+    right = NetworkBackend(sockets[1], local_rom_version="blue" if identified else None)
+    monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 1.0)
+    results = []
+    errors = []
+
+    def clock():
+        try:
+            results.append(left.on_edge(our_bit=0, our_role=1))
+        except BaseException as exc:  # noqa: BLE001 - assert every worker failure below
+            errors.append(exc)
+
+    worker = threading.Thread(target=clock, daemon=True)
+    original_response = right._send_edge_response
+
+    def respond_after_local_response(request):
+        deadline = time.monotonic() + 0.5
+        while not right._edge_response_seen:
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+        return original_response(request)
+
+    monkeypatch.setattr(right, "_send_edge_response", respond_after_local_response)
+    try:
+        for backend in (left, right):
+            backend.start_receiver(
+                local_core=_CompletingSlaveCore(),
+                serial_gate=SerialOperationGate(),
+                dispatch_to_owner=True,
+            )
+        if identified:
+            assert left.wait_for_hello(timeout=1.0) == "blue"
+            assert right.wait_for_hello(timeout=1.0) == "red"
+        right._local_core.internal_clock = 1
+        right._local_core.transfer_enabled = 1
+        worker.start()
+        deadline = time.monotonic() + 0.5
+        while right.debug_snapshot()["pending_edge_requests"] != 1:
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+        assert right.service_pending_edges(max_edges=1) == 0
+        assert right.on_edge(our_bit=1, our_role=1) == 0
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert errors == []
+        assert results == [1]
+        for backend in (left, right):
+            snapshot = backend.debug_snapshot()
+            assert snapshot["pending_edge_requests"] == 0
+            assert snapshot["reciprocal_master_edges"] == 1
+            assert snapshot["owner_edge_applied"] == 0
+            assert snapshot["edge_req_received"] == 1
+            assert snapshot["edge_resp_sent"] == 1
+    finally:
+        _finish_network_test_cleanup(
+            primary=sys.exc_info()[1],
+            backends=(("left", left), ("right", right)),
+            threads=(("earlier master", worker),),
+        )
+
+
 def test_versioned_simultaneous_masters_match_identified_responses(monkeypatch):
     """HELLO peers use ids when both master edges cross on the wire."""
     left_sock, right_sock = _socket.socketpair()
@@ -2151,7 +2216,10 @@ def test_next_edge_waits_for_response_accounting_to_finish(monkeypatch):
     """A peer's next edge cannot overtake the prior pending decrement."""
     master, slave = NetworkBackend.pair()
     core = _CompletingSlaveCore()
-    core.internal_clock = 1
+    # This test exercises response-accounting ordering after an admitted
+    # external-clock edge. An armed internal-clock core now deliberately
+    # defers a peer edge until its own scheduled clock samples the wire.
+    core.internal_clock = 0
     response_decrement_entered = threading.Event()
     response_decrement_done = threading.Event()
     release_response_decrement = threading.Event()
@@ -2234,7 +2302,7 @@ def test_next_edge_waits_for_response_accounting_to_finish(monkeypatch):
         first_sender.join(timeout=10.0)
         assert not first_sender.is_alive()
         assert first_errors == []
-        assert first_reply == [1]
+        assert first_reply == [0]
 
         # The first response is already on the wire, so the peer immediately
         # starts its next edge. The worker is deliberately paused after that
@@ -2250,6 +2318,10 @@ def test_next_edge_waits_for_response_accounting_to_finish(monkeypatch):
 
         release_response_decrement.set()
         assert response_decrement_done.wait(timeout=10.0)
+        # The first completed external edge disarms this test double, as
+        # authentic hardware does. Model the ROM's intervening re-arm before
+        # admitting the next peer clock.
+        core.transfer_enabled = 1
         deadline = time.monotonic() + 10.0
         applied = 0
         while time.monotonic() < deadline and applied == 0:
@@ -2260,7 +2332,7 @@ def test_next_edge_waits_for_response_accounting_to_finish(monkeypatch):
         second_sender.join(timeout=10.0)
         assert not second_sender.is_alive()
         assert second_errors == []
-        assert second_reply == [1]
+        assert second_reply == [0]
         slave.wait_for_wire_idle(timeout=10.0)
         assert slave.debug_snapshot()["pending_edge_requests"] == 0
     finally:
@@ -2507,9 +2579,9 @@ def test_owner_dispatch_uses_no_data_during_clock_role_transition():
     """A transient internal-clock edge gets a connected/no-data response."""
     a, b = NetworkBackend.pair()
     core = _CompletingSlaveCore()
-    core.transfer_enabled = 1
+    core.transfer_enabled = 0
     core.internal_clock = 1
-    core.SC = 0x81
+    core.SC = 0x01
     a.start_receiver(local_core=None)
     b.start_receiver(
         local_core=core,
@@ -2547,6 +2619,7 @@ def test_owner_real_edge_resets_keepalive_byte_boundary():
     a, b = NetworkBackend.pair()
     core = _CompletingSlaveCore()
     core.internal_clock = 1
+    core.transfer_enabled = 0
     a.start_receiver(local_core=None)
     b.start_receiver(
         local_core=core,
@@ -2589,7 +2662,7 @@ def test_owner_real_edge_resets_keepalive_byte_boundary():
         # Seven subsequent transient responses are the first seven bits of
         # 0xFE. Without the reset above, the seventh response would be 0.
         core.internal_clock = 1
-        core.transfer_enabled = 1
+        core.transfer_enabled = 0
         assert [request_and_service() for _ in range(7)] == [1] * 7
     finally:
         a.stop()
@@ -2818,6 +2891,7 @@ def test_listen_and_connect_over_loopback_exchange_byte():
     port = _free_port()
     server_holder: dict = {}
     ready = threading.Event()
+    release_owner = threading.Event()
 
     # Pre-bind the listener in main thread so we can reliably connect
     # once the server thread calls accept().
@@ -2839,7 +2913,7 @@ def test_listen_and_connect_over_loopback_exchange_byte():
         ready.set()
         # Keep the real owner-thread stall: the receiver must exchange the
         # armed byte while its setup/owner thread is not progressing.
-        time.sleep(2.0)
+        release_owner.wait(timeout=10.0)
 
     t = threading.Thread(target=server, daemon=True)
     t.start()
@@ -2856,6 +2930,7 @@ def test_listen_and_connect_over_loopback_exchange_byte():
         assert client_core.SB == 0x33
         assert server_holder["core"].SB == 0xCC
     finally:
+        release_owner.set()
         client_backend.stop()
         t.join(timeout=2.0)
         if "backend" in server_holder:

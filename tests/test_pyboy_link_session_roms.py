@@ -51,6 +51,7 @@ from pokered_harness.link.serial_core import SerialCore
 from tests._battle_turn_evidence import (
     EVIDENCE_EVENTS,
     BattleTurnObserver,
+    choose_supported_battle_move,
     install_continuation_hooks,
     verify_battle_turns,
 )
@@ -676,7 +677,7 @@ def _assert_active_battle_state_is_legal(session) -> tuple[int, int]:
         f"moves={[move for move, _ in active_moves]}, "
         f"pp={[pp for _, pp in active_moves]}"
     )
-    return usable_slots[0], active_moves[usable_slots[0]][0]
+    return choose_supported_battle_move(session, active_moves)
 
 
 @pytest.mark.parametrize(
@@ -1298,7 +1299,7 @@ def _assert_settled_battle_evidence(counters: dict) -> None:
     assert not errors, f"battle settlement evidence failed: {errors}; rows={rows}"
 
 
-def _wait_for_settled_battle_evidence(link, counters: dict, *, budget_frames: int = 600) -> None:
+def _wait_for_settled_battle_evidence(link, counters: dict, *, budget_frames: int = 2400) -> None:
     """Let the ROM pass the exchange into an immutable later-turn boundary."""
     observers = counters.get("_battle_evidence")
     assert isinstance(observers, list) and len(observers) == 2
@@ -1774,20 +1775,25 @@ def _drive_complete_battle_turn(
 
         count_a = known_move_count(active_a)
         count_b = known_move_count(active_b)
-        cursor_a = menu_cursor(a, count_a)
-        cursor_b = menu_cursor(b, count_b)
-        remaining_down = [
-            (slot_a - cursor_a) % count_a,
-            (slot_b - cursor_b) % count_b,
-        ]
-        while remaining_down[0] or remaining_down[1]:
-            if remaining_down[0]:
-                a.press("down")
-                remaining_down[0] -= 1
-            if remaining_down[1]:
-                b.press("down")
-                remaining_down[1] -= 1
-            tick_bounded(min(step_frames, 2))
+        # A move-menu direction is sampled by the ROM's input loop.  A
+        # single pulse can land before that loop reaches its next poll, so
+        # re-read the ROM-owned cursor after every paced attempt instead of
+        # assuming each injected pulse was consumed.  This keeps selection
+        # entirely menu-driven and bounded while allowing a later qualified
+        # slot (for example Blue's Vine Whip after SolarBeam) to be chosen.
+        cursor_attempts = 0
+        while menu_cursor(a, count_a) != slot_a or menu_cursor(b, count_b) != slot_b:
+            if menu_cursor(a, count_a) != slot_a:
+                a.press("down", duration=2)
+            if menu_cursor(b, count_b) != slot_b:
+                b.press("down", duration=2)
+            tick_bounded(min(step_frames, 4))
+            cursor_attempts += 1
+            assert cursor_attempts <= 30, (
+                "move-menu cursor did not reach selected supported slots: "
+                f"targets={(slot_a, slot_b)} cursors="
+                f"{(menu_cursor(a, count_a), menu_cursor(b, count_b))}"
+            )
 
         assert menu_cursor(a, count_a) == slot_a
         assert menu_cursor(b, count_b) == slot_b
