@@ -157,6 +157,72 @@ def _wait_for_edge_request(
             raise AssertionError("network backend closed before EDGE_REQ")
 
 
+def test_byte_completed_at_frame_barrier_resumes_cpu_without_a_ninth_edge(
+    _emulator_fixture,  # noqa: F811 - shared authored-ROM fixture
+    monkeypatch,
+):
+    """The final external edge must leave room for its pending CPU interrupt."""
+    pyboy = _emulator_fixture
+    _install_program(pyboy, internal_clock=False)
+    pyboy.tick(1, render=False, sound=False)
+    assert _snapshot(pyboy)["halt_marker"] == 0xA1
+    peer, backend = NetworkBackend.pair()
+    edge_queued = threading.Event()
+    backend._edge_queue = _ObservedEdgeQueue(edge_queued, maxsize=256)
+    peer.start_receiver(local_core=None)
+    provider = PyBoyLinkSession(network_backend=backend)
+    sender_errors: list[BaseException] = []
+    peer_serial = Serial(backend=peer)
+    peer_serial.set_SB(0xA5)
+    peer_serial.set_SC(0x81)
+
+    def send_byte():
+        try:
+            peer_serial.tick(CYCLES_PER_BYTE_DMG)
+            peer_serial.check_error()
+        except BaseException as exc:  # noqa: BLE001 - collected after bounded join
+            sender_errors.append(exc)
+
+    sender = threading.Thread(target=send_byte, daemon=True)
+    states = []
+
+    def finish_frame(*, leader, progress_callback):
+        assert leader is False
+        assert _snapshot(pyboy)["halted"]
+        sender.start()
+        for _ in range(8):
+            _wait_for_edge_request(backend, edge_queued)
+            progress_callback()
+            states.append(_snapshot(pyboy))
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert sender_errors == []
+        assert backend.debug_snapshot()["edge_req_received"] == 8
+        # No ninth edge or outer Session.step is available to drive this IRQ.
+        assert states[-1]["irq_marker"] == 0xB2
+        assert states[-1]["halt_marker"] == 0xA2
+        assert all(state["irq_marker"] == 0 for state in states[:-1])
+
+    try:
+        provider.attach(pyboy)
+        provider._network_is_internal_clock = False
+        provider._network_frame_barrier = True
+        monkeypatch.setattr(backend, "begin_frame_turn", lambda **_kwargs: None)
+        monkeypatch.setattr(backend, "finish_frame_turn", finish_frame)
+        frame_before = pyboy.frame_count
+        provider.step(1)
+        assert pyboy.mb.serial.SB == 0xA5
+        # One requested frame plus one bounded owner recovery frame.
+        assert pyboy.frame_count - frame_before == 2
+    finally:
+        backend.stop(timeout_s=1.0)
+        peer.stop(timeout_s=1.0)
+        if sender.ident is not None:
+            sender.join(timeout=1.0)
+            assert not sender.is_alive()
+        provider.detach_all()
+
+
 def _run_cpu_case(pyboy, *, internal_clock: bool) -> dict[str, object]:
     """Run one real PyBoy endpoint against a synthetic native Serial peer."""
     _install_program(pyboy, internal_clock=internal_clock)

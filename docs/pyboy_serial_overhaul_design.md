@@ -230,6 +230,21 @@ This was a specific failure mode in [PR #344](https://github.com/Baekalfen/PyBoy
 ("Cython freezes after socket connection"), and the non-blocking
 discipline prevents it.
 
+**Current TCP frame implementation:** `PyBoyLinkSession` wraps the bundled
+source/native one-frame `_tick` entry point. While finishing a transport
+turn, an unarmed deferred request or an external byte completed by owner
+dispatch can require one normal recovery frame per progress callback. This
+runs the pending serial interrupt through ordinary CPU/device execution.
+The completed response may already be on the wire; recovery does not prove
+that the ROM consumed its receive mailbox before the peer continued.
+
+Recovery advances `PyBoy.frame_count` beyond the requested normal frames,
+without adding a transport frame marker or a public plugin post-tick call.
+Ordinary `Session.current_tick()` retains its requested-step accounting;
+use the emulator frame/cycle counters when measuring actual execution.
+This recovery policy is distinct from the shared-cycle coordinator proposed
+above and does not establish equal emulated time across TCP peers.
+
 ## Migration path
 
 The overhaul can land incrementally without breaking existing PyBoy
