@@ -732,17 +732,26 @@ class PyBoyLinkSession:
                 def progress_owner() -> None:
                     pending_before = int(backend.debug_snapshot().get("pending_edge_requests", 0))
                     applied = backend.service_pending_edges(max_edges=1)
-                    # A deferred request means the ROM's serial IRQ has not
-                    # re-armed yet. Advance only this owner thread until that
-                    # native re-arm is observable; do not run speculative
-                    # frames while no edge is admitted. This callback is
-                    # supplied for either pacing role: hardware SC ownership
-                    # can legitimately be opposite the frame metadata.
-                    if (
+                    core = getattr(backend, "_local_core", None)
+                    byte_completed = (
+                        applied > 0
+                        and owner_attribute == "_tick"
+                        and core is not None
+                        and not bool(getattr(core, "internal_clock", 0))
+                        and not bool(getattr(core, "transfer_enabled", 0))
+                    )
+                    # The eighth external edge latches SB and raises IF, but
+                    # does not run the CPU interrupt handler. Give it one
+                    # genuine owner frame even when no ninth edge is queued.
+                    # This uses the same bounded recovery as an unarmed
+                    # deferred request, in addition to the requested frames.
+                    # The response worker may already have sent the byte's
+                    # response; this is not a response/ROM-consumption fence.
+                    if byte_completed or (
                         applied == 0
                         and pending_before > 0
-                        and getattr(backend, "_local_core", None) is not None
-                        and not bool(getattr(backend._local_core, "transfer_enabled", 0))
+                        and core is not None
+                        and not bool(getattr(core, "transfer_enabled", 0))
                     ):
                         original_tick(*args, **kwargs)
 

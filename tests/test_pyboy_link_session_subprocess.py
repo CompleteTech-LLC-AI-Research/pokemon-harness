@@ -2083,14 +2083,13 @@ def test_subprocess_pair_completes_trade_over_tcp(listener_version: str, connect
          its SerialCore and leave the peer's ``on_edge`` timing out
          on the few final bytes of the trade's mon-data exchange.
 
-    NetworkBackend's ``_handle_edge_req`` carries the per-edge work:
-    when the local SerialCore is armed as slave, apply the peer's
-    bit and reply; when it's transiently unarmed (mid-IRQ re-arm
-    window), briefly poll for re-arm before falling back to the
-    SERIAL_NO_DATA_BYTE (0xFE) keep-alive stream. That wait-for-
-    rearm is what lets each side's ROM finish the full fixed-length
-    Serial_ExchangeBytes loops without desyncing on the missing
-    bytes the peer skipped over while busy elsewhere.
+    Live PyBoy peers queue each inbound edge for their emulator owner.
+    Completing a byte latches SB and raises the serial interrupt; normal
+    CPU execution must still run the handler and consume the ROM mailbox.
+    An owner waiting at a frame barrier can execute a recovery frame after
+    byte completion or for an unarmed deferred edge. The response worker
+    does not establish ROM-consumption ordering. Exact party-record checks
+    therefore remain necessary even when both trade hooks have fired.
     """
     if not _strict_fixtures_ready(
         listener_version,
