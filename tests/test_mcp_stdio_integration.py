@@ -229,36 +229,38 @@ async def test_stdio_remote_link_lifecycle_and_explicit_disconnect():
             )
             assert listen["remote_mode"] == "listening"
 
-            async with stdio_client(connector_params) as (connector_read, connector_write):
-                async with ClientSession(connector_read, connector_write) as connector:
-                    await connector.initialize()
-                    connect = _payload(
-                        await connector.call_tool(
-                            "link_connect",
-                            {
-                                "host": "127.0.0.1",
-                                "port": port,
-                                "rom_version": "blue",
-                                "peer_rom_version": "red",
-                                "timeout_s": 15,
-                            },
-                        )
+            async with (
+                stdio_client(connector_params) as (connector_read, connector_write),
+                ClientSession(connector_read, connector_write) as connector,
+            ):
+                await connector.initialize()
+                connect = _payload(
+                    await connector.call_tool(
+                        "link_connect",
+                        {
+                            "host": "127.0.0.1",
+                            "port": port,
+                            "rom_version": "blue",
+                            "peer_rom_version": "red",
+                            "timeout_s": 15,
+                        },
                     )
-                    assert connect["remote_mode"] == "connected"
-                    assert connect["peer_rom_version"] == "red"
-                    connector_status = _payload(
-                        await connector.call_tool("link_status", {})
-                    )
-                    assert connector_status["remote_mode"] == "connected"
+                )
+                assert connect["remote_mode"] == "connected"
+                assert connect["peer_rom_version"] == "red"
+                connector_status = _payload(
+                    await connector.call_tool("link_status", {})
+                )
+                assert connector_status["remote_mode"] == "connected"
 
-                    # Disconnect the live connector before either stdio client
-                    # exits. Both servers must finish TCP/backend cleanup and
-                    # publish a clean idle state through the real MCP API.
-                    disconnected = _payload(
-                        await connector.call_tool("link_disconnect", {})
-                    )
-                    assert disconnected["remote_mode"] == "idle"
-                    connector_idle = await _wait_remote_mode(connector, "idle")
-                    listener_idle = await _wait_remote_mode(listener, "idle")
-                    assert connector_idle["remote_error"] is None
-                    assert listener_idle["remote_error"] is None
+                # Disconnect the live connector before either stdio client
+                # exits. Both servers must finish TCP/backend cleanup and
+                # publish a clean idle state through the real MCP API.
+                disconnected = _payload(
+                    await connector.call_tool("link_disconnect", {})
+                )
+                assert disconnected["remote_mode"] == "idle"
+                connector_idle = await _wait_remote_mode(connector, "idle")
+                listener_idle = await _wait_remote_mode(listener, "idle")
+                assert connector_idle["remote_error"] is None
+                assert listener_idle["remote_error"] is None

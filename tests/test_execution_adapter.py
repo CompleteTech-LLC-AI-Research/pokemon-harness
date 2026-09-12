@@ -16,16 +16,16 @@ class FakeBoard:
     """Only public native fields; hidden flag models setter refusal."""
 
     __slots__ = (
+        "__pair_active",
         "cpu",
         "double_speed",
-        "speed_transition_count",
-        "speed_transition_clock",
-        "speed_transition_double_speed",
-        "execution_before",
         "execution_after",
-        "__pair_active",
-        "instructions",
+        "execution_before",
         "grants",
+        "instructions",
+        "speed_transition_clock",
+        "speed_transition_count",
+        "speed_transition_double_speed",
     )
 
     def __init__(self, double_speed=False):

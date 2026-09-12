@@ -194,11 +194,11 @@ class ExecutionGovernorAdapter:
             self._retired = True
             try:
                 self._recover()
-            except BaseException:
+            except BaseException:  # noqa: BLE001, S110 - cleanup cannot replace the primary failure.
                 pass
             try:
                 self.detach()
-            except BaseException:
+            except BaseException:  # noqa: BLE001, S110 - retain the primary failure and retryable hooks.
                 # Keep registration ownership and pending accounting intact.
                 # Explicit detach may be retried; guarded_tick/attach may not.
                 pass
@@ -261,7 +261,7 @@ class ExecutionGovernorAdapter:
         try:
             try:
                 instructions = self._read_counter() - self._start_counter
-            except BaseException:
+            except BaseException:  # noqa: BLE001 - account interrupted counters as invalid.
                 instructions = -1  # Invalid count, never a guessed native count.
             observed = self._observe(strict=False)
             count = (
@@ -271,7 +271,7 @@ class ExecutionGovernorAdapter:
             )
             transition = self._transition(observed, count, observed[3], observed[4])
             self._record(observed, instructions, transition)
-        except BaseException:
+        except BaseException:  # noqa: BLE001, S110 - recovery must preserve the callback's exception.
             # Preserve the primary callback exception. Coordinator diagnostics
             # retain any endpoint/elapsed interval that could be established.
             pass
@@ -374,7 +374,7 @@ class ExecutionGovernorAdapter:
             counter_error = None
             try:
                 instructions = self._read_counter() - self._start_counter
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - record actuals before propagating interrupts.
                 counter_error = exc
                 instructions = -1
             observed = self._observe(strict=False)

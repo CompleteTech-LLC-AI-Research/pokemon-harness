@@ -2,8 +2,8 @@
 
 import pytest
 
-from pokered_harness.link.serial_core import CYCLES_PER_BYTE_DMG, SerialCore
 from pokered_harness.link.serial_coordinator import CoordinatedBackend
+from pokered_harness.link.serial_core import CYCLES_PER_BYTE_DMG, SerialCore
 
 
 @pytest.mark.parametrize("completed", [False, True])
