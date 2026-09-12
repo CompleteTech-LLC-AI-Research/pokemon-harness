@@ -98,6 +98,7 @@ UNIT_MODULES = frozenset(
         "test_network_backend.py",
         "test_network_backend_shutdown.py",
         "test_network_cpu_owner.py",
+        "test_network_frame_batching.py",
         "test_pre_linkmenu_observation.py",
         "test_network_owner_execution.py",
         "test_network_public_backpressure.py",

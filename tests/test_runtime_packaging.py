@@ -229,17 +229,17 @@ def test_source_and_native_runtime_expose_lockstep_timing_attributes() -> None:
 
 
 def test_source_and_native_runtime_allow_instance_tick_ownership() -> None:
-    """The network serial owner must be able to wrap ``PyBoy.tick`` per instance."""
+    """The network serial owner must be able to wrap one actual frame."""
     from pyboy import PyBoy
 
     pyboy = PyBoy.__new__(PyBoy)
-    original_tick = pyboy.tick
+    original_tick = pyboy._tick
 
     def owned_frame(*args, **kwargs):
         return original_tick(*args, **kwargs)
 
-    pyboy.tick = owned_frame
-    assert pyboy.tick is owned_frame
+    pyboy._tick = owned_frame
+    assert pyboy._tick is owned_frame
 
 
 def test_cython_serial_translation_unit_compiles_with_the_checked_in_pxd() -> None:
@@ -991,6 +991,17 @@ def test_bootstrap_reports_an_incompatible_serial_constructor(monkeypatch) -> No
 
     with pytest.raises(SystemExit, match="serial contract could not be constructed"):
         module._verify_runtime("source")
+
+
+def test_bootstrap_rejects_a_runtime_without_frame_ownership(monkeypatch) -> None:
+    import pyboy
+    from pyboy import utils
+
+    module = _load_bootstrap()
+    monkeypatch.setattr(pyboy, "PyBoy", SimpleNamespace(_tick=None))
+    mode = "cython" if utils.cython_compiled else "source"
+    with pytest.raises(SystemExit, match="PyBoy._tick frame ownership is unavailable"):
+        module._verify_runtime(mode)
 
 
 def test_mcp_config_uses_the_installed_runtime_without_absolute_paths() -> None:

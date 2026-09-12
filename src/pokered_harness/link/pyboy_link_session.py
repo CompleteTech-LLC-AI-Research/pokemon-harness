@@ -710,7 +710,7 @@ class PyBoyLinkSession:
         original_tick = getattr(pyboy, owner_attribute, None)
         if not callable(original_tick):
             # Keep lightweight integrations and older PyBoy-like test
-            # doubles usable. Real source PyBoy exposes ``_tick``; the
+            # doubles usable. Bundled source and native PyBoy expose ``_tick``; the
             # public method fallback cannot split multi-frame calls but is
             # still correctly serialized for a one-frame caller.
             owner_attribute = "tick"
