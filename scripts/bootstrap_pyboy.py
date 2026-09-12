@@ -20,6 +20,7 @@ Both modes use the checked-in source snapshot.  No network VCS checkout,
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import importlib.machinery
 import importlib.metadata
@@ -29,6 +30,9 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +83,9 @@ RUNTIME_MODULES = (
 # mode validates its import and provenance through RUNTIME_MODULES, but must
 # not require it to be an extension module.
 CYTHON_MODULES = tuple(name for name in RUNTIME_MODULES if name not in {"pyboy", "pyboy.link"})
+NATIVE_INPUT_SUFFIXES = frozenset(
+    {".py", ".pyx", ".pxd", ".pxi", ".txt", ".bin", ".md", ".in", ".toml"}
+)
 
 
 def _process_group_options() -> dict[str, object]:
@@ -296,6 +303,50 @@ def _validate_source() -> None:
             "vendored PyBoy revision mismatch: "
             f"expected {EXPECTED_REVISION}, got {revision or '<empty>'}"
         )
+
+
+@contextmanager
+def _native_build_source() -> Iterator[Path]:
+    """Build every extension from one source-only snapshot.
+
+    Cython extension types share method tables across modules. Reusing old
+    generated C or objects after a declaration change can produce a mixed
+    runtime even when every import succeeds. The vendored package contains
+    Python/Cython sources and resources; its C, headers, and binaries are all
+    generated output, so they must never enter this fresh build directory.
+    """
+    build_root = ROOT / "build"
+    build_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="pyboy-native-", dir=build_root) as temporary:
+        destination = Path(temporary) / "pyboy-src"
+        destination.mkdir()
+        digest = hashlib.sha256()
+        for directory, children, filenames in os.walk(PYBOY_SOURCE):
+            children[:] = sorted(
+                name
+                for name in children
+                if not name.startswith(".")
+                and name not in {"build", "dist", "__pycache__", "venv"}
+                and not name.endswith(".egg-info")
+            )
+            for name in children:
+                if (Path(directory) / name).is_symlink():
+                    raise SystemExit("native build inputs must not contain symlinked directories")
+            for name in sorted(filenames):
+                source = Path(directory) / name
+                if source.suffix not in NATIVE_INPUT_SUFFIXES and source != REVISION_FILE:
+                    continue
+                if source.is_symlink():
+                    raise SystemExit("native build inputs must not contain symlinked files")
+                relative = source.relative_to(PYBOY_SOURCE)
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                # Hash the staged bytes, which are the compiler's inputs.
+                digest.update(relative.as_posix().encode("utf-8") + b"\0")
+                digest.update(hashlib.sha256(target.read_bytes()).digest())
+        print(f"PyBoy native build inputs SHA-256: {digest.hexdigest()}", flush=True)
+        yield destination
 
 
 def _module_kind(module: object) -> str:
@@ -545,10 +596,8 @@ def main(argv: list[str] | None = None) -> int:
     env = _isolated_environment()
     if args.mode == "source":
         env["PYBOY_NO_CYTHON"] = "1"
-        install_target = ROOT
     else:
         env.pop("PYBOY_NO_CYTHON", None)
-        install_target = PYBOY_SOURCE
 
     try:
         pip_install = _pip_command()
@@ -589,20 +638,22 @@ def main(argv: list[str] | None = None) -> int:
             if project_result.returncode:
                 return project_result.returncode
 
-        command = [
-            *pip_install,
-            "--force-reinstall",
-            "--no-deps",
-            "--no-build-isolation",
-            CYTHON_REQUIREMENT,
-            str(install_target),
-        ]
-        result = _run_bounded(
-            command,
-            cwd=ROOT,
-            env=env,
-            timeout=INSTALL_TIMEOUT_SECONDS,
-        )
+        source_context = nullcontext(ROOT) if args.mode == "source" else _native_build_source()
+        with source_context as install_target:
+            command = [
+                *pip_install,
+                "--force-reinstall",
+                "--no-deps",
+                "--no-build-isolation",
+                CYTHON_REQUIREMENT,
+                str(install_target),
+            ]
+            result = _run_bounded(
+                command,
+                cwd=ROOT,
+                env=env,
+                timeout=INSTALL_TIMEOUT_SECONDS,
+            )
         if result.returncode:
             if args.mode == "cython":
                 print(
