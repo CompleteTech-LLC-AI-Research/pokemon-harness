@@ -747,47 +747,6 @@ class Motherboard:
 
         return self.breakpoint_singlestep
 
-    def service_serial_irq(self, max_instructions):
-        """Run a bounded serial-interrupt continuation outside ``tick``.
-
-        A cable peer may need the ROM's serial interrupt handler to re-arm an
-        external-clock transfer before its eighth-edge response is released.
-        ``tick`` cannot be called there: it runs until a whole LCD frame is
-        complete and would recurse into the network frame barrier.  This
-        helper retires individual CPU instructions and performs the exact
-        device dispatch normally following each instruction.
-
-        It intentionally declines to run while an execution governor owns
-        CPU progress.  The caller can then leave re-arming to its normal
-        governed frame execution.
-        """
-        if type(max_instructions) is not int or max_instructions <= 0:
-            raise PyBoyInvalidOperationException("max_instructions must be a positive int")
-        if self._execution_governor_active or self._execution_governor_enabled:
-            return False
-        _serial_check_execution_allowed(self.serial)
-        _serial_check_error(self.serial)
-        for _ in range(max_instructions):
-            self.cpu.tick(4)
-            _serial_check_error(self.serial)
-            self.serial.dispatch_owner()
-            self._sync_physical_clock()
-            self.sound.tick(self.cpu.cycles)
-            serial_interrupt = self.serial.tick(self.cpu.cycles)
-            self._prune_serial_time_segments()
-            if serial_interrupt:
-                self.cpu.set_interruptflag(INTR_SERIAL)
-            _serial_check_error(self.serial)
-            if self.timer.tick(self.cpu.cycles):
-                self.cpu.set_interruptflag(INTR_TIMER)
-            if lcd_interrupt := self.lcd.tick(self.cpu.cycles):
-                self.cpu.set_interruptflag(lcd_interrupt)
-            if self.serial.transfer_enabled:
-                return True
-            if self.lcd.frame_done:
-                break
-        return bool(self.serial.transfer_enabled)
-
     ###################################################################
     # MemoryManager
     #

@@ -651,14 +651,6 @@ class PyBoyLinkSession:
             cpu = getattr(getattr(pyboy, "mb", None), "cpu", None)
             if cpu is not None and hasattr(cpu, "set_interruptflag"):
                 cpu.set_interruptflag(INTR_SERIAL)
-            # Cython PyBoy has no private one-frame tick. Its bounded native
-            # continuation executes the ROM serial ISR with the normal
-            # post-instruction device dispatch before the eighth-edge
-            # response can release the remote master.
-            if not callable(getattr(pyboy, "_tick", None)):
-                service_serial_irq = getattr(getattr(pyboy, "mb", None), "service_serial_irq", None)
-                if callable(service_serial_irq):
-                    service_serial_irq(64)
 
         return _raise
 
@@ -740,36 +732,17 @@ class PyBoyLinkSession:
                 def progress_owner() -> None:
                     pending_before = int(backend.debug_snapshot().get("pending_edge_requests", 0))
                     applied = backend.service_pending_edges(max_edges=1)
-                    # Progress only this owner thread at a genuine serial
-                    # boundary. Hardware SC ownership can legitimately be
-                    # opposite the negotiated frame-pacing metadata.
-                    byte_completed = (
-                        applied > 0
-                        and owner_attribute == "_tick"
-                        and getattr(backend, "_local_core", None) is not None
-                        and not bool(getattr(backend._local_core, "internal_clock", 0))
-                        and not bool(getattr(backend._local_core, "transfer_enabled", 0))
-                    )
-                    # Source PyBoy exposes a private single-frame owner tick.
-                    # Run it once after an external byte completes so the
-                    # serial ISR re-arms before this response releases the
-                    # peer's next byte. The native runtime exposes only the
-                    # public tick here; its serial owner pump handles this
-                    # boundary within that native tick.
-                    if byte_completed:
-                        original_tick(*args, **kwargs)
-                        return
+                    # A deferred request means the ROM's serial IRQ has not
+                    # re-armed yet. Advance only this owner thread until that
+                    # native re-arm is observable; do not run speculative
+                    # frames while no edge is admitted. This callback is
+                    # supplied for either pacing role: hardware SC ownership
+                    # can legitimately be opposite the frame metadata.
                     if (
-                        pending_before > 0
+                        applied == 0
+                        and pending_before > 0
                         and getattr(backend, "_local_core", None) is not None
-                        # A deferred request means either that the ROM's
-                        # serial IRQ has not re-armed yet, or that it has
-                        # armed a local internal-clock transfer.
-                        and applied == 0
-                        and (
-                            not bool(getattr(backend._local_core, "transfer_enabled", 0))
-                            or bool(getattr(backend._local_core, "internal_clock", 0))
-                        )
+                        and not bool(getattr(backend._local_core, "transfer_enabled", 0))
                     ):
                         original_tick(*args, **kwargs)
 
