@@ -1296,6 +1296,7 @@ def _assert_settled_battle_evidence(counters: dict) -> None:
     assert isinstance(observers, list) and len(observers) == 2
     rows = [observer.snapshot() for observer in observers]
     errors = verify_battle_turns(rows)
+    print(f"  local battle settlement: {rows}")
     assert not errors, f"battle settlement evidence failed: {errors}; rows={rows}"
 
 

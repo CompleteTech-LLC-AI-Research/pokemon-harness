@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 from tests._battle_turn_evidence import verify_battle_turns
 
 
@@ -63,6 +65,56 @@ def _row(*, reverse: bool = False) -> dict:
         "terminal": None,
         "cleanup": None,
     }
+
+
+def _paralysis_rows(*, attacker: str, status_on_attacker: bool = False) -> list[dict]:
+    rows = [_row(), _row(reverse=True)]
+    opposite = "enemy" if attacker == "local" else "local"
+    for row, side in zip(rows, (attacker, opposite), strict=True):
+        target = "enemy" if side == "local" else "local"
+        for phase in ("baseline", "turn"):
+            row[phase][side]["moves"][0] = 85
+        row["turn"][f"{side}_move_id"] = 85
+        row["turn"][f"{side}_move_effect"] = 6
+        row["turn"]["move_data"][side][:2] = [85, 6]
+        row["turn"][side if status_on_attacker else target]["status"] = 64
+    return rows
+
+
+@pytest.mark.parametrize("attacker", ("local", "enemy"))
+def test_paralysis_is_supported_by_the_attack_on_the_affected_combatant(attacker) -> None:
+    rows = _paralysis_rows(attacker=attacker)
+    before = deepcopy(rows)
+    assert verify_battle_turns(rows) == []
+    assert rows == before
+
+
+@pytest.mark.parametrize("attacker", ("local", "enemy"))
+def test_using_a_paralysis_move_does_not_support_status_on_the_attacker(attacker) -> None:
+    rows = _paralysis_rows(attacker=attacker, status_on_attacker=True)
+    assert verify_battle_turns(rows)
+
+
+@pytest.mark.parametrize("attacker", ("local", "enemy"))
+@pytest.mark.parametrize(
+    "failure", ("missed_attack", "unfinished_attack", "unsupported_status", "peer_disagreement")
+)
+def test_paralysis_requires_completed_supported_and_agreed_application(attacker, failure) -> None:
+    rows = _paralysis_rows(attacker=attacker)
+    opposite = "enemy" if attacker == "local" else "local"
+    for index, (row, side) in enumerate(zip(rows, (attacker, opposite), strict=True)):
+        target = "enemy" if side == "local" else "local"
+        action = row["turn"]["actions"][side]
+        if failure == "missed_attack":
+            action.update(damage_done=0, damage_samples=[], move_missed=1)
+            row["turn"][target]["hp"] = row["baseline"][target]["hp"]
+        elif failure == "unfinished_attack":
+            action["done"] = False
+        elif failure == "unsupported_status":
+            row["turn"][target]["status"] = 8
+        elif index == 1:
+            row["turn"][target]["status"] = 0
+    assert verify_battle_turns(rows)
 
 
 def test_matching_applied_turns_pass() -> None:
