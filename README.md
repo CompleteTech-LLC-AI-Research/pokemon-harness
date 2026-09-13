@@ -537,6 +537,13 @@ collected 1,094 tests in each source and native runtime, had 949 unit tests pass
 and passed timing 50/50 in each of five repetitions. This unit/timing scope does
 not establish ROM gameplay.
 
+For complete captured pytest output, add `--raw-output-dir "$PRIVATE_OUTPUT_DIR"`
+using a new private directory outside the sanitized `--evidence-dir` bundle.
+This retains every attempted matrix row and each regular-tier iteration under
+separate runtime directories, including passing output. These unredacted logs
+are private diagnostic artifacts; see the [production runbook](docs/PRODUCTION_RUNBOOK.md)
+for filenames and capture-failure behavior.
+
 The source runtime is the documented release default. Native module identity,
 unit/timing checks, and attach/step/close smokes do not qualify compiled
 trade/battle gameplay; see the recorded matrix above.

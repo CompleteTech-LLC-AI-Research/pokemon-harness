@@ -36,7 +36,7 @@ import threading
 import time
 from collections import Counter, deque
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -1399,6 +1399,7 @@ def run_collection_preflight(
     python_executable: Path,
     environment: dict[str, str],
     timeout_seconds: float = COLLECTION_TIMEOUT_SECONDS,
+    raw_output_directory: Path | None = None,
 ) -> list[CollectionResult]:
     """Run both supported pytest collection entry points.
 
@@ -1476,6 +1477,7 @@ def run_collection_preflight(
                     environment=environment,
                     timeout_seconds=timeout_seconds,
                     report_path=Path(directory) / f"{index}.json",
+                    raw_output_directory=raw_output_directory,
                 )
             )
 
@@ -1742,6 +1744,23 @@ def run_matrix_collection_audit(
     return audit
 
 
+def _retain_raw_output(directory: Path | None, filename: str, output: str) -> str:
+    """Retain complete captured text privately, without replacing an earlier log."""
+
+    if directory is None:
+        return ""
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(directory / filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(output)
+    except (OSError, UnicodeError) as exc:
+        # Exception messages can contain private paths. The stable filename
+        # and exception type identify the failed capture without exposing them.
+        return f"could not retain raw output {filename}: {type(exc).__name__}"
+    return ""
+
+
 def _run_collection_command(
     *,
     name: str,
@@ -1750,6 +1769,7 @@ def _run_collection_command(
     environment: dict[str, str],
     timeout_seconds: float,
     report_path: Path,
+    raw_output_directory: Path | None = None,
 ) -> CollectionResult:
     started = time.monotonic()
     child_environment = dict(environment)
@@ -1793,6 +1813,9 @@ def _run_collection_command(
     except subprocess.TimeoutExpired:
         _terminate_process(process)
         output = _communicate_after_termination(process)
+        capture_error = _retain_raw_output(
+            raw_output_directory, f"collection-{name}.log", output
+        )
         return CollectionResult(
             name=name,
             command=command,
@@ -1802,13 +1825,16 @@ def _run_collection_command(
             output_tail=(
                 f"pytest collection timed out after {timeout_seconds:.1f}s\n{output[-8000:]}"
             ),
-            reason="collection timeout",
+            reason="; ".join(filter(None, ("collection timeout", capture_error))),
         )
 
     raw_returncode = process.returncode
     returncode = int(raw_returncode) if raw_returncode is not None else 125
     report = _load_gate_report(report_path, expected_returncode=returncode)
     problems: list[str] = []
+    capture_error = _retain_raw_output(raw_output_directory, f"collection-{name}.log", output)
+    if capture_error:
+        problems.append(capture_error)
     if report.error:
         problems.append(report.error)
     if returncode != 0:
@@ -1840,6 +1866,7 @@ def run_pytest_once(
     timeout_seconds: float,
     report_path: Path,
     selectors: Sequence[str] = (),
+    raw_output_directory: Path | None = None,
 ) -> tuple[int, GateReport, str, list[str]]:
     command = [str(python_executable), "-m", "pytest"]
     command.extend(selectors or ("tests",))
@@ -1921,6 +1948,9 @@ def run_pytest_once(
         raw_returncode = process.returncode
         returncode = int(raw_returncode) if raw_returncode is not None else 125
 
+    capture_error = _retain_raw_output(
+        raw_output_directory, report_path.with_suffix(".log").name, output
+    )
     report = _load_gate_report(
         report_path,
         expected_returncode=None if timed_out else returncode,
@@ -1944,6 +1974,8 @@ def run_pytest_once(
             failed_records=report.failed_records,
             error=(f"{timeout_reason}; {report.error}" if report.error else timeout_reason),
         )
+    if capture_error:
+        report = replace(report, error="; ".join(filter(None, (report.error, capture_error))))
     if report.error:
         output = f"{output}\n{report.error}"
     # Keep the command and enough output to diagnose a failed gate without
@@ -2208,6 +2240,7 @@ def run_matrix_tier(
     required_nodeids: Iterable[str] = (),
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
+    raw_output_directory: Path | None = None,
 ) -> TierResult:
     """Run strict acceptance rows under hard per-case and aggregate bounds.
 
@@ -2289,6 +2322,13 @@ def run_matrix_tier(
         _add_counts(aggregate, report.counts)
         aggregate_reasons.update(report.skip_reasons)
         problems: list[str] = []
+        capture_error = _retain_raw_output(
+            raw_output_directory,
+            _matrix_report_path(report_directory, nodeid).with_suffix(".log").name,
+            output,
+        )
+        if capture_error:
+            problems.append(capture_error)
         if timed_out:
             problems.append(timeout_reason or f"matrix case timed out after {timeout:.1f}s")
         if cleanup_error:
@@ -2743,6 +2783,7 @@ def run_tier(
     required_nodeids: Iterable[str] = (),
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
+    raw_output_directory: Path | None = None,
 ) -> TierResult:
     if name in {"trade", "battle"} and required_nodeids:
         return run_matrix_tier(
@@ -2757,6 +2798,7 @@ def run_tier(
             required_nodeids=required_nodeids,
             matrix_workers=matrix_workers,
             matrix_timeout_override=matrix_timeout_override,
+            raw_output_directory=raw_output_directory,
         )
 
     required = name not in OPTIONAL_TIERS
@@ -2801,6 +2843,7 @@ def run_tier(
             expression=TIER_EXPRESSIONS[name],
             timeout_seconds=timeout,
             report_path=report_path,
+            raw_output_directory=raw_output_directory,
         )
         counts = report.counts
         aggregate.total += counts.total
@@ -2969,6 +3012,7 @@ def run_runtime_gate(
     timeout_override: float | None = None,
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
+    raw_output_directory: Path | None = None,
 ) -> RuntimeGateResult:
     """Run the complete gate once under one explicit runtime.
 
@@ -2981,6 +3025,7 @@ def run_runtime_gate(
     if mode not in RUNTIME_MODES:
         raise ValueError(f"runtime gate requires an explicit runtime mode: {mode!r}")
 
+    runtime_output_directory = raw_output_directory / mode if raw_output_directory else None
     selected_tiers = tuple(selected)
     real_rom_scope = bool(set(selected_tiers) & REQUIRED_TIER_ASSETS)
     environment = build_test_environment(
@@ -3014,6 +3059,7 @@ def run_runtime_gate(
         python_executable=python_executable,
         environment=environment,
         timeout_seconds=timeout_override or COLLECTION_TIMEOUT_SECONDS,
+        raw_output_directory=runtime_output_directory,
     )
 
     fixture_manifest = run_fixture_manifest_validation(
@@ -3093,6 +3139,7 @@ def run_runtime_gate(
                     required_nodeids=required_nodeids_by_tier.get(name, ()),
                     matrix_workers=matrix_workers,
                     matrix_timeout_override=matrix_timeout_override,
+                    raw_output_directory=runtime_output_directory,
                 )
             )
 
@@ -3125,6 +3172,7 @@ def run_runtime_gates(
     timeout_override: float | None = None,
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
+    raw_output_directory: Path | None = None,
 ) -> tuple[RuntimeGateResult, ...]:
     """Run identical selected tiers for each runtime named by the CLI.
 
@@ -3159,6 +3207,7 @@ def run_runtime_gates(
             timeout_override=timeout_override,
             matrix_workers=matrix_workers,
             matrix_timeout_override=matrix_timeout_override,
+            raw_output_directory=raw_output_directory,
         )
         for mode in runtime_modes_for_gate(runtime_mode)
     )
@@ -4252,6 +4301,14 @@ def build_parser() -> argparse.ArgumentParser:
             "evidence-manifest.json to this directory"
         ),
     )
+    parser.add_argument(
+        "--raw-output-dir",
+        type=Path,
+        help=(
+            "retain complete, unredacted pytest stdout/stderr in a new private directory; "
+            "must be separate from --evidence-dir"
+        ),
+    )
     return parser
 
 
@@ -4270,6 +4327,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--unit-only cannot be combined with --tier")
     if args.cython_python_executable is not None and args.runtime_mode != "both":
         parser.error("--cython-python requires --runtime-mode both")
+
+    raw_output_directory = None
+    if args.raw_output_dir is not None:
+        raw_output_directory = args.raw_output_dir.expanduser().resolve()
+        if args.evidence_dir is not None:
+            evidence_directory = args.evidence_dir.expanduser().resolve()
+            if raw_output_directory.is_relative_to(evidence_directory):
+                parser.error("--raw-output-dir must be outside --evidence-dir")
+        try:
+            raw_output_directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+        except OSError as exc:
+            parser.error(f"--raw-output-dir requires a new writable directory: {type(exc).__name__}")
 
     project_root = args.repo_root.expanduser().resolve()
     # Do not call ``resolve()`` here: POSIX virtualenv interpreters are often
@@ -4316,6 +4385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         timeout_override=args.timeout_seconds,
         matrix_workers=args.matrix_workers,
         matrix_timeout_override=args.matrix_timeout_seconds,
+        raw_output_directory=raw_output_directory,
     )
 
     dual_runtime = len(runtime_results) > 1

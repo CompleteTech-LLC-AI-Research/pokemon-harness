@@ -479,6 +479,20 @@ gate checks five pinned ROM paths, three symbol paths, the ten manifest state
 entries, and all required real-ROM tiers. It also fails closed when the strict
 acceptance matrix declaration is incomplete.
 
+To keep complete captured pytest stdout/stderr, add
+`--raw-output-dir "$PRIVATE_OUTPUT_DIR"` with a **new** private directory
+outside `--evidence-dir`. The gate creates owner-only files and directories on
+POSIX, and never replaces an earlier log. Each runtime has its own `source/`
+or `cython/` directory containing both collection logs, `<tier>-<iteration>.log`
+for regular tiers, and `matrix-<digest>.log` for each attempted matrix row.
+The digest is the first 20 hexadecimal characters of SHA-256 of the exact
+node ID in the gate report. Logs retain complete captured text before report
+redaction/truncation, including passed rows and every timing repetition;
+they may contain private paths and must not be shared as the sanitized bundle.
+A requested capture failure fails the affected result while preserving
+pytest's actual outcome counts and exit code. Without this option, the gate
+retains only the bounded report diagnostics.
+
 The release workflow uses an explicit Ruff boundary for the production files it
 owns and explicitly excludes the pinned third-party `vendor/pyboy-src` tree.
 That configured CI boundary is clean; the repository still contains legacy

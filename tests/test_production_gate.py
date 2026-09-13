@@ -1091,6 +1091,7 @@ def test_run_pytest_once_sanitizes_credentials_before_output_tail_boundary(tmp_p
     assert "private-fragment" not in output
     assert "assertion-tail" in output
     assert len(output) <= 8000
+    assert not list(tmp_path.glob("*.log"))
 
 
 def test_run_tier_failure_survives_sanitized_report_serialization(tmp_path, repeated_tier_report):
@@ -2645,3 +2646,206 @@ def test_evidence_bundle_rejects_unlisted_files(tmp_path):
 def test_parser_accepts_evidence_directory():
     args = gate.build_parser().parse_args(["--evidence-dir", "retained-evidence"])
     assert args.evidence_dir == Path("retained-evidence")
+
+
+@pytest.fixture
+def raw_pytest_output(monkeypatch):
+    """Keep the real runner/report loader; replace only the pytest process."""
+
+    outputs = {}
+
+    class CompletedPytest:
+        def __init__(self, command, *, env, **kwargs):
+            report_path = Path(env["POKERED_GATE_REPORT"])
+            collection = "--collect-only" in command
+            failed = report_path.stem == "timing-2"
+            self.returncode = int(failed)
+            payload = _matrix_report(
+                "tests/test_sample.py::test_one", outcome="failed" if failed else "passed"
+            )
+            payload["exitstatus"] = self.returncode
+            if collection:
+                payload.update(
+                    collection_only=True,
+                    counts={name: 0 for name in payload["counts"]},
+                    tests=[],
+                )
+            report_path.write_text(json.dumps(payload), encoding="utf-8")
+            self.output = (
+                f"BEGIN {env.get('runtime_mode', 'source')} {report_path.stem}\n"
+                "token=private-capture-secret\n"
+                + "complete captured line\n" * 600
+                + "END\n"
+            )
+            outputs[(env.get("runtime_mode", "source"), report_path.stem)] = self.output
+
+        def communicate(self, timeout=None):
+            return self.output, None
+
+    monkeypatch.setattr(gate.subprocess, "Popen", CompletedPytest)
+    return outputs
+
+
+def test_dual_gate_retains_complete_private_logs_and_sanitized_evidence(
+    tmp_path, monkeypatch, capsys, raw_pytest_output
+):
+    monkeypatch.setattr(
+        gate, "build_test_environment",
+        lambda *args, runtime_mode: {"runtime_mode": runtime_mode},
+    )
+    monkeypatch.setattr(
+        gate, "probe_runtime",
+        lambda _python, _root, env: {"pyboy_mode": env["runtime_mode"]},
+    )
+    monkeypatch.setattr(gate, "runtime_problems", lambda *args, **kwargs: [])
+    monkeypatch.setattr(gate, "environment_policy_problems", lambda **kwargs: [])
+    monkeypatch.setattr(gate, "_pytest_console_script", lambda path: path.parent / "pytest")
+    monkeypatch.setattr(
+        gate, "run_fixture_manifest_validation",
+        lambda **kwargs: {"status": "PASS", "mode": "schema"},
+    )
+    monkeypatch.setattr(gate, "run_matrix_collection_audit", lambda **kwargs: {"status": "PASS"})
+    raw_directory = tmp_path / "private-output"
+    evidence_directory = tmp_path / "evidence"
+    args = _patch_main_inputs(monkeypatch, tmp_path)
+    args += [
+        "--runtime-mode", "both",
+        "--raw-output-dir", str(raw_directory),
+        "--evidence-dir", str(evidence_directory),
+    ]
+
+    assert gate.main(args) == 1
+    report = json.loads(capsys.readouterr().out)
+    for runtime in report["runtimes"]:
+        assert runtime["tiers"][0]["status"] == "PASS"
+        timing = runtime["tiers"][1]
+        assert timing["status"] == "FAIL"
+        assert timing["counts"]["passed"] == 4
+        assert timing["counts"]["failed"] == 1
+        assert timing["returncodes"] == [0, 1, 0, 0, 0]
+    for mode in ("source", "cython"):
+        paths = list((raw_directory / mode).glob("*.log"))
+        assert len(paths) == 8  # Both collection entrypoints, unit, five timing iterations.
+        for path in paths:
+            stem = {"collection-python-module": "0", "collection-pytest-console": "1"}.get(
+                path.stem, path.stem
+            )
+            assert path.read_text(encoding="utf-8") == raw_pytest_output[(mode, stem)]
+            if os.name == "posix":
+                assert path.stat().st_mode & 0o777 == 0o600
+        if os.name == "posix":
+            assert (raw_directory / mode).stat().st_mode & 0o777 == 0o700
+    if os.name == "posix":
+        assert raw_directory.stat().st_mode & 0o777 == 0o700
+    for filename in ("gate-report.json", "gate-report.txt"):
+        text = (evidence_directory / filename).read_text(encoding="utf-8")
+        assert "private-capture-secret" not in text
+        assert str(raw_directory) not in text
+    gate.verify_evidence_bundle(evidence_directory)
+
+
+def test_raw_output_collision_preserves_old_log_and_fails_passing_tier(
+    tmp_path, raw_pytest_output
+):
+    raw_directory = tmp_path / "private-output"
+    raw_directory.mkdir()
+    retained = raw_directory / "unit-1.log"
+    retained.write_text("earlier evidence", encoding="utf-8")
+
+    result = gate.run_tier(
+        name="unit", project_root=tmp_path, python_executable=Path("python"),
+        environment={}, required_problems=[], repeat=1, timeout_override=1,
+        report_directory=tmp_path, raw_output_directory=raw_directory,
+    )
+
+    assert result.status == "FAIL"
+    assert result.counts == gate.Counts(total=1, passed=1)
+    assert result.returncodes == [0]
+    assert any(
+        "could not retain raw output unit-1.log: FileExistsError" in failure
+        for failure in result.iteration_failures
+    )
+    assert retained.read_text(encoding="utf-8") == "earlier evidence"
+
+
+@pytest.mark.parametrize("collision", (False, True))
+def test_matrix_raw_output_keeps_complete_passed_row_or_reports_collision(
+    tmp_path, monkeypatch, collision
+):
+    output = "BEGIN token=private-capture-secret\n" + "full trace\n" * 700 + "END\n"
+
+    class VerboseMatrix(_FakeMatrixPopen):
+        mode = "pass"
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.stdout = io.StringIO(output)
+
+    monkeypatch.setattr(gate.subprocess, "Popen", VerboseMatrix)
+    nodeid = "tests/test_matrix.py::test_pair[red-blue]"
+    raw_directory = tmp_path / "private-output"
+    filename = "matrix-" + hashlib.sha256(nodeid.encode()).hexdigest()[:20] + ".log"
+    retained = raw_directory / filename
+    if collision:
+        raw_directory.mkdir()
+        retained.write_text("earlier evidence", encoding="utf-8")
+    result = gate.run_tier(
+        name="trade", project_root=tmp_path, python_executable=Path("python"),
+        environment={}, required_problems=[], repeat=1, timeout_override=1,
+        report_directory=tmp_path, required_nodeids=(nodeid,),
+        raw_output_directory=raw_directory,
+    )
+
+    assert result.status == ("FAIL" if collision else "PASS")
+    assert result.counts == gate.Counts(total=1, passed=1)
+    assert result.case_results[0].returncode == 0
+    assert len(result.case_results[0].output_tail) <= 4000
+    assert retained.read_text(encoding="utf-8") == ("earlier evidence" if collision else output)
+    if collision:
+        assert "could not retain raw output" in result.case_results[0].reason
+
+
+def test_collection_timeout_retains_complete_captured_output(tmp_path, monkeypatch):
+    output = "BEGIN\n" + "partial collection\n" * 700 + "END\n"
+
+    class TimedOutCollection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired("pytest", timeout)
+
+    monkeypatch.setattr(gate.subprocess, "Popen", TimedOutCollection)
+    monkeypatch.setattr(gate, "_terminate_process", lambda process: None)
+    monkeypatch.setattr(gate, "_communicate_after_termination", lambda process: output)
+    result = gate._run_collection_command(
+        name="python-module", command=["python", "-m", "pytest"],
+        project_root=tmp_path, environment={}, timeout_seconds=1,
+        report_path=tmp_path / "collection.json",
+        raw_output_directory=tmp_path / "private-output",
+    )
+
+    assert result.status == "FAIL"
+    assert result.returncode == 124
+    assert result.reason == "collection timeout"
+    retained = tmp_path / "private-output" / "collection-python-module.log"
+    assert retained.read_text(encoding="utf-8") == output
+
+
+@pytest.mark.parametrize("location", ("equal", "nested", "existing"))
+def test_main_rejects_unsafe_raw_output_directory(tmp_path, capsys, location):
+    evidence = tmp_path / "evidence"
+    raw_directory = evidence / "raw" if location == "nested" else evidence
+    if location == "existing":
+        raw_directory = tmp_path / "earlier-output"
+        raw_directory.mkdir()
+        (raw_directory / "keep").write_text("earlier evidence", encoding="utf-8")
+    with pytest.raises(SystemExit) as error:
+        gate.main(["--evidence-dir", str(evidence), "--raw-output-dir", str(raw_directory)])
+
+    assert error.value.code == 2
+    assert "--raw-output-dir" in capsys.readouterr().err
+    if location == "existing":
+        assert (raw_directory / "keep").read_text(encoding="utf-8") == "earlier evidence"
+    else:
+        assert not evidence.exists()
