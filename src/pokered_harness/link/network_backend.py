@@ -139,9 +139,12 @@ class _InboundEdge:
     completed: bool = False
     deferred: bool = False
     error: BaseException | None = None
-    # ``None`` denotes the historical two-byte frame.  Keep this field last
-    # so positional construction in legacy tests retains its meaning.
+    # ``None`` denotes the historical two-byte frame. Keep this after the
+    # original fields so positional construction retains its meaning.
     edge_id: int | None = None
+    # Only byte responses held for owner progress need a transport receipt.
+    # It is set after the response worker settles wire/pending accounting.
+    response_finished: threading.Event | None = None
 
 
 class _InboundEdgeQueue(queue.Queue):
@@ -435,6 +438,8 @@ class NetworkBackend:
         # native serial object.
         self._edge_queue: queue.Queue[_InboundEdge | None] = _InboundEdgeQueue(maxsize=256)
         self._completed_edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(maxsize=256)
+        self._defer_owner_byte_responses = False
+        self._held_owner_byte_response: _InboundEdge | None = None
         # Counts EDGE_REQ frames from enqueue until their response has been
         # written.  A phase barrier can therefore wait for the wire work
         # already admitted by the reader without mistaking an armed-but-idle
@@ -764,6 +769,7 @@ class NetworkBackend:
         *,
         serial_gate: SerialOperationGate | None = None,
         dispatch_to_owner: bool = False,
+        defer_byte_responses: bool = False,
     ) -> None:
         """Start the reader thread.
 
@@ -783,11 +789,25 @@ class NetworkBackend:
         ``irq_callback`` is provided, the callback fires on the owner
         thread.
 
+        ``defer_byte_responses`` additionally retains the final-bit response
+        until the owner completes a subsequent ordinary emulator frame. The
+        native SB/SC/IF event still occurs immediately. This is conservative
+        transport pacing for an existing ROM receive mailbox, not a shared
+        emulated clock or a claim that arbitrary ROM code consumed the byte.
+        Call :meth:`begin_owner_frame` and :meth:`finish_owner_frame` around
+        actual frame execution when enabling it. If that execution changes
+        the ROM to master mode, its next native master edge first flushes
+        the held response and waits for its wire accounting to settle.
+
         ``EDGE_RESP`` frames (responses to our own master-side
         ``on_edge`` requests) are put on the response queue for the
         blocking ``on_edge`` call to pick up.
 
         """
+        if type(defer_byte_responses) is not bool:
+            raise TypeError("defer_byte_responses must be a bool")
+        if defer_byte_responses and not dispatch_to_owner:
+            raise ValueError("defer_byte_responses requires dispatch_to_owner=True")
         with self._receiver_start_lock:
             if self._closed:
                 raise NetworkBackendError("backend closed")
@@ -824,8 +844,13 @@ class NetworkBackend:
                             raise NetworkBackendError(
                                 "cannot rebind while edge responses are pending; reconnect instead"
                             )
+                        if self._held_owner_byte_response is not None:
+                            raise NetworkBackendError(
+                                "cannot rebind while an owner byte response is held"
+                            )
                         self._local_core = local_core
                         self._irq_callback = irq_callback
+                        self._defer_owner_byte_responses = defer_byte_responses
                         self._local_core_detached = False
                         self._local_core_condition.notify_all()
                 return
@@ -839,6 +864,7 @@ class NetworkBackend:
             if serial_gate is not None:
                 self._serial_gate = serial_gate
             self._dispatch_to_owner = dispatch_to_owner
+            self._defer_owner_byte_responses = defer_byte_responses
             worker_target = (
                 self._owner_response_worker_loop if dispatch_to_owner else self._edge_worker_loop
             )
@@ -875,6 +901,12 @@ class NetworkBackend:
         deadline = time.monotonic() + _EDGE_RESPONSE_TIMEOUT_SECONDS
         # Admission failure must not close or mutate another caller's exchange.
         with self._edge_admission_guard(self._edge_call_lock, deadline):
+            # The ROM can change clock roles during the continuation which
+            # owns a held slave-byte response. Complete that earlier wire
+            # event before publishing a new local master edge. Otherwise
+            # the peer could classify our new request as a collision with
+            # its unfinished last bit and respond from the wrong byte.
+            self._finish_held_response_before_master_edge(deadline)
             stale_error: NetworkBackendError | None = None
             with self._edge_admission_guard(self._edge_response_lock, deadline):
                 if self._closed:
@@ -1396,6 +1428,7 @@ class NetworkBackend:
         with self._close_lock:
             closed = self._closed
             pre_close = self._pre_close_snapshot
+            snap["held_owner_byte_response"] = self._held_owner_byte_response is not None
         snap["closed"] = closed
         snap["reader_started"] = self._reader is not None
         now = time.monotonic()
@@ -1811,6 +1844,7 @@ class NetworkBackend:
                 edge_inflight = self._edge_inflight
                 response_pending = not self._resp_queue.empty()
                 pre_close = dict(self._stats)
+                pre_close["held_owner_byte_response"] = self._held_owner_byte_response is not None
                 pre_close["pending_edge_requests"] = self._edge_pending
                 pre_close["edge_inflight"] = edge_inflight
                 pre_close["response_pending"] = response_pending
@@ -1826,6 +1860,7 @@ class NetworkBackend:
                     pre_close["last_keepalive_state"] = dict(last_keepalive)
                 self._pre_close_snapshot = pre_close
                 self._edge_pending = 0
+                self._held_owner_byte_response = None
                 self._notify_transport_change()
             self._signal_edge_worker_stop()
             try:
@@ -1880,6 +1915,7 @@ class NetworkBackend:
                     self._irq_callback = None
                     self._serial_transcript_context_provider = None
                     self._serial_transcript_context_max_bytes = 1024
+                    self._defer_owner_byte_responses = False
                     return True
                 self._local_core_detaching = True
                 while self._local_core_users:
@@ -1898,10 +1934,19 @@ class NetworkBackend:
                 self._irq_callback = None
                 self._serial_transcript_context_provider = None
                 self._serial_transcript_context_max_bytes = 1024
+                self._defer_owner_byte_responses = False
                 self._local_core_detached = True
                 self._local_core_detaching = False
                 self._local_core_condition.notify_all()
-                return True
+            if self._held_owner_byte_response is not None:
+                # The native byte committed, but its peer has not observed
+                # the final response. Retiring the core cannot transfer this
+                # unfinished exchange to a newly attached emulator.
+                self._mark_closed(
+                    NetworkBackendError("local core detached with a held byte response"),
+                    deadline=deadline,
+                )
+            return True
         finally:
             self._receiver_start_lock.release()
 
@@ -2220,6 +2265,8 @@ class NetworkBackend:
                     return
                 finally:
                     self._decrement_edge_pending()
+                    if request.response_finished is not None:
+                        request.response_finished.set()
 
     def _reserve_queued_master_collision(self) -> _InboundEdge | None:
         """Answer a peer master edge admitted before this owner's edge.
@@ -2343,6 +2390,8 @@ class NetworkBackend:
         """Drain ready requests while the caller holds the serial gate."""
         applied = 0
         while max_edges is None or applied < max_edges:
+            if self._held_owner_byte_response is not None:
+                break
             try:
                 request = self._edge_queue.get_nowait()
             except queue.Empty:
@@ -2409,16 +2458,81 @@ class NetworkBackend:
                         raise error from exc
                     break
                 self._stats["owner_edge_applied"] = int(self._stats["owner_edge_applied"]) + 1
-                try:
-                    self._completed_edge_queue.put_nowait(request)
-                except queue.Full as exc:
-                    self._mark_closed(
-                        NetworkBackendError("completed EDGE_REQ response queue is full")
-                    )
-                    self._decrement_edge_pending()
-                    raise NetworkBackendError("completed EDGE_REQ response queue is full") from exc
+                if request.completed and self._defer_owner_byte_responses:
+                    request.response_finished = threading.Event()
+                    # Deadline-aware close can proceed without dispatch
+                    # quiescence. Serialize this small publication with its
+                    # terminal state so it cannot leave a held response after
+                    # close has cleared the pending accounting.
+                    with self._close_lock:
+                        if not self._closed:
+                            self._held_owner_byte_response = request
+                    applied += 1
+                    break
+                self._publish_owner_response(request)
                 applied += 1
         return applied
+
+    def _publish_owner_response(self, request: _InboundEdge) -> None:
+        """Queue a completed edge for transport-only response transmission."""
+        if self._closed:
+            self._decrement_edge_pending()
+            return
+        try:
+            self._completed_edge_queue.put_nowait(request)
+        except queue.Full as exc:
+            self._mark_closed(
+                NetworkBackendError("completed EDGE_REQ response queue is full")
+            )
+            self._decrement_edge_pending()
+            raise NetworkBackendError("completed EDGE_REQ response queue is full") from exc
+
+    def begin_owner_frame(self) -> _InboundEdge | None:
+        """Snapshot a held byte before actual ordinary owner-frame execution.
+
+        A byte completed inside that frame is intentionally ineligible for
+        release by this token. Its interrupt may have occurred at the very
+        end of the frame, before the CPU had time to consume its mailbox.
+        """
+        with self._serial_gate, self._local_core_access(), self._owner_dispatch_lock:
+            return self._held_owner_byte_response
+
+    def finish_owner_frame(self, token: _InboundEdge | None) -> None:
+        """Release the byte held before a successfully completed owner frame."""
+        if token is None:
+            return
+        with self._serial_gate, self._local_core_access(), self._owner_dispatch_lock:
+            self._release_owner_byte_response(token)
+
+    def _release_owner_byte_response(self, token: _InboundEdge) -> None:
+        """Release one token while the owner retains dispatch admission."""
+        with self._close_lock:
+            if self._closed or self._held_owner_byte_response is not token:
+                return
+            self._held_owner_byte_response = None
+        self._publish_owner_response(token)
+
+    def _finish_held_response_before_master_edge(self, deadline: float) -> None:
+        if self._held_owner_byte_response is None:
+            return
+        with self._serial_gate, self._local_core_access(), self._owner_dispatch_lock:
+            request = self._held_owner_byte_response
+            if request is None:
+                return
+            self._release_owner_byte_response(request)
+        receipt = request.response_finished
+        assert receipt is not None
+        while not receipt.is_set():
+            if self._closed_event.is_set():
+                raise NetworkBackendError("backend closed while completing prior byte response")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                error = NetworkBackendError("prior byte response exceeded EDGE_REQ deadline")
+                self._mark_closed(error)
+                raise error
+            receipt.wait(min(_SEND_POLL_SECONDS, remaining))
+        if self._closed_event.is_set():
+            raise NetworkBackendError("backend closed while completing prior byte response")
 
     def _apply_owner_edge_if_ready(self, request: _InboundEdge) -> bool:
         """Apply one edge atomically if the owner core is armed.

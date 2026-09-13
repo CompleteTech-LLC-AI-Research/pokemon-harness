@@ -231,19 +231,33 @@ This was a specific failure mode in [PR #344](https://github.com/Baekalfen/PyBoy
 discipline prevents it.
 
 **Current TCP frame implementation:** `PyBoyLinkSession` wraps the bundled
-source/native one-frame `_tick` entry point. While finishing a transport
-turn, an unarmed deferred request or an external byte completed by owner
-dispatch can require one normal recovery frame per progress callback. This
-runs the pending serial interrupt through ordinary CPU/device execution.
-The completed response may already be on the wire; recovery does not prove
-that the ROM consumed its receive mailbox before the peer continued.
+source/native one-frame `_tick` entry point. An external byte immediately
+commits its native SB/SC state and serial interrupt, but the backend holds its
+final-bit response until a subsequent ordinary owner frame completes.
+Completing a byte inside a frame cannot use that same frame's completion
+token. The wrapper provides one additional normal frame when needed, including
+for callers without the transport frame barrier. Paused or failed frames
+cannot acknowledge this progress.
+
+If the ROM instead changes to internal clock and reaches a native master
+edge during that continuation, the previous byte's response is sent and
+accounted for before the new request is admitted. This preserves response
+ordering across clock-role changes. Closing cancels a held response; detaching
+a core with one still held closes the unfinished transport.
+
+While finishing a transport turn, an unarmed deferred request, a queued
+master-role request, or a held byte can require another normal recovery frame
+per progress callback. This executes CPU/device work through the ordinary
+owner path. See the [mailbox investigation](NETWORK_MAILBOX_INVESTIGATION_20260913.md)
+for the before/after regression and scoped ROM evidence.
 
 Recovery advances `PyBoy.frame_count` beyond the requested normal frames,
 without adding a transport frame marker or a public plugin post-tick call.
 Ordinary `Session.current_tick()` retains its requested-step accounting;
 use the emulator frame/cycle counters when measuring actual execution.
-This recovery policy is distinct from the shared-cycle coordinator proposed
-above and does not establish equal emulated time across TCP peers.
+This conservative pacing policy is distinct from the shared-cycle coordinator
+proposed above. It neither establishes equal emulated time across TCP peers
+nor guarantees mailbox consumption by arbitrary ROM programs.
 
 ## Migration path
 
