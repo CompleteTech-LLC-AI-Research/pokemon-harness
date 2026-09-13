@@ -626,3 +626,62 @@ def test_main_returns_interrupt_status_and_retains_both_runtime_scopes(
     payload = json.loads(capsys.readouterr().out)
     assert payload["overall"] == "FAIL"
     assert payload["runtimes"][1]["runtime"]["pyboy_mode"] == "not-run"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group cleanup")
+def test_matrix_reader_start_interrupt_retains_output_from_a_real_pipe(tmp_path, monkeypatch):
+    real_popen = subprocess.Popen
+    processes = []
+
+    def start(*_args, **_kwargs):
+        process = real_popen(
+            [
+                sys.executable,
+                "-u",
+                "-c",
+                (
+                    "import sys, time; "
+                    "sys.stdout.write('owned matrix output\\n'); "
+                    "sys.stdout.flush(); time.sleep(60)"
+                ),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        processes.append(process)
+        assert select.select([process.stdout], [], [], 10)[0]
+        return process
+
+    def interrupt(_thread):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gate.subprocess, "Popen", start)
+    monkeypatch.setattr(gate.threading.Thread, "start", interrupt)
+    try:
+        result = gate.run_matrix_tier(
+            name="trade",
+            project_root=tmp_path,
+            python_executable=Path(sys.executable),
+            environment={},
+            required_problems=[],
+            timeout_override=30,
+            report_directory=tmp_path,
+            required_nodeids=(
+                "tests/test_fake.py::test_one",
+                "tests/test_fake.py::test_two",
+            ),
+            matrix_workers=1,
+            raw_output_directory=tmp_path / "raw",
+        )
+        assert result.status == "INTERRUPTED" and result.returncodes == [130]
+        assert [case.status for case in result.case_results] == ["INTERRUPTED", "NOT_STARTED"]
+        assert "owned matrix output" in next((tmp_path / "raw").glob("matrix-*.log")).read_text()
+        assert len(processes) == 1 and processes[0].poll() is not None
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+            process.stdout.close()

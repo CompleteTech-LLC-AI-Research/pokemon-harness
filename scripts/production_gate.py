@@ -2382,12 +2382,9 @@ def _kill_matrix_process(
             pass
         reaped = wait_for_exit()
 
-    stream = getattr(process, "stdout", None)
-    if stream is not None:
-        try:
-            stream.close()
-        except (OSError, ValueError):
-            pass
+    # The reader (or the bounded drain for an interrupted reader start) owns
+    # this pipe. Closing it here can discard unread output or block behind a
+    # concurrent read, crossing the cleanup deadline.
     return reaped
 
 
