@@ -62,6 +62,7 @@ UNIT_MODULES = frozenset(
         "test_diagnostic_script_safety.py",
         "test_emulator_ownership.py",
         "test_pair_checkpoints.py",
+        "test_peer_frame_shutdown.py",
         "test_network_detach_references.py",
         "test_network_provider_locking.py",
         "test_ownership_core.py",
