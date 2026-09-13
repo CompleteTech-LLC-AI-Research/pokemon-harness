@@ -77,46 +77,85 @@ def _parse_cpu_max(text: str) -> float | None:
     return int(parts[0]) / period
 
 
+def _cgroup_relative_path() -> str | None:
+    raw = _read_text(Path("/proc/self/cgroup"))
+    if raw is None:
+        return None
+    for line in raw.splitlines():
+        hierarchy, controllers, path = (line.split(":", 2) + ["", "", ""])[:3]
+        if hierarchy == "0" and not controllers:
+            return path or "/"
+    return None
+
+
+def _iter_cgroup_paths(base: Path, relative: str | None) -> list[Path]:
+    if relative is None:
+        return [base]
+    paths: list[Path] = []
+    current = base / relative.lstrip("/")
+    while True:
+        paths.append(current)
+        if current == base or current.parent == current:
+            break
+        current = current.parent
+    return paths
+
+
 def _read_cgroup_facts() -> dict[str, Any]:
     root = Path("/sys/fs/cgroup")
     version = "unavailable"
     quota_cores: float | None = None
     weight: int | None = None
     throttled: dict[str, int] | None = None
+    relative = _cgroup_relative_path()
 
-    v2_cpu_max = root / "cpu.max"
-    if v2_cpu_max.exists():
+    if (root / "cpu.max").exists():
         version = "v2"
-        raw = _read_text(v2_cpu_max)
-        if raw is not None:
-            quota_cores = _parse_cpu_max(raw)
-        raw_weight = _read_text(root / "cpu.weight")
-        if raw_weight is not None and raw_weight.isdigit():
-            weight = int(raw_weight)
-    else:
-        v1_quota = root / "cpu" / "cpu.cfs_quota_us"
-        v1_period = root / "cpu" / "cpu.cfs_period_us"
-        if v1_quota.exists():
-            version = "v1"
-            quota_raw = _read_text(v1_quota)
-            period_raw = _read_text(v1_period)
-            if quota_raw and period_raw:
-                quota_us = int(quota_raw)
-                period_us = int(period_raw)
-                if quota_us >= 0 and period_us > 0:
-                    quota_cores = quota_us / period_us
-            shares_raw = _read_text(root / "cpu" / "cpu.shares")
+        quotas = [
+            quota
+            for quota in (
+                _parse_cpu_max(_read_text(path / "cpu.max") or "")
+                for path in _iter_cgroup_paths(root, relative)
+            )
+            if quota is not None
+        ]
+        quota_cores = min(quotas) if quotas else None
+        for path in _iter_cgroup_paths(root, relative):
+            raw_weight = _read_text(path / "cpu.weight")
+            if raw_weight is not None and raw_weight.isdigit():
+                weight = int(raw_weight)
+                break
+    elif (root / "cpu" / "cpu.cfs_quota_us").exists():
+        version = "v1"
+        v1_root = root / "cpu"
+        quotas = []
+        for path in _iter_cgroup_paths(v1_root, relative):
+            quota_raw = _read_text(path / "cpu.cfs_quota_us")
+            period_raw = _read_text(path / "cpu.cfs_period_us")
+            if not quota_raw or not period_raw:
+                continue
+            quota_us = int(quota_raw)
+            period_us = int(period_raw)
+            if quota_us >= 0 and period_us > 0:
+                quotas.append(quota_us / period_us)
+        quota_cores = min(quotas) if quotas else None
+        for path in _iter_cgroup_paths(v1_root, relative):
+            shares_raw = _read_text(path / "cpu.shares")
             if shares_raw and shares_raw.isdigit():
                 weight = int(shares_raw)
+                break
 
-    stat_path = root / "cpu.stat" if version == "v2" else root / "cpu" / "cpu.stat"
-    stat_raw = _read_text(stat_path)
-    if stat_raw:
+    stat_base = root if version == "v2" else root / "cpu"
+    for path in _iter_cgroup_paths(stat_base, relative):
+        stat_raw = _read_text(path / "cpu.stat")
+        if not stat_raw:
+            continue
         throttled = {}
         for line in stat_raw.splitlines():
             key, _, value = line.partition(" ")
             if value.strip().isdigit():
                 throttled[key] = int(value.strip())
+        break
     return {
         "cgroup_version": version,
         "cpu_quota_cores": quota_cores,
@@ -201,21 +240,11 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
         facts.affinity_supported = False
         facts.unsupported.append("affinity")
 
-    if system != "Linux":
-        facts.unsupported.extend(["cgroup", "pressure", "procfs"])
-        return facts
-
-    cgroup = _read_cgroup_facts()
-    facts.cgroup_version = cgroup["cgroup_version"]
-    facts.cpu_quota_cores = cgroup["cpu_quota_cores"]
-    facts.cpu_weight = cgroup["cpu_weight"]
-    facts.cpu_throttled = cgroup["cpu_throttled"]
     facts.memory_total_bytes, facts.memory_available_bytes = _read_memory_facts()
     try:
         facts.load_average = list(os.getloadavg())
     except OSError:
         facts.load_average = None
-    facts.psi_cpu_some_avg300 = _read_psi_cpu()
 
     try:
         facts.repo_disk_free_bytes = shutil.disk_usage(repo_root).free
@@ -228,15 +257,31 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
         facts.temp_disk_free_bytes = None
 
     shm = Path(facts.shm_path)
-    try:
-        stats = os.statvfs(shm)
-        facts.shm_size_bytes = stats.f_bsize * stats.f_blocks
-        probe = shm / f".qualification-runner-probe-{os.getpid()}"
-        probe.write_bytes(b"ok")
-        probe.unlink()
-        facts.shm_writable = True
-    except OSError:
-        facts.shm_writable = False
+    if shm.is_dir():
+        try:
+            stats = os.statvfs(shm)
+            facts.shm_size_bytes = stats.f_bsize * stats.f_blocks
+            probe = shm / f".qualification-runner-probe-{os.getpid()}"
+            try:
+                probe.write_bytes(b"ok")
+            finally:
+                probe.unlink(missing_ok=True)
+            facts.shm_writable = True
+        except OSError:
+            facts.shm_writable = False
+    else:
+        facts.unsupported.append("shm-missing")
+
+    if system != "Linux":
+        facts.unsupported.extend(["cgroup", "pressure", "procfs"])
+        return facts
+
+    cgroup = _read_cgroup_facts()
+    facts.cgroup_version = cgroup["cgroup_version"]
+    facts.cpu_quota_cores = cgroup["cpu_quota_cores"]
+    facts.cpu_weight = cgroup["cpu_weight"]
+    facts.cpu_throttled = cgroup["cpu_throttled"]
+    facts.psi_cpu_some_avg300 = _read_psi_cpu()
     return facts
 
 
@@ -328,12 +373,77 @@ def validate_declaration(declaration: dict[str, Any]) -> list[CheckResult]:
                 "external rom_root and fixture_root are required",
             )
         )
+
+    logical = declaration.get("logical_cpus")
+    if isinstance(logical, bool) or not isinstance(logical, int) or logical <= 0:
+        results.append(
+            _result(
+                "logical-cpus-value",
+                "fail",
+                "positive int",
+                logical,
+                "logical_cpus must be a positive integer",
+            )
+        )
+    try:
+        parse_cpuset(declaration.get("affinity_cpus"))
+    except (TypeError, ValueError):
+        results.append(
+            _result(
+                "affinity-value",
+                "fail",
+                "cpuset string or list[int]",
+                declaration.get("affinity_cpus"),
+                "affinity_cpus is malformed",
+            )
+        )
+    for name in ("memory_bytes", "disk_free_bytes_min", "shm_bytes_min"):
+        value = declaration.get(name)
+        if name in declaration and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+        ):
+            results.append(
+                _result(
+                    f"{name}-value",
+                    "fail",
+                    "non-negative int",
+                    value,
+                    f"{name} must be a non-negative integer",
+                )
+            )
+    quota = declaration.get("cpu_quota_cores")
+    if quota is not None and (
+        isinstance(quota, bool) or not isinstance(quota, (int, float)) or quota <= 0
+    ):
+        results.append(
+            _result(
+                "cpu-quota-value",
+                "fail",
+                "positive number or null",
+                quota,
+                "cpu_quota_cores must be positive",
+            )
+        )
+    weight = declaration.get("cpu_weight")
+    if weight is not None and (
+        isinstance(weight, bool) or not isinstance(weight, int) or weight <= 0
+    ):
+        results.append(
+            _result(
+                "cpu-weight-value",
+                "fail",
+                "positive int",
+                weight,
+                "cpu_weight must be a positive integer",
+            )
+        )
     return results
 
 
 def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[CheckResult]:
     """Compare declared allocation requirements against observed host facts."""
 
+    mechanism = declaration.get("reservation_mechanism")
     results: list[CheckResult] = []
 
     declared_cpus = int(declaration.get("logical_cpus") or 0)
@@ -348,92 +458,152 @@ def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[
         )
     )
 
-    declared_affinity = parse_cpuset(declaration.get("affinity_cpus"))
     if not facts.affinity_supported:
         results.append(
             _result(
-                "affinity", "unsupported", declared_affinity, None, "affinity is unavailable here"
+                "affinity",
+                "unsupported",
+                declaration.get("affinity_cpus"),
+                None,
+                "affinity is unavailable here",
             )
         )
     else:
-        subset = set(declared_affinity).issubset(set(facts.affinity_cpus))
-        covers = len(declared_affinity) <= len(facts.affinity_cpus)
+        try:
+            declared_affinity = parse_cpuset(declaration.get("affinity_cpus"))
+        except (TypeError, ValueError):
+            declared_affinity = []
+        usable = set(declared_affinity).issubset(set(facts.affinity_cpus))
+        bounded = bool(declared_affinity) and len(declared_affinity) <= len(facts.affinity_cpus)
         results.append(
             _result(
                 "affinity",
-                "ok" if subset and covers else "fail",
+                "ok" if usable and bounded else "fail",
                 declared_affinity,
                 facts.affinity_cpus,
-                "declared affinity must be usable and bounded by the allocation",
+                "declared affinity must be usable by this process and no larger than the allocation",
             )
         )
 
     declared_quota = declaration.get("cpu_quota_cores")
-    if declared_quota is None:
-        results.append(
-            _result("cpu-quota", "unsupported", None, facts.cpu_quota_cores, "no quota declared")
-        )
-    elif facts.cpu_quota_cores is None:
-        results.append(
-            _result(
-                "cpu-quota",
-                "fail",
-                declared_quota,
-                facts.cpu_quota_cores,
-                "a quota was declared but no cgroup CPU quota is in effect",
-            )
-        )
-    else:
-        results.append(
-            _result(
-                "cpu-quota",
-                "ok" if facts.cpu_quota_cores >= declared_quota else "fail",
-                declared_quota,
-                facts.cpu_quota_cores,
-                "effective cgroup CPU quota in cores",
-            )
-        )
-
-    if "cpu_weight" in declaration:
-        declared_weight = declaration.get("cpu_weight")
-        if facts.cpu_weight is None:
+    if mechanism == "cgroup-quota":
+        if declared_quota is None:
             results.append(
-                _result("cpu-weight", "unsupported", declared_weight, None, "no CPU weight visible")
+                _result(
+                    "cpu-quota",
+                    "fail",
+                    "required for cgroup-quota",
+                    None,
+                    "a cgroup-quota reservation must declare cpu_quota_cores",
+                )
+            )
+        elif facts.cpu_quota_cores is None:
+            results.append(
+                _result("cpu-quota", "fail", declared_quota, None, "no cgroup CPU quota in effect")
             )
         else:
             results.append(
                 _result(
-                    "cpu-weight",
-                    "ok" if facts.cpu_weight >= declared_weight else "fail",
-                    declared_weight,
-                    facts.cpu_weight,
-                    "CPU weight is a share, not a reservation",
+                    "cpu-quota",
+                    "ok" if facts.cpu_quota_cores >= declared_quota else "fail",
+                    declared_quota,
+                    facts.cpu_quota_cores,
+                    "effective cgroup CPU quota in cores",
                 )
             )
+    elif declared_quota is not None:
+        if facts.cpu_quota_cores is None:
+            results.append(
+                _result(
+                    "cpu-quota",
+                    "fail",
+                    declared_quota,
+                    None,
+                    "a quota was declared but none is in effect",
+                )
+            )
+        else:
+            results.append(
+                _result(
+                    "cpu-quota",
+                    "ok" if facts.cpu_quota_cores >= declared_quota else "fail",
+                    declared_quota,
+                    facts.cpu_quota_cores,
+                    "effective cgroup CPU quota in cores",
+                )
+            )
+    else:
+        results.append(
+            _result(
+                "cpu-quota",
+                "skipped",
+                None,
+                facts.cpu_quota_cores,
+                "not applicable to this reservation mechanism",
+            )
+        )
+
+    declared_weight = declaration.get("cpu_weight")
+    if declared_weight is None:
+        results.append(
+            _result("cpu-weight", "skipped", None, facts.cpu_weight, "no CPU weight declared")
+        )
+    elif facts.cpu_weight is None:
+        results.append(
+            _result("cpu-weight", "unsupported", declared_weight, None, "no CPU weight visible")
+        )
+    else:
+        results.append(
+            _result(
+                "cpu-weight",
+                "ok" if facts.cpu_weight >= declared_weight else "fail",
+                declared_weight,
+                facts.cpu_weight,
+                "CPU weight is a share, not a reservation",
+            )
+        )
 
     declared_memory = int(declaration.get("memory_bytes") or 0)
-    observed_memory = facts.memory_total_bytes
-    status = (
-        "unsupported"
-        if observed_memory is None
-        else ("ok" if observed_memory >= declared_memory else "fail")
-    )
-    results.append(
-        _result("memory", status, declared_memory, observed_memory, "total memory bytes")
-    )
+    if declared_memory <= 0:
+        results.append(
+            _result(
+                "memory",
+                "skipped",
+                declared_memory,
+                facts.memory_total_bytes,
+                "no minimum declared",
+            )
+        )
+    else:
+        observed_memory = facts.memory_total_bytes
+        status = (
+            "unsupported"
+            if observed_memory is None
+            else ("ok" if observed_memory >= declared_memory else "fail")
+        )
+        results.append(
+            _result("memory", status, declared_memory, observed_memory, "total memory bytes")
+        )
 
     declared_disk = int(declaration.get("disk_free_bytes_min") or 0)
     for name, observed in (
         ("disk-free-repo", facts.repo_disk_free_bytes),
         ("disk-free-temp", facts.temp_disk_free_bytes),
     ):
+        if declared_disk <= 0:
+            results.append(_result(name, "skipped", declared_disk, observed, "no minimum declared"))
+            continue
         status = (
             "unsupported" if observed is None else ("ok" if observed >= declared_disk else "fail")
         )
         results.append(_result(name, status, declared_disk, observed, "free disk bytes"))
 
     declared_shm = int(declaration.get("shm_bytes_min") or 0)
-    if not facts.shm_writable:
+    if declared_shm <= 0:
+        results.append(
+            _result("shm", "skipped", declared_shm, facts.shm_size_bytes, "no minimum declared")
+        )
+    elif not facts.shm_writable:
         results.append(
             _result(
                 "shm", "fail", declared_shm, facts.shm_size_bytes, "shared memory is not writable"
@@ -461,10 +631,12 @@ def run_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[st
 def prerequisite_checks(
     declaration: dict[str, Any],
     repo_root: Path,
-    runner: Callable[[list[str], Path], subprocess.CompletedProcess[str]] = run_command,
+    runner: Callable[[list[str], Path], subprocess.CompletedProcess[str]] | None = None,
 ) -> list[CheckResult]:
     """Verify interpreters and pinned assets using the repository validators."""
 
+    if runner is None:
+        runner = run_command
     results: list[CheckResult] = []
     interpreters = declaration.get("interpreters") or {}
     for mode in ("source", "native"):
@@ -547,12 +719,15 @@ def prerequisite_checks(
 
 
 def overall_status(results: list[CheckResult]) -> str:
-    for status in _STATUS_ORDER:
-        if any(item.status == status for item in results):
-            if status == "ok":
-                return "ok"
+    active = [item for item in results if item.status != "skipped"]
+    if not active:
+        return "blocked"
+    for status in ("fail", "blocked", "unsupported"):
+        if any(item.status == status for item in active):
             return status
-    return "ok"
+    if all(item.status == "ok" for item in active):
+        return "ok"
+    return "blocked"
 
 
 def load_declaration(path: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -594,6 +769,7 @@ def render_text(payload: dict[str, Any]) -> str:
             "temp_disk_free_bytes",
             "shm_size_bytes",
             "shm_writable",
+            "unsupported",
         ):
             lines.append(f"  {key}={facts.get(key)!r}")
     if payload.get("message"):
@@ -626,7 +802,7 @@ def main(argv: list[str] | None = None) -> int:
         "repo_root": str(repo_root),
         "checks": [],
         "facts": asdict(facts),
-        "overall": "ok",
+        "overall": "report",
     }
 
     if args.report:
@@ -652,7 +828,7 @@ def main(argv: list[str] | None = None) -> int:
             payload["message"] = error
         else:
             checks.extend(validate_declaration(declaration))
-            if overall_status(checks) in ("ok", "unsupported"):
+            if overall_status(checks) == "ok":
                 checks.extend(evaluate_resources(declaration, facts))
                 checks.extend(prerequisite_checks(declaration, repo_root))
             payload["overall"] = overall_status(checks)

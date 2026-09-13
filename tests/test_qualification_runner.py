@@ -145,10 +145,78 @@ def test_overall_status_precedence():
     fail = runner.CheckResult("b", "fail", 1, 0, "")
     blocked = runner.CheckResult("c", "blocked", 1, None, "")
     unsupported = runner.CheckResult("d", "unsupported", 1, None, "")
+    skipped = runner.CheckResult("e", "skipped", None, None, "")
     assert runner.overall_status([ok]) == "ok"
     assert runner.overall_status([ok, blocked]) == "blocked"
     assert runner.overall_status([ok, unsupported]) == "unsupported"
     assert runner.overall_status([ok, blocked, fail]) == "fail"
+    assert runner.overall_status([ok, skipped]) == "ok"
+    assert runner.overall_status([skipped]) == "blocked"
+    assert runner.overall_status([]) == "blocked"
+
+
+def test_validate_declaration_rejects_malformed_values_without_crashing():
+    results = runner.validate_declaration(
+        make_declaration(
+            logical_cpus="many",
+            affinity_cpus=None,
+            memory_bytes=-1,
+            cpu_quota_cores=0,
+            cpu_weight="high",
+        )
+    )
+    observed = statuses(results)
+    assert observed["logical-cpus-value"] == "fail"
+    assert observed["affinity-value"] == "fail"
+    assert observed["memory_bytes-value"] == "fail"
+    assert observed["cpu-quota-value"] == "fail"
+    assert observed["cpu-weight-value"] == "fail"
+
+
+def test_evaluate_resources_skips_quota_for_dedicated_host():
+    declaration = make_declaration(reservation_mechanism="dedicated-host", cpu_quota_cores=None)
+    results = runner.evaluate_resources(declaration, make_facts())
+    assert statuses(results)["cpu-quota"] == "skipped"
+    assert runner.overall_status(results) == "ok"
+
+
+def test_evaluate_resources_requires_quota_for_cgroup_reservation():
+    declaration = make_declaration(reservation_mechanism="cgroup-quota", cpu_quota_cores=None)
+    results = runner.evaluate_resources(declaration, make_facts())
+    assert statuses(results)["cpu-quota"] == "fail"
+
+
+def test_evaluate_resources_quota_equality_is_ok():
+    declaration = make_declaration(cpu_quota_cores=8.0)
+    results = runner.evaluate_resources(declaration, make_facts(cpu_quota_cores=8.0))
+    assert statuses(results)["cpu-quota"] == "ok"
+
+
+def test_evaluate_resources_fails_when_weight_is_lower():
+    declaration = make_declaration(cpu_weight=500)
+    results = runner.evaluate_resources(declaration, make_facts(cpu_weight=100))
+    assert statuses(results)["cpu-weight"] == "fail"
+
+
+def test_load_declaration_reports_missing_file(tmp_path: Path):
+    declaration, error = runner.load_declaration(tmp_path / "absent.json")
+    assert declaration is None
+    assert error and "not found" in error
+
+
+def test_prerequisite_checks_fail_when_bootstrap_fails(tmp_path: Path):
+    class Completed:
+        def __init__(self, returncode: int):
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = "boom"
+
+    declaration = make_declaration()
+    results = runner.prerequisite_checks(
+        declaration, tmp_path, runner=lambda command, cwd: Completed(1)
+    )
+    assert statuses(results)["interpreter-source"] == "fail"
+    assert statuses(results)["interpreter-native"] == "fail"
 
 
 def test_prerequisite_checks_use_injected_runner(tmp_path: Path):
@@ -194,11 +262,13 @@ def test_collect_facts_reports_sane_values(tmp_path: Path):
     assert isinstance(facts.affinity_cpus, list)
 
 
-def test_cli_report_emits_json(capsys):
+def test_cli_report_emits_json_without_claiming_success(capsys):
     exit_code = runner.main(["--report", "--json"])
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["mode"] == "report"
+    assert payload["overall"] == "report"
+    assert payload["checks"] == []
     assert payload["facts"]["logical_cpus"] >= 1
 
 
@@ -216,7 +286,6 @@ def test_cli_check_reads_environment_declaration(monkeypatch, capsys, tmp_path: 
         stdout = ""
         stderr = ""
 
-    monkeypatch.setattr(runner, "run_command", lambda command, cwd: Completed())
     rom_root = tmp_path / "rom"
     rom_root.mkdir()
     declaration = make_declaration(
@@ -225,7 +294,12 @@ def test_cli_check_reads_environment_declaration(monkeypatch, capsys, tmp_path: 
     declaration_path = tmp_path / "declaration.json"
     declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
     monkeypatch.setenv(runner._DECLARATION_ENV, str(declaration_path))
+    monkeypatch.setattr(runner, "collect_facts", lambda root: make_facts())
+    monkeypatch.setattr(runner, "run_command", lambda command, cwd: Completed())
+
     exit_code = runner.main(["--check", "--json"])
     payload = json.loads(capsys.readouterr().out)
-    assert payload["overall"] in {"ok", "fail", "blocked", "unsupported"}
-    assert isinstance(exit_code, int)
+
+    assert payload["declaration"] == str(declaration_path)
+    assert payload["overall"] == "ok"
+    assert exit_code == 0
