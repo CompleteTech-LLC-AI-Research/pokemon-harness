@@ -59,10 +59,11 @@ REQUIRED_FIXTURES: tuple[tuple[str, Path], ...] = (
     ("yellow cable-club", Path("yellow/cable_club.state")),
 )
 
-REQUIRED_TIER_ASSETS = frozenset({"local", "remote", "trade", "battle"})
+REQUIRED_TIER_ASSETS = frozenset({"local", "remote", "trade", "battle", "smoke"})
 OPTIONAL_TIERS = frozenset()
 
 TIER_EXPRESSIONS: dict[str, str] = {
+    "smoke": "unit or mcp_stdio",
     "unit": "unit",
     "local": "real_rom and not remote_link and not acceptance",
     "remote": "real_rom and remote_link and not acceptance",
@@ -71,6 +72,7 @@ TIER_EXPRESSIONS: dict[str, str] = {
     "timing": "timing_sensitive",
 }
 TIER_DESCRIPTIONS: dict[str, str] = {
+    "smoke": "startup, public MCP lifecycle and nine timed ROM orientations",
     "unit": "ROM-free unit tests",
     "local": "real-ROM local/session/link tests",
     "remote": "real-ROM remote TCP/subprocess tests",
@@ -81,6 +83,7 @@ TIER_DESCRIPTIONS: dict[str, str] = {
 DEFAULT_TIERS = ("unit", "local", "remote", "trade", "battle", "timing")
 
 DEFAULT_TIMEOUT_SECONDS: dict[str, float] = {
+    "smoke": 900.0,
     "unit": 900.0,
     "local": 3600.0,
     "remote": 3600.0,
@@ -103,6 +106,37 @@ MATRIX_AGGREGATE_GRACE_SECONDS = 10.0
 MATRIX_CLEANUP_TIMEOUT_SECONDS = 5.0
 MATRIX_READER_JOIN_TIMEOUT_SECONDS = 1.0
 COLLECTION_TIMEOUT_SECONDS = 300.0
+# The smoke is an additional probe before the unchanged qualification tiers.
+# Its explicit selectors keep it small; its required nodes prevent one passing
+# startup check from hiding a missing timed orientation or public workflow.
+SMOKE_SELECTORS = (
+    "tests/test_pyboy_link_imports.py",
+    "tests/test_mcp_timed_stdio.py",
+    "tests/test_mcp_stdio_integration.py",
+    "tests/test_mcp_timed_rom.py",
+)
+SMOKE_REQUIRED_NODEIDS = frozenset(
+    f"tests/test_mcp_timed_rom.py::test_timed_rom_stdio_pair[{listener}-listen-{connector}-connect]"
+    for listener in ("red_color", "blue_color", "yellow")
+    for connector in ("red_color", "blue_color", "yellow")
+) | frozenset(
+    f"tests/test_mcp_stdio_integration.py::{name}"
+    for name in (
+        "test_stdio_list_tools_and_call_step",
+        "test_stdio_game_state_resource_is_parseable",
+        "test_stdio_save_state_roundtrip_is_deterministic",
+        "test_stdio_remote_link_lifecycle_and_explicit_disconnect",
+    )
+)
+SMOKE_REQUIRED_TESTS = frozenset(
+    {
+        ("test_pyboy_link_imports.py", "test_selected_runtime_public_link_imports"),
+        ("test_pyboy_link_imports.py", "test_selected_runtime_serial_constructor_and_pair_cleanup"),
+        ("test_mcp_timed_stdio.py", "test_authored_timed_stdio_pair_frames_and_cleanup"),
+        ("test_mcp_timed_stdio.py", "test_authored_timed_stdio_expected_peer_mismatch"),
+        ("test_mcp_timed_rom.py", "test_rom_client_load_state_timeout_redacts_data"),
+    }
+)
 RUNTIME_MODES = ("source", "cython")
 RUNTIME_MODE_ALIASES = {"dual": "both"}
 RUNTIME_MODE_CHOICES = (*RUNTIME_MODES, "both")
@@ -326,6 +360,100 @@ class RuntimeGateResult:
     matrix_audit: dict[str, Any]
     tiers: list[TierResult]
     gate_problems: list[str] = field(default_factory=list)
+    execution_plan: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PreparedRuntimeGate:
+    """One probed runtime and its unchanged environment for all planned tiers."""
+
+    result: RuntimeGateResult
+    environment: dict[str, str]
+    required_problems: list[str]
+
+
+def build_execution_plan(
+    modes: Sequence[str], selected: Sequence[str], *, early_smoke: bool, fail_fast: bool
+) -> dict[str, Any]:
+    """Declare ordered work before dispatch, including the smoke's evidence role."""
+
+    modes = tuple(modes)
+    selected = tuple(selected)
+    if not modes or len(set(modes)) != len(modes) or set(modes) - set(RUNTIME_MODES):
+        raise ValueError("execution plan requires distinct explicit runtime modes")
+    if not selected or len(set(selected)) != len(selected) or set(selected) - set(TIER_EXPRESSIONS):
+        raise ValueError("execution plan requires distinct known tiers")
+    if type(early_smoke) is not bool or type(fail_fast) is not bool:
+        raise ValueError("execution plan policies must be boolean")
+    if early_smoke and "smoke" in selected:
+        raise ValueError("an additional smoke cannot also be a selected tier")
+    scope = (
+        "smoke-only"
+        if selected == ("smoke",)
+        else "full"
+        if set(selected) == set(DEFAULT_TIERS)
+        else "selected-tiers"
+    )
+    steps = (
+        [{"mode": mode, "tier": "smoke", "role": "additional-probe"} for mode in modes]
+        if early_smoke
+        else []
+    )
+    steps.extend(
+        {"mode": mode, "tier": tier, "role": "selected-tier"} for mode in modes for tier in selected
+    )
+    return {
+        "schema_version": 1,
+        "scope": scope,
+        "runtime_modes": list(modes),
+        "selected_tiers": list(selected),
+        "early_smoke": early_smoke,
+        "fail_fast": fail_fast,
+        "smoke_role": "additional-probe"
+        if early_smoke
+        else ("selected-scope" if "smoke" in selected else "not-selected"),
+        "steps": steps,
+    }
+
+
+def _valid_execution_plan(plan: dict[str, Any]) -> bool:
+    if not isinstance(plan, dict):
+        return False
+    try:
+        return plan == build_execution_plan(
+            plan["runtime_modes"],
+            plan["selected_tiers"],
+            early_smoke=plan["early_smoke"],
+            fail_fast=plan["fail_fast"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _safe_execution_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct only fixed vocabulary; never retain an arbitrary dictionary."""
+
+    if not _valid_execution_plan(plan):
+        return {"schema_version": 1, "scope": "invalid"}
+    return build_execution_plan(
+        plan["runtime_modes"],
+        plan["selected_tiers"],
+        early_smoke=plan["early_smoke"],
+        fail_fast=plan["fail_fast"],
+    )
+
+
+def _execution_plan_lines(plan: dict[str, Any]) -> list[str]:
+    safe = _safe_execution_plan(plan)
+    return [
+        f"execution-scope: {safe['scope']}",
+        f"smoke-role: {safe.get('smoke_role', 'invalid')}",
+        f"fail-fast: {safe.get('fail_fast', 'invalid')}",
+        "execution-order: "
+        + ", ".join(
+            f"{step['mode']}:{step['tier']}({step['role']})" for step in safe.get("steps", ())
+        ),
+    ]
 
 
 def project_root_from_script() -> Path:
@@ -1306,14 +1434,18 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
         try:
             process.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                pass
+            pass
+        # Reaping the parent does not prove its descendants have stopped.
+        # Clear any remaining members of this owned group even when the
+        # parent exited promptly after SIGTERM.
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            pass
         return
 
     # Windows has no killpg.  The caller creates a new process group; taskkill
@@ -1455,6 +1587,17 @@ def run_collection_preflight(
     with tempfile.TemporaryDirectory(prefix="pokered-collection-") as directory:
         results: list[CollectionResult] = []
         for index, (name, command) in enumerate(commands):
+            if any(result.status == "INTERRUPTED" for result in results):
+                results.append(
+                    CollectionResult(
+                        name=name,
+                        command=command,
+                        status="NOT_STARTED",
+                        returncode=None,
+                        reason="collection cancelled before this entry point started",
+                    )
+                )
+                continue
             if name == "pytest-console" and console_missing:
                 results.append(
                     CollectionResult(
@@ -1810,12 +1953,23 @@ def _run_collection_command(
 
     try:
         output, _ = process.communicate(timeout=timeout_seconds)
+    except KeyboardInterrupt:
+        _terminate_process(process)
+        output = _communicate_after_termination(process)
+        capture_error = _retain_raw_output(raw_output_directory, f"collection-{name}.log", output)
+        return CollectionResult(
+            name=name,
+            command=command,
+            status="INTERRUPTED",
+            returncode=130,
+            duration_seconds=time.monotonic() - started,
+            output_tail=output[-8000:],
+            reason="; ".join(filter(None, ("pytest collection interrupted", capture_error))),
+        )
     except subprocess.TimeoutExpired:
         _terminate_process(process)
         output = _communicate_after_termination(process)
-        capture_error = _retain_raw_output(
-            raw_output_directory, f"collection-{name}.log", output
-        )
+        capture_error = _retain_raw_output(raw_output_directory, f"collection-{name}.log", output)
         return CollectionResult(
             name=name,
             command=command,
@@ -1937,8 +2091,14 @@ def run_pytest_once(
         )
 
     timed_out = False
+    interrupted = False
     try:
         output, _ = process.communicate(timeout=timeout_seconds)
+    except KeyboardInterrupt:
+        interrupted = True
+        _terminate_process(process)
+        output = _communicate_after_termination(process)
+        returncode = 130
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate_process(process)
@@ -1953,18 +2113,22 @@ def run_pytest_once(
     )
     report = _load_gate_report(
         report_path,
-        expected_returncode=None if timed_out else returncode,
+        expected_returncode=None if timed_out or interrupted else returncode,
     )
     # A progress report is evidence of the tests that had reached a terminal
-    # outcome only after an actual timeout.  A missing or malformed final
+    # outcome only after an actual timeout or interruption. A missing or malformed final
     # report on an otherwise exited process must remain an error; falling back
     # to stale/partial progress there could turn a broken runner green.
-    if timed_out and report.error:
+    if (timed_out or interrupted) and report.error:
         progress_report = _load_gate_report(progress_path, allow_partial=True)
         if not progress_report.error:
             report = progress_report
-    if timed_out:
-        timeout_reason = f"pytest timed out after {timeout_seconds:.1f}s"
+    if timed_out or interrupted:
+        stop_reason = (
+            "pytest interrupted"
+            if interrupted
+            else f"pytest timed out after {timeout_seconds:.1f}s"
+        )
         report = GateReport(
             counts=report.counts,
             skip_reasons=report.skip_reasons,
@@ -1972,7 +2136,7 @@ def run_pytest_once(
             collection_errors=report.collection_errors,
             collection_skips=report.collection_skips,
             failed_records=report.failed_records,
-            error=(f"{timeout_reason}; {report.error}" if report.error else timeout_reason),
+            error=(f"{stop_reason}; {report.error}" if report.error else stop_reason),
         )
     if capture_error:
         report = replace(report, error="; ".join(filter(None, (report.error, capture_error))))
@@ -2218,12 +2382,9 @@ def _kill_matrix_process(
             pass
         reaped = wait_for_exit()
 
-    stream = getattr(process, "stdout", None)
-    if stream is not None:
-        try:
-            stream.close()
-        except (OSError, ValueError):
-            pass
+    # The reader (or the bounded drain for an interrupted reader start) owns
+    # this pipe. Closing it here can discard unread output or block behind a
+    # concurrent read, crossing the cleanup deadline.
     return reaped
 
 
@@ -2314,6 +2475,7 @@ def run_matrix_tier(
         output: str,
         duration: float,
         timed_out: bool = False,
+        interrupted: bool = False,
         timeout_reason: str = "",
         report_kind: str = "final",
         cleanup_error: str = "",
@@ -2331,6 +2493,8 @@ def run_matrix_tier(
             problems.append(capture_error)
         if timed_out:
             problems.append(timeout_reason or f"matrix case timed out after {timeout:.1f}s")
+        if interrupted:
+            problems.append(timeout_reason or "matrix execution interrupted")
         if cleanup_error:
             problems.append(cleanup_error)
         if report.error:
@@ -2386,15 +2550,17 @@ def run_matrix_tier(
                 output_tails.append(f"{nodeid}\n{output[-4000:]}")
         case_results_by_nodeid[nodeid] = MatrixCaseResult(
             nodeid=nodeid,
-            status="TIMEOUT" if timed_out else ("PASS" if not problems else "FAIL"),
-            returncode=124 if timed_out else returncode,
+            status="INTERRUPTED"
+            if interrupted
+            else ("TIMEOUT" if timed_out else ("PASS" if not problems else "FAIL")),
+            returncode=130 if interrupted else (124 if timed_out else returncode),
             duration_seconds=duration,
             counts=report.counts,
             reason="; ".join(problems),
             output_tail=output[-4000:],
             deadline_seconds=timeout,
             report_kind=report_kind,
-            partial=timed_out or report_kind == "partial",
+            partial=timed_out or interrupted or report_kind == "partial",
         )
 
     def record_not_started(nodeid: str, reason: str) -> None:
@@ -2466,6 +2632,8 @@ def run_matrix_tier(
                 "--maxfail=0",
             )
         )
+        now = time.monotonic()
+        chunks: list[str] = []
         try:
             process = subprocess.Popen(
                 command,
@@ -2489,33 +2657,33 @@ def run_matrix_tier(
                 report_kind="missing",
             )
             return
-        chunks: list[str] = []
+        active[nodeid] = {
+            "process": process,
+            "chunks": chunks,
+            "reader": None,
+            "started_at": now,
+            "deadline_at": now + timeout,
+            "report_path": report_path,
+            "progress_path": progress_path,
+        }
         reader = threading.Thread(
             target=_drain_matrix_stream,
             args=(process.stdout, chunks),
             name=f"pokered-gate-output-{name}",
             daemon=True,
         )
+        active[nodeid]["reader"] = reader
         reader.start()
-        now = time.monotonic()
-        active[nodeid] = {
-            "process": process,
-            "chunks": chunks,
-            "reader": reader,
-            "started_at": now,
-            "deadline_at": now + timeout,
-            "report_path": report_path,
-            "progress_path": progress_path,
-        }
 
     def finish_case(
         nodeid: str,
         *,
         timed_out: bool,
+        interrupted: bool = False,
         reason: str = "",
         cleanup_deadline: float | None = None,
     ) -> None:
-        state = active.pop(nodeid)
+        state = active[nodeid]
         process = state["process"]
         cleanup_error = ""
         if cleanup_deadline is None:
@@ -2523,11 +2691,11 @@ def run_matrix_tier(
                 aggregate_cleanup_deadline,
                 time.monotonic() + MATRIX_CLEANUP_TIMEOUT_SECONDS,
             )
-        cleanup_attempted = timed_out
-        if timed_out:
+        cleanup_attempted = timed_out or interrupted
+        if timed_out or interrupted:
             if not _kill_matrix_process(process, deadline=cleanup_deadline):
                 cleanup_error = "matrix child did not terminate after the cleanup deadline"
-            returncode = 124
+            returncode = 130 if interrupted else 124
         else:
             returncode = process.poll()
             if returncode is None:
@@ -2536,16 +2704,22 @@ def run_matrix_tier(
         # be draining its pipe.  Join it before retaining diagnostics so a
         # fast case does not lose the very failure text needed to audit it.
         reader = state["reader"]
-        reader.join(
-            timeout=max(
-                0.0,
-                min(
-                    MATRIX_READER_JOIN_TIMEOUT_SECONDS,
-                    cleanup_deadline - time.monotonic(),
-                ),
+        if reader is None or reader.ident is None:
+            # Cancellation can arrive before Thread.start() launches its
+            # reader. The owned process is already registered and terminated;
+            # collect its remaining output through the bounded drain path.
+            state["chunks"].append(_communicate_after_termination(process))
+        else:
+            reader.join(
+                timeout=max(
+                    0.0,
+                    min(
+                        MATRIX_READER_JOIN_TIMEOUT_SECONDS,
+                        cleanup_deadline - time.monotonic(),
+                    ),
+                )
             )
-        )
-        if reader.is_alive():
+        if reader is not None and reader.is_alive():
             if not cleanup_attempted:
                 cleanup_attempted = True
                 if not _kill_matrix_process(process, deadline=cleanup_deadline):
@@ -2555,14 +2729,14 @@ def run_matrix_tier(
             remaining = cleanup_deadline - time.monotonic()
             if remaining > 0:
                 reader.join(timeout=remaining)
-        if reader.is_alive():
+        if reader is not None and reader.is_alive():
             cleanup_error = (
                 f"{cleanup_error}; " if cleanup_error else ""
             ) + "matrix output reader did not terminate after the cleanup deadline"
         report, report_kind = load_case_report(
             state,
             returncode=int(returncode),
-            timed_out=timed_out,
+            timed_out=timed_out or interrupted,
         )
         record_case(
             nodeid=nodeid,
@@ -2571,75 +2745,99 @@ def run_matrix_tier(
             output="".join(state["chunks"]),
             duration=time.monotonic() - state["started_at"],
             timed_out=timed_out,
+            interrupted=interrupted,
             timeout_reason=reason,
             report_kind=report_kind,
             cleanup_error=cleanup_error,
         )
+        active.pop(nodeid, None)
 
-    while pending or active:
-        for nodeid, state in list(active.items()):
-            process = state["process"]
-            current = time.monotonic()
-            if current >= aggregate_deadline:
-                finish_case(
-                    nodeid,
-                    timed_out=True,
-                    reason=(f"matrix aggregate deadline exceeded after {aggregate_timeout:.1f}s"),
-                    cleanup_deadline=aggregate_cleanup_deadline,
-                )
-            elif current >= state["deadline_at"]:
-                finish_case(
-                    nodeid,
-                    timed_out=True,
-                    reason=f"matrix case timed out after {timeout:.1f}s",
-                    cleanup_deadline=min(
-                        aggregate_cleanup_deadline,
-                        current + MATRIX_CLEANUP_TIMEOUT_SECONDS,
-                    ),
-                )
-            elif process.poll() is not None:
-                finish_case(
-                    nodeid,
-                    timed_out=False,
-                    cleanup_deadline=min(
-                        aggregate_cleanup_deadline,
-                        current + MATRIX_CLEANUP_TIMEOUT_SECONDS,
-                    ),
-                )
+    interrupted = False
+    try:
+        while pending or active:
+            for nodeid, state in list(active.items()):
+                process = state["process"]
+                current = time.monotonic()
+                if current >= aggregate_deadline:
+                    finish_case(
+                        nodeid,
+                        timed_out=True,
+                        reason=(
+                            f"matrix aggregate deadline exceeded after {aggregate_timeout:.1f}s"
+                        ),
+                        cleanup_deadline=aggregate_cleanup_deadline,
+                    )
+                elif current >= state["deadline_at"]:
+                    finish_case(
+                        nodeid,
+                        timed_out=True,
+                        reason=f"matrix case timed out after {timeout:.1f}s",
+                        cleanup_deadline=min(
+                            aggregate_cleanup_deadline,
+                            current + MATRIX_CLEANUP_TIMEOUT_SECONDS,
+                        ),
+                    )
+                elif process.poll() is not None:
+                    finish_case(
+                        nodeid,
+                        timed_out=False,
+                        cleanup_deadline=min(
+                            aggregate_cleanup_deadline,
+                            current + MATRIX_CLEANUP_TIMEOUT_SECONDS,
+                        ),
+                    )
 
-        if time.monotonic() >= aggregate_deadline:
-            for nodeid in list(active):
-                finish_case(
-                    nodeid,
-                    timed_out=True,
-                    reason=(f"matrix aggregate deadline exceeded after {aggregate_timeout:.1f}s"),
-                    cleanup_deadline=aggregate_cleanup_deadline,
-                )
-            while pending:
-                record_not_started(
-                    pending.popleft(),
-                    "matrix aggregate deadline expired before the case started",
-                )
-            break
-
-        while pending and len(active) < max_workers:
             if time.monotonic() >= aggregate_deadline:
+                for nodeid in list(active):
+                    finish_case(
+                        nodeid,
+                        timed_out=True,
+                        reason=(
+                            f"matrix aggregate deadline exceeded after {aggregate_timeout:.1f}s"
+                        ),
+                        cleanup_deadline=aggregate_cleanup_deadline,
+                    )
+                while pending:
+                    record_not_started(
+                        pending.popleft(),
+                        "matrix aggregate deadline expired before the case started",
+                    )
                 break
-            start_case(pending.popleft())
 
-        if not active:
-            continue
-        remaining = aggregate_deadline - time.monotonic()
-        if remaining > 0:
-            next_deadline = min(
-                [state["deadline_at"] for state in active.values()] + [aggregate_deadline]
+            while pending and len(active) < max_workers:
+                if time.monotonic() >= aggregate_deadline:
+                    break
+                start_case(pending.popleft())
+
+            if not active:
+                continue
+            remaining = aggregate_deadline - time.monotonic()
+            if remaining > 0:
+                next_deadline = min(
+                    [state["deadline_at"] for state in active.values()] + [aggregate_deadline]
+                )
+                time.sleep(min(0.05, max(0.0, next_deadline - time.monotonic())))
+    except KeyboardInterrupt:
+        interrupted = True
+        cleanup_deadline = time.monotonic() + MATRIX_CLEANUP_TIMEOUT_SECONDS
+        for nodeid in list(active):
+            finish_case(
+                nodeid,
+                timed_out=False,
+                interrupted=True,
+                reason="matrix execution interrupted",
+                cleanup_deadline=cleanup_deadline,
             )
-            time.sleep(min(0.05, max(0.0, next_deadline - time.monotonic())))
+        for nodeid in nodeids:
+            if nodeid not in case_results_by_nodeid:
+                record_not_started(nodeid, "matrix interrupted before this case started")
 
     case_results = [case_results_by_nodeid[nodeid] for nodeid in sorted(nodeids)]
     unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
     status = (
-        "PASS"
+        "INTERRUPTED"
+        if interrupted
+        else "PASS"
         if not failures
         and not unexpected
         and len(case_results) == len(nodeids)
@@ -2785,6 +2983,9 @@ def run_tier(
     matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
 ) -> TierResult:
+    if name == "smoke":
+        required_test_keys = frozenset(required_test_keys) | SMOKE_REQUIRED_TESTS
+        required_nodeids = frozenset(required_nodeids) | SMOKE_REQUIRED_NODEIDS
     if name in {"trade", "battle"} and required_nodeids:
         return run_matrix_tier(
             name=name,
@@ -2844,6 +3045,7 @@ def run_tier(
             timeout_seconds=timeout,
             report_path=report_path,
             raw_output_directory=raw_output_directory,
+            **({"selectors": SMOKE_SELECTORS} if name == "smoke" else {}),
         )
         counts = report.counts
         aggregate.total += counts.total
@@ -2940,6 +3142,9 @@ def run_tier(
                 else:
                     failed_output = candidate
 
+        if returncode == 130:
+            break
+
     if omitted_failures:
         iteration_failures.append(f"[...{omitted_failures} additional failure entries omitted...]")
     if failed_output:
@@ -2947,7 +3152,9 @@ def run_tier(
 
     duration = time.monotonic() - started
     unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
-    if iteration_failures or any(code != 0 for code in returncodes) or unexpected:
+    if 130 in returncodes:
+        status = "INTERRUPTED"
+    elif iteration_failures or any(code != 0 for code in returncodes) or unexpected:
         status = "FAIL"
     elif aggregate.total == 0:
         status = "FAIL"
@@ -2995,7 +3202,7 @@ def _optional_preflight_reason(name: str, records: list[AssetRecord]) -> str | N
     return None
 
 
-def run_runtime_gate(
+def prepare_runtime_gate(
     *,
     mode: str,
     project_root: Path,
@@ -3008,13 +3215,10 @@ def run_runtime_gate(
     required_tests_by_tier: dict[str, frozenset[tuple[str, str]]],
     required_nodeids_by_tier: dict[str, frozenset[str]],
     configuration_problems: Iterable[str] = (),
-    repeat: int = 5,
     timeout_override: float | None = None,
-    matrix_workers: int = DEFAULT_MATRIX_WORKERS,
-    matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
-) -> RuntimeGateResult:
-    """Run the complete gate once under one explicit runtime.
+) -> PreparedRuntimeGate:
+    """Probe and collect one runtime once before any planned tier executes.
 
     ``both`` is an orchestration choice, not a PyBoy runtime.  Keeping this
     function restricted to ``source`` and ``cython`` makes it impossible for
@@ -3061,6 +3265,23 @@ def run_runtime_gate(
         timeout_seconds=timeout_override or COLLECTION_TIMEOUT_SECONDS,
         raw_output_directory=runtime_output_directory,
     )
+    if any(collection.status == "INTERRUPTED" for collection in collections):
+        return PreparedRuntimeGate(
+            result=RuntimeGateResult(
+                mode=mode,
+                runtime=runtime,
+                collections=collections,
+                fixture_manifest={
+                    "status": "NOT_STARTED",
+                    "mode": "byte" if real_rom_scope else "schema",
+                },
+                matrix_audit={"status": "NOT_STARTED"},
+                tiers=[],
+                gate_problems=[*gate_problems, "runtime preflight interrupted"],
+            ),
+            environment=environment,
+            required_problems=required_asset_problems(assets),
+        )
 
     fixture_manifest = run_fixture_manifest_validation(
         project_root=project_root,
@@ -3115,43 +3336,198 @@ def run_runtime_gate(
             )
         )
 
-    required_problems = required_asset_problems(assets)
-    tiers: list[TierResult] = []
-    with tempfile.TemporaryDirectory(prefix=f"pokered-gate-{mode}-") as temp_directory:
-        report_directory = Path(temp_directory)
-        for name in selected_tiers:
-            if name in OPTIONAL_TIERS:
-                reason = _optional_preflight_reason(name, assets)
-                if reason:
-                    tiers.append(synthetic_optional_skip(name, reason))
-                    continue
-            tiers.append(
-                run_tier(
-                    name=name,
-                    project_root=project_root,
-                    python_executable=python_executable,
-                    environment=environment,
-                    required_problems=required_problems,
-                    repeat=repeat,
-                    timeout_override=timeout_override,
-                    report_directory=report_directory,
-                    required_test_keys=required_tests_by_tier.get(name, ()),
-                    required_nodeids=required_nodeids_by_tier.get(name, ()),
-                    matrix_workers=matrix_workers,
-                    matrix_timeout_override=matrix_timeout_override,
-                    raw_output_directory=runtime_output_directory,
+    return PreparedRuntimeGate(
+        result=RuntimeGateResult(
+            mode=mode,
+            runtime=runtime,
+            collections=collections,
+            fixture_manifest=fixture_manifest,
+            matrix_audit=matrix_audit,
+            tiers=[],
+            gate_problems=gate_problems,
+        ),
+        environment=environment,
+        required_problems=required_asset_problems(assets),
+    )
+
+
+def run_prepared_tier(
+    *,
+    prepared: PreparedRuntimeGate,
+    name: str,
+    project_root: Path,
+    python_executable: Path,
+    required_tests_by_tier: dict[str, frozenset[tuple[str, str]]],
+    required_nodeids_by_tier: dict[str, frozenset[str]],
+    repeat: int = 5,
+    timeout_override: float | None = None,
+    matrix_workers: int = DEFAULT_MATRIX_WORKERS,
+    matrix_timeout_override: float | None = None,
+    raw_output_directory: Path | None = None,
+) -> TierResult:
+    """Execute one planned tier with the already verified runtime environment."""
+
+    mode = prepared.result.mode
+    runtime_output_directory = raw_output_directory / mode if raw_output_directory else None
+    with tempfile.TemporaryDirectory(prefix=f"pokered-gate-{mode}-{name}-") as directory:
+        return run_tier(
+            name=name,
+            project_root=project_root,
+            python_executable=python_executable,
+            environment=prepared.environment,
+            required_problems=prepared.required_problems,
+            repeat=repeat,
+            timeout_override=timeout_override,
+            report_directory=Path(directory),
+            required_test_keys=required_tests_by_tier.get(name, ()),
+            required_nodeids=required_nodeids_by_tier.get(name, ()),
+            matrix_workers=matrix_workers,
+            matrix_timeout_override=matrix_timeout_override,
+            raw_output_directory=runtime_output_directory,
+        )
+
+
+def _unrun_tier(
+    name: str, reason: str, required_nodeids: Iterable[str] = (), *, status: str = "NOT_STARTED"
+) -> TierResult:
+    nodes = sorted(set(required_nodeids) | (SMOKE_REQUIRED_NODEIDS if name == "smoke" else set()))
+    return TierResult(
+        name=name,
+        description=TIER_DESCRIPTIONS[name],
+        expression=TIER_EXPRESSIONS[name],
+        required=True,
+        status=status,
+        reason=reason,
+        selected_nodeids=nodes,
+        case_results=[
+            MatrixCaseResult(
+                nodeid=node, status=status, returncode=None, duration_seconds=0.0, reason=reason
+            )
+            for node in nodes
+        ],
+    )
+
+
+def _preflight_reason(prepared: PreparedRuntimeGate) -> str:
+    result = prepared.result
+    reasons = list(result.gate_problems)
+    reasons.extend(
+        collection.reason or f"{collection.name} collection {collection.status}"
+        for collection in result.collections
+        if collection.status != "PASS"
+    )
+    if not result.collections:
+        reasons.append("no collection result")
+    return "; ".join(reasons)
+
+
+def _unstarted_preparation(
+    mode: str, reason: str, *, interrupted: bool = False
+) -> PreparedRuntimeGate:
+    return PreparedRuntimeGate(
+        result=RuntimeGateResult(
+            mode=mode,
+            runtime={"pyboy_mode": "not-run"},
+            collections=[
+                CollectionResult(
+                    name="preflight",
+                    command=[],
+                    status="INTERRUPTED" if interrupted else "NOT_STARTED",
+                    returncode=130 if interrupted else None,
+                    reason=reason,
+                )
+            ],
+            fixture_manifest={"status": "NOT_STARTED", "mode": "not-run"},
+            matrix_audit={"status": "NOT_STARTED"},
+            tiers=[],
+            gate_problems=[reason],
+        ),
+        environment={},
+        required_problems=[],
+    )
+
+
+def run_runtime_gate(
+    *,
+    mode: str,
+    project_root: Path,
+    python_executable: Path,
+    rom_root: Path,
+    fixture_root: Path,
+    expected_sha1: dict[Path, str],
+    assets: list[AssetRecord],
+    selected: Sequence[str],
+    required_tests_by_tier: dict[str, frozenset[tuple[str, str]]],
+    required_nodeids_by_tier: dict[str, frozenset[str]],
+    configuration_problems: Iterable[str] = (),
+    repeat: int = 5,
+    timeout_override: float | None = None,
+    matrix_workers: int = DEFAULT_MATRIX_WORKERS,
+    matrix_timeout_override: float | None = None,
+    raw_output_directory: Path | None = None,
+) -> RuntimeGateResult:
+    """Run a selected single-runtime scope, retaining its existing tier order."""
+
+    try:
+        prepared = prepare_runtime_gate(
+            mode=mode,
+            project_root=project_root,
+            python_executable=python_executable,
+            rom_root=rom_root,
+            fixture_root=fixture_root,
+            expected_sha1=expected_sha1,
+            assets=assets,
+            selected=selected,
+            required_tests_by_tier=required_tests_by_tier,
+            required_nodeids_by_tier=required_nodeids_by_tier,
+            configuration_problems=configuration_problems,
+            timeout_override=timeout_override,
+            raw_output_directory=raw_output_directory,
+        )
+    except KeyboardInterrupt:
+        prepared = _unstarted_preparation(
+            mode,
+            f"{mode} preflight interrupted",
+            interrupted=True,
+        )
+    stop_reason = (
+        f"not started after {mode} preflight was interrupted"
+        if any(item.status == "INTERRUPTED" for item in prepared.result.collections)
+        else ""
+    )
+    for name in selected:
+        if stop_reason:
+            prepared.result.tiers.append(
+                _unrun_tier(
+                    name,
+                    stop_reason,
+                    required_nodeids_by_tier.get(name, ()),
                 )
             )
-
-    return RuntimeGateResult(
-        mode=mode,
-        runtime=runtime,
-        collections=collections,
-        fixture_manifest=fixture_manifest,
-        matrix_audit=matrix_audit,
-        tiers=tiers,
-        gate_problems=gate_problems,
-    )
+            continue
+        if name in OPTIONAL_TIERS:
+            reason = _optional_preflight_reason(name, assets)
+            if reason:
+                prepared.result.tiers.append(synthetic_optional_skip(name, reason))
+                continue
+        prepared.result.tiers.append(
+            run_prepared_tier(
+                prepared=prepared,
+                name=name,
+                project_root=project_root,
+                python_executable=python_executable,
+                required_tests_by_tier=required_tests_by_tier,
+                required_nodeids_by_tier=required_nodeids_by_tier,
+                repeat=repeat,
+                timeout_override=timeout_override,
+                matrix_workers=matrix_workers,
+                matrix_timeout_override=matrix_timeout_override,
+                raw_output_directory=raw_output_directory,
+            )
+        )
+        if prepared.result.tiers[-1].status == "INTERRUPTED":
+            stop_reason = f"not started after {mode} {name} INTERRUPTED"
+    return prepared.result
 
 
 def run_runtime_gates(
@@ -3173,49 +3549,154 @@ def run_runtime_gates(
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
+    early_smoke: bool = False,
+    fail_fast: bool = False,
 ) -> tuple[RuntimeGateResult, ...]:
-    """Run identical selected tiers for each runtime named by the CLI.
+    """Execute one declared plan without borrowing results from another run.
 
-    ``--python`` remains the source-runtime interpreter and the interpreter
-    used by single-runtime invocations.  A dual gate may provide a separate
-    ``--cython-python`` environment so source-mode packaging checks do not see
-    metadata left by a native PyBoy installation.  When it is omitted, retain
-    the historical one-interpreter behavior; the source child still has its
-    explicit source import environment and the gate remains fail-closed if
-    that environment violates the packaging contract.
+    Full CLI gates probe both runtimes and run both additional smokes before
+    long tiers. A smoke failure still permits the other runtime's smoke, so a
+    source failure cannot hide native status. The original qualification rows
+    remain required and run separately; smoke passes do not replace them.
     """
 
-    configuration_problems = tuple(configuration_problems)
+    modes = runtime_modes_for_gate(runtime_mode)
+    selected = tuple(selected)
+    plan = build_execution_plan(modes, selected, early_smoke=early_smoke, fail_fast=fail_fast)
     python_by_mode = {
         "source": python_executable,
         "cython": cython_python_executable or python_executable,
     }
-    return tuple(
-        run_runtime_gate(
-            mode=mode,
-            project_root=project_root,
-            python_executable=python_by_mode[mode],
-            rom_root=rom_root,
-            fixture_root=fixture_root,
-            expected_sha1=expected_sha1,
-            assets=assets,
-            selected=selected,
-            required_tests_by_tier=required_tests_by_tier,
-            required_nodeids_by_tier=required_nodeids_by_tier,
-            configuration_problems=configuration_problems,
-            repeat=repeat,
-            timeout_override=timeout_override,
-            matrix_workers=matrix_workers,
-            matrix_timeout_override=matrix_timeout_override,
-            raw_output_directory=raw_output_directory,
-        )
-        for mode in runtime_modes_for_gate(runtime_mode)
-    )
+    preparation_arguments = {
+        "project_root": project_root,
+        "rom_root": rom_root,
+        "fixture_root": fixture_root,
+        "expected_sha1": expected_sha1,
+        "assets": assets,
+        "selected": selected,
+        "required_tests_by_tier": required_tests_by_tier,
+        "required_nodeids_by_tier": required_nodeids_by_tier,
+        "configuration_problems": tuple(configuration_problems),
+        "timeout_override": timeout_override,
+        "raw_output_directory": raw_output_directory,
+    }
+    execution_arguments = {
+        "project_root": project_root,
+        "required_tests_by_tier": required_tests_by_tier,
+        "required_nodeids_by_tier": required_nodeids_by_tier,
+        "repeat": repeat,
+        "timeout_override": timeout_override,
+        "matrix_workers": matrix_workers,
+        "matrix_timeout_override": matrix_timeout_override,
+        "raw_output_directory": raw_output_directory,
+    }
+    if not early_smoke and not fail_fast and selected != ("smoke",):
+        results = []
+        cancel_reason = ""
+        for mode in modes:
+            if cancel_reason:
+                result = _unstarted_preparation(mode, cancel_reason).result
+                result.tiers = [
+                    _unrun_tier(name, cancel_reason, required_nodeids_by_tier.get(name, ()))
+                    for name in selected
+                ]
+            else:
+                result = run_runtime_gate(
+                    mode=mode,
+                    python_executable=python_by_mode[mode],
+                    **preparation_arguments,
+                    repeat=repeat,
+                    matrix_workers=matrix_workers,
+                    matrix_timeout_override=matrix_timeout_override,
+                )
+                if any(tier.status == "INTERRUPTED" for tier in result.tiers) or any(
+                    item.status == "INTERRUPTED" for item in result.collections
+                ):
+                    cancel_reason = f"not started after {mode} was interrupted"
+            result.execution_plan = plan
+            results.append(result)
+        return tuple(results)
+
+    prepared_runtimes: list[PreparedRuntimeGate] = []
+    stop_reason = ""
+    cancel_reason = ""
+    for mode in modes:
+        if cancel_reason:
+            prepared = _unstarted_preparation(mode, cancel_reason)
+        else:
+            try:
+                prepared = prepare_runtime_gate(
+                    mode=mode,
+                    python_executable=python_by_mode[mode],
+                    **preparation_arguments,
+                )
+            except KeyboardInterrupt:
+                prepared = _unstarted_preparation(
+                    mode,
+                    f"{mode} preflight interrupted",
+                    interrupted=True,
+                )
+        if any(item.status == "INTERRUPTED" for item in prepared.result.collections):
+            cancel_reason = stop_reason = f"not started after {mode} preflight was interrupted"
+        prepared.result.execution_plan = plan
+        prepared_runtimes.append(prepared)
+        if early_smoke or selected == ("smoke",):
+            reason = _preflight_reason(prepared)
+            smoke = (
+                _unrun_tier("smoke", reason, status="NOT_STARTED" if cancel_reason else "BLOCKED")
+                if reason
+                else run_prepared_tier(
+                    prepared=prepared,
+                    name="smoke",
+                    python_executable=python_by_mode[mode],
+                    **execution_arguments,
+                )
+            )
+            prepared.result.tiers.append(smoke)
+            if smoke.status == "INTERRUPTED":
+                cancel_reason = stop_reason = f"not started after {mode} smoke INTERRUPTED"
+            if fail_fast and smoke.status != "PASS" and not stop_reason:
+                stop_reason = f"not started after {mode} smoke {smoke.status}"
+
+    if selected == ("smoke",):
+        return tuple(prepared.result for prepared in prepared_runtimes)
+
+    for prepared in prepared_runtimes:
+        mode = prepared.result.mode
+        preflight_reason = _preflight_reason(prepared)
+        for name in selected:
+            if stop_reason or preflight_reason:
+                tier = _unrun_tier(
+                    name,
+                    stop_reason or f"{mode} preflight failed: {preflight_reason}",
+                    required_nodeids_by_tier.get(name, ()),
+                )
+            else:
+                tier = run_prepared_tier(
+                    prepared=prepared,
+                    name=name,
+                    python_executable=python_by_mode[mode],
+                    **execution_arguments,
+                )
+            prepared.result.tiers.append(tier)
+            if tier.status == "INTERRUPTED":
+                stop_reason = f"not started after {mode} {name} INTERRUPTED"
+            if fail_fast and tier.status != "PASS" and not stop_reason:
+                stop_reason = f"not started after {mode} {name} {tier.status}"
+    return tuple(prepared.result for prepared in prepared_runtimes)
 
 
 def runtime_gate_passes(result: RuntimeGateResult) -> bool:
     """Return whether one runtime result satisfies every existing gate rule."""
 
+    if result.execution_plan:
+        if not _valid_execution_plan(result.execution_plan):
+            return False
+        expected = [
+            step["tier"] for step in result.execution_plan["steps"] if step["mode"] == result.mode
+        ]
+        if [tier.name for tier in result.tiers] != expected:
+            return False
     tier_ok = all(
         tier.status == "PASS" if tier.required else tier.status in {"PASS", "SKIP"}
         for tier in result.tiers
@@ -3234,6 +3715,14 @@ def runtime_gates_pass(results: Iterable[RuntimeGateResult]) -> bool:
     """Aggregate runtime results fail-closed, including an empty result set."""
 
     result_list = tuple(results)
+    plans = [result.execution_plan for result in result_list if result.execution_plan]
+    if plans and (
+        len(plans) != len(result_list)
+        or any(not _valid_execution_plan(plan) for plan in plans)
+        or any(plan != plans[0] for plan in plans)
+        or [result.mode for result in result_list] != plans[0].get("runtime_modes")
+    ):
+        return False
     return bool(result_list) and all(runtime_gate_passes(result) for result in result_list)
 
 
@@ -3258,6 +3747,7 @@ def render_text(
     overall: str,
     fixture_manifest: dict[str, Any] | None = None,
     matrix_audit: dict[str, Any] | None = None,
+    execution_plan: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         "Pokémon harness production gate",
@@ -3347,6 +3837,8 @@ def render_text(
         if matrix_audit.get("reason"):
             lines.append(f"  reason: {matrix_audit['reason']}")
 
+    if execution_plan:
+        lines.extend(_execution_plan_lines(execution_plan))
     lines.append("tiers:")
     for tier in tiers:
         lines.append(
@@ -3372,7 +3864,7 @@ def render_text(
             )
             if case.reason:
                 lines.append(f"      reason: {case.reason}")
-        if tier.status in {"FAIL", "BLOCKED"} and tier.output_tail:
+        if tier.status in {"FAIL", "BLOCKED", "INTERRUPTED"} and tier.output_tail:
             lines.append("    output tail:")
             lines.extend(f"      {line}" for line in tier.output_tail.splitlines()[-60:])
     lines.append(f"overall: {overall}")
@@ -3428,6 +3920,7 @@ def render_dual_text(
             overall=status,
             fixture_manifest=result.fixture_manifest,
             matrix_audit=result.matrix_audit,
+            execution_plan=result.execution_plan,
         )
         lines.extend(f"    {line}" for line in detail.splitlines()[4:])
     lines.append(f"overall: {overall}")
@@ -3452,6 +3945,7 @@ def _runtime_result_json(result: RuntimeGateResult) -> dict[str, Any]:
         "tiers": [_jsonable_tier(tier) for tier in result.tiers],
         "gate_problems": result.gate_problems,
         "overall": "PASS" if runtime_gate_passes(result) else "FAIL",
+        **({"execution_plan": result.execution_plan} if result.execution_plan else {}),
     }
 
 
@@ -3784,6 +4278,7 @@ def build_evidence_payload(
     evidence_error: str = "",
     fixture_manifest: dict[str, Any] | None = None,
     matrix_audit: dict[str, Any] | None = None,
+    execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the sanitized, metadata-only payload retained by the gate.
 
@@ -3822,6 +4317,8 @@ def build_evidence_payload(
         payload["fixture_manifest"] = _safe_fixture_manifest(fixture_manifest)
     if matrix_audit is not None:
         payload["matrix_audit"] = _safe_matrix_audit(matrix_audit)
+    if execution_plan:
+        payload["execution_plan"] = _safe_execution_plan(execution_plan)
     if evidence_error:
         payload["evidence_error"] = _safe_diagnostic(
             evidence_error, roots, replacements=replacements, limit=2000
@@ -3865,6 +4362,11 @@ def build_dual_evidence_payload(
                     for problem in result.gate_problems
                 ],
                 "overall": "PASS" if runtime_gate_passes(result) else "FAIL",
+                **(
+                    {"execution_plan": _safe_execution_plan(result.execution_plan)}
+                    if result.execution_plan
+                    else {}
+                ),
             }
         )
 
@@ -3932,6 +4434,7 @@ def _render_dual_evidence_text(payload: dict[str, Any]) -> str:
             "matrix_audit": result.get("matrix_audit"),
             "tiers": result.get("tiers", []),
             "gate_problems": result.get("gate_problems", []),
+            "execution_plan": result.get("execution_plan", {}),
             "safety": {},
         }
         child_lines = render_evidence_text(child_payload).rstrip("\n").splitlines()
@@ -4042,6 +4545,8 @@ def render_evidence_text(payload: dict[str, Any]) -> str:
                         f"  {name}: {group.get('present', 0)}/{group.get('expected', 0)} collected"
                     )
 
+    if payload.get("execution_plan"):
+        lines.extend(_execution_plan_lines(payload["execution_plan"]))
     lines.append("tiers:")
     for tier in payload.get("tiers", []):
         lines.append(
@@ -4248,6 +4753,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the ROM-free unit tier and its fivefold timing regression",
     )
     parser.add_argument(
+        "--smoke-only",
+        action="store_true",
+        help=(
+            "run runtime/import checks, public MCP lifecycle and nine timed ROM "
+            "orientations only; requires pinned assets and does not qualify gameplay"
+        ),
+    )
+    stopping = parser.add_mutually_exclusive_group()
+    stopping.add_argument(
+        "--fail-fast",
+        dest="fail_fast",
+        action="store_true",
+        default=None,
+        help="stop dispatching long tiers after a failure (default for the complete gate)",
+    )
+    stopping.add_argument(
+        "--keep-going",
+        dest="fail_fast",
+        action="store_false",
+        help="continue selected tiers after failures, retaining every failure",
+    )
+    parser.add_argument(
         "--repeat-timing",
         type=int,
         default=5,
@@ -4325,6 +4852,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--matrix-timeout-seconds must be positive")
     if args.unit_only and args.tier:
         parser.error("--unit-only cannot be combined with --tier")
+    if args.smoke_only and (args.unit_only or args.tier):
+        parser.error("--smoke-only cannot be combined with --unit-only or --tier")
     if args.cython_python_executable is not None and args.runtime_mode != "both":
         parser.error("--cython-python requires --runtime-mode both")
 
@@ -4338,7 +4867,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             raw_output_directory.mkdir(mode=0o700, parents=True, exist_ok=False)
         except OSError as exc:
-            parser.error(f"--raw-output-dir requires a new writable directory: {type(exc).__name__}")
+            parser.error(
+                f"--raw-output-dir requires a new writable directory: {type(exc).__name__}"
+            )
 
     project_root = args.repo_root.expanduser().resolve()
     # Do not call ``resolve()`` here: POSIX virtualenv interpreters are often
@@ -4362,7 +4893,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if nodeid_config_error:
         configuration_problems.append(nodeid_config_error)
 
-    if args.unit_only:
+    early_smoke = not (args.unit_only or args.tier or args.smoke_only)
+    fail_fast = early_smoke if args.fail_fast is None else args.fail_fast
+    if args.smoke_only:
+        selected = ["smoke"]
+    elif args.unit_only:
         selected = ["unit", "timing"]
     elif args.tier:
         selected = list(dict.fromkeys(args.tier))
@@ -4386,9 +4921,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         matrix_workers=args.matrix_workers,
         matrix_timeout_override=args.matrix_timeout_seconds,
         raw_output_directory=raw_output_directory,
+        early_smoke=early_smoke,
+        fail_fast=fail_fast,
     )
 
-    dual_runtime = len(runtime_results) > 1
+    expected_modes = runtime_modes_for_gate(args.runtime_mode)
+    observed_modes = tuple(result.mode for result in runtime_results)
+    if observed_modes != expected_modes:
+        reason = (
+            "runtime execution results do not match the requested modes: "
+            f"expected={','.join(expected_modes)} observed={','.join(observed_modes) or 'none'}"
+        )
+        results = list(runtime_results)
+        plan = build_execution_plan(
+            expected_modes, selected, early_smoke=early_smoke, fail_fast=fail_fast
+        )
+        for mode in expected_modes:
+            if mode not in observed_modes:
+                missing = _unstarted_preparation(mode, reason).result
+                missing.execution_plan = plan
+                missing.tiers = [
+                    _unrun_tier(
+                        step["tier"],
+                        reason,
+                        required_nodeids_by_tier.get(step["tier"], ()),
+                    )
+                    for step in plan["steps"]
+                    if step["mode"] == mode
+                ]
+                results.append(missing)
+        for result in results:
+            if reason not in result.gate_problems:
+                result.gate_problems.append(reason)
+        runtime_results = tuple(
+            sorted(
+                results,
+                key=lambda result: (
+                    expected_modes.index(result.mode)
+                    if result.mode in expected_modes
+                    else len(expected_modes)
+                ),
+            )
+        )
+    dual_runtime = len(expected_modes) > 1 or len(runtime_results) > 1
     if not dual_runtime:
         result = runtime_results[0]
         runtime = result.runtime
@@ -4438,6 +5013,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 overall=overall,
                 fixture_manifest=fixture_manifest,
                 matrix_audit=matrix_audit,
+                execution_plan=runtime_results[0].execution_plan,
             )
         try:
             write_evidence_bundle(evidence_dir, evidence_payload)
@@ -4473,6 +5049,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "overall": overall,
                 "fixture_manifest": fixture_manifest,
                 "matrix_audit": matrix_audit,
+                **(
+                    {"execution_plan": runtime_results[0].execution_plan}
+                    if runtime_results[0].execution_plan
+                    else {}
+                ),
             }
         if evidence_error:
             payload["evidence_error"] = evidence_error
@@ -4500,8 +5081,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 overall=overall,
                 fixture_manifest=fixture_manifest,
                 matrix_audit=matrix_audit,
+                execution_plan=runtime_results[0].execution_plan,
             )
         print(output)
+    if any(
+        tier.status == "INTERRUPTED" for result in runtime_results for tier in result.tiers
+    ) or any(
+        collection.status == "INTERRUPTED"
+        for result in runtime_results
+        for collection in result.collections
+    ):
+        return 130
     return 0 if overall == "PASS" else 1
 
 

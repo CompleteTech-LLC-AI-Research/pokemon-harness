@@ -74,6 +74,7 @@ UNIT_MODULES = frozenset(
         "test_execution_adapter.py",
         "test_fixture_provenance.py",
         "test_game_state.py",
+        "test_gate_early_smoke.py",
         "test_gate_failure_retention.py",
         "test_link_orchestrator.py",
         "test_link_pair.py",

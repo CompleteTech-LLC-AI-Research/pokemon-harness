@@ -2673,9 +2673,7 @@ def raw_pytest_output(monkeypatch):
             report_path.write_text(json.dumps(payload), encoding="utf-8")
             self.output = (
                 f"BEGIN {env.get('runtime_mode', 'source')} {report_path.stem}\n"
-                "token=private-capture-secret\n"
-                + "complete captured line\n" * 600
-                + "END\n"
+                "token=private-capture-secret\n" + "complete captured line\n" * 600 + "END\n"
             )
             outputs[(env.get("runtime_mode", "source"), report_path.stem)] = self.output
 
@@ -2690,18 +2688,21 @@ def test_dual_gate_retains_complete_private_logs_and_sanitized_evidence(
     tmp_path, monkeypatch, capsys, raw_pytest_output
 ):
     monkeypatch.setattr(
-        gate, "build_test_environment",
+        gate,
+        "build_test_environment",
         lambda *args, runtime_mode: {"runtime_mode": runtime_mode},
     )
     monkeypatch.setattr(
-        gate, "probe_runtime",
+        gate,
+        "probe_runtime",
         lambda _python, _root, env: {"pyboy_mode": env["runtime_mode"]},
     )
     monkeypatch.setattr(gate, "runtime_problems", lambda *args, **kwargs: [])
     monkeypatch.setattr(gate, "environment_policy_problems", lambda **kwargs: [])
     monkeypatch.setattr(gate, "_pytest_console_script", lambda path: path.parent / "pytest")
     monkeypatch.setattr(
-        gate, "run_fixture_manifest_validation",
+        gate,
+        "run_fixture_manifest_validation",
         lambda **kwargs: {"status": "PASS", "mode": "schema"},
     )
     monkeypatch.setattr(gate, "run_matrix_collection_audit", lambda **kwargs: {"status": "PASS"})
@@ -2709,9 +2710,12 @@ def test_dual_gate_retains_complete_private_logs_and_sanitized_evidence(
     evidence_directory = tmp_path / "evidence"
     args = _patch_main_inputs(monkeypatch, tmp_path)
     args += [
-        "--runtime-mode", "both",
-        "--raw-output-dir", str(raw_directory),
-        "--evidence-dir", str(evidence_directory),
+        "--runtime-mode",
+        "both",
+        "--raw-output-dir",
+        str(raw_directory),
+        "--evidence-dir",
+        str(evidence_directory),
     ]
 
     assert gate.main(args) == 1
@@ -2744,18 +2748,22 @@ def test_dual_gate_retains_complete_private_logs_and_sanitized_evidence(
     gate.verify_evidence_bundle(evidence_directory)
 
 
-def test_raw_output_collision_preserves_old_log_and_fails_passing_tier(
-    tmp_path, raw_pytest_output
-):
+def test_raw_output_collision_preserves_old_log_and_fails_passing_tier(tmp_path, raw_pytest_output):
     raw_directory = tmp_path / "private-output"
     raw_directory.mkdir()
     retained = raw_directory / "unit-1.log"
     retained.write_text("earlier evidence", encoding="utf-8")
 
     result = gate.run_tier(
-        name="unit", project_root=tmp_path, python_executable=Path("python"),
-        environment={}, required_problems=[], repeat=1, timeout_override=1,
-        report_directory=tmp_path, raw_output_directory=raw_directory,
+        name="unit",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+        raw_output_directory=raw_directory,
     )
 
     assert result.status == "FAIL"
@@ -2790,9 +2798,15 @@ def test_matrix_raw_output_keeps_complete_passed_row_or_reports_collision(
         raw_directory.mkdir()
         retained.write_text("earlier evidence", encoding="utf-8")
     result = gate.run_tier(
-        name="trade", project_root=tmp_path, python_executable=Path("python"),
-        environment={}, required_problems=[], repeat=1, timeout_override=1,
-        report_directory=tmp_path, required_nodeids=(nodeid,),
+        name="trade",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=1,
+        timeout_override=1,
+        report_directory=tmp_path,
+        required_nodeids=(nodeid,),
         raw_output_directory=raw_directory,
     )
 
@@ -2819,8 +2833,11 @@ def test_collection_timeout_retains_complete_captured_output(tmp_path, monkeypat
     monkeypatch.setattr(gate, "_terminate_process", lambda process: None)
     monkeypatch.setattr(gate, "_communicate_after_termination", lambda process: output)
     result = gate._run_collection_command(
-        name="python-module", command=["python", "-m", "pytest"],
-        project_root=tmp_path, environment={}, timeout_seconds=1,
+        name="python-module",
+        command=["python", "-m", "pytest"],
+        project_root=tmp_path,
+        environment={},
+        timeout_seconds=1,
         report_path=tmp_path / "collection.json",
         raw_output_directory=tmp_path / "private-output",
     )
