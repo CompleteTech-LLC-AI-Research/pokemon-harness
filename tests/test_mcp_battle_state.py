@@ -11,6 +11,7 @@ separate, unclaimed gate.
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -125,22 +126,32 @@ def test_phase_inactive_when_battle_flag_is_zero(mem, symbols):
     assert state.phase_evidence == ("wIsInBattle",)
 
 
-def test_phase_intro_when_active_and_every_transient_flag_is_clear():
+def test_phase_all_clear_evidence_is_unknown_not_intro():
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 2
     state = parse_battle(mem, sym)
-    assert state.phase is BattlePhase.INTRO
-    assert state.phase_valid is True
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
     assert state.phase_evidence[0] == "wIsInBattle"
-    assert _TRANSIENT_SYMBOLS <= set(state.phase_evidence)
+    assert set(_TRANSIENT_SYMBOLS) <= set(state.phase_evidence)
+
+
+def test_phase_regular_menu_mode_is_not_command_selection():
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 1
+    mem[0xC003] = 0  # wMoveMenuType: regular-mode default, menu may be closed
+    state = parse_battle(mem, sym)
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
 
 
 def test_phase_command_selection_when_move_menu_is_open():
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 1
-    mem[0xC003] = 1  # wMoveMenuType
+    mem[0xC003] = 1  # wMoveMenuType: mimic mode
     state = parse_battle(mem, sym)
     assert state.phase is BattlePhase.COMMAND_SELECTION
     assert state.phase_valid is True
@@ -157,7 +168,7 @@ def test_phase_command_selection_corroborating_index_is_not_contradiction():
     assert state.phase_valid is True
 
 
-def test_phase_move_index_is_fallback_only_when_menu_byte_absent():
+def test_phase_move_index_absent_required_symbols_is_unknown():
     sym = load_sym_text(
         """
         00:C000 wIsInBattle
@@ -166,19 +177,19 @@ def test_phase_move_index_is_fallback_only_when_menu_byte_absent():
     )
     mem = DictMemory({0xC000: 1, 0xC004: 2})
     state = parse_battle(mem, sym)
-    assert state.phase is BattlePhase.COMMAND_SELECTION
-    assert state.phase_valid is True
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
 
 
-def test_phase_authoritative_clear_menu_flag_ignores_stale_move_index():
+def test_phase_regular_menu_flag_ignores_stale_move_index():
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 1
-    mem[0xC003] = 0  # wMoveMenuType: not in the move menu
+    mem[0xC003] = 0  # wMoveMenuType: regular-mode default
     mem[0xC004] = 3  # stale move-list index from an earlier menu
     state = parse_battle(mem, sym)
-    assert state.phase is BattlePhase.INTRO
-    assert state.phase_valid is True
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
 
 
 def test_phase_action_resolution_when_turn_was_consumed():
@@ -201,15 +212,38 @@ def test_phase_forced_replacement_when_player_faint_handler_is_set():
     assert state.phase_valid is True
 
 
-def test_phase_terminal_return_and_result():
+@pytest.mark.parametrize("result", [1, 2])
+def test_phase_terminal_return_for_valid_outcomes(result):
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 2
-    mem[0xC001] = 3  # wBattleResult
+    mem[0xC001] = result  # wBattleResult: lose / draw
     state = parse_battle(mem, sym)
     assert state.phase is BattlePhase.TERMINAL_RETURN
     assert state.phase_valid is True
-    assert state.terminal_result == 3
+    assert state.terminal_result == result
+
+
+def test_phase_zero_result_is_not_terminal_and_exposed_as_raw_value():
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 2
+    mem[0xC001] = 0  # wBattleResult: also the reset value, ambiguous
+    state = parse_battle(mem, sym)
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
+    assert state.terminal_result == 0
+
+
+def test_phase_invalid_result_is_not_terminal_and_not_exposed():
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 2
+    mem[0xC001] = 255  # wBattleResult: no engine writer emits this
+    state = parse_battle(mem, sym)
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
+    assert state.terminal_result is None
 
 
 @pytest.mark.parametrize(
@@ -398,10 +432,11 @@ def _session() -> Session:
 def test_game_state_resource_contains_additive_battle_fields():
     session = _session()
     session._pyboy.memory[0xC000] = 2  # trainer battle
+    session._pyboy.memory[0xC003] = 1  # wMoveMenuType: mimic selection
     _write_enemy(session._pyboy.memory)
     body = json.loads(read_resource(session, "pokered://game-state"))
     battle = body["battle"]
-    assert battle["phase"] == int(BattlePhase.INTRO)
+    assert battle["phase"] == int(BattlePhase.COMMAND_SELECTION)
     assert battle["phase_valid"] is True
     assert "wMoveMenuType" in battle["phase_evidence"]
     assert battle["enemy_mon_valid"] is True
@@ -413,9 +448,26 @@ def test_game_state_resource_contains_additive_battle_fields():
 
 def test_state_epoch_resource_tracks_session_tick():
     session = _session()
-    assert json.loads(read_resource(session, "pokered://state-epoch")) == {"tick": 0}
+    assert json.loads(read_resource(session, "pokered://state-epoch")) == {
+        "tick": 0,
+        "load_generation": 0,
+    }
     dispatch_tool(session, "step", {"count": 3})
-    assert json.loads(read_resource(session, "pokered://state-epoch")) == {"tick": 3}
+    assert json.loads(read_resource(session, "pokered://state-epoch")) == {
+        "tick": 3,
+        "load_generation": 0,
+    }
+
+
+def test_state_epoch_load_generation_advances_on_load_state():
+    session = _session()
+    dispatch_tool(session, "step", {"count": 5})
+    payload = base64.b64encode(b"SNAPSHOT").decode("ascii")
+    dispatch_tool(session, "load_state", {"data": payload})
+    assert json.loads(read_resource(session, "pokered://state-epoch")) == {
+        "tick": 5,
+        "load_generation": 1,
+    }
 
 
 def test_resource_specs_advertise_state_epoch():

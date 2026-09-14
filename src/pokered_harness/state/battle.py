@@ -10,10 +10,18 @@ module therefore derives a best-effort :class:`BattlePhase` candidate from
 ROM-owned observations (``wIsInBattle``, ``wMoveMenuType``,
 ``wPlayerMoveListIndex``, ``wActionResultOrTookBattleTurn``,
 ``wInHandlePlayerMonFainted`` and ``wBattleResult``).  The derivation fails
-closed: when the evidence is contradictory the phase is ``None``, when a
-required symbol is absent it is :attr:`BattlePhase.UNKNOWN`, and
-``phase_valid`` is ``False`` in both cases.  The exact symbols consulted are
-exposed through ``phase_evidence`` so callers can audit the decision.
+closed and only reports a valid phase when *every* required evidence symbol
+is present and the surviving signals agree.  Contradictory evidence yields
+``None``/``phase_valid=False``; missing evidence or an all-clear (but
+ambiguous) snapshot yields :attr:`BattlePhase.UNKNOWN`/``phase_valid=False``.
+The exact symbols consulted are exposed through ``phase_evidence``.
+
+The ambiguity is deliberate and documented in ``_derive_phase``: neither
+``wMoveMenuType == 0`` (the regular-mode default written before every
+``MoveSelectionMenu`` call) nor an all-zero flag block is positive evidence
+that a menu is open or that the intro animation is playing, so neither
+produces an observed phase.  :attr:`BattlePhase.INTRO` is retained for
+schema compatibility but is never derived from the available symbols.
 """
 
 from __future__ import annotations
@@ -57,9 +65,12 @@ class BattlePhase(IntEnum):
 
     pokered has no single authoritative sub-phase byte, so this is a
     candidate derived from several ROM-owned observations.  ``UNKNOWN``
-    means the battle is active but the required evidence symbols were not
-    all present; ``None`` means the evidence was contradictory or the
-    battle kind itself was not decodable.
+    means the battle is active but the available evidence was insufficient
+    to name a phase (a required symbol was absent, or every signal was
+    clear and therefore ambiguous); ``None`` means the evidence was
+    contradictory or the battle kind itself was not decodable.  ``INTRO``
+    is retained for schema compatibility but is never derived, because no
+    symbol proves the intro animation is playing.
     """
 
     INACTIVE = 0
@@ -72,7 +83,8 @@ class BattlePhase(IntEnum):
 
 
 # Symbols consulted to derive :class:`BattlePhase`.  ``wIsInBattle`` is
-# mandatory; the rest are ROM-owned flags.  Never hardcode their addresses.
+# mandatory; the rest are required ROM-owned evidence.  Never hardcode
+# their addresses.  If any is absent the phase is UNKNOWN (fail closed).
 _PHASE_TRANSIENT_SYMBOLS = (
     "wBattleResult",
     "wInHandlePlayerMonFainted",
@@ -80,6 +92,21 @@ _PHASE_TRANSIENT_SYMBOLS = (
     "wPlayerMoveListIndex",
     "wActionResultOrTookBattleTurn",
 )
+
+# Valid ``wBattleResult`` outcomes (engine/battle/end_of_battle.asm):
+# 0 player win, 1 player lose, 2 draw.  0 is also written at battle start
+# (init_battle_variables.asm) and at EnemyRan, so it is not terminal-only
+# evidence; values 3..255 have no engine writer and are rejected.
+_VALID_BATTLE_RESULTS = frozenset((0, 1, 2))
+
+# ``wMoveMenuType`` is a mode selector, not an open/closed flag: 0 is written
+# immediately before every regular ``MoveSelectionMenu`` call and is the
+# default/reset value, so it is ambiguous about whether a menu is open.  Modes
+# 1 (mimic, effects.asm) and 2 (relearn/PP, item_effects.asm) are written only
+# at call sites that invoke ``MoveSelectionMenu`` immediately afterward and are
+# never written by passive initialization, so they are positive evidence of
+# move selection.
+_MOVE_MENU_SELECTION_MODES = frozenset((1, 2))
 
 
 def _safe_enum(enum: type[IntEnum], value: int) -> IntEnum | None:
@@ -133,6 +160,7 @@ def parse_battle(memory: MemoryLike, symbols: SymbolTable) -> BattleState:
     kind = _safe_enum(BattleKind, raw)
     enemy_mon, enemy_mon_valid = _parse_enemy_mon(memory, symbols, kind=kind)
     phase, phase_valid, phase_evidence = _derive_phase(memory, symbols, raw=raw, kind=kind)
+    raw_battle_result = _opt(memory, symbols, "wBattleResult")
     return BattleState(
         kind=kind,  # type: ignore[arg-type]
         raw_is_in_battle=raw,
@@ -151,7 +179,11 @@ def parse_battle(memory: MemoryLike, symbols: SymbolTable) -> BattleState:
         phase=phase,
         phase_valid=phase_valid,
         phase_evidence=phase_evidence,
-        terminal_result=_opt(memory, symbols, "wBattleResult"),
+        terminal_result=(
+            raw_battle_result
+            if raw_battle_result in _VALID_BATTLE_RESULTS
+            else None
+        ),
     )
 
 
@@ -191,10 +223,24 @@ def _derive_phase(
 ) -> tuple[BattlePhase | None, bool, tuple[str, ...]]:
     """Derive a battle phase candidate from ROM-owned observations.
 
-    Returns ``(phase, phase_valid, evidence)``.  Contradictory flags yield
-    ``(None, False, evidence)``; a missing evidence symbol yields
-    ``(BattlePhase.UNKNOWN, False, evidence)``; an active battle whose
-    ``wIsInBattle`` value is not a known kind also yields ``None``.
+    Returns ``(phase, phase_valid, evidence)``.  The derivation fails closed:
+
+    * an inactive battle (``wIsInBattle == 0``) is ``INACTIVE``;
+    * an active battle whose ``wIsInBattle`` value is not a known kind is
+      ``None`` (undecodable);
+    * if any required evidence symbol is absent the result is
+      ``UNKNOWN``/``False`` and no observed phase is reported;
+    * two or more surviving signals yield ``None``/``False`` (contradiction);
+    * one surviving signal yields that phase with ``phase_valid=True``;
+    * no surviving signal yields ``UNKNOWN``/``False``.  An all-clear flag
+      block is *not* enough to claim ``INTRO``: absence of the other flags
+      does not prove the intro animation is playing.
+
+    ``wBattleResult`` is only terminal for the engine-written outcomes 1/2;
+    the reset value 0 is ambiguous and never emits ``TERMINAL_RETURN``.
+    ``wMoveMenuType`` only emits ``COMMAND_SELECTION`` for the non-default
+    selection modes 1/2; mode 0 is the regular-mode default and is ambiguous.
+    ``wPlayerMoveListIndex`` is required evidence but never sufficient alone.
     """
     if raw == 0:
         return BattlePhase.INACTIVE, True, ("wIsInBattle",)
@@ -202,39 +248,32 @@ def _derive_phase(
         return None, False, ("wIsInBattle",)
 
     evidence = ["wIsInBattle"]
+    if any(name not in symbols for name in _PHASE_TRANSIENT_SYMBOLS):
+        evidence.extend(
+            name for name in _PHASE_TRANSIENT_SYMBOLS if name in symbols
+        )
+        return BattlePhase.UNKNOWN, False, tuple(evidence)
+    evidence.extend(_PHASE_TRANSIENT_SYMBOLS)
 
-    def _flag(name: str) -> bool | None:
-        if name not in symbols:
-            return None
-        evidence.append(name)
-        return symbols.read_u8(memory, name) != 0
+    result = symbols.read_u8(memory, "wBattleResult")
+    forced = symbols.read_u8(memory, "wInHandlePlayerMonFainted") != 0
+    action = symbols.read_u8(memory, "wActionResultOrTookBattleTurn") != 0
+    menu = symbols.read_u8(memory, "wMoveMenuType")
 
-    terminal = _flag("wBattleResult")
-    forced = _flag("wInHandlePlayerMonFainted")
-    action = _flag("wActionResultOrTookBattleTurn")
-    menu = _flag("wMoveMenuType")
-    move_index = _flag("wPlayerMoveListIndex")
-
-    # Distinct candidate phases.  ``wMoveMenuType`` is authoritative for the
-    # command menu; the move-list index is a fallback only when the primary
-    # menu byte is unavailable.  Two signals for the same phase are not a
-    # contradiction.
     observed: set[BattlePhase] = set()
-    if terminal:
+    if result in _VALID_BATTLE_RESULTS and result != 0:
         observed.add(BattlePhase.TERMINAL_RETURN)
     if forced:
         observed.add(BattlePhase.FORCED_REPLACEMENT)
     if action:
         observed.add(BattlePhase.ACTION_RESOLUTION)
-    if menu is True or (menu is None and move_index is True):
+    if menu in _MOVE_MENU_SELECTION_MODES:
         observed.add(BattlePhase.COMMAND_SELECTION)
 
     if len(observed) > 1:
         return None, False, tuple(evidence)
     if observed:
         return next(iter(observed)), True, tuple(evidence)
-    if all(name in symbols for name in _PHASE_TRANSIENT_SYMBOLS):
-        return BattlePhase.INTRO, True, tuple(evidence)
     return BattlePhase.UNKNOWN, False, tuple(evidence)
 
 

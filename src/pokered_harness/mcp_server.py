@@ -2864,8 +2864,15 @@ def read_resource(
     if uri == _URI_STATE_EPOCH:
         # Read-only session bookkeeping: lets a client pair a game-state
         # snapshot with a monotonic tick and reject a stale observation after
-        # a later step/load without touching emulator state.
-        return json.dumps({"tick": session.current_tick()})
+        # a later step/load without touching emulator state.  The monotonic
+        # load_generation advances on every load_state, which the tick does
+        # not, so a rewound state is still detectable.
+        return json.dumps(
+            {
+                "tick": session.current_tick(),
+                "load_generation": session.current_load_generation(),
+            }
+        )
     if uri == _URI_EVENT_LOG:
         events: list[GameEvent] = session.event_snapshot()
         return json.dumps([to_jsonable(e) for e in events])
@@ -2907,8 +2914,11 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
             uri=_URI_STATE_EPOCH,  # type: ignore[arg-type]
             name="State Epoch",
             description=(
-                "Monotonic session tick paired with `pokered://game-state`. "
-                "Compare successive reads to reject stale snapshots."
+                "Monotonic session tick plus load generation paired with "
+                "`pokered://game-state`. The tick advances with stepping; the "
+                "load generation advances on every `load_state`, so a rewound "
+                "state remains detectable. Compare successive reads to reject "
+                "stale snapshots."
             ),
             mimeType="application/json",
         ),

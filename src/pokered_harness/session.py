@@ -173,6 +173,7 @@ class Session:
         # bus is falsy and ``event_bus or EventBus()`` would drop it.
         self._events = event_bus if event_bus is not None else EventBus()
         self._tick: int = 0
+        self._load_generation: int = 0
         # The owner registry is shared with raw link providers.  Keep the
         # Session-facing ``_lock`` property below for compatibility with
         # existing tests/instrumentation, but make the owner lock the one
@@ -761,6 +762,16 @@ class Session:
         with self._emulator_access(allow_closed=True):
             return self._tick
 
+    def current_load_generation(self) -> int:
+        """Monotonic count of successful ``load_state`` calls.
+
+        Unlike :meth:`current_tick`, this counter is not restored by a
+        ``load_state``; callers can pair it with a game-state snapshot to
+        detect that the emulated clock was rewound by a state load.
+        """
+        with self._emulator_access(allow_closed=True):
+            return self._load_generation
+
     @property
     def events(self) -> EventBus:
         return self._events
@@ -1222,7 +1233,10 @@ class Session:
             self._pyboy.load_state(BytesIO(payload))
             # After load_state the emulated clock has been restored, but our
             # external tick counter is just bookkeeping — callers can reset
-            # it via reset_tick if they care about matching exactly.
+            # it via reset_tick if they care about matching exactly.  The
+            # monotonic load-generation counter always advances so callers
+            # can detect that a load happened even when the tick repeats.
+            self._load_generation += 1
 
     def reset_tick(self, value: int = 0) -> None:
         if self._timed_endpoint is not None:
