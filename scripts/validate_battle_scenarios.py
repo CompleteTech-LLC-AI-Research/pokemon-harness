@@ -361,6 +361,32 @@ def _validate_cross_references(scenarios: list[dict[str, Any]], manifest: dict[s
     _require(not missing, f"catalog is missing manifest fixtures: {', '.join(missing)}")
 
 
+def _validate_coverage_dimension(document: dict[str, Any]) -> None:
+    """Validate the additive coverage/effects dimension.
+
+    The #87 scenario contract remains the primary shape check. The coverage
+    catalog is validated here too so a release run cannot silently accept an
+    incomplete or self-contradictory coverage declaration. Import the shared
+    validator by path when this module is executed as a standalone script.
+    """
+    try:
+        from scripts import coverage_report
+    except ModuleNotFoundError:
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "coverage_report.py"
+        spec = importlib.util.spec_from_file_location("_coverage_report", path)
+        if spec is None or spec.loader is None:
+            raise _error("could not load the coverage report validator") from None
+        coverage_report = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = coverage_report
+        spec.loader.exec_module(coverage_report)
+    try:
+        coverage_report.validate_catalog(document)
+    except ValueError as exc:
+        raise _error(f"coverage dimension is invalid: {exc}") from exc
+
+
 def _validate_schema(document: dict[str, Any], manifest: dict[str, Any]) -> list[dict[str, Any]]:
     _require(
         document.get("catalog_id") == "pokered-harness.battle-scenarios",
@@ -385,6 +411,7 @@ def _validate_schema(document: dict[str, Any], manifest: dict[str, Any]) -> list
         seen_ids.add(scenario_id)
 
     _validate_cross_references(scenarios, manifest)
+    _validate_coverage_dimension(document)
     return scenarios
 
 

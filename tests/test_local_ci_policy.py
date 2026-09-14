@@ -69,6 +69,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     # prefixes, so a local run cannot silently lint a smaller set.
     workflow_paths = (
         "scripts/bootstrap_pyboy.py",
+        "scripts/coverage_report.py",
         "scripts/network_concurrency_probe.py",
         "scripts/produce_battle_scenario.py",
         "scripts/production_gate.py",
@@ -81,6 +82,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "tests/_rom_assets.py",
         "tests/_tier_config.py",
         "tests/conftest.py",
+        "tests/test_battle_coverage.py",
         "tests/test_battle_scenario_fixtures.py",
         "tests/test_fixture_provenance.py",
         "tests/test_production_gate.py",
