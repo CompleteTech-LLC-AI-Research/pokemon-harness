@@ -149,6 +149,7 @@ python -m ruff check \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
+    tests/test_party_record_audit.py \
     tests/test_production_gate.py \
     tests/test_runtime_packaging.py
 python -m ruff format --check \
@@ -168,6 +169,7 @@ python -m ruff format --check \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
+    tests/test_party_record_audit.py \
     tests/test_production_gate.py \
     tests/test_runtime_packaging.py
 

@@ -176,6 +176,7 @@ _URI_EVENT_LOG = "pokered://events"
 _URI_PEER_GAME_STATE = "pokered://peer-game-state"
 _URI_LINK_TRANSPORT = "pokered://link-transport"
 _URI_LINK_STATUS = "pokered://link-status"
+_URI_PARTY_RECORDS = "pokered://party-records"
 
 
 # -- server state container --------------------------------------------------
@@ -2860,6 +2861,11 @@ def read_resource(
         return timed_owner.submit(lambda owned: read_resource(owned, uri, link)).result()
     if uri == _URI_GAME_STATE:
         return json.dumps(to_jsonable(session.read_game_state()))
+    if uri == _URI_PARTY_RECORDS:
+        # Bounded, read-only projection: per-slot record SHA-256 digests plus
+        # the sanitized species/level needed to interpret them.  Raw record
+        # bytes and absolute paths are deliberately never serialized.
+        return json.dumps(session.read_party_records().to_resource_payload())
     if uri == _URI_EVENT_LOG:
         events: list[GameEvent] = session.event_snapshot()
         return json.dumps([to_jsonable(e) for e in events])
@@ -2910,6 +2916,16 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
                 "Current link-cable state (in-process pair + remote TCP "
                 "link). Equivalent to the `link_status` tool as a pollable "
                 "resource."
+            ),
+            mimeType="application/json",
+        ),
+        mcp_types.Resource(
+            uri=_URI_PARTY_RECORDS,  # type: ignore[arg-type]
+            name="Party Records",
+            description=(
+                "Read-only per-slot SHA-256 digests of the raw 44-byte "
+                "party_struct records, plus sanitized species/level fields "
+                "for interpretation. Observational only; no raw bytes."
             ),
             mimeType="application/json",
         ),

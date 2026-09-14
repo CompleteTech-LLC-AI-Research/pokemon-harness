@@ -684,7 +684,9 @@ The single-session server exposes tools for:
 - stepping frames and pressing, holding, or releasing buttons;
 - saving and loading base64-encoded emulator state;
 - waiting for named hook events; and
-- reading parsed game state and the event log as resources.
+- reading parsed game state, the event log, and read-only per-slot 44-byte
+  party-record SHA-256 digests (`pokered://party-records`) as resources. The
+  digest resource is observational only and does not assert a completed trade.
 
 When a peer session is configured with `POKERED_PEER_*` variables, the
 link-related tools are also exposed. The peer is constructed at startup but
