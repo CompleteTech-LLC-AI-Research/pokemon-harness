@@ -357,6 +357,26 @@ def _validate_cross_references(scenarios: list[dict[str, Any]], manifest: dict[s
             f"{prefix}.game symbol pin disagrees with the manifest for {fixture_id}",
         )
 
+        provenance = scenario["provenance"]
+        source_fixture_id = provenance.get("source_fixture_id")
+        input_fixture_sha1 = provenance.get("input_fixture_sha1")
+        if source_fixture_id is not None:
+            _require(
+                source_fixture_id in manifest_by_id,
+                f"{prefix}.provenance.source_fixture_id is not in the manifest",
+            )
+            manifest_source = manifest_by_id[source_fixture_id]
+            _require(
+                input_fixture_sha1 == manifest_source["sha1"],
+                f"{prefix}.provenance.input_fixture_sha1 disagrees with manifest fixture "
+                f"{source_fixture_id}",
+            )
+        else:
+            _require(
+                input_fixture_sha1 is None,
+                f"{prefix}.provenance.input_fixture_sha1 requires a source_fixture_id",
+            )
+
     missing = sorted(set(manifest_by_id) - referenced)
     _require(not missing, f"catalog is missing manifest fixtures: {', '.join(missing)}")
 

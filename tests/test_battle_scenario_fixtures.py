@@ -214,6 +214,22 @@ def test_catalog_cross_reference_rejects_unknown_and_missing_fixtures() -> None:
         validator._validate_schema(catalog, _load_manifest())
 
 
+def test_catalog_cross_reference_rejects_unknown_source_fixture() -> None:
+    catalog = copy.deepcopy(_load_catalog())
+    scenario = _scenario(catalog, "red_color_battle")
+    scenario["provenance"]["source_fixture_id"] = "not-a-real-fixture"
+    with pytest.raises(ValueError, match="source_fixture_id is not in the manifest"):
+        validator._validate_schema(catalog, _load_manifest())
+
+
+def test_catalog_cross_reference_rejects_source_input_hash_drift() -> None:
+    catalog = copy.deepcopy(_load_catalog())
+    scenario = _scenario(catalog, "red_color_battle")
+    scenario["provenance"]["input_fixture_sha1"] = "0" * 40
+    with pytest.raises(ValueError, match="input_fixture_sha1 disagrees with manifest fixture"):
+        validator._validate_schema(catalog, _load_manifest())
+
+
 def test_missing_required_scenario_is_blocked_not_pass() -> None:
     catalog = _load_catalog()
     assert producer.scenario_status(catalog, "not_declared") == "BLOCKED"
@@ -266,22 +282,73 @@ def test_producer_refuses_existing_output(tmp_path: Path) -> None:
 
 
 def test_producer_capture_stub_refuses_without_writing(tmp_path: Path) -> None:
-    catalog = _load_catalog()
+    catalog = copy.deepcopy(_load_catalog())
     scenario = _scenario(catalog, "red_color_battle")
+    rom = tmp_path / "pokemon-red-color.gb"
+    sym = tmp_path / "pokemon-red.sym"
+    input_fixture = tmp_path / "input.state"
+    rom.write_bytes(b"temporary rom bytes")
+    sym.write_bytes(b"temporary sym bytes")
+    input_fixture.write_bytes(b"temporary input state bytes")
+    scenario["game"]["rom_sha1"] = hashlib.sha1(rom.read_bytes()).hexdigest()
+    scenario["game"]["sym_sha1"] = hashlib.sha1(sym.read_bytes()).hexdigest()
+    scenario["provenance"]["input_fixture_sha1"] = hashlib.sha1(
+        input_fixture.read_bytes()
+    ).hexdigest()
     output = tmp_path / "out.state"
     report = tmp_path / "report.json"
     with pytest.raises(producer.CaptureNotAvailable, match="capture requires a controlled ROM run"):
         producer.run(
             scenario_id="red_color_battle",
             catalog=catalog,
-            rom="rom/red/pokemon-red-color.gb",
-            sym="rom/red/pokemon-red.sym",
+            rom=rom,
+            sym=sym,
+            input_fixture=input_fixture,
             output=output,
             report=report,
             pins=_FakePins(scenario["game"]["rom_sha1"], scenario["game"]["sym_sha1"]),
         )
     assert not output.exists()
     assert not report.exists()
+
+
+def test_producer_requires_declared_input_fixture(tmp_path: Path) -> None:
+    catalog = copy.deepcopy(_load_catalog())
+    scenario = _scenario(catalog, "red_color_battle")
+    rom = tmp_path / "pokemon-red-color.gb"
+    sym = tmp_path / "pokemon-red.sym"
+    rom.write_bytes(b"temporary rom bytes")
+    sym.write_bytes(b"temporary sym bytes")
+    scenario["game"]["rom_sha1"] = hashlib.sha1(rom.read_bytes()).hexdigest()
+    scenario["game"]["sym_sha1"] = hashlib.sha1(sym.read_bytes()).hexdigest()
+    with pytest.raises(producer.ScenarioRefusal, match="input fixture is required"):
+        producer.run(
+            scenario_id="red_color_battle",
+            catalog=catalog,
+            rom=rom,
+            sym=sym,
+            output=tmp_path / "out.state",
+            pins=_FakePins(scenario["game"]["rom_sha1"], scenario["game"]["sym_sha1"]),
+        )
+
+
+def test_producer_refuses_missing_or_substituted_assets(tmp_path: Path) -> None:
+    with pytest.raises(producer.ScenarioRefusal, match="ROM not found"):
+        producer.verify_pinned_assets(
+            tmp_path / "absent.gb", tmp_path / "absent.sym", "a" * 40, "b" * 40
+        )
+    rom = tmp_path / "pokemon-red-color.gb"
+    sym = tmp_path / "pokemon-red.sym"
+    rom.write_bytes(b"temporary rom bytes")
+    sym.write_bytes(b"temporary sym bytes")
+    with pytest.raises(producer.ScenarioRefusal, match="ROM SHA-1 mismatch"):
+        producer.verify_pinned_assets(rom, sym, "a" * 40, "b" * 40)
+    producer.verify_pinned_assets(
+        rom,
+        sym,
+        hashlib.sha1(rom.read_bytes()).hexdigest(),
+        hashlib.sha1(sym.read_bytes()).hexdigest(),
+    )
 
 
 def test_producer_source_never_enables_hash_bypass() -> None:
@@ -398,6 +465,9 @@ def test_producer_cli_refusals_and_bounds(tmp_path: Path) -> None:
         == 2
     )
 
+    # A recognized suffix is not proof the asset exists. With the declared ROM
+    # absent, the producer now refuses before capture instead of reaching the
+    # stub, so the missing asset can never be recorded as pinned.
     assert (
         producer.main(
             [
@@ -411,7 +481,7 @@ def test_producer_cli_refusals_and_bounds(tmp_path: Path) -> None:
                 str(output),
             ]
         )
-        == 4
+        == 2
     )
     assert not output.exists()
 

@@ -167,6 +167,32 @@ def validate_scenario_pins(scenario: dict[str, Any], rom_pin: str, sym_pin: str)
         )
 
 
+def verify_pinned_assets(
+    rom: str | Path,
+    sym: str | Path,
+    rom_pin: str,
+    sym_pin: str,
+) -> None:
+    """Refuse when the on-disk ROM/symbol assets disagree with the resolved pins.
+
+    Pin resolution matches a documented path suffix; it does not read the
+    asset. Verify the actual bytes so a missing or substituted file cannot be
+    recorded in the capture plan as if it were the pinned asset.
+    """
+    for path, expected, label in (
+        (rom, rom_pin, "ROM"),
+        (sym, sym_pin, "symbol file"),
+    ):
+        target = Path(path)
+        if not target.is_file():
+            raise ScenarioRefusal(f"{label} not found: {target}")
+        actual = sha1_file(target)
+        if actual != expected:
+            raise ScenarioRefusal(
+                f"{label} SHA-1 mismatch: expected {expected}, got {actual}"
+            )
+
+
 def sha1_file(path: str | Path) -> str:
     """Return the SHA-1 of a file using chunked reads."""
     digest = hashlib.sha1()
@@ -261,11 +287,16 @@ def run(
         pins = load_versions(Path(repo_root) / "VERSIONS.md")
     rom_pin, sym_pin = resolve_pins(pins, rom, sym)
     validate_scenario_pins(scenario, rom_pin, sym_pin)
+    verify_pinned_assets(rom, sym, rom_pin, sym_pin)
+    provenance = scenario["provenance"]
+    declared_input_sha1 = provenance.get("input_fixture_sha1")
+    if provenance.get("source_fixture_id") is not None and input_fixture is None:
+        raise ScenarioRefusal(
+            "scenario declares a source fixture; an input fixture is required"
+        )
     input_sha1: str | None = None
     if input_fixture is not None:
-        input_sha1 = verify_input_fixture(
-            input_fixture, scenario["provenance"].get("input_fixture_sha1")
-        )
+        input_sha1 = verify_input_fixture(input_fixture, declared_input_sha1)
     plan = {
         "scenario_id": scenario_id,
         "role": resolved_role,
