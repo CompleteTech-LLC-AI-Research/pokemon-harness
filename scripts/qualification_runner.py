@@ -76,8 +76,8 @@ def _parse_cpu_max(text: str) -> float | None:
     return int(parts[0]) / period
 
 
-def _cgroup_relative_path(controller: str | None) -> str | None:
-    raw = _read_text(Path("/proc/self/cgroup"))
+def _cgroup_relative_path(controller: str | None, cgroup_text: str | None = None) -> str | None:
+    raw = cgroup_text if cgroup_text is not None else _read_text(Path("/proc/self/cgroup"))
     if raw is None:
         return None
     for line in raw.splitlines():
@@ -749,6 +749,8 @@ def load_declaration(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     except FileNotFoundError:
         return None, f"declaration not found: {path}"
     except OSError as exc:
+        return None, f"cannot read declaration: {exc}"
+    except UnicodeDecodeError as exc:
         return None, f"cannot read declaration: {exc}"
     except json.JSONDecodeError as exc:
         return None, f"declaration is not valid JSON: {exc}"

@@ -216,6 +216,30 @@ def test_load_declaration_rejects_directory(tmp_path: Path):
     assert error and "cannot read" in error
 
 
+def test_load_declaration_rejects_non_utf8(tmp_path: Path):
+    binary = tmp_path / "declaration.bin"
+    binary.write_bytes(b"\xff\xfe\x00\x01")
+    declaration, error = runner.load_declaration(binary)
+    assert declaration is None
+    assert error and "cannot read" in error
+
+
+def test_cgroup_relative_path_resolves_v1_and_v2():
+    v2 = "12:pids:/\n0::/user.slice/session.scope\n"
+    v1 = "12:cpu,cpuacct:/user.slice/session.scope\n"
+    assert runner._cgroup_relative_path(None, v2) == "/user.slice/session.scope"
+    assert runner._cgroup_relative_path("cpu", v1) == "/user.slice/session.scope"
+    assert runner._cgroup_relative_path("memory", v1) is None
+
+
+def test_iter_cgroup_paths_walks_to_base(tmp_path: Path):
+    base = tmp_path / "cgroup"
+    paths = runner._iter_cgroup_paths(base, "/user.slice/session.scope")
+    assert paths[0] == base / "user.slice" / "session.scope"
+    assert paths[-1] == base
+    assert base / "user.slice" in paths
+
+
 def test_prerequisite_checks_fail_when_bootstrap_fails(tmp_path: Path):
     class Completed:
         def __init__(self, returncode: int):
