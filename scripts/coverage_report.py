@@ -198,6 +198,12 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
             f"accepted_outcomes must not use the internal {_CASE_SENTINEL!r} sentinel; "
             "it is not a terminal pytest outcome"
         )
+    forbidden = sorted(set(accepted) & _INCOMPLETE_STATUSES)
+    if forbidden:
+        raise CoverageError(
+            "coverage.evidence_policy.accepted_outcomes must never authorize "
+            f"non-passing outcomes: {', '.join(forbidden)}"
+        )
 
     fixtures = _scenario_fixture_ids(catalog)
     seen_case_ids: set[str] = set()
@@ -288,6 +294,11 @@ def _validate_move_effects(catalog: dict[str, Any]) -> None:
     expected_ids = list(range(len(families)))
     if [family.get("effect_id") for family in families] != expected_ids:
         raise CoverageError("effect families must cover every pinned effect id exactly once")
+    expanded_cases = {
+        case.get("case_id"): case
+        for case in required_cases(catalog)
+        if case.get("dimension_id") == EXPANDED_DIMENSION
+    }
     planned = 0
     excluded = 0
     for family in families:
@@ -303,8 +314,8 @@ def _validate_move_effects(catalog: dict[str, Any]) -> None:
             planned += 1
         elif scope == "deliberately_excluded":
             excluded += 1
-        elif not family.get("evidence"):
-            raise CoverageError(f"effect {family.get('effect_id')} claims tested without evidence")
+        else:
+            _validate_tested_family_evidence(family, expanded_cases)
     if move_effects.get("planned_unverified_count") != planned:
         raise CoverageError("planned_unverified_count does not match the family list")
     if move_effects.get("deliberately_excluded_count") != excluded:
@@ -323,6 +334,39 @@ def _validate_move_effects(catalog: dict[str, Any]) -> None:
         raise CoverageError("current_selector must record the Counter (move 68) exclusion")
 
 
+def _validate_tested_family_evidence(
+    family: dict[str, Any], expanded_cases: dict[str, dict[str, Any]]
+) -> None:
+    """Require a ``tested`` family to name declared mechanics cases.
+
+    A truthy string is declaration presence, not evidence. Every referenced
+    case must be a declared ``expanded_mechanics`` case for this same effect so
+    the report can later require its terminal passing result before counting the
+    family as tested.
+    """
+    effect_id = family.get("effect_id")
+    evidence = family.get("evidence")
+    if (
+        not isinstance(evidence, list)
+        or not evidence
+        or any(not isinstance(item, str) or not item.strip() for item in evidence)
+    ):
+        raise CoverageError(
+            f"effect {effect_id} claims tested without a list of declared mechanics case IDs"
+        )
+    for case_id in evidence:
+        case = expanded_cases.get(case_id)
+        if case is None:
+            raise CoverageError(
+                f"effect {effect_id} claims tested with undeclared mechanics case {case_id!r}"
+            )
+        declared_effect = case.get("effect_id")
+        if declared_effect != effect_id:
+            raise CoverageError(
+                f"effect {effect_id} claims case {case_id!r} declared for effect {declared_effect!r}"
+            )
+
+
 @dataclass
 class Outcome:
     """One terminal test outcome for a single node ID and runtime."""
@@ -333,6 +377,7 @@ class Outcome:
     reason: str = ""
     partial: bool = False
     commit: str | None = None
+    run_id: str | None = None
 
 
 @dataclass
@@ -347,6 +392,8 @@ class ResultSet:
     outcomes: list[Outcome] = field(default_factory=list)
     collection_errors: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    identity_conflicts: list[str] = field(default_factory=list)
+    merge_conflict: bool = False
 
     def lookup(self, runtime: str, selector: str) -> list[Outcome]:
         target = normalize_nodeid(selector)
@@ -407,17 +454,48 @@ def result_set_from_document(
         blocks = [block for block in raw_runtimes if isinstance(block, dict)]
         modes = {_mode_for(block) for block in blocks}
         default_mode = modes.pop() if len(modes) == 1 else "unknown"
+        block_run_ids: set[str] = set()
+        block_commits: set[str] = set()
+        fingerprints: dict[str, set[tuple[Any, Any, str]]] = {}
+        any_partial = False
         for block in blocks:
             mode = _mode_for(block)
             identity = _runtime_identity(block)
+            block_run = block.get("run_id")
+            block_run = block_run if isinstance(block_run, str) and block_run else None
+            block_commit = block.get("commit")
+            block_commit = block_commit if isinstance(block_commit, str) and block_commit else None
+            block_partial = bool(block.get("partial", False))
+            if block_run:
+                block_run_ids.add(block_run)
+            if block_commit:
+                block_commits.add(block_commit)
+            if block_partial:
+                any_partial = True
+            fingerprints.setdefault(mode, set()).add(
+                (
+                    block_run,
+                    block_commit,
+                    json.dumps(identity, sort_keys=True, default=str),
+                )
+            )
             if identity:
                 result.runtimes[mode] = {**identity, "mode": mode}
             elif mode not in result.runtimes:
                 result.runtimes[mode] = {"mode": mode}
-            _collect_outcomes(block, mode, result)
+            _collect_outcomes(
+                block,
+                mode,
+                result,
+                block_run=block_run,
+                block_commit=block_commit,
+                block_partial=block_partial,
+            )
+        _record_block_conflicts(result, block_run_ids, block_commits, fingerprints, any_partial)
         raw_records = document.get("records")
         if isinstance(raw_records, list):
             _collect_outcome_records(raw_records, default_mode, result)
+        _finalize_identity(result)
         return result
 
     if not (
@@ -435,11 +513,63 @@ def result_set_from_document(
         result.runtimes[mode] = {**identity, "mode": mode}
     elif mode not in result.runtimes:
         result.runtimes[mode] = {"mode": mode}
-    _collect_outcomes(document, mode, result)
+    _collect_outcomes(
+        document,
+        mode,
+        result,
+        block_run=result.run_id,
+        block_commit=result.commit,
+        block_partial=bool(document.get("partial", False)),
+    )
+    _finalize_identity(result)
     return result
 
 
-def _collect_outcome_records(records: list[Any], default_mode: str, result: ResultSet) -> None:
+def _record_block_conflicts(
+    result: ResultSet,
+    block_run_ids: set[str],
+    block_commits: set[str],
+    fingerprints: dict[str, set[tuple[Any, Any, str]]],
+    any_partial: bool,
+) -> None:
+    if any_partial:
+        result.identity_conflicts.append(
+            "results source contains partial blocks; refusing to merge partial runs"
+        )
+    if len(block_run_ids) > 1:
+        result.identity_conflicts.append(
+            f"results source mixes {len(block_run_ids)} run identities across blocks"
+        )
+    if len(block_commits) > 1:
+        result.identity_conflicts.append(
+            f"results source mixes {len(block_commits)} commit identities across blocks"
+        )
+    for mode, prints in sorted(fingerprints.items()):
+        if len(prints) > 1:
+            result.identity_conflicts.append(
+                f"results source merges conflicting block identities for runtime {mode!r}"
+            )
+
+
+def _finalize_identity(result: ResultSet) -> None:
+    record_commits = {outcome.commit for outcome in result.outcomes if outcome.commit}
+    if len(record_commits) > 1:
+        result.identity_conflicts.append(
+            f"results source contains {len(record_commits)} per-record commit identities"
+        )
+    if result.identity_conflicts:
+        result.merge_conflict = True
+
+
+def _collect_outcome_records(
+    records: list[Any],
+    default_mode: str,
+    result: ResultSet,
+    *,
+    block_run: str | None = None,
+    block_commit: str | None = None,
+    block_partial: bool = False,
+) -> None:
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -449,23 +579,44 @@ def _collect_outcome_records(records: list[Any], default_mode: str, result: Resu
         runtime = record.get("runtime")
         runtime = runtime if isinstance(runtime, str) and runtime else default_mode
         commit = record.get("commit")
+        if not (isinstance(commit, str) and commit):
+            commit = block_commit
+        run_id = record.get("run_id")
+        if not (isinstance(run_id, str) and run_id):
+            run_id = block_run
         result.outcomes.append(
             Outcome(
                 nodeid=nodeid,
                 status=str(record.get("status", "error")).lower(),
                 runtime=runtime,
                 reason=str(record.get("reason", "")),
-                partial=bool(record.get("partial", False)),
-                commit=commit if isinstance(commit, str) and commit else None,
+                partial=bool(record.get("partial", False)) or block_partial,
+                commit=commit,
+                run_id=run_id,
             )
         )
 
 
-def _collect_outcomes(block: dict[str, Any], mode: str, result: ResultSet) -> None:
+def _collect_outcomes(
+    block: dict[str, Any],
+    mode: str,
+    result: ResultSet,
+    *,
+    block_run: str | None = None,
+    block_commit: str | None = None,
+    block_partial: bool = False,
+) -> None:
     seen_nodeids: set[str] = set()
     records = block.get("records")
     if isinstance(records, list):
-        _collect_outcome_records(records, mode, result)
+        _collect_outcome_records(
+            records,
+            mode,
+            result,
+            block_run=block_run,
+            block_commit=block_commit,
+            block_partial=block_partial,
+        )
         seen_nodeids.update(
             normalize_nodeid(record["nodeid"])
             for record in records
@@ -484,13 +635,21 @@ def _collect_outcomes(block: dict[str, Any], mode: str, result: ResultSet) -> No
                 status = "xfailed"
             elif record.get("was_xfail") and status == "passed":
                 status = "xpassed"
+            commit = record.get("commit")
+            if not (isinstance(commit, str) and commit):
+                commit = block_commit
+            run_id = record.get("run_id")
+            if not (isinstance(run_id, str) and run_id):
+                run_id = block_run
             result.outcomes.append(
                 Outcome(
                     nodeid=nodeid,
                     status=status,
                     runtime=mode,
                     reason=str(record.get("reason", "")),
-                    commit=record.get("commit") if isinstance(record.get("commit"), str) else None,
+                    partial=block_partial,
+                    commit=commit,
+                    run_id=run_id,
                 )
             )
             seen_nodeids.add(normalize_nodeid(nodeid))
@@ -511,7 +670,9 @@ def _collect_outcomes(block: dict[str, Any], mode: str, result: ResultSet) -> No
                         status=_status_from_gate(case.get("status")),
                         runtime=mode,
                         reason=str(case.get("reason", "")),
-                        partial=bool(case.get("partial", False)),
+                        partial=bool(case.get("partial", False)) or block_partial,
+                        commit=block_commit,
+                        run_id=block_run,
                     )
                 )
                 seen_nodeids.add(normalize_nodeid(nodeid))
@@ -610,9 +771,14 @@ def _accepted_outcomes(policy: dict[str, Any]) -> tuple[str, ...]:
         and accepted
         and all(isinstance(item, str) and item.strip() for item in accepted)
     ):
-        # Never allow the internal sentinel to act as a terminal outcome, even
-        # if a malformed catalog declares it and bypasses validation.
-        filtered = tuple(item for item in accepted if item != _CASE_SENTINEL)
+        # Never allow the internal sentinel or a non-passing outcome to act as
+        # a terminal pass, even if a malformed catalog declares it and bypasses
+        # validation.
+        filtered = tuple(
+            item
+            for item in accepted
+            if item != _CASE_SENTINEL and item not in _INCOMPLETE_STATUSES
+        )
         if filtered:
             return filtered
     return _DEFAULT_ACCEPTED_OUTCOMES
@@ -644,6 +810,14 @@ def _evaluate_case(
         label = _incomplete_label(record.status)
         return label, record.reason or (
             f"result status {record.status!r} is not an accepted outcome {list(accepted)!r}"
+        )
+    if results is not None and results.merge_conflict:
+        return (
+            "mismatched",
+            (
+                "results source mixes partial or multiple run/commit identities; "
+                "refusing to merge into a complete claim"
+            ),
         )
 
     identity: dict[str, Any] = {}
@@ -689,6 +863,28 @@ def _evaluate_case(
     return _CASE_SENTINEL, ""
 
 
+def _verified_mechanics_case_ids(case_reports: list[dict[str, Any]]) -> dict[str, bool]:
+    """Return whether each declared mechanics case has all terminal passes."""
+    reports_by_case: dict[str, list[dict[str, Any]]] = {}
+    for report in case_reports:
+        if report.get("dimension_id") != EXPANDED_DIMENSION:
+            continue
+        case_id = report.get("case_id")
+        if isinstance(case_id, str):
+            reports_by_case.setdefault(case_id, []).append(report)
+    return {
+        case_id: bool(reports) and all(report["status"] == "tested" for report in reports)
+        for case_id, reports in reports_by_case.items()
+    }
+
+
+def _family_is_verified(family: dict[str, Any], verified_cases: dict[str, bool]) -> bool:
+    evidence = family.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return False
+    return all(verified_cases.get(case_id, False) for case_id in evidence)
+
+
 def _dimension_status(
     dimension_id: str,
     case_reports: list[dict[str, Any]],
@@ -700,9 +896,18 @@ def _dimension_status(
             families = effect_families(catalog)
         except CoverageError:
             families = []
-        tested = sum(1 for family in families if family.get("scope") == "tested")
-        planned = sum(1 for family in families if family.get("scope") == "planned_unverified")
-        excluded = sum(1 for family in families if family.get("scope") == "deliberately_excluded")
+        verified_cases = _verified_mechanics_case_ids(case_reports)
+        tested = 0
+        planned = 0
+        excluded = 0
+        for family in families:
+            scope = family.get("scope")
+            if scope == "deliberately_excluded":
+                excluded += 1
+            elif scope == "tested" and _family_is_verified(family, verified_cases):
+                tested += 1
+            else:
+                planned += 1
         if planned and tested:
             status = "PARTIAL"
         elif planned:
@@ -801,6 +1006,7 @@ def build_report(
         if results.collection_errors:
             for entry in results.collection_errors:
                 problems.append(f"collection failure: {entry}")
+        problems.extend(results.identity_conflicts)
         if expected_commit and results.commit and results.commit != expected_commit:
             problems.append(
                 f"commit mismatch: declared {expected_commit!r}, result {results.commit!r}"
@@ -915,18 +1121,26 @@ def build_report(
             "statuses": dict(sorted(summary.items())),
         },
         "cases": case_reports,
-        "move_effects": _move_effects_summary(document),
+        "move_effects": _move_effects_summary(document, case_reports),
         "problems": problems,
         "overall": overall,
     }
 
 
-def _move_effects_summary(catalog: dict[str, Any]) -> dict[str, Any]:
+def _move_effects_summary(
+    catalog: dict[str, Any], case_reports: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     try:
         families = effect_families(catalog)
     except CoverageError:
         return {"families": [], "current_selector": {}}
     move_effects = catalog.get("move_effects", {})
+    verified_cases = _verified_mechanics_case_ids(case_reports or [])
+    verified_tested = sum(
+        1
+        for family in families
+        if family.get("scope") == "tested" and _family_is_verified(family, verified_cases)
+    )
     return {
         "families": families,
         "planned_unverified": sum(
@@ -935,7 +1149,8 @@ def _move_effects_summary(catalog: dict[str, Any]) -> dict[str, Any]:
         "deliberately_excluded": sum(
             1 for family in families if family.get("scope") == "deliberately_excluded"
         ),
-        "tested": sum(1 for family in families if family.get("scope") == "tested"),
+        "tested": verified_tested,
+        "declared_tested": sum(1 for family in families if family.get("scope") == "tested"),
         "current_selector": move_effects.get("current_selector", {})
         if isinstance(move_effects, dict)
         else {},

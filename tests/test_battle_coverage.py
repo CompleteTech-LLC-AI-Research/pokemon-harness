@@ -444,5 +444,132 @@ def test_declared_commit_without_result_commit_is_explicitly_unidentified(catalo
     assert "commit" in sample["reason"]
 
 
+def test_truthy_evidence_string_cannot_complete_mechanics(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    promoted = 0
+    for family in mutated["move_effects"]["families"]:
+        if family["scope"] == "planned_unverified":
+            family["scope"] = "tested"
+            family["evidence"] = "not-executed"
+            promoted += 1
+    mutated["move_effects"]["planned_unverified_count"] = 0
+    assert promoted == 68
+
+    results = coverage.result_set_from_document(_passing_document(catalog))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    assert report["overall"] == "INCOMPLETE"
+    assert report["dimensions"]["expanded_mechanics"]["status"] != "COMPLETE"
+
+
+def test_evidence_linked_but_unexecuted_mechanics_cannot_complete(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    case = copy.deepcopy(mutated["coverage"]["required_cases"][0])
+    case["case_id"] = "mechanics_effect_0"
+    case["dimension_id"] = coverage.EXPANDED_DIMENSION
+    case["effect_id"] = 0
+    case["selector"] = "tests/test_battle_mechanics.py::test_effect_0"
+    mutated["coverage"]["required_cases"].append(case)
+
+    for family in mutated["move_effects"]["families"]:
+        if family["effect_id"] == 0:
+            family["scope"] = "tested"
+            family["evidence"] = ["mechanics_effect_0"]
+        elif family["scope"] == "planned_unverified":
+            family["scope"] = "deliberately_excluded"
+    families = mutated["move_effects"]["families"]
+    mutated["move_effects"]["planned_unverified_count"] = sum(
+        1 for family in families if family["scope"] == "planned_unverified"
+    )
+    mutated["move_effects"]["deliberately_excluded_count"] = sum(
+        1 for family in families if family["scope"] == "deliberately_excluded"
+    )
+
+    results = coverage.result_set_from_document(_passing_document(catalog))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    assert report["overall"] == "INCOMPLETE"
+    assert report["dimensions"]["expanded_mechanics"]["status"] != "COMPLETE"
+
+
+def _split_partial_document(
+    catalog: dict, *, partial: bool, with_identity: bool
+) -> dict:
+    cases = coverage.one_turn_pairing_cases(catalog)
+    half = len(cases) // 2
+    subsets = (cases[:half], cases[half:])
+    revision = _pinned_revision(catalog)
+    blocks: list[dict] = []
+    for mode in ("source", "cython"):
+        for index, subset in enumerate(subsets):
+            block = {
+                "mode": mode,
+                "partial": partial,
+                "runtime": {
+                    "pyboy_mode": mode,
+                    "pyboy_version": "2.7.0",
+                    "pyboy_revision": revision,
+                },
+                "records": [
+                    {"nodeid": case["selector"], "runtime": mode, "status": "passed"}
+                    for case in subset
+                ],
+            }
+            if with_identity:
+                block["run_id"] = f"partial-run-{index}"
+                block["commit"] = ("a" if index == 0 else "b") * 40
+            blocks.append(block)
+    return {"runtimes": blocks}
+
+
+def test_partial_block_runs_are_not_merged(catalog: dict) -> None:
+    document = _split_partial_document(catalog, partial=True, with_identity=True)
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+    assert any("partial" in problem for problem in report["problems"])
+
+
+def test_mixed_block_run_identities_are_not_merged(catalog: dict) -> None:
+    document = _split_partial_document(catalog, partial=False, with_identity=True)
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+
+
+def test_mixed_record_commits_without_declared_commit_are_not_merged(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    document.pop("commit")
+    for index, record in enumerate(document["records"]):
+        record["commit"] = ("a" if index % 2 == 0 else "b") * 40
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+
+
+def test_forbidden_outcomes_cannot_be_authorized_by_policy(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    mutated["coverage"]["evidence_policy"]["accepted_outcomes"] = [
+        "skipped",
+        "xfailed",
+        "timed_out",
+        "not_run",
+    ]
+    with pytest.raises(coverage.CoverageError):
+        coverage.validate_catalog(mutated)
+
+    results = coverage.result_set_from_document(_passing_document(catalog, status="skipped"))
+    report = coverage.build_report(mutated, results)
+    assert report["overall"] == "INCOMPLETE"
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+
+
 def test_battle_coverage_module_is_classified_as_unit() -> None:
     assert "test_battle_coverage.py" in _tier_config.UNIT_MODULES
