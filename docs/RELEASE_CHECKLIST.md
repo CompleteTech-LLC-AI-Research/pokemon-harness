@@ -406,6 +406,9 @@ release readiness.
   each of five repetitions.
 - [ ] Serialized emulator access, concurrent calls, shutdown, and cancellation
   invariants pass on the candidate under the declared scope.
+- [ ] The opt-in capacity policy (`--capacity-policy`, issue #86) is exercised
+  on a real declared allocation; its enforcement defaults and end-to-end
+  admission/telemetry evidence remain open, so it does not gate releases yet.
 - [ ] Required native build/runtime coverage and independent release review
   are complete. Unadvertised load and platform extensions are coverage limits,
   not additional blockers; historical Windows checks do not qualify the candidate.
