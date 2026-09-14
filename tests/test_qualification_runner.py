@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -20,6 +22,7 @@ def make_facts(**overrides):
         affinity_count=8,
         affinity_supported=True,
         cgroup_version="v2",
+        cgroup_relative_path="/user.slice/session.scope",
         cpu_quota_cores=8.0,
         cpu_weight=100,
         cpu_throttled={"nr_throttled": 0},
@@ -40,9 +43,13 @@ def make_facts(**overrides):
 
 def make_declaration(**overrides):
     declaration = {
-        "declaration_version": 1,
+        "declaration_version": runner.SCHEMA_VERSION,
         "runner_id": "test-runner",
         "reservation_mechanism": "cgroup-quota",
+        "reservation": {
+            "allocation_id": "test-runner",
+            "cgroup_path": "/user.slice/session.scope",
+        },
         "logical_cpus": 4,
         "affinity_cpus": [0, 1, 2, 3],
         "cpu_quota_cores": 4.0,
@@ -51,10 +58,23 @@ def make_declaration(**overrides):
         "disk_free_bytes_min": 10**9,
         "shm_bytes_min": 10**8,
         "interpreters": {"source": sys.executable, "native": sys.executable},
-        "assets": {"rom_root": "/tmp/rom", "fixture_root": "/tmp/fixtures"},
+        "assets": {
+            "rom_root": "/tmp/rom",
+            "fixture_root": "/tmp/fixtures",
+            "inputs": [
+                {"path": "red/pokemon-red.gb", "sha1": "ea9bcae617fdf159b045185467ae58b2e4a48b9a"}
+            ],
+        },
     }
     declaration.update(overrides)
     return declaration
+
+
+def write_input(root: Path, relative: str, data: bytes = b"rom-bytes") -> dict:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return {"path": relative, "sha1": hashlib.sha1(data).hexdigest()}
 
 
 def statuses(results):
@@ -173,11 +193,42 @@ def test_validate_declaration_rejects_malformed_values_without_crashing():
     assert observed["cpu-weight-value"] == "fail"
 
 
-def test_evaluate_resources_skips_quota_for_dedicated_host():
-    declaration = make_declaration(reservation_mechanism="dedicated-host", cpu_quota_cores=None)
-    results = runner.evaluate_resources(declaration, make_facts())
+def test_evaluate_resources_skips_quota_for_verified_dedicated_host():
+    declaration = make_declaration(
+        reservation_mechanism="dedicated-host",
+        cpu_quota_cores=None,
+        affinity_cpus=[0, 1, 2, 3],
+        reservation={"allocation_id": "test-runner", "exclusive": True},
+    )
+    facts = make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None)
+    results = runner.evaluate_resources(declaration, facts)
     assert statuses(results)["cpu-quota"] == "skipped"
+    assert statuses(results)["reservation-evidence"] == "ok"
     assert runner.overall_status(results) == "ok"
+
+
+def test_evaluate_resources_rejects_dedicated_host_that_merely_contains_cpus():
+    declaration = make_declaration(
+        reservation_mechanism="dedicated-host",
+        cpu_quota_cores=None,
+        affinity_cpus=[0, 1, 2, 3],
+        reservation={"allocation_id": "test-runner", "exclusive": True},
+    )
+    results = runner.evaluate_resources(declaration, make_facts())
+    assert statuses(results)["reservation-evidence"] == "fail"
+    assert runner.overall_status(results) != "ok"
+
+
+def test_evaluate_resources_rejects_dedicated_host_without_exclusive_evidence():
+    declaration = make_declaration(
+        reservation_mechanism="dedicated-host",
+        cpu_quota_cores=None,
+        affinity_cpus=[0, 1, 2, 3],
+        reservation={"allocation_id": "test-runner"},
+    )
+    facts = make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None)
+    results = runner.evaluate_resources(declaration, facts)
+    assert statuses(results)["reservation-evidence"] == "fail"
 
 
 def test_evaluate_resources_requires_quota_for_cgroup_reservation():
@@ -269,8 +320,15 @@ def test_prerequisite_checks_use_injected_runner(tmp_path: Path):
 
     rom_root = tmp_path / "rom"
     rom_root.mkdir()
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    entry = write_input(rom_root, "custom/rom.bin")
     declaration = make_declaration(
-        assets={"rom_root": str(rom_root), "fixture_root": str(tmp_path)}
+        assets={
+            "rom_root": str(rom_root),
+            "fixture_root": str(fixture_root),
+            "inputs": [entry],
+        }
     )
     results = runner.prerequisite_checks(declaration, tmp_path, runner=fake_runner)
     assert runner.overall_status(results) == "ok"
@@ -324,8 +382,15 @@ def test_cli_check_reads_environment_declaration(monkeypatch, capsys, tmp_path: 
 
     rom_root = tmp_path / "rom"
     rom_root.mkdir()
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    entry = write_input(rom_root, "custom/rom.bin")
     declaration = make_declaration(
-        assets={"rom_root": str(rom_root), "fixture_root": str(tmp_path)}
+        assets={
+            "rom_root": str(rom_root),
+            "fixture_root": str(fixture_root),
+            "inputs": [entry],
+        }
     )
     declaration_path = tmp_path / "declaration.json"
     declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
@@ -336,6 +401,171 @@ def test_cli_check_reads_environment_declaration(monkeypatch, capsys, tmp_path: 
     exit_code = runner.main(["--check", "--json"])
     payload = json.loads(capsys.readouterr().out)
 
-    assert payload["declaration"] == str(declaration_path)
+    assert payload["declaration"] == declaration_path.name
     assert payload["overall"] == "ok"
     assert exit_code == 0
+
+
+def test_validate_declaration_requires_reservation_evidence():
+    declaration = make_declaration()
+    declaration.pop("reservation")
+    results = runner.validate_declaration(declaration)
+    assert statuses(results)["reservation-structure"] == "fail"
+
+
+def test_validate_declaration_binds_runner_id_to_allocation():
+    results = runner.validate_declaration(make_declaration(runner_id="other-runner"))
+    assert statuses(results)["reservation-allocation"] == "fail"
+
+
+def test_validate_declaration_requires_declared_assets():
+    declaration = make_declaration(
+        assets={"rom_root": "/tmp/rom", "fixture_root": "/tmp/fixtures", "inputs": []}
+    )
+    results = runner.validate_declaration(declaration)
+    assert statuses(results)["assets-inputs"] == "fail"
+
+
+def test_evaluate_resources_cgroup_quota_requires_observed_path():
+    facts = make_facts(cgroup_relative_path="/system.slice/other.scope")
+    results = runner.evaluate_resources(make_declaration(), facts)
+    assert statuses(results)["reservation-evidence"] == "fail"
+
+
+def test_evaluate_resources_cpuset_affinity_must_be_exact():
+    declaration = make_declaration(reservation_mechanism="cpuset-affinity", cpu_quota_cores=None)
+    results = runner.evaluate_resources(declaration, make_facts())
+    assert statuses(results)["affinity"] == "fail"
+    assert statuses(results)["reservation-evidence"] == "fail"
+
+
+@pytest.mark.parametrize("mechanism", ["cgroup-quota", "dedicated-host", "cpuset-affinity"])
+def test_cpu_bandwidth_negative_control_never_passes(mechanism):
+    reservation = {"allocation_id": "test-runner", "cgroup_path": "/user.slice/session.scope"}
+    if mechanism == "dedicated-host":
+        reservation["exclusive"] = True
+    declaration = make_declaration(
+        reservation_mechanism=mechanism,
+        logical_cpus=4,
+        affinity_cpus=list(range(8)),
+        cpu_quota_cores=0.5,
+        reservation=reservation,
+    )
+    facts = make_facts(affinity_cpus=list(range(8)), affinity_count=8, cpu_quota_cores=0.5)
+    results = runner.evaluate_resources(declaration, facts)
+    assert runner.overall_status(results) != "ok"
+
+
+@pytest.mark.parametrize("mechanism", ["dedicated-host", "cpuset-affinity"])
+def test_undeclared_restrictive_quota_is_not_skipped(mechanism):
+    reservation = {"allocation_id": "test-runner"}
+    if mechanism == "dedicated-host":
+        reservation["exclusive"] = True
+    declaration = make_declaration(
+        reservation_mechanism=mechanism,
+        logical_cpus=4,
+        affinity_cpus=list(range(8)),
+        cpu_quota_cores=None,
+        reservation=reservation,
+    )
+    facts = make_facts(affinity_cpus=list(range(8)), affinity_count=8, cpu_quota_cores=0.5)
+    results = runner.evaluate_resources(declaration, facts)
+    assert statuses(results)["cpu-quota"] == "fail"
+    assert runner.overall_status(results) != "ok"
+
+
+def test_cgroup_v2_detected_below_hierarchy_root(tmp_path: Path):
+    child = tmp_path / "user.slice" / "session.scope"
+    child.mkdir(parents=True)
+    (child / "cpu.max").write_text("200000 100000\n", encoding="utf-8")
+    facts = runner._read_cgroup_facts(tmp_path, "0::/user.slice/session.scope\n")
+    assert facts["cgroup_version"] == "v2"
+    assert facts["cpu_quota_cores"] == 2.0
+    assert facts["cgroup_relative_path"] == "/user.slice/session.scope"
+
+
+def test_cgroup_v1_detected_below_hierarchy_root(tmp_path: Path):
+    child = tmp_path / "cpu" / "user.slice" / "session.scope"
+    child.mkdir(parents=True)
+    (child / "cpu.cfs_quota_us").write_text("50000\n", encoding="utf-8")
+    (child / "cpu.cfs_period_us").write_text("100000\n", encoding="utf-8")
+    facts = runner._read_cgroup_facts(tmp_path, "12:cpu,cpuacct:/user.slice/session.scope\n")
+    assert facts["cgroup_version"] == "v1"
+    assert facts["cpu_quota_cores"] == 0.5
+
+
+def _asset_declaration(tmp_path: Path, rom_root: Path, entry: dict) -> dict:
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir(exist_ok=True)
+    return make_declaration(
+        assets={
+            "rom_root": str(rom_root),
+            "fixture_root": str(fixture_root),
+            "inputs": [entry],
+        }
+    )
+
+
+def test_validate_asset_inputs_verifies_declared_bytes(tmp_path: Path):
+    rom_root = tmp_path / "rom"
+    entry = write_input(rom_root, "red/custom.gb")
+    results = runner.validate_asset_inputs(_asset_declaration(tmp_path, rom_root, entry), tmp_path)
+    assert runner.overall_status(results) == "ok"
+
+
+def test_validate_asset_inputs_blocks_missing_file(tmp_path: Path):
+    rom_root = tmp_path / "rom"
+    rom_root.mkdir()
+    entry = {"path": "red/missing.gb", "sha1": "0" * 40}
+    results = runner.validate_asset_inputs(_asset_declaration(tmp_path, rom_root, entry), tmp_path)
+    assert statuses(results)["assets-input-0"] == "fail"
+
+
+def test_validate_asset_inputs_blocks_empty_file(tmp_path: Path):
+    rom_root = tmp_path / "rom"
+    entry = write_input(rom_root, "red/empty.gb", b"")
+    results = runner.validate_asset_inputs(_asset_declaration(tmp_path, rom_root, entry), tmp_path)
+    assert statuses(results)["assets-input-0"] == "fail"
+
+
+def test_validate_asset_inputs_blocks_hash_mismatch(tmp_path: Path):
+    rom_root = tmp_path / "rom"
+    entry = write_input(rom_root, "red/custom.gb", b"content")
+    entry["sha1"] = "0" * 40
+    results = runner.validate_asset_inputs(_asset_declaration(tmp_path, rom_root, entry), tmp_path)
+    assert statuses(results)["assets-input-0"] == "fail"
+
+
+def test_validate_asset_inputs_prefers_repository_pins(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    rom_root = tmp_path / "rom"
+    entry = write_input(rom_root, "red/pokemon-red.gb", b"not-the-pinned-rom")
+    entry["sha1"] = "0" * 40
+    results = runner.validate_asset_inputs(_asset_declaration(tmp_path, rom_root, entry), repo_root)
+    assert statuses(results)["assets-input-0"] == "fail"
+    assert "repository pin" in results[0].detail
+
+
+def test_shm_probe_refuses_to_overwrite_existing(tmp_path: Path):
+    existing = tmp_path / f".qualification-runner-probe-{os.getpid()}"
+    existing.write_bytes(b"keep")
+    writable, marker = runner._probe_shm(tmp_path)
+    assert writable is False
+    assert marker == "shm-probe-exists"
+    assert existing.read_bytes() == b"keep"
+
+
+def test_shm_probe_creates_and_removes(tmp_path: Path):
+    writable, marker = runner._probe_shm(tmp_path)
+    assert writable is True
+    assert marker is None
+    assert not (tmp_path / f".qualification-runner-probe-{os.getpid()}").exists()
+
+
+def test_report_sanitizes_absolute_paths(capsys):
+    exit_code = runner.main(["--report", "--json"])
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    assert payload["repo_root"] == "."
+    assert str(Path.cwd().resolve()) not in output

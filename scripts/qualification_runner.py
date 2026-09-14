@@ -16,15 +16,17 @@ Two modes are supported:
 The declaration is operator-owned and deliberately external to the repository.
 Use ``--declaration`` or ``POKERED_QUALIFICATION_DECLARATION``.  No ROM bytes,
 credentials, or machine-local paths are written into Git or the report; paths
-are reported only as observed local values.
+are emitted relative to the repository root or reduced to their basename.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -33,9 +35,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _DECLARATION_ENV = "POKERED_QUALIFICATION_DECLARATION"
 _RESERVATION_MECHANISMS = ("dedicated-host", "cgroup-quota", "cpuset-affinity")
+_CPU_BINDING_MECHANISMS = ("dedicated-host", "cpuset-affinity")
+_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _read_text(path: Path) -> str | None:
@@ -103,36 +107,47 @@ def _iter_cgroup_paths(base: Path, relative: str | None) -> list[Path]:
     return paths
 
 
-def _read_cgroup_facts() -> dict[str, Any]:
-    root = Path("/sys/fs/cgroup")
+def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None) -> dict[str, Any]:
+    """Read the cgroup facts for this process.
+
+    The controller files are detected on the process cgroup and its ancestors,
+    not only at the mount root: a cgroup-v2 hierarchy can expose ``cpu.max``
+    below ``/sys/fs/cgroup`` without it existing at the root itself.
+    """
+
+    base = Path("/sys/fs/cgroup") if root is None else Path(root)
     version = "unavailable"
     quota_cores: float | None = None
     weight: int | None = None
     throttled: dict[str, int] | None = None
-    relative = _cgroup_relative_path(None)
+    relative: str | None = None
 
-    if (root / "cpu.max").exists():
+    v2_relative = _cgroup_relative_path(None, cgroup_text)
+    v2_paths = _iter_cgroup_paths(base, v2_relative)
+    v1_base = base / "cpu"
+    v1_relative = _cgroup_relative_path("cpu", cgroup_text)
+    v1_paths = _iter_cgroup_paths(v1_base, v1_relative)
+
+    if any((path / "cpu.max").exists() for path in v2_paths):
         version = "v2"
+        relative = v2_relative
         quotas = [
             quota
-            for quota in (
-                _parse_cpu_max(_read_text(path / "cpu.max") or "")
-                for path in _iter_cgroup_paths(root, relative)
-            )
+            for quota in (_parse_cpu_max(_read_text(path / "cpu.max") or "") for path in v2_paths)
             if quota is not None
         ]
         quota_cores = min(quotas) if quotas else None
-        for path in _iter_cgroup_paths(root, relative):
+        for path in v2_paths:
             raw_weight = _read_text(path / "cpu.weight")
             if raw_weight is not None and raw_weight.isdigit():
                 weight = int(raw_weight)
                 break
-    elif (root / "cpu" / "cpu.cfs_quota_us").exists():
+        stat_paths = v2_paths
+    elif any((path / "cpu.cfs_quota_us").exists() for path in v1_paths):
         version = "v1"
-        v1_root = root / "cpu"
-        relative = _cgroup_relative_path("cpu") or relative
+        relative = v1_relative
         quotas = []
-        for path in _iter_cgroup_paths(v1_root, relative):
+        for path in v1_paths:
             quota_raw = _read_text(path / "cpu.cfs_quota_us")
             period_raw = _read_text(path / "cpu.cfs_period_us")
             if not quota_raw or not period_raw:
@@ -142,14 +157,16 @@ def _read_cgroup_facts() -> dict[str, Any]:
             if quota_us >= 0 and period_us > 0:
                 quotas.append(quota_us / period_us)
         quota_cores = min(quotas) if quotas else None
-        for path in _iter_cgroup_paths(v1_root, relative):
+        for path in v1_paths:
             shares_raw = _read_text(path / "cpu.shares")
             if shares_raw and shares_raw.isdigit():
                 weight = int(shares_raw)
                 break
+        stat_paths = v1_paths
+    else:
+        stat_paths = v2_paths
 
-    stat_base = root if version == "v2" else root / "cpu"
-    for path in _iter_cgroup_paths(stat_base, relative):
+    for path in stat_paths:
         stat_raw = _read_text(path / "cpu.stat")
         if not stat_raw:
             continue
@@ -164,6 +181,7 @@ def _read_cgroup_facts() -> dict[str, Any]:
         "cpu_quota_cores": quota_cores,
         "cpu_weight": weight,
         "cpu_throttled": throttled,
+        "cgroup_relative_path": relative,
     }
 
 
@@ -208,6 +226,7 @@ class RunnerFacts:
     affinity_count: int = 0
     affinity_supported: bool = True
     cgroup_version: str = "unavailable"
+    cgroup_relative_path: str | None = None
     cpu_quota_cores: float | None = None
     cpu_weight: int | None = None
     cpu_throttled: dict[str, int] | None = None
@@ -221,6 +240,34 @@ class RunnerFacts:
     shm_size_bytes: int | None = None
     shm_writable: bool = False
     unsupported: list[str] = field(default_factory=list)
+
+
+def _probe_shm(shm: Path) -> tuple[bool, str | None]:
+    """Atomically prove shared memory is writable.
+
+    The probe name is predictable (it embeds the PID), so it is created with
+    ``O_CREAT | O_EXCL``.  A pre-existing entry is never overwritten and is
+    reported back so the caller can surface it as unsupported.
+    """
+
+    probe = shm / f".qualification-runner-probe-{os.getpid()}"
+    try:
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False, "shm-probe-exists"
+    except OSError:
+        return False, None
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(b"ok")
+    except OSError:
+        return False, None
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+    return True, None
 
 
 def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts:
@@ -264,12 +311,10 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
         try:
             stats = os.statvfs(shm)
             facts.shm_size_bytes = stats.f_bsize * stats.f_blocks
-            probe = shm / f".qualification-runner-probe-{os.getpid()}"
-            try:
-                probe.write_bytes(b"ok")
-            finally:
-                probe.unlink(missing_ok=True)
-            facts.shm_writable = True
+            writable, marker = _probe_shm(shm)
+            facts.shm_writable = writable
+            if marker is not None:
+                facts.unsupported.append(marker)
         except OSError:
             facts.shm_writable = False
     else:
@@ -281,6 +326,7 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
 
     cgroup = _read_cgroup_facts()
     facts.cgroup_version = cgroup["cgroup_version"]
+    facts.cgroup_relative_path = cgroup["cgroup_relative_path"]
     facts.cpu_quota_cores = cgroup["cpu_quota_cores"]
     facts.cpu_weight = cgroup["cpu_weight"]
     facts.cpu_throttled = cgroup["cpu_throttled"]
@@ -303,6 +349,10 @@ def _result(name: str, status: str, required: Any, observed: Any, detail: str) -
     )
 
 
+def _is_sha1(value: Any) -> bool:
+    return isinstance(value, str) and _SHA1_RE.fullmatch(value.strip().lower()) is not None
+
+
 def validate_declaration(declaration: dict[str, Any]) -> list[CheckResult]:
     """Validate the declaration structure and required fields."""
 
@@ -310,6 +360,7 @@ def validate_declaration(declaration: dict[str, Any]) -> list[CheckResult]:
         "declaration_version",
         "runner_id",
         "reservation_mechanism",
+        "reservation",
         "logical_cpus",
         "affinity_cpus",
         "memory_bytes",
@@ -350,6 +401,75 @@ def validate_declaration(declaration: dict[str, Any]) -> list[CheckResult]:
                 "affinity or a quota alone is not a reservation; declare a mechanism",
             )
         )
+    reservation = declaration.get("reservation")
+    if not isinstance(reservation, dict):
+        results.append(
+            _result(
+                "reservation-structure",
+                "fail",
+                "allocation evidence object",
+                reservation,
+                "a reservation must carry verifiable allocation evidence, not a bare declaration",
+            )
+        )
+    else:
+        allocation_id = reservation.get("allocation_id")
+        runner_id = declaration.get("runner_id")
+        if not isinstance(allocation_id, str) or not allocation_id.strip():
+            results.append(
+                _result(
+                    "reservation-allocation",
+                    "fail",
+                    "non-empty allocation_id",
+                    allocation_id,
+                    "reservation.allocation_id is required to bind the run",
+                )
+            )
+        elif allocation_id != runner_id:
+            results.append(
+                _result(
+                    "reservation-allocation",
+                    "fail",
+                    runner_id,
+                    allocation_id,
+                    "runner_id must equal the reservation allocation_id",
+                )
+            )
+        else:
+            results.append(
+                _result(
+                    "reservation-allocation",
+                    "ok",
+                    runner_id,
+                    allocation_id,
+                    "runner is bound to a declared allocation",
+                )
+            )
+        exclusive = reservation.get("exclusive")
+        if exclusive is not None and not isinstance(exclusive, bool):
+            results.append(
+                _result(
+                    "reservation-exclusive",
+                    "fail",
+                    "bool",
+                    exclusive,
+                    "reservation.exclusive must be a boolean",
+                )
+            )
+        cgroup_path = reservation.get("cgroup_path")
+        if cgroup_path is not None and (
+            not isinstance(cgroup_path, str) or not cgroup_path.strip()
+        ):
+            results.append(
+                _result(
+                    "reservation-cgroup-path",
+                    "fail",
+                    "non-empty string",
+                    cgroup_path,
+                    "reservation.cgroup_path must be a non-empty string",
+                )
+            )
+
     interpreters = declaration.get("interpreters")
     if (
         not isinstance(interpreters, dict)
@@ -374,6 +494,27 @@ def validate_declaration(declaration: dict[str, Any]) -> list[CheckResult]:
                 {"rom_root": "path", "fixture_root": "path"},
                 assets,
                 "external rom_root and fixture_root are required",
+            )
+        )
+    inputs = assets.get("inputs") if isinstance(assets, dict) else None
+    if not isinstance(inputs, list) or not inputs:
+        results.append(
+            _result(
+                "assets-inputs",
+                "fail",
+                "non-empty list of {path, sha1}",
+                inputs,
+                "declared ROM/SYM inputs are required",
+            )
+        )
+    elif any(not isinstance(entry, dict) or not entry.get("path") for entry in inputs):
+        results.append(
+            _result(
+                "assets-inputs",
+                "fail",
+                "list of {path, sha1}",
+                inputs,
+                "every asset input must be an object with a path",
             )
         )
 
@@ -443,21 +584,191 @@ def validate_declaration(declaration: dict[str, Any]) -> list[CheckResult]:
     return results
 
 
+def _effective_cpu_cores(facts: RunnerFacts) -> float:
+    """Effective CPUs are bounded by both affinity and any cgroup quota."""
+
+    if facts.affinity_supported:
+        affinity = float(facts.affinity_count)
+    else:
+        affinity = float(facts.logical_cpus)
+    if facts.cpu_quota_cores is not None:
+        return min(affinity, float(facts.cpu_quota_cores))
+    return affinity
+
+
+def evaluate_reservation(declaration: dict[str, Any], facts: RunnerFacts) -> CheckResult:
+    """Verify that the run is bound to an observable allocation.
+
+    A bare declaration, an affinity mask that merely contains the declared
+    CPUs, or a CPU share is not a reservation.  Each mechanism must be
+    confirmed against host facts, otherwise the result is fail/unsupported.
+    """
+
+    mechanism = declaration.get("reservation_mechanism")
+    reservation = declaration.get("reservation")
+    declared_cpus = int(declaration.get("logical_cpus") or 0)
+    if not isinstance(reservation, dict):
+        return _result(
+            "reservation-evidence",
+            "fail",
+            "allocation evidence object",
+            reservation,
+            "no verifiable allocation evidence was declared",
+        )
+    allocation_id = reservation.get("allocation_id")
+    runner_id = declaration.get("runner_id")
+    if not allocation_id or allocation_id != runner_id:
+        return _result(
+            "reservation-evidence",
+            "fail",
+            f"bound to {runner_id!r}",
+            allocation_id,
+            "runner_id is not bound to an allocation",
+        )
+    try:
+        declared_affinity = set(parse_cpuset(declaration.get("affinity_cpus")))
+    except (TypeError, ValueError):
+        declared_affinity = set()
+    exact_affinity = (
+        facts.affinity_supported
+        and bool(declared_affinity)
+        and declared_affinity == set(facts.affinity_cpus)
+    )
+
+    if mechanism == "cgroup-quota":
+        cgroup_path = reservation.get("cgroup_path")
+        if not isinstance(cgroup_path, str) or not cgroup_path.strip():
+            return _result(
+                "reservation-evidence",
+                "fail",
+                "reservation.cgroup_path",
+                cgroup_path,
+                "a cgroup-quota allocation must declare its cgroup path",
+            )
+        if facts.cgroup_relative_path is None:
+            return _result(
+                "reservation-evidence",
+                "unsupported",
+                cgroup_path,
+                None,
+                "observed cgroup path is unavailable",
+            )
+        if facts.cgroup_relative_path != cgroup_path:
+            return _result(
+                "reservation-evidence",
+                "fail",
+                cgroup_path,
+                facts.cgroup_relative_path,
+                "observed cgroup is not the declared allocation",
+            )
+        if facts.cpu_quota_cores is None:
+            return _result(
+                "reservation-evidence",
+                "fail",
+                cgroup_path,
+                None,
+                "the declared allocation has no observed CPU quota",
+            )
+        return _result(
+            "reservation-evidence",
+            "ok",
+            cgroup_path,
+            facts.cgroup_relative_path,
+            "cgroup allocation verified by path and quota",
+        )
+    if mechanism == "cpuset-affinity":
+        if not facts.affinity_supported:
+            return _result(
+                "reservation-evidence",
+                "unsupported",
+                sorted(declared_affinity),
+                None,
+                "affinity is unavailable here",
+            )
+        return _result(
+            "reservation-evidence",
+            "ok" if exact_affinity else "fail",
+            sorted(declared_affinity),
+            facts.affinity_cpus,
+            "cpuset allocation must exactly equal the observed affinity",
+        )
+    if mechanism == "dedicated-host":
+        if reservation.get("exclusive") is not True:
+            return _result(
+                "reservation-evidence",
+                "fail",
+                True,
+                reservation.get("exclusive"),
+                "dedicated-host requires reservation.exclusive=true",
+            )
+        if not facts.affinity_supported:
+            return _result(
+                "reservation-evidence",
+                "unsupported",
+                sorted(declared_affinity),
+                None,
+                "affinity is unavailable here",
+            )
+        if not exact_affinity:
+            return _result(
+                "reservation-evidence",
+                "fail",
+                sorted(declared_affinity),
+                facts.affinity_cpus,
+                "a dedicated host must own exactly the declared CPUs",
+            )
+        if facts.cpu_quota_cores is not None and facts.cpu_quota_cores < declared_cpus:
+            return _result(
+                "reservation-evidence",
+                "fail",
+                declared_cpus,
+                facts.cpu_quota_cores,
+                "a competing CPU quota restricts the dedicated host",
+            )
+        declared_weight = declaration.get("cpu_weight")
+        if (
+            declared_weight is not None
+            and facts.cpu_weight is not None
+            and facts.cpu_weight < declared_weight
+        ):
+            return _result(
+                "reservation-evidence",
+                "fail",
+                declared_weight,
+                facts.cpu_weight,
+                "a competing CPU weight exists on the dedicated host",
+            )
+        return _result(
+            "reservation-evidence",
+            "ok",
+            sorted(declared_affinity),
+            facts.affinity_cpus,
+            "dedicated host owns exactly the declared CPUs with no competing quota",
+        )
+    return _result(
+        "reservation-evidence",
+        "fail",
+        list(_RESERVATION_MECHANISMS),
+        mechanism,
+        "unsupported reservation mechanism",
+    )
+
+
 def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[CheckResult]:
     """Compare declared allocation requirements against observed host facts."""
 
     mechanism = declaration.get("reservation_mechanism")
-    results: list[CheckResult] = []
+    results: list[CheckResult] = [evaluate_reservation(declaration, facts)]
 
     declared_cpus = int(declaration.get("logical_cpus") or 0)
-    observed_cpus = facts.affinity_count or facts.logical_cpus
+    effective_cpus = _effective_cpu_cores(facts)
     results.append(
         _result(
             "logical-cpus",
-            "ok" if observed_cpus >= declared_cpus > 0 else "fail",
+            "ok" if effective_cpus >= declared_cpus > 0 else "fail",
             declared_cpus,
-            observed_cpus,
-            "effective CPUs available to this process",
+            effective_cpus,
+            "effective CPUs available: min(affinity, cgroup quota)",
         )
     )
 
@@ -476,19 +787,26 @@ def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[
             declared_affinity = parse_cpuset(declaration.get("affinity_cpus"))
         except (TypeError, ValueError):
             declared_affinity = []
-        usable = set(declared_affinity).issubset(set(facts.affinity_cpus))
+        declared_set = set(declared_affinity)
+        observed_set = set(facts.affinity_cpus)
+        usable = declared_set.issubset(observed_set)
         bounded = bool(declared_affinity) and len(declared_affinity) <= len(facts.affinity_cpus)
+        if mechanism in _CPU_BINDING_MECHANISMS:
+            ok = usable and bounded and declared_set == observed_set
+            detail = "declared affinity must exactly equal the process affinity for this mechanism"
+        else:
+            ok = usable and bounded
+            detail = (
+                "declared affinity must be usable by this process and no larger than the allocation"
+            )
         results.append(
             _result(
-                "affinity",
-                "ok" if usable and bounded else "fail",
-                declared_affinity,
-                facts.affinity_cpus,
-                "declared affinity must be usable by this process and no larger than the allocation",
+                "affinity", "ok" if ok else "fail", declared_affinity, facts.affinity_cpus, detail
             )
         )
 
     declared_quota = declaration.get("cpu_quota_cores")
+    quota_below_requirement = declared_quota is not None and declared_quota < declared_cpus
     if mechanism == "cgroup-quota":
         if declared_quota is None:
             results.append(
@@ -498,6 +816,16 @@ def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[
                     "required for cgroup-quota",
                     None,
                     "a cgroup-quota reservation must declare cpu_quota_cores",
+                )
+            )
+        elif quota_below_requirement:
+            results.append(
+                _result(
+                    "cpu-quota",
+                    "fail",
+                    declared_cpus,
+                    declared_quota,
+                    "declared quota is below the declared CPU requirement",
                 )
             )
         elif facts.cpu_quota_cores is None:
@@ -515,7 +843,17 @@ def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[
                 )
             )
     elif declared_quota is not None:
-        if facts.cpu_quota_cores is None:
+        if quota_below_requirement:
+            results.append(
+                _result(
+                    "cpu-quota",
+                    "fail",
+                    declared_cpus,
+                    declared_quota,
+                    "declared quota is below the declared CPU requirement",
+                )
+            )
+        elif facts.cpu_quota_cores is None:
             results.append(
                 _result(
                     "cpu-quota",
@@ -535,6 +873,16 @@ def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[
                     "effective cgroup CPU quota in cores",
                 )
             )
+    elif facts.cpu_quota_cores is not None and facts.cpu_quota_cores < declared_cpus:
+        results.append(
+            _result(
+                "cpu-quota",
+                "fail",
+                declared_cpus,
+                facts.cpu_quota_cores,
+                "an undeclared cgroup quota restricts the declared CPU requirement",
+            )
+        )
     else:
         results.append(
             _result(
@@ -616,6 +964,16 @@ def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[
                 "shared memory is unavailable on this host",
             )
         )
+    elif "shm-probe-exists" in facts.unsupported:
+        results.append(
+            _result(
+                "shm",
+                "unsupported",
+                declared_shm,
+                facts.shm_size_bytes,
+                "the shared-memory probe path already exists; not overwritten",
+            )
+        )
     elif not facts.shm_writable:
         results.append(
             _result(
@@ -639,6 +997,184 @@ def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[
 
 def run_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
+
+
+def _sha1_of_file(path: Path) -> str:
+    digest = hashlib.sha1()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_versions_pins(repo_root: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Return ROM and symbol pins keyed by root-relative and full paths."""
+
+    try:
+        from pokered_harness.config import load_versions
+    except ImportError:
+        return {}, {}
+    versions_path = repo_root / "VERSIONS.md"
+    if not versions_path.is_file():
+        return {}, {}
+    try:
+        config = load_versions(versions_path)
+    except (OSError, ValueError):
+        return {}, {}
+    rom_pins: dict[str, str] = {}
+    symbol_pins: dict[str, str] = {}
+    for documented, sha1 in config.rom_sha1_by_path:
+        rom_pins[documented] = sha1
+        rom_pins[documented.removeprefix("rom/")] = sha1
+    for documented, sha1 in config.symbol_sha1_by_path:
+        symbol_pins[documented] = sha1
+        symbol_pins[documented.removeprefix("rom/")] = sha1
+    return rom_pins, symbol_pins
+
+
+def validate_asset_inputs(declaration: dict[str, Any], repo_root: Path) -> list[CheckResult]:
+    """Verify declared ROM/SYM bytes exist, are readable, and match pins.
+
+    Missing, empty, unreadable, or hash-mismatched inputs are blocked, never
+    accepted.  The repository pins in ``VERSIONS.md`` take precedence; an
+    explicit ``sha1`` is required only when no repository pin matches.
+    """
+
+    assets = declaration.get("assets") or {}
+    results: list[CheckResult] = []
+    rom_root_value = assets.get("rom_root")
+    rom_root = Path(rom_root_value) if rom_root_value else None
+    if rom_root is None or not rom_root.is_dir():
+        results.append(
+            _result(
+                "assets-rom-root",
+                "fail",
+                "directory",
+                rom_root_value,
+                "rom_root is not a directory",
+            )
+        )
+    fixture_root_value = assets.get("fixture_root")
+    fixture_root = Path(fixture_root_value) if fixture_root_value else None
+    if fixture_root is None or not fixture_root.is_dir():
+        results.append(
+            _result(
+                "assets-fixture-root",
+                "fail",
+                "directory",
+                fixture_root_value,
+                "fixture_root is not a directory",
+            )
+        )
+
+    inputs = assets.get("inputs")
+    if not isinstance(inputs, list) or not inputs:
+        results.append(
+            _result(
+                "assets-inputs",
+                "fail",
+                "non-empty list of {path, sha1}",
+                inputs,
+                "declared ROM/SYM inputs are required",
+            )
+        )
+        return results
+    if rom_root is None or not rom_root.is_dir():
+        return results
+
+    rom_pins, symbol_pins = _load_versions_pins(repo_root)
+    for index, entry in enumerate(inputs):
+        name = f"assets-input-{index}"
+        if not isinstance(entry, dict):
+            results.append(_result(name, "fail", "object", entry, "asset input must be an object"))
+            continue
+        relative = entry.get("path")
+        declared_sha1 = entry.get("sha1")
+        if not isinstance(relative, str) or not relative.strip():
+            results.append(
+                _result(name, "fail", "relative path", relative, "asset path is required")
+            )
+            continue
+        candidate = Path(relative)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            results.append(
+                _result(
+                    name,
+                    "fail",
+                    "relative path under rom_root",
+                    relative,
+                    "asset input must stay under rom_root",
+                )
+            )
+            continue
+        resolved = rom_root / candidate
+        if not resolved.is_file():
+            results.append(
+                _result(
+                    name, "fail", "readable non-empty file", relative, "declared input is missing"
+                )
+            )
+            continue
+        try:
+            if resolved.stat().st_size <= 0:
+                results.append(
+                    _result(name, "fail", "non-empty file", relative, "declared input is empty")
+                )
+                continue
+            actual_sha1 = _sha1_of_file(resolved)
+        except OSError as exc:
+            results.append(
+                _result(
+                    name, "fail", "readable file", relative, f"declared input is unreadable: {exc}"
+                )
+            )
+            continue
+
+        normalised = relative.replace("\\", "/").lstrip("./").lower()
+        expected = rom_pins.get(normalised) or symbol_pins.get(normalised)
+        if expected is not None:
+            if (
+                declared_sha1 is not None
+                and _is_sha1(declared_sha1)
+                and declared_sha1.lower() != expected
+            ):
+                results.append(
+                    _result(
+                        name,
+                        "fail",
+                        expected,
+                        declared_sha1,
+                        "declared hash disagrees with the repository pin",
+                    )
+                )
+                continue
+            target = expected
+        elif _is_sha1(declared_sha1):
+            target = declared_sha1.lower()
+        else:
+            results.append(
+                _result(
+                    name,
+                    "fail",
+                    "repository pin or declared sha1",
+                    declared_sha1,
+                    "asset input has no verifiable hash",
+                )
+            )
+            continue
+        if actual_sha1 != target:
+            results.append(
+                _result(
+                    name,
+                    "fail",
+                    target,
+                    actual_sha1,
+                    "asset input bytes do not match the pinned hash",
+                )
+            )
+            continue
+        results.append(_result(name, "ok", target, actual_sha1, "asset input bytes verified"))
+    return results
 
 
 def prerequisite_checks(
@@ -680,11 +1216,7 @@ def prerequisite_checks(
         )
 
     assets = declaration.get("assets") or {}
-    rom_root = assets.get("rom_root")
-    if rom_root and not Path(rom_root).is_dir():
-        results.append(
-            _result("assets-rom-root", "fail", "directory", rom_root, "rom_root is not a directory")
-        )
+    results.extend(validate_asset_inputs(declaration, repo_root))
 
     manifest = repo_root / "release-evidence" / "fixture-manifest.json"
     schema = runner(
@@ -794,6 +1326,52 @@ def render_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _sanitize_path(value: Any, root: Path) -> str:
+    """Return a relative path when possible, never a machine-local absolute."""
+
+    text = str(value)
+    candidate = Path(text)
+    if not candidate.is_absolute():
+        return candidate.as_posix()
+    try:
+        relative = candidate.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return candidate.name
+    return relative.as_posix() or "."
+
+
+def _redact_payload(value: Any, redactions: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        for token, replacement in redactions.items():
+            if token:
+                value = value.replace(token, replacement)
+        return value
+    if isinstance(value, list):
+        return [_redact_payload(item, redactions) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_payload(item, redactions) for key, item in value.items()}
+    return value
+
+
+def _collect_redactions(
+    repo_root: Path, declaration: dict[str, Any] | None, declaration_path: Path | None
+) -> dict[str, str]:
+    redactions = {str(repo_root): _sanitize_path(repo_root, repo_root)}
+    if declaration_path is not None:
+        redactions[str(declaration_path)] = _sanitize_path(declaration_path, repo_root)
+    if declaration:
+        assets = declaration.get("assets") or {}
+        for key in ("rom_root", "fixture_root"):
+            value = assets.get(key)
+            if isinstance(value, str) and value:
+                redactions[value] = _sanitize_path(value, repo_root)
+        interpreters = declaration.get("interpreters") or {}
+        for value in interpreters.values():
+            if isinstance(value, str) and value:
+                redactions[value] = _sanitize_path(value, repo_root)
+    return redactions
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Verify a declared qualification-runner allocation."
@@ -813,16 +1391,19 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     repo_root = args.repo_root.resolve()
     facts = collect_facts(repo_root)
+    facts_payload = asdict(facts)
+    facts_payload["shm_path"] = _sanitize_path(facts.shm_path, repo_root)
     payload: dict[str, Any] = {
         "mode": "check" if args.check else "report",
         "declaration_version": SCHEMA_VERSION,
-        "repo_root": str(repo_root),
+        "repo_root": _sanitize_path(repo_root, repo_root),
         "checks": [],
-        "facts": asdict(facts),
+        "facts": facts_payload,
         "overall": "report",
     }
 
     if args.report:
+        payload = _redact_payload(payload, _collect_redactions(repo_root, None, None))
         print(json.dumps(payload, indent=2) if args.json else render_text(payload))
         return 0
 
@@ -830,6 +1411,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(os.environ[_DECLARATION_ENV]) if os.environ.get(_DECLARATION_ENV) else None
     )
     checks: list[CheckResult] = []
+    declaration: dict[str, Any] | None = None
     if declaration_path is None:
         payload["overall"] = "blocked"
         payload["message"] = (
@@ -839,7 +1421,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         declaration, error = load_declaration(declaration_path)
-        payload["declaration"] = str(declaration_path)
+        payload["declaration"] = _sanitize_path(declaration_path, repo_root)
         if declaration is None:
             payload["overall"] = "blocked"
             payload["message"] = error
@@ -850,6 +1432,9 @@ def main(argv: list[str] | None = None) -> int:
                 checks.extend(prerequisite_checks(declaration, repo_root))
             payload["overall"] = overall_status(checks)
     payload["checks"] = [asdict(item) for item in checks]
+    payload = _redact_payload(
+        payload, _collect_redactions(repo_root, declaration, declaration_path)
+    )
 
     print(json.dumps(payload, indent=2) if args.json else render_text(payload))
     return 0 if payload["overall"] == "ok" else 1
