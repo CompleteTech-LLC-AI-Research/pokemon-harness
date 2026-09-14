@@ -138,7 +138,7 @@ class BagSnapshot:
     terminator: int = BAG_TERMINATOR
     raw_count: int | None = None
     terminator_position: int | None = None
-    valid: bool | None = True
+    valid: bool | None = None
 
     def quantity_of(self, item_id: int) -> int:
         return sum(stack.quantity for stack in self.stacks if stack.item_id == item_id)
@@ -305,6 +305,8 @@ def assert_single_consumption(
         raise ValueError("expected_consumed must be exactly 0 or 1")
     if before.item_id != item_id:
         raise AssertionError("before snapshot is for a different item")
+    if after.item_id != item_id:
+        raise AssertionError("after snapshot is for a different item")
     before_quantity = before.bag.quantity_of(item_id)
     after_quantity = after.bag.quantity_of(item_id)
     if expected_consumed and before_quantity < expected_consumed:
@@ -531,6 +533,8 @@ def assert_medicine_application(
     validate_snapshot(after)
     if rule.item_id != before.item_id:
         raise AssertionError("medicine rule does not describe the used item")
+    if after.item_id != before.item_id:
+        raise AssertionError("after snapshot is for a different item")
     if before.target_slot != after.target_slot:
         raise AssertionError("selected target slot changed during item use")
     outcome = medicine_outcome(rule, before.mon(before.target_slot))

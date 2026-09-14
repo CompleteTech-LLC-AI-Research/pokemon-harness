@@ -244,7 +244,12 @@ def test_stale_bag_count_after_removal_is_rejected() -> None:
     stale = _snapshot(
         1,
         0,
-        BagSnapshot((BagStack(4, 2), BagStack(5, 1)), raw_count=3, terminator_position=3),
+        BagSnapshot(
+            (BagStack(4, 2), BagStack(5, 1)),
+            raw_count=3,
+            terminator_position=3,
+            valid=True,
+        ),
         [_mon(0, hp=50, max_hp=100)],
         _active(0, party[0]),
     )
@@ -253,13 +258,61 @@ def test_stale_bag_count_after_removal_is_rejected() -> None:
         assert_last_unit_compaction(before, stale, 1)
 
 
+def test_omitted_bag_validity_is_rejected() -> None:
+    party = [_mon(0, hp=30, max_hp=100)]
+    before = _snapshot(1, 0, _bag(((4, 2), (1, 1), (5, 1))), party, _active(0, party[0]))
+    # Count and terminator position are present but the validity tri-state was
+    # not carried over from the parser, so acceptance must fail closed.
+    omitted = _snapshot(
+        1,
+        0,
+        BagSnapshot(
+            (BagStack(4, 2), BagStack(5, 1)),
+            raw_count=2,
+            terminator_position=2,
+        ),
+        [_mon(0, hp=50, max_hp=100)],
+        _active(0, party[0]),
+    )
+
+    with pytest.raises(ValueError, match="bag observation is not valid"):
+        assert_last_unit_compaction(before, omitted, 1)
+
+
+def test_after_snapshot_item_identity_is_enforced() -> None:
+    rule = MedicineRule(item_id=1, fixed_heal=POTION_HEAL)
+    party = [_mon(0, hp=30, max_hp=100)]
+    before = _snapshot(1, 0, _bag(((1, 3),)), party, _active(0, party[0]))
+    after_party = [_mon(0, hp=50, max_hp=100)]
+    # The observation is relabeled as a different item while applying item 1.
+    after = _snapshot(2, 0, _bag(((1, 2),)), after_party, _active(0, after_party[0]))
+
+    with pytest.raises(AssertionError, match="after snapshot is for a different item"):
+        assert_medicine_application(before, after, rule, expected_consumed=1)
+
+
+def test_continuation_item_identity_is_enforced() -> None:
+    party = [_mon(0, hp=30, max_hp=100)]
+    before = _snapshot(1, 0, _bag(((1, 3),)), party, _active(0, party[0]))
+    after = _snapshot(1, 0, _bag(((1, 2),)), [_mon(0, hp=50, max_hp=100)], _active(0, party[0]))
+    continued = _snapshot(2, 0, _bag(((1, 2),)), [_mon(0, hp=50, max_hp=100)], _active(0, party[0]))
+
+    with pytest.raises(AssertionError, match="after snapshot is for a different item"):
+        assert_continuation_idempotent(before, after, continued, 1)
+
+
 def test_terminator_not_after_last_stack_is_rejected() -> None:
     party = [_mon(0, hp=30, max_hp=100)]
     before = _snapshot(1, 0, _bag(((4, 2), (1, 1), (5, 1))), party, _active(0, party[0]))
     stale = _snapshot(
         1,
         0,
-        BagSnapshot((BagStack(4, 2), BagStack(5, 1)), raw_count=2, terminator_position=3),
+        BagSnapshot(
+            (BagStack(4, 2), BagStack(5, 1)),
+            raw_count=2,
+            terminator_position=3,
+            valid=True,
+        ),
         [_mon(0, hp=50, max_hp=100)],
         _active(0, party[0]),
     )
