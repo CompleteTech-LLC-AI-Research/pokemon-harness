@@ -329,6 +329,31 @@ def test_released_response_is_flushed_before_new_master_edge():
         assert peer.stop(timeout_s=1.0)
 
 
+def test_closed_abandonment_retires_released_response_accounting():
+    """A close that wins the publication race must retire the counted receipt."""
+    peer, backend = NetworkBackend.pair()
+    try:
+        token = _InboundEdge(
+            peer_bit=0,
+            response_bit=1,
+            completed=True,
+            response_finished=threading.Event(),
+        )
+        backend._held_owner_byte_response = token
+        backend._edge_pending = 1
+        # Count the released response, then let a deadline-aware close publish
+        # terminal state before the response worker can queue it.
+        backend._begin_owner_response()
+        assert backend._owner_response_pending == 1
+        backend._mark_closed(NetworkBackendError("close won the publication race"))
+        backend._publish_owner_response(token)
+        assert backend._owner_response_pending == 0
+        assert token.response_finished.is_set()
+    finally:
+        assert backend.stop(timeout_s=1.0)
+        assert peer.stop(timeout_s=1.0)
+
+
 @pytest.mark.parametrize("operation", ["stop", "detach_local_core"])
 def test_retiring_receiver_cancels_held_byte_without_acknowledging_it(operation):
     with _held_byte() as case:

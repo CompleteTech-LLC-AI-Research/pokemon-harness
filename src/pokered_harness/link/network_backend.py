@@ -2487,6 +2487,12 @@ class NetworkBackend:
         """Queue a completed edge for transport-only response transmission."""
         if self._closed:
             self._decrement_edge_pending()
+            if request.response_finished is not None:
+                # A deferred response counted at release is abandoned here
+                # because a deadline-aware close won the race. Retire the
+                # receipt so outstanding-work accounting stays truthful.
+                request.response_finished.set()
+                self._settle_owner_response()
             return
         try:
             self._completed_edge_queue.put_nowait(request)
