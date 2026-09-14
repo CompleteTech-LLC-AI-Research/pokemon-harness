@@ -307,11 +307,21 @@ def assert_last_unit_compaction(
 
 
 def assert_continuation_idempotent(
-    before: ItemUseSnapshot, after: ItemUseSnapshot, item_id: int
+    before: ItemUseSnapshot,
+    after: ItemUseSnapshot,
+    continued: ItemUseSnapshot,
+    item_id: int,
 ) -> None:
-    """Advancing text over a settled snapshot must not decrement again."""
+    """Advancing text over the settled snapshot must not decrement again.
+
+    ``after`` is the settled post-use snapshot and ``continued`` is a distinct
+    snapshot taken after the text advance.  The first consumption is verified
+    against ``before``; the second comparison is between ``after`` and the
+    separate ``continued`` snapshot, so it can detect a duplicated decrement
+    rather than comparing a value with itself.
+    """
     assert_single_consumption(before, after, item_id, expected_consumed=1)
-    assert_single_consumption(after, after, item_id, expected_consumed=0)
+    assert_single_consumption(after, continued, item_id, expected_consumed=0)
 
 
 def assert_selected_target_changes_only(before: ItemUseSnapshot, after: ItemUseSnapshot) -> None:
@@ -348,7 +358,9 @@ def assert_active_battle_refresh(before: ItemUseSnapshot, after: ItemUseSnapshot
     target = after.mon(after.target_slot)
     if after.active.hp != target.hp or after.active.status != target.status:
         raise AssertionError("active battle HP/status did not refresh from the target")
-    for field in ("player_slot", "species", "level", "moves", "pp"):
+    if after.active.max_hp != target.max_hp:
+        raise AssertionError("active battle max HP does not mirror the selected target")
+    for field in ("player_slot", "species", "level", "max_hp", "moves", "pp"):
         if getattr(before.active, field) != getattr(after.active, field):
             raise AssertionError(f"active battle {field} changed during item use")
 
@@ -416,11 +428,28 @@ def revive_hp(max_hp: int, *, to_max: bool) -> int:
     return max_hp if to_max else max_hp // 2
 
 
-def cure_status(status: int, mask: int) -> int:
-    """Clear the declared status bits from a Gen I status byte."""
+def status_matches_mask(status: int, mask: int) -> bool:
+    """Eligibility only: does the status byte hold a bit the item can cure?
+
+    ``item_effects.asm`` computes ``ld a, [hl]; and c`` where ``c`` is the
+    item's mask and branches to ``.healingItemNoEffect`` when the result is
+    zero.  It never consults current HP here.
+    """
     _integer(status, 0, 255, "status")
     _integer(mask, 0, 255, "cure mask")
-    return status & (~mask & 0xFF)
+    return (status & mask) != 0
+
+
+def cure_status(status: int, mask: int) -> int:
+    """Status write: the pinned routine zeroes the ENTIRE byte once eligible.
+
+    The mask is used only for eligibility (see ``status_matches_mask``); the
+    write itself is ``xor a; ld [hl], a``, so a matching mask clears every
+    status bit, not just the masked ones.  A non-matching status is unchanged.
+    """
+    _integer(status, 0, 255, "status")
+    _integer(mask, 0, 255, "cure mask")
+    return 0 if status_matches_mask(status, mask) else status
 
 
 def medicine_outcome(rule: MedicineRule, mon: PartyMonSnapshot) -> MedicineOutcome:
@@ -436,26 +465,32 @@ def medicine_outcome(rule: MedicineRule, mon: PartyMonSnapshot) -> MedicineOutco
             mon.status,
             REASON_APPLIED,
         )
+    is_hp_medicine = rule.fixed_heal > 0 or rule.heal_to_max
+    if not is_hp_medicine:
+        # Status-only medicine: the pinned ``.cureStatusAilment`` path masks
+        # eligibility but performs no HP check, so a fainted target is still
+        # eligible; a matching mask zeroes the entire status byte.
+        if not status_matches_mask(mon.status, rule.cure_mask):
+            return MedicineOutcome(False, mon.hp, mon.status, REASON_WRONG_STATUS)
+        return MedicineOutcome(
+            True, mon.hp, cure_status(mon.status, rule.cure_mask), REASON_APPLIED
+        )
     if mon.hp == 0:
         return MedicineOutcome(False, mon.hp, mon.status, REASON_FAINTED_NON_REVIVE)
-    if rule.fixed_heal or rule.heal_to_max:
-        if mon.hp >= mon.max_hp:
-            if not rule.cure_mask:
-                return MedicineOutcome(False, mon.hp, mon.status, REASON_FULL_HP)
-            if mon.status == 0:
-                return MedicineOutcome(False, mon.hp, mon.status, REASON_FULL_HP_NO_STATUS)
-            return MedicineOutcome(
-                True, mon.hp, cure_status(mon.status, rule.cure_mask), REASON_APPLIED
-            )
-        if rule.heal_to_max:
-            healed = mon.max_hp
-        else:
-            healed = capped_heal(mon.hp, mon.max_hp, rule.fixed_heal)
-        status = cure_status(mon.status, rule.cure_mask) if rule.cure_mask else mon.status
-        return MedicineOutcome(True, healed, status, REASON_APPLIED)
-    if (mon.status & rule.cure_mask) == 0:
-        return MedicineOutcome(False, mon.hp, mon.status, REASON_WRONG_STATUS)
-    return MedicineOutcome(True, mon.hp, cure_status(mon.status, rule.cure_mask), REASON_APPLIED)
+    if mon.hp >= mon.max_hp:
+        if not rule.cure_mask:
+            return MedicineOutcome(False, mon.hp, mon.status, REASON_FULL_HP)
+        if mon.status == 0:
+            return MedicineOutcome(False, mon.hp, mon.status, REASON_FULL_HP_NO_STATUS)
+        return MedicineOutcome(
+            True, mon.hp, cure_status(mon.status, rule.cure_mask), REASON_APPLIED
+        )
+    if rule.heal_to_max:
+        healed = mon.max_hp
+    else:
+        healed = capped_heal(mon.hp, mon.max_hp, rule.fixed_heal)
+    status = cure_status(mon.status, rule.cure_mask) if rule.cure_mask else mon.status
+    return MedicineOutcome(True, healed, status, REASON_APPLIED)
 
 
 def assert_medicine_application(
@@ -608,6 +643,14 @@ def account_timeline(timeline: ActionTimeline, *, continuation: ContinuationRule
     if outcome_index <= selection:
         raise AssertionError("item outcome must follow item/target selection")
     outcome = events[outcome_index]
+    selection_event = events[selection]
+    if (
+        selection_event.item_id != outcome.item_id
+        or selection_event.target_slot != outcome.target_slot
+    ):
+        raise AssertionError(
+            "item outcome identity does not match the selected item/target"
+        )
 
     expected_kind = EVENT_APPLICATION if continuation.consumes_item else EVENT_REJECTION
     if outcome.kind != expected_kind:
@@ -773,5 +816,6 @@ __all__ = [
     "later_hp_delta",
     "medicine_outcome",
     "revive_hp",
+    "status_matches_mask",
     "validate_snapshot",
 ]

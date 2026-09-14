@@ -32,8 +32,10 @@ from tests._battle_item_evidence import (
     REASON_WRONG_STATUS,
     STATUS_ALL,
     STATUS_BURN,
+    STATUS_FREEZE,
     STATUS_PARALYSIS,
     STATUS_POISON,
+    STATUS_SLEEP_MASK,
     SUCCESSFUL_ITEM_CONTINUATION,
     SUPER_POTION_HEAL,
     TURN_CONSUMING_FAILURE_CONTINUATION,
@@ -61,6 +63,7 @@ from tests._battle_item_evidence import (
     later_hp_delta,
     medicine_outcome,
     revive_hp,
+    status_matches_mask,
     validate_snapshot,
 )
 
@@ -244,9 +247,22 @@ def test_settled_snapshot_does_not_reconsume_on_text_advance() -> None:
     before = _snapshot(1, 0, _bag(((1, 2),)), party, _active(0, party[0]))
     after_party = [_mon(0, hp=50, max_hp=100)]
     after = _snapshot(1, 0, _bag(((1, 1),)), after_party, _active(0, after_party[0]))
+    continued = _snapshot(1, 0, _bag(((1, 1),)), after_party, _active(0, after_party[0]))
 
-    assert_continuation_idempotent(before, after, 1)
-    assert after.bag.quantity_of(1) == 1
+    assert_continuation_idempotent(before, after, continued, 1)
+    assert continued.bag.quantity_of(1) == 1
+
+
+def test_continuation_detects_a_second_decrement_after_text_advance() -> None:
+    party = [_mon(0, hp=30, max_hp=100)]
+    before = _snapshot(1, 0, _bag(((1, 3),)), party, _active(0, party[0]))
+    after_party = [_mon(0, hp=50, max_hp=100)]
+    after = _snapshot(1, 0, _bag(((1, 2),)), after_party, _active(0, after_party[0]))
+    # The bug: advancing the continuation text decrements the settled stack again.
+    continued = _snapshot(1, 0, _bag(((1, 1),)), after_party, _active(0, after_party[0]))
+
+    with pytest.raises(AssertionError, match="observed 1"):
+        assert_continuation_idempotent(before, after, continued, 1)
 
 
 def test_inventory_underflow_or_unexpected_stack_change_is_rejected() -> None:
@@ -356,6 +372,27 @@ def test_active_refresh_rejects_swapped_active_identity() -> None:
         assert_active_battle_refresh(before, after)
 
 
+def test_active_refresh_rejects_active_max_hp_corruption() -> None:
+    target_before = _mon(0, species=25, hp=30, max_hp=100)
+    target_after = _mon(0, species=25, hp=50, max_hp=100)
+    before = _snapshot(1, 0, _bag(((1, 1),)), [target_before], _active(0, target_before))
+    # The bug: the item doubles the active battle max HP while party max HP stays 100.
+    corrupted = ActiveBattleSnapshot(
+        player_slot=0,
+        species=target_after.species,
+        level=target_after.level,
+        hp=target_after.hp,
+        max_hp=200,
+        status=target_after.status,
+        moves=target_after.moves,
+        pp=target_after.pp,
+    )
+    after = _snapshot(1, 0, _bag(()), [target_after], corrupted)
+
+    with pytest.raises(AssertionError, match="active battle max HP"):
+        assert_active_battle_refresh(before, after)
+
+
 def test_selected_target_changes_only_rejects_other_slot_mutation() -> None:
     target = _mon(1, hp=10, max_hp=20)
     other_before = _mon(0, hp=40, max_hp=40)
@@ -391,11 +428,26 @@ def test_revive_and_max_revive_amounts() -> None:
     assert revive_hp(1, to_max=False) == 0
 
 
-def test_cure_status_clears_only_declared_bits() -> None:
+def test_pinned_amounts_and_status_bytes_are_literal() -> None:
+    assert POTION_HEAL == 20
+    assert SUPER_POTION_HEAL == 50
+    assert HYPER_POTION_HEAL == 200
+    assert STATUS_SLEEP_MASK == 0x07
+    assert STATUS_POISON == 0x08
+    assert STATUS_BURN == 0x10
+    assert STATUS_FREEZE == 0x20
+    assert STATUS_PARALYSIS == 0x40
+    assert STATUS_ALL == 0xFF
+
+
+def test_cure_status_zeroes_the_entire_byte_when_eligible() -> None:
     poisoned_burned = STATUS_POISON | STATUS_BURN
-    assert cure_status(poisoned_burned, STATUS_POISON) == STATUS_BURN
+    assert cure_status(poisoned_burned, STATUS_POISON) == 0
     assert cure_status(poisoned_burned, STATUS_ALL) == 0
     assert cure_status(STATUS_PARALYSIS, STATUS_BURN) == STATUS_PARALYSIS
+    assert cure_status(0x4F, 0x01) == 0
+    assert status_matches_mask(poisoned_burned, STATUS_POISON) is True
+    assert status_matches_mask(poisoned_burned, STATUS_PARALYSIS) is False
 
 
 def test_potion_heals_below_cap_and_is_applied() -> None:
@@ -416,6 +468,16 @@ def test_potion_clamps_at_cap_and_does_not_charge_extra() -> None:
 
     outcome = assert_medicine_application(before, after, _potion(1), expected_consumed=1)
     assert outcome.hp == 100
+
+
+def test_super_potion_heals_its_full_fifty_below_the_cap() -> None:
+    target_before = _mon(0, hp=30, max_hp=200)
+    target_after = _mon(0, hp=80, max_hp=200)
+    before = _snapshot(1, 0, _bag(((1, 2),)), [target_before], _active(0, target_before))
+    after = _snapshot(1, 0, _bag(((1, 1),)), [target_after], _active(0, target_after))
+
+    outcome = assert_medicine_application(before, after, _super_potion(1), expected_consumed=1)
+    assert (outcome.applied, outcome.hp) == (True, 80)
 
 
 def test_max_potion_restores_to_max() -> None:
@@ -501,6 +563,50 @@ def test_matching_status_medicine_cures_and_consumes_one() -> None:
         before, after, MedicineRule(item_id=1, cure_mask=STATUS_POISON), expected_consumed=1
     )
     assert outcome.applied is True
+
+
+def test_status_only_medicine_cures_a_fainted_target_and_zeroes_the_byte() -> None:
+    active_mon = _mon(0, species=25, hp=80, max_hp=80)
+    fainted = _mon(1, species=4, hp=0, max_hp=60, status=0x18)
+    cured = _mon(1, species=4, hp=0, max_hp=60, status=0x00)
+    before = _snapshot(1, 1, _bag(((1, 1),)), [active_mon, fainted], _active(0, active_mon))
+    after = _snapshot(1, 1, _bag(()), [active_mon, cured], _active(0, active_mon))
+
+    outcome = assert_medicine_application(
+        before, after, MedicineRule(item_id=1, cure_mask=STATUS_POISON), expected_consumed=1
+    )
+    assert (outcome.applied, outcome.hp, outcome.status, outcome.reason) == (
+        True,
+        0,
+        0x00,
+        REASON_APPLIED,
+    )
+
+
+def test_full_heal_clears_every_status_bit_at_once() -> None:
+    active_mon = _mon(0, species=25, hp=80, max_hp=80)
+    afflicted = _mon(1, species=4, hp=10, max_hp=60, status=0x4F)
+    cured = _mon(1, species=4, hp=10, max_hp=60, status=0x00)
+    before = _snapshot(1, 1, _bag(((1, 1),)), [active_mon, afflicted], _active(0, active_mon))
+    after = _snapshot(1, 1, _bag(()), [active_mon, cured], _active(0, active_mon))
+
+    outcome = assert_medicine_application(
+        before, after, MedicineRule(item_id=1, cure_mask=0xFF), expected_consumed=1
+    )
+    assert outcome.applied is True
+    assert outcome.status == 0x00
+
+
+def test_status_only_medicine_without_a_matching_bit_is_wrong_status() -> None:
+    active_mon = _mon(0, species=25, hp=80, max_hp=80)
+    burned = _mon(1, species=4, hp=10, max_hp=60, status=0x10)
+    before = _snapshot(1, 1, _bag(((1, 1),)), [active_mon, burned], _active(0, active_mon))
+    after = _snapshot(1, 1, _bag(((1, 1),)), [active_mon, burned], _active(0, active_mon))
+
+    outcome = assert_medicine_application(
+        before, after, MedicineRule(item_id=1, cure_mask=0x08), expected_consumed=0
+    )
+    assert (outcome.applied, outcome.status, outcome.reason) == (False, 0x10, REASON_WRONG_STATUS)
 
 
 def test_potion_on_fainted_target_is_an_invalid_target_not_a_no_effect() -> None:
@@ -792,3 +898,16 @@ def test_successful_item_turn_rejects_wrong_item_or_target_identity() -> None:
         assert_successful_item_turn(
             _successful_timeline(), item_id=1, target_slot=0, expected_hp_delta=21
         )
+
+
+def test_timeline_selection_identity_must_match_the_application_outcome() -> None:
+    timeline = ActionTimeline()
+    timeline.record(EVENT_COMMAND_SELECTION)
+    # The selection names item 2 / slot 1 but the applied outcome is item 1 / slot 0.
+    timeline.record(EVENT_ITEM_SELECTION, item_id=2, target_slot=1)
+    timeline.record(EVENT_APPLICATION, item_id=1, target_slot=0, consumed=1, consumes_action=True)
+    timeline.record(EVENT_OPPONENT_ACTION, hp_delta=-5)
+    timeline.record(EVENT_NEXT_COMMAND)
+
+    with pytest.raises(AssertionError, match="identity does not match"):
+        account_timeline(timeline, continuation=SUCCESSFUL_ITEM_CONTINUATION)
