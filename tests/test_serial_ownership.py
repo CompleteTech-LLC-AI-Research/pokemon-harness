@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import threading
 import sys
+import threading
 import time
 from types import SimpleNamespace
 

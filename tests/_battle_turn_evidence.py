@@ -288,7 +288,8 @@ def validate_turn(baseline: dict[str, Any], turn: dict[str, Any]) -> None:
             and not (turn[opposite]["hp"] == 0 and action["damage_done"] == 1)
         ):
             raise ValueError("multi-hit move did not complete its applications")
-        old_status, new_status = before["status"], after["status"]
+        # This move's status effect applies to the same target as its damage.
+        old_status, new_status = baseline[opposite]["status"], turn[opposite]["status"]
         if old_status != new_status and not (
             old_status == 0
             and new_status == 64

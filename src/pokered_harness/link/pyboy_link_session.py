@@ -514,6 +514,10 @@ class PyBoyLinkSession:
                     irq_callback=self._make_serial_irq_raiser(pyboy),
                     serial_gate=self._serial_gate,
                     dispatch_to_owner=True,
+                    defer_byte_responses=(
+                        callable(getattr(pyboy, "_tick", None))
+                        and hasattr(pyboy, "frame_count")
+                    ),
                 )
                 if (
                     self._local_rom_version is not None
@@ -729,6 +733,18 @@ class PyBoyLinkSession:
                 if frame_barrier:
                     backend.begin_frame_turn(leader=bool(pacing_leader))
 
+                def advance_owner_frame():
+                    token = backend.begin_owner_frame()
+                    frame_before = getattr(pyboy, "frame_count", None)
+                    result = original_tick(*args, **kwargs)
+                    if (
+                        frame_before is not None
+                        and pyboy.frame_count > frame_before
+                        and not bool(getattr(pyboy, "quitting", False))
+                    ):
+                        backend.finish_owner_frame(token)
+                    return result
+
                 def progress_owner() -> None:
                     pending_before = int(backend.debug_snapshot().get("pending_edge_requests", 0))
                     applied = backend.service_pending_edges(max_edges=1)
@@ -740,32 +756,51 @@ class PyBoyLinkSession:
                         and not bool(getattr(core, "internal_clock", 0))
                         and not bool(getattr(core, "transfer_enabled", 0))
                     )
-                    # The eighth external edge latches SB and raises IF, but
-                    # does not run the CPU interrupt handler. Give it one
-                    # genuine owner frame even when no ninth edge is queued.
-                    # This uses the same bounded recovery as an unarmed
-                    # deferred request, in addition to the requested frames.
-                    # The response worker may already have sent the byte's
-                    # response; this is not a response/ROM-consumption fence.
-                    if byte_completed or (
+                    # A held final-bit response also needs progress when no
+                    # ninth request exists. Its peer remains blocked until
+                    # normal owner execution has had a complete frame.
+                    if backend.begin_owner_frame() is not None or byte_completed or (
                         applied == 0
                         and pending_before > 0
                         and core is not None
-                        and not bool(getattr(core, "transfer_enabled", 0))
+                        and (
+                            not bool(getattr(core, "transfer_enabled", 0))
+                            or bool(getattr(core, "internal_clock", 0))
+                        )
                     ):
-                        original_tick(*args, **kwargs)
+                        advance_owner_frame()
 
                 try:
                     if getattr(backend, "_dispatch_to_owner", False):
                         backend.service_pending_edges()
-                    result = original_tick(*args, **kwargs)
+                    result = advance_owner_frame()
                 except BaseException:
                     if frame_barrier:
                         backend.abort_frame_turn(leader=bool(pacing_leader))
+                    else:
+                        backend._mark_closed(
+                            RuntimeError("emulator frame aborted with pending serial work")
+                        )
                     raise
                 finally:
                     if getattr(backend, "_dispatch_to_owner", False):
                         backend.service_pending_edges()
+                if backend.begin_owner_frame() is not None:
+                    try:
+                        # A byte may complete inside the requested frame or
+                        # in the post-frame pump. A subsequent ordinary frame
+                        # is required even for callers without frame barriers.
+                        # This is one bounded continuation, not a queue-drain
+                        # loop which can execute indefinitely.
+                        advance_owner_frame()
+                    except BaseException:
+                        if frame_barrier:
+                            backend.abort_frame_turn(leader=bool(pacing_leader))
+                        else:
+                            backend._mark_closed(
+                                RuntimeError("emulator byte continuation aborted")
+                            )
+                        raise
                 if frame_barrier:
                     try:
                         backend.finish_frame_turn(

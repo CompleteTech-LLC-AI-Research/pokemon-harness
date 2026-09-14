@@ -379,10 +379,10 @@ required below. Fixture-gated tests may be skipped during development, but a
 skip is not a passing release result.
 
 The complete gate command uses the same interpreter as the activated
-environment and keeps its report outside the checkout:
+environment and keeps its report in ignored output:
 
 ```bash
-EVIDENCE_DIR="$(mktemp -d)"
+EVIDENCE_DIR="$PWD/target/gate-$RUN_ID/report"
 POKERED_ROM_ROOT="$PWD/rom" \
 POKERED_FIXTURE_ROOT="$PWD/tests/fixtures/link" \
 python scripts/production_gate.py \
@@ -394,8 +394,50 @@ python scripts/production_gate.py \
   --repeat-timing 5 \
   --matrix-workers 1 \
   --evidence-dir "$EVIDENCE_DIR" \
+  --raw-output-dir "$PWD/target/gate-$RUN_ID/raw" \
   --format text
 ```
+
+Choose a fresh `RUN_ID` for each invocation. The full command runs an additional
+smoke before `unit`, `local`, `remote`, `trade`, `battle`, and five repetitions
+of `timing`. For `--runtime-mode both`, supply the separate source/native
+interpreters as shown below: both smoke lanes finish before either runtime
+starts those original tiers. Each runtime's import identity, collection, and
+fixture preflight runs once. The smoke explicitly selects:
+
+- `tests/test_pyboy_link_imports.py`: public imports and serial pair cleanup.
+- `tests/test_mcp_timed_stdio.py`: authored timed MCP and mismatch regressions.
+- `tests/test_mcp_stdio_integration.py`: actual public startup, state,
+  save/load, and remote disconnect/EOF lifecycle.
+- `tests/test_mcp_timed_rom.py`: all nine ordered Red-color/Blue-color/Yellow
+  listener/connector pairs and the load-state redaction regression.
+
+The smoke is an additional probe. These original selectors remain required
+in their qualification tiers; smoke outcomes are reported separately and
+never counted toward those tiers. Their operation/request/pair deadlines are
+unchanged. `--smoke-only` runs just this ROM-backed developer scope, with
+`execution-scope: smoke-only` and `smoke-role: selected-scope` in its report.
+It cannot be combined with `--unit-only` or `--tier`.
+
+Full gates default to `--fail-fast`: if either smoke fails, required later
+tiers and matrix rows are retained as `NOT_STARTED` with the stopping reason.
+An ordinary failed source smoke still permits native preflight and smoke;
+it does not establish native status. A later tier failure also stops queued
+tiers. `--keep-going` dispatches remaining tiers in runtimes whose preflight
+passed, retaining the original failures. Explicit `--tier` and `--unit-only`
+selections keep their previous continue-through-tiers default unless
+`--fail-fast` is selected.
+
+Cancellation stops further dispatch even with `--keep-going`. Interrupted
+pytest children and their owned process groups are terminated and drained;
+active matrix rows retain `INTERRUPTED` and queued rows retain `NOT_STARTED`.
+Available partial records remain partial, and the CLI returns exit status
+`130`. Failed, blocked, skipped, timed-out, interrupted, or missing required
+results cannot produce a pass. JSON and text evidence include the execution
+plan, selected scope, smoke role, and stopping policy, alongside the existing
+failure details. Complete raw pytest output remains in the separate private
+raw directory. A passing smoke-only or selected-tier result leaves full
+qualification and the release decision `PARTIAL`.
 
 For the asset-free smoke used to validate a source-only checkout, run the
 scoped gate explicitly:
@@ -478,6 +520,20 @@ failed or blocked run still writes its status and diagnostics. The default
 gate checks five pinned ROM paths, three symbol paths, the ten manifest state
 entries, and all required real-ROM tiers. It also fails closed when the strict
 acceptance matrix declaration is incomplete.
+
+To keep complete captured pytest stdout/stderr, add
+`--raw-output-dir "$PRIVATE_OUTPUT_DIR"` with a **new** private directory
+outside `--evidence-dir`. The gate creates owner-only files and directories on
+POSIX, and never replaces an earlier log. Each runtime has its own `source/`
+or `cython/` directory containing both collection logs, `<tier>-<iteration>.log`
+for regular tiers, and `matrix-<digest>.log` for each attempted matrix row.
+The digest is the first 20 hexadecimal characters of SHA-256 of the exact
+node ID in the gate report. Logs retain complete captured text before report
+redaction/truncation, including passed rows and every timing repetition;
+they may contain private paths and must not be shared as the sanitized bundle.
+A requested capture failure fails the affected result while preserving
+pytest's actual outcome counts and exit code. Without this option, the gate
+retains only the bounded report diagnostics.
 
 The release workflow uses an explicit Ruff boundary for the production files it
 owns and explicitly excludes the pinned third-party `vendor/pyboy-src` tree.

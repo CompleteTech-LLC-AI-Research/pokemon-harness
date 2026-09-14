@@ -883,6 +883,83 @@ class _LinkMenuHistory:
         )
 
 
+def _peer_frame_shutdown_sync(
+    backend,
+    *,
+    step,
+    backend_snapshot,
+    ready_sync_id,
+    release_sync_id,
+    leader,
+    timeout,
+    monotonic,
+    sleep,
+):
+    """Stop frame admission after both owners have entered shutdown.
+
+    The leader sends release outside a completed frame and starts no further
+    turns. A follower may still need to finish a turn admitted before that
+    release. It advances only for an already-received FRAME_TICK, so a marker
+    arriving between a poll and owner progress cannot strand it waiting for
+    a frame the leader will never send.
+    """
+    deadline = monotonic() + timeout
+
+    def remaining():
+        value = deadline - monotonic()
+        if value <= 0:
+            raise RuntimeError(
+                f"peer frame shutdown did not converge: backend={backend_snapshot()}"
+            )
+        return value
+
+    def progress(*, admit_turn):
+        if leader and admit_turn:
+            step(1)
+        elif not leader:
+            stats = backend_snapshot()
+            # Only this owner consumes FRAME_TICK. The reader publishes the
+            # received counter after queue insertion, and the owner updates
+            # ACK accounting before its frame call returns. At this owner
+            # boundary a positive difference therefore identifies a queued
+            # turn without removing it or waiting for a future turn.
+            if stats["frame_ticks_received"] > stats["frame_acks_sent"]:
+                step(1)
+            else:
+                backend.service_pending_edges(max_edges=1)
+        else:
+            backend.service_pending_edges(max_edges=1)
+
+    def wait_for_peer(marker, *, admit_turn):
+        while not backend.poll_peer_sync(sync_id=marker):
+            remaining()
+            progress(admit_turn=admit_turn)
+            sleep(min(0.001, remaining()))
+
+    backend.wait_for_wire_idle(
+        timeout=remaining(),
+        progress_callback=lambda: step(1),
+        stable_checks=8,
+    )
+    backend.announce_sync(sync_id=ready_sync_id)
+    wait_for_peer(ready_sync_id, admit_turn=True)
+    # Each ready marker was published outside that peer's frame call. Once
+    # both owners are here, a second ticking quiet window could demand more
+    # turns after one peer has already finished it. Fence admission instead.
+    backend.announce_sync(sync_id=release_sync_id)
+    wait_for_peer(release_sync_id, admit_turn=False)
+    # FRAME_ACK and the peer's release are ordered on its socket. The leader
+    # cannot release before its last ACK; the follower cannot observe that
+    # release until any last admitted turn has completed. No new frame can
+    # create serial work during this final transport-only check.
+    backend.wait_for_wire_idle(
+        timeout=remaining(),
+        allow_peer_close=True,
+        progress_callback=lambda: backend.service_pending_edges(max_edges=1),
+        stable_checks=8,
+    )
+
+
 def _peer_shutdown_sync(
     backend,
     *,
@@ -892,6 +969,7 @@ def _peer_shutdown_sync(
     timeout: float = 120.0,
     release_sync_id: int | None = None,
     progress_after_marker: Callable[[], None] | None = None,
+    frame_leader: bool | None = None,
     monotonic=time.monotonic,
     sleep=time.sleep,
 ) -> None:
@@ -905,7 +983,26 @@ def _peer_shutdown_sync(
     provide ``progress_after_marker`` to keep both native owners live through
     the marker and final quiet-window handshake. The default remains
     transport-only after the marker for lightweight/unit-test callers.
+    A negotiated frame-paced caller supplies ``frame_leader`` so shutdown
+    fences new turns before the final transport-only check.
     """
+    if frame_leader is not None:
+        if type(frame_leader) is not bool:
+            raise TypeError("frame_leader must be a bool or None")
+        if release_sync_id is None:
+            raise ValueError("frame shutdown requires a release marker")
+        _peer_frame_shutdown_sync(
+            backend,
+            step=step,
+            backend_snapshot=backend_snapshot,
+            ready_sync_id=ready_sync_id,
+            release_sync_id=release_sync_id,
+            leader=frame_leader,
+            timeout=timeout,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+        return
 
     def wait_for_peer_marker(sync_id: int) -> None:
         deadline_at = monotonic() + timeout
@@ -922,16 +1019,7 @@ def _peer_shutdown_sync(
                 # own quiet-window tick. Keep both owner clocks moving until
                 # the marker is observed; the final quiet-window drain below
                 # fences any edge admitted during this handshake.
-                try:
-                    progress_after_marker()
-                except BaseException:
-                    # The peer may have sent the expected release marker and
-                    # then closed before this owner entered its next frame
-                    # turn. Consume that queued marker before treating the
-                    # close as an error; unrelated failures still propagate.
-                    if backend.poll_peer_sync(sync_id=sync_id):
-                        return
-                    raise
+                progress_after_marker()
             sleep(0.001)
         raise RuntimeError(
             f"peer shutdown sync {sync_id} did not converge: backend={backend_snapshot()}"
@@ -1703,6 +1791,9 @@ def _run_peer(trace=None) -> int:
             timeout=timeout,
             release_sync_id=ready_sync_id + 1,
             progress_after_marker=lambda: session.step(1),
+            frame_leader=(
+                link._network_is_internal_clock if link._network_frame_barrier else None
+            ),
         )
 
     def current_menu_item() -> int | None:
@@ -2635,9 +2726,15 @@ def _run_peer(trace=None) -> int:
                 )
             log("battle Colosseum warp complete on both peers")
             shot("03_colosseum")
-            if args.version == "yellow" and peer_rom_version == "yellow":
-                link.set_network_frame_barrier(True)
-                log("enabled Yellow frame barrier at Colosseum boundary")
+            # Startup negotiation leaves Yellow's input-sensitive preamble
+            # unpaced. Both peers have now observed the same ROM-owned map
+            # boundary, so use the existing frame turns for every battle
+            # pair. Otherwise a fast external-clock ROM can exhaust its
+            # receive counter while a peer byte is still arriving and store
+            # stale party data. Owner progress still services native edges
+            # while either endpoint waits for the frame handshake.
+            link.set_network_frame_barrier(True)
+            log("enabled frame barrier at Colosseum boundary")
             session.step(120)
 
             conn_status = session._pyboy.memory[session.symbols.addr_of("hSerialConnectionStatus")]
@@ -2685,17 +2782,17 @@ def _run_peer(trace=None) -> int:
                         f"backend={backend_snapshot()}"
                     )
                     last_prebattle_log = time.monotonic()
-            log(
-                "battle VS-text milestone reached; waiting for wire quiet "
-                f"counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} } "
-                f"state={state_snapshot()} backend={backend_snapshot()}"
-            )
             if counters["DisplayLinkBattleVersusTextBox"][0] == 0:
                 raise RuntimeError(
                     "battle VS-text milestone did not complete: "
                     f"counters={counters} state={state_snapshot()} "
                     f"backend={backend_snapshot()}"
                 )
+            log(
+                "battle VS-text milestone reached; waiting for wire quiet "
+                f"counters={ {k: counters[k][0] for k in _TRADE_DIAG_SYMBOLS} } "
+                f"state={state_snapshot()} backend={backend_snapshot()}"
+            )
             # A later edge can still be admitted immediately after the hook.
             # Let the owner continue for a bounded stable quiet window before
             # entering the no-tick ready/release barrier.

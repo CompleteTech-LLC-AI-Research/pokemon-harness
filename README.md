@@ -537,6 +537,43 @@ collected 1,094 tests in each source and native runtime, had 949 unit tests pass
 and passed timing 50/50 in each of five repetitions. This unit/timing scope does
 not establish ROM gameplay.
 
+For complete captured pytest output, add `--raw-output-dir "$PRIVATE_OUTPUT_DIR"`
+using a new private directory outside the sanitized `--evidence-dir` bundle.
+This retains every attempted matrix row and each regular-tier iteration under
+separate runtime directories, including passing output. These unredacted logs
+are private diagnostic artifacts; see the [production runbook](docs/PRODUCTION_RUNBOOK.md)
+for filenames and capture-failure behavior.
+
+The complete gate now starts with an additional runtime/import and MCP smoke
+in every requested runtime. With `--runtime-mode both`, source and native each
+run the public MCP startup/state/save-load/disconnect checks and all nine
+ordered canonical timed-ROM pairs before the long qualification tiers start.
+The smoke uses their existing deadlines. Its passes do not replace any of the
+six original tiers or the five timing repetitions.
+
+For this ROM-backed developer scope alone, use separate bootstrapped
+interpreters and a fresh `RUN_ID`:
+
+```bash
+"$SOURCE_PYTHON" scripts/production_gate.py \
+  --repo-root "$PWD" --runtime-mode both \
+  --python "$SOURCE_PYTHON" --cython-python "$NATIVE_PYTHON" \
+  --rom-root "$ROM_ROOT" --fixture-root "$FIXTURE_ROOT" \
+  --smoke-only \
+  --evidence-dir "$PWD/target/gate-$RUN_ID/report" \
+  --raw-output-dir "$PWD/target/gate-$RUN_ID/raw"
+```
+
+`ROM_ROOT` and `FIXTURE_ROOT` must contain the pinned legal inputs described
+below. A smoke-only pass is labeled `execution-scope: smoke-only`; it does not
+qualify a release. Omit `--smoke-only` to run the full gate. Full gates stop
+queued tiers after a failure by default and retain each unrun tier as
+`NOT_STARTED` with its stopping reason. An ordinary source smoke failure still
+allows the native smoke to report its own result. `--keep-going` continues the
+remaining tiers while preserving failures; `--fail-fast` explicitly enables
+stopping for a selected scope. `--unit-only` remains the asset-free unit/timing
+scope. See the runbook for cancellation and report details.
+
 The source runtime is the documented release default. Native module identity,
 unit/timing checks, and attach/step/close smokes do not qualify compiled
 trade/battle gameplay; see the recorded matrix above.

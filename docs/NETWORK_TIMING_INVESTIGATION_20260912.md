@@ -1,5 +1,17 @@
 # TCP serial timing investigation — 2026-09-12
 
+This is the historical investigation of issue #71. The later full matrix
+exposed another failure, tracked in
+[issue #79 and its mailbox investigation](NETWORK_MAILBOX_INVESTIGATION_20260913.md).
+The later evidence supersedes this document's conclusion that no remaining
+scheduler defect had been demonstrated.
+
+Subsequent qualification also exposed
+[cross-family battle receive timeouts (#82)](BATTLE_PACING_INVESTIGATION_20260913.md)
+and [frame admission during shutdown (#83)](FRAME_SHUTDOWN_INVESTIGATION_20260913.md).
+Those investigations record the later driver corrections and their separate
+ordinary and diagnostic results.
+
 Issue [#71](https://github.com/CompleteDotTech/pokemon/issues/71) is resolved
 for its documented Blue/Blue failure by the preceding fixes, particularly
 the owner continuation in [#76](https://github.com/CompleteDotTech/pokemon/pull/76).

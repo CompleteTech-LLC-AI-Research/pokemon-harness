@@ -34,6 +34,7 @@ walkthrough_*/
 .production-gate/
 production_gate_output/
 artifacts/
+/target/
 
 # Tooling
 .idea/

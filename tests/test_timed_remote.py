@@ -757,6 +757,7 @@ def test_authored_runtime_two_owner_factory_attach_passive_sync_and_bilateral_fe
     record_property("runtime", "native" if all(native) else "source")
     record_property("runtime_modules", repr(paths))
     ready = threading.Barrier(2, timeout=BOUND)
+    completed = threading.Barrier(2)
     finished = [threading.Event(), threading.Event()]
     deadline = time.monotonic() + BOUND
 
@@ -808,6 +809,9 @@ def test_authored_runtime_two_owner_factory_attach_passive_sync_and_bilateral_fe
                     game.mb.serial.SC,
                 ) == baseline
                 assert endpoint.snapshot() is not None
+                # A peer's finished flag can arrive during our last control call.
+                # Both owners must leave those calls before either endpoint closes.
+                completed.wait(timeout=max(0, deadline - time.monotonic()))
                 return endpoint.epoch
             finally:
                 if endpoint is not None:
