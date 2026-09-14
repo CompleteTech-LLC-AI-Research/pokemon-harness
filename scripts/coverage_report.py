@@ -1,0 +1,974 @@
+"""Generate a functional-coverage report from the battle-scenario catalog.
+
+The catalog in ``release-evidence/battle-scenarios.json`` deliberately keeps two
+separate coverage dimensions:
+
+* ``one_turn_pairing`` -- the 19 strict battle entry points, each required once
+  per declared runtime; and
+* ``expanded_mechanics`` -- every move-effect family in the pinned game tables,
+  mapped to ``tested`` / ``planned_unverified`` / ``deliberately_excluded``.
+
+This command combines the declared catalog with actual collected and terminal
+records (a production-gate JSON/XML path, or an explicit ``--no-results`` mode).
+Declaration, enum, or table presence is never execution evidence. A required
+case is only ``tested`` when a single terminal ``passed`` record for the
+declared runtime with matching runtime build exists. Missing, skipped, xfailed,
+timed-out, unrun, partial, duplicated, or mismatched results are reported as
+``INCOMPLETE`` and can never be confused with a complete pairing matrix.
+
+The report refuses to merge unrelated partial runs: it accepts one results
+source, records that source's identity, and flags differing commits or runtime
+builds instead of synthesising a clean gate.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import runpy
+import sys
+import xml.etree.ElementTree as ET
+from collections import Counter
+from copy import deepcopy
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+_REPO = Path(__file__).resolve().parents[1]
+_MATRIX = runpy.run_path(str(_REPO / "scripts" / "tcp_link_matrix.py"))
+CATALOG_PATH = _REPO / "release-evidence" / "battle-scenarios.json"
+COVERAGE_DIMENSION = "one_turn_pairing"
+EXPANDED_DIMENSION = "expanded_mechanics"
+_REQUIRED_DIMENSIONS = (COVERAGE_DIMENSION, EXPANDED_DIMENSION)
+_RUNTIMES = ("source", "cython")
+_ROLES = ("listen", "connect")
+_VERSIONS = ("red", "blue", "yellow")
+_TRANSPORTS = ("local", "remote")
+_SCOPES = ("tested", "planned_unverified", "deliberately_excluded")
+_TERMINAL_PASS = "passed"
+_INCOMPLETE_STATUSES = frozenset(
+    {
+        "missing",
+        "duplicate",
+        "mismatched",
+        "unidentified",
+        "partial",
+        "skipped",
+        "xfailed",
+        "xpassed",
+        "failed",
+        "error",
+        "timed_out",
+        "interrupted",
+        "not_run",
+    }
+)
+_GATE_STATUS = {
+    "PASS": "passed",
+    "FAIL": "failed",
+    "TIMEOUT": "timed_out",
+    "INTERRUPTED": "interrupted",
+    "NOT_STARTED": "not_run",
+}
+
+
+class CoverageError(ValueError):
+    """Raised when the catalog or a supplied result cannot be interpreted."""
+
+
+def normalize_nodeid(nodeid: str) -> str:
+    """Normalise a pytest node ID for comparison."""
+    path, separator, test_name = str(nodeid).partition("::")
+    normalized_path = path.replace("\\", "/")
+    while normalized_path.startswith("./"):
+        normalized_path = normalized_path[2:]
+    return f"{normalized_path}::{test_name}" if separator else normalized_path
+
+
+def load_catalog(path: str | Path = CATALOG_PATH) -> dict[str, Any]:
+    """Load a scenario catalog, requiring an object with a ``scenarios`` list."""
+    target = Path(path)
+    try:
+        document = json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise CoverageError(f"catalog not found: {target}") from exc
+    except json.JSONDecodeError as exc:
+        raise CoverageError(f"catalog is not valid JSON: {target}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise CoverageError("catalog root must be an object")
+    if not isinstance(document.get("scenarios"), list) or not document["scenarios"]:
+        raise CoverageError("catalog.scenarios must be a non-empty list")
+    return document
+
+
+def _coverage(catalog: dict[str, Any]) -> dict[str, Any]:
+    coverage = catalog.get("coverage")
+    if not isinstance(coverage, dict):
+        raise CoverageError("catalog.coverage must be an object")
+    return coverage
+
+
+def dimensions(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw = _coverage(catalog).get("dimensions")
+    if not isinstance(raw, list):
+        raise CoverageError("catalog.coverage.dimensions must be a list")
+    result: dict[str, dict[str, Any]] = {}
+    for index, dimension in enumerate(raw):
+        if not isinstance(dimension, dict):
+            raise CoverageError(f"coverage.dimensions[{index}] must be an object")
+        dimension_id = dimension.get("dimension_id")
+        if not isinstance(dimension_id, str) or not dimension_id:
+            raise CoverageError(f"coverage.dimensions[{index}].dimension_id is required")
+        result[dimension_id] = dimension
+    return result
+
+
+def required_cases(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = _coverage(catalog).get("required_cases")
+    if not isinstance(raw, list):
+        raise CoverageError("catalog.coverage.required_cases must be a list")
+    return [case for case in raw if isinstance(case, dict)]
+
+
+def one_turn_pairing_cases(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the declared one-turn pairing cases (the strict battle rows)."""
+    return [
+        case for case in required_cases(catalog) if case.get("dimension_id") == COVERAGE_DIMENSION
+    ]
+
+
+def effect_families(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    move_effects = catalog.get("move_effects")
+    if not isinstance(move_effects, dict):
+        raise CoverageError("catalog.move_effects must be an object")
+    raw = move_effects.get("families")
+    if not isinstance(raw, list):
+        raise CoverageError("catalog.move_effects.families must be a list")
+    families = [family for family in raw if isinstance(family, dict)]
+    if len(families) != len(raw):
+        raise CoverageError("catalog.move_effects.families entries must be objects")
+    return families
+
+
+def _scenario_fixture_ids(catalog: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for scenario in catalog.get("scenarios", []):
+        if not isinstance(scenario, dict):
+            continue
+        fixture = scenario.get("fixture")
+        if isinstance(fixture, dict) and isinstance(fixture.get("fixture_id"), str):
+            ids.add(fixture["fixture_id"])
+    return ids
+
+
+def _authoritative_selectors() -> frozenset[str]:
+    return frozenset(_MATRIX["STRICT_BATTLE_NODEIDS"])
+
+
+def validate_catalog(catalog: dict[str, Any]) -> None:
+    """Validate the additive coverage/effects dimension, raising on defects."""
+    coverage = _coverage(catalog)
+    if coverage.get("coverage_version") != 1:
+        raise CoverageError("unsupported coverage_version")
+    known_dimensions = dimensions(catalog)
+    for required_dimension in _REQUIRED_DIMENSIONS:
+        if required_dimension not in known_dimensions:
+            raise CoverageError(f"missing required coverage dimension: {required_dimension}")
+
+    policy = coverage.get("evidence_policy")
+    if not isinstance(policy, dict):
+        raise CoverageError("catalog.coverage.evidence_policy must be an object")
+
+    fixtures = _scenario_fixture_ids(catalog)
+    seen_case_ids: set[str] = set()
+    seen_selectors: set[str] = set()
+    role_coverage: dict[str, set[str]] = {dimension_id: set() for dimension_id in known_dimensions}
+    declared_pairing: set[str] = set()
+
+    for index, case in enumerate(required_cases(catalog)):
+        prefix = f"coverage.required_cases[{index}]"
+        case_id = case.get("case_id")
+        if not isinstance(case_id, str) or not case_id:
+            raise CoverageError(f"{prefix}.case_id is required")
+        if case_id in seen_case_ids:
+            raise CoverageError(f"duplicate case_id: {case_id}")
+        seen_case_ids.add(case_id)
+        dimension_id = case.get("dimension_id")
+        if dimension_id not in known_dimensions:
+            raise CoverageError(f"{prefix}.dimension_id is unknown: {dimension_id!r}")
+        if case.get("operation") != "battle":
+            raise CoverageError(f"{prefix}.operation must be battle")
+        if case.get("transport") not in _TRANSPORTS:
+            raise CoverageError(f"{prefix}.transport is invalid")
+        versions = case.get("game_versions")
+        if not isinstance(versions, list) or not versions:
+            raise CoverageError(f"{prefix}.game_versions must be a non-empty list")
+        if any(version not in _VERSIONS for version in versions):
+            raise CoverageError(f"{prefix}.game_versions has an unknown version")
+        roles = case.get("roles")
+        if not isinstance(roles, list) or not roles:
+            raise CoverageError(f"{prefix}.roles must be a non-empty list")
+        if any(role not in _ROLES for role in roles):
+            raise CoverageError(f"{prefix}.roles has an unknown role")
+        case_runtimes = case.get("runtimes")
+        if not isinstance(case_runtimes, list) or not case_runtimes:
+            raise CoverageError(f"{prefix}.runtimes must be a non-empty list")
+        if any(runtime not in _RUNTIMES for runtime in case_runtimes):
+            raise CoverageError(f"{prefix}.runtimes has an unknown runtime")
+        fixture_id = case.get("fixture_id")
+        if fixture_id not in fixtures:
+            raise CoverageError(f"{prefix}.fixture_id is unknown: {fixture_id!r}")
+        if not isinstance(case.get("oracle"), str) or not case["oracle"].strip():
+            raise CoverageError(f"{prefix}.oracle is required")
+        selector = case.get("selector")
+        if not isinstance(selector, str) or "::" not in selector:
+            raise CoverageError(f"{prefix}.selector must be a pytest node ID")
+        normalized = normalize_nodeid(selector)
+        if normalized in seen_selectors:
+            raise CoverageError(f"duplicate case selector: {selector}")
+        seen_selectors.add(normalized)
+        if case.get("status") != "required":
+            raise CoverageError(f"{prefix}.status must be required")
+        role_coverage.setdefault(dimension_id, set()).update(roles)
+        if dimension_id == COVERAGE_DIMENSION:
+            declared_pairing.add(normalized)
+
+    for dimension_id, dimension in known_dimensions.items():
+        required_roles = dimension.get("required_roles")
+        if not isinstance(required_roles, list) or not required_roles:
+            raise CoverageError(f"dimension {dimension_id!r} must declare required_roles")
+        if required_roles and role_coverage.get(dimension_id):
+            missing_roles = sorted(set(required_roles) - role_coverage[dimension_id])
+            if missing_roles:
+                raise CoverageError(
+                    f"dimension {dimension_id!r} has no case for roles: {', '.join(missing_roles)}"
+                )
+
+    expected_pairing = _authoritative_selectors()
+    if declared_pairing != expected_pairing:
+        missing = sorted(expected_pairing - declared_pairing)
+        extra = sorted(declared_pairing - expected_pairing)
+        raise CoverageError(
+            "one_turn_pairing declaration does not match tcp_link_matrix "
+            f"(missing={missing}, undeclared={extra})"
+        )
+
+    _validate_move_effects(catalog)
+
+
+def _validate_move_effects(catalog: dict[str, Any]) -> None:
+    move_effects = catalog.get("move_effects")
+    if not isinstance(move_effects, dict):
+        raise CoverageError("catalog.move_effects must be an object")
+    if move_effects.get("effects_version") != 1:
+        raise CoverageError("unsupported effects_version")
+    families = effect_families(catalog)
+    if move_effects.get("family_count") != len(families):
+        raise CoverageError("family_count does not match the family list")
+    expected_ids = list(range(len(families)))
+    if [family.get("effect_id") for family in families] != expected_ids:
+        raise CoverageError("effect families must cover every pinned effect id exactly once")
+    planned = 0
+    excluded = 0
+    for family in families:
+        scope = family.get("scope")
+        if scope not in _SCOPES:
+            raise CoverageError(f"effect {family.get('effect_id')} has an unknown scope")
+        if not isinstance(family.get("reason"), str) or not family["reason"].strip():
+            raise CoverageError(f"effect {family.get('effect_id')} requires a reason")
+        move_ids = family.get("move_ids")
+        if not isinstance(move_ids, list):
+            raise CoverageError(f"effect {family.get('effect_id')} require a move_ids list")
+        if scope == "planned_unverified":
+            planned += 1
+        elif scope == "deliberately_excluded":
+            excluded += 1
+        elif not family.get("evidence"):
+            raise CoverageError(f"effect {family.get('effect_id')} claims tested without evidence")
+    if move_effects.get("planned_unverified_count") != planned:
+        raise CoverageError("planned_unverified_count does not match the family list")
+    if move_effects.get("deliberately_excluded_count") != excluded:
+        raise CoverageError("deliberately_excluded_count does not match the family list")
+
+    selector = move_effects.get("current_selector")
+    if not isinstance(selector, dict):
+        raise CoverageError("catalog.move_effects.current_selector must be an object")
+    if selector.get("admitted_effect_ids") != [0, 6, 44]:
+        raise CoverageError("current_selector must admit effects 0, 6, and 44")
+    excluded_moves = selector.get("excluded_moves")
+    if not isinstance(excluded_moves, list):
+        raise CoverageError("current_selector.excluded_moves must be a list")
+    excluded_ids = {entry.get("move_id") for entry in excluded_moves if isinstance(entry, dict)}
+    if 68 not in excluded_ids:
+        raise CoverageError("current_selector must record the Counter (move 68) exclusion")
+
+
+@dataclass
+class Outcome:
+    """One terminal test outcome for a single node ID and runtime."""
+
+    nodeid: str
+    status: str
+    runtime: str
+    reason: str = ""
+    partial: bool = False
+
+
+@dataclass
+class ResultSet:
+    """Normalised collected/terminal records from one results source."""
+
+    source_path: str | None = None
+    source_kind: str = "unknown"
+    run_id: str | None = None
+    commit: str | None = None
+    runtimes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    outcomes: list[Outcome] = field(default_factory=list)
+    collection_errors: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def lookup(self, runtime: str, selector: str) -> list[Outcome]:
+        target = normalize_nodeid(selector)
+        return [
+            outcome
+            for outcome in self.outcomes
+            if outcome.runtime == runtime and normalize_nodeid(outcome.nodeid) == target
+        ]
+
+
+def _status_from_gate(status: Any) -> str:
+    if isinstance(status, str) and status in _GATE_STATUS:
+        return _GATE_STATUS[status]
+    if isinstance(status, str) and status:
+        return status.lower()
+    return "error"
+
+
+def _runtime_identity(block: dict[str, Any]) -> dict[str, Any]:
+    runtime = block.get("runtime")
+    return runtime if isinstance(runtime, dict) else {}
+
+
+def _mode_for(block: dict[str, Any]) -> str:
+    mode = block.get("mode")
+    if isinstance(mode, str) and mode:
+        return mode
+    identity = _runtime_identity(block)
+    mode = identity.get("pyboy_mode")
+    if isinstance(mode, str) and mode:
+        return mode
+    return "unknown"
+
+
+def result_set_from_document(
+    document: Any,
+    *,
+    source_path: str | None = None,
+) -> ResultSet:
+    """Normalise a gate/evidence/normalised JSON document into a result set."""
+    if not isinstance(document, dict):
+        raise CoverageError("results root must be an object")
+    result = ResultSet(source_path=source_path, source_kind="json")
+    result.run_id = document.get("run_id") if isinstance(document.get("run_id"), str) else None
+    result.commit = document.get("commit") if isinstance(document.get("commit"), str) else None
+    raw_collection_errors = document.get("collection_errors")
+    if isinstance(raw_collection_errors, list):
+        for entry in raw_collection_errors:
+            if isinstance(entry, dict):
+                result.collection_errors.append(
+                    f"{entry.get('nodeid', '<collection>')}: {entry.get('reason', '')}"
+                )
+            elif isinstance(entry, str):
+                result.collection_errors.append(entry)
+
+    raw_runtimes = document.get("runtimes")
+    if isinstance(raw_runtimes, list):
+        blocks = [block for block in raw_runtimes if isinstance(block, dict)]
+        modes = {_mode_for(block) for block in blocks}
+        default_mode = modes.pop() if len(modes) == 1 else "unknown"
+        for block in blocks:
+            mode = _mode_for(block)
+            identity = _runtime_identity(block)
+            if identity:
+                result.runtimes[mode] = {**identity, "mode": mode}
+            elif mode not in result.runtimes:
+                result.runtimes[mode] = {"mode": mode}
+            _collect_outcomes(block, mode, result)
+        raw_records = document.get("records")
+        if isinstance(raw_records, list):
+            _collect_outcome_records(raw_records, default_mode, result)
+        return result
+
+    if not (
+        isinstance(document.get("tiers"), list)
+        or isinstance(document.get("runtime"), dict)
+        or isinstance(document.get("records"), list)
+        or isinstance(document.get("tests"), list)
+    ):
+        result.notes.append("results source contains no runtime blocks")
+        return result
+
+    mode = _mode_for(document)
+    identity = _runtime_identity(document)
+    if identity:
+        result.runtimes[mode] = {**identity, "mode": mode}
+    elif mode not in result.runtimes:
+        result.runtimes[mode] = {"mode": mode}
+    _collect_outcomes(document, mode, result)
+    return result
+
+
+def _collect_outcome_records(records: list[Any], default_mode: str, result: ResultSet) -> None:
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        nodeid = record.get("nodeid")
+        if not isinstance(nodeid, str) or not nodeid:
+            continue
+        runtime = record.get("runtime")
+        runtime = runtime if isinstance(runtime, str) and runtime else default_mode
+        result.outcomes.append(
+            Outcome(
+                nodeid=nodeid,
+                status=str(record.get("status", "error")).lower(),
+                runtime=runtime,
+                reason=str(record.get("reason", "")),
+                partial=bool(record.get("partial", False)),
+            )
+        )
+
+
+def _collect_outcomes(block: dict[str, Any], mode: str, result: ResultSet) -> None:
+    seen_nodeids: set[str] = set()
+    records = block.get("records")
+    if isinstance(records, list):
+        _collect_outcome_records(records, mode, result)
+        seen_nodeids.update(
+            normalize_nodeid(record["nodeid"])
+            for record in records
+            if isinstance(record, dict) and isinstance(record.get("nodeid"), str)
+        )
+    tests = block.get("tests")
+    if isinstance(tests, list):
+        for record in tests:
+            if not isinstance(record, dict):
+                continue
+            nodeid = record.get("nodeid")
+            if not isinstance(nodeid, str) or not nodeid:
+                continue
+            status = str(record.get("outcome", "error")).lower()
+            if record.get("was_xfail") and status == "skipped":
+                status = "xfailed"
+            elif record.get("was_xfail") and status == "passed":
+                status = "xpassed"
+            result.outcomes.append(
+                Outcome(
+                    nodeid=nodeid, status=status, runtime=mode, reason=str(record.get("reason", ""))
+                )
+            )
+            seen_nodeids.add(normalize_nodeid(nodeid))
+    tiers = block.get("tiers")
+    if isinstance(tiers, list):
+        for tier in tiers:
+            if not isinstance(tier, dict):
+                continue
+            for case in tier.get("case_results", []):
+                if not isinstance(case, dict):
+                    continue
+                nodeid = case.get("nodeid")
+                if not isinstance(nodeid, str) or not nodeid:
+                    continue
+                result.outcomes.append(
+                    Outcome(
+                        nodeid=nodeid,
+                        status=_status_from_gate(case.get("status")),
+                        runtime=mode,
+                        reason=str(case.get("reason", "")),
+                        partial=bool(case.get("partial", False)),
+                    )
+                )
+                seen_nodeids.add(normalize_nodeid(nodeid))
+            for detail in tier.get("failure_details", []):
+                if not isinstance(detail, dict):
+                    continue
+                nodeid = detail.get("nodeid")
+                if not isinstance(nodeid, str) or not nodeid:
+                    continue
+                if normalize_nodeid(nodeid) in seen_nodeids:
+                    continue
+                outcome = str(detail.get("outcome", "failed")).lower()
+                if outcome == "xfailed":
+                    outcome = "xfailed"
+                elif outcome == "xpassed":
+                    outcome = "xpassed"
+                result.outcomes.append(
+                    Outcome(
+                        nodeid=nodeid,
+                        status=outcome,
+                        runtime=mode,
+                        reason=str(detail.get("reason", "")),
+                    )
+                )
+
+
+def _parse_junit(text: str, source_path: str) -> ResultSet:
+    result = ResultSet(source_path=source_path, source_kind="junit-xml")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise CoverageError(f"invalid JUnit XML: {exc}") from exc
+    for testcase in root.iter("testcase"):
+        classname = testcase.get("classname") or ""
+        name = testcase.get("name") or ""
+        if classname:
+            module = classname.replace(".", "/")
+            nodeid = f"{module}::{name}"
+        else:
+            nodeid = name
+        status = _TERMINAL_PASS
+        reason = ""
+        failure = testcase.find("failure")
+        error = testcase.find("error")
+        skipped = testcase.find("skipped")
+        if failure is not None:
+            status = "failed"
+            reason = failure.get("message") or ""
+        elif error is not None:
+            status = "error"
+            reason = error.get("message") or ""
+        elif skipped is not None:
+            marker = f"{skipped.get('type', '')} {skipped.get('message', '')}".lower()
+            status = "xfailed" if "xfail" in marker else "skipped"
+            reason = skipped.get("message") or skipped.get("type") or ""
+        result.outcomes.append(
+            Outcome(nodeid=nodeid, status=status, runtime="unknown", reason=reason)
+        )
+    result.notes.append("JUnit results carry no runtime/build identity")
+    return result
+
+
+def load_results(path: str | Path) -> ResultSet:
+    """Load a gate report, JUnit XML, or normalised JSON results file."""
+    target = Path(path)
+    if not target.is_file():
+        raise CoverageError(f"results source not found: {target}")
+    text = target.read_text(encoding="utf-8")
+    if target.suffix.lower() == ".xml" or text.lstrip().startswith("<"):
+        return _parse_junit(text, str(target))
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CoverageError(f"results source is not valid JSON: {target}: {exc}") from exc
+    return result_set_from_document(document, source_path=str(target))
+
+
+def _evidence_policy(catalog: dict[str, Any]) -> dict[str, Any]:
+    coverage = catalog.get("coverage")
+    if not isinstance(coverage, dict):
+        return {}
+    policy = coverage.get("evidence_policy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def _evaluate_case(
+    runtime: str,
+    records: list[Outcome],
+    results: ResultSet | None,
+    expected_commit: str | None,
+    policy: dict[str, Any],
+) -> tuple[str, str]:
+    if not records:
+        return "missing", f"no result for runtime {runtime}"
+    if len(records) > 1:
+        return "duplicate", f"{len(records)} results for runtime {runtime}"
+    record = records[0]
+    if record.partial:
+        return "partial", f"partial {record.status} record"
+    if record.status != _TERMINAL_PASS:
+        return record.status, record.reason or f"result status {record.status}"
+
+    identity: dict[str, Any] = {}
+    if results is not None:
+        identity = results.runtimes.get(runtime, {})
+        if runtime not in results.runtimes:
+            return "unidentified", f"runtime/build identity unavailable for {runtime}"
+    mode = identity.get("pyboy_mode") or identity.get("mode")
+    if isinstance(mode, str) and mode and mode != runtime:
+        return "mismatched", f"runtime mode {mode!r} does not match required {runtime!r}"
+    expected_revision = policy.get("expected_pyboy_revision")
+    actual_revision = identity.get("pyboy_revision")
+    if expected_revision:
+        if not actual_revision:
+            return "unidentified", "PyBoy revision unavailable for the declared runtime"
+        if actual_revision != expected_revision:
+            return (
+                "mismatched",
+                f"PyBoy revision {actual_revision!r} does not match pinned {expected_revision!r}",
+            )
+    expected_version = policy.get("expected_pyboy_version")
+    actual_version = identity.get("pyboy_version")
+    if expected_version and actual_version and actual_version != expected_version:
+        return (
+            "mismatched",
+            f"PyBoy version {actual_version!r} does not match pinned {expected_version!r}",
+        )
+    if expected_commit:
+        result_commit = results.commit if results else None
+        if not result_commit:
+            return "unidentified", "result commit unavailable"
+        if result_commit != expected_commit:
+            return (
+                "mismatched",
+                f"result commit {result_commit!r} does not match declared {expected_commit!r}",
+            )
+    return "tested", ""
+
+
+def _dimension_status(
+    dimension_id: str,
+    case_reports: list[dict[str, Any]],
+    catalog: dict[str, Any],
+) -> dict[str, Any]:
+    if dimension_id == EXPANDED_DIMENSION:
+        families = []
+        try:
+            families = effect_families(catalog)
+        except CoverageError:
+            families = []
+        tested = sum(1 for family in families if family.get("scope") == "tested")
+        planned = sum(1 for family in families if family.get("scope") == "planned_unverified")
+        excluded = sum(1 for family in families if family.get("scope") == "deliberately_excluded")
+        if planned and tested:
+            status = "PARTIAL"
+        elif planned:
+            status = "PLANNED_UNVERIFIED"
+        elif tested:
+            status = "COMPLETE"
+        else:
+            status = "DELIBERATELY_EXCLUDED"
+        return {
+            "status": status,
+            "families": len(families),
+            "tested": tested,
+            "planned_unverified": planned,
+            "deliberately_excluded": excluded,
+        }
+    relevant = [report for report in case_reports if report["dimension_id"] == dimension_id]
+    incomplete = [report for report in relevant if report["status"] != "tested"]
+    if not relevant:
+        return {"status": "MISSING", "checks": 0, "complete": 0}
+    return {
+        "status": "INCOMPLETE" if incomplete else "COMPLETE",
+        "checks": len(relevant),
+        "complete": len(relevant) - len(incomplete),
+    }
+
+
+def build_report(
+    catalog: dict[str, Any],
+    results: ResultSet | None = None,
+    *,
+    expected_commit: str | None = None,
+    catalog_path: str | None = None,
+) -> dict[str, Any]:
+    """Build a coverage report; never merge partial runs into a clean gate."""
+    document = deepcopy(catalog)
+    problems: list[str] = []
+    catalog_valid = True
+    try:
+        validate_catalog(document)
+    except CoverageError as exc:
+        problems.append(f"catalog: {exc}")
+        catalog_valid = False
+
+    known_dimensions: dict[str, dict[str, Any]] = {}
+    try:
+        known_dimensions = dimensions(document)
+    except CoverageError:
+        known_dimensions = {}
+
+    for required_dimension in _REQUIRED_DIMENSIONS:
+        if required_dimension not in known_dimensions:
+            problems.append(f"missing coverage dimension: {required_dimension}")
+
+    cases: list[dict[str, Any]] = []
+    try:
+        cases = required_cases(document)
+    except CoverageError:
+        cases = []
+
+    fixtures = _scenario_fixture_ids(document)
+    for case in cases:
+        fixture_id = case.get("fixture_id")
+        if fixture_id not in fixtures:
+            problems.append(
+                f"case {case.get('case_id')!r} references unknown fixture {fixture_id!r}"
+            )
+
+    policy = _evidence_policy(document)
+    declared_pairing = {
+        normalize_nodeid(case.get("selector", ""))
+        for case in cases
+        if case.get("dimension_id") == COVERAGE_DIMENSION
+    }
+    expected_pairing = _authoritative_selectors()
+    for selector in sorted(expected_pairing - declared_pairing):
+        problems.append(f"missing required one_turn_pairing case: {selector}")
+    for selector in sorted(declared_pairing - expected_pairing):
+        problems.append(f"undeclared one_turn_pairing case: {selector}")
+
+    for case in cases:
+        dimension = known_dimensions.get(case.get("dimension_id"), {})
+        case_runtimes = case.get("runtimes")
+        case_runtimes = case_runtimes if isinstance(case_runtimes, list) else []
+        case_roles = case.get("roles")
+        case_roles = case_roles if isinstance(case_roles, list) else []
+        for runtime in dimension.get("required_runtimes", []):
+            if runtime not in case_runtimes:
+                problems.append(
+                    f"case {case.get('case_id')!r} is missing required runtime {runtime!r}"
+                )
+        for role in dimension.get("required_roles", []):
+            if role not in case_roles:
+                problems.append(f"case {case.get('case_id')!r} is missing required role {role!r}")
+
+    if results is not None:
+        if results.collection_errors:
+            for entry in results.collection_errors:
+                problems.append(f"collection failure: {entry}")
+        if expected_commit and results.commit and results.commit != expected_commit:
+            problems.append(
+                f"commit mismatch: declared {expected_commit!r}, result {results.commit!r}"
+            )
+        distinct_commits = {
+            identity.get("pyboy_revision")
+            for identity in results.runtimes.values()
+            if identity.get("pyboy_revision")
+        }
+        if len(distinct_commits) > 1:
+            problems.append("results source mixes runtime builds; refusing to merge partial runs")
+
+    case_reports: list[dict[str, Any]] = []
+    summary: Counter[str] = Counter()
+    for case in cases:
+        selectors = case.get("selector")
+        if not isinstance(selectors, str):
+            continue
+        for runtime in case.get("runtimes", []):
+            if not isinstance(runtime, str):
+                continue
+            records = results.lookup(runtime, selectors) if results is not None else []
+            status, reason = _evaluate_case(runtime, records, results, expected_commit, policy)
+            summary[status] += 1
+            case_reports.append(
+                {
+                    "case_id": case.get("case_id"),
+                    "dimension_id": case.get("dimension_id"),
+                    "selector": selectors,
+                    "runtime": runtime,
+                    "transport": case.get("transport"),
+                    "game_versions": case.get("game_versions"),
+                    "roles": case.get("roles"),
+                    "fixture_id": case.get("fixture_id"),
+                    "status": status,
+                    "tested": status == "tested",
+                    "reason": reason,
+                }
+            )
+
+    dimension_reports = {
+        dimension_id: _dimension_status(dimension_id, case_reports, document)
+        for dimension_id in known_dimensions
+    }
+    if results is None:
+        problems.append("no results supplied; declaration-only report")
+
+    overall = "COMPLETE"
+    if problems or not catalog_valid:
+        overall = "INCOMPLETE"
+    if results is None or any(report["status"] in _INCOMPLETE_STATUSES for report in case_reports):
+        overall = "INCOMPLETE"
+    pairing = dimension_reports.get(COVERAGE_DIMENSION, {}).get("status")
+    mechanics = dimension_reports.get(EXPANDED_DIMENSION, {}).get("status")
+    if pairing != "COMPLETE" or mechanics not in ("COMPLETE",):
+        overall = "INCOMPLETE"
+
+    run: dict[str, Any] = {
+        "expected_commit": expected_commit,
+        "result_commit": results.commit if results is not None else None,
+        "source_path": results.source_path if results is not None else None,
+        "source_kind": results.source_kind if results is not None else "none",
+        "run_id": results.run_id if results is not None else None,
+        "runtimes": results.runtimes if results is not None else {},
+    }
+    if results is not None and results.notes:
+        run["notes"] = list(results.notes)
+
+    return {
+        "catalog_id": document.get("catalog_id"),
+        "catalog_version": document.get("catalog_version"),
+        "coverage_version": (
+            document.get("coverage", {}).get("coverage_version")
+            if isinstance(document.get("coverage"), dict)
+            else None
+        ),
+        "effects_version": (
+            document.get("move_effects", {}).get("effects_version")
+            if isinstance(document.get("move_effects"), dict)
+            else None
+        ),
+        "catalog_path": catalog_path,
+        "run": run,
+        "dimensions": dimension_reports,
+        "summary": {
+            "checks": len(case_reports),
+            "tested": summary.get("tested", 0),
+            "incomplete": sum(
+                count for status, count in summary.items() if status in _INCOMPLETE_STATUSES
+            ),
+            "statuses": dict(sorted(summary.items())),
+        },
+        "cases": case_reports,
+        "move_effects": _move_effects_summary(document),
+        "problems": problems,
+        "overall": overall,
+    }
+
+
+def _move_effects_summary(catalog: dict[str, Any]) -> dict[str, Any]:
+    try:
+        families = effect_families(catalog)
+    except CoverageError:
+        return {"families": [], "current_selector": {}}
+    move_effects = catalog.get("move_effects", {})
+    return {
+        "families": families,
+        "planned_unverified": sum(
+            1 for family in families if family.get("scope") == "planned_unverified"
+        ),
+        "deliberately_excluded": sum(
+            1 for family in families if family.get("scope") == "deliberately_excluded"
+        ),
+        "tested": sum(1 for family in families if family.get("scope") == "tested"),
+        "current_selector": move_effects.get("current_selector", {})
+        if isinstance(move_effects, dict)
+        else {},
+    }
+
+
+def render_text(report: dict[str, Any]) -> str:
+    """Render a readable report that keeps the two dimensions distinct."""
+    lines = [
+        "Battle-scenario functional coverage report",
+        (
+            f"catalog: {report.get('catalog_id')} v{report.get('catalog_version')} "
+            f"(coverage v{report.get('coverage_version')}, effects "
+            f"v{report.get('effects_version')})"
+        ),
+    ]
+    run = report.get("run", {})
+    lines.append(
+        "run: "
+        f"kind={run.get('source_kind')} path={run.get('source_path') or '(none)'} "
+        f"run_id={run.get('run_id') or '(none)'} "
+        f"commit={run.get('result_commit') or run.get('expected_commit') or '(unknown)'}"
+    )
+    for mode, identity in sorted((run.get("runtimes") or {}).items()):
+        lines.append(
+            f"  runtime {mode}: build={identity.get('pyboy_revision') or '(unknown)'} "
+            f"python={identity.get('python_version') or '(unknown)'}"
+        )
+    lines.append("dimensions (separate scopes):")
+    pairing = report["dimensions"].get(COVERAGE_DIMENSION, {})
+    lines.append(
+        f"  one_turn_pairing: {pairing.get('status', 'MISSING')} "
+        f"[one-turn settled battle pairing; checks={pairing.get('checks', 0)} "
+        f"complete={pairing.get('complete', 0)}]"
+    )
+    mechanics = report["dimensions"].get(EXPANDED_DIMENSION, {})
+    lines.append(
+        f"  expanded_mechanics: {mechanics.get('status', 'MISSING')} "
+        "[expanded mechanics / move effects; "
+        f"families={mechanics.get('families', 0)} "
+        f"tested={mechanics.get('tested', 0)} "
+        f"planned_unverified={mechanics.get('planned_unverified', 0)} "
+        f"deliberately_excluded={mechanics.get('deliberately_excluded', 0)}]"
+    )
+    summary = report.get("summary", {})
+    lines.append(
+        f"required checks: {summary.get('checks', 0)} "
+        f"tested={summary.get('tested', 0)} incomplete={summary.get('incomplete', 0)}"
+    )
+    selector = report.get("move_effects", {}).get("current_selector", {})
+    admitted = selector.get("admitted_effect_ids", [])
+    excluded = [entry.get("move_id") for entry in selector.get("excluded_moves", [])]
+    lines.append(f"current selector: admits effects {admitted}; excludes moves {excluded}")
+    if report.get("problems"):
+        lines.append("problems:")
+        lines.extend(f"  - {problem}" for problem in report["problems"])
+    lines.append("case results:")
+    for case in report.get("cases", []):
+        status = case["status"].upper()
+        lines.append(
+            f"  {status:12} runtime={case['runtime']} selector={case['selector']}"
+            + (f" reason={case['reason']}" if case.get("reason") else "")
+        )
+    lines.append(f"overall: {report.get('overall')}")
+    return "\n".join(lines)
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--catalog", type=Path, default=CATALOG_PATH)
+    parser.add_argument(
+        "--results",
+        type=Path,
+        default=None,
+        help="gate report JSON, JUnit XML, or normalised JSON results path",
+    )
+    parser.add_argument(
+        "--no-results",
+        action="store_true",
+        help="explicit declaration-only mode; no execution evidence is claimed",
+    )
+    parser.add_argument(
+        "--commit",
+        default=None,
+        help="declared harness commit that a supplied result must match",
+    )
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    if args.results is not None and args.no_results:
+        print("--results and --no-results are mutually exclusive", file=sys.stderr)
+        return 2
+    try:
+        catalog = load_catalog(args.catalog)
+        results = None
+        if not args.no_results:
+            if args.results is None:
+                print("provide --results or --no-results", file=sys.stderr)
+                return 2
+            results = load_results(args.results)
+    except (OSError, CoverageError) as exc:
+        print(f"coverage report failed: {exc}", file=sys.stderr)
+        return 2
+
+    report = build_report(
+        catalog,
+        results,
+        expected_commit=args.commit,
+        catalog_path=str(args.catalog),
+    )
+    if args.format == "json":
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(render_text(report))
+    return 0 if report["overall"] == "COMPLETE" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
