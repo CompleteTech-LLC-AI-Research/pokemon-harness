@@ -59,6 +59,7 @@ _INCOMPLETE_STATUSES = frozenset(
         "unidentified",
         "unaccepted",
         "partial",
+        "collection",
         "skipped",
         "xfailed",
         "xpassed",
@@ -76,6 +77,13 @@ _GATE_STATUS = {
     "INTERRUPTED": "interrupted",
     "NOT_STARTED": "not_run",
 }
+# A production-gate collection entry passes only with an explicitly successful
+# status; every other status (FAIL, INTERRUPTED, NOT_STARTED) fails closed.
+_COLLECTION_PASS = frozenset({"pass", "passed"})
+# The one_turn_pairing cases are settled link battles. A declared case fixture
+# must be a link-battle fixture for the listen endpoint's game.
+_LINK_BATTLE_TYPE = "link_battle"
+_LINK_BATTLE_VARIANTS = {"red": "color", "blue": "color", "yellow": "cgb"}
 
 
 class CoverageError(ValueError):
@@ -157,14 +165,101 @@ def effect_families(catalog: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _scenario_fixture_ids(catalog: dict[str, Any]) -> set[str]:
-    ids: set[str] = set()
+    return set(_scenarios_by_fixture_id(catalog))
+
+
+def _scenarios_by_fixture_id(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    scenarios: dict[str, dict[str, Any]] = {}
     for scenario in catalog.get("scenarios", []):
         if not isinstance(scenario, dict):
             continue
         fixture = scenario.get("fixture")
         if isinstance(fixture, dict) and isinstance(fixture.get("fixture_id"), str):
-            ids.add(fixture["fixture_id"])
-    return ids
+            scenarios.setdefault(fixture["fixture_id"], scenario)
+    return scenarios
+
+
+def _validate_case_fixture(prefix: str, case: dict[str, Any], scenario: dict[str, Any]) -> None:
+    """Reject a pairing case whose fixture is not the declared link battle.
+
+    The declared case's ``roles`` and ``game_versions`` are parallel endpoint
+    assignments. The fixture must belong to the listen endpoint's game, be a
+    link battle, carry both endpoint roles, and use the canonical variant for
+    that game. A wrong-game or wrong-type fixture must fail closed rather than
+    silently qualify the pairing matrix.
+    """
+    fixture_id = case.get("fixture_id")
+    versions = case.get("game_versions")
+    roles = case.get("roles")
+    if not isinstance(versions, list) or not isinstance(roles, list):
+        return
+    if len(versions) != len(roles):
+        raise CoverageError(
+            f"{prefix}.game_versions and roles must assign both endpoints: "
+            f"{len(versions)} versions vs {len(roles)} roles"
+        )
+    if set(roles) != set(_ROLES):
+        raise CoverageError(
+            f"{prefix}.roles must assign both listen and connect endpoints: {roles!r}"
+        )
+    endpoint = dict(zip(roles, versions, strict=True))
+    listen_version = endpoint["listen"]
+    game = scenario.get("game") if isinstance(scenario.get("game"), dict) else {}
+    battle = scenario.get("battle") if isinstance(scenario.get("battle"), dict) else {}
+    if game.get("version") != listen_version:
+        raise CoverageError(
+            f"{prefix}.fixture_id {fixture_id!r} is a {game.get('version')!r} fixture "
+            f"but the listen endpoint is {listen_version!r}"
+        )
+    expected_variant = _LINK_BATTLE_VARIANTS.get(listen_version)
+    if expected_variant is not None and game.get("variant") != expected_variant:
+        raise CoverageError(
+            f"{prefix}.fixture_id {fixture_id!r} uses variant {game.get('variant')!r}, "
+            f"expected {expected_variant!r} for the {listen_version!r} listen endpoint"
+        )
+    if battle.get("type") != _LINK_BATTLE_TYPE:
+        raise CoverageError(
+            f"{prefix}.fixture_id {fixture_id!r} is not a {_LINK_BATTLE_TYPE!r} fixture "
+            f"(battle type {battle.get('type')!r})"
+        )
+    scenario_roles = battle.get("roles")
+    if not isinstance(scenario_roles, list) or not set(roles).issubset(set(scenario_roles)):
+        raise CoverageError(
+            f"{prefix}.fixture_id {fixture_id!r} does not assign both case roles: "
+            f"fixture roles {scenario_roles!r}, case roles {roles!r}"
+        )
+
+
+def _declared_input_hashes(scenario: dict[str, Any] | None) -> dict[str, str]:
+    """Return declared ROM/symbol/fixture hashes keyed by observed-input aliases."""
+    hashes: dict[str, str] = {}
+    if not isinstance(scenario, dict):
+        return hashes
+    fixture = scenario.get("fixture")
+    if isinstance(fixture, dict):
+        sha1 = fixture.get("sha1")
+        if isinstance(sha1, str) and sha1:
+            hashes["fixture"] = sha1.lower()
+            fixture_id = fixture.get("fixture_id")
+            if isinstance(fixture_id, str) and fixture_id:
+                hashes[fixture_id.lower()] = sha1.lower()
+    game = scenario.get("game")
+    if isinstance(game, dict):
+        for alias, field in (
+            ("rom", "rom_sha1"),
+            ("rom_sha1", "rom_sha1"),
+            ("sym", "sym_sha1"),
+            ("symbol", "sym_sha1"),
+            ("sym_sha1", "sym_sha1"),
+        ):
+            value = game.get(field)
+            if isinstance(value, str) and value:
+                hashes.setdefault(alias, value.lower())
+    return hashes
+
+
+def _declared_fixture_sha1(scenario: dict[str, Any] | None) -> str | None:
+    return _declared_input_hashes(scenario).get("fixture")
 
 
 def _authoritative_selectors() -> frozenset[str]:
@@ -206,6 +301,7 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         )
 
     fixtures = _scenario_fixture_ids(catalog)
+    scenarios_by_fixture = _scenarios_by_fixture_id(catalog)
     seen_case_ids: set[str] = set()
     seen_selectors: set[str] = set()
     role_coverage: dict[str, set[str]] = {dimension_id: set() for dimension_id in known_dimensions}
@@ -244,6 +340,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         fixture_id = case.get("fixture_id")
         if fixture_id not in fixtures:
             raise CoverageError(f"{prefix}.fixture_id is unknown: {fixture_id!r}")
+        if dimension_id == COVERAGE_DIMENSION:
+            _validate_case_fixture(prefix, case, scenarios_by_fixture[fixture_id])
         if not isinstance(case.get("oracle"), str) or not case["oracle"].strip():
             raise CoverageError(f"{prefix}.oracle is required")
         selector = case.get("selector")
@@ -378,6 +476,18 @@ class Outcome:
     partial: bool = False
     commit: str | None = None
     run_id: str | None = None
+    input_hashes: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class CollectionEvidence:
+    """One pytest collection record for a declared runtime."""
+
+    runtime: str
+    name: str
+    status: str
+    nodeids: tuple[str, ...] = ()
+    reason: str = ""
 
 
 @dataclass
@@ -388,9 +498,15 @@ class ResultSet:
     source_kind: str = "unknown"
     run_id: str | None = None
     commit: str | None = None
+    partial: bool = False
     runtimes: dict[str, dict[str, Any]] = field(default_factory=dict)
     outcomes: list[Outcome] = field(default_factory=list)
     collection_errors: list[str] = field(default_factory=list)
+    collection_failures: list[str] = field(default_factory=list)
+    collections: list[CollectionEvidence] = field(default_factory=list)
+    block_run_ids: set[str] = field(default_factory=set)
+    block_commits: set[str] = field(default_factory=set)
+    missing_commit: bool = False
     notes: list[str] = field(default_factory=list)
     identity_conflicts: list[str] = field(default_factory=list)
     merge_conflict: bool = False
@@ -428,6 +544,49 @@ def _mode_for(block: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _collect_collection_errors(raw: Any, result: ResultSet) -> None:
+    if not isinstance(raw, list):
+        return
+    for entry in raw:
+        if isinstance(entry, dict):
+            result.collection_errors.append(
+                f"{entry.get('nodeid', '<collection>')}: {entry.get('reason', '')}"
+            )
+        elif isinstance(entry, str):
+            result.collection_errors.append(entry)
+
+
+def _collect_collections(raw: Any, runtime: str, result: ResultSet) -> None:
+    if not isinstance(raw, list):
+        return
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        name = name if isinstance(name, str) and name else "collection"
+        status = entry.get("status")
+        status = status if isinstance(status, str) and status else "error"
+        raw_nodeids = entry.get("nodeids")
+        nodeids = (
+            tuple(item for item in raw_nodeids if isinstance(item, str))
+            if isinstance(raw_nodeids, list)
+            else ()
+        )
+        reason = entry.get("reason")
+        reason = reason if isinstance(reason, str) else ""
+        result.collections.append(
+            CollectionEvidence(
+                runtime=runtime,
+                name=name,
+                status=status,
+                nodeids=nodeids,
+                reason=reason,
+            )
+        )
+        if status.lower() not in _COLLECTION_PASS:
+            result.collection_failures.append(f"{name} ({runtime}): {reason or status}")
+
+
 def result_set_from_document(
     document: Any,
     *,
@@ -439,25 +598,21 @@ def result_set_from_document(
     result = ResultSet(source_path=source_path, source_kind="json")
     result.run_id = document.get("run_id") if isinstance(document.get("run_id"), str) else None
     result.commit = document.get("commit") if isinstance(document.get("commit"), str) else None
-    raw_collection_errors = document.get("collection_errors")
-    if isinstance(raw_collection_errors, list):
-        for entry in raw_collection_errors:
-            if isinstance(entry, dict):
-                result.collection_errors.append(
-                    f"{entry.get('nodeid', '<collection>')}: {entry.get('reason', '')}"
-                )
-            elif isinstance(entry, str):
-                result.collection_errors.append(entry)
+    result.partial = bool(document.get("partial", False))
+    document_input_hashes = _record_input_hashes(document)
+    _collect_collection_errors(document.get("collection_errors"), result)
 
     raw_runtimes = document.get("runtimes")
     if isinstance(raw_runtimes, list):
         blocks = [block for block in raw_runtimes if isinstance(block, dict)]
-        modes = {_mode_for(block) for block in blocks}
-        default_mode = modes.pop() if len(modes) == 1 else "unknown"
+        block_modes = {_mode_for(block) for block in blocks}
+        default_mode = next(iter(block_modes)) if len(block_modes) == 1 else "unknown"
+        for mode in sorted(block_modes):
+            _collect_collections(document.get("collections"), mode, result)
         block_run_ids: set[str] = set()
         block_commits: set[str] = set()
         fingerprints: dict[str, set[tuple[Any, Any, str]]] = {}
-        any_partial = False
+        any_partial = result.partial
         for block in blocks:
             mode = _mode_for(block)
             identity = _runtime_identity(block)
@@ -465,7 +620,7 @@ def result_set_from_document(
             block_run = block_run if isinstance(block_run, str) and block_run else None
             block_commit = block.get("commit")
             block_commit = block_commit if isinstance(block_commit, str) and block_commit else None
-            block_partial = bool(block.get("partial", False))
+            block_partial = bool(block.get("partial", False)) or result.partial
             if block_run:
                 block_run_ids.add(block_run)
             if block_commit:
@@ -483,6 +638,8 @@ def result_set_from_document(
                 result.runtimes[mode] = {**identity, "mode": mode}
             elif mode not in result.runtimes:
                 result.runtimes[mode] = {"mode": mode}
+            _collect_collection_errors(block.get("collection_errors"), result)
+            _collect_collections(block.get("collections"), mode, result)
             _collect_outcomes(
                 block,
                 mode,
@@ -490,11 +647,20 @@ def result_set_from_document(
                 block_run=block_run,
                 block_commit=block_commit,
                 block_partial=block_partial,
+                default_input_hashes=document_input_hashes,
             )
         _record_block_conflicts(result, block_run_ids, block_commits, fingerprints, any_partial)
         raw_records = document.get("records")
         if isinstance(raw_records, list):
-            _collect_outcome_records(raw_records, default_mode, result)
+            _collect_outcome_records(
+                raw_records,
+                default_mode,
+                result,
+                block_run=result.run_id,
+                block_commit=result.commit,
+                block_partial=result.partial,
+                default_input_hashes=document_input_hashes,
+            )
         _finalize_identity(result)
         return result
 
@@ -513,13 +679,15 @@ def result_set_from_document(
         result.runtimes[mode] = {**identity, "mode": mode}
     elif mode not in result.runtimes:
         result.runtimes[mode] = {"mode": mode}
+    _collect_collections(document.get("collections"), mode, result)
     _collect_outcomes(
         document,
         mode,
         result,
         block_run=result.run_id,
         block_commit=result.commit,
-        block_partial=bool(document.get("partial", False)),
+        block_partial=result.partial,
+        default_input_hashes=document_input_hashes,
     )
     _finalize_identity(result)
     return result
@@ -532,17 +700,11 @@ def _record_block_conflicts(
     fingerprints: dict[str, set[tuple[Any, Any, str]]],
     any_partial: bool,
 ) -> None:
+    result.block_run_ids = set(block_run_ids)
+    result.block_commits = set(block_commits)
     if any_partial:
         result.identity_conflicts.append(
             "results source contains partial blocks; refusing to merge partial runs"
-        )
-    if len(block_run_ids) > 1:
-        result.identity_conflicts.append(
-            f"results source mixes {len(block_run_ids)} run identities across blocks"
-        )
-    if len(block_commits) > 1:
-        result.identity_conflicts.append(
-            f"results source mixes {len(block_commits)} commit identities across blocks"
         )
     for mode, prints in sorted(fingerprints.items()):
         if len(prints) > 1:
@@ -553,12 +715,41 @@ def _record_block_conflicts(
 
 def _finalize_identity(result: ResultSet) -> None:
     record_commits = {outcome.commit for outcome in result.outcomes if outcome.commit}
-    if len(record_commits) > 1:
+    record_run_ids = {outcome.run_id for outcome in result.outcomes if outcome.run_id}
+    all_commits = set(record_commits) | set(result.block_commits)
+    if result.commit:
+        all_commits.add(result.commit)
+    all_run_ids = set(record_run_ids) | set(result.block_run_ids)
+    if result.run_id:
+        all_run_ids.add(result.run_id)
+    if len(all_commits) > 1:
         result.identity_conflicts.append(
-            f"results source contains {len(record_commits)} per-record commit identities"
+            "results source mixes "
+            f"{len(all_commits)} commit identities across document, blocks, and records"
         )
+    if len(all_run_ids) > 1:
+        result.identity_conflicts.append(
+            "results source mixes "
+            f"{len(all_run_ids)} run identities across document, blocks, and records"
+        )
+    if result.outcomes and not all_commits:
+        result.missing_commit = True
     if result.identity_conflicts:
         result.merge_conflict = True
+
+
+def _record_input_hashes(record: dict[str, Any]) -> dict[str, str]:
+    """Extract observed input hashes from a record or document, if declared."""
+    hashes: dict[str, str] = {}
+    raw = record.get("input_hashes")
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if isinstance(key, str) and key and isinstance(value, str) and value:
+                hashes[key.lower()] = value.lower()
+    fixture_sha1 = record.get("fixture_sha1")
+    if isinstance(fixture_sha1, str) and fixture_sha1:
+        hashes.setdefault("fixture", fixture_sha1.lower())
+    return hashes
 
 
 def _collect_outcome_records(
@@ -569,6 +760,7 @@ def _collect_outcome_records(
     block_run: str | None = None,
     block_commit: str | None = None,
     block_partial: bool = False,
+    default_input_hashes: dict[str, str] | None = None,
 ) -> None:
     for record in records:
         if not isinstance(record, dict):
@@ -584,6 +776,8 @@ def _collect_outcome_records(
         run_id = record.get("run_id")
         if not (isinstance(run_id, str) and run_id):
             run_id = block_run
+        input_hashes = dict(default_input_hashes or {})
+        input_hashes.update(_record_input_hashes(record))
         result.outcomes.append(
             Outcome(
                 nodeid=nodeid,
@@ -593,6 +787,7 @@ def _collect_outcome_records(
                 partial=bool(record.get("partial", False)) or block_partial,
                 commit=commit,
                 run_id=run_id,
+                input_hashes=input_hashes,
             )
         )
 
@@ -605,8 +800,11 @@ def _collect_outcomes(
     block_run: str | None = None,
     block_commit: str | None = None,
     block_partial: bool = False,
+    default_input_hashes: dict[str, str] | None = None,
 ) -> None:
     seen_nodeids: set[str] = set()
+    inherited_hashes = dict(default_input_hashes or {})
+    inherited_hashes.update(_record_input_hashes(block))
     records = block.get("records")
     if isinstance(records, list):
         _collect_outcome_records(
@@ -616,6 +814,7 @@ def _collect_outcomes(
             block_run=block_run,
             block_commit=block_commit,
             block_partial=block_partial,
+            default_input_hashes=inherited_hashes,
         )
         seen_nodeids.update(
             normalize_nodeid(record["nodeid"])
@@ -641,6 +840,8 @@ def _collect_outcomes(
             run_id = record.get("run_id")
             if not (isinstance(run_id, str) and run_id):
                 run_id = block_run
+            input_hashes = dict(inherited_hashes)
+            input_hashes.update(_record_input_hashes(record))
             result.outcomes.append(
                 Outcome(
                     nodeid=nodeid,
@@ -650,6 +851,7 @@ def _collect_outcomes(
                     partial=block_partial,
                     commit=commit,
                     run_id=run_id,
+                    input_hashes=input_hashes,
                 )
             )
             seen_nodeids.add(normalize_nodeid(nodeid))
@@ -664,6 +866,8 @@ def _collect_outcomes(
                 nodeid = case.get("nodeid")
                 if not isinstance(nodeid, str) or not nodeid:
                     continue
+                case_hashes = dict(inherited_hashes)
+                case_hashes.update(_record_input_hashes(case))
                 result.outcomes.append(
                     Outcome(
                         nodeid=nodeid,
@@ -673,6 +877,7 @@ def _collect_outcomes(
                         partial=bool(case.get("partial", False)) or block_partial,
                         commit=block_commit,
                         run_id=block_run,
+                        input_hashes=case_hashes,
                     )
                 )
                 seen_nodeids.add(normalize_nodeid(nodeid))
@@ -789,12 +994,43 @@ def _incomplete_label(status: str) -> str:
     return "unaccepted"
 
 
+def _runtime_collection_gate(
+    results: ResultSet | None, runtime: str, selector: str
+) -> tuple[bool, str]:
+    """Return whether a runtime's collection evidence qualifies one selector.
+
+    A production-gate collection record must be explicitly successful, the
+    declared selector must appear in the collected node IDs, and a scope with
+    no collection evidence at all cannot qualify. Any globally recorded
+    collection error or failure fails every scope closed.
+    """
+    if results is None:
+        return True, ""
+    if results.collection_errors or results.collection_failures:
+        return False, "collection evidence failed; this scope cannot qualify"
+    evidence = [item for item in results.collections if item.runtime == runtime]
+    if not evidence:
+        return False, f"no collection evidence for runtime {runtime!r}"
+    collected: set[str] = set()
+    for item in evidence:
+        if item.status.lower() not in _COLLECTION_PASS:
+            return (
+                False,
+                f"collection {item.name!r} for runtime {runtime!r} did not pass ({item.status})",
+            )
+        collected.update(normalize_nodeid(nodeid) for nodeid in item.nodeids)
+    if normalize_nodeid(selector) not in collected:
+        return False, f"selector {selector!r} was not collected for runtime {runtime!r}"
+    return True, ""
+
+
 def _evaluate_case(
     runtime: str,
     records: list[Outcome],
     results: ResultSet | None,
     expected_commit: str | None,
     policy: dict[str, Any],
+    selector: str = "",
 ) -> tuple[str, str]:
     accepted = _accepted_outcomes(policy)
     if not records:
@@ -843,21 +1079,23 @@ def _evaluate_case(
             "mismatched",
             f"PyBoy version {actual_version!r} does not match pinned {expected_version!r}",
         )
-    if expected_commit:
-        result_commit = record.commit or (results.commit if results else None)
-        if not result_commit:
-            return (
-                "unidentified",
-                (
-                    "result commit unavailable: the results source carries no per-record "
-                    "or top-level commit, so the declared exact commit cannot be confirmed"
-                ),
-            )
-        if result_commit != expected_commit:
-            return (
-                "mismatched",
-                f"result commit {result_commit!r} does not match declared {expected_commit!r}",
-            )
+    result_commit = record.commit or (results.commit if results else None)
+    if not result_commit:
+        return (
+            "unidentified",
+            (
+                "result commit unavailable: the results source carries no per-record "
+                "or top-level commit, so exact commit provenance cannot be confirmed"
+            ),
+        )
+    if expected_commit and result_commit != expected_commit:
+        return (
+            "mismatched",
+            f"result commit {result_commit!r} does not match declared {expected_commit!r}",
+        )
+    collected, collection_reason = _runtime_collection_gate(results, runtime, selector)
+    if not collected:
+        return "collection", collection_reason
     return _CASE_SENTINEL, ""
 
 
@@ -966,6 +1204,7 @@ def build_report(
         cases = []
 
     fixtures = _scenario_fixture_ids(document)
+    scenarios_by_fixture = _scenarios_by_fixture_id(document)
     for case in cases:
         fixture_id = case.get("fixture_id")
         if fixture_id not in fixtures:
@@ -1001,13 +1240,21 @@ def build_report(
                 problems.append(f"case {case.get('case_id')!r} is missing required role {role!r}")
 
     if results is not None:
-        if results.collection_errors:
-            for entry in results.collection_errors:
-                problems.append(f"collection failure: {entry}")
+        for entry in (*results.collection_errors, *results.collection_failures):
+            problems.append(f"collection failure: {entry}")
+        if results.partial:
+            problems.append(
+                "results source is marked partial; refusing to qualify any scope as complete"
+            )
         problems.extend(results.identity_conflicts)
         if expected_commit and results.commit and results.commit != expected_commit:
             problems.append(
                 f"commit mismatch: declared {expected_commit!r}, result {results.commit!r}"
+            )
+        if results.missing_commit:
+            problems.append(
+                "results source carries no document, block, or record commit; exact commit "
+                "provenance is required regardless of --commit (fail-closed)"
             )
         if (
             expected_commit
@@ -1032,11 +1279,33 @@ def build_report(
         selectors = case.get("selector")
         if not isinstance(selectors, str):
             continue
+        scenario = scenarios_by_fixture.get(case.get("fixture_id"))
+        declared_hashes = _declared_input_hashes(scenario)
+        declared_sha1 = declared_hashes.get("fixture")
         for runtime in case.get("runtimes", []):
             if not isinstance(runtime, str):
                 continue
             records = results.lookup(runtime, selectors) if results is not None else []
-            status, reason = _evaluate_case(runtime, records, results, expected_commit, policy)
+            status, reason = _evaluate_case(
+                runtime, records, results, expected_commit, policy, selectors
+            )
+            observed_hashes = dict(records[0].input_hashes) if len(records) == 1 else {}
+            mismatched_input = next(
+                (
+                    (key, value)
+                    for key, value in sorted(observed_hashes.items())
+                    if key in declared_hashes and value != declared_hashes[key]
+                ),
+                None,
+            )
+            if status == _CASE_SENTINEL and mismatched_input is not None:
+                key, value = mismatched_input
+                status = "mismatched"
+                reason = (
+                    f"observed input hash {value!r} for {key!r} does not match declared "
+                    f"{declared_hashes[key]!r}"
+                )
+                problems.append(f"case {case.get('case_id')!r} ({runtime}): {reason}")
             summary[status] += 1
             case_reports.append(
                 {
@@ -1048,6 +1317,8 @@ def build_report(
                     "game_versions": case.get("game_versions"),
                     "roles": case.get("roles"),
                     "fixture_id": case.get("fixture_id"),
+                    "declared_fixture_sha1": declared_sha1,
+                    "observed_input_hashes": observed_hashes,
                     "status": status,
                     "tested": status == "tested",
                     "reason": reason,
@@ -1058,6 +1329,10 @@ def build_report(
         dimension_id: _dimension_status(dimension_id, case_reports, document)
         for dimension_id in known_dimensions
     }
+    if not catalog_valid:
+        for dimension_report in dimension_reports.values():
+            if dimension_report.get("status") == "COMPLETE":
+                dimension_report["status"] = "INCOMPLETE"
     if results is None:
         problems.append("no results supplied; declaration-only report")
 
@@ -1091,7 +1366,18 @@ def build_report(
     }
     if results is not None and results.notes:
         run["notes"] = list(results.notes)
-    if expected_commit and commit_source is None and results is not None:
+    if results is not None:
+        run["partial"] = results.partial
+        run["collections"] = [
+            {
+                "runtime": item.runtime,
+                "name": item.name,
+                "status": item.status,
+                "collected": len(item.nodeids),
+            }
+            for item in results.collections
+        ]
+    if (expected_commit or results is not None) and commit_source is None and results is not None:
         run["commit_status"] = "unidentified: results source carries no commit"
 
     return {

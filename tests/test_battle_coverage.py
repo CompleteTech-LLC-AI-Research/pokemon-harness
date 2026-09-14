@@ -41,6 +41,14 @@ def _pinned_revision(catalog: dict) -> str:
     return catalog["coverage"]["evidence_policy"]["expected_pyboy_revision"]
 
 
+def _selectors(catalog: dict) -> list[str]:
+    return [case["selector"] for case in coverage.one_turn_pairing_cases(catalog)]
+
+
+def _passing_collections(nodeids: list[str]) -> list[dict]:
+    return [{"name": "python-module", "status": "PASS", "nodeids": list(nodeids)}]
+
+
 def _passing_document(
     catalog: dict,
     *,
@@ -57,6 +65,7 @@ def _passing_document(
                 "pyboy_version": "2.7.0",
                 "pyboy_revision": revision,
             },
+            "collections": _passing_collections(_selectors(catalog)),
         }
         for mode in runtimes
     ]
@@ -195,6 +204,73 @@ def test_unknown_fixture_is_reported(catalog: dict) -> None:
     assert any("unknown fixture" in problem for problem in report["problems"])
 
 
+def test_incompatible_fixture_is_rejected(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    target = next(
+        case
+        for case in mutated["coverage"]["required_cases"]
+        if case["case_id"] == "battle_local_red_red"
+    )
+    target["fixture_id"] = "yellow-cgb-ordinary"
+
+    with pytest.raises(coverage.CoverageError):
+        coverage.validate_catalog(mutated)
+    results = coverage.result_set_from_document(_passing_document(catalog))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+    assert report["overall"] == "INCOMPLETE"
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert any("yellow-cgb-ordinary" in problem for problem in report["problems"])
+
+
+@pytest.mark.parametrize(
+    "fixture_id",
+    ["yellow-cgb-battle", "red-vanilla-battle", "red-color-ordinary"],
+)
+def test_incompatible_fixture_version_variant_or_type_is_rejected(
+    catalog: dict, fixture_id: str
+) -> None:
+    mutated = copy.deepcopy(catalog)
+    target = next(
+        case
+        for case in mutated["coverage"]["required_cases"]
+        if case["case_id"] == "battle_local_red_red"
+    )
+    target["fixture_id"] = fixture_id
+
+    with pytest.raises(coverage.CoverageError):
+        coverage.validate_catalog(mutated)
+
+
+def test_declared_fixture_hash_and_observed_input_hash_are_retained(catalog: dict) -> None:
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    scenario = next(
+        item for item in catalog["scenarios"] if item["fixture"]["fixture_id"] == "red-color-battle"
+    )
+    declared = scenario["fixture"]["sha1"]
+    document = _passing_document(catalog)
+    document["records"][0]["input_hashes"] = {"fixture": declared}
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    sample = _case_report(report, selector, "source")
+    assert sample["status"] == "tested"
+    assert sample["declared_fixture_sha1"] == declared
+    assert sample["observed_input_hashes"]["fixture"] == declared
+
+
+def test_observed_input_hash_mismatch_is_rejected(catalog: dict) -> None:
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    document = _passing_document(catalog)
+    document["records"][0]["input_hashes"] = {"fixture": "0" * 40}
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    sample = _case_report(report, selector, "source")
+    assert sample["status"] == "mismatched"
+    assert sample["observed_input_hashes"]["fixture"] == "0" * 40
+    assert any("observed input hash" in problem for problem in report["problems"])
+
+
 def test_duplicate_result_is_incomplete(catalog: dict) -> None:
     document = _passing_document(catalog)
     duplicated = document["records"][0]
@@ -225,7 +301,62 @@ def test_collection_failure_is_reported_incomplete(catalog: dict) -> None:
 
     report = coverage.build_report(catalog, results, expected_commit="a" * 40)
     assert report["overall"] == "INCOMPLETE"
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
     assert any("collection failure" in problem for problem in report["problems"])
+
+
+def test_runtime_collection_failure_is_not_ignored(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    document["runtimes"][0]["collections"][0]["status"] = "FAIL"
+    document["runtimes"][0]["collections"][0]["reason"] = "collection crashed"
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] < 38
+    assert any("collection failure" in problem for problem in report["problems"])
+    sample = _case_report(report, coverage.one_turn_pairing_cases(catalog)[0]["selector"], "source")
+    assert sample["status"] == "collection"
+
+
+def test_runtime_collection_error_is_not_ignored(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    document["runtimes"][0]["collection_errors"] = [
+        {"nodeid": "tests/broken.py", "reason": "import boom"}
+    ]
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+    assert any("collection failure" in problem for problem in report["problems"])
+
+
+def test_missing_collection_evidence_is_not_ignored(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    for block in document["runtimes"]:
+        block.pop("collections")
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+    sample = _case_report(report, coverage.one_turn_pairing_cases(catalog)[0]["selector"], "source")
+    assert "no collection evidence" in sample["reason"]
+
+
+def test_uncollected_selector_is_incomplete(catalog: dict) -> None:
+    selectors = _selectors(catalog)
+    document = _passing_document(catalog)
+    document["runtimes"][0]["collections"][0]["nodeids"] = selectors[1:]
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    sample = _case_report(report, selectors[0], "source")
+    assert sample["status"] == "collection"
+    assert "not collected" in sample["reason"]
+    assert _case_report(report, selectors[1], "source")["status"] == "tested"
 
 
 def test_mismatched_commit_is_reported_incomplete(catalog: dict) -> None:
@@ -290,11 +421,13 @@ def test_unrelated_partial_runs_are_not_merged(catalog: dict) -> None:
 def test_gate_json_matrix_rows_are_consumed_without_double_counting(catalog: dict) -> None:
     selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
     document = {
+        "commit": "a" * 40,
         "runtime": {
             "pyboy_mode": "source",
             "pyboy_version": "2.7.0",
             "pyboy_revision": _pinned_revision(catalog),
         },
+        "collections": _passing_collections([selector]),
         "tiers": [
             {
                 "name": "battle",
@@ -549,6 +682,57 @@ def test_mixed_record_commits_without_declared_commit_are_not_merged(catalog: di
     report = coverage.build_report(catalog, results)
     assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
     assert report["summary"]["tested"] == 0
+
+
+def test_alternating_record_run_ids_are_not_merged(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    document.pop("run_id")
+    for index, record in enumerate(document["records"]):
+        record["run_id"] = f"run-{index % 2}"
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+    assert any("run identities" in problem for problem in report["problems"])
+
+
+def test_uniform_record_commit_contradicting_document_is_not_merged(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    for record in document["records"]:
+        record["commit"] = "b" * 40
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+    assert any("commit identities" in problem for problem in report["problems"])
+
+
+def test_top_level_partial_is_propagated_and_not_merged(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    document["partial"] = True
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+    assert report["run"]["partial"] is True
+    assert any("partial" in problem for problem in report["problems"])
+
+
+def test_missing_commit_provenance_fails_closed_without_declared_commit(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    document.pop("commit")
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results)
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+    assert report["run"]["commit_source"] is None
+    assert any("commit provenance" in problem for problem in report["problems"])
+    sample = _case_report(report, coverage.one_turn_pairing_cases(catalog)[0]["selector"], "source")
+    assert sample["status"] == "unidentified"
 
 
 def test_forbidden_outcomes_cannot_be_authorized_by_policy(catalog: dict) -> None:
