@@ -137,6 +137,7 @@ python -m ruff check \
     scripts/network_concurrency_probe.py \
     scripts/production_gate.py \
     scripts/qualification_runner.py \
+    scripts/gate_capacity.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_fixture_manifest.py \
     tests/_gate_report.py \
@@ -145,6 +146,7 @@ python -m ruff check \
     tests/conftest.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
+    tests/test_gate_capacity.py \
     tests/test_production_gate.py \
     tests/test_qualification_runner.py \
     tests/test_runtime_packaging.py
@@ -153,6 +155,7 @@ python -m ruff format --check \
     scripts/network_concurrency_probe.py \
     scripts/production_gate.py \
     scripts/qualification_runner.py \
+    scripts/gate_capacity.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_fixture_manifest.py \
     tests/_gate_report.py \
@@ -161,6 +164,7 @@ python -m ruff format --check \
     tests/conftest.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
+    tests/test_gate_capacity.py \
     tests/test_production_gate.py \
     tests/test_qualification_runner.py \
     tests/test_runtime_packaging.py

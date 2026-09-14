@@ -23,6 +23,7 @@ are reported as blocked rather than converted into a green skip.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -40,6 +41,11 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 from typing import Any
+
+try:  # Imported as ``scripts.production_gate`` by tests and package callers.
+    from scripts import gate_capacity
+except ImportError:  # pragma: no cover - executed as ``python scripts/production_gate.py``.
+    import gate_capacity  # type: ignore[no-redef]
 
 KNOWN_ROM_FILES: tuple[tuple[str, Path], ...] = (
     ("red-stock", Path("red/pokemon-red.gb")),
@@ -2402,6 +2408,7 @@ def run_matrix_tier(
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
+    capacity_session: Any | None = None,
 ) -> TierResult:
     """Run strict acceptance rows under hard per-case and aggregate bounds.
 
@@ -2448,6 +2455,13 @@ def run_matrix_tier(
         name, DEFAULT_TIMEOUT_SECONDS[name]
     )
     max_workers = min(matrix_workers, len(nodeids))
+    if capacity_session is not None:
+        # The declared policy may be tighter than the CLI worker count; never
+        # admit more concurrent pairs than the policy permits.  A telemetry
+        # failure here leaves the existing worker count in effect.
+        with contextlib.suppress(Exception):
+            capacity_session.ensure_started()
+            max_workers = max(1, min(max_workers, capacity_session.policy.max_concurrent_pairs))
     waves = (len(nodeids) + max_workers - 1) // max_workers
     aggregate_timeout = matrix_timeout_override or (
         timeout * waves + MATRIX_AGGREGATE_GRACE_SECONDS
@@ -2563,11 +2577,11 @@ def run_matrix_tier(
             partial=timed_out or interrupted or report_kind == "partial",
         )
 
-    def record_not_started(nodeid: str, reason: str) -> None:
+    def record_not_started(nodeid: str, reason: str, *, status: str = "NOT_STARTED") -> None:
         failures.append(f"{nodeid}: {reason}")
         case_results_by_nodeid[nodeid] = MatrixCaseResult(
             nodeid=nodeid,
-            status="NOT_STARTED",
+            status=status,
             returncode=None,
             duration_seconds=0.0,
             reason=reason,
@@ -2575,6 +2589,33 @@ def run_matrix_tier(
             report_kind="not-started",
             partial=True,
         )
+        if capacity_session is not None:
+            with contextlib.suppress(Exception):
+                capacity_session.telemetry.mark(nodeid, "not_started")
+
+    def capacity_admit(nodeid: str) -> tuple[str, str]:
+        """Return the admission status and reason for one matrix row."""
+
+        if capacity_session is None:
+            return "ok", ""
+        try:
+            capacity_session.maybe_observe()
+            decision = capacity_session.admission.admit(nodeid)
+        except Exception as exc:  # noqa: BLE001 - fail closed, never crash.
+            return "blocked", f"capacity admission failed: {type(exc).__name__}: {exc}"
+        reason = decision.reason
+        if decision.status != "ok" and capacity_session.availability_reasons:
+            reason = "; ".join(capacity_session.availability_reasons)
+        return decision.status, reason
+
+    def release_capacity(nodeid: str, state: str) -> None:
+        if capacity_session is None:
+            return
+        # Releasing the slot may promote a queued pair.  A telemetry failure
+        # here must never erase an original failure or block cleanup.
+        with contextlib.suppress(Exception):
+            capacity_session.admission.release(nodeid)
+            capacity_session.telemetry.mark(nodeid, state)
 
     def load_case_report(
         state: dict[str, Any],
@@ -2618,6 +2659,7 @@ def run_matrix_tier(
                     duration=0.0,
                     report_kind="missing",
                 )
+                release_capacity(nodeid, "not_started")
                 return
         child_environment = dict(environment)
         child_environment["POKERED_GATE_REPORT"] = str(report_path)
@@ -2656,6 +2698,7 @@ def run_matrix_tier(
                 duration=0.0,
                 report_kind="missing",
             )
+            release_capacity(nodeid, "not_started")
             return
         active[nodeid] = {
             "process": process,
@@ -2674,6 +2717,9 @@ def run_matrix_tier(
         )
         active[nodeid]["reader"] = reader
         reader.start()
+        if capacity_session is not None:
+            with contextlib.suppress(Exception):
+                capacity_session.telemetry.mark(nodeid, "running")
 
     def finish_case(
         nodeid: str,
@@ -2751,6 +2797,7 @@ def run_matrix_tier(
             cleanup_error=cleanup_error,
         )
         active.pop(nodeid, None)
+        release_capacity(nodeid, "interrupted" if interrupted else "completed")
 
     interrupted = False
     try:
@@ -2807,7 +2854,21 @@ def run_matrix_tier(
             while pending and len(active) < max_workers:
                 if time.monotonic() >= aggregate_deadline:
                     break
-                start_case(pending.popleft())
+                candidate = pending[0]
+                admission_status, admission_reason = capacity_admit(candidate)
+                if admission_status == "queued":
+                    # No slot for this row yet; wait rather than spin so an
+                    # active owner's deadline is never enlarged or reprioritized.
+                    break
+                pending.popleft()
+                if admission_status in {"blocked", "expired"}:
+                    record_not_started(
+                        candidate,
+                        f"capacity {admission_status}: {admission_reason}",
+                        status="BLOCKED",
+                    )
+                    continue
+                start_case(candidate)
 
             if not active:
                 continue
@@ -2982,6 +3043,7 @@ def run_tier(
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
+    capacity_session: Any | None = None,
 ) -> TierResult:
     if name == "smoke":
         required_test_keys = frozenset(required_test_keys) | SMOKE_REQUIRED_TESTS
@@ -3000,6 +3062,7 @@ def run_tier(
             matrix_workers=matrix_workers,
             matrix_timeout_override=matrix_timeout_override,
             raw_output_directory=raw_output_directory,
+            capacity_session=capacity_session,
         )
 
     required = name not in OPTIONAL_TIERS
@@ -3364,6 +3427,7 @@ def run_prepared_tier(
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
+    capacity_session: Any | None = None,
 ) -> TierResult:
     """Execute one planned tier with the already verified runtime environment."""
 
@@ -3384,6 +3448,7 @@ def run_prepared_tier(
             matrix_workers=matrix_workers,
             matrix_timeout_override=matrix_timeout_override,
             raw_output_directory=runtime_output_directory,
+            capacity_session=capacity_session,
         )
 
 
@@ -3447,6 +3512,25 @@ def _unstarted_preparation(
     )
 
 
+def _capacity_tier_reason(capacity_session: Any | None, name: str) -> str:
+    """Return a BLOCKED reason when declared capacity cannot admit ``name``.
+
+    Only real-ROM tiers that spawn emulator pairs are capacity-gated; the
+    ROM-free unit/timing tiers are unaffected.  When no policy is supplied the
+    existing behavior is preserved exactly.
+    """
+
+    if capacity_session is None or name not in REQUIRED_TIER_ASSETS:
+        return ""
+    try:
+        status = capacity_session.ensure_started()
+    except Exception as exc:  # noqa: BLE001 - fail closed, never crash.
+        return f"capacity unsupported: {type(exc).__name__}: {exc}"
+    if status == "ok":
+        return ""
+    return capacity_session.capacity_reason()
+
+
 def run_runtime_gate(
     *,
     mode: str,
@@ -3465,6 +3549,7 @@ def run_runtime_gate(
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
+    capacity_session: Any | None = None,
 ) -> RuntimeGateResult:
     """Run a selected single-runtime scope, retaining its existing tier order."""
 
@@ -3505,6 +3590,17 @@ def run_runtime_gate(
                 )
             )
             continue
+        capacity_reason = _capacity_tier_reason(capacity_session, name)
+        if capacity_reason:
+            prepared.result.tiers.append(
+                _unrun_tier(
+                    name,
+                    capacity_reason,
+                    required_nodeids_by_tier.get(name, ()),
+                    status="BLOCKED",
+                )
+            )
+            continue
         if name in OPTIONAL_TIERS:
             reason = _optional_preflight_reason(name, assets)
             if reason:
@@ -3523,6 +3619,7 @@ def run_runtime_gate(
                 matrix_workers=matrix_workers,
                 matrix_timeout_override=matrix_timeout_override,
                 raw_output_directory=raw_output_directory,
+                capacity_session=capacity_session,
             )
         )
         if prepared.result.tiers[-1].status == "INTERRUPTED":
@@ -3551,6 +3648,7 @@ def run_runtime_gates(
     raw_output_directory: Path | None = None,
     early_smoke: bool = False,
     fail_fast: bool = False,
+    capacity_session: Any | None = None,
 ) -> tuple[RuntimeGateResult, ...]:
     """Execute one declared plan without borrowing results from another run.
 
@@ -3589,6 +3687,7 @@ def run_runtime_gates(
         "matrix_workers": matrix_workers,
         "matrix_timeout_override": matrix_timeout_override,
         "raw_output_directory": raw_output_directory,
+        "capacity_session": capacity_session,
     }
     if not early_smoke and not fail_fast and selected != ("smoke",):
         results = []
@@ -3608,6 +3707,7 @@ def run_runtime_gates(
                     repeat=repeat,
                     matrix_workers=matrix_workers,
                     matrix_timeout_override=matrix_timeout_override,
+                    capacity_session=capacity_session,
                 )
                 if any(tier.status == "INTERRUPTED" for tier in result.tiers) or any(
                     item.status == "INTERRUPTED" for item in result.collections
@@ -3642,6 +3742,8 @@ def run_runtime_gates(
         prepared_runtimes.append(prepared)
         if early_smoke or selected == ("smoke",):
             reason = _preflight_reason(prepared)
+            capacity_reason = "" if reason else _capacity_tier_reason(capacity_session, "smoke")
+            reason = reason or capacity_reason
             smoke = (
                 _unrun_tier("smoke", reason, status="NOT_STARTED" if cancel_reason else "BLOCKED")
                 if reason
@@ -3665,11 +3767,19 @@ def run_runtime_gates(
         mode = prepared.result.mode
         preflight_reason = _preflight_reason(prepared)
         for name in selected:
+            capacity_reason = _capacity_tier_reason(capacity_session, name)
             if stop_reason or preflight_reason:
                 tier = _unrun_tier(
                     name,
                     stop_reason or f"{mode} preflight failed: {preflight_reason}",
                     required_nodeids_by_tier.get(name, ()),
+                )
+            elif capacity_reason:
+                tier = _unrun_tier(
+                    name,
+                    capacity_reason,
+                    required_nodeids_by_tier.get(name, ()),
+                    status="BLOCKED",
                 )
             else:
                 tier = run_prepared_tier(
@@ -3734,6 +3844,12 @@ def _format_counts(counts: Counts) -> str:
     )
 
 
+def _capacity_text_lines(capacity: dict[str, Any] | None) -> list[str]:
+    if not capacity:
+        return ["capacity-policy: unavailable"]
+    return gate_capacity.render_capacity_text(capacity).splitlines()
+
+
 def render_text(
     *,
     project_root: Path,
@@ -3748,6 +3864,7 @@ def render_text(
     fixture_manifest: dict[str, Any] | None = None,
     matrix_audit: dict[str, Any] | None = None,
     execution_plan: dict[str, Any] | None = None,
+    capacity: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         "Pokémon harness production gate",
@@ -3867,6 +3984,8 @@ def render_text(
         if tier.status in {"FAIL", "BLOCKED", "INTERRUPTED"} and tier.output_tail:
             lines.append("    output tail:")
             lines.extend(f"      {line}" for line in tier.output_tail.splitlines()[-60:])
+    if capacity is not None:
+        lines.extend(_capacity_text_lines(capacity))
     lines.append(f"overall: {overall}")
     return "\n".join(lines)
 
@@ -3879,6 +3998,7 @@ def render_dual_text(
     assets: Sequence[AssetRecord],
     runtime_results: Sequence[RuntimeGateResult],
     overall: str,
+    capacity: dict[str, Any] | None = None,
 ) -> str:
     """Render explicit source/Cython results without collapsing either run."""
 
@@ -3923,6 +4043,8 @@ def render_dual_text(
             execution_plan=result.execution_plan,
         )
         lines.extend(f"    {line}" for line in detail.splitlines()[4:])
+    if capacity is not None:
+        lines.extend(_capacity_text_lines(capacity))
     lines.append(f"overall: {overall}")
     return "\n".join(lines)
 
@@ -4112,6 +4234,147 @@ def _safe_collection(
     return data
 
 
+MAX_CAPACITY_SAMPLES = 256
+
+
+def _safe_capacity_sample(
+    sample: Any,
+    roots: tuple[tuple[str, Path], ...],
+    *,
+    replacements: tuple[tuple[str, str], ...] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(sample, dict):
+        return {"status": "invalid"}
+    facts = sample.get("facts")
+    safe_facts: dict[str, Any] = {}
+    if isinstance(facts, dict):
+        for key, value in facts.items():
+            if value is None or isinstance(value, (bool, int, float)):
+                safe_facts[key] = value
+            elif isinstance(value, list):
+                safe_facts[key] = [
+                    _safe_diagnostic(item, roots, replacements=replacements, limit=500)
+                    for item in value
+                ]
+            else:
+                safe_facts[key] = _safe_diagnostic(
+                    value, roots, replacements=replacements, limit=500
+                )
+    problems = sample.get("problems")
+    return {
+        "sequence": sample.get("sequence"),
+        "monotonic_seconds": sample.get("monotonic_seconds"),
+        "utc_timestamp": sample.get("utc_timestamp")
+        if isinstance(sample.get("utc_timestamp"), str)
+        else None,
+        "status": sample.get("status"),
+        "problems": [
+            _safe_diagnostic(item, roots, replacements=replacements, limit=1000)
+            for item in (problems if isinstance(problems, list) else [])
+        ],
+        "facts": safe_facts,
+    }
+
+
+def _safe_capacity(
+    capacity: dict[str, Any] | None,
+    roots: tuple[tuple[str, Path], ...] = (),
+    *,
+    replacements: tuple[tuple[str, str], ...] | None = None,
+) -> dict[str, Any]:
+    """Sanitize one capacity section without retaining machine-local paths."""
+
+    if not isinstance(capacity, dict):
+        return gate_capacity.unavailable_capacity("no capacity policy supplied")
+    status = capacity.get("status")
+    result: dict[str, Any] = {"status": status if isinstance(status, str) else "unavailable"}
+    if isinstance(capacity.get("capacity_policy"), str):
+        result["capacity_policy"] = capacity["capacity_policy"]
+    policy = capacity.get("policy")
+    if isinstance(policy, dict):
+        result["policy"] = {
+            key: value
+            for key, value in policy.items()
+            if value is None or isinstance(value, (str, int, float, bool))
+        }
+    if isinstance(capacity.get("pressure_metric"), str):
+        result["pressure_metric"] = capacity["pressure_metric"]
+    availability = capacity.get("availability")
+    if isinstance(availability, dict):
+        result["availability"] = {
+            "status": availability.get("status"),
+            "reasons": [
+                _safe_diagnostic(item, roots, replacements=replacements, limit=2000)
+                for item in (
+                    availability.get("reasons")
+                    if isinstance(availability.get("reasons"), list)
+                    else []
+                )
+            ],
+        }
+    assumptions = capacity.get("capability_assumptions")
+    result["capability_assumptions"] = [
+        _safe_diagnostic(item, roots, replacements=replacements, limit=1000)
+        for item in (assumptions if isinstance(assumptions, list) else [])
+    ]
+    admission = capacity.get("admission")
+    if isinstance(admission, dict):
+        decisions = []
+        for decision in admission.get("decisions", []):
+            if not isinstance(decision, dict):
+                continue
+            decisions.append(
+                {
+                    "pair_id": _safe_diagnostic(
+                        decision.get("pair_id"), roots, replacements=replacements, limit=500
+                    ),
+                    "status": decision.get("status"),
+                    "reason": _safe_diagnostic(
+                        decision.get("reason"), roots, replacements=replacements, limit=1000
+                    ),
+                    "sequence": decision.get("sequence"),
+                    "virtual_seconds": decision.get("virtual_seconds"),
+                    "owner": bool(decision.get("owner")),
+                    "promoted": bool(decision.get("promoted")),
+                }
+            )
+        result["admission"] = {
+            "max_concurrent_pairs": admission.get("max_concurrent_pairs"),
+            "admitted": admission.get("admitted"),
+            "active": [
+                _safe_diagnostic(item, roots, replacements=replacements, limit=500)
+                for item in (admission.get("active") or [])
+            ],
+            "queued": [
+                _safe_diagnostic(item, roots, replacements=replacements, limit=500)
+                for item in (admission.get("queued") or [])
+            ],
+            "decisions": decisions,
+        }
+    lifecycle = capacity.get("lifecycle")
+    if isinstance(lifecycle, dict):
+        result["lifecycle"] = {
+            state: lifecycle.get(state, 0) for state in gate_capacity.LIFECYCLE_STATES
+        }
+    if isinstance(capacity.get("collection_failures"), int):
+        result["collection_failures"] = capacity["collection_failures"]
+    reference = capacity.get("sample_reference")
+    if isinstance(reference, dict):
+        result["sample_reference"] = {
+            key: value
+            for key, value in reference.items()
+            if value is None or isinstance(value, (str, int, float, bool))
+        }
+    samples = capacity.get("samples")
+    if isinstance(samples, list):
+        retained = samples[:MAX_CAPACITY_SAMPLES]
+        result["samples"] = [
+            _safe_capacity_sample(sample, roots, replacements=replacements) for sample in retained
+        ]
+        result["samples_omitted"] = max(0, len(samples) - len(retained))
+    return result
+
+
 def _safe_fixture_manifest(result: dict[str, Any]) -> dict[str, Any]:
     """Keep only bounded, non-path fields from manifest validation."""
 
@@ -4279,6 +4542,7 @@ def build_evidence_payload(
     fixture_manifest: dict[str, Any] | None = None,
     matrix_audit: dict[str, Any] | None = None,
     execution_plan: dict[str, Any] | None = None,
+    capacity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the sanitized, metadata-only payload retained by the gate.
 
@@ -4319,6 +4583,7 @@ def build_evidence_payload(
         payload["matrix_audit"] = _safe_matrix_audit(matrix_audit)
     if execution_plan:
         payload["execution_plan"] = _safe_execution_plan(execution_plan)
+    payload["capacity"] = _safe_capacity(capacity, roots, replacements=replacements)
     if evidence_error:
         payload["evidence_error"] = _safe_diagnostic(
             evidence_error, roots, replacements=replacements, limit=2000
@@ -4337,6 +4602,7 @@ def build_dual_evidence_payload(
     requested_mode: str = "both",
     generated_at: str | None = None,
     evidence_error: str = "",
+    capacity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a sanitized evidence bundle containing both runtime executions."""
 
@@ -4380,6 +4646,7 @@ def build_dual_evidence_payload(
         "runtimes": runtimes,
         "assets": [_safe_asset(item, roots) for item in assets],
         "overall": overall,
+        "capacity": _safe_capacity(capacity, roots, replacements=replacements),
         "safety": {
             "rom_bytes": "not included",
             "credentials": "environment is not captured; free-form diagnostics are redacted",
@@ -4443,6 +4710,8 @@ def _render_dual_evidence_text(payload: dict[str, Any]) -> str:
         # parent already identifies the combined evidence bundle.
         lines.extend(f"    {line}" for line in child_lines[3:])
 
+    if isinstance(payload.get("capacity"), dict):
+        lines.extend(_capacity_text_lines(payload["capacity"]))
     if payload.get("evidence_error"):
         lines.append(f"evidence-error: {payload['evidence_error']}")
     lines.append("safety:")
@@ -4581,6 +4850,8 @@ def render_evidence_text(payload: dict[str, Any]) -> str:
             lines.append("    output tail:")
             lines.extend(f"      {line}" for line in tier["output_tail"].splitlines())
 
+    if isinstance(payload.get("capacity"), dict):
+        lines.extend(_capacity_text_lines(payload["capacity"]))
     if payload.get("evidence_error"):
         lines.append(f"evidence-error: {payload['evidence_error']}")
     lines.append("safety:")
@@ -4732,6 +5003,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=project_root_from_script())
     parser.add_argument("--rom-root", type=Path)
     parser.add_argument("--fixture-root", type=Path)
+    parser.add_argument(
+        "--capacity-policy",
+        type=Path,
+        help=(
+            "path to a versioned JSON capacity policy; when omitted the report "
+            "records capacity_policy: unavailable and gate behavior is unchanged"
+        ),
+    )
     parser.add_argument(
         "--python", dest="python_executable", type=Path, default=Path(sys.executable)
     )
@@ -4893,6 +5172,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if nodeid_config_error:
         configuration_problems.append(nodeid_config_error)
 
+    capacity_session = None
+    capacity_payload = gate_capacity.unavailable_capacity(
+        "no --capacity-policy supplied; capacity admission is not enforced"
+    )
+    if args.capacity_policy is not None:
+        capacity_path = _path_from_project_root(project_root, args.capacity_policy)
+        policy, policy_error = gate_capacity.load_capacity_policy(capacity_path)
+        if policy is None:
+            capacity_payload = gate_capacity.unavailable_capacity(
+                f"capacity policy blocked: {policy_error}"
+            )
+            capacity_payload["status"] = "blocked"
+            configuration_problems.append(f"capacity policy blocked: {policy_error}")
+        else:
+            capacity_session = gate_capacity.CapacitySession(policy, repo_root=project_root)
+
     early_smoke = not (args.unit_only or args.tier or args.smoke_only)
     fail_fast = early_smoke if args.fail_fast is None else args.fail_fast
     if args.smoke_only:
@@ -4923,6 +5218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw_output_directory=raw_output_directory,
         early_smoke=early_smoke,
         fail_fast=fail_fast,
+        capacity_session=capacity_session,
     )
 
     expected_modes = runtime_modes_for_gate(args.runtime_mode)
@@ -4985,6 +5281,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             for problem in result.gate_problems
         ]
         overall = "PASS" if runtime_gates_pass(runtime_results) else "FAIL"
+    if capacity_session is not None:
+        with contextlib.suppress(Exception):
+            capacity_session.ensure_started()
+        capacity_payload = capacity_session.report()
     evidence_error = ""
     if args.evidence_dir is not None:
         evidence_dir = args.evidence_dir.expanduser()
@@ -4999,6 +5299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runtime_results=runtime_results,
                 overall=overall,
                 requested_mode="both",
+                capacity=capacity_payload,
             )
         else:
             evidence_payload = build_evidence_payload(
@@ -5014,6 +5315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fixture_manifest=fixture_manifest,
                 matrix_audit=matrix_audit,
                 execution_plan=runtime_results[0].execution_plan,
+                capacity=capacity_payload,
             )
         try:
             write_evidence_bundle(evidence_dir, evidence_payload)
@@ -5035,6 +5337,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "assets": [asdict(asset) for asset in assets],
                 "gate_problems": gate_problems,
                 "overall": overall,
+                "capacity": capacity_payload,
             }
         else:
             payload = {
@@ -5049,6 +5352,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "overall": overall,
                 "fixture_manifest": fixture_manifest,
                 "matrix_audit": matrix_audit,
+                "capacity": capacity_payload,
                 **(
                     {"execution_plan": runtime_results[0].execution_plan}
                     if runtime_results[0].execution_plan
@@ -5067,6 +5371,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 assets=assets,
                 runtime_results=runtime_results,
                 overall=overall,
+                capacity=capacity_payload,
             )
         else:
             output = render_text(
@@ -5082,6 +5387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fixture_manifest=fixture_manifest,
                 matrix_audit=matrix_audit,
                 execution_plan=runtime_results[0].execution_plan,
+                capacity=capacity_payload,
             )
         print(output)
     if any(
