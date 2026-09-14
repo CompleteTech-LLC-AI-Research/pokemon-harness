@@ -371,5 +371,78 @@ def test_cli_no_results_is_declaration_only(catalog: dict, capsys: pytest.Captur
     assert "INCOMPLETE" in captured.out
 
 
+def test_internal_tested_sentinel_is_not_a_terminal_pass(catalog: dict) -> None:
+    document = _passing_document(catalog, status="tested")
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    assert report["overall"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert all(case["status"] != "tested" for case in report["cases"])
+    assert report["summary"]["statuses"].get("unaccepted") == 38
+
+
+def test_only_accepted_outcomes_can_complete_a_dimension(catalog: dict) -> None:
+    accepted = coverage.result_set_from_document(_passing_document(catalog, status="passed"))
+    completed = coverage.build_report(catalog, accepted, expected_commit="a" * 40)
+    assert completed["dimensions"]["one_turn_pairing"]["status"] == "COMPLETE"
+
+    for status in ("tested", "ok", "pass", "xpassed"):
+        results = coverage.result_set_from_document(_passing_document(catalog, status=status))
+        report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+        assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE", status
+        assert report["summary"]["tested"] == 0, status
+
+
+def test_accepted_outcomes_declaration_is_enforced(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    mutated["coverage"]["evidence_policy"]["accepted_outcomes"] = ["tested"]
+    with pytest.raises(coverage.CoverageError, match="sentinel"):
+        coverage.validate_catalog(mutated)
+
+    mutated["coverage"]["evidence_policy"]["accepted_outcomes"] = []
+    with pytest.raises(coverage.CoverageError, match="accepted_outcomes"):
+        coverage.validate_catalog(mutated)
+
+
+def test_sentinel_is_filtered_even_when_catalog_declares_it(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    mutated["coverage"]["evidence_policy"]["accepted_outcomes"] = ["tested"]
+    results = coverage.result_set_from_document(_passing_document(catalog, status="tested"))
+
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+    assert report["overall"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+
+
+def test_record_commit_is_accepted_when_present(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    document.pop("commit")
+    for record in document["records"]:
+        record["commit"] = "a" * 40
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    assert report["run"]["commit_source"] == "records"
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "COMPLETE"
+
+
+def test_declared_commit_without_result_commit_is_explicitly_unidentified(catalog: dict) -> None:
+    document = _passing_document(catalog)
+    document.pop("commit")
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    assert report["overall"] == "INCOMPLETE"
+    assert report["run"]["commit_source"] is None
+    assert report["run"]["commit_status"].startswith("unidentified")
+    assert any("carries no commit" in problem for problem in report["problems"])
+    sample = _case_report(report, coverage.one_turn_pairing_cases(catalog)[0]["selector"], "source")
+    assert sample["status"] == "unidentified"
+    assert "commit" in sample["reason"]
+
+
 def test_battle_coverage_module_is_classified_as_unit() -> None:
     assert "test_battle_coverage.py" in _tier_config.UNIT_MODULES

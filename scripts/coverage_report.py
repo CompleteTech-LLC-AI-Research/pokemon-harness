@@ -45,13 +45,19 @@ _ROLES = ("listen", "connect")
 _VERSIONS = ("red", "blue", "yellow")
 _TRANSPORTS = ("local", "remote")
 _SCOPES = ("tested", "planned_unverified", "deliberately_excluded")
-_TERMINAL_PASS = "passed"
+# Internal report sentinel for a fully-evidenced required case. It is never a
+# terminal pytest outcome and must stay distinct from any result status.
+_CASE_SENTINEL = "tested"
+# Fallback only; the catalog's coverage.evidence_policy.accepted_outcomes is
+# authoritative and is enforced when classifying terminal records.
+_DEFAULT_ACCEPTED_OUTCOMES = ("passed",)
 _INCOMPLETE_STATUSES = frozenset(
     {
         "missing",
         "duplicate",
         "mismatched",
         "unidentified",
+        "unaccepted",
         "partial",
         "skipped",
         "xfailed",
@@ -178,6 +184,20 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
     policy = coverage.get("evidence_policy")
     if not isinstance(policy, dict):
         raise CoverageError("catalog.coverage.evidence_policy must be an object")
+    accepted = policy.get("accepted_outcomes")
+    if (
+        not isinstance(accepted, list)
+        or not accepted
+        or any(not isinstance(item, str) or not item.strip() for item in accepted)
+    ):
+        raise CoverageError(
+            "coverage.evidence_policy.accepted_outcomes must be a non-empty list of strings"
+        )
+    if _CASE_SENTINEL in accepted:
+        raise CoverageError(
+            f"accepted_outcomes must not use the internal {_CASE_SENTINEL!r} sentinel; "
+            "it is not a terminal pytest outcome"
+        )
 
     fixtures = _scenario_fixture_ids(catalog)
     seen_case_ids: set[str] = set()
@@ -312,6 +332,7 @@ class Outcome:
     runtime: str
     reason: str = ""
     partial: bool = False
+    commit: str | None = None
 
 
 @dataclass
@@ -427,6 +448,7 @@ def _collect_outcome_records(records: list[Any], default_mode: str, result: Resu
             continue
         runtime = record.get("runtime")
         runtime = runtime if isinstance(runtime, str) and runtime else default_mode
+        commit = record.get("commit")
         result.outcomes.append(
             Outcome(
                 nodeid=nodeid,
@@ -434,6 +456,7 @@ def _collect_outcome_records(records: list[Any], default_mode: str, result: Resu
                 runtime=runtime,
                 reason=str(record.get("reason", "")),
                 partial=bool(record.get("partial", False)),
+                commit=commit if isinstance(commit, str) and commit else None,
             )
         )
 
@@ -463,7 +486,11 @@ def _collect_outcomes(block: dict[str, Any], mode: str, result: ResultSet) -> No
                 status = "xpassed"
             result.outcomes.append(
                 Outcome(
-                    nodeid=nodeid, status=status, runtime=mode, reason=str(record.get("reason", ""))
+                    nodeid=nodeid,
+                    status=status,
+                    runtime=mode,
+                    reason=str(record.get("reason", "")),
+                    commit=record.get("commit") if isinstance(record.get("commit"), str) else None,
                 )
             )
             seen_nodeids.add(normalize_nodeid(nodeid))
@@ -525,7 +552,7 @@ def _parse_junit(text: str, source_path: str) -> ResultSet:
             nodeid = f"{module}::{name}"
         else:
             nodeid = name
-        status = _TERMINAL_PASS
+        status = _DEFAULT_ACCEPTED_OUTCOMES[0]
         reason = ""
         failure = testcase.find("failure")
         error = testcase.find("error")
@@ -570,6 +597,34 @@ def _evidence_policy(catalog: dict[str, Any]) -> dict[str, Any]:
     return policy if isinstance(policy, dict) else {}
 
 
+def _accepted_outcomes(policy: dict[str, Any]) -> tuple[str, ...]:
+    """Return the catalog-declared terminal outcomes that may count as PASS.
+
+    The catalog is authoritative. A malformed declaration falls back to the
+    default accepted outcome so the report stays fail-closed rather than
+    silently accepting an unknown status.
+    """
+    accepted = policy.get("accepted_outcomes")
+    if (
+        isinstance(accepted, list)
+        and accepted
+        and all(isinstance(item, str) and item.strip() for item in accepted)
+    ):
+        # Never allow the internal sentinel to act as a terminal outcome, even
+        # if a malformed catalog declares it and bypasses validation.
+        filtered = tuple(item for item in accepted if item != _CASE_SENTINEL)
+        if filtered:
+            return filtered
+    return _DEFAULT_ACCEPTED_OUTCOMES
+
+
+def _incomplete_label(status: str) -> str:
+    """Map an unaccepted status to a safe incomplete report label."""
+    if status in _INCOMPLETE_STATUSES and status != _CASE_SENTINEL:
+        return status
+    return "unaccepted"
+
+
 def _evaluate_case(
     runtime: str,
     records: list[Outcome],
@@ -577,6 +632,7 @@ def _evaluate_case(
     expected_commit: str | None,
     policy: dict[str, Any],
 ) -> tuple[str, str]:
+    accepted = _accepted_outcomes(policy)
     if not records:
         return "missing", f"no result for runtime {runtime}"
     if len(records) > 1:
@@ -584,8 +640,11 @@ def _evaluate_case(
     record = records[0]
     if record.partial:
         return "partial", f"partial {record.status} record"
-    if record.status != _TERMINAL_PASS:
-        return record.status, record.reason or f"result status {record.status}"
+    if record.status not in accepted:
+        label = _incomplete_label(record.status)
+        return label, record.reason or (
+            f"result status {record.status!r} is not an accepted outcome {list(accepted)!r}"
+        )
 
     identity: dict[str, Any] = {}
     if results is not None:
@@ -613,15 +672,21 @@ def _evaluate_case(
             f"PyBoy version {actual_version!r} does not match pinned {expected_version!r}",
         )
     if expected_commit:
-        result_commit = results.commit if results else None
+        result_commit = record.commit or (results.commit if results else None)
         if not result_commit:
-            return "unidentified", "result commit unavailable"
+            return (
+                "unidentified",
+                (
+                    "result commit unavailable: the results source carries no per-record "
+                    "or top-level commit, so the declared exact commit cannot be confirmed"
+                ),
+            )
         if result_commit != expected_commit:
             return (
                 "mismatched",
                 f"result commit {result_commit!r} does not match declared {expected_commit!r}",
             )
-    return "tested", ""
+    return _CASE_SENTINEL, ""
 
 
 def _dimension_status(
@@ -740,6 +805,15 @@ def build_report(
             problems.append(
                 f"commit mismatch: declared {expected_commit!r}, result {results.commit!r}"
             )
+        if (
+            expected_commit
+            and not results.commit
+            and not any(outcome.commit for outcome in results.outcomes)
+        ):
+            problems.append(
+                f"results source carries no commit; cannot confirm declared commit "
+                f"{expected_commit!r} (fail-closed); retain a result with an exact commit"
+            )
         distinct_commits = {
             identity.get("pyboy_revision")
             for identity in results.runtimes.values()
@@ -793,9 +867,19 @@ def build_report(
     if pairing != "COMPLETE" or mechanics not in ("COMPLETE",):
         overall = "INCOMPLETE"
 
+    record_commit_available = results is not None and any(
+        outcome.commit for outcome in results.outcomes
+    )
+    if results is not None and results.commit:
+        commit_source = "result"
+    elif record_commit_available:
+        commit_source = "records"
+    else:
+        commit_source = None
     run: dict[str, Any] = {
         "expected_commit": expected_commit,
         "result_commit": results.commit if results is not None else None,
+        "commit_source": commit_source,
         "source_path": results.source_path if results is not None else None,
         "source_kind": results.source_kind if results is not None else "none",
         "run_id": results.run_id if results is not None else None,
@@ -803,6 +887,8 @@ def build_report(
     }
     if results is not None and results.notes:
         run["notes"] = list(results.notes)
+    if expected_commit and commit_source is None and results is not None:
+        run["commit_status"] = "unidentified: results source carries no commit"
 
     return {
         "catalog_id": document.get("catalog_id"),
@@ -871,8 +957,11 @@ def render_text(report: dict[str, Any]) -> str:
         "run: "
         f"kind={run.get('source_kind')} path={run.get('source_path') or '(none)'} "
         f"run_id={run.get('run_id') or '(none)'} "
-        f"commit={run.get('result_commit') or run.get('expected_commit') or '(unknown)'}"
+        f"commit={run.get('result_commit') or run.get('expected_commit') or '(unknown)'} "
+        f"commit_source={run.get('commit_source') or '(none)'}"
     )
+    if run.get("commit_status"):
+        lines.append(f"  commit_status: {run['commit_status']}")
     for mode, identity in sorted((run.get("runtimes") or {}).items()):
         lines.append(
             f"  runtime {mode}: build={identity.get('pyboy_revision') or '(unknown)'} "
