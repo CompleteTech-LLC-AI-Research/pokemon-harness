@@ -70,16 +70,21 @@ _PARTY_SPECIES_SENTINEL = 0xFF
 _NO_MON = 0x00
 _BATTLE_ACTIVE_VALUES = frozenset((0x01, 0x02))
 
-_ACTIVE_BATTLE_SYMBOLS = (
-    "wBattleMonSpecies",
-    "wBattleMonHP",
-    "wBattleMonStatus",
-    "wBattleMonType1",
-    "wBattleMonType2",
-    "wBattleMonMoves",
-    "wBattleMonPP",
-    "wBattleMonLevel",
-    "wBattleMonMaxHP",
+# Field suffixes shared by the ``wBattleMon`` and ``wEnemyMon`` battle-struct
+# symbol families.  The battle record is a distinct binary ABI from
+# ``party_struct`` (for example PP at offset 25 versus 29 and MaxHP at offset
+# 15 versus 34), so combatants are always read through these named symbols and
+# never by applying party offsets to a battle record.
+_BATTLE_STRUCT_FIELD_SUFFIXES = (
+    "Species",
+    "HP",
+    "Status",
+    "Type1",
+    "Type2",
+    "Moves",
+    "PP",
+    "Level",
+    "MaxHP",
 )
 
 
@@ -339,6 +344,40 @@ def _make_party_mon(
     )
 
 
+def parse_battle_combatant(
+    memory: MemoryLike,
+    symbols: SymbolTable,
+    prefix: str,
+    *,
+    slot: int,
+) -> PartyMon | None:
+    """Parse one combatant from a named battle-struct symbol family.
+
+    ``prefix`` is the ROM-label prefix (``wBattleMon`` for the player and
+    ``wEnemyMon`` for the opposing side).  Every field is read through its
+    named symbol, never by applying ``party_struct`` offsets, because the
+    battle record uses a different layout (PP at offset 25 versus 29 and
+    MaxHP at offset 15 versus 34).  When any required symbol is absent the
+    result is ``None`` so callers can distinguish unknown data from a real
+    zero value.
+    """
+    if any(prefix + suffix not in symbols for suffix in _BATTLE_STRUCT_FIELD_SUFFIXES):
+        return None
+    return _make_party_mon(
+        slot=slot,
+        species=symbols.read_u8(memory, prefix + "Species"),
+        level=symbols.read_u8(memory, prefix + "Level"),
+        hp=symbols.read_u16_be(memory, prefix + "HP"),
+        max_hp=symbols.read_u16_be(memory, prefix + "MaxHP"),
+        status=parse_status(symbols.read_u8(memory, prefix + "Status")),
+        type1=symbols.read_u8(memory, prefix + "Type1"),
+        type2=symbols.read_u8(memory, prefix + "Type2"),
+        moves=_read_tuple4(memory, symbols.addr_of(prefix + "Moves")),
+        pp=_read_tuple4(memory, symbols.addr_of(prefix + "PP")),
+        standalone_species=True,
+    )
+
+
 def _parse_active_battle(
     memory: MemoryLike,
     symbols: SymbolTable,
@@ -361,31 +400,9 @@ def _parse_active_battle(
     slot = symbols.read_u8(memory, "wPlayerMonNumber")
     if slot >= len(mons):
         return raw, slot, None, False
-    if any(name not in symbols for name in _ACTIVE_BATTLE_SYMBOLS):
+    active_mon = parse_battle_combatant(memory, symbols, "wBattleMon", slot=slot)
+    if active_mon is None:
         return raw, slot, None, False
-
-    species = symbols.read_u8(memory, "wBattleMonSpecies")
-    hp = symbols.read_u16_be(memory, "wBattleMonHP")
-    status = parse_status(symbols.read_u8(memory, "wBattleMonStatus"))
-    type1 = symbols.read_u8(memory, "wBattleMonType1")
-    type2 = symbols.read_u8(memory, "wBattleMonType2")
-    moves = _read_tuple4(memory, symbols.addr_of("wBattleMonMoves"))
-    pp = _read_tuple4(memory, symbols.addr_of("wBattleMonPP"))
-    level = symbols.read_u8(memory, "wBattleMonLevel")
-    max_hp = symbols.read_u16_be(memory, "wBattleMonMaxHP")
-    active_mon = _make_party_mon(
-        slot=slot,
-        species=species,
-        level=level,
-        hp=hp,
-        max_hp=max_hp,
-        status=status,
-        type1=type1,
-        type2=type2,
-        moves=moves,
-        pp=pp,
-        standalone_species=True,
-    )
     return raw, slot, active_mon, active_mon.is_valid is True
 
 

@@ -19,6 +19,7 @@ from pokered_harness.state.base import (
 )
 from pokered_harness.state.battle import (
     BattleKind,
+    BattlePhase,
     BattleState,
     BattleType,
     parse_battle,
@@ -36,6 +37,7 @@ from pokered_harness.state.party import (
     PARTY_STRUCT_SIZE,
     Party,
     PartyMon,
+    parse_battle_combatant,
     parse_party,
 )
 from pokered_harness.state.progress import (
@@ -58,6 +60,7 @@ __all__ = [
     "Bag",
     "BagStack",
     "BattleKind",
+    "BattlePhase",
     "BattleState",
     "BattleType",
     "Direction",
@@ -71,6 +74,7 @@ __all__ = [
     "TextState",
     "parse_bag",
     "parse_battle",
+    "parse_battle_combatant",
     "parse_direction",
     "parse_game_state",
     "parse_menu",
