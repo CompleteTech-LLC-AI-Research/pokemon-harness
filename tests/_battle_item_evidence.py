@@ -125,10 +125,18 @@ class BagStack:
 
 @dataclass(frozen=True, slots=True)
 class BagSnapshot:
-    """Ordered, compacted bag stacks plus the single ``$FF`` terminator slot."""
+    """Ordered, compacted bag stacks plus the single ``$FF`` terminator slot.
+
+    ``raw_count`` and ``terminator_position`` are the ROM-observed bag count
+    and the index of the ``$FF`` terminator.  When present they must agree
+    with the compacted ``stacks`` (a stale count or a terminator not directly
+    after the last stack is a malformed observation and is rejected).
+    """
 
     stacks: tuple[BagStack, ...]
     terminator: int = BAG_TERMINATOR
+    raw_count: int | None = None
+    terminator_position: int | None = None
 
     def quantity_of(self, item_id: int) -> int:
         return sum(stack.quantity for stack in self.stacks if stack.item_id == item_id)
@@ -201,6 +209,20 @@ def _validate_bag(bag: BagSnapshot) -> None:
         raise ValueError(f"invalid bag terminator: {bag.terminator!r}")
     if len(bag.stacks) > MAX_BAG_STACKS:
         raise ValueError("bag stack count exceeds capacity")
+    if bag.raw_count is not None:
+        _integer(bag.raw_count, 0, MAX_BAG_STACKS, "bag raw count")
+        if bag.raw_count != len(bag.stacks):
+            raise ValueError(
+                "bag raw count does not match the compacted stack count "
+                f"({bag.raw_count} != {len(bag.stacks)})"
+            )
+    if bag.terminator_position is not None:
+        _integer(bag.terminator_position, 0, MAX_BAG_STACKS, "bag terminator position")
+        if bag.terminator_position != len(bag.stacks):
+            raise ValueError(
+                "bag terminator does not immediately follow the last stack "
+                f"({bag.terminator_position} != {len(bag.stacks)})"
+            )
     seen: set[int] = set()
     for stack in bag.stacks:
         _integer(stack.item_id, NO_ITEM + 1, BAG_TERMINATOR - 1, "bag item id")
@@ -648,9 +670,7 @@ def account_timeline(timeline: ActionTimeline, *, continuation: ContinuationRule
         selection_event.item_id != outcome.item_id
         or selection_event.target_slot != outcome.target_slot
     ):
-        raise AssertionError(
-            "item outcome identity does not match the selected item/target"
-        )
+        raise AssertionError("item outcome identity does not match the selected item/target")
 
     expected_kind = EVENT_APPLICATION if continuation.consumes_item else EVENT_REJECTION
     if outcome.kind != expected_kind:

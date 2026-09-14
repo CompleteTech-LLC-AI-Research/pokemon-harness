@@ -223,6 +223,38 @@ def test_last_unit_is_removed_compacted_and_terminator_preserved() -> None:
     assert after.bag.terminator == 0xFF
 
 
+def test_stale_bag_count_after_removal_is_rejected() -> None:
+    party = [_mon(0, hp=30, max_hp=100)]
+    before = _snapshot(1, 0, _bag(((4, 2), (1, 1), (5, 1))), party, _active(0, party[0]))
+    # The last unit was removed and the stack list compacted to two entries,
+    # but the ROM count byte was not updated and still reads three.
+    stale = _snapshot(
+        1,
+        0,
+        BagSnapshot((BagStack(4, 2), BagStack(5, 1)), raw_count=3, terminator_position=3),
+        [_mon(0, hp=50, max_hp=100)],
+        _active(0, party[0]),
+    )
+
+    with pytest.raises(ValueError, match="raw count does not match"):
+        assert_last_unit_compaction(before, stale, 1)
+
+
+def test_terminator_not_after_last_stack_is_rejected() -> None:
+    party = [_mon(0, hp=30, max_hp=100)]
+    before = _snapshot(1, 0, _bag(((4, 2), (1, 1), (5, 1))), party, _active(0, party[0]))
+    stale = _snapshot(
+        1,
+        0,
+        BagSnapshot((BagStack(4, 2), BagStack(5, 1)), raw_count=2, terminator_position=3),
+        [_mon(0, hp=50, max_hp=100)],
+        _active(0, party[0]),
+    )
+
+    with pytest.raises(ValueError, match="terminator does not immediately follow"):
+        assert_last_unit_compaction(before, stale, 1)
+
+
 def test_no_effect_and_cancelled_branches_consume_zero_and_do_not_reorder() -> None:
     party = [_mon(0, hp=100, max_hp=100)]
     before = _snapshot(1, 0, _bag(((4, 2), (1, 3))), party, _active(0, party[0]))
