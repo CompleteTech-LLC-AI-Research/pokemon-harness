@@ -732,6 +732,14 @@ def audit_exact_party_exchange(
 def _slot_problem(name: str, records: PartyRecords, slot: int) -> str | None:
     if not isinstance(slot, int) or isinstance(slot, bool) or slot < 0:
         return f"{name}: slot {slot!r} is not a non-negative index"
+    if slot >= MAX_PARTY_SLOTS:
+        return f"{name}: slot {slot} exceeds the {MAX_PARTY_SLOTS}-slot party"
+    # A bounded, validated count proves an index is out of range even when the
+    # record bytes themselves are unavailable (for example a missing
+    # ``wPartyMons`` symbol).  Only slots that could still be valid stay
+    # unknown.
+    if records.count is not None and records.count_valid is True and slot >= records.count:
+        return f"{name}: slot {slot} outside party of {records.count} record(s)"
     if records.valid is True and slot >= len(records.records):
         return f"{name}: slot {slot} outside party of {len(records.records)} record(s)"
     return None

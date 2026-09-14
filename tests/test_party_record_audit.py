@@ -262,6 +262,39 @@ def test_absent_party_mons_symbol_is_unknown():
     assert audit.is_unknown is True
 
 
+def test_known_count_marks_out_of_range_slots_without_record_bytes():
+    symbols = load_sym_text("00:C001 wPartyCount\n")
+    mem = DictMemory({0xC001: 1})
+    view = parse_party_records(mem, symbols)
+    assert view.valid is None  # record bytes unavailable, but the count is known
+    assert view.count == 1 and view.count_valid is True
+
+    for slot in (1, 6, 999):
+        audit = audit_exact_party_exchange(
+            owner_a_before=view,
+            owner_a_after=view,
+            owner_b_before=view,
+            owner_b_after=view,
+            slot_a=slot,
+            slot_b=0,
+        )
+        assert audit.valid is False, slot
+        assert audit.status == "out_of_range", slot
+
+    # A slot that could still be valid remains explicitly unknown rather than
+    # being reported as a failure.
+    audit = audit_exact_party_exchange(
+        owner_a_before=view,
+        owner_a_after=view,
+        owner_b_before=view,
+        owner_b_after=view,
+        slot_a=0,
+        slot_b=0,
+    )
+    assert audit.valid is None
+    assert audit.status == "unknown"
+
+
 def test_absent_party_count_symbol_is_unknown():
     symbols = load_sym_text("00:C100 wPartyMons\n")
     view = parse_party_records(DictMemory(), symbols)
