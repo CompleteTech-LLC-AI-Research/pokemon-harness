@@ -46,6 +46,7 @@ readers offer both ``read_u16_le`` and ``read_u16_be``.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from pokered_harness.state.base import StatusCondition, parse_status
@@ -449,3 +450,320 @@ def _read_tuple4(memory: MemoryLike, addr: int) -> tuple[int, int, int, int]:
         _read_u8(memory, addr + 2),
         _read_u8(memory, addr + 3),
     )
+
+
+# --- read-only raw party-record digest / exchange audit ---------------------
+#
+# The public :class:`PartyMon` DTO decodes only the fields ordinary observation
+# needs, so it cannot prove a byte-exact cross-owner trade: two same-species
+# members can share every decoded field while holding different raw records.
+# The helpers below expose the complete source-defined 44-byte ``party_struct``
+# identity as a stable SHA-256 digest and audit an intended-slot exchange.
+# They are pure readers: they never tick, write RAM, touch serial state, or
+# call a gameplay driver, and they never fabricate a value from a species
+# match.  Missing symbols stay explicitly unknown; an out-of-range slot or a
+# record that is not 44 bytes stays an explicit failure.
+
+_DIGEST_ALGORITHM = "sha256"
+_RECORD_SPECIES_OFFSET = _OFFSET_SPECIES
+_RECORD_LEVEL_OFFSET = _OFFSET_LEVEL
+
+
+@dataclass(frozen=True, slots=True)
+class PartyRecord:
+    """One occupied ``wPartyMons`` slot as raw bytes plus a stable digest."""
+
+    slot: int
+    raw: bytes
+    digest: str
+    species: int
+    level: int
+
+    @property
+    def size(self) -> int:
+        return len(self.raw)
+
+    def to_resource_dict(self) -> dict[str, object]:
+        """Bounded, sanitized projection; deliberately omits ``raw`` bytes."""
+        return {
+            "slot": self.slot,
+            "digest": self.digest,
+            "record_size": len(self.raw),
+            "species": self.species,
+            "level": self.level,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PartyRecords:
+    """Read-only per-slot record view with explicit validity provenance.
+
+    ``valid is None`` means the backing symbols/provenance are unavailable and
+    the records must not be treated as an observed party.  ``valid is False``
+    means the raw count is outside the engine's party-length invariant.  Raw
+    bytes are retained for the pure audit helper but are never serialized by
+    :meth:`to_resource_payload`.
+    """
+
+    records: tuple[PartyRecord, ...] = ()
+    count: int | None = None
+    count_raw: int | None = None
+    count_valid: bool | None = None
+    valid: bool | None = None
+    missing_symbols: tuple[str, ...] = ()
+
+    @property
+    def is_unknown(self) -> bool:
+        return self.valid is None
+
+    def record_at(self, slot: int) -> PartyRecord | None:
+        if not isinstance(slot, int) or isinstance(slot, bool):
+            return None
+        if slot < 0 or slot >= len(self.records):
+            return None
+        return self.records[slot]
+
+    def digests(self) -> tuple[str, ...]:
+        return tuple(record.digest for record in self.records)
+
+    def to_resource_payload(self) -> dict[str, object]:
+        """JSON-ready, sanitized shape for the read-only MCP resource."""
+        return {
+            "source": "party-records",
+            "digest_algorithm": _DIGEST_ALGORITHM,
+            "record_size": PARTY_STRUCT_SIZE,
+            "count": self.count,
+            "count_raw": self.count_raw,
+            "count_valid": self.count_valid,
+            "valid": self.valid,
+            "missing_symbols": list(self.missing_symbols),
+            "records": [record.to_resource_dict() for record in self.records],
+        }
+
+
+def parse_party_records(memory: MemoryLike, symbols: SymbolTable) -> PartyRecords:
+    """Read every occupied party slot's raw 44-byte record and digest it.
+
+    Missing ``wPartyCount`` or (for a non-empty party) ``wPartyMons`` returns
+    an explicitly unknown result rather than a guessed empty party.  The read
+    is bounded to :data:`MAX_PARTY_SLOTS` records and never mutates ``memory``.
+    """
+    if "wPartyCount" not in symbols:
+        return PartyRecords(valid=None, missing_symbols=("wPartyCount",))
+    count_raw = symbols.read_u8(memory, "wPartyCount")
+    count = min(count_raw, MAX_PARTY_SLOTS)
+    count_valid = count_raw <= MAX_PARTY_SLOTS
+    if count == 0:
+        return PartyRecords(
+            records=(),
+            count=0,
+            count_raw=count_raw,
+            count_valid=count_valid,
+            valid=count_valid,
+        )
+    if "wPartyMons" not in symbols:
+        return PartyRecords(
+            records=(),
+            count=count,
+            count_raw=count_raw,
+            count_valid=count_valid,
+            valid=None,
+            missing_symbols=("wPartyMons",),
+        )
+    base = symbols.addr_of("wPartyMons")
+    records = tuple(
+        _read_party_record(memory, slot, base + slot * PARTY_STRUCT_SIZE) for slot in range(count)
+    )
+    return PartyRecords(
+        records=records,
+        count=count,
+        count_raw=count_raw,
+        count_valid=count_valid,
+        valid=count_valid,
+    )
+
+
+def _read_party_record(memory: MemoryLike, slot: int, base: int) -> PartyRecord:
+    raw = bytes(int(memory[base + offset]) & 0xFF for offset in range(PARTY_STRUCT_SIZE))
+    return PartyRecord(
+        slot=slot,
+        raw=raw,
+        digest=hashlib.sha256(raw).hexdigest(),
+        species=raw[_RECORD_SPECIES_OFFSET],
+        level=raw[_RECORD_LEVEL_OFFSET],
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangeCheck:
+    """One named Boolean (or unknown) condition inside an exchange audit."""
+
+    name: str
+    status: bool | None
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangeAudit:
+    """Explicit outcome of :func:`audit_exact_party_exchange`.
+
+    ``status`` is ``"exact"`` (valid), ``"mismatch"`` (invalid), ``"unknown"``
+    (provenance unavailable), or ``"out_of_range"`` (invalid slot/size).
+    """
+
+    valid: bool | None
+    status: str
+    slot_a: int
+    slot_b: int
+    checks: tuple[ExchangeCheck, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+    @property
+    def is_exact(self) -> bool:
+        return self.valid is True
+
+    @property
+    def is_unknown(self) -> bool:
+        return self.valid is None
+
+    def check(self, name: str) -> bool | None:
+        for item in self.checks:
+            if item.name == name:
+                return item.status
+        return None
+
+
+def audit_exact_party_exchange(
+    *,
+    owner_a_before: PartyRecords,
+    owner_a_after: PartyRecords,
+    owner_b_before: PartyRecords,
+    owner_b_after: PartyRecords,
+    slot_a: int,
+    slot_b: int,
+) -> ExchangeAudit:
+    """Audit a byte-exact record swap between two owners' intended slots.
+
+    ``valid is True`` only when the full 44-byte records moved exactly between
+    the intended slots and every unrelated record is byte-identical.  Missing
+    symbols return ``valid is None``; an out-of-range slot or a record that is
+    not 44 bytes is an explicit ``valid is False``.  A same-species pair is
+    still compared by raw record identity, never by species alone.
+    """
+    positions = (
+        ("owner_a_before", owner_a_before, slot_a),
+        ("owner_a_after", owner_a_after, slot_a),
+        ("owner_b_before", owner_b_before, slot_b),
+        ("owner_b_after", owner_b_after, slot_b),
+    )
+    for name, records, slot in positions:
+        problem = _slot_problem(name, records, slot)
+        if problem is not None:
+            return ExchangeAudit(
+                valid=False,
+                status="out_of_range",
+                slot_a=slot_a,
+                slot_b=slot_b,
+                reasons=(problem,),
+            )
+    for name, records, _slot in positions:
+        if records.valid is None:
+            missing = ", ".join(records.missing_symbols) or "symbols"
+            return ExchangeAudit(
+                valid=None,
+                status="unknown",
+                slot_a=slot_a,
+                slot_b=slot_b,
+                reasons=(f"{name}: party records unavailable ({missing})",),
+            )
+        if records.valid is False:
+            return ExchangeAudit(
+                valid=None,
+                status="unknown",
+                slot_a=slot_a,
+                slot_b=slot_b,
+                reasons=(f"{name}: party count outside the engine invariant",),
+            )
+
+    a_before_slot = owner_a_before.records[slot_a]
+    a_after_slot = owner_a_after.records[slot_a]
+    b_before_slot = owner_b_before.records[slot_b]
+    b_after_slot = owner_b_after.records[slot_b]
+    involved = (a_before_slot, a_after_slot, b_before_slot, b_after_slot)
+
+    size_ok = all(record.size == PARTY_STRUCT_SIZE for record in involved)
+    intended_swap = a_after_slot.raw == b_before_slot.raw and b_after_slot.raw == a_before_slot.raw
+    unrelated_unchanged = _other_records_unchanged(
+        owner_a_before, owner_a_after, slot_a
+    ) and _other_records_unchanged(owner_b_before, owner_b_after, slot_b)
+    if a_before_slot.species == b_before_slot.species:
+        distinguished: bool | None = a_before_slot.raw != b_before_slot.raw and intended_swap
+    else:
+        distinguished = True
+
+    checks = (
+        ExchangeCheck(
+            "record_size_44",
+            size_ok,
+            "a party record is not the 44-byte party_struct size" if not size_ok else "",
+        ),
+        ExchangeCheck(
+            "intended_slots_swapped",
+            intended_swap,
+            "the intended slots did not receive each other's exact record"
+            if not intended_swap
+            else "",
+        ),
+        ExchangeCheck(
+            "unrelated_records_unchanged",
+            unrelated_unchanged,
+            "a record outside the intended slots changed" if not unrelated_unchanged else "",
+        ),
+        ExchangeCheck(
+            "same_species_distinguished",
+            distinguished,
+            "same-species members were not distinguished by raw record"
+            if distinguished is False
+            else "",
+        ),
+    )
+    reasons = tuple(check.detail for check in checks if check.status is False)
+    if all(check.status is True for check in checks):
+        return ExchangeAudit(
+            valid=True,
+            status="exact",
+            slot_a=slot_a,
+            slot_b=slot_b,
+            checks=checks,
+        )
+    return ExchangeAudit(
+        valid=False,
+        status="mismatch",
+        slot_a=slot_a,
+        slot_b=slot_b,
+        checks=checks,
+        reasons=reasons,
+    )
+
+
+def _slot_problem(name: str, records: PartyRecords, slot: int) -> str | None:
+    if not isinstance(slot, int) or isinstance(slot, bool) or slot < 0:
+        return f"{name}: slot {slot!r} is not a non-negative index"
+    if records.valid is True and slot >= len(records.records):
+        return f"{name}: slot {slot} outside party of {len(records.records)} record(s)"
+    return None
+
+
+def _other_records_unchanged(
+    before: PartyRecords,
+    after: PartyRecords,
+    intended_slot: int,
+) -> bool:
+    if len(before.records) != len(after.records):
+        return False
+    for index, (old, new) in enumerate(zip(before.records, after.records)):
+        if index == intended_slot:
+            continue
+        if old.raw != new.raw:
+            return False
+    return True

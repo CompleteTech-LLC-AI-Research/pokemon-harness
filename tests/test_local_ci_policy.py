@@ -87,6 +87,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "tests/test_battle_item_evidence.py",
         "tests/test_battle_scenario_fixtures.py",
         "tests/test_fixture_provenance.py",
+        "tests/test_party_record_audit.py",
         "tests/test_production_gate.py",
         "tests/test_qualification_runner.py",
         "tests/test_gate_capacity.py",
