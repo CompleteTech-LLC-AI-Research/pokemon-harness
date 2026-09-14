@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sys
 import time
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
@@ -39,6 +40,7 @@ from typing import Any
 POLICY_SCHEMA_VERSION = 1
 ADMISSION_STATUSES = ("ok", "queued", "blocked", "expired")
 CAPACITY_OUTCOMES = ("ok", "blocked", "failed", "unsupported")
+NOT_APPLICABLE = "not_applicable"
 LIFECYCLE_STATES = ("running", "completed", "interrupted", "not_started")
 _REQUIRED_FACT_KEYS = (
     "platform",
@@ -71,7 +73,16 @@ def _load_qualification_runner() -> Any:
         if spec is None or spec.loader is None:  # pragma: no cover - defensive.
             raise
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Register the module before execution: its ``from __future__ import
+        # annotations`` string annotations are resolved by ``@dataclass`` via
+        # ``sys.modules[cls.__module__]``.  Leaving it unregistered raises
+        # ``AttributeError: 'NoneType' object has no attribute '__dict__'``.
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(spec.name, None)
+            raise
         return module
 
 
@@ -385,6 +396,7 @@ class CapacityAdmission:
         self.queued: list[str] = []
         self.waiting_since: dict[str, float] = {}
         self.decisions: list[AdmissionDecision] = []
+        self._admitted: set[str] = set()
         self._sequence = 0
 
     def _next_sequence(self) -> int:
@@ -402,9 +414,13 @@ class CapacityAdmission:
 
     @property
     def admitted_count(self) -> int:
-        return sum(1 for decision in self.decisions if decision.status == "ok" and decision.owner)
+        """Distinct pairs that have ever owned a slot, counted idempotently."""
+
+        return len(self._admitted)
 
     def _record(self, decision: AdmissionDecision) -> AdmissionDecision:
+        if decision.status == "ok" and decision.owner:
+            self._admitted.add(decision.pair_id)
         self.decisions.append(decision)
         return decision
 
@@ -778,6 +794,14 @@ class CapacitySession:
             "sample_reference": self.telemetry.reference(),
         }
 
+    def not_applicable_report(self) -> dict[str, Any]:
+        """Report an asset-free selection without claiming capacity success."""
+
+        return not_applicable_capacity(
+            self.policy,
+            "asset-free selection does not dispatch emulator pairs",
+        )
+
 
 def overall_outcome(
     *,
@@ -814,6 +838,37 @@ def unavailable_capacity(reason: str) -> dict[str, Any]:
         "lifecycle": {state: 0 for state in LIFECYCLE_STATES},
         "samples": [],
         "collection_failures": 0,
+    }
+
+
+def not_applicable_capacity(policy: CapacityPolicy, reason: str) -> dict[str, Any]:
+    """Return an explicit marker for an asset-free selection that is not gated."""
+
+    return {
+        "status": NOT_APPLICABLE,
+        "capacity_policy": policy.runner_id,
+        "policy": policy.as_dict(),
+        "pressure_metric": _PRESSURE_METRIC,
+        "availability": {"status": NOT_APPLICABLE, "reasons": [reason]},
+        "capability_assumptions": [],
+        "admission": {
+            "max_concurrent_pairs": policy.max_concurrent_pairs,
+            "admitted": 0,
+            "active": [],
+            "queued": [],
+            "decisions": [],
+        },
+        "lifecycle": {state: 0 for state in LIFECYCLE_STATES},
+        "collection_failures": 0,
+        "samples": [],
+        "sample_reference": {
+            "algorithm": "sha256",
+            "sha256": hashlib.sha256(b"[]").hexdigest(),
+            "sample_count": 0,
+            "collection_failures": 0,
+            "first_monotonic_seconds": None,
+            "last_monotonic_seconds": None,
+        },
     }
 
 
@@ -875,6 +930,7 @@ __all__ = [
     "ADMISSION_STATUSES",
     "CAPACITY_OUTCOMES",
     "LIFECYCLE_STATES",
+    "NOT_APPLICABLE",
     "POLICY_SCHEMA_VERSION",
     "AdmissionDecision",
     "CapacityAdmission",
@@ -886,6 +942,7 @@ __all__ = [
     "evaluate_capacity",
     "facts_to_dict",
     "load_capacity_policy",
+    "not_applicable_capacity",
     "overall_outcome",
     "render_capacity_text",
     "sample_facts",

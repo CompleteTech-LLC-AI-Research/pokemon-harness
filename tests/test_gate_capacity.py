@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -722,3 +724,90 @@ def test_main_without_policy_records_unavailable_capacity(tmp_path, monkeypatch,
     assert report["capacity"]["capacity_policy"] == "unavailable"
     text = (evidence / "gate-report.txt").read_text(encoding="utf-8")
     assert "capacity-policy: unavailable" in text
+
+
+def test_admitted_count_is_idempotent_for_re_admission():
+    clock = FakeClock()
+    admission = gate_capacity.CapacityAdmission(make_policy(max_concurrent_pairs=2), clock=clock)
+    assert admission.admit("pair-1").status == "ok"
+    assert admission.admit("pair-2").status == "ok"
+    # Re-admitting an already-active owner must not double count.
+    assert admission.admit("pair-1").status == "ok"
+    assert admission.admitted_count == 2
+    assert admission.release("pair-1") is None
+    # Re-admitting the same pair after release still counts it once.
+    assert admission.admit("pair-1").status == "ok"
+    assert admission.admitted_count == 2
+
+
+def test_main_with_policy_asset_free_reports_not_applicable(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(gate, "parse_expected_sha1", lambda _path: {})
+    monkeypatch.setattr(gate, "inspect_assets", lambda *_args: [])
+    monkeypatch.setattr(gate, "load_required_test_keys", lambda _path: ({}, ""))
+    monkeypatch.setattr(gate, "load_required_nodeids", lambda _path: ({}, ""))
+
+    def fake_runtime_gates(**_kwargs):
+        result = _runtime_result("source")
+        result.execution_plan = gate.build_execution_plan(
+            ("source",), ("unit",), early_smoke=False, fail_fast=False
+        )
+        return [result]
+
+    monkeypatch.setattr(gate, "run_runtime_gates", fake_runtime_gates)
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(make_policy(effective_cpus=99).as_dict()), encoding="utf-8")
+    evidence = tmp_path / "evidence"
+    returncode = gate.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--tier",
+            "unit",
+            "--capacity-policy",
+            str(policy_path),
+            "--format",
+            "json",
+            "--evidence-dir",
+            str(evidence),
+        ]
+    )
+    capsys.readouterr()
+    assert returncode == 0
+    report = json.loads((evidence / "gate-report.json").read_text(encoding="utf-8"))
+    assert report["overall"] == "PASS"
+    assert report["capacity"]["status"] == "not_applicable"
+    assert report["capacity"]["availability"]["status"] == "not_applicable"
+    assert report["capacity"]["admission"]["admitted"] == 0
+    text = (evidence / "gate-report.txt").read_text(encoding="utf-8")
+    assert "capacity-policy: not_applicable" in text
+
+
+def _standalone_environment():
+    """Environment where ``scripts`` is not importable as a package."""
+
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(ROOT / "vendor" / "pyboy-src"), str(ROOT / "src")]
+    )
+    environment["PYBOY_NO_CYTHON"] = "1"
+    environment.pop("PYTEST_ADDOPTS", None)
+    environment.pop("POKERED_SKIP_SHA1", None)
+    return environment
+
+
+def test_standalone_gate_help_runs_without_package_layout():
+    # Regression for the dynamic qualification_runner load: the loaded module
+    # must be registered in ``sys.modules`` before ``exec_module`` so the
+    # sibling module's annotated ``@dataclass`` can resolve its own globals.
+    completed = subprocess.run(
+        [sys.executable, "scripts/production_gate.py", "--help"],
+        cwd=ROOT,
+        env=_standalone_environment(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert "usage:" in completed.stdout

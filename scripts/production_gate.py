@@ -5282,9 +5282,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ]
         overall = "PASS" if runtime_gates_pass(runtime_results) else "FAIL"
     if capacity_session is not None:
-        with contextlib.suppress(Exception):
-            capacity_session.ensure_started()
-        capacity_payload = capacity_session.report()
+        if set(selected) & REQUIRED_TIER_ASSETS:
+            with contextlib.suppress(Exception):
+                capacity_session.ensure_started()
+            capacity_payload = capacity_session.report()
+        else:
+            # Asset-free selections dispatch no emulator pairs, so the capacity
+            # section must not contradict a unit-only PASS with a blocked status.
+            capacity_payload = capacity_session.not_applicable_report()
     evidence_error = ""
     if args.evidence_dir is not None:
         evidence_dir = args.evidence_dir.expanduser()

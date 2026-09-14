@@ -544,7 +544,9 @@ unchanged. When it is present the gate reports a real-ROM tier `BLOCKED` (with
 the reason) if the declared allocation is unavailable, admits at most
 `max_concurrent_pairs` matrix rows, and retains the policy, timestamped host
 samples, their SHA-256 reference, and the admission/lifecycle decisions in the
-report. Unit-only and other asset-free selections are not capacity-gated.
+report. Unit-only and other asset-free selections are not capacity-gated;
+their retained section reports `capacity-policy: not_applicable` (never a
+contradictory `blocked`) so a unit-only `PASS` stays consistent.
 
 The declared fields are `policy_version`, `runner_id`, `effective_cpus`,
 `max_concurrent_pairs`, `memory_bytes_min`, `disk_free_bytes_min`,
