@@ -36,7 +36,6 @@ from typing import Any
 SCHEMA_VERSION = 1
 _DECLARATION_ENV = "POKERED_QUALIFICATION_DECLARATION"
 _RESERVATION_MECHANISMS = ("dedicated-host", "cgroup-quota", "cpuset-affinity")
-_STATUS_ORDER = ("fail", "blocked", "unsupported", "ok")
 
 
 def _read_text(path: Path) -> str | None:
@@ -77,13 +76,16 @@ def _parse_cpu_max(text: str) -> float | None:
     return int(parts[0]) / period
 
 
-def _cgroup_relative_path() -> str | None:
+def _cgroup_relative_path(controller: str | None) -> str | None:
     raw = _read_text(Path("/proc/self/cgroup"))
     if raw is None:
         return None
     for line in raw.splitlines():
         hierarchy, controllers, path = (line.split(":", 2) + ["", "", ""])[:3]
-        if hierarchy == "0" and not controllers:
+        if controller is None:
+            if hierarchy == "0" and not controllers:
+                return path or "/"
+        elif controller in controllers.split(","):
             return path or "/"
     return None
 
@@ -107,7 +109,7 @@ def _read_cgroup_facts() -> dict[str, Any]:
     quota_cores: float | None = None
     weight: int | None = None
     throttled: dict[str, int] | None = None
-    relative = _cgroup_relative_path()
+    relative = _cgroup_relative_path(None)
 
     if (root / "cpu.max").exists():
         version = "v2"
@@ -128,6 +130,7 @@ def _read_cgroup_facts() -> dict[str, Any]:
     elif (root / "cpu" / "cpu.cfs_quota_us").exists():
         version = "v1"
         v1_root = root / "cpu"
+        relative = _cgroup_relative_path("cpu") or relative
         quotas = []
         for path in _iter_cgroup_paths(v1_root, relative):
             quota_raw = _read_text(path / "cpu.cfs_quota_us")
@@ -603,6 +606,16 @@ def evaluate_resources(declaration: dict[str, Any], facts: RunnerFacts) -> list[
         results.append(
             _result("shm", "skipped", declared_shm, facts.shm_size_bytes, "no minimum declared")
         )
+    elif "shm-missing" in facts.unsupported:
+        results.append(
+            _result(
+                "shm",
+                "unsupported",
+                declared_shm,
+                facts.shm_size_bytes,
+                "shared memory is unavailable on this host",
+            )
+        )
     elif not facts.shm_writable:
         results.append(
             _result(
@@ -735,6 +748,8 @@ def load_declaration(path: Path) -> tuple[dict[str, Any] | None, str | None]:
         document = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None, f"declaration not found: {path}"
+    except OSError as exc:
+        return None, f"cannot read declaration: {exc}"
     except json.JSONDecodeError as exc:
         return None, f"declaration is not valid JSON: {exc}"
     if not isinstance(document, dict):

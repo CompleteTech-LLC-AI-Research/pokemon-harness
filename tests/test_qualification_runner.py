@@ -198,10 +198,22 @@ def test_evaluate_resources_fails_when_weight_is_lower():
     assert statuses(results)["cpu-weight"] == "fail"
 
 
+def test_evaluate_resources_marks_missing_shm_unsupported():
+    facts = make_facts(shm_writable=False, unsupported=["shm-missing"])
+    results = runner.evaluate_resources(make_declaration(), facts)
+    assert statuses(results)["shm"] == "unsupported"
+
+
 def test_load_declaration_reports_missing_file(tmp_path: Path):
     declaration, error = runner.load_declaration(tmp_path / "absent.json")
     assert declaration is None
     assert error and "not found" in error
+
+
+def test_load_declaration_rejects_directory(tmp_path: Path):
+    declaration, error = runner.load_declaration(tmp_path)
+    assert declaration is None
+    assert error and "cannot read" in error
 
 
 def test_prerequisite_checks_fail_when_bootstrap_fails(tmp_path: Path):
