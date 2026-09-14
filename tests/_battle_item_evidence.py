@@ -125,18 +125,20 @@ class BagStack:
 
 @dataclass(frozen=True, slots=True)
 class BagSnapshot:
-    """Ordered, compacted bag stacks plus the single ``$FF`` terminator slot.
+    """Ordered, compacted bag stacks plus the observed bag metadata.
 
-    ``raw_count`` and ``terminator_position`` are the ROM-observed bag count
-    and the index of the ``$FF`` terminator.  When present they must agree
-    with the compacted ``stacks`` (a stale count or a terminator not directly
-    after the last stack is a malformed observation and is rejected).
+    Inventory acceptance requires the ROM-observed ``raw_count``, the
+    ``terminator_position`` (index of the ``$FF`` terminator), and a ``valid``
+    tri-state copied from the production parser.  A snapshot with
+    ``valid`` not ``True`` or with missing metadata is rejected before any
+    consumption assertion can trust it.
     """
 
     stacks: tuple[BagStack, ...]
     terminator: int = BAG_TERMINATOR
     raw_count: int | None = None
     terminator_position: int | None = None
+    valid: bool | None = True
 
     def quantity_of(self, item_id: int) -> int:
         return sum(stack.quantity for stack in self.stacks if stack.item_id == item_id)
@@ -207,22 +209,24 @@ def _validate_bag(bag: BagSnapshot) -> None:
         raise TypeError("bag is not a BagSnapshot")
     if bag.terminator != BAG_TERMINATOR:
         raise ValueError(f"invalid bag terminator: {bag.terminator!r}")
+    if bag.valid is not True:
+        raise ValueError(f"bag observation is not valid: {bag.valid!r}")
+    if bag.raw_count is None:
+        raise ValueError("bag raw count is required for inventory acceptance")
+    if bag.terminator_position is None:
+        raise ValueError("bag terminator position is required for inventory acceptance")
     if len(bag.stacks) > MAX_BAG_STACKS:
         raise ValueError("bag stack count exceeds capacity")
-    if bag.raw_count is not None:
-        _integer(bag.raw_count, 0, MAX_BAG_STACKS, "bag raw count")
-        if bag.raw_count != len(bag.stacks):
-            raise ValueError(
-                "bag raw count does not match the compacted stack count "
-                f"({bag.raw_count} != {len(bag.stacks)})"
-            )
-    if bag.terminator_position is not None:
-        _integer(bag.terminator_position, 0, MAX_BAG_STACKS, "bag terminator position")
-        if bag.terminator_position != len(bag.stacks):
-            raise ValueError(
-                "bag terminator does not immediately follow the last stack "
-                f"({bag.terminator_position} != {len(bag.stacks)})"
-            )
+    if bag.raw_count != len(bag.stacks):
+        raise ValueError(
+            "bag raw count does not match the compacted stack count "
+            f"({bag.raw_count} != {len(bag.stacks)})"
+        )
+    if bag.terminator_position != len(bag.stacks):
+        raise ValueError(
+            "bag terminator does not immediately follow the last stack "
+            f"({bag.terminator_position} != {len(bag.stacks)})"
+        )
     seen: set[int] = set()
     for stack in bag.stacks:
         _integer(stack.item_id, NO_ITEM + 1, BAG_TERMINATOR - 1, "bag item id")

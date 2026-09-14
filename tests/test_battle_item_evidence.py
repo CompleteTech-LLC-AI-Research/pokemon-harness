@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from pokered_harness.state.bag import parse_bag
 from tests._battle_item_evidence import (
     CANCELLATION_CONTINUATION,
     EVENT_APPLICATION,
@@ -69,7 +70,13 @@ from tests._battle_item_evidence import (
 
 
 def _bag(order: tuple[tuple[int, int], ...]) -> BagSnapshot:
-    return BagSnapshot(tuple(BagStack(item_id, quantity) for item_id, quantity in order))
+    stacks = tuple(BagStack(item_id, quantity) for item_id, quantity in order)
+    return BagSnapshot(
+        stacks,
+        raw_count=len(stacks),
+        terminator_position=len(stacks),
+        valid=True,
+    )
 
 
 def _mon(
@@ -178,7 +185,13 @@ def test_snapshot_validation_rejects_duplicate_or_malformed_records() -> None:
             _snapshot(
                 1,
                 0,
-                BagSnapshot((BagStack(1, 1),), terminator=0x00),
+                BagSnapshot(
+                    (BagStack(1, 1),),
+                    terminator=0x00,
+                    raw_count=1,
+                    terminator_position=1,
+                    valid=True,
+                ),
                 [_mon(0, hp=10, max_hp=10)],
                 active,
             )
@@ -255,6 +268,35 @@ def test_terminator_not_after_last_stack_is_rejected() -> None:
         assert_last_unit_compaction(before, stale, 1)
 
 
+def test_parser_backed_missing_terminator_observation_is_rejected(mem, symbols) -> None:
+    mem[0xD31D] = 2  # wNumBagItems: two stacks declared
+    mem[0xD31E] = 0x01
+    mem[0xD31F] = 1
+    mem[0xD320] = 0x04
+    mem[0xD321] = 5
+    parsed = parse_bag(mem, symbols)
+    assert parsed.valid is False
+    assert parsed.terminator_index is None
+    assert parsed.raw_count == 2
+
+    party = [_mon(0, hp=30, max_hp=100)]
+    snapshot = _snapshot(
+        1,
+        0,
+        BagSnapshot(
+            tuple(BagStack(stack.item_id, stack.quantity) for stack in parsed.stacks),
+            raw_count=parsed.raw_count,
+            terminator_position=parsed.terminator_index,
+            valid=parsed.valid,
+        ),
+        party,
+        _active(0, party[0]),
+    )
+
+    with pytest.raises(ValueError, match="bag observation is not valid"):
+        assert_last_unit_compaction(snapshot, snapshot, 1)
+
+
 def test_no_effect_and_cancelled_branches_consume_zero_and_do_not_reorder() -> None:
     party = [_mon(0, hp=100, max_hp=100)]
     before = _snapshot(1, 0, _bag(((4, 2), (1, 3))), party, _active(0, party[0]))
@@ -318,7 +360,18 @@ def test_consuming_an_absent_or_zero_quantity_stack_is_rejected() -> None:
         assert_single_consumption(before, after, 1, expected_consumed=1)
     with pytest.raises(ValueError, match="invalid bag quantity"):
         validate_snapshot(
-            _snapshot(1, 0, BagSnapshot((BagStack(1, 0),)), party, _active(0, party[0]))
+            _snapshot(
+                1,
+                0,
+                BagSnapshot(
+                    (BagStack(1, 0),),
+                    raw_count=1,
+                    terminator_position=1,
+                    valid=True,
+                ),
+                party,
+                _active(0, party[0]),
+            )
         )
 
 
