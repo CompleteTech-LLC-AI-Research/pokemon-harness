@@ -135,15 +135,18 @@ python -m pip install -e ".[dev]"
 python -m ruff check \
     scripts/bootstrap_pyboy.py \
     scripts/network_concurrency_probe.py \
+    scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
     scripts/qualification_runner.py \
     scripts/gate_capacity.py \
     scripts/tcp_link_matrix.py \
+    scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
     tests/_gate_report.py \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
+    tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_gate_capacity.py \
@@ -153,15 +156,18 @@ python -m ruff check \
 python -m ruff format --check \
     scripts/bootstrap_pyboy.py \
     scripts/network_concurrency_probe.py \
+    scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
     scripts/qualification_runner.py \
     scripts/gate_capacity.py \
     scripts/tcp_link_matrix.py \
+    scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
     tests/_gate_report.py \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
+    tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_gate_capacity.py \
@@ -188,6 +194,9 @@ python -m ruff check \
 
 # Validate fixture-manifest schema
 python scripts/validate_fixture_manifest.py --schema-only
+
+# Validate battle-scenario catalog schema
+python scripts/validate_battle_scenarios.py --schema-only
 
 # Audit collected matrix and tier declarations
 python scripts/tcp_link_matrix.py --format text
