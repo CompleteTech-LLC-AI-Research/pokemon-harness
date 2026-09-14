@@ -85,6 +85,7 @@ UNIT_MODULES = frozenset(
         "test_local_acceptance_driver_contract.py",
         "test_live_trade_demo_contract.py",
         "test_local_scheduler_candidate.py",
+        "test_mcp_battle_state.py",
         "test_mcp_lifecycle_hardening.py",
         "test_mcp_local_locking.py",
         "test_mcp_local_runtime_contract.py",

@@ -172,6 +172,7 @@ DEFAULT_HOOKS: tuple[tuple[str, str], ...] = (
 
 # URIs for resources exposed by this server.
 _URI_GAME_STATE = "pokered://game-state"
+_URI_STATE_EPOCH = "pokered://state-epoch"
 _URI_EVENT_LOG = "pokered://events"
 _URI_PEER_GAME_STATE = "pokered://peer-game-state"
 _URI_LINK_TRANSPORT = "pokered://link-transport"
@@ -2860,6 +2861,11 @@ def read_resource(
         return timed_owner.submit(lambda owned: read_resource(owned, uri, link)).result()
     if uri == _URI_GAME_STATE:
         return json.dumps(to_jsonable(session.read_game_state()))
+    if uri == _URI_STATE_EPOCH:
+        # Read-only session bookkeeping: lets a client pair a game-state
+        # snapshot with a monotonic tick and reject a stale observation after
+        # a later step/load without touching emulator state.
+        return json.dumps({"tick": session.current_tick()})
     if uri == _URI_EVENT_LOG:
         events: list[GameEvent] = session.event_snapshot()
         return json.dumps([to_jsonable(e) for e in events])
@@ -2895,6 +2901,15 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
             uri=_URI_GAME_STATE,  # type: ignore[arg-type]
             name="Game State",
             description="Current parsed game state snapshot (JSON).",
+            mimeType="application/json",
+        ),
+        mcp_types.Resource(
+            uri=_URI_STATE_EPOCH,  # type: ignore[arg-type]
+            name="State Epoch",
+            description=(
+                "Monotonic session tick paired with `pokered://game-state`. "
+                "Compare successive reads to reject stale snapshots."
+            ),
             mimeType="application/json",
         ),
         mcp_types.Resource(
