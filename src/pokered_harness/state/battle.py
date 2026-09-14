@@ -100,13 +100,12 @@ _PHASE_TRANSIENT_SYMBOLS = (
 _VALID_BATTLE_RESULTS = frozenset((0, 1, 2))
 
 # ``wMoveMenuType`` is a mode selector, not an open/closed flag: 0 is written
-# immediately before every regular ``MoveSelectionMenu`` call and is the
-# default/reset value, so it is ambiguous about whether a menu is open.  Modes
-# 1 (mimic, effects.asm) and 2 (relearn/PP, item_effects.asm) are written only
-# at call sites that invoke ``MoveSelectionMenu`` immediately afterward and are
-# never written by passive initialization, so they are positive evidence of
-# move selection.
-_MOVE_MENU_SELECTION_MODES = frozenset((1, 2))
+# immediately before every regular ``MoveSelectionMenu`` call, and modes 1
+# (mimic) and 2 (relearn/PP) are left set after ``MoveSelectionMenu`` returns
+# (they persist through the subsequent animation/text).  No value therefore
+# proves that move selection is *currently* active, so it is required as
+# evidence (fail closed when absent) but never sufficient to name
+# ``COMMAND_SELECTION``.
 
 
 def _safe_enum(enum: type[IntEnum], value: int) -> IntEnum | None:
@@ -171,19 +170,13 @@ def parse_battle(memory: MemoryLike, symbols: SymbolTable) -> BattleState:
         move_menu_type=_opt(memory, symbols, "wMoveMenuType"),
         player_selected_move=_opt(memory, symbols, "wPlayerSelectedMove"),
         enemy_selected_move=_opt(memory, symbols, "wEnemySelectedMove"),
-        action_result_or_took_turn=_opt(
-            memory, symbols, "wActionResultOrTookBattleTurn"
-        ),
+        action_result_or_took_turn=_opt(memory, symbols, "wActionResultOrTookBattleTurn"),
         enemy_mon=enemy_mon,
         enemy_mon_valid=enemy_mon_valid,
         phase=phase,
         phase_valid=phase_valid,
         phase_evidence=phase_evidence,
-        terminal_result=(
-            raw_battle_result
-            if raw_battle_result in _VALID_BATTLE_RESULTS
-            else None
-        ),
+        terminal_result=(raw_battle_result if raw_battle_result in _VALID_BATTLE_RESULTS else None),
     )
 
 
@@ -238,9 +231,9 @@ def _derive_phase(
 
     ``wBattleResult`` is only terminal for the engine-written outcomes 1/2;
     the reset value 0 is ambiguous and never emits ``TERMINAL_RETURN``.
-    ``wMoveMenuType`` only emits ``COMMAND_SELECTION`` for the non-default
-    selection modes 1/2; mode 0 is the regular-mode default and is ambiguous.
-    ``wPlayerMoveListIndex`` is required evidence but never sufficient alone.
+    ``wMoveMenuType`` and ``wPlayerMoveListIndex`` are required evidence but
+    never sufficient alone: no value proves move selection is currently
+    active, so ``COMMAND_SELECTION`` is never derived.
     """
     if raw == 0:
         return BattlePhase.INACTIVE, True, ("wIsInBattle",)
@@ -249,16 +242,13 @@ def _derive_phase(
 
     evidence = ["wIsInBattle"]
     if any(name not in symbols for name in _PHASE_TRANSIENT_SYMBOLS):
-        evidence.extend(
-            name for name in _PHASE_TRANSIENT_SYMBOLS if name in symbols
-        )
+        evidence.extend(name for name in _PHASE_TRANSIENT_SYMBOLS if name in symbols)
         return BattlePhase.UNKNOWN, False, tuple(evidence)
     evidence.extend(_PHASE_TRANSIENT_SYMBOLS)
 
     result = symbols.read_u8(memory, "wBattleResult")
     forced = symbols.read_u8(memory, "wInHandlePlayerMonFainted") != 0
     action = symbols.read_u8(memory, "wActionResultOrTookBattleTurn") != 0
-    menu = symbols.read_u8(memory, "wMoveMenuType")
 
     observed: set[BattlePhase] = set()
     if result in _VALID_BATTLE_RESULTS and result != 0:
@@ -267,8 +257,6 @@ def _derive_phase(
         observed.add(BattlePhase.FORCED_REPLACEMENT)
     if action:
         observed.add(BattlePhase.ACTION_RESOLUTION)
-    if menu in _MOVE_MENU_SELECTION_MODES:
-        observed.add(BattlePhase.COMMAND_SELECTION)
 
     if len(observed) > 1:
         return None, False, tuple(evidence)

@@ -147,25 +147,26 @@ def test_phase_regular_menu_mode_is_not_command_selection():
     assert state.phase_valid is False
 
 
-def test_phase_command_selection_when_move_menu_is_open():
+def test_phase_mimic_menu_mode_is_not_command_selection():
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 1
-    mem[0xC003] = 1  # wMoveMenuType: mimic mode
+    mem[0xC003] = 1  # wMoveMenuType: mimic mode persists after the menu closes
     state = parse_battle(mem, sym)
-    assert state.phase is BattlePhase.COMMAND_SELECTION
-    assert state.phase_valid is True
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
+    assert "wMoveMenuType" in state.phase_evidence
 
 
-def test_phase_command_selection_corroborating_index_is_not_contradiction():
+def test_phase_menu_mode_with_stale_index_is_not_command_selection():
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 1
-    mem[0xC003] = 1  # wMoveMenuType
+    mem[0xC003] = 2  # wMoveMenuType: relearn/PP mode, also persistent
     mem[0xC004] = 2  # wPlayerMoveListIndex
     state = parse_battle(mem, sym)
-    assert state.phase is BattlePhase.COMMAND_SELECTION
-    assert state.phase_valid is True
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
 
 
 def test_phase_move_index_absent_required_symbols_is_unknown():
@@ -249,9 +250,9 @@ def test_phase_invalid_result_is_not_terminal_and_not_exposed():
 @pytest.mark.parametrize(
     "flags",
     [
-        {"wBattleResult": 1, "wMoveMenuType": 1},
         {"wInHandlePlayerMonFainted": 1, "wActionResultOrTookBattleTurn": 1},
         {"wBattleResult": 1, "wInHandlePlayerMonFainted": 1},
+        {"wBattleResult": 1, "wActionResultOrTookBattleTurn": 1},
     ],
 )
 def test_phase_contradictory_flags_fail_closed_to_none(flags):
@@ -432,11 +433,11 @@ def _session() -> Session:
 def test_game_state_resource_contains_additive_battle_fields():
     session = _session()
     session._pyboy.memory[0xC000] = 2  # trainer battle
-    session._pyboy.memory[0xC003] = 1  # wMoveMenuType: mimic selection
+    session._pyboy.memory[0xC005] = 1  # wActionResultOrTookBattleTurn
     _write_enemy(session._pyboy.memory)
     body = json.loads(read_resource(session, "pokered://game-state"))
     battle = body["battle"]
-    assert battle["phase"] == int(BattlePhase.COMMAND_SELECTION)
+    assert battle["phase"] == int(BattlePhase.ACTION_RESOLUTION)
     assert battle["phase_valid"] is True
     assert "wMoveMenuType" in battle["phase_evidence"]
     assert battle["enemy_mon_valid"] is True
