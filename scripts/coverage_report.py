@@ -775,9 +775,7 @@ def _accepted_outcomes(policy: dict[str, Any]) -> tuple[str, ...]:
         # a terminal pass, even if a malformed catalog declares it and bypasses
         # validation.
         filtered = tuple(
-            item
-            for item in accepted
-            if item != _CASE_SENTINEL and item not in _INCOMPLETE_STATUSES
+            item for item in accepted if item != _CASE_SENTINEL and item not in _INCOMPLETE_STATUSES
         )
         if filtered:
             return filtered

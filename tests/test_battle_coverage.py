@@ -492,9 +492,7 @@ def test_evidence_linked_but_unexecuted_mechanics_cannot_complete(catalog: dict)
     assert report["dimensions"]["expanded_mechanics"]["status"] != "COMPLETE"
 
 
-def _split_partial_document(
-    catalog: dict, *, partial: bool, with_identity: bool
-) -> dict:
+def _split_partial_document(catalog: dict, *, partial: bool, with_identity: bool) -> dict:
     cases = coverage.one_turn_pairing_cases(catalog)
     half = len(cases) // 2
     subsets = (cases[:half], cases[half:])
