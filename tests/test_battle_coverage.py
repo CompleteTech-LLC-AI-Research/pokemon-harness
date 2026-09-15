@@ -968,6 +968,37 @@ def test_duplicate_effect_family_receives_no_tested_credit(catalog: dict) -> Non
     assert report["move_effects"]["tested"] == 0
 
 
+def test_move_reassignment_is_rejected(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    families = mutated["move_effects"]["families"]
+    donor = next(item for item in families if item["effect_id"] == 0)
+    recipient = next(item for item in families if item["effect_id"] == 29)
+    recipient["move_ids"].append(donor["move_ids"].pop(0))
+
+    with pytest.raises(coverage.CoverageError, match="move-to-effect mapping"):
+        coverage.validate_catalog(mutated)
+
+
+def test_move_deletion_is_rejected(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    donor = next(item for item in mutated["move_effects"]["families"] if item["effect_id"] == 0)
+    donor["move_ids"].pop(0)
+
+    with pytest.raises(coverage.CoverageError, match="move-to-effect mapping"):
+        coverage.validate_catalog(mutated)
+
+
+def test_unused_effect_slot_cannot_declare_a_move(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    families = mutated["move_effects"]["families"]
+    donor = next(item for item in families if item["effect_id"] == 0)
+    unused = next(item for item in families if item["effect_id"] == 1)
+    unused["move_ids"].append(donor["move_ids"].pop(0))
+
+    with pytest.raises(coverage.CoverageError):
+        coverage.validate_catalog(mutated)
+
+
 def test_mechanics_family_stays_unverified_with_wrong_effect(catalog: dict) -> None:
     results = coverage.result_set_from_document(_mechanics_document(catalog, effect=6))
     report = coverage.build_report(catalog, results, expected_commit="a" * 40)

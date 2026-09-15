@@ -49,6 +49,200 @@ _SCOPES = ("tested", "planned_unverified", "deliberately_excluded")
 # Tool-owned complete effect inventory for effects_version 1: the pinned pret
 # move-effect constants 0..86. Never derived from the supplied family list.
 _PINNED_EFFECT_IDS: tuple[int, ...] = tuple(range(87))
+# Tool-owned exact move-to-effect mapping for effects_version 1, derived from the
+# pinned pret `data/moves/moves.asm` and `constants/move_effect_constants.asm`
+# (Red/Blue revision fbcf7d0e). Index i is move id i+1 (move ids 1..165); the
+# catalog may never reassign, omit, or duplicate a move.
+_PINNED_MOVE_EFFECTS: tuple[int, ...] = (
+    0,
+    0,
+    29,
+    29,
+    0,
+    16,
+    4,
+    5,
+    6,
+    0,
+    0,
+    38,
+    39,
+    50,
+    0,
+    0,
+    0,
+    28,
+    43,
+    42,
+    0,
+    0,
+    37,
+    44,
+    0,
+    45,
+    37,
+    22,
+    37,
+    0,
+    29,
+    38,
+    0,
+    36,
+    42,
+    48,
+    27,
+    48,
+    19,
+    2,
+    77,
+    29,
+    19,
+    31,
+    18,
+    28,
+    32,
+    49,
+    41,
+    86,
+    69,
+    4,
+    4,
+    46,
+    0,
+    0,
+    0,
+    5,
+    5,
+    76,
+    70,
+    68,
+    80,
+    0,
+    0,
+    48,
+    37,
+    0,
+    41,
+    0,
+    3,
+    3,
+    84,
+    13,
+    0,
+    39,
+    66,
+    67,
+    32,
+    27,
+    20,
+    41,
+    42,
+    6,
+    6,
+    67,
+    6,
+    0,
+    0,
+    38,
+    39,
+    66,
+    76,
+    71,
+    32,
+    10,
+    52,
+    0,
+    81,
+    28,
+    41,
+    82,
+    59,
+    15,
+    56,
+    11,
+    15,
+    22,
+    49,
+    11,
+    11,
+    51,
+    64,
+    25,
+    65,
+    47,
+    26,
+    83,
+    9,
+    7,
+    0,
+    36,
+    33,
+    33,
+    31,
+    34,
+    0,
+    42,
+    17,
+    39,
+    29,
+    70,
+    53,
+    22,
+    56,
+    45,
+    67,
+    8,
+    66,
+    29,
+    3,
+    32,
+    39,
+    57,
+    70,
+    0,
+    32,
+    22,
+    41,
+    85,
+    51,
+    0,
+    7,
+    29,
+    44,
+    56,
+    0,
+    31,
+    10,
+    24,
+    0,
+    40,
+    0,
+    79,
+    48,
+)
+# Effect slots the pinned table assigns no move (const_skip padding and unused
+# constants); these must be declared empty and deliberately excluded.
+_PINNED_UNUSED_EFFECT_IDS: tuple[int, ...] = (
+    1,
+    12,
+    14,
+    21,
+    23,
+    30,
+    35,
+    54,
+    55,
+    58,
+    60,
+    61,
+    62,
+    63,
+    72,
+    73,
+    74,
+    75,
+    78,
+)
 # Tool-owned mandatory runtimes keyed by coverage scope version. The catalog
 # declares requirements, but these pins are data the tool owns: a catalog edit
 # can never remove a runtime the coverage scope version requires.
@@ -605,6 +799,41 @@ def _validate_move_effects(catalog: dict[str, Any]) -> None:
             excluded += 1
         else:
             _validate_tested_family_evidence(family, expanded_cases)
+
+    declared_moves: dict[int, int] = {}
+    for family in families:
+        effect_id = family.get("effect_id")
+        for move_id in family.get("move_ids", []):
+            if not isinstance(move_id, int) or isinstance(move_id, bool):
+                raise CoverageError(f"effect {effect_id} has a non-integer move id")
+            if move_id in declared_moves:
+                raise CoverageError(f"move {move_id} is mapped to multiple effects")
+            declared_moves[move_id] = effect_id
+    expected_moves = {index + 1: effect for index, effect in enumerate(_PINNED_MOVE_EFFECTS)}
+    if declared_moves != expected_moves:
+        missing = sorted(set(expected_moves) - set(declared_moves))
+        extra = sorted(set(declared_moves) - set(expected_moves))
+        wrong = sorted(
+            move
+            for move in set(declared_moves) & set(expected_moves)
+            if declared_moves[move] != expected_moves[move]
+        )
+        raise CoverageError(
+            "move-to-effect mapping does not match the pinned table "
+            f"(missing={missing[:8]}, extra={extra[:8]}, wrong={wrong[:8]})"
+        )
+    for family in families:
+        effect_id = family.get("effect_id")
+        if not family.get("move_ids"):
+            if effect_id not in _PINNED_UNUSED_EFFECT_IDS:
+                raise CoverageError(
+                    f"effect {effect_id} declares no moves but the pinned table assigns moves to it"
+                )
+            if family.get("scope") != "deliberately_excluded":
+                raise CoverageError(f"unused effect {effect_id} must be deliberately_excluded")
+        elif effect_id in _PINNED_UNUSED_EFFECT_IDS:
+            raise CoverageError(f"unused effect {effect_id} must not declare moves")
+
     if move_effects.get("planned_unverified_count") != planned:
         raise CoverageError("planned_unverified_count does not match the family list")
     if move_effects.get("deliberately_excluded_count") != excluded:
