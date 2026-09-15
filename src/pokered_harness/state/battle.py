@@ -18,14 +18,30 @@ The exact symbols consulted are exposed through ``phase_evidence``.
 
 The raw ``wBattleResult`` byte is exposed as
 :attr:`BattleState.raw_battle_result`; it is never promoted to a confirmed
-:attr:`BattleState.terminal_result` on its own.  The engine writes zero at
-battle start (``InitBattleVariables``), on ``EnemyRan``, and again when a
-blackout is processed (``ResetStatusAndHalveMoneyOnBlackout``), so zero is
-ambiguous; positive bytes can also be overwritten in an ongoing battle.  A
-confirmed outcome therefore also requires lifecycle evidence: the caller
-tracks the previous observation in :class:`BattleLifecycle` and a terminal
-result is only reported on the observed transition from an active battle to
-``wIsInBattle == 0``.
+:attr:`BattleState.terminal_result` on its own.  The engine's writers split
+into two classes (all verified against the pinned sources in
+``asset-build-pokered``):
+
+* zero writers — battle start (``InitBattleVariables``), a link
+  ``EnemyRan`` (``core.asm``), every enemy-mon faint
+  (``HandleEnemyMonFainted``), a blackout
+  (``ResetStatusAndHalveMoneyOnBlackout``), and a fly/dungeon warp
+  (``HandleFlyWarpOrDungeonWarp``);
+* non-zero outcome writers — ``RemoveFaintedPlayerMon`` writes ``1`` when a
+  player mon faints, ``TryRunningFromBattle`` writes ``2`` on a successful
+  single-player run (``1``/``2`` in link play), and a successful capture
+  writes ``2``.
+
+A battle ends when a previously active ``wIsInBattle`` falls to zero
+(:class:`BattleLifecycle`).  A *zero* at that falling edge is ambiguous:
+``EndOfBattle`` leaves the byte untouched, so a win (``HandleEnemyMonFainted``
+wrote ``0``), a blackout, a Roar/Whirlwind/Teleport escape, and a link
+``EnemyRan`` are indistinguishable.  The byte is therefore only promoted to
+:attr:`BattleState.terminal_result` when it is a non-zero outcome value that
+survived teardown, and no escape evidence (``wEscapedFromBattle``) was
+captured before cleanup.  A confirmed *win* is consequently not derivable
+from the specified symbols and is reported as an unknown result rather than
+fabricated.
 
 The ambiguity is deliberate and documented in ``_derive_phase``: neither
 ``wMoveMenuType == 0`` (the regular-mode default written before every
@@ -104,30 +120,46 @@ _PHASE_TRANSIENT_SYMBOLS = (
     "wActionResultOrTookBattleTurn",
 )
 
-# Valid ``wBattleResult`` outcomes (engine/battle/end_of_battle.asm):
-# 0 player win, 1 player lose, 2 draw.  0 is also written at battle start
-# (init_battle_variables.asm), at EnemyRan (core.asm), and when a blackout
-# is processed (events/black_out.asm), so it is not terminal-only evidence;
-# values 3..255 have no engine writer and are rejected.
+# Raw ``wBattleResult`` bytes with an engine writer (end_of_battle.asm maps
+# 0 to a win, 1 to a loss, and 2 to a draw in link battles).  0 is also
+# written at battle start, on a link EnemyRan, on every enemy faint, on a
+# blackout, and on a fly/dungeon warp, so a zero at the falling edge cannot
+# establish an outcome; values 3..255 have no engine writer and are rejected.
 _VALID_BATTLE_RESULTS = frozenset((0, 1, 2))
+
+# Non-zero outcome bytes that survive teardown, so they can be confirmed on
+# the active -> inactive transition.  A surviving 1 is the player-faint /
+# run marker and a surviving 2 is the run/capture/draw marker; neither is a
+# win.  Zero is deliberately excluded because it is ambiguous (see above).
+_CONFIRMED_BATTLE_RESULTS = frozenset((1, 2))
 
 
 @dataclass(frozen=True, slots=True)
 class BattleLifecycle:
-    """Prior observation used to qualify a terminal battle outcome.
+    """Prior observations used to qualify a terminal battle outcome.
 
     ``wBattleResult`` alone cannot establish an outcome: the engine writes
-    zero at battle start (``InitBattleVariables``), on ``EnemyRan``, and
-    when a blackout is processed (``ResetStatusAndHalveMoneyOnBlackout``),
-    and a positive byte written for a faint can be left behind even when the
-    battle continues.  A terminal result is only reported when the caller
-    has observed the battle *end*: ``was_active`` records whether the
-    immediately preceding snapshot of the same emulator decoded
-    ``wIsInBattle`` as a live wild or trainer battle.  Confirmation happens
-    on the falling edge (previous snapshot active, current raw value zero).
+    zero at battle start (``InitBattleVariables``), on ``EnemyRan``, on
+    every enemy faint, and when a blackout is processed
+    (``ResetStatusAndHalveMoneyOnBlackout``), and a non-zero byte written for
+    a faint can be left behind even when the battle continues.  A terminal
+    result is only reported when the caller has observed the battle *end*:
+    ``was_active`` records whether the immediately preceding snapshot of the
+    same emulator decoded ``wIsInBattle`` as a live wild or trainer battle.
+    Confirmation happens on the falling edge (previous snapshot active,
+    current raw value zero), and only for a non-zero outcome byte that
+    survived the teardown.
+
+    ``escaped`` records outcome-specific ROM evidence captured before
+    cleanup: ``wEscapedFromBattle`` set while a battle was active
+    (``SwitchAndTeleportEffect`` / item escape).  An escape leaves or clears
+    the result byte, so an outcome that coincides with it stays unknown.
+    Both fields are cleared once the battle is no longer active so evidence
+    cannot leak into a later encounter.
     """
 
     was_active: bool = False
+    escaped: bool = False
 
 
 # ``wMoveMenuType`` is a mode selector, not an open/closed flag: 0 is written
@@ -164,6 +196,7 @@ class BattleState:
     phase_valid: bool | None = None
     phase_evidence: tuple[str, ...] = ()
     raw_battle_result: int | None = None
+    escaped_from_battle: int | None = None
     terminal_result: int | None = None
 
     @property
@@ -196,12 +229,19 @@ def parse_battle(
     kind = _safe_enum(BattleKind, raw)
     enemy_mon, enemy_mon_valid = _parse_enemy_mon(memory, symbols, kind=kind)
     raw_battle_result = _opt(memory, symbols, "wBattleResult")
+    escaped_from_battle = _opt(memory, symbols, "wEscapedFromBattle")
     # A battle has ended only when a previously active battle now reports
     # wIsInBattle == 0.  Without that transition the raw result byte stays
-    # unqualified (stated in BattleLifecycle).
+    # unqualified (stated in BattleLifecycle).  A zero result at the edge is
+    # never promoted: win, blackout, and escape all leave or clear zero, so
+    # the outcome stays unknown unless a non-zero byte survived teardown and
+    # no escape evidence was captured before cleanup.
     battle_ended = lifecycle is not None and lifecycle.was_active and raw == 0
+    escaped = bool(escaped_from_battle) or (lifecycle.escaped if lifecycle is not None else False)
     terminal_result = (
-        raw_battle_result if battle_ended and raw_battle_result in _VALID_BATTLE_RESULTS else None
+        raw_battle_result
+        if battle_ended and raw_battle_result in _CONFIRMED_BATTLE_RESULTS and not escaped
+        else None
     )
     phase, phase_valid, phase_evidence = _derive_phase(
         memory, symbols, raw=raw, kind=kind, battle_ended=battle_ended
@@ -223,6 +263,7 @@ def parse_battle(
         phase_valid=phase_valid,
         phase_evidence=phase_evidence,
         raw_battle_result=raw_battle_result,
+        escaped_from_battle=escaped_from_battle,
         terminal_result=terminal_result,
     )
 
@@ -268,7 +309,9 @@ def _derive_phase(
 
     * an inactive battle (``wIsInBattle == 0``) is ``INACTIVE``, unless
       ``battle_ended`` proves the battle just ended, in which case a valid
-      ``wBattleResult`` yields ``TERMINAL_RETURN``;
+      ``wBattleResult`` yields ``TERMINAL_RETURN`` (the phase only names the
+      terminal/return state; ``terminal_result`` separately stays ``None``
+      when the byte is an ambiguous zero);
     * an active battle whose ``wIsInBattle`` value is not a known kind is
       ``None`` (undecodable);
     * if any required evidence symbol is absent the result is

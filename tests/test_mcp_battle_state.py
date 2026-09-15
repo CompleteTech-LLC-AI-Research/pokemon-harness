@@ -59,6 +59,7 @@ _FULL_SYM = """\
 00:C003 wMoveMenuType
 00:C004 wPlayerMoveListIndex
 00:C005 wActionResultOrTookBattleTurn
+00:C006 wEscapedFromBattle
 00:C007 wBattleType
 00:C008 wEngagedTrainerClass
 00:C009 wEngagedTrainerSet
@@ -217,7 +218,7 @@ def test_phase_forced_replacement_when_player_faint_handler_is_set():
 
 
 @pytest.mark.parametrize("result", [0, 1, 2])
-def test_phase_ended_battle_confirms_terminal_outcome(result):
+def test_phase_ended_battle_reports_terminal_phase(result):
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 0  # wIsInBattle: battle has ended
@@ -225,8 +226,49 @@ def test_phase_ended_battle_confirms_terminal_outcome(result):
     state = parse_battle(mem, sym, lifecycle=BattleLifecycle(was_active=True))
     assert state.phase is BattlePhase.TERMINAL_RETURN
     assert state.phase_valid is True
-    assert state.terminal_result == result
     assert state.raw_battle_result == result
+    # Only a non-zero byte survives teardown; zero is ambiguous.
+    assert state.terminal_result == (result if result in (1, 2) else None)
+
+
+def test_phase_blackout_zero_is_not_a_confirmed_win():
+    # ResetStatusAndHalveMoneyOnBlackout writes wBattleResult = 0 and
+    # wIsInBattle = 0, so the zero after an active battle cannot be a win.
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 0
+    mem[0xC001] = 0
+    state = parse_battle(mem, sym, lifecycle=BattleLifecycle(was_active=True))
+    assert state.phase is BattlePhase.TERMINAL_RETURN
+    assert state.phase_valid is True
+    assert state.terminal_result is None
+    assert state.raw_battle_result == 0
+
+
+def test_phase_escape_zero_is_not_a_confirmed_win():
+    # Roar/Whirlwind/Teleport set wEscapedFromBattle and leave the result at
+    # zero; captured escape evidence keeps the outcome unknown.
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 0
+    mem[0xC001] = 0
+    mem[0xC006] = 1  # wEscapedFromBattle left set after cleanup
+    state = parse_battle(mem, sym, lifecycle=BattleLifecycle(was_active=True, escaped=True))
+    assert state.phase is BattlePhase.TERMINAL_RETURN
+    assert state.terminal_result is None
+    assert state.escaped_from_battle == 1
+
+
+def test_phase_escape_evidence_suppresses_nonzero_result():
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 0
+    mem[0xC001] = 2
+    mem[0xC006] = 1  # wEscapedFromBattle
+    state = parse_battle(mem, sym, lifecycle=BattleLifecycle(was_active=True))
+    assert state.phase is BattlePhase.TERMINAL_RETURN
+    assert state.terminal_result is None
+    assert state.raw_battle_result == 2
 
 
 def test_phase_fresh_inactive_result_zero_is_not_terminal():
@@ -593,24 +635,98 @@ def test_state_epoch_load_generation_advances_on_load_state():
     }
 
 
-def test_read_game_state_confirms_terminal_win_on_battle_end():
+def test_read_game_state_keeps_ambiguous_zero_unknown_on_battle_end():
     session = _session()
     session._pyboy.memory[0xC000] = 2  # battle active
     active = session.read_game_state()
     assert active.battle is not None
     assert active.battle.terminal_result is None
-    # EndOfBattle leaves wBattleResult at the committed outcome and clears
-    # wIsInBattle; the next observation confirms the win.
+    # EndOfBattle clears wIsInBattle but leaves wBattleResult at zero for a
+    # win; a blackout or escape also leaves/clears zero, so the outcome stays
+    # unknown even though the battle is observed to end.
     session._pyboy.memory[0xC000] = 0
     session._pyboy.memory[0xC001] = 0
     ended = session.read_game_state()
     assert ended.battle is not None
     assert ended.battle.phase is BattlePhase.TERMINAL_RETURN
-    assert ended.battle.terminal_result == 0
+    assert ended.battle.terminal_result is None
+    assert ended.battle.raw_battle_result == 0
     # Confirmation is edge-triggered: a later overworld read is inactive.
     later = session.read_game_state()
     assert later.battle is not None
+    assert later.battle.phase is BattlePhase.INACTIVE
     assert later.battle.terminal_result is None
+
+
+def test_read_game_state_confirms_surviving_nonzero_outcome():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    session._pyboy.memory[0xC001] = 1  # player-faint marker while active
+    assert session.read_game_state().battle.terminal_result is None
+    session._pyboy.memory[0xC000] = 0
+    session._pyboy.memory[0xC001] = 1  # survived teardown
+    ended = session.read_game_state()
+    assert ended.battle is not None
+    assert ended.battle.terminal_result == 1
+
+
+def test_read_game_state_blackout_zero_does_not_confirm_win():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    session._pyboy.memory[0xC001] = 1  # player-faint handler ran while active
+    session.read_game_state()
+    # ResetStatusAndHalveMoneyOnBlackout zeroes both bytes before the
+    # overworld read; the captured faint byte cannot be turned into a win.
+    session._pyboy.memory[0xC000] = 0
+    session._pyboy.memory[0xC001] = 0
+    ended = session.read_game_state()
+    assert ended.battle is not None
+    assert ended.battle.phase is BattlePhase.TERMINAL_RETURN
+    assert ended.battle.terminal_result is None
+
+
+def test_read_game_state_escape_zero_does_not_confirm_win():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    session._pyboy.memory[0xC006] = 1  # wEscapedFromBattle observed while active
+    session.read_game_state()
+    session._pyboy.memory[0xC000] = 0
+    session._pyboy.memory[0xC001] = 0
+    session._pyboy.memory[0xC006] = 0
+    ended = session.read_game_state()
+    assert ended.battle is not None
+    assert ended.battle.phase is BattlePhase.TERMINAL_RETURN
+    assert ended.battle.terminal_result is None
+
+
+def test_load_state_resets_battle_lifecycle():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2  # active battle observed
+    assert session.read_game_state().battle is not None
+    # The loaded state is an overworld snapshot; its zero must not be
+    # qualified by the pre-load active-battle history.
+    session._pyboy.memory[0xC000] = 0
+    session._pyboy.memory[0xC001] = 0
+    payload = base64.b64encode(b"OVERWORLD").decode("ascii")
+    dispatch_tool(session, "load_state", {"data": payload})
+    loaded = session.read_game_state()
+    assert loaded.battle is not None
+    assert loaded.battle.phase is BattlePhase.INACTIVE
+    assert loaded.battle.phase_valid is True
+    assert loaded.battle.terminal_result is None
+
+
+def test_reset_tick_resets_battle_lifecycle():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    session.read_game_state()
+    session._pyboy.memory[0xC000] = 0
+    session._pyboy.memory[0xC001] = 0
+    session.reset_tick(0)
+    loaded = session.read_game_state()
+    assert loaded.battle is not None
+    assert loaded.battle.phase is BattlePhase.INACTIVE
+    assert loaded.battle.terminal_result is None
 
 
 class _BlockingMemory(DictMemory):

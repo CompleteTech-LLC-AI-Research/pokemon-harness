@@ -2931,7 +2931,10 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
                 "scope as the state, so a client can reject a stale snapshot "
                 "without a second resource read. Battle fields expose the raw "
                 "`wBattleResult` byte as `battle.raw_battle_result` and a "
-                "lifecycle-confirmed `battle.terminal_result`."
+                "`battle.terminal_result` that is set only for a non-zero "
+                "outcome byte surviving teardown; an ambiguous zero at the "
+                "falling edge stays null because win, blackout, and escape "
+                "all leave or clear zero."
             ),
             mimeType="application/json",
         ),

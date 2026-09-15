@@ -1293,10 +1293,20 @@ class Session:
         battle = state.battle
         if battle is None:
             return state
-        qualified = parse_battle(memory, self._symbols, lifecycle=self._battle_lifecycle)
-        self._battle_lifecycle = BattleLifecycle(
-            was_active=qualified.kind in (BattleKind.WILD, BattleKind.TRAINER)
-        )
+        previous = self._battle_lifecycle
+        qualified = parse_battle(memory, self._symbols, lifecycle=previous)
+        if qualified.kind in (BattleKind.WILD, BattleKind.TRAINER):
+            # Accumulate outcome-specific evidence while a battle is live.
+            # ``escaped_from_battle`` is observed before the engine clears
+            # it, so a later ambiguous zero cannot be read as a win.
+            self._battle_lifecycle = BattleLifecycle(
+                was_active=True,
+                escaped=previous.escaped or bool(qualified.escaped_from_battle),
+            )
+        else:
+            # The battle ended (or no battle is live); drop the history so a
+            # load or a subsequent encounter cannot inherit stale evidence.
+            self._battle_lifecycle = BattleLifecycle()
         return replace(state, battle=qualified)
 
     def event_snapshot(self) -> list[GameEvent]:
@@ -1340,6 +1350,10 @@ class Session:
             # monotonic load-generation counter always advances so callers
             # can detect that a load happened even when the tick repeats.
             self._load_generation += 1
+            # A load replaces the emulated state with a different instant;
+            # any battle observed before the load must not qualify a
+            # terminal outcome afterwards.
+            self._battle_lifecycle = BattleLifecycle()
 
     def reset_tick(self, value: int = 0) -> None:
         if self._timed_endpoint is not None:
@@ -1357,6 +1371,9 @@ class Session:
                 raise SessionError("cannot reset tick during a bound timed epoch")
             self._tick = value
             self._reset_generation += 1
+            # A tick reset starts a distinct observation epoch; stale battle
+            # history must not span it.
+            self._battle_lifecycle = BattleLifecycle()
 
     # --- event-driven advance -----------------------------------------
 
