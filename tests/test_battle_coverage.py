@@ -49,6 +49,16 @@ def _passing_collections(nodeids: list[str]) -> list[dict]:
     return [{"name": "python-module", "status": "PASS", "nodeids": list(nodeids)}]
 
 
+def _case_input_hashes(catalog: dict, case: dict) -> dict:
+    """Return observed per-endpoint ROM/symbol/fixture hashes for one case."""
+    hashes: dict[str, str] = {}
+    for role, scenario in coverage._case_endpoint_scenarios(catalog, case).items():
+        hashes[f"{role}_rom_sha1"] = scenario["game"]["rom_sha1"]
+        hashes[f"{role}_sym_sha1"] = scenario["game"]["sym_sha1"]
+        hashes[f"{role}_fixture_sha1"] = scenario["fixture"]["sha1"]
+    return hashes
+
+
 def _passing_document(
     catalog: dict,
     *,
@@ -70,7 +80,12 @@ def _passing_document(
         for mode in runtimes
     ]
     records = [
-        {"nodeid": case["selector"], "runtime": mode, "status": status}
+        {
+            "nodeid": case["selector"],
+            "runtime": mode,
+            "status": status,
+            "input_hashes": _case_input_hashes(catalog, case),
+        }
         for case in coverage.one_turn_pairing_cases(catalog)
         for mode in runtimes
     ]
@@ -122,7 +137,9 @@ def test_effect_families_cover_every_pinned_effect_id(catalog: dict) -> None:
 
     assert len(families) == 87
     assert [family["effect_id"] for family in families] == list(range(87))
-    for family in families:
+    tested = [family["effect_id"] for family in families if family["scope"] == "tested"]
+    assert tested == [0]
+    for family in families[1:]:
         assert family["scope"] in coverage._SCOPES
         assert isinstance(family["reason"], str) and family["reason"].strip()
         assert isinstance(family["move_ids"], list)
@@ -136,7 +153,10 @@ def test_effect_families_account_for_every_move_and_reserved_slot(catalog: dict)
     assert all_moves == list(range(1, 166))
     for family in families:
         if family["move_ids"]:
-            assert family["scope"] == "planned_unverified"
+            if family["effect_id"] == 0:
+                assert family["scope"] == "tested"
+            else:
+                assert family["scope"] == "planned_unverified"
             assert family["kind"] == "effect"
         else:
             assert family["scope"] == "deliberately_excluded"
@@ -152,7 +172,9 @@ def test_current_selector_admits_0_6_44_and_excludes_counter(catalog: dict) -> N
     assert [entry["move_id"] for entry in selector["excluded_moves"]] == [68]
     assert selector["excluded_moves"][0]["name"] == "COUNTER"
     assert selector["excluded_moves"][0]["effect_id"] == 0
-    for effect_id in (0, 6, 44):
+    assert families[0]["scope"] == "tested"
+    assert families[0]["evidence"] == ["mechanics_effect_0_no_additional_effect"]
+    for effect_id in (6, 44):
         assert families[effect_id]["scope"] == "planned_unverified"
 
 
@@ -248,7 +270,7 @@ def test_declared_fixture_hash_and_observed_input_hash_are_retained(catalog: dic
     )
     declared = scenario["fixture"]["sha1"]
     document = _passing_document(catalog)
-    document["records"][0]["input_hashes"] = {"fixture": declared}
+    document["records"][0]["input_hashes"]["fixture"] = declared
     results = coverage.result_set_from_document(document)
 
     report = coverage.build_report(catalog, results, expected_commit="a" * 40)
@@ -261,14 +283,27 @@ def test_declared_fixture_hash_and_observed_input_hash_are_retained(catalog: dic
 def test_observed_input_hash_mismatch_is_rejected(catalog: dict) -> None:
     selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
     document = _passing_document(catalog)
-    document["records"][0]["input_hashes"] = {"fixture": "0" * 40}
+    document["records"][0]["input_hashes"]["listen_rom_sha1"] = "0" * 40
     results = coverage.result_set_from_document(document)
 
     report = coverage.build_report(catalog, results, expected_commit="a" * 40)
     sample = _case_report(report, selector, "source")
     assert sample["status"] == "mismatched"
-    assert sample["observed_input_hashes"]["fixture"] == "0" * 40
+    assert sample["observed_input_hashes"]["listen_rom_sha1"] == "0" * 40
     assert any("observed input hash" in problem for problem in report["problems"])
+
+
+def test_missing_observed_input_hashes_fail_closed(catalog: dict) -> None:
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    document = _passing_document(catalog)
+    document["records"][0]["input_hashes"] = {}
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    sample = _case_report(report, selector, "source")
+    assert sample["status"] == "unidentified"
+    assert "missing observed input hashes" in sample["reason"]
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
 
 
 def test_duplicate_result_is_incomplete(catalog: dict) -> None:
@@ -280,7 +315,9 @@ def test_duplicate_result_is_incomplete(catalog: dict) -> None:
     report = coverage.build_report(catalog, results, expected_commit="a" * 40)
     assert report["overall"] == "INCOMPLETE"
     assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
-    assert report["summary"]["statuses"].get("duplicate") == 1
+    # The duplicated selector backs both its pairing case and the shared
+    # expanded-mechanics case, so both runtimes' registrations are duplicates.
+    assert report["summary"]["statuses"].get("duplicate") == 2
 
 
 @pytest.mark.parametrize("status", _TERMINAL_FAILURES)
@@ -419,7 +456,8 @@ def test_unrelated_partial_runs_are_not_merged(catalog: dict) -> None:
 
 
 def test_gate_json_matrix_rows_are_consumed_without_double_counting(catalog: dict) -> None:
-    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    case = coverage.one_turn_pairing_cases(catalog)[0]
+    selector = case["selector"]
     document = {
         "commit": "a" * 40,
         "runtime": {
@@ -427,6 +465,7 @@ def test_gate_json_matrix_rows_are_consumed_without_double_counting(catalog: dic
             "pyboy_version": "2.7.0",
             "pyboy_revision": _pinned_revision(catalog),
         },
+        "input_hashes": _case_input_hashes(catalog, case),
         "collections": _passing_collections([selector]),
         "tiers": [
             {
@@ -513,7 +552,7 @@ def test_internal_tested_sentinel_is_not_a_terminal_pass(catalog: dict) -> None:
     assert report["summary"]["tested"] == 0
     assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
     assert all(case["status"] != "tested" for case in report["cases"])
-    assert report["summary"]["statuses"].get("unaccepted") == 38
+    assert report["summary"]["statuses"].get("unaccepted") == 40
 
 
 def test_only_accepted_outcomes_can_complete_a_dimension(catalog: dict) -> None:
@@ -586,7 +625,7 @@ def test_truthy_evidence_string_cannot_complete_mechanics(catalog: dict) -> None
             family["evidence"] = "not-executed"
             promoted += 1
     mutated["move_effects"]["planned_unverified_count"] = 0
-    assert promoted == 68
+    assert promoted == 67
 
     results = coverage.result_set_from_document(_passing_document(catalog))
     report = coverage.build_report(mutated, results, expected_commit="a" * 40)
@@ -750,6 +789,431 @@ def test_forbidden_outcomes_cannot_be_authorized_by_policy(catalog: dict) -> Non
     report = coverage.build_report(mutated, results)
     assert report["overall"] == "INCOMPLETE"
     assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+
+
+def _mechanics_case(catalog: dict) -> dict:
+    return next(
+        case
+        for case in coverage.required_cases(catalog)
+        if case["case_id"] == "mechanics_effect_0_no_additional_effect"
+    )
+
+
+def _mechanics_document(
+    catalog: dict,
+    *,
+    runtimes: tuple[str, ...] = ("source", "cython"),
+    status: str = "passed",
+    effect: int | None = 0,
+    hashes: dict | None = None,
+) -> dict:
+    case = _mechanics_case(catalog)
+    selector = case["selector"]
+    revision = _pinned_revision(catalog)
+    blocks = [
+        {
+            "mode": mode,
+            "runtime": {
+                "pyboy_mode": mode,
+                "pyboy_version": "2.7.0",
+                "pyboy_revision": revision,
+            },
+            "collections": _passing_collections([selector]),
+        }
+        for mode in runtimes
+    ]
+    records = []
+    for mode in runtimes:
+        record = {
+            "nodeid": selector,
+            "runtime": mode,
+            "status": status,
+            "commit": "a" * 40,
+            "input_hashes": dict(
+                hashes if hashes is not None else _case_input_hashes(catalog, case)
+            ),
+        }
+        if effect is not None:
+            record["effect_id"] = effect
+        records.append(record)
+    return {
+        "run_id": "synthetic-mechanics-test",
+        "runtimes": blocks,
+        "records": records,
+    }
+
+
+def _mechanics_status(catalog: dict, report: dict, runtime: str) -> dict:
+    case = _mechanics_case(catalog)
+    return next(
+        item
+        for item in report["cases"]
+        if item["case_id"] == case["case_id"] and item["runtime"] == runtime
+    )
+
+
+def test_expanded_mechanics_family_becomes_tested_only_with_dual_runtime_evidence(
+    catalog: dict,
+) -> None:
+    results = coverage.result_set_from_document(_mechanics_document(catalog))
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(catalog, report, "source")["status"] == "tested"
+    assert _mechanics_status(catalog, report, "cython")["status"] == "tested"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 1
+    assert report["dimensions"]["expanded_mechanics"]["planned_unverified"] == 67
+    tested_families = [
+        family for family in report["move_effects"]["families"] if family["effect_id"] == 0
+    ]
+    verified = coverage._verified_mechanics_case_ids(report["cases"])
+    assert coverage._family_is_verified(tested_families[0], verified)
+
+
+def test_mechanics_family_stays_unverified_without_both_runtimes(catalog: dict) -> None:
+    results = coverage.result_set_from_document(_mechanics_document(catalog, runtimes=("source",)))
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(catalog, report, "source")["status"] == "tested"
+    assert _mechanics_status(catalog, report, "cython")["status"] == "missing"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+
+
+def test_mechanics_family_stays_unverified_with_wrong_effect(catalog: dict) -> None:
+    results = coverage.result_set_from_document(_mechanics_document(catalog, effect=6))
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(catalog, report, "source")["status"] == "mismatched"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+    assert any("declared effect" in problem for problem in report["problems"])
+
+
+def test_mechanics_family_stays_unverified_with_missing_effect(catalog: dict) -> None:
+    results = coverage.result_set_from_document(_mechanics_document(catalog, effect=None))
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(catalog, report, "source")["status"] == "unidentified"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+
+
+@pytest.mark.parametrize("status", ["skipped", "failed", "timed_out", "not_run"])
+def test_mechanics_family_stays_unverified_with_non_terminal_evidence(
+    catalog: dict, status: str
+) -> None:
+    document = _mechanics_document(catalog, status=status)
+    results = coverage.result_set_from_document(document)
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(catalog, report, "source")["status"] != "tested"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+
+
+def test_mechanics_family_stays_unverified_with_mismatched_hashes(catalog: dict) -> None:
+    case = _mechanics_case(catalog)
+    hashes = _case_input_hashes(catalog, case)
+    hashes["listen_rom_sha1"] = "0" * 40
+    results = coverage.result_set_from_document(_mechanics_document(catalog, hashes=hashes))
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(catalog, report, "source")["status"] == "mismatched"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+
+
+def test_mechanics_family_stays_unverified_with_missing_hashes(catalog: dict) -> None:
+    results = coverage.result_set_from_document(_mechanics_document(catalog, hashes={}))
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(catalog, report, "source")["status"] == "unidentified"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+
+
+def test_gate_output_settlement_rows_verify_the_declared_effect(catalog: dict) -> None:
+    selector = _mechanics_case(catalog)["selector"]
+    case = _mechanics_case(catalog)
+    settlement = (
+        "  local battle settlement: ["
+        "{'turn': {'local_move_effect': 0, 'enemy_move_effect': 0}}, "
+        "{'turn': {'local_move_effect': 0, 'enemy_move_effect': 0}}]"
+    )
+    document = {
+        "commit": "a" * 40,
+        "runtime": {
+            "pyboy_mode": "source",
+            "pyboy_version": "2.7.0",
+            "pyboy_revision": _pinned_revision(catalog),
+        },
+        "input_hashes": _case_input_hashes(catalog, case),
+        "collections": _passing_collections([selector]),
+        "tiers": [
+            {
+                "name": "battle",
+                "case_results": [
+                    {
+                        "nodeid": selector,
+                        "status": "PASS",
+                        "partial": False,
+                        "reason": "",
+                        "output_tail": settlement,
+                    }
+                ],
+            }
+        ],
+    }
+    results = coverage.result_set_from_document(document)
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(catalog, report, "source")["status"] == "tested"
+
+
+def test_junit_system_out_is_parsed_for_the_declared_effect(catalog: dict, tmp_path: Path) -> None:
+    case = _mechanics_case(catalog)
+    selector = case["selector"]
+    module, _, name = selector.partition("::")
+    classname = (module.removesuffix(".py")).replace("/", ".")
+    junit = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<testsuites><testsuite name="pytest" tests="1">'
+        f'<testcase classname="{classname}" name="{name}" time="0.1">'
+        "<system-out>'local_move_effect': 0 'enemy_move_effect': 0</system-out>"
+        "</testcase></testsuite></testsuites>"
+    )
+    path = tmp_path / "mechanisms.xml"
+    path.write_text(junit, encoding="utf-8")
+
+    results = coverage.load_results(path)
+    outcome = results.lookup("unknown", selector)[0]
+    assert outcome.effects == (0, 0)
+
+
+def test_connector_endpoint_must_match_the_selector(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    target = next(
+        case
+        for case in mutated["coverage"]["required_cases"]
+        if case["case_id"] == "battle_local_red_red"
+    )
+    target["game_versions"] = ["red", "yellow"]
+
+    with pytest.raises(coverage.CoverageError, match="endpoints"):
+        coverage.validate_catalog(mutated)
+    report = coverage.build_report(mutated)
+    assert report["overall"] == "INCOMPLETE"
+
+
+def test_both_endpoint_hashes_are_required(catalog: dict) -> None:
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    case = coverage.one_turn_pairing_cases(catalog)[0]
+    hashes = _case_input_hashes(catalog, case)
+    hashes.pop("connect_rom_sha1")
+    document = _passing_document(catalog)
+    document["records"][0]["input_hashes"] = hashes
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    sample = _case_report(report, selector, "source")
+    assert sample["status"] == "unidentified"
+    assert "connect" in sample["reason"]
+
+
+def test_record_level_partial_in_tests_is_not_ignored(catalog: dict) -> None:
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    case = coverage.one_turn_pairing_cases(catalog)[0]
+    document = {
+        "commit": "a" * 40,
+        "runtime": {
+            "pyboy_mode": "source",
+            "pyboy_version": "2.7.0",
+            "pyboy_revision": _pinned_revision(catalog),
+        },
+        "input_hashes": _case_input_hashes(catalog, case),
+        "collections": _passing_collections([selector]),
+        "tests": [
+            {"nodeid": selector, "outcome": "passed", "partial": True, "reason": "timed out"}
+        ],
+    }
+    results = coverage.result_set_from_document(document)
+    report = coverage.build_report(catalog, results)
+
+    sample = _case_report(report, selector, "source")
+    assert sample["status"] == "partial"
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+
+
+def test_enclosing_partial_tier_propagates_to_contained_cases(catalog: dict) -> None:
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    case = coverage.one_turn_pairing_cases(catalog)[0]
+    document = {
+        "commit": "a" * 40,
+        "runtime": {
+            "pyboy_mode": "source",
+            "pyboy_version": "2.7.0",
+            "pyboy_revision": _pinned_revision(catalog),
+        },
+        "input_hashes": _case_input_hashes(catalog, case),
+        "collections": _passing_collections([selector]),
+        "tiers": [
+            {
+                "name": "battle",
+                "partial": True,
+                "status": "TIMEOUT",
+                "case_results": [
+                    {"nodeid": selector, "status": "PASS", "partial": False, "reason": ""}
+                ],
+            }
+        ],
+    }
+    results = coverage.result_set_from_document(document)
+    report = coverage.build_report(catalog, results)
+
+    sample = _case_report(report, selector, "source")
+    assert sample["status"] == "partial"
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 0
+
+
+def test_enclosing_non_pass_tier_status_propagates(catalog: dict) -> None:
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    case = coverage.one_turn_pairing_cases(catalog)[0]
+    document = {
+        "commit": "a" * 40,
+        "runtime": {
+            "pyboy_mode": "source",
+            "pyboy_version": "2.7.0",
+            "pyboy_revision": _pinned_revision(catalog),
+        },
+        "input_hashes": _case_input_hashes(catalog, case),
+        "collections": _passing_collections([selector]),
+        "tiers": [
+            {
+                "name": "battle",
+                "status": "INTERRUPTED",
+                "case_results": [
+                    {"nodeid": selector, "status": "PASS", "partial": False, "reason": ""}
+                ],
+            }
+        ],
+    }
+    results = coverage.result_set_from_document(document)
+    report = coverage.build_report(catalog, results)
+
+    sample = _case_report(report, selector, "source")
+    assert sample["status"] == "partial"
+    assert report["summary"]["tested"] == 0
+
+
+def test_dual_runtime_gate_assets_satisfy_endpoint_hashes(catalog: dict) -> None:
+    case = _mechanics_case(catalog)
+    selector = case["selector"]
+    red = coverage._canonical_battle_scenarios(catalog)["red"]
+    blocks = [
+        {
+            "mode": mode,
+            "runtime": {
+                "pyboy_mode": mode,
+                "pyboy_version": "2.7.0",
+                "pyboy_revision": _pinned_revision(catalog),
+            },
+            "collections": _passing_collections([selector]),
+            "tiers": [
+                {
+                    "name": "battle",
+                    "status": "PASS",
+                    "case_results": [
+                        {
+                            "nodeid": selector,
+                            "status": "PASS",
+                            "partial": False,
+                            "reason": "",
+                            "output_tail": "'local_move_effect': 0 'enemy_move_effect': 0",
+                        }
+                    ],
+                }
+            ],
+        }
+        for mode in ("source", "cython")
+    ]
+    document = {
+        "run_id": "gate",
+        "commit": "a" * 40,
+        "runtimes": blocks,
+        "assets": [
+            {"kind": "rom", "label": "red-stock", "status": "ok", "actual_sha1": "0" * 40},
+            {
+                "kind": "rom",
+                "label": "red-color",
+                "status": "ok",
+                "actual_sha1": red["game"]["rom_sha1"],
+            },
+            {
+                "kind": "symbol",
+                "label": "red",
+                "status": "ok",
+                "actual_sha1": red["game"]["sym_sha1"],
+            },
+            {
+                "kind": "fixture",
+                "label": "red cable-club",
+                "status": "ok",
+                "actual_sha1": red["provenance"]["input_fixture_sha1"],
+            },
+        ],
+    }
+    results = coverage.result_set_from_document(document)
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(catalog, report, "source")["status"] == "tested"
+    assert _mechanics_status(catalog, report, "cython")["status"] == "tested"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 1
+
+
+def test_gate_asset_hashes_are_canonical_and_version_scoped(catalog: dict) -> None:
+    document = {
+        "assets": [
+            {"kind": "rom", "label": "red-stock", "status": "ok", "actual_sha1": "a" * 40},
+            {"kind": "rom", "label": "red-color", "status": "ok", "actual_sha1": "b" * 40},
+            {"kind": "symbol", "label": "red", "status": "ok", "actual_sha1": "c" * 40},
+            {"kind": "fixture", "label": "red cable-club", "status": "ok", "actual_sha1": "d" * 40},
+        ]
+    }
+    hashes = coverage._gate_input_hashes(document)
+
+    assert hashes["rom:red"] == "b" * 40
+    assert hashes["sym:red"] == "c" * 40
+    assert hashes["input_fixture:red"] == "d" * 40
+
+
+def test_tier_case_level_commit_is_preserved(catalog: dict) -> None:
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    case = coverage.one_turn_pairing_cases(catalog)[0]
+    document = {
+        "commit": "a" * 40,
+        "runtime": {
+            "pyboy_mode": "source",
+            "pyboy_version": "2.7.0",
+            "pyboy_revision": _pinned_revision(catalog),
+        },
+        "input_hashes": _case_input_hashes(catalog, case),
+        "collections": _passing_collections([selector]),
+        "tiers": [
+            {
+                "name": "battle",
+                "status": "PASS",
+                "case_results": [
+                    {
+                        "nodeid": selector,
+                        "status": "PASS",
+                        "partial": False,
+                        "reason": "",
+                        "commit": "b" * 40,
+                    }
+                ],
+            }
+        ],
+    }
+    results = coverage.result_set_from_document(document)
+    report = coverage.build_report(catalog, results)
+
+    assert any("commit identities" in problem for problem in report["problems"])
     assert report["summary"]["tested"] == 0
 
 

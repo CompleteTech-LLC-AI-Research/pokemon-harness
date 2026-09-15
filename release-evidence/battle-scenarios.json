@@ -1239,6 +1239,29 @@
         "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
         "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-yellow-connect]",
         "status": "required"
+      },
+      {
+        "case_id": "mechanics_effect_0_no_additional_effect",
+        "dimension_id": "expanded_mechanics",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "red",
+          "red"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "red-color-battle",
+        "effect_id": 0,
+        "oracle": "one settled local Red/Red battle turn under the strict selector observes local and enemy move effects equal to effect 0 (NO_ADDITIONAL_EFFECT)",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-red]",
+        "status": "required"
       }
     ],
     "evidence_policy": {
@@ -1253,7 +1276,7 @@
   "move_effects": {
     "effects_version": 1,
     "family_count": 87,
-    "planned_unverified_count": 68,
+    "planned_unverified_count": 67,
     "deliberately_excluded_count": 19,
     "pinned_sources": {
       "pokered": {
@@ -1300,8 +1323,8 @@
         "effect_id": 0,
         "name": "NO_ADDITIONAL_EFFECT",
         "kind": "effect",
-        "scope": "planned_unverified",
-        "reason": "admitted by the current one-turn selector's effect allowlist but has no collected or terminal real-ROM evidence; selector or effect-table presence is not execution evidence",
+        "scope": "tested",
+        "reason": "effect 0 is admitted by the current one-turn selector and the declared strict Red/Red battle selector observes the chosen move effect; the family is tested only while that dual-runtime terminal evidence carries the declared effect and matching provenance",
         "move_ids": [
           1,
           2,
@@ -1334,6 +1357,9 @@
           157,
           161,
           163
+        ],
+        "evidence": [
+          "mechanics_effect_0_no_additional_effect"
         ]
       },
       {

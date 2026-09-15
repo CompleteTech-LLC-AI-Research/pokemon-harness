@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import runpy
 import sys
 import xml.etree.ElementTree as ET
@@ -84,6 +85,12 @@ _COLLECTION_PASS = frozenset({"pass", "passed"})
 # must be a link-battle fixture for the listen endpoint's game.
 _LINK_BATTLE_TYPE = "link_battle"
 _LINK_BATTLE_VARIANTS = {"red": "color", "blue": "color", "yellow": "cgb"}
+# Enclosing status values that still mean "not a clean terminal pass". Any
+# tier/block status that maps to something outside this set marks every
+# contained case as partial rather than silently qualifying the dimension.
+_ENCLOSING_PASS = frozenset({"passed"})
+_MOVE_EFFECT_RE = re.compile(r"[\"'](?:local|enemy)_move_effect[\"']\s*:\s*(\d+)")
+_EFFECT_TEXT_KEYS = ("output_tail", "system_out", "stdout")
 
 
 class CoverageError(ValueError):
@@ -179,14 +186,84 @@ def _scenarios_by_fixture_id(catalog: dict[str, Any]) -> dict[str, dict[str, Any
     return scenarios
 
 
-def _validate_case_fixture(prefix: str, case: dict[str, Any], scenario: dict[str, Any]) -> None:
-    """Reject a pairing case whose fixture is not the declared link battle.
+def _profile_version(profile: str) -> str:
+    """Map a strict profile name (for example ``red_color``) to its version."""
+    return profile.removesuffix("_color")
+
+
+def _selector_endpoint_versions() -> dict[str, tuple[str, str]]:
+    """Map every authoritative battle selector to its ordered endpoint versions."""
+    matrix = _MATRIX
+    mapping: dict[str, tuple[str, str]] = {}
+    for left, right in matrix["SUPPORTED_VERSION_PAIRS"]:
+        mapping[
+            "tests/test_pyboy_link_session_roms.py::"
+            f"test_pair_completes_battle_turn[{left}-{right}]"
+        ] = (left, right)
+    for listener, connector in matrix["REMOTE_STRICT_PROFILE_PAIRS"]:
+        mapping[
+            "tests/test_pyboy_link_session_subprocess.py::"
+            f"test_subprocess_pair_resolves_battle_turn_over_tcp"
+            f"[{listener}-listen-{connector}-connect]"
+        ] = (_profile_version(listener), _profile_version(connector))
+    mapping["tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved"] = (
+        "red",
+        "yellow",
+    )
+    return mapping
+
+
+def _canonical_battle_scenarios(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return the canonical link-battle scenario for each game version."""
+    battles: dict[str, dict[str, Any]] = {}
+    for scenario in catalog.get("scenarios", []):
+        if not isinstance(scenario, dict):
+            continue
+        game = scenario.get("game") if isinstance(scenario.get("game"), dict) else {}
+        battle = scenario.get("battle") if isinstance(scenario.get("battle"), dict) else {}
+        version = game.get("version")
+        if battle.get("type") != _LINK_BATTLE_TYPE or version not in _VERSIONS:
+            continue
+        if game.get("variant") == _LINK_BATTLE_VARIANTS.get(version):
+            battles.setdefault(version, scenario)
+    return battles
+
+
+def _case_endpoint_scenarios(
+    catalog: dict[str, Any], case: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Resolve the canonical battle scenario for each declared endpoint role."""
+    roles = case.get("roles")
+    versions = case.get("game_versions")
+    if not isinstance(roles, list) or not isinstance(versions, list):
+        return {}
+    if len(roles) != len(versions) or set(roles) != set(_ROLES):
+        return {}
+    battles = _canonical_battle_scenarios(catalog)
+    resolved: dict[str, dict[str, Any]] = {}
+    for role, version in zip(roles, versions, strict=True):
+        scenario = battles.get(version)
+        if scenario is not None:
+            resolved[role] = scenario
+    return resolved
+
+
+def _validate_case_fixture(
+    prefix: str,
+    case: dict[str, Any],
+    scenario: dict[str, Any],
+    battle_by_version: dict[str, dict[str, Any]],
+) -> None:
+    """Reject a case whose endpoint assignments disagree with its selector.
 
     The declared case's ``roles`` and ``game_versions`` are parallel endpoint
-    assignments. The fixture must belong to the listen endpoint's game, be a
-    link battle, carry both endpoint roles, and use the canonical variant for
-    that game. A wrong-game or wrong-type fixture must fail closed rather than
-    silently qualify the pairing matrix.
+    assignments. Both endpoints must match the ordered versions encoded by the
+    authoritative selector, the fixture must belong to the listen endpoint's
+    game, be a link battle, carry both endpoint roles, and use the canonical
+    variant for that game. The connect endpoint must resolve to a canonical
+    link-battle scenario as well. A wrong-game, wrong-variant, or swapped
+    endpoint assignment must fail closed rather than silently qualify the
+    pairing matrix.
     """
     fixture_id = case.get("fixture_id")
     versions = case.get("game_versions")
@@ -198,12 +275,29 @@ def _validate_case_fixture(prefix: str, case: dict[str, Any], scenario: dict[str
             f"{prefix}.game_versions and roles must assign both endpoints: "
             f"{len(versions)} versions vs {len(roles)} roles"
         )
-    if set(roles) != set(_ROLES):
+    if set(roles) != set(_ROLES) or len(set(roles)) != len(_ROLES):
         raise CoverageError(
             f"{prefix}.roles must assign both listen and connect endpoints: {roles!r}"
         )
     endpoint = dict(zip(roles, versions, strict=True))
+    selector = case.get("selector")
+    if isinstance(selector, str):
+        expected = _selector_endpoint_versions().get(normalize_nodeid(selector))
+        if expected is not None and tuple(versions) != expected:
+            raise CoverageError(
+                f"{prefix}.game_versions {versions!r} do not match selector "
+                f"{selector!r} endpoints {expected!r}; both endpoint assignments "
+                "must agree with the authoritative selector"
+            )
     listen_version = endpoint["listen"]
+    connect_version = endpoint["connect"]
+    for role, version in (("listen", listen_version), ("connect", connect_version)):
+        canonical = battle_by_version.get(version)
+        if canonical is None:
+            raise CoverageError(
+                f"{prefix}.{role} endpoint {version!r} has no canonical "
+                f"{_LINK_BATTLE_TYPE!r} scenario in the catalog"
+            )
     game = scenario.get("game") if isinstance(scenario.get("game"), dict) else {}
     battle = scenario.get("battle") if isinstance(scenario.get("battle"), dict) else {}
     if game.get("version") != listen_version:
@@ -227,6 +321,13 @@ def _validate_case_fixture(prefix: str, case: dict[str, Any], scenario: dict[str
         raise CoverageError(
             f"{prefix}.fixture_id {fixture_id!r} does not assign both case roles: "
             f"fixture roles {scenario_roles!r}, case roles {roles!r}"
+        )
+    canonical_listen = battle_by_version.get(listen_version, {})
+    canonical_fixture = canonical_listen.get("fixture", {}).get("fixture_id")
+    if canonical_fixture is not None and fixture_id != canonical_fixture:
+        raise CoverageError(
+            f"{prefix}.fixture_id {fixture_id!r} is not the canonical "
+            f"{listen_version!r} battle fixture {canonical_fixture!r}"
         )
 
 
@@ -302,8 +403,9 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
 
     fixtures = _scenario_fixture_ids(catalog)
     scenarios_by_fixture = _scenarios_by_fixture_id(catalog)
+    battle_by_version = _canonical_battle_scenarios(catalog)
     seen_case_ids: set[str] = set()
-    seen_selectors: set[str] = set()
+    seen_selectors: set[tuple[str, str]] = set()
     role_coverage: dict[str, set[str]] = {dimension_id: set() for dimension_id in known_dimensions}
     declared_pairing: set[str] = set()
 
@@ -340,17 +442,21 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         fixture_id = case.get("fixture_id")
         if fixture_id not in fixtures:
             raise CoverageError(f"{prefix}.fixture_id is unknown: {fixture_id!r}")
-        if dimension_id == COVERAGE_DIMENSION:
-            _validate_case_fixture(prefix, case, scenarios_by_fixture[fixture_id])
+        _validate_case_fixture(prefix, case, scenarios_by_fixture[fixture_id], battle_by_version)
+        declared_effect = case.get("effect_id")
+        if declared_effect is not None and (
+            isinstance(declared_effect, bool) or not isinstance(declared_effect, int)
+        ):
+            raise CoverageError(f"{prefix}.effect_id must be an integer")
         if not isinstance(case.get("oracle"), str) or not case["oracle"].strip():
             raise CoverageError(f"{prefix}.oracle is required")
         selector = case.get("selector")
         if not isinstance(selector, str) or "::" not in selector:
             raise CoverageError(f"{prefix}.selector must be a pytest node ID")
         normalized = normalize_nodeid(selector)
-        if normalized in seen_selectors:
+        if (dimension_id, normalized) in seen_selectors:
             raise CoverageError(f"duplicate case selector: {selector}")
-        seen_selectors.add(normalized)
+        seen_selectors.add((dimension_id, normalized))
         if case.get("status") != "required":
             raise CoverageError(f"{prefix}.status must be required")
         role_coverage.setdefault(dimension_id, set()).update(roles)
@@ -477,6 +583,7 @@ class Outcome:
     commit: str | None = None
     run_id: str | None = None
     input_hashes: dict[str, str] = field(default_factory=dict)
+    effects: tuple[int, ...] = ()
 
 
 @dataclass
@@ -531,6 +638,84 @@ def _status_from_gate(status: Any) -> str:
 def _runtime_identity(block: dict[str, Any]) -> dict[str, Any]:
     runtime = block.get("runtime")
     return runtime if isinstance(runtime, dict) else {}
+
+
+def _effects_from_text(text: str) -> tuple[int, ...]:
+    """Extract observed ``local``/``enemy`` move effects from retained output."""
+    return tuple(int(match.group(1)) for match in _MOVE_EFFECT_RE.finditer(text))
+
+
+def _record_effects(record: dict[str, Any]) -> tuple[int, ...]:
+    """Return the observed move effects carried by a result record.
+
+    A normalised record may declare ``effect_id``/``effect`` directly. Gate and
+    JUnit evidence instead retain the strict battle test's printed settlement
+    rows, so the same normalisation path also scans the retained output text.
+    """
+    explicit = record.get("effect_id", record.get("effect"))
+    if isinstance(explicit, int) and not isinstance(explicit, bool):
+        return (explicit,)
+    effects: list[int] = []
+    for key in _EFFECT_TEXT_KEYS:
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            effects.extend(_effects_from_text(value))
+    return tuple(effects)
+
+
+def _enclosing_partial(record: dict[str, Any]) -> bool:
+    """Return whether an enclosing container marks every child non-terminal.
+
+    An explicit ``partial`` marker or any enclosing status that is not a clean
+    terminal pass propagates to every contained case so a timed-out or partial
+    tier can never qualify a dimension.
+    """
+    if bool(record.get("partial", False)):
+        return True
+    status = record.get("status")
+    if isinstance(status, str) and status.strip():
+        return _status_from_gate(status) not in _ENCLOSING_PASS
+    return False
+
+
+def _normalise_outcome(
+    record: dict[str, Any] | None,
+    *,
+    nodeid: str,
+    status: str,
+    runtime: str,
+    inherited_partial: bool,
+    inherited_commit: str | None,
+    inherited_run_id: str | None,
+    inherited_hashes: dict[str, str],
+) -> Outcome:
+    """Build one :class:`Outcome`, preserving partial and identity provenance.
+
+    Every supported input format funnels through this single normaliser so a
+    record-level ``partial`` marker, commit, run identity, input hashes, and
+    observed move effect behave the same for ``records``, ``tests``, gate
+    ``tiers``/``case_results``, and JUnit testcases.
+    """
+    source = record if isinstance(record, dict) else {}
+    commit = source.get("commit")
+    if not (isinstance(commit, str) and commit):
+        commit = inherited_commit
+    run_id = source.get("run_id")
+    if not (isinstance(run_id, str) and run_id):
+        run_id = inherited_run_id
+    input_hashes = dict(inherited_hashes)
+    input_hashes.update(_record_input_hashes(source))
+    return Outcome(
+        nodeid=nodeid,
+        status=status,
+        runtime=runtime,
+        reason=str(source.get("reason", "")),
+        partial=bool(source.get("partial", False)) or inherited_partial,
+        commit=commit,
+        run_id=run_id,
+        input_hashes=input_hashes,
+        effects=_record_effects(source),
+    )
 
 
 def _mode_for(block: dict[str, Any]) -> str:
@@ -599,7 +784,7 @@ def result_set_from_document(
     result.run_id = document.get("run_id") if isinstance(document.get("run_id"), str) else None
     result.commit = document.get("commit") if isinstance(document.get("commit"), str) else None
     result.partial = bool(document.get("partial", False))
-    document_input_hashes = _record_input_hashes(document)
+    document_input_hashes = _document_input_hashes(document)
     _collect_collection_errors(document.get("collection_errors"), result)
 
     raw_runtimes = document.get("runtimes")
@@ -752,6 +937,86 @@ def _record_input_hashes(record: dict[str, Any]) -> dict[str, str]:
     return hashes
 
 
+def _asset_version(label: str) -> str | None:
+    """Return the game version encoded in a gate asset label, if any."""
+    head = re.split(r"[\s\-_]+", label.strip().lower(), maxsplit=1)[0]
+    return head if head in _VERSIONS else None
+
+
+def _canonical_asset_version(kind: Any, label: str) -> str | None:
+    """Map a gate asset to its canonical version without stock shadowing.
+
+    A strict battle row uses the canonical ``red-color``/``blue-color``/
+    ``yellow`` ROM and fixture, not the stock or vanilla ROM that may share a
+    version prefix. Stock and vanilla assets must not override the canonical
+    pin, so they are ignored here.
+    """
+    normalized = label.strip().lower()
+    if kind == "rom":
+        if normalized == "yellow":
+            return "yellow"
+        for version in ("red", "blue"):
+            if normalized == f"{version}-color":
+                return version
+        return None
+    if kind == "symbol":
+        return normalized if normalized in _VERSIONS else None
+    if kind == "fixture":
+        return _asset_version(normalized)
+    return None
+
+
+def _gate_input_hashes(document: dict[str, Any]) -> dict[str, str]:
+    """Extract version-scoped observed input hashes from a gate report.
+
+    A production gate records the operator ROM, symbol, and fixture assets it
+    actually opened. Those hashes describe one process, so they are exposed as
+    document defaults keyed by version and consumed by every contained record.
+    """
+    hashes: dict[str, str] = {}
+    assets = document.get("assets")
+    if isinstance(assets, list):
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            status = asset.get("status")
+            if isinstance(status, str) and status.lower() not in ("ok", "pass", "passed"):
+                continue
+            sha1 = asset.get("actual_sha1", asset.get("expected_sha1"))
+            label = asset.get("label")
+            if not (isinstance(sha1, str) and sha1 and isinstance(label, str) and label):
+                continue
+            kind = asset.get("kind")
+            version = _canonical_asset_version(kind, label)
+            if version is None:
+                continue
+            if kind == "rom":
+                hashes.setdefault(f"rom:{version}", sha1.lower())
+            elif kind == "symbol":
+                hashes.setdefault(f"sym:{version}", sha1.lower())
+            elif kind == "fixture":
+                hashes.setdefault(f"input_fixture:{version}", sha1.lower())
+    manifest = document.get("fixture_manifest")
+    if isinstance(manifest, dict):
+        entries = manifest.get("fixtures", manifest.get("entries"))
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                fixture_id = entry.get("id", entry.get("fixture_id"))
+                sha1 = entry.get("sha1")
+                if isinstance(fixture_id, str) and fixture_id and isinstance(sha1, str) and sha1:
+                    hashes.setdefault(f"fixture:{fixture_id.lower()}", sha1.lower())
+    return hashes
+
+
+def _document_input_hashes(document: dict[str, Any]) -> dict[str, str]:
+    """Merge document-level gate assets and any explicit input hash declaration."""
+    merged = _gate_input_hashes(document)
+    merged.update(_record_input_hashes(document))
+    return merged
+
+
 def _collect_outcome_records(
     records: list[Any],
     default_mode: str,
@@ -770,24 +1035,16 @@ def _collect_outcome_records(
             continue
         runtime = record.get("runtime")
         runtime = runtime if isinstance(runtime, str) and runtime else default_mode
-        commit = record.get("commit")
-        if not (isinstance(commit, str) and commit):
-            commit = block_commit
-        run_id = record.get("run_id")
-        if not (isinstance(run_id, str) and run_id):
-            run_id = block_run
-        input_hashes = dict(default_input_hashes or {})
-        input_hashes.update(_record_input_hashes(record))
         result.outcomes.append(
-            Outcome(
+            _normalise_outcome(
+                record,
                 nodeid=nodeid,
                 status=str(record.get("status", "error")).lower(),
                 runtime=runtime,
-                reason=str(record.get("reason", "")),
-                partial=bool(record.get("partial", False)) or block_partial,
-                commit=commit,
-                run_id=run_id,
-                input_hashes=input_hashes,
+                inherited_partial=block_partial,
+                inherited_commit=block_commit,
+                inherited_run_id=block_run,
+                inherited_hashes=dict(default_input_hashes or {}),
             )
         )
 
@@ -834,24 +1091,16 @@ def _collect_outcomes(
                 status = "xfailed"
             elif record.get("was_xfail") and status == "passed":
                 status = "xpassed"
-            commit = record.get("commit")
-            if not (isinstance(commit, str) and commit):
-                commit = block_commit
-            run_id = record.get("run_id")
-            if not (isinstance(run_id, str) and run_id):
-                run_id = block_run
-            input_hashes = dict(inherited_hashes)
-            input_hashes.update(_record_input_hashes(record))
             result.outcomes.append(
-                Outcome(
+                _normalise_outcome(
+                    record,
                     nodeid=nodeid,
                     status=status,
                     runtime=mode,
-                    reason=str(record.get("reason", "")),
-                    partial=block_partial,
-                    commit=commit,
-                    run_id=run_id,
-                    input_hashes=input_hashes,
+                    inherited_partial=block_partial,
+                    inherited_commit=block_commit,
+                    inherited_run_id=block_run,
+                    inherited_hashes=inherited_hashes,
                 )
             )
             seen_nodeids.add(normalize_nodeid(nodeid))
@@ -860,24 +1109,28 @@ def _collect_outcomes(
         for tier in tiers:
             if not isinstance(tier, dict):
                 continue
+            tier_partial = _enclosing_partial(tier)
+            if tier_partial:
+                result.identity_conflicts.append(
+                    "results source contains a partial or non-passing tier; "
+                    "every contained case is treated as partial"
+                )
             for case in tier.get("case_results", []):
                 if not isinstance(case, dict):
                     continue
                 nodeid = case.get("nodeid")
                 if not isinstance(nodeid, str) or not nodeid:
                     continue
-                case_hashes = dict(inherited_hashes)
-                case_hashes.update(_record_input_hashes(case))
                 result.outcomes.append(
-                    Outcome(
+                    _normalise_outcome(
+                        case,
                         nodeid=nodeid,
                         status=_status_from_gate(case.get("status")),
                         runtime=mode,
-                        reason=str(case.get("reason", "")),
-                        partial=bool(case.get("partial", False)) or block_partial,
-                        commit=block_commit,
-                        run_id=block_run,
-                        input_hashes=case_hashes,
+                        inherited_partial=block_partial or tier_partial,
+                        inherited_commit=block_commit,
+                        inherited_run_id=block_run,
+                        inherited_hashes=inherited_hashes,
                     )
                 )
                 seen_nodeids.add(normalize_nodeid(nodeid))
@@ -890,16 +1143,18 @@ def _collect_outcomes(
                 if normalize_nodeid(nodeid) in seen_nodeids:
                     continue
                 outcome = str(detail.get("outcome", "failed")).lower()
-                if outcome == "xfailed":
-                    outcome = "xfailed"
-                elif outcome == "xpassed":
-                    outcome = "xpassed"
+                if outcome not in ("xfailed", "xpassed"):
+                    outcome = outcome or "failed"
                 result.outcomes.append(
-                    Outcome(
+                    _normalise_outcome(
+                        detail,
                         nodeid=nodeid,
                         status=outcome,
                         runtime=mode,
-                        reason=str(detail.get("reason", "")),
+                        inherited_partial=block_partial or tier_partial,
+                        inherited_commit=block_commit,
+                        inherited_run_id=block_run,
+                        inherited_hashes=inherited_hashes,
                     )
                 )
 
@@ -915,6 +1170,8 @@ def _parse_junit(text: str, source_path: str) -> ResultSet:
         name = testcase.get("name") or ""
         if classname:
             module = classname.replace(".", "/")
+            if not module.endswith(".py"):
+                module = f"{module}.py"
             nodeid = f"{module}::{name}"
         else:
             nodeid = name
@@ -933,10 +1190,21 @@ def _parse_junit(text: str, source_path: str) -> ResultSet:
             marker = f"{skipped.get('type', '')} {skipped.get('message', '')}".lower()
             status = "xfailed" if "xfail" in marker else "skipped"
             reason = skipped.get("message") or skipped.get("type") or ""
+        system_out = testcase.findtext("system-out") or ""
         result.outcomes.append(
-            Outcome(nodeid=nodeid, status=status, runtime="unknown", reason=reason)
+            _normalise_outcome(
+                {"reason": reason, "output_tail": system_out},
+                nodeid=nodeid,
+                status=status,
+                runtime="unknown",
+                inherited_partial=False,
+                inherited_commit=None,
+                inherited_run_id=None,
+                inherited_hashes={},
+            )
         )
     result.notes.append("JUnit results carry no runtime/build identity")
+    _finalize_identity(result)
     return result
 
 
@@ -1170,6 +1438,111 @@ def _dimension_status(
     }
 
 
+def _endpoint_hash_requirements(
+    catalog: dict[str, Any], case: dict[str, Any]
+) -> list[tuple[str, str, str, tuple[str, ...], str]]:
+    """Return ``(label, role, kind, accepted_values, version)`` for each endpoint."""
+    requirements: list[tuple[str, str, str, tuple[str, ...], str]] = []
+    for role, scenario in _case_endpoint_scenarios(catalog, case).items():
+        game = scenario.get("game") if isinstance(scenario.get("game"), dict) else {}
+        fixture = scenario.get("fixture") if isinstance(scenario.get("fixture"), dict) else {}
+        provenance = (
+            scenario.get("provenance") if isinstance(scenario.get("provenance"), dict) else {}
+        )
+        version = game.get("version")
+        if not isinstance(version, str):
+            continue
+        if isinstance(game.get("rom_sha1"), str) and game["rom_sha1"]:
+            requirements.append(
+                (f"{role} ROM ({version})", role, "rom", (game["rom_sha1"].lower(),), version)
+            )
+        if isinstance(game.get("sym_sha1"), str) and game["sym_sha1"]:
+            requirements.append(
+                (f"{role} symbol ({version})", role, "sym", (game["sym_sha1"].lower(),), version)
+            )
+        fixture_values: list[str] = []
+        if isinstance(fixture.get("sha1"), str) and fixture["sha1"]:
+            fixture_values.append(fixture["sha1"].lower())
+        if (
+            isinstance(provenance.get("input_fixture_sha1"), str)
+            and provenance["input_fixture_sha1"]
+        ):
+            fixture_values.append(provenance["input_fixture_sha1"].lower())
+        if fixture_values:
+            requirements.append(
+                (
+                    f"{role} fixture ({version})",
+                    role,
+                    "fixture",
+                    tuple(dict.fromkeys(fixture_values)),
+                    version,
+                )
+            )
+    return requirements
+
+
+def _observed_endpoint_hash(
+    observed: dict[str, str], role: str, kind: str, version: str
+) -> tuple[str | None, str | None]:
+    keys = [
+        f"{role}_{kind}",
+        f"{role}_{kind}_sha1",
+        f"{version}_{kind}",
+        f"{version}_{kind}_sha1",
+        f"{kind}:{version}",
+    ]
+    if kind == "fixture":
+        keys.extend((f"{role}_input_fixture", f"input_fixture:{version}"))
+    if role == "listen":
+        keys.extend((kind, f"{kind}_sha1", "input_fixture"))
+    for key in keys:
+        value = observed.get(key)
+        if isinstance(value, str) and value:
+            return key, value.lower()
+    return None, None
+
+
+def _check_case_inputs(
+    catalog: dict[str, Any], case: dict[str, Any], observed: dict[str, str]
+) -> tuple[str, str] | None:
+    """Fail closed unless every declared endpoint ROM/symbol/fixture hash matches."""
+    requirements = _endpoint_hash_requirements(catalog, case)
+    if not requirements:
+        return None
+    missing: list[str] = []
+    mismatched: list[str] = []
+    for label, role, kind, accepted, version in requirements:
+        _, value = _observed_endpoint_hash(observed, role, kind, version)
+        if value is None:
+            missing.append(label)
+        elif value not in accepted:
+            mismatched.append(f"{label}: observed {value!r} not in {sorted(accepted)}")
+    if mismatched:
+        return "mismatched", "observed input hash mismatch for " + "; ".join(mismatched)
+    if missing:
+        return "unidentified", "missing observed input hashes for " + ", ".join(missing)
+    return None
+
+
+def _check_case_effect(case: dict[str, Any], record: Outcome) -> tuple[str, str] | None:
+    """Fail closed unless the observed move effect matches the declared effect."""
+    declared = case.get("effect_id")
+    if isinstance(declared, bool) or not isinstance(declared, int):
+        return None
+    effects = record.effects
+    if not effects:
+        return (
+            "unidentified",
+            f"no observed move effect for declared effect {declared}",
+        )
+    if any(effect != declared for effect in effects):
+        return (
+            "mismatched",
+            f"observed move effects {sorted(set(effects))} do not match declared effect {declared}",
+        )
+    return None
+
+
 def build_report(
     catalog: dict[str, Any],
     results: ResultSet | None = None,
@@ -1290,22 +1663,16 @@ def build_report(
                 runtime, records, results, expected_commit, policy, selectors
             )
             observed_hashes = dict(records[0].input_hashes) if len(records) == 1 else {}
-            mismatched_input = next(
-                (
-                    (key, value)
-                    for key, value in sorted(observed_hashes.items())
-                    if key in declared_hashes and value != declared_hashes[key]
-                ),
-                None,
-            )
-            if status == _CASE_SENTINEL and mismatched_input is not None:
-                key, value = mismatched_input
-                status = "mismatched"
-                reason = (
-                    f"observed input hash {value!r} for {key!r} does not match declared "
-                    f"{declared_hashes[key]!r}"
-                )
-                problems.append(f"case {case.get('case_id')!r} ({runtime}): {reason}")
+            if status == _CASE_SENTINEL:
+                input_result = _check_case_inputs(document, case, observed_hashes)
+                if input_result is not None:
+                    status, reason = input_result
+                    problems.append(f"case {case.get('case_id')!r} ({runtime}): {reason}")
+            if status == _CASE_SENTINEL and len(records) == 1:
+                effect_result = _check_case_effect(case, records[0])
+                if effect_result is not None:
+                    status, reason = effect_result
+                    problems.append(f"case {case.get('case_id')!r} ({runtime}): {reason}")
             summary[status] += 1
             case_reports.append(
                 {
