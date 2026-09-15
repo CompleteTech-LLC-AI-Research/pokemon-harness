@@ -932,9 +932,40 @@ def test_invalid_family_link_does_not_receive_tested_credit(catalog: dict) -> No
     results = coverage.result_set_from_document(_mechanics_document(mutated))
     report = coverage.build_report(mutated, results, expected_commit="a" * 40)
 
-    # The effect-6 family references a case declared for effect 0; it may not
-    # receive tested credit, so exactly the effect-0 family stays tested.
-    assert report["dimensions"]["expanded_mechanics"]["tested"] == 1
+    # The effect-6 family references a case declared for effect 0, so the catalog
+    # is invalid and no family can receive tested credit.
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+    assert report["move_effects"]["tested"] == 0
+
+
+def test_truncated_effect_inventory_cannot_claim_completion(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    keep = next(item for item in mutated["move_effects"]["families"] if item["effect_id"] == 0)
+    mutated["move_effects"]["families"] = [keep]
+    mutated["move_effects"]["family_count"] = 1
+    mutated["move_effects"]["planned_unverified_count"] = 1
+    mutated["move_effects"]["deliberately_excluded_count"] = 0
+
+    results = coverage.result_set_from_document(_mechanics_document(mutated))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+    assert report["dimensions"]["expanded_mechanics"]["status"] != "COMPLETE"
+
+
+def test_duplicate_effect_family_receives_no_tested_credit(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    duplicate = copy.deepcopy(
+        next(item for item in mutated["move_effects"]["families"] if item["effect_id"] == 0)
+    )
+    mutated["move_effects"]["families"].append(duplicate)
+    mutated["move_effects"]["family_count"] = len(mutated["move_effects"]["families"])
+
+    results = coverage.result_set_from_document(_mechanics_document(mutated))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+    assert report["move_effects"]["tested"] == 0
 
 
 def test_mechanics_family_stays_unverified_with_wrong_effect(catalog: dict) -> None:

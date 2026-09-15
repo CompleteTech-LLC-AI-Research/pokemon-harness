@@ -46,6 +46,9 @@ _ROLES = ("listen", "connect")
 _VERSIONS = ("red", "blue", "yellow")
 _TRANSPORTS = ("local", "remote")
 _SCOPES = ("tested", "planned_unverified", "deliberately_excluded")
+# Tool-owned complete effect inventory for effects_version 1: the pinned pret
+# move-effect constants 0..86. Never derived from the supplied family list.
+_PINNED_EFFECT_IDS: tuple[int, ...] = tuple(range(87))
 # Tool-owned mandatory runtimes keyed by coverage scope version. The catalog
 # declares requirements, but these pins are data the tool owns: a catalog edit
 # can never remove a runtime the coverage scope version requires.
@@ -574,7 +577,10 @@ def _validate_move_effects(catalog: dict[str, Any]) -> None:
     families = effect_families(catalog)
     if move_effects.get("family_count") != len(families):
         raise CoverageError("family_count does not match the family list")
-    expected_ids = list(range(len(families)))
+    # The complete effect inventory is tool-owned: effects_version 1 covers the
+    # pinned pret move-effect constants 0..86.  It must never be derived from
+    # the supplied list, or a truncated list would define its own sufficiency.
+    expected_ids = list(_PINNED_EFFECT_IDS)
     if [family.get("effect_id") for family in families] != expected_ids:
         raise CoverageError("effect families must cover every pinned effect id exactly once")
     expanded_cases = {
@@ -1526,6 +1532,8 @@ def _dimension_status(
     dimension_id: str,
     case_reports: list[dict[str, Any]],
     catalog: dict[str, Any],
+    *,
+    catalog_valid: bool = True,
 ) -> dict[str, Any]:
     if dimension_id == EXPANDED_DIMENSION:
         families = []
@@ -1537,10 +1545,19 @@ def _dimension_status(
             case_reports, _expanded_required_runtimes(catalog)
         )
         declared_effects = _declared_case_effects(catalog)
+        # A catalog-invalid or duplicate/truncated family declaration can never
+        # earn tested credit: the tool pins the complete effect inventory.
+        if not catalog_valid:
+            verified_cases = {}
         tested = 0
         planned = 0
         excluded = 0
+        seen_effects: set[Any] = set()
         for family in families:
+            effect_id = family.get("effect_id")
+            if effect_id in seen_effects:
+                continue
+            seen_effects.add(effect_id)
             scope = family.get("scope")
             if scope == "deliberately_excluded":
                 excluded += 1
@@ -1558,6 +1575,9 @@ def _dimension_status(
             status = "COMPLETE"
         else:
             status = "DELIBERATELY_EXCLUDED"
+        if not catalog_valid:
+            status = "INCOMPLETE"
+            tested = 0
         return {
             "status": status,
             "families": len(families),
@@ -1862,7 +1882,9 @@ def build_report(
             )
 
     dimension_reports = {
-        dimension_id: _dimension_status(dimension_id, case_reports, document)
+        dimension_id: _dimension_status(
+            dimension_id, case_reports, document, catalog_valid=catalog_valid
+        )
         for dimension_id in known_dimensions
     }
     if not catalog_valid or incomplete_dimensions or catalog_error_dimensions:
@@ -1944,14 +1966,17 @@ def build_report(
             "statuses": dict(sorted(summary.items())),
         },
         "cases": case_reports,
-        "move_effects": _move_effects_summary(document, case_reports),
+        "move_effects": _move_effects_summary(document, case_reports, catalog_valid=catalog_valid),
         "problems": problems,
         "overall": overall,
     }
 
 
 def _move_effects_summary(
-    catalog: dict[str, Any], case_reports: list[dict[str, Any]] | None = None
+    catalog: dict[str, Any],
+    case_reports: list[dict[str, Any]] | None = None,
+    *,
+    catalog_valid: bool = True,
 ) -> dict[str, Any]:
     try:
         families = effect_families(catalog)
@@ -1962,6 +1987,8 @@ def _move_effects_summary(
         case_reports or [], _expanded_required_runtimes(catalog)
     )
     declared_effects = _declared_case_effects(catalog)
+    if not catalog_valid:
+        verified_cases = {}
     verified_tested = sum(
         1
         for family in families
