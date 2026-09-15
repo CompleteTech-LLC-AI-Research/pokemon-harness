@@ -134,6 +134,7 @@ python -m pip install -e ".[dev]"
 # Check packaging and gate lint/format
 python -m ruff check \
     scripts/bootstrap_pyboy.py \
+    scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
@@ -144,6 +145,7 @@ python -m ruff check \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
+    tests/test_battle_coverage.py \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
@@ -151,6 +153,7 @@ python -m ruff check \
     tests/test_runtime_packaging.py
 python -m ruff format --check \
     scripts/bootstrap_pyboy.py \
+    scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
@@ -161,6 +164,7 @@ python -m ruff format --check \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
+    tests/test_battle_coverage.py \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \

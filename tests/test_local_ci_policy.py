@@ -42,7 +42,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     # command-level contract rather than a YAML parser so the unit tier has no
     # PyYAML dependency and cannot accidentally run the expensive checks.
     commands = (
-        "python -m pip install -e \".[dev]\"",
+        'python -m pip install -e ".[dev]"',
         "python -m ruff check",
         "python -m ruff format --check",
         "python scripts/validate_fixture_manifest.py --schema-only",
@@ -50,8 +50,8 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "python scripts/tcp_link_matrix.py --format text",
         "python scripts/network_concurrency_probe.py",
         "python scripts/production_gate.py --runtime-mode source --unit-only --repeat-timing 5",
-        "--evidence-dir \"$RUNNER_TEMP/pokered-unit-evidence\"",
-        "python -m pip wheel --no-deps --wheel-dir \"$RUNNER_TEMP/pokered-wheels\" .",
+        '--evidence-dir "$RUNNER_TEMP/pokered-unit-evidence"',
+        'python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/pokered-wheels" .',
         "python - \"$RUNNER_TEMP/pokered-wheels\" <<'PY'",
         'clean_venv="$RUNNER_TEMP/pokered-clean-venv"',
         'python -m venv "$clean_venv"',
@@ -69,6 +69,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     # prefixes, so a local run cannot silently lint a smaller set.
     workflow_paths = (
         "scripts/bootstrap_pyboy.py",
+        "scripts/coverage_report.py",
         "scripts/network_concurrency_probe.py",
         "scripts/produce_battle_scenario.py",
         "scripts/production_gate.py",
@@ -79,6 +80,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "tests/_rom_assets.py",
         "tests/_tier_config.py",
         "tests/conftest.py",
+        "tests/test_battle_coverage.py",
         "tests/test_battle_scenario_fixtures.py",
         "tests/test_fixture_provenance.py",
         "tests/test_production_gate.py",
@@ -107,7 +109,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "windows_absolute = re.compile",
         'forbidden_parts = {"rom", "roms", "fixtures", "release-evidence", "artifacts"}',
         'assert pyboy.__version__ == "2.7.0"',
-        'assert pyboy.__pokered_harness_revision__ == (',
+        "assert pyboy.__pokered_harness_revision__ == (",
         "assert utils.cython_compiled is False",
         '"backend", "apply_external_edge", "peek_out_bit"',
         '"POKERED_SKIP_SHA1",',
@@ -123,8 +125,8 @@ def test_local_runner_retains_external_evidence() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
 
     assert 'RUNNER_TEMP="$(mktemp -d ' in runner
-    assert 'export RUNNER_TEMP' in runner
-    assert 'trap report_retained EXIT' in runner
+    assert "export RUNNER_TEMP" in runner
+    assert "trap report_retained EXIT" in runner
     assert '"$repo_root"/*' in runner
     assert "Local CI temporary evidence retained at:" in runner
     assert "--dry-run" in runner
@@ -137,7 +139,7 @@ def test_local_runner_retains_external_evidence() -> None:
 def test_local_runner_requires_supported_active_virtualenv() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
 
-    assert 'VIRTUAL_ENV:-' in runner
+    assert "VIRTUAL_ENV:-" in runner
     assert "sys.prefix == sys.base_prefix" in runner
     assert "3.11|3.12" in runner
     assert "command -v python" in runner

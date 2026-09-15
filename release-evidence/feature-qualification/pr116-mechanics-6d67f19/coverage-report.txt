@@ -1,0 +1,52 @@
+Battle-scenario functional coverage report
+catalog: pokered-harness.battle-scenarios v1 (coverage v1, effects v1)
+run: kind=json path=release-evidence/feature-qualification/pr116-mechanics-6d67f19/coverage-evidence.json run_id=pr116-mechanics-6d67f19d93abbe93a8147cafa810f437c312a706 commit=6d67f19d93abbe93a8147cafa810f437c312a706 commit_source=result
+  runtime cython: build=c565df66c3731fad2856169a90f6bbec99925915 python=(unknown)
+  runtime source: build=c565df66c3731fad2856169a90f6bbec99925915 python=(unknown)
+dimensions (separate scopes):
+  one_turn_pairing: INCOMPLETE [one-turn settled battle pairing; checks=38 complete=2]
+  expanded_mechanics: PARTIAL [expanded mechanics / move effects; families=87 tested=1 planned_unverified=67 deliberately_excluded=19]
+required checks: 40 tested=4 incomplete=36
+current selector: admits effects [0, 6, 44]; excludes moves [68]
+case results:
+  TESTED       runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-red]
+  TESTED       runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-red]
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-blue] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-blue] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-yellow] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-yellow] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[blue-red] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[blue-red] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[blue-blue] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[blue-blue] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[blue-yellow] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[blue-yellow] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[yellow-red] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[yellow-red] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[yellow-blue] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[yellow-blue] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[yellow-yellow] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[yellow-yellow] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[red_color-listen-red_color-connect] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[red_color-listen-red_color-connect] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[red_color-listen-blue_color-connect] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[red_color-listen-blue_color-connect] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[red_color-listen-yellow-connect] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[red_color-listen-yellow-connect] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[blue_color-listen-red_color-connect] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[blue_color-listen-red_color-connect] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[blue_color-listen-blue_color-connect] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[blue_color-listen-blue_color-connect] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[blue_color-listen-yellow-connect] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[blue_color-listen-yellow-connect] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-red_color-connect] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-red_color-connect] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-blue_color-connect] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-blue_color-connect] reason=no result for runtime cython
+  MISSING      runtime=source selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-yellow-connect] reason=no result for runtime source
+  MISSING      runtime=cython selector=tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-yellow-connect] reason=no result for runtime cython
+  TESTED       runtime=source selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-red]
+  TESTED       runtime=cython selector=tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-red]
+overall: INCOMPLETE

@@ -781,5 +781,1476 @@
         "real_rom_execution": null
       }
     }
-  ]
+  ],
+  "coverage": {
+    "coverage_version": 1,
+    "dimensions": [
+      {
+        "dimension_id": "one_turn_pairing",
+        "title": "One settled battle turn per ordered version/role pairing",
+        "evidence_kind": "real_rom_terminal",
+        "status": "declared_only",
+        "required_runtimes": [
+          "source",
+          "cython"
+        ],
+        "required_roles": [
+          "listen",
+          "connect"
+        ],
+        "selector_source": "scripts/tcp_link_matrix.py",
+        "selector_symbol": "STRICT_BATTLE_NODEIDS",
+        "scope_note": "Each of the 19 strict battle entry points is required once per declared runtime. Collection only proves declaration shape; a passing one-turn row does not qualify wider mechanics."
+      },
+      {
+        "dimension_id": "expanded_mechanics",
+        "title": "Expanded move-effect mechanics coverage",
+        "evidence_kind": "real_rom_terminal",
+        "status": "planned_unverified",
+        "required_runtimes": [
+          "source",
+          "cython"
+        ],
+        "required_roles": [
+          "listen",
+          "connect"
+        ],
+        "selector_source": null,
+        "selector_symbol": null,
+        "effects_ref": "move_effects",
+        "scope_note": "Every mapped move-effect family requires its own scenario, selector, and terminal evidence before it may be called tested. This dimension is separate from one-turn pairing coverage and stays unverified when those rows pass."
+      }
+    ],
+    "required_cases": [
+      {
+        "case_id": "battle_local_red_red",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "red",
+          "red"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "red-color-battle",
+        "oracle": "both peers retain a settled, read-only one-turn battle snapshot with reciprocal exchanged slots, moves, and damage application evidence",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-red]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_local_red_blue",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "red",
+          "blue"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "red-color-battle",
+        "oracle": "both peers retain a settled, read-only one-turn battle snapshot with reciprocal exchanged slots, moves, and damage application evidence",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-blue]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_local_red_yellow",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "red",
+          "yellow"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "red-color-battle",
+        "oracle": "both peers retain a settled, read-only one-turn battle snapshot with reciprocal exchanged slots, moves, and damage application evidence",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-yellow]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_local_blue_red",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "blue",
+          "red"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "blue-color-battle",
+        "oracle": "both peers retain a settled, read-only one-turn battle snapshot with reciprocal exchanged slots, moves, and damage application evidence",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[blue-red]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_local_blue_blue",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "blue",
+          "blue"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "blue-color-battle",
+        "oracle": "both peers retain a settled, read-only one-turn battle snapshot with reciprocal exchanged slots, moves, and damage application evidence",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[blue-blue]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_local_blue_yellow",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "blue",
+          "yellow"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "blue-color-battle",
+        "oracle": "both peers retain a settled, read-only one-turn battle snapshot with reciprocal exchanged slots, moves, and damage application evidence",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[blue-yellow]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_local_yellow_red",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "yellow",
+          "red"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "yellow-cgb-battle",
+        "oracle": "both peers retain a settled, read-only one-turn battle snapshot with reciprocal exchanged slots, moves, and damage application evidence",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[yellow-red]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_local_yellow_blue",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "yellow",
+          "blue"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "yellow-cgb-battle",
+        "oracle": "both peers retain a settled, read-only one-turn battle snapshot with reciprocal exchanged slots, moves, and damage application evidence",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[yellow-blue]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_local_yellow_yellow",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "yellow",
+          "yellow"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "yellow-cgb-battle",
+        "oracle": "both peers retain a settled, read-only one-turn battle snapshot with reciprocal exchanged slots, moves, and damage application evidence",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[yellow-yellow]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_local_red_yellow_resolved",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "red",
+          "yellow"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "red-color-battle",
+        "oracle": "the dedicated Red/Yellow assertion resolves one settled battle turn with a real cross-version party exchange",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_remote_red_color_listen_red_color_connect",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "remote",
+        "game_versions": [
+          "red",
+          "red"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "red-color-battle",
+        "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
+        "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[red_color-listen-red_color-connect]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_remote_red_color_listen_blue_color_connect",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "remote",
+        "game_versions": [
+          "red",
+          "blue"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "red-color-battle",
+        "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
+        "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[red_color-listen-blue_color-connect]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_remote_red_color_listen_yellow_connect",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "remote",
+        "game_versions": [
+          "red",
+          "yellow"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "red-color-battle",
+        "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
+        "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[red_color-listen-yellow-connect]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_remote_blue_color_listen_red_color_connect",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "remote",
+        "game_versions": [
+          "blue",
+          "red"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "blue-color-battle",
+        "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
+        "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[blue_color-listen-red_color-connect]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_remote_blue_color_listen_blue_color_connect",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "remote",
+        "game_versions": [
+          "blue",
+          "blue"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "blue-color-battle",
+        "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
+        "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[blue_color-listen-blue_color-connect]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_remote_blue_color_listen_yellow_connect",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "remote",
+        "game_versions": [
+          "blue",
+          "yellow"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "blue-color-battle",
+        "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
+        "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[blue_color-listen-yellow-connect]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_remote_yellow_listen_red_color_connect",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "remote",
+        "game_versions": [
+          "yellow",
+          "red"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "yellow-cgb-battle",
+        "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
+        "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-red_color-connect]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_remote_yellow_listen_blue_color_connect",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "remote",
+        "game_versions": [
+          "yellow",
+          "blue"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "yellow-cgb-battle",
+        "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
+        "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-blue_color-connect]",
+        "status": "required"
+      },
+      {
+        "case_id": "battle_remote_yellow_listen_yellow_connect",
+        "dimension_id": "one_turn_pairing",
+        "operation": "battle",
+        "transport": "remote",
+        "game_versions": [
+          "yellow",
+          "yellow"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "yellow-cgb-battle",
+        "oracle": "both subprocess peers resolve one settled battle turn over native bit-level TCP serial traffic",
+        "selector": "tests/test_pyboy_link_session_subprocess.py::test_subprocess_pair_resolves_battle_turn_over_tcp[yellow-listen-yellow-connect]",
+        "status": "required"
+      },
+      {
+        "case_id": "mechanics_effect_0_no_additional_effect",
+        "dimension_id": "expanded_mechanics",
+        "operation": "battle",
+        "transport": "local",
+        "game_versions": [
+          "red",
+          "red"
+        ],
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "runtimes": [
+          "source",
+          "cython"
+        ],
+        "fixture_id": "red-color-battle",
+        "effect_id": 0,
+        "oracle": "one settled local Red/Red battle turn under the strict selector observes local and enemy move effects equal to effect 0 (NO_ADDITIONAL_EFFECT)",
+        "selector": "tests/test_pyboy_link_session_roms.py::test_pair_completes_battle_turn[red-red]",
+        "status": "required"
+      }
+    ],
+    "evidence_policy": {
+      "expected_pyboy_version": "2.7.0",
+      "expected_pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+      "accepted_outcomes": [
+        "passed"
+      ],
+      "note": "Only a terminal passed record for the declared runtime with matching runtime build counts as tested. Missing, skipped, xfailed, timed-out, unrun, duplicated, or mismatched results are incomplete, never PASS."
+    }
+  },
+  "move_effects": {
+    "effects_version": 1,
+    "family_count": 87,
+    "planned_unverified_count": 67,
+    "deliberately_excluded_count": 19,
+    "pinned_sources": {
+      "pokered": {
+        "commit": "fbcf7d0e19a3a2db505440d3ccd3d40ca996c15c",
+        "moves_path": "data/moves/moves.asm",
+        "moves_sha256": "a2cf3e1ec6bf4b5caaeeec974967691c9eb47923d1e7432fb0267ba7d3a5931f",
+        "effects_path": "constants/move_effect_constants.asm",
+        "effects_sha256": "18aef2cad7df1cabed23980b64e95c6b2a624f7c52a06588e3b673413374b061"
+      },
+      "pokeyellow": {
+        "commit": "bfa7170107eea23b89febb60bfb2ce39173bf2e1",
+        "moves_path": "data/moves/moves.asm",
+        "moves_sha256": "a2cf3e1ec6bf4b5caaeeec974967691c9eb47923d1e7432fb0267ba7d3a5931f",
+        "effects_path": "constants/move_effect_constants.asm",
+        "effects_sha256": "18aef2cad7df1cabed23980b64e95c6b2a624f7c52a06588e3b673413374b061"
+      }
+    },
+    "table_identity": "The pinned Red/Blue and Yellow move and move-effect tables are byte-identical at their referenced commits; SHA-256 values above are equal across both games.",
+    "current_selector": {
+      "selector_source": "scripts/_timed_battle_probe.py",
+      "admitted_effect_ids": [
+        0,
+        6,
+        44
+      ],
+      "admitted_effect_names": [
+        "NO_ADDITIONAL_EFFECT",
+        "PARALYZE_SIDE_EFFECT1",
+        "ATTACK_TWICE_EFFECT"
+      ],
+      "excluded_moves": [
+        {
+          "move_id": 68,
+          "name": "COUNTER",
+          "effect_id": 0,
+          "reason": "Counter's special return path is not qualified by the current one-turn selector"
+        }
+      ],
+      "evidence_status": "declared_selector_only",
+      "note": "Selector admission is source-derived and is not execution evidence. With no collected or terminal real-ROM records, every family is planned_unverified or deliberately_excluded."
+    },
+    "families": [
+      {
+        "effect_id": 0,
+        "name": "NO_ADDITIONAL_EFFECT",
+        "kind": "effect",
+        "scope": "tested",
+        "reason": "effect 0 is admitted by the current one-turn selector and the declared strict Red/Red battle selector observes the chosen move effect; the family is tested only while that dual-runtime terminal evidence carries the declared effect and matching provenance",
+        "move_ids": [
+          1,
+          2,
+          5,
+          10,
+          11,
+          15,
+          16,
+          17,
+          21,
+          22,
+          25,
+          30,
+          33,
+          55,
+          56,
+          57,
+          64,
+          65,
+          68,
+          70,
+          75,
+          88,
+          89,
+          98,
+          121,
+          127,
+          146,
+          152,
+          157,
+          161,
+          163
+        ],
+        "evidence": [
+          "mechanics_effect_0_no_additional_effect"
+        ]
+      },
+      {
+        "effect_id": 1,
+        "name": "EFFECT_01",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 2,
+        "name": "POISON_SIDE_EFFECT1",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          40
+        ]
+      },
+      {
+        "effect_id": 3,
+        "name": "DRAIN_HP_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          71,
+          72,
+          141
+        ]
+      },
+      {
+        "effect_id": 4,
+        "name": "BURN_SIDE_EFFECT1",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          7,
+          52,
+          53
+        ]
+      },
+      {
+        "effect_id": 5,
+        "name": "FREEZE_SIDE_EFFECT1",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          8,
+          58,
+          59
+        ]
+      },
+      {
+        "effect_id": 6,
+        "name": "PARALYZE_SIDE_EFFECT1",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "admitted by the current one-turn selector's effect allowlist but has no collected or terminal real-ROM evidence; selector or effect-table presence is not execution evidence",
+        "move_ids": [
+          9,
+          84,
+          85,
+          87
+        ]
+      },
+      {
+        "effect_id": 7,
+        "name": "EXPLODE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          120,
+          153
+        ]
+      },
+      {
+        "effect_id": 8,
+        "name": "DREAM_EATER_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          138
+        ]
+      },
+      {
+        "effect_id": 9,
+        "name": "MIRROR_MOVE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          119
+        ]
+      },
+      {
+        "effect_id": 10,
+        "name": "ATTACK_UP1_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          96,
+          159
+        ]
+      },
+      {
+        "effect_id": 11,
+        "name": "DEFENSE_UP1_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          106,
+          110,
+          111
+        ]
+      },
+      {
+        "effect_id": 12,
+        "name": "SPEED_UP1_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 13,
+        "name": "SPECIAL_UP1_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          74
+        ]
+      },
+      {
+        "effect_id": 14,
+        "name": "ACCURACY_UP1_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 15,
+        "name": "EVASION_UP1_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          104,
+          107
+        ]
+      },
+      {
+        "effect_id": 16,
+        "name": "PAY_DAY_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          6
+        ]
+      },
+      {
+        "effect_id": 17,
+        "name": "SWIFT_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          129
+        ]
+      },
+      {
+        "effect_id": 18,
+        "name": "ATTACK_DOWN1_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          45
+        ]
+      },
+      {
+        "effect_id": 19,
+        "name": "DEFENSE_DOWN1_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          39,
+          43
+        ]
+      },
+      {
+        "effect_id": 20,
+        "name": "SPEED_DOWN1_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          81
+        ]
+      },
+      {
+        "effect_id": 21,
+        "name": "SPECIAL_DOWN1_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 22,
+        "name": "ACCURACY_DOWN1_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 4 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          28,
+          108,
+          134,
+          148
+        ]
+      },
+      {
+        "effect_id": 23,
+        "name": "EVASION_DOWN1_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 24,
+        "name": "CONVERSION_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          160
+        ]
+      },
+      {
+        "effect_id": 25,
+        "name": "HAZE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          114
+        ]
+      },
+      {
+        "effect_id": 26,
+        "name": "BIDE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          117
+        ]
+      },
+      {
+        "effect_id": 27,
+        "name": "THRASH_PETAL_DANCE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          37,
+          80
+        ]
+      },
+      {
+        "effect_id": 28,
+        "name": "SWITCH_AND_TELEPORT_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          18,
+          46,
+          100
+        ]
+      },
+      {
+        "effect_id": 29,
+        "name": "TWO_TO_FIVE_ATTACKS_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 7 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          3,
+          4,
+          31,
+          42,
+          131,
+          140,
+          154
+        ]
+      },
+      {
+        "effect_id": 30,
+        "name": "EFFECT_1E",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 31,
+        "name": "FLINCH_SIDE_EFFECT1",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          44,
+          125,
+          158
+        ]
+      },
+      {
+        "effect_id": 32,
+        "name": "SLEEP_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 5 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          47,
+          79,
+          95,
+          142,
+          147
+        ]
+      },
+      {
+        "effect_id": 33,
+        "name": "POISON_SIDE_EFFECT2",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          123,
+          124
+        ]
+      },
+      {
+        "effect_id": 34,
+        "name": "BURN_SIDE_EFFECT2",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          126
+        ]
+      },
+      {
+        "effect_id": 35,
+        "name": "FREEZE_SIDE_EFFECT2",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 36,
+        "name": "PARALYZE_SIDE_EFFECT2",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          34,
+          122
+        ]
+      },
+      {
+        "effect_id": 37,
+        "name": "FLINCH_SIDE_EFFECT2",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 4 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          23,
+          27,
+          29,
+          67
+        ]
+      },
+      {
+        "effect_id": 38,
+        "name": "OHKO_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          12,
+          32,
+          90
+        ]
+      },
+      {
+        "effect_id": 39,
+        "name": "CHARGE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 5 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          13,
+          76,
+          91,
+          130,
+          143
+        ]
+      },
+      {
+        "effect_id": 40,
+        "name": "SUPER_FANG_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          162
+        ]
+      },
+      {
+        "effect_id": 41,
+        "name": "SPECIAL_DAMAGE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 5 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          49,
+          69,
+          82,
+          101,
+          149
+        ]
+      },
+      {
+        "effect_id": 42,
+        "name": "TRAPPING_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 4 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          20,
+          35,
+          83,
+          128
+        ]
+      },
+      {
+        "effect_id": 43,
+        "name": "FLY_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          19
+        ]
+      },
+      {
+        "effect_id": 44,
+        "name": "ATTACK_TWICE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "admitted by the current one-turn selector's effect allowlist but has no collected or terminal real-ROM evidence; selector or effect-table presence is not execution evidence",
+        "move_ids": [
+          24,
+          155
+        ]
+      },
+      {
+        "effect_id": 45,
+        "name": "JUMP_KICK_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          26,
+          136
+        ]
+      },
+      {
+        "effect_id": 46,
+        "name": "MIST_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          54
+        ]
+      },
+      {
+        "effect_id": 47,
+        "name": "FOCUS_ENERGY_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          116
+        ]
+      },
+      {
+        "effect_id": 48,
+        "name": "RECOIL_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 4 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          36,
+          38,
+          66,
+          165
+        ]
+      },
+      {
+        "effect_id": 49,
+        "name": "CONFUSION_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          48,
+          109
+        ]
+      },
+      {
+        "effect_id": 50,
+        "name": "ATTACK_UP2_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          14
+        ]
+      },
+      {
+        "effect_id": 51,
+        "name": "DEFENSE_UP2_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          112,
+          151
+        ]
+      },
+      {
+        "effect_id": 52,
+        "name": "SPEED_UP2_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          97
+        ]
+      },
+      {
+        "effect_id": 53,
+        "name": "SPECIAL_UP2_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          133
+        ]
+      },
+      {
+        "effect_id": 54,
+        "name": "ACCURACY_UP2_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 55,
+        "name": "EVASION_UP2_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 56,
+        "name": "HEAL_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          105,
+          135,
+          156
+        ]
+      },
+      {
+        "effect_id": 57,
+        "name": "TRANSFORM_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          144
+        ]
+      },
+      {
+        "effect_id": 58,
+        "name": "ATTACK_DOWN2_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 59,
+        "name": "DEFENSE_DOWN2_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          103
+        ]
+      },
+      {
+        "effect_id": 60,
+        "name": "SPEED_DOWN2_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 61,
+        "name": "SPECIAL_DOWN2_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 62,
+        "name": "ACCURACY_DOWN2_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 63,
+        "name": "EVASION_DOWN2_EFFECT",
+        "kind": "effect",
+        "scope": "deliberately_excluded",
+        "reason": "constant is defined in the pinned move-effect table but no move in Red/Blue or Yellow references it; there is no execution path to qualify",
+        "move_ids": []
+      },
+      {
+        "effect_id": 64,
+        "name": "LIGHT_SCREEN_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          113
+        ]
+      },
+      {
+        "effect_id": 65,
+        "name": "REFLECT_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          115
+        ]
+      },
+      {
+        "effect_id": 66,
+        "name": "POISON_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          77,
+          92,
+          139
+        ]
+      },
+      {
+        "effect_id": 67,
+        "name": "PARALYZE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          78,
+          86,
+          137
+        ]
+      },
+      {
+        "effect_id": 68,
+        "name": "ATTACK_DOWN_SIDE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          62
+        ]
+      },
+      {
+        "effect_id": 69,
+        "name": "DEFENSE_DOWN_SIDE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          51
+        ]
+      },
+      {
+        "effect_id": 70,
+        "name": "SPEED_DOWN_SIDE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 3 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          61,
+          132,
+          145
+        ]
+      },
+      {
+        "effect_id": 71,
+        "name": "SPECIAL_DOWN_SIDE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          94
+        ]
+      },
+      {
+        "effect_id": 72,
+        "name": null,
+        "kind": "const_skip",
+        "scope": "deliberately_excluded",
+        "reason": "reserved const_skip padding slot in the pinned move-effect table; it is not a move-effect family",
+        "move_ids": []
+      },
+      {
+        "effect_id": 73,
+        "name": null,
+        "kind": "const_skip",
+        "scope": "deliberately_excluded",
+        "reason": "reserved const_skip padding slot in the pinned move-effect table; it is not a move-effect family",
+        "move_ids": []
+      },
+      {
+        "effect_id": 74,
+        "name": null,
+        "kind": "const_skip",
+        "scope": "deliberately_excluded",
+        "reason": "reserved const_skip padding slot in the pinned move-effect table; it is not a move-effect family",
+        "move_ids": []
+      },
+      {
+        "effect_id": 75,
+        "name": null,
+        "kind": "const_skip",
+        "scope": "deliberately_excluded",
+        "reason": "reserved const_skip padding slot in the pinned move-effect table; it is not a move-effect family",
+        "move_ids": []
+      },
+      {
+        "effect_id": 76,
+        "name": "CONFUSION_SIDE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 2 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          60,
+          93
+        ]
+      },
+      {
+        "effect_id": 77,
+        "name": "TWINEEDLE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          41
+        ]
+      },
+      {
+        "effect_id": 78,
+        "name": null,
+        "kind": "const_skip",
+        "scope": "deliberately_excluded",
+        "reason": "reserved const_skip padding slot in the pinned move-effect table; it is not a move-effect family",
+        "move_ids": []
+      },
+      {
+        "effect_id": 79,
+        "name": "SUBSTITUTE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          164
+        ]
+      },
+      {
+        "effect_id": 80,
+        "name": "HYPER_BEAM_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          63
+        ]
+      },
+      {
+        "effect_id": 81,
+        "name": "RAGE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          99
+        ]
+      },
+      {
+        "effect_id": 82,
+        "name": "MIMIC_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          102
+        ]
+      },
+      {
+        "effect_id": 83,
+        "name": "METRONOME_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          118
+        ]
+      },
+      {
+        "effect_id": 84,
+        "name": "LEECH_SEED_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          73
+        ]
+      },
+      {
+        "effect_id": 85,
+        "name": "SPLASH_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          150
+        ]
+      },
+      {
+        "effect_id": 86,
+        "name": "DISABLE_EFFECT",
+        "kind": "effect",
+        "scope": "planned_unverified",
+        "reason": "used by 1 move(s) in the pinned table but no implemented scenario or collected evidence covers this effect family",
+        "move_ids": [
+          50
+        ]
+      }
+    ]
+  }
 }
