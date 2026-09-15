@@ -410,12 +410,15 @@ release readiness.
   are complete. Unadvertised load and platform extensions are coverage limits,
   not additional blockers; historical Windows checks do not qualify the candidate.
 - [ ] The qualification job was bound to a pinned, immutable allocation
-  descriptor whose held lease, allocation cgroup membership, reserved cpuset, or
-  exclusive marker was re-observed on the host, and the complete pinned
-  ROM/SYM/fixture input set for the declared scope was present and
-  hash-validated. A declaration that only matched deployment IDs, a writable
-  descriptor, competing cgroup members, or a missing required input does not
-  count as a provisioned runner.
+  descriptor whose host-wide lease lock, allocation cgroup membership, reserved
+  cpuset, or operator-created exclusive marker was re-observed on the host, the
+  holder was the only lock holder, the complete pinned ROM/SYM/fixture input set
+  for the declared scope was present and hash-validated, and retained evidence
+  from the fresh native build procedure tied the pinned inputs and completed
+  build to the installed outputs. A declaration that only matched deployment
+  IDs, a writable descriptor, a job-private lock, a checker-generated marker,
+  competing cgroup members, a missing required input, or a mixed build without
+  retained evidence does not count as a provisioned runner.
 
 ## Fixture provenance and generation
 

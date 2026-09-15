@@ -584,18 +584,25 @@ the host; a declaration that merely matches deployment IDs never passes.
 Choose one reservation mechanism:
 
 - `cgroup-quota`: the job runs in a non-root cgroup with a finite `cpu.max`
-  quota narrower than the host, and that cgroup contains only the job's process
-  tree.
+  quota narrower than the host, and that cgroup contains only the lease holder
+  and its job descendants.
 - `cpuset-affinity`: the job's observed affinity exactly equals a reserved
   cpuset that is a strict subset of the host CPUs.
 - `dedicated-host`: the allocation owns every host CPU, records no competing
-  quota or weight, and carries an operator-created exclusive marker plus a held
-  lease.
+  quota or weight, and carries an operator-created exclusive marker whose
+  contents match an operator-issued exclusive token, plus a held lease.
+
+Every mechanism also requires `reservation.host_lock_path`: one host-wide lock
+file that concurrent jobs contend on. A lock inside the per-job directory is
+rejected, because two overlapping jobs could then hold independent leases. The
+kernel must report the recorded holder as the only holder, so a competing
+unregistered process fails the lease.
 
 The declaration is operator-owned and external to the repository. It records
 `reservation_mechanism`, the allocation facts, the source/native interpreters
-and their pinned native build fingerprints, and the complete pinned ROM, symbol,
-and fixture input set for the declared scope. `POKERED_QUALIFICATION_DECLARATION`
+and their pinned native build fingerprints, a SHA-256 pin on retained evidence
+from the fresh native build procedure, and the complete pinned ROM, symbol, and
+fixture input set for the declared scope. `POKERED_QUALIFICATION_DECLARATION`
 or `--declaration` selects it. `--setup` prints the deterministic
 `native_build_inputs_sha256` and `native_fingerprint` to pin in the declaration.
 
@@ -629,18 +636,27 @@ declared capacity is not held. `--reserve` is what writes and pins the
 descriptor; `--release` and `--recover` only ever touch resources whose owner
 is identifiable.
 
-`--reserve` writes an owner-only `allocation.json` inside the private job
-directory, pins its SHA-256 in the declaration, and holds an exclusive lease
-lock while the `--run` command executes as a descendant of the holder. A lease
-is accepted only when the recorded holder is alive, its start time matches, and
-the kernel reports it holding the lock. `--setup` creates `tmp/`, `evidence/`,
-and `logs/` under the job directory. Assets are expected to be read-only shared
-inputs; a writable asset root fails the prerequisite check. `--release` signals
-only a holder whose command line and start time identify an owned
-qualification-runner lease, and `--recover` removes only stale state whose owner
-is already gone. Interrupted prerequisite subprocesses are bounded by
-`POKERED_QUALIFICATION_COMMAND_TIMEOUT_SECONDS` (default `300`) and their owned
-process group is terminated without discarding the original failure.
+`--reserve` validates the declaration and runtime/asset prerequisites, then
+acquires the host-wide lock, verifies the observed allocation, and only then
+launches `--run`. It refuses to launch when admission fails. The `--run` child
+receives `TMPDIR` under the job's private `tmp/`, plus
+`POKERED_QUALIFICATION_JOB_DIR` and `POKERED_QUALIFICATION_EVIDENCE_DIR` for its
+evidence. It writes an owner-only `allocation.json` inside the private job
+directory, pins its SHA-256 in the declaration, and holds the host-wide lease
+lock while the command executes as a descendant of the holder. A lease is
+accepted only when the recorded holder is alive, its start time matches, the
+lock is host-wide, and the kernel reports it as the only holder. `--setup`
+creates `tmp/`, `evidence/`, and `logs/` under the job directory. Assets are
+expected to be read-only shared inputs; a writable asset root fails the
+prerequisite check. `--release` refuses to touch state it cannot attribute to an
+owned qualification-runner lease, and `--recover` preserves state and fails
+closed whenever the holder is still alive, still holds the lock, or lock
+ownership cannot be observed. Interrupted prerequisite subprocesses are bounded
+by `POKERED_QUALIFICATION_COMMAND_TIMEOUT_SECONDS` (default `300`) and their
+owned process group is terminated without discarding the original failure; the
+`--run` qualification command has its own deadline,
+`POKERED_QUALIFICATION_RUN_TIMEOUT_SECONDS` or `--run-timeout` (default
+`86400`).
 
 Both peers of every TCP pair stay on the host because the supported transport
 is loopback-only. Provisioning new paid infrastructure or uploading

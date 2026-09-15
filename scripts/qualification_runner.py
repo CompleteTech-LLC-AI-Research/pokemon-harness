@@ -62,7 +62,10 @@ _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DESCRIPTOR_VERSION = 1
 _PROBE_TIMEOUT_ENV = "POKERED_QUALIFICATION_COMMAND_TIMEOUT_SECONDS"
+_QUALIFICATION_TIMEOUT_ENV = "POKERED_QUALIFICATION_RUN_TIMEOUT_SECONDS"
 _DEFAULT_PROBE_TIMEOUT_SECONDS = 300.0
+_DEFAULT_QUALIFICATION_TIMEOUT_SECONDS = 86400.0
+_NATIVE_BUILD_EVIDENCE_PROCEDURE = "bootstrap_pyboy --mode cython"
 _TIMEOUT_RETURNCODE = 124
 _CHILD_TERMINATION_GRACE_SECONDS = 5.0
 _RUNTIME_MODULES = (
@@ -272,6 +275,25 @@ def _flock_holder_pids(lock_path: Path) -> set[int] | None:
         if entry_inode == inode:
             holders.add(holder)
     return holders
+
+
+def _observe_flock_holders(lock_path: Path) -> set[int] | None:
+    """Observe the flock holders for *lock_path*.
+
+    A missing lock file is a positive observation that no process holds the
+    lock; an unreadable file or lock table returns ``None`` so callers fail
+    closed instead of assuming the lease is free.
+    """
+
+    if lock_path.is_symlink():
+        return None
+    try:
+        exists = lock_path.exists()
+    except OSError:
+        return None
+    if not exists:
+        return set()
+    return _flock_holder_pids(lock_path)
 
 
 def _descriptor_is_private(path: Path) -> bool:
@@ -778,6 +800,40 @@ def validate_declaration(declaration: dict[str, Any]) -> list[CheckResult]:
                     "the allocation descriptor must be pinned by its SHA-256 digest",
                 )
             )
+        host_lock = reservation.get("host_lock_path")
+        if not isinstance(host_lock, str) or not host_lock.strip():
+            results.append(
+                _result(
+                    "reservation-host-lock",
+                    "fail",
+                    "host-wide allocation lock path",
+                    host_lock,
+                    "a single host-wide lock is required for mutual exclusion between jobs",
+                )
+            )
+        if mechanism == "dedicated-host":
+            marker_path = reservation.get("exclusive_marker_path")
+            if not isinstance(marker_path, str) or not marker_path.strip():
+                results.append(
+                    _result(
+                        "reservation-exclusive-marker",
+                        "fail",
+                        "operator-created exclusive marker path",
+                        marker_path,
+                        "a dedicated host requires an operator-created exclusive marker",
+                    )
+                )
+            token = reservation.get("exclusive_token")
+            if not isinstance(token, str) or not token.strip():
+                results.append(
+                    _result(
+                        "reservation-exclusive-token",
+                        "fail",
+                        "operator-issued exclusive token",
+                        token,
+                        "a dedicated host requires an operator-issued exclusive token",
+                    )
+                )
 
     interpreters = declaration.get("interpreters")
     if (
@@ -942,8 +998,16 @@ def _load_allocation_descriptor(path: Path) -> tuple[dict[str, Any] | None, str]
     return document, ""
 
 
-def _descriptor_lease_status(descriptor: dict[str, Any], facts: RunnerFacts) -> tuple[str, str]:
-    """Re-observe that the descriptor's lease is held by the live holder."""
+def _descriptor_lease_status(
+    descriptor: dict[str, Any], facts: RunnerFacts, job_dir: Path
+) -> tuple[str, str]:
+    """Re-observe that the descriptor's host-wide lease is held by the holder.
+
+    The lease lock must be host-wide (outside ``reservation.job_dir``) so
+    overlapping jobs contend on it, and the kernel lock table must show the
+    recorded holder as the only holder.  Any extra holder is a competing
+    unregistered process and fails the lease.
+    """
 
     holder = descriptor.get("holder_pid")
     if not isinstance(holder, int) or isinstance(holder, bool) or holder <= 0:
@@ -962,21 +1026,28 @@ def _descriptor_lease_status(descriptor: dict[str, Any], facts: RunnerFacts) -> 
     if not isinstance(lock_raw, str) or not lock_raw.strip():
         return "fail", "descriptor.lock_path is required to prove the lease is held"
     lock = Path(lock_raw)
+    if _path_within(lock, job_dir):
+        return "fail", "the allocation lock is private to the job, not a host-wide allocation lock"
     if lock.is_symlink() or not lock.is_file():
         return "fail", "the lease lock file is missing"
-    holders = _flock_holder_pids(lock)
+    holders = _observe_flock_holders(lock)
     if holders is None:
         return "unsupported", "the kernel lock table is unavailable, so holding is unproven"
     if holder not in holders:
         return "fail", "the recorded holder does not hold the lease lock"
-    return "ok", "allocation lease is held by the recorded live holder"
+    if holders - {holder}:
+        return "fail", "a competing unregistered process holds the allocation lock"
+    return "ok", "allocation lease is held by the recorded live holder as the only holder"
 
 
-def _cgroup_members_are_owned(facts: RunnerFacts) -> bool:
+def _cgroup_members_are_owned(facts: RunnerFacts, holder_pid: Any = None) -> bool:
     members = facts.cgroup_member_pids
     if members is None:
         return False
-    owned = set(facts.process_tree_pids)
+    if isinstance(holder_pid, int) and not isinstance(holder_pid, bool) and holder_pid > 0:
+        owned = set(_process_tree_pids(holder_pid))
+    else:
+        owned = set(facts.process_tree_pids)
     if not owned:
         owned = {os.getpid()}
     return set(members).issubset(owned)
@@ -1103,7 +1174,7 @@ def evaluate_reservation(
             descriptor.get("state"),
             "the allocation descriptor does not report a held lease",
         )
-    lease_status, lease_detail = _descriptor_lease_status(descriptor, facts)
+    lease_status, lease_detail = _descriptor_lease_status(descriptor, facts, job_dir)
     if lease_status != "ok":
         return _result(
             "reservation-evidence", lease_status, "held allocation lease", None, lease_detail
@@ -1114,7 +1185,7 @@ def evaluate_reservation(
     if mechanism == "cpuset-affinity":
         return _verify_cpuset_reservation(descriptor, facts)
     if mechanism == "dedicated-host":
-        return _verify_dedicated_reservation(descriptor, declaration, facts, repo_root)
+        return _verify_dedicated_reservation(descriptor, declaration, facts, repo_root, job_dir)
     return _result(
         "reservation-evidence",
         "fail",
@@ -1191,11 +1262,11 @@ def _verify_cgroup_reservation(descriptor: dict[str, Any], facts: RunnerFacts) -
             None,
             "competing cgroup workloads cannot be ruled out on this host",
         )
-    if not _cgroup_members_are_owned(facts):
+    if not _cgroup_members_are_owned(facts, descriptor.get("holder_pid")):
         return _result(
             "reservation-evidence",
             "fail",
-            "this job's process tree only",
+            "the lease holder and its job descendants only",
             facts.cgroup_member_pids,
             "competing processes share the declared allocation cgroup",
         )
@@ -1259,6 +1330,7 @@ def _verify_dedicated_reservation(
     declaration: dict[str, Any],
     facts: RunnerFacts,
     repo_root: Path,
+    job_dir: Path,
 ) -> CheckResult:
     declared_cpus = int(declaration.get("logical_cpus") or 0)
     if descriptor.get("exclusive") is not True:
@@ -1311,21 +1383,38 @@ def _verify_dedicated_reservation(
         return _result(
             "reservation-evidence",
             "fail",
-            "a documented exclusive marker",
+            "an operator-created exclusive marker",
             descriptor.get("exclusive_marker_path"),
             "a dedicated host needs an operator-created exclusive marker",
+        )
+    if _path_within(marker, job_dir):
+        return _result(
+            "reservation-evidence",
+            "fail",
+            "an operator-owned exclusive marker outside the job directory",
+            marker.name,
+            "the checker must not generate the exclusive marker inside its own job directory",
+        )
+    token = descriptor.get("exclusive_token")
+    if not isinstance(token, str) or not token.strip():
+        return _result(
+            "reservation-evidence",
+            "fail",
+            "an operator-issued exclusive token",
+            token,
+            "the allocation descriptor does not record the operator exclusive token",
         )
     try:
         marker_value = marker.read_text(encoding="utf-8").strip()
     except (OSError, ValueError):
         marker_value = ""
-    if marker_value != descriptor.get("lease_id"):
+    if marker_value != token:
         return _result(
             "reservation-evidence",
             "fail",
-            descriptor.get("lease_id"),
+            token,
             marker_value[:64],
-            "the exclusive marker does not match the allocation lease id",
+            "the operator exclusive marker does not match the declared token",
         )
     return _result(
         "reservation-evidence",
@@ -1590,6 +1679,19 @@ def _command_timeout() -> float:
     return value if value > 0 else _DEFAULT_PROBE_TIMEOUT_SECONDS
 
 
+def _qualification_timeout(override: float | None = None) -> float:
+    """Return the qualification-command deadline, distinct from prerequisites."""
+
+    raw = override if override is not None else os.environ.get(_QUALIFICATION_TIMEOUT_ENV)
+    if raw is None:
+        return _DEFAULT_QUALIFICATION_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_QUALIFICATION_TIMEOUT_SECONDS
+    return value if value > 0 else _DEFAULT_QUALIFICATION_TIMEOUT_SECONDS
+
+
 def _posix_child_preexec() -> None:
     """Ask the kernel to kill an owned child when this process dies."""
 
@@ -1697,13 +1799,18 @@ def _install_signal_handlers() -> None:
 
 
 def run_command(
-    command: list[str], cwd: Path, timeout: float | None = None
+    command: list[str],
+    cwd: Path,
+    timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run *command* under a deadline with owned-process cleanup.
 
     The command runs in its own session/process group, receives a parent-death
     signal, and is torn down as a group on timeout.  The timeout is reported as
-    a distinct terminal result without discarding captured output.
+    a distinct terminal result without discarding captured output.  *timeout*
+    defaults to the bounded prerequisite deadline; callers running a
+    qualification command pass their own deadline.
     """
 
     timeout = _command_timeout() if timeout is None else timeout
@@ -1714,6 +1821,7 @@ def run_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
             **_process_group_options(),
         )
     except OSError as exc:
@@ -2093,6 +2201,20 @@ def _native_source_digest(repo_root: Path) -> str | None:
     return digest.hexdigest()
 
 
+def _load_native_build_evidence(path: Path) -> tuple[dict[str, Any] | None, str]:
+    if path.is_symlink():
+        return None, "the retained native build evidence must be a regular file"
+    if not path.is_file():
+        return None, "the retained native build evidence is missing"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"the retained native build evidence is not readable JSON: {exc}"
+    if not isinstance(document, dict):
+        return None, "the retained native build evidence must be a JSON object"
+    return document, ""
+
+
 def _native_build_evidence(
     declaration: dict[str, Any],
     repo_root: Path,
@@ -2249,7 +2371,104 @@ def _native_build_evidence(
                 "the installed native runtime matches the pinned consistent-build fingerprint",
             )
         )
+    results.append(
+        _native_build_evidence_check(
+            interpreters, repo_root, expected_inputs, expected_fingerprint, fingerprint
+        )
+    )
     return results
+
+
+def _native_build_evidence_check(
+    interpreters: dict[str, Any],
+    repo_root: Path,
+    expected_inputs: Any,
+    expected_fingerprint: Any,
+    probe_fingerprint: str,
+) -> CheckResult:
+    """Require retained evidence from the complete fresh native build procedure.
+
+    Pinning the source bytes and the installed fingerprint independently does not
+    prove the installed extensions were compiled from the pinned inputs: a
+    pre-existing mixed build satisfies both comparisons.  The operator must
+    retain the fresh-build procedure's own record connecting the staged inputs,
+    build completion, and installed outputs; absent that record the check is
+    ``unsupported`` rather than a pass.
+    """
+
+    evidence_path = _resolve_declared_path(interpreters.get("native_build_evidence"), repo_root)
+    if evidence_path is None:
+        return _result(
+            "native-build-evidence",
+            "unsupported",
+            "retained fresh native build evidence",
+            None,
+            "no retained evidence connects the pinned inputs to the installed outputs",
+        )
+    name = "native-build-evidence"
+    evidence_sha = interpreters.get("native_build_evidence_sha256")
+    if not _is_sha256(evidence_sha):
+        return _result(
+            name,
+            "fail",
+            "sha256 pin for the retained evidence",
+            evidence_sha,
+            "the retained native build evidence must be pinned by SHA-256",
+        )
+    try:
+        actual_sha = _sha256_of_file(evidence_path)
+    except OSError:
+        return _result(
+            name,
+            "unsupported",
+            evidence_sha,
+            None,
+            "the retained native build evidence could not be read",
+        )
+    if actual_sha != evidence_sha.strip().lower():
+        return _result(
+            name,
+            "fail",
+            evidence_sha,
+            actual_sha,
+            "the retained native build evidence bytes do not match the pinned digest",
+        )
+    document, error = _load_native_build_evidence(evidence_path)
+    if document is None:
+        return _result(name, "fail", "valid retained evidence JSON", None, error)
+    problems: list[str] = []
+    if document.get("procedure") != _NATIVE_BUILD_EVIDENCE_PROCEDURE:
+        problems.append(
+            "the retained evidence was not produced by the fresh native build procedure"
+        )
+    if document.get("status") != "complete":
+        problems.append("the retained evidence does not record a completed native build")
+    if document.get("build_inputs_sha256") != expected_inputs:
+        problems.append("the retained evidence staged inputs do not match the pinned build inputs")
+    recorded_fingerprint = document.get("installed_fingerprint")
+    if recorded_fingerprint != expected_fingerprint:
+        problems.append(
+            "the retained evidence installed outputs do not match the pinned fingerprint"
+        )
+    if recorded_fingerprint != probe_fingerprint:
+        problems.append(
+            "the retained evidence installed outputs do not match the installed runtime"
+        )
+    if problems:
+        return _result(
+            name,
+            "fail",
+            "a consistent fresh native build",
+            recorded_fingerprint,
+            "; ".join(problems),
+        )
+    return _result(
+        name,
+        "ok",
+        expected_inputs,
+        recorded_fingerprint,
+        "the retained evidence ties the pinned inputs and completed build to the installed outputs",
+    )
 
 
 def _asset_tree_writable(root: Path) -> bool:
@@ -2461,7 +2680,14 @@ _PATH_FRAGMENT_RE = re.compile(
 
 
 def _scrub_absolute_paths(text: str) -> str:
-    return _PATH_FRAGMENT_RE.sub("<redacted-path>", text)
+    """Redact any remaining absolute path, including unregistered diagnostics.
+
+    Registered paths are already replaced by relative or basename forms before
+    this runs; this fallback removes arbitrary absolute build, temporary, and
+    compiler diagnostic paths that were never declared.
+    """
+
+    return _ABSOLUTE_PATH_RE.sub("<redacted-path>", _PATH_FRAGMENT_RE.sub("<redacted-path>", text))
 
 
 def _redact_text(text: str, redactions: dict[str, str]) -> str:
@@ -2520,7 +2746,12 @@ def _collect_redactions(
                 register(str(resolved.parent.parent))
         reservation = declaration.get("reservation")
         if isinstance(reservation, dict):
-            for key in ("descriptor_path", "job_dir", "exclusive_marker_path"):
+            for key in (
+                "descriptor_path",
+                "job_dir",
+                "exclusive_marker_path",
+                "host_lock_path",
+            ):
                 register(reservation.get(key))
     return redactions
 
@@ -2570,8 +2801,44 @@ def _reserve_allocation(
     reservation = declaration.get("reservation")
     reservation = reservation if isinstance(reservation, dict) else {}
     mechanism = declaration.get("reservation_mechanism")
+    host_lock_raw = reservation.get("host_lock_path")
+    if not isinstance(host_lock_raw, str) or not host_lock_raw.strip():
+        raise ValueError("reservation.host_lock_path is required for a mutually exclusive lease")
+    host_lock = _resolve_declared_path(host_lock_raw, repo_root)
+    if host_lock is None:
+        raise ValueError("reservation.host_lock_path could not be resolved")
+    if _path_within(host_lock, job_dir):
+        raise ValueError("the allocation lock must be host-wide, not inside reservation.job_dir")
+
+    exclusive_token: str | None = None
+    marker_path: Path | None = None
+    if mechanism == "dedicated-host":
+        token = reservation.get("exclusive_token")
+        marker_path = _resolve_declared_path(reservation.get("exclusive_marker_path"), repo_root)
+        if marker_path is None or not isinstance(token, str) or not token.strip():
+            raise ValueError("a dedicated host requires an operator-created exclusive marker")
+        if marker_path.is_symlink() or not marker_path.is_file():
+            raise ValueError("the operator exclusive marker is missing")
+        if _path_within(marker_path, job_dir):
+            raise ValueError(
+                "the exclusive marker must be operator-owned outside reservation.job_dir"
+            )
+        try:
+            marker_value = marker_path.read_text(encoding="utf-8").strip()
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"the operator exclusive marker is unreadable: {exc}") from exc
+        if marker_value != token:
+            raise ValueError("the operator exclusive marker does not match the declared token")
+        exclusive_token = token
+
     _prepare_job_directory(job_dir)
-    lock_path = job_dir / "allocation.lock"
+    lock_fd = os.open(host_lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lock_fd)
+        raise
+
     lease_id = uuid.uuid4().hex
     try:
         cpuset = parse_cpuset(declaration.get("affinity_cpus"))
@@ -2592,7 +2859,7 @@ def _reserve_allocation(
         "lease_id": lease_id,
         "holder_pid": os.getpid(),
         "holder_start_time": _process_start_time(os.getpid()),
-        "lock_path": str(lock_path),
+        "lock_path": str(host_lock),
         "cgroup_path": reservation.get("cgroup_path") or facts.cgroup_relative_path,
         "cpuset": cpuset,
         "cpu_quota_cores": quota,
@@ -2602,17 +2869,17 @@ def _reserve_allocation(
         "created_at": _iso_now(),
     }
     if mechanism == "dedicated-host":
-        marker = job_dir / "exclusive.marker"
-        marker.write_text(lease_id, encoding="utf-8")
-        os.chmod(marker, 0o400)
-        descriptor["exclusive_marker_path"] = str(marker)
+        descriptor["exclusive_marker_path"] = str(marker_path)
+        descriptor["exclusive_token"] = exclusive_token
     descriptor_path = job_dir / "allocation.json"
-    descriptor_path.write_text(
-        json.dumps(descriptor, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.chmod(descriptor_path, 0o400)
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        descriptor_path.write_text(
+            json.dumps(descriptor, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        os.chmod(descriptor_path, 0o400)
+    except OSError:
+        os.close(lock_fd)
+        raise
     return descriptor_path, descriptor, lock_fd
 
 
@@ -2665,8 +2932,17 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
     if descriptor is None:
         return "fail", error
     holder = descriptor.get("holder_pid")
-    owned = _holder_is_owned(holder, descriptor.get("holder_start_time"))
-    if owned and holder != os.getpid():
+    owned = holder == os.getpid() or _holder_is_owned(holder, descriptor.get("holder_start_time"))
+    if not owned:
+        return (
+            "fail",
+            "the recorded holder is not an owned qualification-runner lease; refusing to remove state",
+        )
+    raw = descriptor.get("lock_path")
+    lock_holders = _observe_flock_holders(Path(raw)) if isinstance(raw, str) and raw else None
+    if lock_holders is None:
+        return "blocked", "lock ownership is not observable; refusing to remove state"
+    if holder != os.getpid() and (_pid_alive(holder) or holder in lock_holders):
         try:
             os.kill(holder, signal.SIGTERM)
         except OSError:
@@ -2680,9 +2956,7 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
             except OSError:
                 pass
     _remove_allocation_state(descriptor, descriptor_path)
-    if owned:
-        return "ok", "the owned lease holder was terminated and the lease removed"
-    return "fail", "the recorded holder is not an owned qualification-runner lease"
+    return "ok", "the owned lease holder was terminated and the lease removed"
 
 
 def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[str, str]:
@@ -2691,18 +2965,24 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
         return "ok", "no allocation descriptor to recover"
     descriptor, error = _load_allocation_descriptor(descriptor_path)
     if descriptor is None:
-        try:
-            descriptor_path.unlink()
-        except OSError:
-            pass
-        return "ok", f"removed a stale descriptor ({error})"
+        return "blocked", f"the descriptor could not be read; refusing to remove state ({error})"
     holder = descriptor.get("holder_pid")
-    lock_holders: set[int] = set()
+    holder_valid = isinstance(holder, int) and not isinstance(holder, bool) and holder > 0
     raw = descriptor.get("lock_path")
-    if isinstance(raw, str) and raw:
-        lock_holders = _flock_holder_pids(Path(raw)) or set()
-    if _holder_is_owned(holder, descriptor.get("holder_start_time")) and holder in lock_holders:
-        return "fail", "an active owned lease is still held; release it first"
+    if not isinstance(raw, str) or not raw.strip():
+        return "blocked", "the lease lock path is unknown; refusing to remove state"
+    lock_holders = _observe_flock_holders(Path(raw))
+    if lock_holders is None:
+        return "blocked", "lock ownership is not observable; refusing to remove state"
+    if holder_valid and _pid_alive(holder):
+        return "fail", "the recorded holder is still running; refusing to remove state"
+    if holder_valid and holder in lock_holders:
+        return "fail", "the recorded holder still holds the lease; release it first"
+    if lock_holders:
+        return (
+            "blocked",
+            "the lease lock is held by an unrecognized process; refusing to remove state",
+        )
     _remove_allocation_state(descriptor, descriptor_path)
     return "ok", "removed stale allocation state whose owner is gone"
 
@@ -2723,6 +3003,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--json", action="store_true", help="emit a structured JSON report")
     parser.add_argument(
+        "--run-timeout",
+        type=float,
+        default=None,
+        help="deadline in seconds for --run, separate from the prerequisite timeout",
+    )
+    parser.add_argument(
         "--run",
         nargs=argparse.REMAINDER,
         default=[],
@@ -2742,13 +3028,28 @@ def _do_reserve(
     repo_root: Path,
     facts: RunnerFacts,
 ) -> tuple[str, str, dict[str, Any]]:
+    admission = validate_declaration(declaration)
+    if overall_status(admission) != "ok":
+        return (
+            "fail",
+            "the declaration failed prerequisite admission; refusing to reserve or run",
+            {"checks": [asdict(item) for item in admission]},
+        )
+    prerequisites = prerequisite_checks(declaration, repo_root)
+    if overall_status(prerequisites) != "ok":
+        return (
+            "fail",
+            "runtime and asset prerequisites failed admission; refusing to reserve or run",
+            {"checks": [asdict(item) for item in prerequisites]},
+        )
+
     job_dir = _job_directory(args, declaration, repo_root)
     try:
         descriptor_path, _descriptor, _lock_fd = _reserve_allocation(
             declaration, repo_root, job_dir, facts
         )
         digest = _pin_declaration(declaration_path, declaration, job_dir, descriptor_path)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return "fail", f"could not reserve the allocation: {exc}", {}
     extra = {
         "job_dir": _sanitize_path(job_dir, repo_root),
@@ -2764,13 +3065,38 @@ def _do_reserve(
             ),
             extra,
         )
+
+    resources = evaluate_resources(declaration, facts, repo_root)
+    if overall_status(resources) != "ok":
+        _release_allocation(declaration, repo_root)
+        return (
+            "fail",
+            "the observed allocation failed verification; refusing to launch the qualification job",
+            {"checks": [asdict(item) for item in resources], **extra},
+        )
+
     command = list(args.run)
-    process = run_command(command, repo_root)
+    child_env = dict(os.environ)
+    for name, child in (
+        ("TMPDIR", job_dir / "tmp"),
+        ("POKERED_QUALIFICATION_JOB_DIR", job_dir),
+        ("POKERED_QUALIFICATION_EVIDENCE_DIR", job_dir / "evidence"),
+    ):
+        child.mkdir(parents=True, exist_ok=True)
+        child_env[name] = str(child)
+    process = run_command(
+        command,
+        repo_root,
+        timeout=_qualification_timeout(getattr(args, "run_timeout", None)),
+        env=child_env,
+    )
     if process.stdout:
         print(process.stdout, end="")
     if process.stderr:
         print(process.stderr, end="", file=sys.stderr)
-    _release_allocation(declaration, repo_root)
+    release_status, _release_message = _release_allocation(declaration, repo_root)
+    if release_status != "ok":
+        return "fail", f"leased command exited {process.returncode}; {_release_message}", extra
     status = "ok" if process.returncode == 0 else "fail"
     return status, f"leased command exited {process.returncode}", extra
 

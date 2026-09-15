@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import hashlib
 import json
@@ -63,6 +64,7 @@ def make_declaration(**overrides):
             "job_dir": "target/qualification-runs/test-runner",
             "descriptor_path": "target/qualification-runs/test-runner/allocation.json",
             "descriptor_sha256": "a" * 64,
+            "host_lock_path": "target/qualification-runs/host.lock",
             "cgroup_path": "/user.slice/session.scope",
         },
         "logical_cpus": 4,
@@ -96,14 +98,38 @@ def make_declaration(**overrides):
 _HELD_FDS: list[int] = []
 
 
+def _lock_observation_supported() -> bool:
+    import tempfile
+
+    directory = tempfile.mkdtemp(prefix="qualification-lock-probe-")
+    path = Path(directory) / "probe.lock"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        holders = runner._flock_holder_pids(path)
+        return holders is not None and os.getpid() in holders
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+        os.unlink(path)
+        os.rmdir(directory)
+
+
+_LOCK_OBSERVATION_SUPPORTED = _lock_observation_supported()
+
+
 def held_reservation(tmp_path: Path, mechanism: str = "cgroup-quota", **overrides):
     """Create a real, held allocation descriptor and matching host facts."""
 
-    job_dir = tmp_path / f"job-{mechanism}-{uuid.uuid4().hex[:8]}"
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    suffix = uuid.uuid4().hex[:8]
+    job_dir = tmp_path / f"job-{mechanism}-{suffix}"
     job_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(job_dir, 0o700)
-    lock_path = job_dir / "allocation.lock"
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    host_lock = tmp_path / f"host-{mechanism}-{suffix}.lock"
+    lock_fd = os.open(host_lock, os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     _HELD_FDS.append(lock_fd)
 
@@ -117,10 +143,13 @@ def held_reservation(tmp_path: Path, mechanism: str = "cgroup-quota", **override
         affinity = list(range(16))
         quota = None
 
+    exclusive_token = f"operator-token-{suffix}"
+    marker = tmp_path / f"exclusive-{suffix}.marker"
     reservation = {
         "allocation_id": "test-runner",
         "job_dir": str(job_dir),
         "descriptor_path": str(job_dir / "allocation.json"),
+        "host_lock_path": str(host_lock),
         "cgroup_path": "/user.slice/session.scope",
         "exclusive": mechanism == "dedicated-host",
     }
@@ -133,7 +162,7 @@ def held_reservation(tmp_path: Path, mechanism: str = "cgroup-quota", **override
         "lease_id": "lease-123",
         "holder_pid": os.getpid(),
         "holder_start_time": runner._process_start_time(os.getpid()),
-        "lock_path": str(lock_path),
+        "lock_path": str(host_lock),
         "cgroup_path": "/user.slice/session.scope",
         "cpuset": affinity,
         "cpu_quota_cores": quota,
@@ -143,10 +172,12 @@ def held_reservation(tmp_path: Path, mechanism: str = "cgroup-quota", **override
         "created_at": "2026-01-01T00:00:00Z",
     }
     if mechanism == "dedicated-host":
-        marker = job_dir / "exclusive.marker"
-        marker.write_text("lease-123", encoding="utf-8")
+        marker.write_text(exclusive_token, encoding="utf-8")
         os.chmod(marker, 0o400)
+        reservation["exclusive_marker_path"] = str(marker)
+        reservation["exclusive_token"] = exclusive_token
         descriptor["exclusive_marker_path"] = str(marker)
+        descriptor["exclusive_token"] = exclusive_token
     descriptor_path = job_dir / "allocation.json"
     descriptor_path.write_text(json.dumps(descriptor), encoding="utf-8")
     os.chmod(descriptor_path, 0o400)
@@ -333,7 +364,7 @@ def test_reservation_rejects_writable_descriptor(tmp_path: Path):
 
 def test_reservation_rejects_unheld_lease(tmp_path: Path):
     declaration, facts = held_reservation(tmp_path, "cgroup-quota")
-    lock_path = Path(declaration["reservation"]["job_dir"]) / "allocation.lock"
+    lock_path = Path(declaration["reservation"]["host_lock_path"])
     fd = _HELD_FDS.pop()
     os.close(fd)
     lock_holders = runner._flock_holder_pids(lock_path)
@@ -344,7 +375,16 @@ def test_reservation_rejects_unheld_lease(tmp_path: Path):
 
 def test_dedicated_reservation_requires_exclusive_marker(tmp_path: Path):
     declaration, facts = held_reservation(tmp_path, "dedicated-host")
-    Path(declaration["reservation"]["job_dir"], "exclusive.marker").unlink()
+    Path(declaration["reservation"]["exclusive_marker_path"]).unlink()
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "fail"
+
+
+def test_dedicated_reservation_rejects_job_generated_marker(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "dedicated-host")
+    inside = Path(declaration["reservation"]["job_dir"]) / "exclusive.marker"
+    inside.write_text(declaration["reservation"]["exclusive_token"], encoding="utf-8")
+    rewrite_descriptor(declaration, {"exclusive_marker_path": str(inside)})
     results = runner.evaluate_resources(declaration, facts, tmp_path)
     assert statuses(results)["reservation-evidence"] == "fail"
 
@@ -568,6 +608,28 @@ def _prerequisite_runner(probe_payload: dict):
     return fake_runner, calls
 
 
+def with_native_evidence(
+    declaration: dict,
+    tmp_path: Path,
+    build_inputs: str = "b" * 64,
+    fingerprint: str = "c" * 64,
+    procedure: str = runner._NATIVE_BUILD_EVIDENCE_PROCEDURE,
+    status: str = "complete",
+) -> dict:
+    document = {
+        "procedure": procedure,
+        "status": status,
+        "build_inputs_sha256": build_inputs,
+        "installed_fingerprint": fingerprint,
+        "completed_at": "2026-01-01T00:00:00Z",
+    }
+    path = tmp_path / "native-build-evidence.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    declaration.setdefault("interpreters", {})["native_build_evidence"] = str(path)
+    declaration["interpreters"]["native_build_evidence_sha256"] = runner._sha256_of_file(path)
+    return declaration
+
+
 def _prepare_assets(tmp_path: Path) -> tuple[Path, Path, dict]:
     rom_root = tmp_path / "rom"
     fixture_root = tmp_path / "fixtures"
@@ -589,6 +651,7 @@ def _prepare_assets(tmp_path: Path) -> tuple[Path, Path, dict]:
 
 def test_prerequisite_checks_use_injected_runner(tmp_path: Path, monkeypatch):
     requirements, declaration = _prepare_assets(tmp_path)
+    with_native_evidence(declaration, tmp_path)
     monkeypatch.setattr(runner, "_required_asset_entries", lambda decl, root: requirements)
     monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
     monkeypatch.setattr(runner, "_asset_tree_writable", lambda root: False)
@@ -628,11 +691,44 @@ def test_prerequisite_checks_fail_missing_interpreter(tmp_path: Path):
 def test_native_build_evidence_accepts_consistent_build(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
     declaration = make_declaration()
+    with_native_evidence(declaration, tmp_path)
     probe_payload = _probe_payload("c" * 64)
     fake_runner, _calls = _prerequisite_runner(probe_payload)
     results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
     assert statuses(results)["native-build-inputs"] == "ok"
     assert statuses(results)["native-runtime-fingerprint"] == "ok"
+    assert statuses(results)["native-build-evidence"] == "ok"
+
+
+def test_native_build_evidence_requires_retained_evidence(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration()
+    probe_payload = _probe_payload("c" * 64)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    assert statuses(results)["native-build-evidence"] == "unsupported"
+    assert runner.overall_status(results) != "ok"
+
+
+def test_native_build_evidence_rejects_mixed_build_evidence(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration()
+    with_native_evidence(declaration, tmp_path, fingerprint="e" * 64)
+    probe_payload = _probe_payload("c" * 64)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    assert statuses(results)["native-build-evidence"] == "fail"
+    assert runner.overall_status(results) != "ok"
+
+
+def test_native_build_evidence_rejects_incomplete_build(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration()
+    with_native_evidence(declaration, tmp_path, status="in-progress")
+    probe_payload = _probe_payload("c" * 64)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    assert statuses(results)["native-build-evidence"] == "fail"
 
 
 def test_native_build_evidence_rejects_source_mismatch(tmp_path: Path, monkeypatch):
@@ -720,18 +816,25 @@ def test_cli_setup_prepares_private_job_directory(monkeypatch, capsys, tmp_path:
     assert (job_dir / "evidence").is_dir()
 
 
-def test_cli_reserve_run_holds_and_releases_lease(tmp_path: Path):
+def test_cli_reserve_run_holds_and_releases_lease(monkeypatch, capsys, tmp_path: Path):
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
     declaration = make_declaration()
+    declaration["reservation"]["host_lock_path"] = str(tmp_path / "host.lock")
     declaration_path = tmp_path / "declaration.json"
     declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
     job_dir = tmp_path / "lease-job"
     sentinel = tmp_path / "ran.txt"
     script = f"from pathlib import Path; Path({str(sentinel)!r}).write_text('ran')"
-    env = dict(os.environ, PYTHONPATH=f"{REPO_ROOT}:{REPO_ROOT / 'src'}")
-    completed = subprocess.run(
+    monkeypatch.setattr(runner, "collect_facts", lambda root: make_facts(cpu_quota_cores=4.0))
+    monkeypatch.setattr(
+        runner,
+        "prerequisite_checks",
+        lambda decl, root: [runner.CheckResult("stub", "ok", 1, 1, "")],
+    )
+
+    exit_code = runner.main(
         [
-            sys.executable,
-            "scripts/qualification_runner.py",
             "--reserve",
             "--json",
             "--declaration",
@@ -742,15 +845,10 @@ def test_cli_reserve_run_holds_and_releases_lease(tmp_path: Path):
             sys.executable,
             "-c",
             script,
-        ],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
+        ]
     )
-    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0, payload
     assert sentinel.read_text(encoding="utf-8") == "ran"
     assert not (job_dir / "allocation.json").exists()
     pinned = json.loads(declaration_path.read_text(encoding="utf-8"))
@@ -783,13 +881,22 @@ def test_recover_removes_stale_allocation(tmp_path: Path):
     assert not descriptor_path.exists()
 
 
-def test_recover_keeps_active_lease(tmp_path: Path, monkeypatch):
+def test_recover_keeps_active_lease(tmp_path: Path):
     declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
     descriptor_path = Path(declaration["reservation"]["descriptor_path"])
-    monkeypatch.setattr(runner, "_holder_is_owned", lambda holder, start: True)
     status, _message = runner._recover_allocation(declaration, tmp_path)
     assert status == "fail"
     assert descriptor_path.exists()
+
+
+def rewrite_descriptor(declaration: dict, changes: dict) -> None:
+    path = Path(declaration["reservation"]["descriptor_path"])
+    os.chmod(path, 0o600)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document.update(changes)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    os.chmod(path, 0o400)
+    declaration["reservation"]["descriptor_sha256"] = runner._sha256_of_file(path)
 
 
 def test_run_command_preserves_failure(tmp_path: Path):
@@ -1029,3 +1136,225 @@ def test_report_sanitizes_absolute_paths(capsys):
     payload = json.loads(output)
     assert payload["repo_root"] == "."
     assert str(Path.cwd().resolve()) not in output
+
+
+def test_validate_declaration_requires_host_wide_lock():
+    declaration = make_declaration()
+    del declaration["reservation"]["host_lock_path"]
+    results = runner.validate_declaration(declaration)
+    assert statuses(results)["reservation-host-lock"] == "fail"
+
+
+def test_validate_declaration_requires_operator_exclusive_marker():
+    declaration = make_declaration(reservation_mechanism="dedicated-host")
+    results = runner.validate_declaration(declaration)
+    assert statuses(results)["reservation-exclusive-marker"] == "fail"
+    assert statuses(results)["reservation-exclusive-token"] == "fail"
+
+
+def test_lease_status_rejects_private_job_lock(tmp_path: Path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    lock = job_dir / "allocation.lock"
+    lock_fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _HELD_FDS.append(lock_fd)
+    descriptor = {
+        "holder_pid": os.getpid(),
+        "holder_start_time": runner._process_start_time(os.getpid()),
+        "lock_path": str(lock),
+    }
+    status, detail = runner._descriptor_lease_status(descriptor, make_facts(), job_dir)
+    assert status == "fail"
+    assert "private" in detail
+
+
+def test_lease_status_rejects_competing_lock_holder(tmp_path: Path, monkeypatch):
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor = json.loads(
+        Path(declaration["reservation"]["descriptor_path"]).read_text(encoding="utf-8")
+    )
+    job_dir = Path(declaration["reservation"]["job_dir"])
+    monkeypatch.setattr(runner, "_observe_flock_holders", lambda path: {os.getpid(), 999999})
+    status, detail = runner._descriptor_lease_status(descriptor, facts, job_dir)
+    assert status == "fail"
+    assert "competing" in detail
+
+
+def test_all_mechanisms_require_a_real_host_wide_lock(tmp_path: Path):
+    for mechanism in runner._RESERVATION_MECHANISMS:
+        declaration, facts = held_reservation(tmp_path, mechanism)
+        private_lock = Path(declaration["reservation"]["job_dir"]) / "allocation.lock"
+        lock_fd = os.open(private_lock, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _HELD_FDS.append(lock_fd)
+        rewrite_descriptor(declaration, {"lock_path": str(private_lock)})
+        results = runner.evaluate_resources(declaration, facts, tmp_path)
+        assert runner.overall_status(results) != "ok", mechanism
+        assert statuses(results)["reservation-evidence"] == "fail", mechanism
+
+
+def test_reserve_allocation_rejects_contended_host_lock(tmp_path: Path):
+    host_lock = tmp_path / "host.lock"
+    fd = os.open(host_lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        declaration = make_declaration()
+        declaration["reservation"]["host_lock_path"] = str(host_lock)
+        with pytest.raises(OSError):
+            runner._reserve_allocation(declaration, tmp_path, tmp_path / "job", make_facts())
+    finally:
+        os.close(fd)
+
+
+def test_reserve_allocation_rejects_private_job_lock(tmp_path: Path):
+    job_dir = tmp_path / "job"
+    declaration = make_declaration()
+    declaration["reservation"]["host_lock_path"] = str(job_dir / "allocation.lock")
+    with pytest.raises(ValueError):
+        runner._reserve_allocation(declaration, tmp_path, job_dir, make_facts())
+
+
+def test_cgroup_members_ownership_follows_lease_holder(monkeypatch):
+    facts = make_facts(cgroup_member_pids=[10, 20, 30])
+    monkeypatch.setattr(runner, "_process_tree_pids", lambda root: [10, 20, 30])
+    assert runner._cgroup_members_are_owned(facts, 10) is True
+    facts.cgroup_member_pids = [10, 99]
+    assert runner._cgroup_members_are_owned(facts, 10) is False
+
+
+def test_recover_fails_closed_when_lock_unobservable(tmp_path: Path, monkeypatch):
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    monkeypatch.setattr(runner, "_observe_flock_holders", lambda path: None)
+    status, _message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert descriptor_path.exists()
+
+
+def test_recover_refuses_unrecognized_lock_holder(tmp_path: Path, monkeypatch):
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    monkeypatch.setattr(runner, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(runner, "_observe_flock_holders", lambda path: {999999})
+    status, _message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert descriptor_path.exists()
+
+
+def test_release_refuses_unrecognized_holder(tmp_path: Path):
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        rewrite_descriptor(
+            declaration,
+            {
+                "holder_pid": child.pid,
+                "holder_start_time": runner._process_start_time(child.pid),
+            },
+        )
+        status, _message = runner._release_allocation(declaration, tmp_path)
+        assert status == "fail"
+        assert descriptor_path.exists()
+        assert child.poll() is None
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+def test_release_refuses_when_lock_unobservable(tmp_path: Path, monkeypatch):
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    monkeypatch.setattr(runner, "_observe_flock_holders", lambda path: None)
+    status, _message = runner._release_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert descriptor_path.exists()
+
+
+def test_qualification_timeout_is_separate_from_prerequisite(monkeypatch):
+    monkeypatch.delenv(runner._PROBE_TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(runner._QUALIFICATION_TIMEOUT_ENV, raising=False)
+    assert runner._command_timeout() == 300.0
+    assert runner._qualification_timeout() == runner._DEFAULT_QUALIFICATION_TIMEOUT_SECONDS
+    assert runner._qualification_timeout(5.0) == 5.0
+    assert runner._qualification_timeout(0) == runner._DEFAULT_QUALIFICATION_TIMEOUT_SECONDS
+
+
+def test_reserve_run_requires_admission(monkeypatch, capsys, tmp_path: Path):
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps({}), encoding="utf-8")
+    sentinel = tmp_path / "ran.txt"
+    script = f"from pathlib import Path; Path({str(sentinel)!r}).write_text('ran')"
+    calls: list[int] = []
+    monkeypatch.setattr(runner, "prerequisite_checks", lambda decl, root: calls.append(1) or [])
+    exit_code = runner.main(
+        [
+            "--reserve",
+            "--json",
+            "--declaration",
+            str(declaration_path),
+            "--job-dir",
+            str(tmp_path / "job"),
+            "--run",
+            sys.executable,
+            "-c",
+            script,
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert "admission" in payload["message"]
+    assert not sentinel.exists()
+    assert calls == []
+
+
+def test_reserve_run_configures_private_paths_and_timeout(monkeypatch, tmp_path: Path):
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration = make_declaration()
+    declaration["reservation"]["host_lock_path"] = str(tmp_path / "host.lock")
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    job_dir = tmp_path / "job"
+    captured: dict = {}
+
+    def fake_run(command, cwd, timeout=None, env=None):
+        captured["timeout"] = timeout
+        captured["env"] = env
+        return Completed(0, "", "")
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+    monkeypatch.setattr(
+        runner,
+        "prerequisite_checks",
+        lambda decl, root: [runner.CheckResult("stub", "ok", 1, 1, "")],
+    )
+    monkeypatch.setattr(
+        runner,
+        "evaluate_resources",
+        lambda decl, facts, root: [runner.CheckResult("stub", "ok", 1, 1, "")],
+    )
+    args = argparse.Namespace(job_dir=job_dir, run=[sys.executable, "-c", "pass"], run_timeout=5.0)
+    status, message, _extra = runner._do_reserve(
+        args, declaration, declaration_path, tmp_path, make_facts()
+    )
+    assert status == "ok", message
+    assert captured["timeout"] == 5.0
+    assert captured["env"]["TMPDIR"] == str(job_dir / "tmp")
+    assert captured["env"]["POKERED_QUALIFICATION_EVIDENCE_DIR"] == str(job_dir / "evidence")
+
+
+def test_scrub_absolute_paths_redacts_build_diagnostics():
+    text = "cc failed at /var/private/operator-name/build-tmp/compiler.log via /opt/tool/bin/cc"
+    scrubbed = runner._scrub_absolute_paths(text)
+    assert "/var/private" not in scrubbed
+    assert "/opt/tool" not in scrubbed
+    assert "<redacted-path>" in scrubbed
+
+
+def test_redact_payload_scrubs_unregistered_build_paths():
+    payload = {"detail": "/var/private/operator-name/build-tmp/compiler.log"}
+    rendered = json.dumps(runner._redact_payload(payload, {}))
+    assert "/var/private" not in rendered
+    assert "<redacted-path>" in rendered
