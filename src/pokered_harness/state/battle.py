@@ -16,6 +16,17 @@ is present and the surviving signals agree.  Contradictory evidence yields
 ambiguous) snapshot yields :attr:`BattlePhase.UNKNOWN`/``phase_valid=False``.
 The exact symbols consulted are exposed through ``phase_evidence``.
 
+The raw ``wBattleResult`` byte is exposed as
+:attr:`BattleState.raw_battle_result`; it is never promoted to a confirmed
+:attr:`BattleState.terminal_result` on its own.  The engine writes zero at
+battle start (``InitBattleVariables``), on ``EnemyRan``, and again when a
+blackout is processed (``ResetStatusAndHalveMoneyOnBlackout``), so zero is
+ambiguous; positive bytes can also be overwritten in an ongoing battle.  A
+confirmed outcome therefore also requires lifecycle evidence: the caller
+tracks the previous observation in :class:`BattleLifecycle` and a terminal
+result is only reported on the observed transition from an active battle to
+``wIsInBattle == 0``.
+
 The ambiguity is deliberate and documented in ``_derive_phase``: neither
 ``wMoveMenuType == 0`` (the regular-mode default written before every
 ``MoveSelectionMenu`` call) nor an all-zero flag block is positive evidence
@@ -95,9 +106,29 @@ _PHASE_TRANSIENT_SYMBOLS = (
 
 # Valid ``wBattleResult`` outcomes (engine/battle/end_of_battle.asm):
 # 0 player win, 1 player lose, 2 draw.  0 is also written at battle start
-# (init_battle_variables.asm) and at EnemyRan, so it is not terminal-only
-# evidence; values 3..255 have no engine writer and are rejected.
+# (init_battle_variables.asm), at EnemyRan (core.asm), and when a blackout
+# is processed (events/black_out.asm), so it is not terminal-only evidence;
+# values 3..255 have no engine writer and are rejected.
 _VALID_BATTLE_RESULTS = frozenset((0, 1, 2))
+
+
+@dataclass(frozen=True, slots=True)
+class BattleLifecycle:
+    """Prior observation used to qualify a terminal battle outcome.
+
+    ``wBattleResult`` alone cannot establish an outcome: the engine writes
+    zero at battle start (``InitBattleVariables``), on ``EnemyRan``, and
+    when a blackout is processed (``ResetStatusAndHalveMoneyOnBlackout``),
+    and a positive byte written for a faint can be left behind even when the
+    battle continues.  A terminal result is only reported when the caller
+    has observed the battle *end*: ``was_active`` records whether the
+    immediately preceding snapshot of the same emulator decoded
+    ``wIsInBattle`` as a live wild or trainer battle.  Confirmation happens
+    on the falling edge (previous snapshot active, current raw value zero).
+    """
+
+    was_active: bool = False
+
 
 # ``wMoveMenuType`` is a mode selector, not an open/closed flag: 0 is written
 # immediately before every regular ``MoveSelectionMenu`` call, and modes 1
@@ -132,6 +163,7 @@ class BattleState:
     phase: BattlePhase | None = None
     phase_valid: bool | None = None
     phase_evidence: tuple[str, ...] = ()
+    raw_battle_result: int | None = None
     terminal_result: int | None = None
 
     @property
@@ -154,12 +186,26 @@ class BattleState:
         return bool(self.action_result_or_took_turn)
 
 
-def parse_battle(memory: MemoryLike, symbols: SymbolTable) -> BattleState:
+def parse_battle(
+    memory: MemoryLike,
+    symbols: SymbolTable,
+    *,
+    lifecycle: BattleLifecycle | None = None,
+) -> BattleState:
     raw = symbols.read_u8(memory, "wIsInBattle")
     kind = _safe_enum(BattleKind, raw)
     enemy_mon, enemy_mon_valid = _parse_enemy_mon(memory, symbols, kind=kind)
-    phase, phase_valid, phase_evidence = _derive_phase(memory, symbols, raw=raw, kind=kind)
     raw_battle_result = _opt(memory, symbols, "wBattleResult")
+    # A battle has ended only when a previously active battle now reports
+    # wIsInBattle == 0.  Without that transition the raw result byte stays
+    # unqualified (stated in BattleLifecycle).
+    battle_ended = lifecycle is not None and lifecycle.was_active and raw == 0
+    terminal_result = (
+        raw_battle_result if battle_ended and raw_battle_result in _VALID_BATTLE_RESULTS else None
+    )
+    phase, phase_valid, phase_evidence = _derive_phase(
+        memory, symbols, raw=raw, kind=kind, battle_ended=battle_ended
+    )
     return BattleState(
         kind=kind,  # type: ignore[arg-type]
         raw_is_in_battle=raw,
@@ -176,7 +222,8 @@ def parse_battle(memory: MemoryLike, symbols: SymbolTable) -> BattleState:
         phase=phase,
         phase_valid=phase_valid,
         phase_evidence=phase_evidence,
-        terminal_result=(raw_battle_result if raw_battle_result in _VALID_BATTLE_RESULTS else None),
+        raw_battle_result=raw_battle_result,
+        terminal_result=terminal_result,
     )
 
 
@@ -213,12 +260,15 @@ def _derive_phase(
     *,
     raw: int,
     kind: IntEnum | None,
+    battle_ended: bool = False,
 ) -> tuple[BattlePhase | None, bool, tuple[str, ...]]:
     """Derive a battle phase candidate from ROM-owned observations.
 
     Returns ``(phase, phase_valid, evidence)``.  The derivation fails closed:
 
-    * an inactive battle (``wIsInBattle == 0``) is ``INACTIVE``;
+    * an inactive battle (``wIsInBattle == 0``) is ``INACTIVE``, unless
+      ``battle_ended`` proves the battle just ended, in which case a valid
+      ``wBattleResult`` yields ``TERMINAL_RETURN``;
     * an active battle whose ``wIsInBattle`` value is not a known kind is
       ``None`` (undecodable);
     * if any required evidence symbol is absent the result is
@@ -229,13 +279,24 @@ def _derive_phase(
       block is *not* enough to claim ``INTRO``: absence of the other flags
       does not prove the intro animation is playing.
 
-    ``wBattleResult`` is only terminal for the engine-written outcomes 1/2;
-    the reset value 0 is ambiguous and never emits ``TERMINAL_RETURN``.
-    ``wMoveMenuType`` and ``wPlayerMoveListIndex`` are required evidence but
-    never sufficient alone: no value proves move selection is currently
-    active, so ``COMMAND_SELECTION`` is never derived.
+    ``wBattleResult`` only emits ``TERMINAL_RETURN`` on the observed
+    battle-end transition (``battle_ended``); its reset value 0 and its
+    mid-battle writes are never terminal on their own.  ``wMoveMenuType``
+    and ``wPlayerMoveListIndex`` are required evidence but never sufficient
+    alone: no value proves move selection is currently active, so
+    ``COMMAND_SELECTION`` is never derived.
     """
     if raw == 0:
+        if battle_ended:
+            if "wBattleResult" in symbols:
+                result = symbols.read_u8(memory, "wBattleResult")
+                if result in _VALID_BATTLE_RESULTS:
+                    return (
+                        BattlePhase.TERMINAL_RETURN,
+                        True,
+                        ("wIsInBattle", "wBattleResult"),
+                    )
+            return BattlePhase.UNKNOWN, False, ("wIsInBattle",)
         return BattlePhase.INACTIVE, True, ("wIsInBattle",)
     if kind is None:
         return None, False, ("wIsInBattle",)
@@ -246,13 +307,10 @@ def _derive_phase(
         return BattlePhase.UNKNOWN, False, tuple(evidence)
     evidence.extend(_PHASE_TRANSIENT_SYMBOLS)
 
-    result = symbols.read_u8(memory, "wBattleResult")
     forced = symbols.read_u8(memory, "wInHandlePlayerMonFainted") != 0
     action = symbols.read_u8(memory, "wActionResultOrTookBattleTurn") != 0
 
     observed: set[BattlePhase] = set()
-    if result in _VALID_BATTLE_RESULTS and result != 0:
-        observed.add(BattlePhase.TERMINAL_RETURN)
     if forced:
         observed.add(BattlePhase.FORCED_REPLACEMENT)
     if action:

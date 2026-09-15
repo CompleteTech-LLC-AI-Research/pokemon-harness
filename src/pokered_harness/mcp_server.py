@@ -82,8 +82,10 @@ from pokered_harness.session import (
     SessionCloseError,
     SessionCloseTimeout,
     SessionConfigurationError,
+    SessionEpoch,
     SessionError,
     SessionLockTimeout,
+    StateSnapshot,
     SymbolHashMismatch,
     SymbolNotFoundError,
     VersionMismatch,
@@ -2839,6 +2841,24 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
         raise McpHarnessError("link_teardown_failed", details)
 
 
+def _epoch_payload(epoch: SessionEpoch) -> dict[str, int]:
+    return {
+        "tick": epoch.tick,
+        "load_generation": epoch.load_generation,
+        "reset_generation": epoch.reset_generation,
+        "session_id": epoch.session_id,
+    }
+
+
+def _game_state_payload(snapshot: StateSnapshot) -> dict[str, Any]:
+    # The epoch is embedded in the same JSON object as the parsed state, so a
+    # client never has to correlate two independent resource reads.  The
+    # standalone `pokered://state-epoch` resource is retained for polling.
+    payload = to_jsonable(snapshot.state)
+    payload["epoch"] = _epoch_payload(snapshot.epoch)
+    return payload
+
+
 def read_resource(
     session: Session,
     uri: str,
@@ -2860,19 +2880,16 @@ def read_resource(
             return json.dumps(_timed_status(timed_owner))
         return timed_owner.submit(lambda owned: read_resource(owned, uri, link)).result()
     if uri == _URI_GAME_STATE:
-        return json.dumps(to_jsonable(session.read_game_state()))
+        return json.dumps(_game_state_payload(session.read_state_snapshot()))
     if uri == _URI_STATE_EPOCH:
         # Read-only session bookkeeping: lets a client pair a game-state
         # snapshot with a monotonic tick and reject a stale observation after
         # a later step/load without touching emulator state.  The monotonic
         # load_generation advances on every load_state, which the tick does
-        # not, so a rewound state is still detectable.
-        return json.dumps(
-            {
-                "tick": session.current_tick(),
-                "load_generation": session.current_load_generation(),
-            }
-        )
+        # not, so a rewound state is still detectable.  session_id
+        # distinguishes a replacement session, and all three counters are
+        # captured together (read_epoch) so the payload is never torn.
+        return json.dumps(_epoch_payload(session.read_epoch()))
     if uri == _URI_EVENT_LOG:
         events: list[GameEvent] = session.event_snapshot()
         return json.dumps([to_jsonable(e) for e in events])
@@ -2881,7 +2898,7 @@ def read_resource(
             raise McpHarnessError("peer_not_configured", "peer session not configured")
         with link.state():
             peer = link.peer_session
-        return json.dumps(to_jsonable(peer.read_game_state()))
+        return json.dumps(_game_state_payload(peer.read_state_snapshot()))
     if uri == _URI_LINK_TRANSPORT:
         if link is None:
             return json.dumps({"a_to_b": [], "b_to_a": []})
@@ -2907,18 +2924,28 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
         mcp_types.Resource(
             uri=_URI_GAME_STATE,  # type: ignore[arg-type]
             name="Game State",
-            description="Current parsed game state snapshot (JSON).",
+            description=(
+                "Current parsed game state snapshot (JSON). Includes an "
+                "`epoch` object (`tick`, `load_generation`, "
+                "`reset_generation`, `session_id`) captured in the same lock "
+                "scope as the state, so a client can reject a stale snapshot "
+                "without a second resource read. Battle fields expose the raw "
+                "`wBattleResult` byte as `battle.raw_battle_result` and a "
+                "lifecycle-confirmed `battle.terminal_result`."
+            ),
             mimeType="application/json",
         ),
         mcp_types.Resource(
             uri=_URI_STATE_EPOCH,  # type: ignore[arg-type]
             name="State Epoch",
             description=(
-                "Monotonic session tick plus load generation paired with "
-                "`pokered://game-state`. The tick advances with stepping; the "
-                "load generation advances on every `load_state`, so a rewound "
-                "state remains detectable. Compare successive reads to reject "
-                "stale snapshots."
+                "Monotonic session tick, load/reset generations, and session "
+                "identity captured atomically for `pokered://game-state`. The "
+                "tick advances with stepping; the load generation advances on "
+                "every `load_state` and the reset generation on every "
+                "`reset_tick`, so a rewound clock remains detectable; "
+                "`session_id` distinguishes a replacement session. Compare "
+                "successive reads to reject stale snapshots."
             ),
             mimeType="application/json",
         ),
@@ -2944,7 +2971,10 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
             mcp_types.Resource(
                 uri=_URI_PEER_GAME_STATE,  # type: ignore[arg-type]
                 name="Peer Game State",
-                description="Parsed game state of the peer session (JSON).",
+                description=(
+                    "Parsed game state of the peer session (JSON), including "
+                    "the peer's atomically captured `epoch`."
+                ),
                 mimeType="application/json",
             )
         )

@@ -10,13 +10,14 @@ between "emulator control" (this module) and "policy" (external).
 from __future__ import annotations
 
 import hashlib
+import itertools
 import math
 import re
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from pathlib import Path
 from typing import Self
@@ -29,7 +30,13 @@ from pokered_harness.ownership import (
     owner_group,
 )
 from pokered_harness.pyboy_protocol import PyBoyLike
-from pokered_harness.state import GameState, parse_game_state
+from pokered_harness.state import (
+    BattleKind,
+    BattleLifecycle,
+    GameState,
+    parse_battle,
+    parse_game_state,
+)
 from pokered_harness.symbols.loader import SymbolTable, load_sym_file
 
 
@@ -113,6 +120,49 @@ class SymbolHashMismatch(VersionMismatch):
 
 _DEFAULT_CLOSE_TIMEOUT_S = 5.0
 
+# Process-local monotonic identity for each Session.  A replacement session
+# (a new Session object over a fresh emulator) must not be able to reuse the
+# tick/load-generation pair of the session it replaced, so the identity is
+# included in every epoch snapshot.
+_SESSION_ID_SEQUENCE = itertools.count(1)
+_SESSION_ID_LOCK = threading.Lock()
+
+
+def _next_session_id() -> int:
+    with _SESSION_ID_LOCK:
+        return next(_SESSION_ID_SEQUENCE)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionEpoch:
+    """Identity and clock counters captured atomically with a snapshot.
+
+    ``tick`` advances with :meth:`Session.step`; ``load_generation`` advances
+    on every successful :meth:`Session.load_state` (the tick is restored by a
+    load, so the pair alone can repeat); ``reset_generation`` advances on
+    every :meth:`Session.reset_tick` (which can intentionally rewind the
+    tick); ``session_id`` distinguishes a replacement :class:`Session` from
+    the one it replaced.
+    """
+
+    tick: int
+    load_generation: int
+    reset_generation: int
+    session_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class StateSnapshot:
+    """A game-state observation paired with its :class:`SessionEpoch`.
+
+    Both fields are read under one owner-locked emulator scope, so the epoch
+    always describes the same instant as ``state``; a concurrent step or load
+    cannot tear the two apart.
+    """
+
+    state: GameState
+    epoch: SessionEpoch
+
 
 @dataclass(frozen=True, slots=True)
 class RunUntilResult:
@@ -174,6 +224,9 @@ class Session:
         self._events = event_bus if event_bus is not None else EventBus()
         self._tick: int = 0
         self._load_generation: int = 0
+        self._reset_generation: int = 0
+        self._session_id: int = _next_session_id()
+        self._battle_lifecycle = BattleLifecycle()
         # The owner registry is shared with raw link providers.  Keep the
         # Session-facing ``_lock`` property below for compatibility with
         # existing tests/instrumentation, but make the owner lock the one
@@ -773,6 +826,30 @@ class Session:
             return self._load_generation
 
     @property
+    def session_id(self) -> int:
+        """Process-local identity that distinguishes replacement sessions."""
+        return self._session_id
+
+    def _epoch_locked(self) -> SessionEpoch:
+        return SessionEpoch(
+            tick=self._tick,
+            load_generation=self._load_generation,
+            reset_generation=self._reset_generation,
+            session_id=self._session_id,
+        )
+
+    def read_epoch(self) -> SessionEpoch:
+        """Capture tick, generations, and identity under one lock scope.
+
+        Unlike reading :meth:`current_tick` and
+        :meth:`current_load_generation` separately, the counters are captured
+        atomically, so concurrent stepping/loading cannot pair a torn tick
+        with a mismatched generation.
+        """
+        with self._emulator_access(allow_closed=True):
+            return self._epoch_locked()
+
+    @property
     def events(self) -> EventBus:
         return self._events
 
@@ -1194,7 +1271,33 @@ class Session:
         self._ensure_open()
         with self._emulator_access():
             self._ensure_open()
-            return parse_game_state(self._pyboy.memory, self._symbols)
+            return self._read_game_state_locked()
+
+    def read_state_snapshot(self) -> StateSnapshot:
+        """Read the game state and its :class:`SessionEpoch` under one lock.
+
+        This is the atomic form of ``read_game_state()`` plus
+        ``read_epoch()``: a concurrent step or load cannot slip between the
+        parsed memory and the epoch counters it is paired with.
+        """
+        self._ensure_open()
+        with self._emulator_access():
+            self._ensure_open()
+            state = self._read_game_state_locked()
+            return StateSnapshot(state=state, epoch=self._epoch_locked())
+
+    def _read_game_state_locked(self) -> GameState:
+        """Parse the aggregate and qualify terminal outcomes by lifecycle."""
+        memory = self._pyboy.memory
+        state = parse_game_state(memory, self._symbols)
+        battle = state.battle
+        if battle is None:
+            return state
+        qualified = parse_battle(memory, self._symbols, lifecycle=self._battle_lifecycle)
+        self._battle_lifecycle = BattleLifecycle(
+            was_active=qualified.kind in (BattleKind.WILD, BattleKind.TRAINER)
+        )
+        return replace(state, battle=qualified)
 
     def event_snapshot(self) -> list[GameEvent]:
         """Return a consistent copy of the current event log."""
@@ -1253,6 +1356,7 @@ class Session:
             if self._timed_endpoint is not None:
                 raise SessionError("cannot reset tick during a bound timed epoch")
             self._tick = value
+            self._reset_generation += 1
 
     # --- event-driven advance -----------------------------------------
 

@@ -19,6 +19,7 @@ from pokered_harness.state.base import (
 )
 from pokered_harness.state.battle import (
     BattleKind,
+    BattleLifecycle,
     BattlePhase,
     BattleState,
     BattleType,
@@ -60,6 +61,7 @@ __all__ = [
     "Bag",
     "BagStack",
     "BattleKind",
+    "BattleLifecycle",
     "BattlePhase",
     "BattleState",
     "BattleType",

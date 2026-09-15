@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 
 import pytest
 
 from pokered_harness.events import EventBus
 from pokered_harness.mcp_server import (
+    LinkState,
     _resource_specs,
     dispatch_tool,
     read_resource,
@@ -25,6 +27,7 @@ from pokered_harness.mcp_server import (
 from pokered_harness.session import Session
 from pokered_harness.state.battle import (
     BattleKind,
+    BattleLifecycle,
     BattlePhase,
     parse_battle,
 )
@@ -213,37 +216,75 @@ def test_phase_forced_replacement_when_player_faint_handler_is_set():
     assert state.phase_valid is True
 
 
-@pytest.mark.parametrize("result", [1, 2])
-def test_phase_terminal_return_for_valid_outcomes(result):
+@pytest.mark.parametrize("result", [0, 1, 2])
+def test_phase_ended_battle_confirms_terminal_outcome(result):
     mem = DictMemory()
     sym = _symbols()
-    mem[0xC000] = 2
-    mem[0xC001] = result  # wBattleResult: lose / draw
-    state = parse_battle(mem, sym)
+    mem[0xC000] = 0  # wIsInBattle: battle has ended
+    mem[0xC001] = result  # wBattleResult: win / lose / draw
+    state = parse_battle(mem, sym, lifecycle=BattleLifecycle(was_active=True))
     assert state.phase is BattlePhase.TERMINAL_RETURN
     assert state.phase_valid is True
     assert state.terminal_result == result
+    assert state.raw_battle_result == result
 
 
-def test_phase_zero_result_is_not_terminal_and_exposed_as_raw_value():
+def test_phase_fresh_inactive_result_zero_is_not_terminal():
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 0
+    mem[0xC001] = 0  # reset value, no battle was observed
+    state = parse_battle(mem, sym)
+    assert state.phase is BattlePhase.INACTIVE
+    assert state.phase_valid is True
+    assert state.terminal_result is None
+    assert state.raw_battle_result == 0
+
+
+def test_phase_active_result_zero_is_not_terminal():
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 2
-    mem[0xC001] = 0  # wBattleResult: also the reset value, ambiguous
+    mem[0xC001] = 0  # also written by InitBattleVariables at battle start
     state = parse_battle(mem, sym)
     assert state.phase is BattlePhase.UNKNOWN
     assert state.phase_valid is False
-    assert state.terminal_result == 0
+    assert state.terminal_result is None
+    assert state.raw_battle_result == 0
 
 
-def test_phase_invalid_result_is_not_terminal_and_not_exposed():
+@pytest.mark.parametrize("result", [1, 2])
+def test_phase_active_positive_result_is_raw_only(result):
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 2
-    mem[0xC001] = 255  # wBattleResult: no engine writer emits this
+    mem[0xC001] = result  # mid-battle faint/capture marker, not the end
     state = parse_battle(mem, sym)
     assert state.phase is BattlePhase.UNKNOWN
     assert state.phase_valid is False
+    assert state.terminal_result is None
+    assert state.raw_battle_result == result
+
+
+def test_phase_ended_with_invalid_result_is_not_terminal():
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 0
+    mem[0xC001] = 255  # no engine writer emits this
+    state = parse_battle(mem, sym, lifecycle=BattleLifecycle(was_active=True))
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
+    assert state.terminal_result is None
+    assert state.raw_battle_result == 255
+
+
+def test_phase_lifecycle_active_but_still_in_battle_is_not_terminal():
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 1
+    mem[0xC001] = 0
+    state = parse_battle(mem, sym, lifecycle=BattleLifecycle(was_active=True))
+    assert state.phase is BattlePhase.UNKNOWN
     assert state.terminal_result is None
 
 
@@ -251,8 +292,6 @@ def test_phase_invalid_result_is_not_terminal_and_not_exposed():
     "flags",
     [
         {"wInHandlePlayerMonFainted": 1, "wActionResultOrTookBattleTurn": 1},
-        {"wBattleResult": 1, "wInHandlePlayerMonFainted": 1},
-        {"wBattleResult": 1, "wActionResultOrTookBattleTurn": 1},
     ],
 )
 def test_phase_contradictory_flags_fail_closed_to_none(flags):
@@ -270,6 +309,24 @@ def test_phase_contradictory_flags_fail_closed_to_none(flags):
     state = parse_battle(mem, sym)
     assert state.phase is None
     assert state.phase_valid is False
+
+
+def test_phase_terminal_missing_result_symbol_fails_closed():
+    sym = load_sym_text(
+        """
+        00:C000 wIsInBattle
+        00:C002 wInHandlePlayerMonFainted
+        00:C003 wMoveMenuType
+        00:C004 wPlayerMoveListIndex
+        00:C005 wActionResultOrTookBattleTurn
+        """
+    )
+    mem = DictMemory({0xC000: 0})
+    state = parse_battle(mem, sym, lifecycle=BattleLifecycle(was_active=True))
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
+    assert state.terminal_result is None
+    assert state.raw_battle_result is None
 
 
 def test_phase_missing_evidence_fails_closed_to_unknown():
@@ -444,7 +501,54 @@ def test_game_state_resource_contains_additive_battle_fields():
     assert battle["enemy_mon"]["hp"] == 32
     assert battle["enemy_mon"]["max_hp"] == 40
     assert battle["enemy_mon"]["pp"] == [20, 25, 0, 0]
-    assert battle["terminal_result"] == 0
+    # The raw byte is always exposed; an unended battle never confirms it.
+    assert battle["raw_battle_result"] == 0
+    assert battle["terminal_result"] is None
+
+
+def test_game_state_resource_embeds_snapshot_epoch():
+    session = _session()
+    dispatch_tool(session, "step", {"count": 4})
+    body = json.loads(read_resource(session, "pokered://game-state"))
+    assert body["epoch"] == {
+        "tick": 4,
+        "load_generation": 0,
+        "reset_generation": 0,
+        "session_id": session.session_id,
+    }
+
+
+def test_session_read_state_snapshot_pairs_state_with_epoch():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    snapshot = session.read_state_snapshot()
+    assert snapshot.state.battle is not None
+    assert snapshot.epoch == session.read_epoch()
+    assert snapshot.epoch.session_id == session.session_id
+
+
+def test_replacement_sessions_have_distinct_identities():
+    first = _session()
+    second = _session()
+    assert first.session_id != second.session_id
+    assert read_resource(first, "pokered://state-epoch") != read_resource(
+        second, "pokered://state-epoch"
+    )
+
+
+def test_peer_game_state_resource_embeds_peer_epoch():
+    primary = _session()
+    peer = _session()
+    peer._pyboy.memory[0xC000] = 1  # wild battle on the peer
+    link = LinkState(peer_session=peer)
+    body = json.loads(read_resource(primary, "pokered://peer-game-state", link=link))
+    assert body["battle"]["raw_is_in_battle"] == 1
+    assert body["epoch"] == {
+        "tick": 0,
+        "load_generation": 0,
+        "reset_generation": 0,
+        "session_id": peer.session_id,
+    }
 
 
 def test_state_epoch_resource_tracks_session_tick():
@@ -452,11 +556,27 @@ def test_state_epoch_resource_tracks_session_tick():
     assert json.loads(read_resource(session, "pokered://state-epoch")) == {
         "tick": 0,
         "load_generation": 0,
+        "reset_generation": 0,
+        "session_id": session.session_id,
     }
     dispatch_tool(session, "step", {"count": 3})
     assert json.loads(read_resource(session, "pokered://state-epoch")) == {
         "tick": 3,
         "load_generation": 0,
+        "reset_generation": 0,
+        "session_id": session.session_id,
+    }
+
+
+def test_state_epoch_reset_generation_advances_on_reset_tick():
+    session = _session()
+    dispatch_tool(session, "step", {"count": 3})
+    session.reset_tick(3)
+    assert json.loads(read_resource(session, "pokered://state-epoch")) == {
+        "tick": 3,
+        "load_generation": 0,
+        "reset_generation": 1,
+        "session_id": session.session_id,
     }
 
 
@@ -468,7 +588,81 @@ def test_state_epoch_load_generation_advances_on_load_state():
     assert json.loads(read_resource(session, "pokered://state-epoch")) == {
         "tick": 5,
         "load_generation": 1,
+        "reset_generation": 0,
+        "session_id": session.session_id,
     }
+
+
+def test_read_game_state_confirms_terminal_win_on_battle_end():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2  # battle active
+    active = session.read_game_state()
+    assert active.battle is not None
+    assert active.battle.terminal_result is None
+    # EndOfBattle leaves wBattleResult at the committed outcome and clears
+    # wIsInBattle; the next observation confirms the win.
+    session._pyboy.memory[0xC000] = 0
+    session._pyboy.memory[0xC001] = 0
+    ended = session.read_game_state()
+    assert ended.battle is not None
+    assert ended.battle.phase is BattlePhase.TERMINAL_RETURN
+    assert ended.battle.terminal_result == 0
+    # Confirmation is edge-triggered: a later overworld read is inactive.
+    later = session.read_game_state()
+    assert later.battle is not None
+    assert later.battle.terminal_result is None
+
+
+class _BlockingMemory(DictMemory):
+    """DictMemory that parks the first read of ``block_addr`` on an event."""
+
+    def __init__(
+        self, *, block_addr: int, entered: threading.Event, release: threading.Event
+    ) -> None:
+        super().__init__()
+        self._block_addr = block_addr
+        self._entered = entered
+        self._release = release
+        self._blocked = False
+
+    def __getitem__(self, key):
+        if key == self._block_addr and not self._blocked:
+            self._blocked = True
+            self._entered.set()
+            if not self._release.wait(timeout=5):
+                raise AssertionError("snapshot parse was never released")
+        return super().__getitem__(key)
+
+
+def test_state_snapshot_holds_owner_lock_across_parse_and_epoch():
+    entered = threading.Event()
+    release = threading.Event()
+    memory = _BlockingMemory(block_addr=0xC000, entered=entered, release=release)
+    session = Session(pyboy=FakePyBoy(memory), symbols=_symbols(), event_bus=EventBus())
+    captured: dict[str, object] = {}
+
+    def snapshot() -> None:
+        captured["snapshot"] = session.read_state_snapshot()
+
+    def step() -> None:
+        session.step(1)
+        captured["stepped"] = True
+
+    snapshot_thread = threading.Thread(target=snapshot)
+    snapshot_thread.start()
+    assert entered.wait(timeout=5)
+    step_thread = threading.Thread(target=step)
+    step_thread.start()
+    # The owner lock is held across parsing and epoch capture, so a
+    # concurrent step cannot advance the tick mid-snapshot.
+    assert "stepped" not in captured
+    release.set()
+    snapshot_thread.join(timeout=5)
+    step_thread.join(timeout=5)
+    assert not snapshot_thread.is_alive() and not step_thread.is_alive()
+    result = captured["snapshot"]
+    assert result.epoch.tick == 0
+    assert result.epoch.session_id == session.session_id
 
 
 def test_resource_specs_advertise_state_epoch():
