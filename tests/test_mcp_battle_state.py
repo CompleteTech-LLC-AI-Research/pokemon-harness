@@ -476,6 +476,26 @@ def test_command_selection_closes_on_mimic_submenu_return():
     assert closed.menu_open is False
 
 
+def test_advance_tick_preserves_observation_but_reset_tick_invalidates():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2  # trainer battle
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[0])
+    assert session.read_game_state().battle.menu_open is True
+
+    # Ordinary interleaved-step bookkeeping advancement must not discard the
+    # observation the execution hooks just recorded.
+    session._advance_tick(5)
+    still_open = session.read_game_state().battle
+    assert still_open.menu_open is True
+    assert still_open.phase is BattlePhase.COMMAND_SELECTION
+    assert still_open.phase_valid is True
+
+    # An intentional rewind still starts a new epoch and invalidates evidence.
+    session.reset_tick(0)
+    invalidated = session.read_game_state().battle
+    assert invalidated.menu_open is None
+
+
 def test_command_selection_stale_mode_byte_without_hook_is_not_selection():
     session = _session()
     # Mimic mode (1) and relearn mode (2) persist after the menu closes; the

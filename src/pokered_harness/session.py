@@ -1466,6 +1466,28 @@ class Session:
             if self._battle_menu_observed:
                 self._battle_menu_open = None
 
+    def _advance_tick(self, count: int) -> int:
+        """Advance the bookkeeping clock for an interleaved link step.
+
+        The linked path drives the emulators directly and only needs the
+        session's bookkeeping clock kept in step.  This is ordinary forward
+        advancement, not a rewind, so it must not start a new observation
+        epoch or discard the battle lifecycle/menu evidence the execution
+        hooks recorded while stepping.  :meth:`reset_tick` remains the
+        intentional-rewind path that invalidates that evidence.
+        """
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError(
+                f"advance must be a non-negative integer, got {count!r}"
+            )
+        self._ensure_open()
+        with self._emulator_access():
+            self._ensure_open()
+            if self._timed_endpoint is not None:
+                raise SessionError("cannot advance tick during a bound timed epoch")
+            self._tick += count
+            return self._tick
+
     # --- event-driven advance -----------------------------------------
 
     def run_until_event(

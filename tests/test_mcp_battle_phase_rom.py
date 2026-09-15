@@ -27,11 +27,11 @@ preloads the immutable peer fixture before serving; the primary fixture is
 loaded through the public ``load_state`` tool.  Every asset is validated
 against the pinned ROM/SYM SHA-1 values (``POKERED_SKIP_SHA1`` is rejected).
 
-The paired additive observation is read while the link is up.  Because the
-local-pair ``link_step`` bookkeeping rewinds the external tick (which resets
-the observational menu state), the pair is then unpaired and the primary alone
-is stepped into a fresh ``FIGHT`` -> move-menu entry so ``command_selection``
-is itself demonstrated from the session's own hooks.
+The paired additive observation is read while the link is up, and the primary
+is then driven into a ``FIGHT`` -> move-menu entry with the pair STILL
+connected through the public ``link_step`` tool: ordinary paired stepping
+advances bookkeeping without starting a new observation epoch, so the
+``command_selection`` hook evidence survives and is observed without unpairing.
 
 Gated with ``skipif`` on the canonical ROM/SYM/fixture assets.  The parameter
 ids match the canonical games (``red_color``, ``blue_color``, ``yellow``).
@@ -353,12 +353,14 @@ async def _mash_until(client, predicate, *, budget, prompt):
     )
 
 
-async def _advance_primary_until(client, predicate, *, budget, prompt):
-    """Advance only the primary one frame at a time (no pair bookkeeping).
+async def _advance_pair_primary_until(client, predicate, *, budget, prompt):
+    """Advance the still-paired link through ``link_step`` until the primary
+    state satisfies ``predicate``.
 
-    After ``link_unpair`` the primary can be stepped like an ordinary session,
-    so a freshly entered battle menu hook is observed instead of being cleared
-    by ``link_step``'s tick bookkeeping.
+    Ordinary paired stepping must preserve the battle/menu observations the
+    execution hooks record: ``link_step`` advances bookkeeping without starting
+    a new observation epoch.  This enters the FIGHT -> move menu through the
+    ROM's own input handling while the pair remains connected.
     """
     spent = 0
     last_press = -100
@@ -369,8 +371,8 @@ async def _advance_primary_until(client, predicate, *, budget, prompt):
         if spent - last_press >= 16:
             await _press(client, "a", duration=2)
             last_press = spent
-        await client.tool("step", {"count": 1})
-        spent += 1
+        await _link_step(client, 4)
+        spent += 4
     state = await _request(client, "pokered://game-state")
     raise AssertionError(f"{prompt}: budget {budget} frames; state={json.dumps(state)}")
 
@@ -593,16 +595,15 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
             _assert_battle_observations(state, label=label)
             assert _battle(state)["terminal_result"] is None, (label, state)
 
-        # Detach the pair so a fresh menu entry is observed rather than cleared
-        # by link_step's tick bookkeeping (which rewinds the external tick and
-        # resets the observational state).  Selecting FIGHT then opens the move
-        # menu through the ROM's own handling and fires SelectMenuItem.
-        assert await client.tool("link_unpair") == {"paired": False}
-        single, menu_frames = await _advance_primary_until(
+        # Select FIGHT on the primary and observe the ROM move menu open while
+        # the pair is STILL stepped through the public link_step tool.  Ordinary
+        # paired stepping advances bookkeeping without invalidating the menu
+        # observation the execution hooks recorded.
+        single, menu_frames = await _advance_pair_primary_until(
             client,
             lambda state: _battle(state)["menu_open"] is True,
             budget=BATTLE_MENU_BUDGET,
-            prompt="battle command/move menu never opened on the primary",
+            prompt="battle command/move menu never opened on the primary while paired",
         )
         _log("battle_menu", f"frames={menu_frames}")
         _assert_battle_observations(single, label=labels[0])
