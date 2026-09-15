@@ -33,6 +33,26 @@ connected through the public ``link_step`` tool: ordinary paired stepping
 advances bookkeeping without starting a new observation epoch, so the
 ``command_selection`` hook evidence survives and is observed without unpairing.
 
+Beyond menu entry the scenario also settles a real move: both sides select the
+highlighted move through the ROM's menu handling, the paired link is advanced
+through the move exchange and execution, and the test asserts the settled
+``player_selected_move``, the matching PP decrement, the opponent HP drop and
+the return to the next command boundary from the public
+``pokered://game-state`` resource.  It then issues and cancels an outstanding
+``link_step`` request, proving a bounded client-side ``CancelledError``, a
+still-responsive server and clean owned-process teardown at ``client.eof()``.
+Forced replacement and a terminal return are not reachable from these
+fixtures within a reasonable finite bound (six full-HP party mons, same-type
+reduced damage and limited lead-move PP); the test therefore asserts the
+documented fail-closed behavior instead of fabricating a terminal result: the
+battle stays active and ``terminal_result`` stays ``None``.  A normal FIGHT
+move also leaves ``wActionResultOrTookBattleTurn`` at zero (``ExecutePlayerMoveDone``
+resets it), so ``ACTION_RESOLUTION`` is correctly never derived for this turn;
+the test asserts that fail-closed outcome and records every observed phase.
+
+Runs inside the harness child with a preloaded peer; the child reuses the
+existing peer-preload harness approach.
+
 Gated with ``skipif`` on the canonical ROM/SYM/fixture assets.  The parameter
 ids match the canonical games (``red_color``, ``blue_color``, ``yellow``).
 """
@@ -53,6 +73,7 @@ import pytest
 from scripts.probe_timed_rom_pair import resolve_assets
 from tests._rom_assets import fixture_path, rom_path, sym_path
 from tests.test_mcp_timed_rom import PIPE_CAP, RomClient
+from tests.test_mcp_timed_stdio import CALL_BOUND
 
 ROOT = Path(__file__).resolve().parents[1]
 FAMILIES = ("red_color", "blue_color", "yellow")
@@ -66,6 +87,25 @@ LINK_MENU_CURSOR_BUDGET = 400
 COLOSSEUM_WARP_BUDGET = 2400
 BATTLE_ENTRY_BUDGET = 2400
 BATTLE_MENU_BUDGET = 2400
+# Move settlement is driven through the public link tools only.  The turn
+# itself (move text, animation, damage, return to the next command menu) is a
+# bounded number of paired frames; the boundary wait below is a separate finite
+# cap so a settled turn is not mistaken for a stalled transport.
+SETTLEMENT_BUDGET = 2400
+SETTLEMENT_STEP = 4
+# One A press per side at most this often; the ROM's HandleMenuInput needs a
+# fresh joypad sample and a single queued event can be lost to a transition.
+SETTLEMENT_INPUT_SPACING = 8
+BOUNDARY_BUDGET = 1200
+# The battle command menu stores wMaxMenuItem == 1; the move menu stores
+# wNumMovesMinusOne + 2 (>= 2 for any legal moveset).
+COMMAND_MENU_MAX_ITEM = 1
+TERMINAL_RETURN_PHASE = 5
+# An outstanding paired request is large enough to still be in flight after a
+# short cancellation delay (measured ~0.22 s/frame on this host) yet small
+# enough that the server's eventual response is drained within CALL_BOUND.
+OUTSTANDING_STEP_FRAMES = 20
+OUTSTANDING_CANCEL_DELAY = 0.2
 
 LINK_MENU_MAX_ITEMS = (2, 3)
 MENU_WATCHED_A = 0x01
@@ -377,6 +417,198 @@ async def _advance_pair_primary_until(client, predicate, *, budget, prompt):
     raise AssertionError(f"{prompt}: budget {budget} frames; state={json.dumps(state)}")
 
 
+def _active_mon(state):
+    """Return the parsed ``party.active_mon`` dict, or ``None`` when absent."""
+    party = state.get("party")
+    if not isinstance(party, dict):
+        return None
+    mon = party.get("active_mon")
+    return mon if isinstance(mon, dict) else None
+
+
+def _active_pp(state):
+    mon = _active_mon(state)
+    if mon is None:
+        return None
+    pp = mon.get("pp")
+    return tuple(pp) if isinstance(pp, (list, tuple)) else None
+
+
+def _active_moves(state):
+    mon = _active_mon(state)
+    if mon is None:
+        return None
+    moves = mon.get("moves")
+    return tuple(moves) if isinstance(moves, (list, tuple)) else None
+
+
+def _active_hp(state):
+    mon = _active_mon(state)
+    if mon is None:
+        return None
+    hp = mon.get("hp")
+    return hp if type(hp) is int else None
+
+
+def _pp_decrements(before, after):
+    """Return the move slots whose PP strictly decreased, or ``None`` if the
+    before/after PP tuples are not both available."""
+    if before is None or after is None or len(before) != len(after):
+        return None
+    return tuple(index for index in range(len(before)) if after[index] < before[index])
+
+
+def _menu_awaiting_input(state):
+    """True when the ROM's command or move menu is open and its cursor bytes
+    are integer-shaped (a live HandleMenuInput loop, not a stale draw)."""
+    battle = _battle(state)
+    if battle.get("menu_open") is not True:
+        return False
+    menu = state.get("menu")
+    if not isinstance(menu, dict):
+        return False
+    return type(menu.get("current_item")) is int and type(menu.get("max_item")) is int
+
+
+def _at_command_boundary(state):
+    """True when the primary is back at the FIGHT/ITEM command menu."""
+    battle = _battle(state)
+    if battle.get("menu_open") is not True:
+        return False
+    menu = state.get("menu")
+    return (
+        isinstance(menu, dict)
+        and type(menu.get("max_item")) is int
+        and menu["max_item"] <= COMMAND_MENU_MAX_ITEM
+    )
+
+
+async def _settle_selected_move(client, *, before, budget=SETTLEMENT_BUDGET):
+    """Drive the paired ROMs through one move selection -> resolution cycle.
+
+    Both combatants must select a move before the link exchange can complete,
+    so each side is advanced toward its own menu with at most one A press per
+    ``SETTLEMENT_INPUT_SPACING`` frames.  The loop stops as soon as *both*
+    active mons show a PP decrement (the ROM executes ``DecrementPP`` before
+    damage, so this is a strict settlement signal) and then waits, input-free,
+    for the primary to return to a command/next input boundary.
+
+    Returns the pre/post PP tuples, the decremented slots, the selected move
+    bytes, every valid phase and action-flag value observed during the turn,
+    and both states captured at the final boundary.
+    """
+    labels = len(before)
+    if labels != 2:
+        raise ValueError("settlement expects the primary and peer states")
+    pp_before = tuple(_active_pp(state) for state in before)
+    decremented = [None] * labels
+    selected = [None] * labels
+    phases_seen = set()
+    actions_seen = set()
+    terminal_observations = []
+    raw_values = set()
+    spent = 0
+    next_input = [-SETTLEMENT_INPUT_SPACING] * labels
+    while spent < budget:
+        states = await _states(client)
+        for index, state in enumerate(states):
+            battle = _battle(state)
+            raw_values.add(battle.get("raw_is_in_battle"))
+            if battle.get("phase_valid") is True:
+                phases_seen.add(battle.get("phase"))
+            if battle.get("phase") == TERMINAL_RETURN_PHASE and not terminal_observations:
+                terminal_observations.append(
+                    {
+                        "side": index,
+                        "raw_is_in_battle": battle.get("raw_is_in_battle"),
+                        "raw_battle_result": battle.get("raw_battle_result"),
+                        "terminal_result": battle.get("terminal_result"),
+                        "tick": state["epoch"]["tick"],
+                    }
+                )
+            actions_seen.add(battle.get("action_result_or_took_turn"))
+            if decremented[index] is None:
+                changed = _pp_decrements(pp_before[index], _active_pp(state))
+                if changed:
+                    decremented[index] = changed
+                    selected[index] = battle.get("player_selected_move")
+        if all(changed is not None for changed in decremented):
+            break
+        for index, state in enumerate(states):
+            if decremented[index] is not None:
+                continue
+            if not _menu_awaiting_input(state):
+                continue
+            if spent < next_input[index]:
+                continue
+            if index == 0:
+                await _press(client, "a", duration=4)
+            else:
+                await _peer_press(client, "a", duration=4)
+            next_input[index] = spent + SETTLEMENT_INPUT_SPACING
+        await _link_step(client, SETTLEMENT_STEP)
+        spent += SETTLEMENT_STEP
+    if not all(changed is not None for changed in decremented):
+        raise AssertionError(
+            "selected move never settled (PP decrement not observed): "
+            f"before={pp_before} frames={spent}"
+        )
+
+    boundary = None
+    boundary_frames = 0
+    while boundary_frames < BOUNDARY_BUDGET:
+        states = await _states(client)
+        if _battle(states[0]).get("raw_is_in_battle") not in BATTLE_KINDS:
+            boundary = states
+            break
+        if _at_command_boundary(states[0]):
+            boundary = states
+            break
+        await _link_step(client, SETTLEMENT_STEP)
+        boundary_frames += SETTLEMENT_STEP
+    if boundary is None:
+        states = await _states(client)
+        raise AssertionError(
+            "settled turn never returned to a command/next boundary: "
+            f"{json.dumps([_battle(state) for state in states])}"
+        )
+    return {
+        "frames": spent,
+        "boundary_frames": boundary_frames,
+        "pp_before": pp_before,
+        "pp_after": tuple(_active_pp(state) for state in boundary),
+        "decremented": tuple(decremented),
+        "selected": tuple(selected),
+        "phases_seen": tuple(sorted(value for value in phases_seen if value is not None)),
+        "actions_seen": tuple(sorted(value for value in actions_seen if value is not None)),
+        "raw_values": tuple(sorted(value for value in raw_values if value is not None)),
+        "terminal_observations": terminal_observations,
+        "boundary": boundary,
+    }
+
+
+async def _send_raw_request(client, method, params):
+    """Send one JSON-RPC request and return its id without awaiting a reply."""
+    client.sequence += 1
+    request_id = client.sequence
+    await client.send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+    return request_id
+
+
+async def _read_response_for(client, request_id, *, bound):
+    """Read stdout until the response for ``request_id`` arrives (or fail)."""
+    async with asyncio.timeout(bound):
+        while True:
+            line = await client.process.stdout.readline()
+            assert line, f"server EOF while awaiting response {request_id}"
+            response = json.loads(line)
+            assert response.get("jsonrpc") == "2.0", response
+            if "id" not in response:
+                continue
+            if response["id"] == request_id:
+                return response
+
+
 async def _pair(client):
     paired = await client.tool("link_pair")
     assert paired["paired"] is True, paired
@@ -613,6 +845,127 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
         assert battle["menu_evidence"], battle
         assert battle["terminal_result"] is None, battle
 
+        # -- move settlement -------------------------------------------------
+        # Capture the pre-turn PP/HP before either side commits a move.  The
+        # cursor is still on FIGHT (current_menu_item == 0) and no move has been
+        # selected yet, so a later change is a genuine ROM-driven settlement.
+        turn_start = await _states(client)
+        for state, label in zip(turn_start, labels, strict=True):
+            _assert_battle_observations(state, label=label)
+        assert _battle(turn_start[0])["player_selected_move"] == 0, turn_start[0]
+        enemy_hp_before = _battle(turn_start[0])["enemy_mon"]["hp"]
+        player_hp_before = _active_hp(turn_start[0])
+        assert player_hp_before is not None, turn_start[0]
+
+        settlement = await _settle_selected_move(client, before=turn_start)
+        boundary = settlement["boundary"]
+        assert settlement["decremented"][0] is not None, settlement
+        assert settlement["decremented"][1] is not None, settlement
+        for index, label in enumerate(labels):
+            changed = settlement["decremented"][index]
+            before_pp = settlement["pp_before"][index]
+            after_pp = settlement["pp_after"][index]
+            assert len(changed) == 1, (label, changed, settlement)
+            assert before_pp is not None and after_pp is not None, (label, settlement)
+            slot = changed[0]
+            assert before_pp[slot] - after_pp[slot] == 1, (label, slot, settlement)
+
+        primary_state = boundary[0]
+        primary_battle = _battle(primary_state)
+        primary_moves = _active_moves(primary_state)
+        primary_slot = settlement["decremented"][0][0]
+        assert primary_moves is not None and primary_moves[primary_slot] != 0, primary_state
+        assert primary_battle["player_selected_move"] == primary_moves[primary_slot], (
+            primary_battle,
+            primary_moves,
+        )
+        # The opponent's HP dropped from the executed move and the player's
+        # active mon never healed; both sides returned to a live battle.
+        enemy_hp_after = primary_battle["enemy_mon"]["hp"]
+        player_hp_after = _active_hp(primary_state)
+        assert 0 <= enemy_hp_after < enemy_hp_before, (enemy_hp_before, enemy_hp_after)
+        assert player_hp_after is not None and player_hp_after <= player_hp_before, (
+            player_hp_before,
+            player_hp_after,
+        )
+        assert primary_battle["raw_is_in_battle"] in BATTLE_KINDS, primary_battle
+        assert primary_battle["terminal_result"] is None, primary_battle
+        assert _at_command_boundary(primary_state), primary_battle
+        assert primary_battle["phase"] == 2 and primary_battle["phase_valid"] is True, (
+            primary_battle
+        )
+        _log(
+            "move_settlement",
+            f"frames={settlement['frames']} "
+            f"boundary_frames={settlement['boundary_frames']} "
+            f"phases={settlement['phases_seen']} actions={settlement['actions_seen']}",
+        )
+
+        # Action/phase fail-closed.  A regular FIGHT move resets
+        # wActionResultOrTookBattleTurn to zero in ExecutePlayerMoveDone and no
+        # item/switch/run path runs here, so the derived ACTION_RESOLUTION phase
+        # is correctly absent.  If a non-zero flag or ACTION_RESOLUTION *were*
+        # observed we require the documented value to be present; otherwise the
+        # observed all-zero contract is asserted rather than fabricating
+        # resolution evidence.
+        if 3 in settlement["phases_seen"] or any(
+            value != 0 for value in settlement["actions_seen"]
+        ):
+            assert any(value != 0 for value in settlement["actions_seen"]), settlement
+        else:
+            assert all(value == 0 for value in settlement["actions_seen"]), settlement
+            assert 3 not in settlement["phases_seen"], settlement
+
+        # -- outstanding request / asyncio cancellation ----------------------
+        # Issue a paired link request, cancel it while it is still outstanding,
+        # then prove the server stayed responsive and completed its own bounded
+        # operation.  The cancel is a client-side asyncio task cancellation (the
+        # documented terminal outcome is asyncio.CancelledError); the server
+        # never sees it, so its response is drained before any later request.
+        responsive_before = await _request(client, "pokered://game-state")
+        request_id = await _send_raw_request(
+            client,
+            "tools/call",
+            {"name": "link_step", "arguments": {"count": OUTSTANDING_STEP_FRAMES}},
+        )
+        reader = asyncio.create_task(_read_response_for(client, request_id, bound=CALL_BOUND))
+        await asyncio.sleep(OUTSTANDING_CANCEL_DELAY)
+        assert not reader.done(), "outstanding link_step completed before cancellation"
+        reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+        cancelled_response = await _read_response_for(client, request_id, bound=CALL_BOUND)
+        assert "result" in cancelled_response, cancelled_response
+        responsive_after = await _request(client, "pokered://game-state")
+        assert responsive_after["epoch"]["tick"] > responsive_before["epoch"]["tick"], (
+            responsive_before["epoch"],
+            responsive_after["epoch"],
+        )
+        _log(
+            "cancellation",
+            f"request_id={request_id} step_frames={OUTSTANDING_STEP_FRAMES} "
+            f"tick={responsive_before['epoch']['tick']}->{responsive_after['epoch']['tick']}",
+        )
+
+        # -- forced replacement / terminal return (documented absent) --------
+        # Reaching a knockout/terminal in these fixtures needs ~130 further
+        # turns: six full-HP level-53/54 party mons, same-type matchups that
+        # reduce the observed per-turn damage to ~7-31 HP, and a lead move with
+        # as little as 2 PP.  That is not a reasonable finite path for this
+        # scenario, so the documented fail-closed contract is asserted instead:
+        # the battle remains active and terminal_result stays None.
+        final_battle = _battle(responsive_after)
+        assert final_battle["raw_is_in_battle"] in BATTLE_KINDS, final_battle
+        assert final_battle["terminal_result"] is None, final_battle
+        assert final_battle["phase"] != TERMINAL_RETURN_PHASE, final_battle
+        assert final_battle["in_handle_player_mon_fainted"] == 0, final_battle
+        # A transient TERMINAL_RETURN during the turn is only valid as the
+        # documented unconfirmed falling edge: wIsInBattle read as zero with no
+        # surviving non-zero outcome, so terminal_result must stay None.
+        for observation in settlement["terminal_observations"]:
+            assert observation["raw_is_in_battle"] == 0, observation
+            assert observation["terminal_result"] is None, observation
+
         print(
             "MCP_BATTLE_PHASE_ROM "
             + json.dumps(
@@ -623,6 +976,30 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
                     "primary_battle": states[0]["battle"],
                     "peer_battle": states[1]["battle"],
                     "primary_selection": single["battle"],
+                    "settlement": {
+                        "frames": settlement["frames"],
+                        "boundary_frames": settlement["boundary_frames"],
+                        "pp_before": settlement["pp_before"],
+                        "pp_after": settlement["pp_after"],
+                        "decremented": settlement["decremented"],
+                        "selected": settlement["selected"],
+                        "phases_seen": settlement["phases_seen"],
+                        "actions_seen": settlement["actions_seen"],
+                        "raw_values": settlement["raw_values"],
+                        "terminal_observations": settlement["terminal_observations"],
+                        "enemy_hp": [enemy_hp_before, enemy_hp_after],
+                        "player_hp": [player_hp_before, player_hp_after],
+                    },
+                    "cancellation": {
+                        "step_frames": OUTSTANDING_STEP_FRAMES,
+                        "terminal": "asyncio.CancelledError",
+                        "response_result": True,
+                    },
+                    "terminal_absent": {
+                        "raw_is_in_battle": final_battle["raw_is_in_battle"],
+                        "terminal_result": final_battle["terminal_result"],
+                        "phase": final_battle["phase"],
+                    },
                     "primary_epoch": states[0]["epoch"],
                     "peer_epoch": states[1]["epoch"],
                 },
