@@ -33,6 +33,7 @@ from pokered_harness.pyboy_protocol import PyBoyLike
 from pokered_harness.state import (
     BattleKind,
     BattleLifecycle,
+    BattleMenuObservation,
     GameState,
     parse_battle,
     parse_game_state,
@@ -131,6 +132,28 @@ _SESSION_ID_LOCK = threading.Lock()
 def _next_session_id() -> int:
     with _SESSION_ID_LOCK:
         return next(_SESSION_ID_SEQUENCE)
+
+
+# ROM labels whose execution brackets the battle command/move menu.  There is
+# no RAM byte that reports "menu open": ``wMoveMenuType`` is a mode selector
+# (0 regular, 1 mimic, 2 relearn/PP) written before every ``MoveSelectionMenu``
+# call and left set after the menu closes.  The session instead observes the
+# control flow.  Entry into ``SelectMenuItem`` (the move-menu input loop) or
+# ``DisplayBattleMenu.handleBattleMenuInput`` (the FIGHT/ITEM/POKéMON/RUN
+# input setup) proves the menu was drawn and is awaiting input; entry into the
+# per-turn ``MainInBattleLoop`` or its post-selection continuation
+# ``MainInBattleLoop.selectEnemyMove`` proves the menu closed.  Observation is
+# only available when every one of these labels exists in the loaded ``.sym``;
+# otherwise the session reports no menu evidence and ``COMMAND_SELECTION`` is
+# never derived (fail closed).
+_BATTLE_MENU_OPEN_SYMBOLS = (
+    "SelectMenuItem",
+    "DisplayBattleMenu.handleBattleMenuInput",
+)
+_BATTLE_MENU_CLOSE_SYMBOLS = (
+    "MainInBattleLoop",
+    "MainInBattleLoop.selectEnemyMove",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +267,12 @@ class Session:
         self._closed = False
         self._event_hooks: list[HookRegistration] = []
         self._serial_hooks: list[tuple[_HookState, int, int, str]] = []
+        # Battle command/move menu entry/exit state, maintained by execution
+        # hooks when ``enable_battle_menu_observation`` succeeds.  ``None``
+        # means the hooks are not installed, so COMMAND_SELECTION is unknown.
+        self._battle_menu_observed = False
+        self._battle_menu_open: bool | None = None
+        self._battle_menu_evidence: tuple[str, ...] = ()
         # ``view`` is stashed for introspection; the actual wiring into the
         # PyBoy factory happens in ``from_files`` where the ROM is loaded.
         self._view = view
@@ -930,6 +959,50 @@ class Session:
                 replace_existing=replace_existing,
             )
 
+    def enable_battle_menu_observation(self) -> bool:
+        """Install execution hooks that bracket the battle command/move menu.
+
+        Returns ``True`` when the hooks are (now) installed.  The observation
+        is unavailable, and :attr:`BattlePhase.COMMAND_SELECTION` is never
+        derived, when any bracketing label is absent from the loaded ``.sym``.
+        The hooks only read the program counter: they write no RAM, press no
+        input, and advance no frame.  They are closed with the session.
+        """
+        self._ensure_open()
+        with self._emulator_access():
+            self._ensure_open()
+            if self._battle_menu_observed:
+                return True
+            labels = _BATTLE_MENU_OPEN_SYMBOLS + _BATTLE_MENU_CLOSE_SYMBOLS
+            if any(name not in self._symbols for name in labels):
+                return False
+
+            def _mark_open(_ctx: object) -> None:
+                self._battle_menu_open = True
+
+            def _mark_closed(_ctx: object) -> None:
+                self._battle_menu_open = False
+
+            for name in _BATTLE_MENU_OPEN_SYMBOLS:
+                bank, addr = self._symbols.bank_addr(name)
+                self._register_event_hook_at_locked(bank, addr, _mark_open)
+            for name in _BATTLE_MENU_CLOSE_SYMBOLS:
+                bank, addr = self._symbols.bank_addr(name)
+                self._register_event_hook_at_locked(bank, addr, _mark_closed)
+            self._battle_menu_observed = True
+            self._battle_menu_open = False
+            self._battle_menu_evidence = labels
+            return True
+
+    def _battle_menu_observation(self) -> BattleMenuObservation | None:
+        """Current hook-derived menu state, or ``None`` when not observed."""
+        if not self._battle_menu_observed:
+            return None
+        return BattleMenuObservation(
+            open=self._battle_menu_open,
+            evidence=self._battle_menu_evidence,
+        )
+
     def _register_event_hook_at_locked(
         self,
         bank: int,
@@ -1294,7 +1367,12 @@ class Session:
         if battle is None:
             return state
         previous = self._battle_lifecycle
-        qualified = parse_battle(memory, self._symbols, lifecycle=previous)
+        qualified = parse_battle(
+            memory,
+            self._symbols,
+            lifecycle=previous,
+            menu=self._battle_menu_observation(),
+        )
         if qualified.kind in (BattleKind.WILD, BattleKind.TRAINER):
             # Accumulate outcome-specific evidence while a battle is live.
             # ``escaped_from_battle`` is observed before the engine clears
@@ -1352,8 +1430,12 @@ class Session:
             self._load_generation += 1
             # A load replaces the emulated state with a different instant;
             # any battle observed before the load must not qualify a
-            # terminal outcome afterwards.
+            # terminal outcome afterwards.  Menu entry/exit state recorded
+            # before the load is equally stale, so it becomes unknown until
+            # a fresh hook event is observed.
             self._battle_lifecycle = BattleLifecycle()
+            if self._battle_menu_observed:
+                self._battle_menu_open = None
 
     def reset_tick(self, value: int = 0) -> None:
         if self._timed_endpoint is not None:
@@ -1374,6 +1456,8 @@ class Session:
             # A tick reset starts a distinct observation epoch; stale battle
             # history must not span it.
             self._battle_lifecycle = BattleLifecycle()
+            if self._battle_menu_observed:
+                self._battle_menu_open = None
 
     # --- event-driven advance -----------------------------------------
 

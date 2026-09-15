@@ -2934,7 +2934,18 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
                 "`battle.terminal_result` that is set only for a non-zero "
                 "outcome byte surviving teardown; an ambiguous zero at the "
                 "falling edge stays null because win, blackout, and escape "
-                "all leave or clear zero."
+                "all leave or clear zero. Transient fields "
+                "(`battle.move_menu_type`, `battle.player_move_list_index`, "
+                "`battle.current_menu_item`, `battle.player_selected_move`, "
+                "`battle.enemy_selected_move`, "
+                "`battle.action_result_or_took_turn`, "
+                "`battle.in_handle_player_mon_fainted`) and decoded "
+                "`battle.player_stat_stages`/`battle.enemy_stat_stages` "
+                "report null when their symbol is absent. `battle.phase` "
+                "reports `command_selection` only from session "
+                "execution-hook evidence (`battle.menu_open`; "
+                "`battle.menu_evidence` names the hooked ROM labels), never "
+                "from a persistent mode byte."
             ),
             mimeType="application/json",
         ),
@@ -3806,6 +3817,7 @@ def main() -> None:
                 expected_pyboy_revision=expected_pyboy_revision,
             )
             register_default_hooks(session)
+            session.enable_battle_menu_observation()
             if peer_rom is not None and peer_sym is not None:
                 peer_session = Session.from_files(
                     peer_rom,
@@ -3816,6 +3828,7 @@ def main() -> None:
                     expected_pyboy_revision=expected_pyboy_revision,
                 )
                 register_default_hooks(peer_session)
+                peer_session.enable_battle_menu_observation()
 
         timed_options: dict[str, Any] = {}
         if timed_policy is not None:

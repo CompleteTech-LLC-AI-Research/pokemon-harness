@@ -66,6 +66,19 @@ _FULL_SYM = """\
 00:C00A wPlayerMonNumber
 00:C00B wPlayerSelectedMove
 00:C00C wEnemySelectedMove
+00:C00D wCurrentMenuItem
+00:C018 wPlayerMonAttackMod
+00:C019 wPlayerMonDefenseMod
+00:C01A wPlayerMonSpeedMod
+00:C01B wPlayerMonSpecialMod
+00:C01C wPlayerMonAccuracyMod
+00:C01D wPlayerMonEvasionMod
+00:C01E wEnemyMonAttackMod
+00:C01F wEnemyMonDefenseMod
+00:C020 wEnemyMonSpeedMod
+00:C021 wEnemyMonSpecialMod
+00:C022 wEnemyMonAccuracyMod
+00:C023 wEnemyMonEvasionMod
 00:C100 wEnemyMonSpecies
 00:C101 wEnemyMonHP
 00:C103 wEnemyMonPartyPos
@@ -76,7 +89,20 @@ _FULL_SYM = """\
 00:C10E wEnemyMonLevel
 00:C10F wEnemyMonMaxHP
 00:C119 wEnemyMonPP
+0F:4233 MainInBattleLoop
+0F:42A6 MainInBattleLoop.selectEnemyMove
+0F:4F1A DisplayBattleMenu.handleBattleMenuInput
+0F:52FE SelectMenuItem
 """
+
+# Execution-hook addresses the session installs for the battle command/move
+# menu; firing them drives the same entry/exit state a real ROM program
+# counter would produce.
+_MENU_OPEN_HOOKS = ((0x0F, 0x52FE), (0x0F, 0x4F1A))
+_MENU_CLOSE_HOOKS = ((0x0F, 0x4233), (0x0F, 0x42A6))
+_PLAYER_STAT_MOD_BASE = 0xC018
+_ENEMY_STAT_MOD_BASE = 0xC01E
+_CURRENT_MENU_ITEM = 0xC00D
 
 _TRANSIENT_SYMBOLS = {
     "wBattleResult",
@@ -389,6 +415,243 @@ def test_phase_invalid_kind_is_none_not_guessed():
     assert state.phase_valid is False
 
 
+# --- command selection via session execution hooks --------------------------
+
+
+def test_command_selection_derived_from_move_menu_hook_entry():
+    session = _session()
+    session._pyboy.memory[0xC000] = 1  # wild battle
+    session._pyboy.memory[0xC003] = 0  # stale regular-mode byte, menu closed
+
+    closed = session.read_game_state().battle
+    assert closed.phase is BattlePhase.UNKNOWN
+    assert closed.phase_valid is False
+    assert closed.menu_open is False
+    assert closed.menu_evidence[:1] == ("SelectMenuItem",)
+
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[0])
+    opened = session.read_game_state().battle
+    assert opened.phase is BattlePhase.COMMAND_SELECTION
+    assert opened.phase_valid is True
+    assert opened.menu_open is True
+    assert "SelectMenuItem" in opened.phase_evidence
+
+    session._pyboy.fire(*_MENU_CLOSE_HOOKS[0])
+    closed_again = session.read_game_state().battle
+    assert closed_again.phase is BattlePhase.UNKNOWN
+    assert closed_again.phase_valid is False
+    assert closed_again.menu_open is False
+
+
+def test_command_selection_derived_from_command_menu_hook_entry():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[1])
+    opened = session.read_game_state().battle
+    assert opened.phase is BattlePhase.COMMAND_SELECTION
+    assert opened.menu_open is True
+    assert "DisplayBattleMenu.handleBattleMenuInput" in opened.phase_evidence
+    session._pyboy.fire(*_MENU_CLOSE_HOOKS[1])
+    assert session.read_game_state().battle.menu_open is False
+
+
+def test_command_selection_stale_mode_byte_without_hook_is_not_selection():
+    session = _session()
+    # Mimic mode (1) and relearn mode (2) persist after the menu closes; the
+    # move-list index and selected-move bytes also persist.  Without a hook
+    # entry none is evidence that the menu is open.
+    for mode in (0, 1, 2):
+        session._pyboy.memory[0xC000] = 1
+        session._pyboy.memory[0xC003] = mode
+        session._pyboy.memory[0xC004] = 2
+        session._pyboy.memory[0xC00B] = 0x21
+        state = session.read_game_state().battle
+        assert state.phase is BattlePhase.UNKNOWN
+        assert state.phase_valid is False
+        assert state.menu_open is False
+
+
+def test_command_selection_requires_observation_enabled():
+    mem = DictMemory({0xC000: 1, 0xC003: 0})
+    session = Session(pyboy=FakePyBoy(mem), symbols=_symbols(), event_bus=EventBus())
+    state = session.read_game_state().battle
+    assert state.menu_open is None
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
+
+
+def test_command_selection_absent_menu_symbols_is_uncertain():
+    sym = load_sym_text(
+        """
+        00:C000 wIsInBattle
+        00:C001 wBattleResult
+        00:C002 wInHandlePlayerMonFainted
+        00:C003 wMoveMenuType
+        00:C004 wPlayerMoveListIndex
+        00:C005 wActionResultOrTookBattleTurn
+        """
+    )
+    mem = DictMemory({0xC000: 1, 0xC003: 0})
+    session = Session(pyboy=FakePyBoy(mem), symbols=sym, event_bus=EventBus())
+    assert session.enable_battle_menu_observation() is False
+    state = session.read_game_state().battle
+    assert state.menu_open is None
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
+
+
+def test_command_selection_contradicting_action_flag_fails_closed():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    session._pyboy.memory[0xC005] = 1  # wActionResultOrTookBattleTurn
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[0])
+    state = session.read_game_state().battle
+    # Two surviving signals (menu open + action resolution) contradict.
+    assert state.phase is None
+    assert state.phase_valid is False
+    assert state.menu_open is True
+
+
+def test_load_state_resets_menu_observation_to_unknown():
+    session = _session()
+    session._pyboy.memory[0xC000] = 1
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[0])
+    assert session.read_game_state().battle.menu_open is True
+    payload = base64.b64encode(b"OVERWORLD").decode("ascii")
+    dispatch_tool(session, "load_state", {"data": payload})
+    state = session.read_game_state().battle
+    assert state.menu_open is None
+    assert state.phase is not BattlePhase.COMMAND_SELECTION
+
+
+def test_reset_tick_resets_menu_observation_to_unknown():
+    session = _session()
+    session._pyboy.memory[0xC000] = 1
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[0])
+    session.read_game_state()
+    session.reset_tick(0)
+    assert session.read_game_state().battle.menu_open is None
+
+
+# --- transient / stat-stage fields ------------------------------------------
+
+
+def test_transient_battle_fields_read_named_symbols():
+    session = _session()
+    mem = session._pyboy.memory
+    mem[0xC000] = 2
+    mem[0xC004] = 2  # wPlayerMoveListIndex
+    mem[_CURRENT_MENU_ITEM] = 3  # wCurrentMenuItem
+    mem[0xC002] = 1  # wInHandlePlayerMonFainted
+    state = session.read_game_state().battle
+    assert state.player_move_list_index == 2
+    assert state.current_menu_item == 3
+    assert state.in_handle_player_mon_fainted == 1
+    assert state.action_result_or_took_turn == 0
+    assert state.turn_already_consumed is False
+
+
+def test_transient_fields_absent_symbols_are_none():
+    sym = load_sym_text(
+        """
+        00:C000 wIsInBattle
+        00:C001 wBattleResult
+        00:C002 wInHandlePlayerMonFainted
+        00:C003 wMoveMenuType
+        00:C004 wPlayerMoveListIndex
+        00:C005 wActionResultOrTookBattleTurn
+        """
+    )
+    mem = DictMemory({0xC000: 1})
+    state = parse_battle(mem, sym)
+    assert state.current_menu_item is None
+    assert state.player_move_list_index == 0
+    assert state.in_handle_player_mon_fainted == 0
+
+
+def test_stat_stages_decode_engine_offset_and_validity():
+    session = _session()
+    mem = session._pyboy.memory
+    mem[0xC000] = 2
+    for offset, raw in enumerate((7, 8, 6, 13, 1, 9)):
+        mem[_PLAYER_STAT_MOD_BASE + offset] = raw
+    for offset in range(6):
+        mem[_ENEMY_STAT_MOD_BASE + offset] = 7  # neutral stat modifiers
+    state = session.read_game_state().battle
+    stages = state.player_stat_stages
+    assert stages is not None
+    assert stages.valid is True
+    assert (
+        stages.attack,
+        stages.defense,
+        stages.speed,
+        stages.special,
+        stages.accuracy,
+        stages.evasion,
+    ) == (0, 1, -1, 6, -6, 2)
+    assert state.enemy_stat_stages is not None
+    assert state.enemy_stat_stages.attack == 0
+    assert state.enemy_stat_stages.valid is True
+
+
+@pytest.mark.parametrize("raw", [0, 14, 255])
+def test_stat_stages_out_of_range_byte_is_invalid_not_guessed(raw):
+    session = _session()
+    mem = session._pyboy.memory
+    mem[0xC000] = 2
+    for offset in range(6):
+        mem[_PLAYER_STAT_MOD_BASE + offset] = 7
+    mem[_PLAYER_STAT_MOD_BASE + 2] = raw  # wPlayerMonSpeedMod
+    stages = session.read_game_state().battle.player_stat_stages
+    assert stages is not None
+    assert stages.speed is None
+    assert stages.valid is False
+
+
+def test_stat_stages_partial_symbols_report_unknown_validity():
+    sym = load_sym_text(
+        """
+        00:C000 wIsInBattle
+        00:C001 wBattleResult
+        00:C002 wInHandlePlayerMonFainted
+        00:C003 wMoveMenuType
+        00:C004 wPlayerMoveListIndex
+        00:C005 wActionResultOrTookBattleTurn
+        00:C018 wPlayerMonAttackMod
+        """
+    )
+    state = parse_battle(DictMemory({0xC000: 1, 0xC018: 8}), sym)
+    assert state.player_stat_stages is not None
+    assert state.player_stat_stages.attack == 1
+    assert state.player_stat_stages.defense is None
+    assert state.player_stat_stages.valid is None
+
+
+def test_stat_stages_absent_family_is_none():
+    sym = load_sym_text(
+        """
+        00:C000 wIsInBattle
+        00:C001 wBattleResult
+        00:C002 wInHandlePlayerMonFainted
+        00:C003 wMoveMenuType
+        00:C004 wPlayerMoveListIndex
+        00:C005 wActionResultOrTookBattleTurn
+        """
+    )
+    state = parse_battle(DictMemory({0xC000: 2}), sym)
+    assert state.player_stat_stages is None
+    assert state.enemy_stat_stages is None
+
+
+def test_stat_stages_are_not_exposed_out_of_battle():
+    session = _session()
+    for offset in range(6):
+        session._pyboy.memory[_PLAYER_STAT_MOD_BASE + offset] = 8
+    state = session.read_game_state().battle
+    assert state.active is False
+    assert state.player_stat_stages is None
+
+
 # --- enemy combatant --------------------------------------------------------
 
 
@@ -520,13 +783,16 @@ def test_battle_kind_and_existing_fields_unchanged_by_new_observation():
 # --- resource / JSON exposure ----------------------------------------------
 
 
-def _session() -> Session:
+def _session(*, observe: bool = True) -> Session:
     mem = DictMemory()
-    return Session(
+    session = Session(
         pyboy=FakePyBoy(mem),
         symbols=_symbols(),
         event_bus=EventBus(),
     )
+    if observe:
+        assert session.enable_battle_menu_observation() is True
+    return session
 
 
 def test_game_state_resource_contains_additive_battle_fields():
@@ -546,6 +812,32 @@ def test_game_state_resource_contains_additive_battle_fields():
     # The raw byte is always exposed; an unended battle never confirms it.
     assert battle["raw_battle_result"] == 0
     assert battle["terminal_result"] is None
+
+
+def test_game_state_resource_exposes_menu_and_transient_fields():
+    session = _session()
+    mem = session._pyboy.memory
+    mem[0xC000] = 2  # trainer battle
+    mem[0xC004] = 1  # wPlayerMoveListIndex
+    mem[_CURRENT_MENU_ITEM] = 2  # wCurrentMenuItem
+    for offset, raw in enumerate((7, 8, 7, 7, 7, 7)):
+        mem[_PLAYER_STAT_MOD_BASE + offset] = raw
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[0])
+    battle = json.loads(read_resource(session, "pokered://game-state"))["battle"]
+    assert battle["phase"] == int(BattlePhase.COMMAND_SELECTION)
+    assert battle["menu_open"] is True
+    assert battle["menu_evidence"][:1] == ["SelectMenuItem"]
+    assert battle["player_move_list_index"] == 1
+    assert battle["current_menu_item"] == 2
+    assert battle["player_stat_stages"] == {
+        "attack": 0,
+        "defense": 1,
+        "speed": 0,
+        "special": 0,
+        "accuracy": 0,
+        "evasion": 0,
+        "valid": True,
+    }
 
 
 def test_game_state_resource_embeds_snapshot_epoch():

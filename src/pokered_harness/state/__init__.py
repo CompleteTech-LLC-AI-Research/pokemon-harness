@@ -20,9 +20,11 @@ from pokered_harness.state.base import (
 from pokered_harness.state.battle import (
     BattleKind,
     BattleLifecycle,
+    BattleMenuObservation,
     BattlePhase,
     BattleState,
     BattleType,
+    StatStages,
     parse_battle,
 )
 from pokered_harness.state.game_state import GameState, parse_game_state
@@ -62,6 +64,7 @@ __all__ = [
     "BagStack",
     "BattleKind",
     "BattleLifecycle",
+    "BattleMenuObservation",
     "BattlePhase",
     "BattleState",
     "BattleType",
@@ -72,6 +75,7 @@ __all__ = [
     "Party",
     "PartyMon",
     "ProgressState",
+    "StatStages",
     "StatusCondition",
     "TextState",
     "parse_bag",

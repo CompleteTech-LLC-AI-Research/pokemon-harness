@@ -16,6 +16,21 @@ is present and the surviving signals agree.  Contradictory evidence yields
 ambiguous) snapshot yields :attr:`BattlePhase.UNKNOWN`/``phase_valid=False``.
 The exact symbols consulted are exposed through ``phase_evidence``.
 
+:attr:`BattlePhase.COMMAND_SELECTION` cannot be derived from RAM: there is
+no "menu open" byte.  ``wMoveMenuType`` is a *mode selector* (0 regular, 1
+mimic, 2 relearn/PP) that is written before every ``MoveSelectionMenu`` call
+and left set after the menu closes, so it is required evidence but never
+sufficient.  The menu descriptor bytes (`wCurrentMenuItem`, `wTopMenuItemY/X`,
+`wMaxMenuItem`, `wMenuWatchedKeys`) and the draw buffers are also left in
+place after the menu returns, and ``wMenuWrappingEnabled`` is cleared both on
+exit *and* before entry, so none of them distinguishes an open menu from a
+stale one.  The phase is therefore only reported when a
+:class:`BattleMenuObservation` supplied by the session proves that an
+execution hook fired on entry to the ROM routines that bracket the battle
+command/move menu and has not since left them (see ``session.py``).  Without
+that hook evidence the menu state is unknown and ``COMMAND_SELECTION`` is
+never emitted.
+
 The raw ``wBattleResult`` byte is exposed as
 :attr:`BattleState.raw_battle_result`; it is never promoted to a confirmed
 :attr:`BattleState.terminal_result` on its own.  The engine's writers split
@@ -49,6 +64,15 @@ The ambiguity is deliberate and documented in ``_derive_phase``: neither
 that a menu is open or that the intro animation is playing, so neither
 produces an observed phase.  :attr:`BattlePhase.INTRO` is retained for
 schema compatibility but is never derived from the available symbols.
+
+Beyond the phase candidate, :class:`BattleState` exposes the supported
+transient bytes (raw move-menu mode, move-list index, selected moves, the
+current menu cursor, the action/turn flag, and the player-faint handler
+flag) and decoded Gen-1 stat stages for both combatants.  Every optional
+field is ``None`` when its backing symbol is absent from the loaded ``.sym``;
+a value is never guessed.  The stat-stage aggregate additionally reports a
+``valid`` tri-state: ``False`` when a present byte has no engine writer and
+``None`` when a required symbol is missing.
 """
 
 from __future__ import annotations
@@ -85,6 +109,60 @@ class BattleType(IntEnum):
     NORMAL = 0
     OLD_MAN = 1
     SAFARI = 2
+
+
+# ``w*MonStatMods`` store the Gen-1 stat modifier as ``stage + 7``: 1 is the
+# -6 floor, 7 is neutral, and 13 is the +6 ceiling.  ``StatModifierUpEffect``
+# and ``StatModifierDownEffect`` never write outside 1..13, so any other byte
+# is reported as unknown rather than decoded into a guessed stage.
+STAT_MOD_NEUTRAL = 7
+STAT_MOD_MIN = 1
+STAT_MOD_MAX = 13
+_STAT_MOD_FIELDS = (
+    ("attack", "AttackMod"),
+    ("defense", "DefenseMod"),
+    ("speed", "SpeedMod"),
+    ("special", "SpecialMod"),
+    ("accuracy", "AccuracyMod"),
+    ("evasion", "EvasionMod"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class StatStages:
+    """Decoded Gen-1 stat stages for one combatant.
+
+    Each field is the stage in ``-6..+6`` (``raw - 7``), or ``None`` when its
+    ``w*Mon*Mod`` symbol is absent or holds a byte with no engine writer.
+    ``valid`` is ``True`` only when every one of the six symbols is present
+    and in range, ``False`` when a present byte is out of range, and ``None``
+    when none is out of range but at least one symbol is absent.
+    """
+
+    attack: int | None = None
+    defense: int | None = None
+    speed: int | None = None
+    special: int | None = None
+    accuracy: int | None = None
+    evasion: int | None = None
+    valid: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BattleMenuObservation:
+    """Session execution-hook evidence for the battle command/move menu.
+
+    ``open`` is the session-maintained entry/exit state of the ROM routines
+    that bracket the battle menus (``True`` entered and not yet left,
+    ``False`` observed closed, ``None`` unknown after a load/reset);
+    ``evidence`` names the exact ROM labels whose execution was hooked.  There
+    is no RAM byte that reports "menu open" (see the module docstring), so the
+    observation is only available when the session installed the hooks and is
+    never fabricated from a mode byte.
+    """
+
+    open: bool | None
+    evidence: tuple[str, ...] = ()
 
 
 class BattlePhase(IntEnum):
@@ -198,6 +276,13 @@ class BattleState:
     raw_battle_result: int | None = None
     escaped_from_battle: int | None = None
     terminal_result: int | None = None
+    player_move_list_index: int | None = None
+    current_menu_item: int | None = None
+    in_handle_player_mon_fainted: int | None = None
+    player_stat_stages: StatStages | None = None
+    enemy_stat_stages: StatStages | None = None
+    menu_open: bool | None = None
+    menu_evidence: tuple[str, ...] = ()
 
     @property
     def active(self) -> bool:
@@ -224,6 +309,7 @@ def parse_battle(
     symbols: SymbolTable,
     *,
     lifecycle: BattleLifecycle | None = None,
+    menu: BattleMenuObservation | None = None,
 ) -> BattleState:
     raw = symbols.read_u8(memory, "wIsInBattle")
     kind = _safe_enum(BattleKind, raw)
@@ -244,8 +330,14 @@ def parse_battle(
         else None
     )
     phase, phase_valid, phase_evidence = _derive_phase(
-        memory, symbols, raw=raw, kind=kind, battle_ended=battle_ended
+        memory,
+        symbols,
+        raw=raw,
+        kind=kind,
+        battle_ended=battle_ended,
+        menu=menu,
     )
+    in_battle = kind is BattleKind.WILD or kind is BattleKind.TRAINER
     return BattleState(
         kind=kind,  # type: ignore[arg-type]
         raw_is_in_battle=raw,
@@ -265,7 +357,54 @@ def parse_battle(
         raw_battle_result=raw_battle_result,
         escaped_from_battle=escaped_from_battle,
         terminal_result=terminal_result,
+        player_move_list_index=_opt(memory, symbols, "wPlayerMoveListIndex"),
+        current_menu_item=_opt(memory, symbols, "wCurrentMenuItem"),
+        in_handle_player_mon_fainted=_opt(memory, symbols, "wInHandlePlayerMonFainted"),
+        # Stat stages are only meaningful for a live battle mon; out of battle
+        # the bytes are stale and must not be presented as live state.
+        player_stat_stages=(
+            _parse_stat_stages(memory, symbols, "wPlayerMon") if in_battle else None
+        ),
+        enemy_stat_stages=(_parse_stat_stages(memory, symbols, "wEnemyMon") if in_battle else None),
+        menu_open=(menu.open if menu is not None else None),
+        menu_evidence=(menu.evidence if menu is not None else ()),
     )
+
+
+def _parse_stat_stages(
+    memory: MemoryLike,
+    symbols: SymbolTable,
+    prefix: str,
+) -> StatStages | None:
+    """Decode one ``w*MonStatMods`` block into Gen-1 stages.
+
+    Returns ``None`` when none of the six ``*Mod`` symbols is present, so an
+    absent symbol family is distinguishable from a decoded neutral block.
+    """
+    if not any(prefix + suffix in symbols for _field, suffix in _STAT_MOD_FIELDS):
+        return None
+    stages: dict[str, int | None] = {}
+    any_invalid = False
+    any_missing = False
+    for field, suffix in _STAT_MOD_FIELDS:
+        name = prefix + suffix
+        if name not in symbols:
+            stages[field] = None
+            any_missing = True
+            continue
+        raw_mod = symbols.read_u8(memory, name)
+        if STAT_MOD_MIN <= raw_mod <= STAT_MOD_MAX:
+            stages[field] = raw_mod - STAT_MOD_NEUTRAL
+        else:
+            stages[field] = None
+            any_invalid = True
+    if any_invalid:
+        valid: bool | None = False
+    elif any_missing:
+        valid = None
+    else:
+        valid = True
+    return StatStages(valid=valid, **stages)
 
 
 def _parse_enemy_mon(
@@ -302,6 +441,7 @@ def _derive_phase(
     raw: int,
     kind: IntEnum | None,
     battle_ended: bool = False,
+    menu: BattleMenuObservation | None = None,
 ) -> tuple[BattlePhase | None, bool, tuple[str, ...]]:
     """Derive a battle phase candidate from ROM-owned observations.
 
@@ -326,8 +466,9 @@ def _derive_phase(
     battle-end transition (``battle_ended``); its reset value 0 and its
     mid-battle writes are never terminal on their own.  ``wMoveMenuType``
     and ``wPlayerMoveListIndex`` are required evidence but never sufficient
-    alone: no value proves move selection is currently active, so
-    ``COMMAND_SELECTION`` is never derived.
+    alone: no value proves move selection is currently active.  The only
+    positive source of ``COMMAND_SELECTION`` is a session hook observation
+    (``menu``) that proves the menu routine was entered and not yet left.
     """
     if raw == 0:
         if battle_ended:
@@ -347,23 +488,34 @@ def _derive_phase(
     evidence = ["wIsInBattle"]
     if any(name not in symbols for name in _PHASE_TRANSIENT_SYMBOLS):
         evidence.extend(name for name in _PHASE_TRANSIENT_SYMBOLS if name in symbols)
+        _extend_unique(evidence, menu.evidence if menu is not None else ())
         return BattlePhase.UNKNOWN, False, tuple(evidence)
     evidence.extend(_PHASE_TRANSIENT_SYMBOLS)
+    _extend_unique(evidence, menu.evidence if menu is not None else ())
 
     forced = symbols.read_u8(memory, "wInHandlePlayerMonFainted") != 0
     action = symbols.read_u8(memory, "wActionResultOrTookBattleTurn") != 0
+    menu_open = menu is not None and menu.open is True
 
     observed: set[BattlePhase] = set()
     if forced:
         observed.add(BattlePhase.FORCED_REPLACEMENT)
     if action:
         observed.add(BattlePhase.ACTION_RESOLUTION)
+    if menu_open:
+        observed.add(BattlePhase.COMMAND_SELECTION)
 
     if len(observed) > 1:
         return None, False, tuple(evidence)
     if observed:
         return next(iter(observed)), True, tuple(evidence)
     return BattlePhase.UNKNOWN, False, tuple(evidence)
+
+
+def _extend_unique(target: list[str], extra: tuple[str, ...]) -> None:
+    for name in extra:
+        if name not in target:
+            target.append(name)
 
 
 def _opt(memory: MemoryLike, symbols: SymbolTable, name: str) -> int | None:
