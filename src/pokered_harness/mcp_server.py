@@ -9,7 +9,8 @@ session, which is where lifecycle, version enforcement, and hooks live.
 When a peer :class:`Session` is configured (via ``POKERED_PEER_*`` env
 vars), the server also exposes link-cable tools (``link_pair``,
 ``link_step``, ``link_peer_press``, ...) and peer resources
-(``pokered://peer-game-state``, ``pokered://link-transport``). The peer
+(``pokered://peer-game-state``, ``pokered://peer-party-records``,
+``pokered://link-transport``). The peer
 Session is constructed at startup but not *paired* — callers must invoke
 ``link_pair`` explicitly.
 """
@@ -177,6 +178,7 @@ _URI_PEER_GAME_STATE = "pokered://peer-game-state"
 _URI_LINK_TRANSPORT = "pokered://link-transport"
 _URI_LINK_STATUS = "pokered://link-status"
 _URI_PARTY_RECORDS = "pokered://party-records"
+_URI_PEER_PARTY_RECORDS = "pokered://peer-party-records"
 
 
 # -- server state container --------------------------------------------------
@@ -2852,7 +2854,11 @@ def read_resource(
             raise McpHarnessError(
                 "invalid_timed_configuration", "timed owner belongs to another session"
             )
-        if uri in {_URI_PEER_GAME_STATE, _URI_LINK_TRANSPORT}:
+        if uri in {
+            _URI_PEER_GAME_STATE,
+            _URI_PEER_PARTY_RECORDS,
+            _URI_LINK_TRANSPORT,
+        }:
             raise McpHarnessError(
                 "timed_unsupported_resource", "timed remote transport has no local peer"
             )
@@ -2866,6 +2872,17 @@ def read_resource(
         # the sanitized species/level needed to interpret them.  Raw record
         # bytes and absolute paths are deliberately never serialized.
         return json.dumps(session.read_party_records().to_resource_payload())
+    if uri == _URI_PEER_PARTY_RECORDS:
+        # Owner-scoped peer observation: read the peer Session's own party
+        # records under that owner's lock. Like peer-game-state, this is
+        # strictly observational and never advances or repairs either owner.
+        if link is None or link.peer_session is None:
+            raise McpHarnessError("peer_not_configured", "peer session not configured")
+        with link.state():
+            peer = link.peer_session
+        return json.dumps(
+            peer.read_party_records().to_resource_payload(source="peer-party-records")
+        )
     if uri == _URI_EVENT_LOG:
         events: list[GameEvent] = session.event_snapshot()
         return json.dumps([to_jsonable(e) for e in events])
@@ -2936,6 +2953,19 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
                 uri=_URI_PEER_GAME_STATE,  # type: ignore[arg-type]
                 name="Peer Game State",
                 description="Parsed game state of the peer session (JSON).",
+                mimeType="application/json",
+            )
+        )
+        specs.append(
+            mcp_types.Resource(
+                uri=_URI_PEER_PARTY_RECORDS,  # type: ignore[arg-type]
+                name="Peer Party Records",
+                description=(
+                    "Read-only per-slot SHA-256 digests of the peer session's "
+                    "raw 44-byte party_struct records, plus sanitized "
+                    "species/level fields for interpretation. Observational "
+                    "only; no raw bytes."
+                ),
                 mimeType="application/json",
             )
         )
@@ -3393,7 +3423,11 @@ def build_server(
             try:
                 if resource_uri == _URI_LINK_STATUS:
                     return json.dumps(_timed_status(timed_owner))
-                if resource_uri in {_URI_PEER_GAME_STATE, _URI_LINK_TRANSPORT}:
+                if resource_uri in {
+                    _URI_PEER_GAME_STATE,
+                    _URI_PEER_PARTY_RECORDS,
+                    _URI_LINK_TRANSPORT,
+                }:
                     raise McpHarnessError(
                         "timed_unsupported_resource", "timed remote transport has no local peer"
                     )

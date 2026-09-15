@@ -11,11 +11,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 
 import mcp.types as mcp_types
+import pytest
 
-from pokered_harness.mcp_server import build_server, read_resource
-from pokered_harness.session import Session
+from pokered_harness.mcp_server import LinkState, build_server, read_resource
+from pokered_harness.session import Session, SessionClosedError, SessionCloseTimeout
 from pokered_harness.state.party import (
     PARTY_STRUCT_SIZE,
     PartyRecord,
@@ -23,7 +25,7 @@ from pokered_harness.state.party import (
     audit_exact_party_exchange,
     parse_party_records,
 )
-from pokered_harness.symbols.loader import load_sym_text
+from pokered_harness.symbols.loader import SymbolTable, load_sym_text
 from tests.conftest import CANONICAL_SYM, DictMemory
 from tests.fakes import FakePyBoy
 
@@ -406,3 +408,235 @@ def test_party_records_resource_is_advertised():
     uris = {str(resource.uri) for resource in response.root.resources}
     assert "Party Records" in names
     assert "pokered://party-records" in uris
+
+
+# -- peer owner observation, freshness, and ownership coverage ---------------
+
+
+def _session_with_memory(
+    records: list[bytes] | None = None,
+    symbols: SymbolTable | None = None,
+) -> tuple[Session, DictMemory, FakePyBoy, SymbolTable]:
+    symbols = symbols or _symbols()
+    mem = DictMemory()
+    pyboy = FakePyBoy(mem)
+    session = Session(pyboy=pyboy, symbols=symbols)
+    if records is not None:
+        _load_party(mem, symbols, records)
+    return session, mem, pyboy, symbols
+
+
+def _list_resources(server) -> set[str]:
+    handler = server.request_handlers[mcp_types.ListResourcesRequest]
+    response = asyncio.run(handler(mcp_types.ListResourcesRequest()))
+    return {str(resource.uri) for resource in response.root.resources}
+
+
+class _ImmediateTimedOwner:
+    """Minimal persistent-owner double that runs submissions synchronously."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.submissions = 0
+        self.owned_sessions: list[Session] = []
+
+    def submit(self, operation, *args, **kwargs):
+        owner = self
+        self.submissions += 1
+
+        class _Result:
+            def result(self):
+                owner.owned_sessions.append(owner.session)
+                return operation(owner.session, *args, **kwargs)
+
+        return _Result()
+
+
+def test_party_records_resource_reread_reflects_changed_memory():
+    session, mem, _pyboy, symbols = _session_with_memory([_record(0x99, 1)])
+    first = json.loads(read_resource(session, "pokered://party-records"))
+    assert first["count"] == 1
+    assert first["records"][0]["species"] == 0x99
+
+    replacement = _record(0x25, 2)
+    base = symbols.addr_of("wPartyMons")
+    for offset, value in enumerate(replacement):
+        mem[base + offset] = value
+
+    second = json.loads(read_resource(session, "pokered://party-records"))
+    assert second["records"][0]["species"] == 0x25
+    assert second["records"][0]["digest"] == hashlib.sha256(replacement).hexdigest()
+    assert second["records"][0]["digest"] != first["records"][0]["digest"]
+
+
+def test_party_records_resource_fails_closed_after_close():
+    session, _mem, pyboy, _symbols = _session_with_memory([_record(0x99, 1)])
+    session.close()
+    assert session.closed and pyboy.stopped
+
+    with pytest.raises(SessionClosedError):
+        read_resource(session, "pokered://party-records")
+
+
+def test_party_records_read_serializes_with_competing_owner():
+    session, _mem, _pyboy, _symbols = _session_with_memory([_record(0x99, 1)])
+    entered, release = threading.Event(), threading.Event()
+
+    def hold():
+        with session.locked(timeout_s=1.0):
+            entered.set()
+            assert release.wait(timeout=2.0)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert entered.wait(timeout=1.0)
+
+    bodies: list[str] = []
+    errors: list[BaseException] = []
+
+    def read():
+        try:
+            bodies.append(read_resource(session, "pokered://party-records"))
+        except BaseException as exc:  # noqa: BLE001 - collect worker failures
+            errors.append(exc)
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    # A competing owner scope must keep the read out until it releases.
+    assert not reader.join(timeout=0.2), "read did not serialize behind the owner lock"
+    assert bodies == [] and errors == []
+
+    release.set()
+    holder.join(timeout=2.0)
+    reader.join(timeout=2.0)
+    assert not reader.is_alive()
+    assert errors == []
+    assert json.loads(bodies[0])["count"] == 1
+
+
+def test_party_records_read_fails_closed_when_closed_during_contention():
+    session, _mem, _pyboy, _symbols = _session_with_memory([_record(0x99, 1)])
+    entered, release = threading.Event(), threading.Event()
+
+    def hold():
+        with session.locked(timeout_s=1.0):
+            entered.set()
+            assert release.wait(timeout=2.0)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert entered.wait(timeout=1.0)
+
+    errors: list[BaseException] = []
+
+    def read():
+        try:
+            read_resource(session, "pokered://party-records")
+        except BaseException as exc:  # noqa: BLE001 - collect worker failures
+            errors.append(exc)
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    assert not reader.join(timeout=0.2)
+
+    # Publish the closed lifecycle while the reader waits on the owner lock.
+    with pytest.raises(SessionCloseTimeout):
+        session.close(timeout_s=0.01)
+    assert session.closed
+
+    release.set()
+    holder.join(timeout=2.0)
+    reader.join(timeout=2.0)
+    assert not reader.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], SessionClosedError)
+
+
+def test_distinct_owners_party_records_are_not_conflated():
+    owner_a, _mem_a, _pyboy_a, symbols = _session_with_memory([_record(0x99, 1)])
+    owner_b, _mem_b, _pyboy_b, _symbols = _session_with_memory([_record(0x25, 2)], symbols)
+
+    payload_a = json.loads(read_resource(owner_a, "pokered://party-records"))
+    payload_b = json.loads(read_resource(owner_b, "pokered://party-records"))
+
+    assert payload_a["records"][0]["species"] == 0x99
+    assert payload_b["records"][0]["species"] == 0x25
+    assert payload_a["records"][0]["digest"] != payload_b["records"][0]["digest"]
+
+
+def test_peer_party_records_resource_reads_peer_owner():
+    primary, _mem, _pyboy, symbols = _session_with_memory([_record(0x99, 1)])
+    peer_record = _record(0x25, 2)
+    peer, _peer_mem, _peer_pyboy, _peer_symbols = _session_with_memory([peer_record], symbols)
+    link = LinkState(peer_session=peer)
+
+    primary_payload = json.loads(read_resource(primary, "pokered://party-records", link=link))
+    peer_payload = json.loads(read_resource(primary, "pokered://peer-party-records", link=link))
+
+    assert primary_payload["source"] == "party-records"
+    assert primary_payload["records"][0]["species"] == 0x99
+    assert peer_payload["source"] == "peer-party-records"
+    assert peer_payload["records"][0]["species"] == 0x25
+    assert peer_payload["records"][0]["digest"] == hashlib.sha256(peer_record).hexdigest()
+    assert peer_payload["records"][0]["digest"] != primary_payload["records"][0]["digest"]
+
+
+def test_peer_party_records_read_is_observational_only():
+    primary, _mem, _pyboy, symbols = _session_with_memory([_record(0x99, 1)])
+    peer_record = _record(0x25, 2)
+    peer, peer_mem, peer_pyboy, _peer_symbols = _session_with_memory([peer_record], symbols)
+    link = LinkState(peer_session=peer)
+    base = symbols.addr_of("wPartyMons")
+    span = range(base, base + PARTY_STRUCT_SIZE)
+    before = {address: peer_mem[address] for address in span}
+
+    read_resource(primary, "pokered://peer-party-records", link=link)
+
+    assert peer_pyboy.tick_calls == []
+    assert peer_pyboy.button_calls == []
+    assert peer_pyboy.button_press_calls == []
+    assert peer_pyboy.button_release_calls == []
+    assert {address: peer_mem[address] for address in span} == before
+
+
+def test_peer_party_records_resource_errors_when_not_configured():
+    session, _mem, _pyboy, _symbols = _session_with_memory([_record(0x99, 1)])
+    link = LinkState(peer_session=None)
+
+    with pytest.raises(ValueError, match="peer session not configured"):
+        read_resource(session, "pokered://peer-party-records", link=link)
+
+
+def test_peer_party_records_resource_is_advertised_only_with_peer():
+    primary, _mem, _pyboy, symbols = _session_with_memory([_record(0x99, 1)])
+    assert "pokered://peer-party-records" not in _list_resources(build_server(primary))
+
+    peer, _peer_mem, _peer_pyboy, _peer_symbols = _session_with_memory([], symbols)
+    server = build_server(primary, peer_session=peer)
+    handler = server.request_handlers[mcp_types.ListResourcesRequest]
+    response = asyncio.run(handler(mcp_types.ListResourcesRequest()))
+    names = {resource.name for resource in response.root.resources}
+    uris = {str(resource.uri) for resource in response.root.resources}
+    assert "Peer Party Records" in names
+    assert "pokered://peer-party-records" in uris
+
+
+def test_party_records_resource_routes_through_timed_owner():
+    session, _mem, _pyboy, _symbols = _session_with_memory([_record(0x99, 1)])
+    owner = _ImmediateTimedOwner(session)
+
+    payload = json.loads(read_resource(session, "pokered://party-records", timed_owner=owner))
+
+    assert payload["source"] == "party-records"
+    assert payload["count"] == 1
+    assert owner.submissions == 1
+    assert owner.owned_sessions == [session]
+
+
+def test_peer_party_records_rejected_in_timed_owner_mode():
+    session, _mem, _pyboy, _symbols = _session_with_memory([_record(0x99, 1)])
+    owner = _ImmediateTimedOwner(session)
+
+    with pytest.raises(ValueError, match="no local peer"):
+        read_resource(session, "pokered://peer-party-records", timed_owner=owner)
+    assert owner.submissions == 0

@@ -509,10 +509,14 @@ class PartyRecords:
     def digests(self) -> tuple[str, ...]:
         return tuple(record.digest for record in self.records)
 
-    def to_resource_payload(self) -> dict[str, object]:
-        """JSON-ready, sanitized shape for the read-only MCP resource."""
+    def to_resource_payload(self, *, source: str = "party-records") -> dict[str, object]:
+        """JSON-ready, sanitized shape for the read-only MCP resource.
+
+        ``source`` labels the owning observation (primary vs peer) so two
+        owners' payloads stay distinguishable; it never carries raw bytes.
+        """
         return {
-            "source": "party-records",
+            "source": source,
             "digest_algorithm": _DIGEST_ALGORITHM,
             "record_size": PARTY_STRUCT_SIZE,
             "count": self.count,

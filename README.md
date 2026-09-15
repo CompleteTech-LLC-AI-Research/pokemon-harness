@@ -690,7 +690,17 @@ The single-session server exposes tools for:
 
 When a peer session is configured with `POKERED_PEER_*` variables, the
 link-related tools are also exposed. The peer is constructed at startup but
-is not paired automatically. Evidence from the pre-fix implementation/runtime snapshot
+is not paired automatically. The paired server additionally advertises
+`pokered://peer-party-records`, an owner-scoped, observational view of the
+peer's `wPartyMons` records. It reports only per-slot slot/digest/
+record_size/species/level plus the count and missing-symbol provenance, and
+it never exposes raw record or ROM bytes or absolute paths. Because the
+primary (`pokered://party-records`) and peer views are read under each
+owner's own lock, a public client can compare both owners' intended receiving
+slots and unrelated records without conflating owners. Timed remote mode has
+no local peer, so the peer resource is rejected there.
+
+Evidence from the pre-fix implementation/runtime snapshot
 includes six real MCP integration checks in 13.11 seconds with one SDL warning
 and 104 MCP dispatch tests. Ordinary MCP calls drove a real Red session from
 bedroom map 38 at `(3,7)` through the house exit, Pallet Town map 0 at `(5,5)`,
