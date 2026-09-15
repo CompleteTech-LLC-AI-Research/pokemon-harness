@@ -409,6 +409,13 @@ release readiness.
 - [ ] Required native build/runtime coverage and independent release review
   are complete. Unadvertised load and platform extensions are coverage limits,
   not additional blockers; historical Windows checks do not qualify the candidate.
+- [ ] The qualification job was bound to a pinned, immutable allocation
+  descriptor whose held lease, allocation cgroup membership, reserved cpuset, or
+  exclusive marker was re-observed on the host, and the complete pinned
+  ROM/SYM/fixture input set for the declared scope was present and
+  hash-validated. A declaration that only matched deployment IDs, a writable
+  descriptor, competing cgroup members, or a missing required input does not
+  count as a provisioned runner.
 
 ## Fixture provenance and generation
 

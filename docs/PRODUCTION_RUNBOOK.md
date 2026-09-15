@@ -573,6 +573,81 @@ tests are missing. Keep the evidence directory outside version control. The
 stdout `--format json` output remains available for callers that need it, but
 the evidence directory is the retained, sanitized bundle.
 
+## 3a. Provision a dedicated qualification runner
+
+Issue #85 requires an operator-owned allocation whose competing workloads are
+controlled. Affinity, a CPU quota, or a `dedicated-host` label is not a
+reservation by itself. `scripts/qualification_runner.py` binds a qualification
+job to a pinned, immutable allocation descriptor and re-observes the lease on
+the host; a declaration that merely matches deployment IDs never passes.
+
+Choose one reservation mechanism:
+
+- `cgroup-quota`: the job runs in a non-root cgroup with a finite `cpu.max`
+  quota narrower than the host, and that cgroup contains only the job's process
+  tree.
+- `cpuset-affinity`: the job's observed affinity exactly equals a reserved
+  cpuset that is a strict subset of the host CPUs.
+- `dedicated-host`: the allocation owns every host CPU, records no competing
+  quota or weight, and carries an operator-created exclusive marker plus a held
+  lease.
+
+The declaration is operator-owned and external to the repository. It records
+`reservation_mechanism`, the allocation facts, the source/native interpreters
+and their pinned native build fingerprints, and the complete pinned ROM, symbol,
+and fixture input set for the declared scope. `POKERED_QUALIFICATION_DECLARATION`
+or `--declaration` selects it. `--setup` prints the deterministic
+`native_build_inputs_sha256` and `native_fingerprint` to pin in the declaration.
+
+Required operator procedure:
+
+```bash
+# 1. Prepare owner-only per-job directories and print native build pins.
+python scripts/qualification_runner.py --setup \
+  --declaration /absolute/qualification-declaration.json \
+  --job-dir /absolute/private/qualification-job
+
+# 2. Under one held lease, verify the allocation and run the qualification job.
+#    The check must execute as a descendant of the lease holder.
+python scripts/qualification_runner.py --reserve \
+  --declaration /absolute/qualification-declaration.json \
+  --job-dir /absolute/private/qualification-job \
+  --run bash -c '
+    python scripts/qualification_runner.py --check \
+      --declaration /absolute/qualification-declaration.json &&
+    python scripts/production_gate.py ... --python "$SOURCE_PYTHON" ...'
+
+# 3. Release an owned lease, or clear only stale state whose owner is gone.
+python scripts/qualification_runner.py --release \
+  --declaration /absolute/qualification-declaration.json
+python scripts/qualification_runner.py --recover \
+  --declaration /absolute/qualification-declaration.json
+```
+
+A standalone `--check` without a live lease fails closed, because the
+declared capacity is not held. `--reserve` is what writes and pins the
+descriptor; `--release` and `--recover` only ever touch resources whose owner
+is identifiable.
+
+`--reserve` writes an owner-only `allocation.json` inside the private job
+directory, pins its SHA-256 in the declaration, and holds an exclusive lease
+lock while the `--run` command executes as a descendant of the holder. A lease
+is accepted only when the recorded holder is alive, its start time matches, and
+the kernel reports it holding the lock. `--setup` creates `tmp/`, `evidence/`,
+and `logs/` under the job directory. Assets are expected to be read-only shared
+inputs; a writable asset root fails the prerequisite check. `--release` signals
+only a holder whose command line and start time identify an owned
+qualification-runner lease, and `--recover` removes only stale state whose owner
+is already gone. Interrupted prerequisite subprocesses are bounded by
+`POKERED_QUALIFICATION_COMMAND_TIMEOUT_SECONDS` (default `300`) and their owned
+process group is terminated without discarding the original failure.
+
+Both peers of every TCP pair stay on the host because the supported transport
+is loopback-only. Provisioning new paid infrastructure or uploading
+ROM-derived inputs requires separate operator authorization; this procedure
+does not grant it. A prepared runner is not a passing gate: keep provisioning
+status, test status, and release qualification separate.
+
 ## 4. Run the evidence tiers
 
 Run the tiers in order and save the complete output with the commit and
