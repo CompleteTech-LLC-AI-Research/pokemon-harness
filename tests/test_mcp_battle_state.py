@@ -93,6 +93,7 @@ _FULL_SYM = """\
 0F:42A6 MainInBattleLoop.selectEnemyMove
 0F:4F1A DisplayBattleMenu.handleBattleMenuInput
 0F:52FE SelectMenuItem
+0F:3725 LoadScreenTilesFromBuffer1
 """
 
 # Execution-hook addresses the session installs for the battle command/move
@@ -100,6 +101,9 @@ _FULL_SYM = """\
 # counter would produce.
 _MENU_OPEN_HOOKS = ((0x0F, 0x52FE), (0x0F, 0x4F1A))
 _MENU_CLOSE_HOOKS = ((0x0F, 0x4233), (0x0F, 0x42A6))
+# The shared post-menu redraw path fired on the regular move-selection return
+# and on the Mimic submenu return into animation/result text.
+_MIMIC_CLOSE_HOOK = (0x0F, 0x3725)
 _PLAYER_STAT_MOD_BASE = 0xC018
 _ENEMY_STAT_MOD_BASE = 0xC01E
 _CURRENT_MENU_ITEM = 0xC00D
@@ -453,6 +457,23 @@ def test_command_selection_derived_from_command_menu_hook_entry():
     assert "DisplayBattleMenu.handleBattleMenuInput" in opened.phase_evidence
     session._pyboy.fire(*_MENU_CLOSE_HOOKS[1])
     assert session.read_game_state().battle.menu_open is False
+
+
+def test_command_selection_closes_on_mimic_submenu_return():
+    session = _session()
+    session._pyboy.memory[0xC000] = 1  # wild battle
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[0])
+    opened = session.read_game_state().battle
+    assert opened.phase is BattlePhase.COMMAND_SELECTION
+    assert opened.menu_open is True
+
+    # Mimic returns from MoveSelectionMenu straight into animation/result text,
+    # so the per-turn MainInBattleLoop close hooks do not fire.  The shared
+    # post-menu redraw does, and it must end the selection observation.
+    session._pyboy.fire(*_MIMIC_CLOSE_HOOK)
+    closed = session.read_game_state().battle
+    assert closed.phase is not BattlePhase.COMMAND_SELECTION
+    assert closed.menu_open is False
 
 
 def test_command_selection_stale_mode_byte_without_hook_is_not_selection():

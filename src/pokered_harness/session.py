@@ -153,6 +153,13 @@ _BATTLE_MENU_OPEN_SYMBOLS = (
 _BATTLE_MENU_CLOSE_SYMBOLS = (
     "MainInBattleLoop",
     "MainInBattleLoop.selectEnemyMove",
+    # Both the regular move-selection return (core.asm: ``call MoveSelectionMenu
+    # / call LoadScreenTilesFromBuffer1``) and the Mimic submenu return
+    # (effects.asm: ``call MoveSelectionMenu / call LoadScreenTilesFromBuffer1``)
+    # redraw the screen immediately after the menu closes.  ``MainInBattleLoop``
+    # alone does not fire on Mimic's return into animation/result text, so this
+    # closes the observation on the shared post-menu redraw path.
+    "LoadScreenTilesFromBuffer1",
 )
 
 
