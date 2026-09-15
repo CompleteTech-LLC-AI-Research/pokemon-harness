@@ -205,6 +205,19 @@ def test_missing_required_runtime_is_reported_incomplete(catalog: dict) -> None:
     assert any("missing required runtime 'cython'" in problem for problem in report["problems"])
 
 
+def test_missing_declared_runtime_makes_dimension_incomplete(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    for case in mutated["coverage"]["required_cases"]:
+        case["runtimes"] = [runtime for runtime in case["runtimes"] if runtime != "cython"]
+
+    results = coverage.result_set_from_document(_passing_document(catalog))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+    assert report["summary"]["tested"] == 19
+    assert any("missing required runtime 'cython'" in problem for problem in report["problems"])
+
+
 def test_missing_required_role_is_reported_incomplete(catalog: dict) -> None:
     mutated = copy.deepcopy(catalog)
     target = mutated["coverage"]["required_cases"][0]
@@ -1099,6 +1112,33 @@ def test_enclosing_non_pass_tier_status_propagates(catalog: dict) -> None:
     sample = _case_report(report, selector, "source")
     assert sample["status"] == "partial"
     assert report["summary"]["tested"] == 0
+
+
+@pytest.mark.parametrize("status", ["TIMEOUT", "INTERRUPTED"])
+def test_enclosing_document_status_propagates(catalog: dict, status: str) -> None:
+    document = _passing_document(catalog)
+    document["status"] = status
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    assert _case_report(report, selector, "source")["status"] == "partial"
+    assert report["summary"]["tested"] == 0
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("status", ["TIMEOUT", "INTERRUPTED"])
+def test_enclosing_runtime_block_status_propagates(catalog: dict, status: str) -> None:
+    document = _passing_document(catalog)
+    for block in document["runtimes"]:
+        block["status"] = status
+    results = coverage.result_set_from_document(document)
+
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+    selector = coverage.one_turn_pairing_cases(catalog)[0]["selector"]
+    assert _case_report(report, selector, "source")["status"] == "partial"
+    assert report["summary"]["tested"] == 0
+    assert report["dimensions"]["one_turn_pairing"]["status"] == "INCOMPLETE"
 
 
 def test_dual_runtime_gate_assets_satisfy_endpoint_hashes(catalog: dict) -> None:

@@ -783,7 +783,7 @@ def result_set_from_document(
     result = ResultSet(source_path=source_path, source_kind="json")
     result.run_id = document.get("run_id") if isinstance(document.get("run_id"), str) else None
     result.commit = document.get("commit") if isinstance(document.get("commit"), str) else None
-    result.partial = bool(document.get("partial", False))
+    result.partial = _enclosing_partial(document)
     document_input_hashes = _document_input_hashes(document)
     _collect_collection_errors(document.get("collection_errors"), result)
 
@@ -797,6 +797,7 @@ def result_set_from_document(
         block_run_ids: set[str] = set()
         block_commits: set[str] = set()
         fingerprints: dict[str, set[tuple[Any, Any, str]]] = {}
+        block_partial_by_mode: dict[str, bool] = {}
         any_partial = result.partial
         for block in blocks:
             mode = _mode_for(block)
@@ -805,7 +806,8 @@ def result_set_from_document(
             block_run = block_run if isinstance(block_run, str) and block_run else None
             block_commit = block.get("commit")
             block_commit = block_commit if isinstance(block_commit, str) and block_commit else None
-            block_partial = bool(block.get("partial", False)) or result.partial
+            block_partial = _enclosing_partial(block) or result.partial
+            block_partial_by_mode[mode] = block_partial_by_mode.get(mode, False) or block_partial
             if block_run:
                 block_run_ids.add(block_run)
             if block_commit:
@@ -845,6 +847,7 @@ def result_set_from_document(
                 block_commit=result.commit,
                 block_partial=result.partial,
                 default_input_hashes=document_input_hashes,
+                runtime_partial=block_partial_by_mode,
             )
         _finalize_identity(result)
         return result
@@ -1026,6 +1029,7 @@ def _collect_outcome_records(
     block_commit: str | None = None,
     block_partial: bool = False,
     default_input_hashes: dict[str, str] | None = None,
+    runtime_partial: dict[str, bool] | None = None,
 ) -> None:
     for record in records:
         if not isinstance(record, dict):
@@ -1035,13 +1039,14 @@ def _collect_outcome_records(
             continue
         runtime = record.get("runtime")
         runtime = runtime if isinstance(runtime, str) and runtime else default_mode
+        inherited_partial = block_partial or bool((runtime_partial or {}).get(runtime, False))
         result.outcomes.append(
             _normalise_outcome(
                 record,
                 nodeid=nodeid,
                 status=str(record.get("status", "error")).lower(),
                 runtime=runtime,
-                inherited_partial=block_partial,
+                inherited_partial=inherited_partial,
                 inherited_commit=block_commit,
                 inherited_run_id=block_run,
                 inherited_hashes=dict(default_input_hashes or {}),
@@ -1597,8 +1602,10 @@ def build_report(
     for selector in sorted(declared_pairing - expected_pairing):
         problems.append(f"undeclared one_turn_pairing case: {selector}")
 
+    incomplete_dimensions: set[str] = set()
     for case in cases:
-        dimension = known_dimensions.get(case.get("dimension_id"), {})
+        dimension_id = case.get("dimension_id")
+        dimension = known_dimensions.get(dimension_id, {})
         case_runtimes = case.get("runtimes")
         case_runtimes = case_runtimes if isinstance(case_runtimes, list) else []
         case_roles = case.get("roles")
@@ -1608,9 +1615,13 @@ def build_report(
                 problems.append(
                     f"case {case.get('case_id')!r} is missing required runtime {runtime!r}"
                 )
+                if isinstance(dimension_id, str):
+                    incomplete_dimensions.add(dimension_id)
         for role in dimension.get("required_roles", []):
             if role not in case_roles:
                 problems.append(f"case {case.get('case_id')!r} is missing required role {role!r}")
+                if isinstance(dimension_id, str):
+                    incomplete_dimensions.add(dimension_id)
 
     if results is not None:
         for entry in (*results.collection_errors, *results.collection_failures):
@@ -1696,9 +1707,11 @@ def build_report(
         dimension_id: _dimension_status(dimension_id, case_reports, document)
         for dimension_id in known_dimensions
     }
-    if not catalog_valid:
-        for dimension_report in dimension_reports.values():
-            if dimension_report.get("status") == "COMPLETE":
+    if not catalog_valid or incomplete_dimensions:
+        for dimension_id, dimension_report in dimension_reports.items():
+            if dimension_report.get("status") == "COMPLETE" and (
+                not catalog_valid or dimension_id in incomplete_dimensions
+            ):
                 dimension_report["status"] = "INCOMPLETE"
     if results is None:
         problems.append("no results supplied; declaration-only report")
