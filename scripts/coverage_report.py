@@ -1492,11 +1492,34 @@ def _verified_mechanics_case_ids(
     return verified
 
 
-def _family_is_verified(family: dict[str, Any], verified_cases: dict[str, bool]) -> bool:
+def _declared_case_effects(catalog: dict[str, Any]) -> dict[str, Any]:
+    """Map each declared mechanics case_id to its declared effect_id."""
+    try:
+        cases = required_cases(catalog)
+    except CoverageError:
+        return {}
+    return {
+        case.get("case_id"): case.get("effect_id")
+        for case in cases
+        if isinstance(case.get("case_id"), str)
+    }
+
+
+def _family_is_verified(
+    family: dict[str, Any],
+    verified_cases: dict[str, bool],
+    declared_effects: dict[str, Any] | None = None,
+) -> bool:
     evidence = family.get("evidence")
     if not isinstance(evidence, list) or not evidence:
         return False
-    return all(verified_cases.get(case_id, False) for case_id in evidence)
+    family_effect = family.get("effect_id")
+    for case_id in evidence:
+        if not verified_cases.get(case_id, False):
+            return False
+        if declared_effects is not None and declared_effects.get(case_id) != family_effect:
+            return False
+    return True
 
 
 def _dimension_status(
@@ -1513,6 +1536,7 @@ def _dimension_status(
         verified_cases = _verified_mechanics_case_ids(
             case_reports, _expanded_required_runtimes(catalog)
         )
+        declared_effects = _declared_case_effects(catalog)
         tested = 0
         planned = 0
         excluded = 0
@@ -1520,7 +1544,9 @@ def _dimension_status(
             scope = family.get("scope")
             if scope == "deliberately_excluded":
                 excluded += 1
-            elif scope == "tested" and _family_is_verified(family, verified_cases):
+            elif scope == "tested" and _family_is_verified(
+                family, verified_cases, declared_effects
+            ):
                 tested += 1
             else:
                 planned += 1
@@ -1935,10 +1961,12 @@ def _move_effects_summary(
     verified_cases = _verified_mechanics_case_ids(
         case_reports or [], _expanded_required_runtimes(catalog)
     )
+    declared_effects = _declared_case_effects(catalog)
     verified_tested = sum(
         1
         for family in families
-        if family.get("scope") == "tested" and _family_is_verified(family, verified_cases)
+        if family.get("scope") == "tested"
+        and _family_is_verified(family, verified_cases, declared_effects)
     )
     return {
         "families": families,

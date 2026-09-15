@@ -919,6 +919,24 @@ def test_mechanics_family_stays_unverified_when_a_required_runtime_is_undeclared
     assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
 
 
+def test_invalid_family_link_does_not_receive_tested_credit(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    family = next(item for item in mutated["move_effects"]["families"] if item["effect_id"] == 6)
+    family["scope"] = "tested"
+    family["evidence"] = ["mechanics_effect_0_no_additional_effect"]
+    family["reason"] = "probe: effect 6 pointing at the effect-0 case"
+    mutated["move_effects"]["planned_unverified_count"] = (
+        mutated["move_effects"]["planned_unverified_count"] - 1
+    )
+
+    results = coverage.result_set_from_document(_mechanics_document(mutated))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    # The effect-6 family references a case declared for effect 0; it may not
+    # receive tested credit, so exactly the effect-0 family stays tested.
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 1
+
+
 def test_mechanics_family_stays_unverified_with_wrong_effect(catalog: dict) -> None:
     results = coverage.result_set_from_document(_mechanics_document(catalog, effect=6))
     report = coverage.build_report(catalog, results, expected_commit="a" * 40)
