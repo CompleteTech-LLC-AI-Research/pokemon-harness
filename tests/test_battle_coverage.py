@@ -892,6 +892,27 @@ def test_mechanics_family_stays_unverified_without_both_runtimes(catalog: dict) 
     assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
 
 
+def test_mechanics_family_stays_unverified_when_a_required_runtime_is_undeclared(
+    catalog: dict,
+) -> None:
+    mutated = copy.deepcopy(catalog)
+    case = next(
+        item
+        for item in mutated["coverage"]["required_cases"]
+        if item["case_id"] == "mechanics_effect_0_no_additional_effect"
+    )
+    case["runtimes"] = [runtime for runtime in case["runtimes"] if runtime != "cython"]
+    assert "cython" not in case["runtimes"]
+
+    # Only source evidence is supplied, matching the now-incomplete declaration;
+    # the dimension still requires both runtimes, so the family must not be tested.
+    results = coverage.result_set_from_document(_mechanics_document(mutated, runtimes=("source",)))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    assert _mechanics_status(mutated, report, "source")["status"] == "tested"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+
+
 def test_mechanics_family_stays_unverified_with_wrong_effect(catalog: dict) -> None:
     results = coverage.result_set_from_document(_mechanics_document(catalog, effect=6))
     report = coverage.build_report(catalog, results, expected_commit="a" * 40)

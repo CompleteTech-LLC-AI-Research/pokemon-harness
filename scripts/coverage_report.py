@@ -1372,8 +1372,30 @@ def _evaluate_case(
     return _CASE_SENTINEL, ""
 
 
-def _verified_mechanics_case_ids(case_reports: list[dict[str, Any]]) -> dict[str, bool]:
-    """Return whether each declared mechanics case has all terminal passes."""
+def _expanded_required_runtimes(catalog: dict[str, Any]) -> tuple[str, ...]:
+    """Return the runtimes every expanded_mechanics case must be tested under."""
+    dimensions = catalog.get("coverage", {}).get("dimensions", [])
+    if not isinstance(dimensions, list):
+        return ()
+    for dimension in dimensions:
+        if isinstance(dimension, dict) and dimension.get("dimension_id") == EXPANDED_DIMENSION:
+            runtimes = dimension.get("required_runtimes", [])
+            if isinstance(runtimes, list):
+                return tuple(str(runtime) for runtime in runtimes)
+    return ()
+
+
+def _verified_mechanics_case_ids(
+    case_reports: list[dict[str, Any]],
+    required_runtimes: tuple[str, ...] = (),
+) -> dict[str, bool]:
+    """Return whether each declared mechanics case has all terminal passes.
+
+    A case is only verified when it carries a terminal ``tested`` record for
+    every runtime the dimension requires.  A case whose declaration or
+    evidence omits a required runtime can never mark its family ``tested``,
+    even if the runtimes that are present all passed.
+    """
     reports_by_case: dict[str, list[dict[str, Any]]] = {}
     for report in case_reports:
         if report.get("dimension_id") != EXPANDED_DIMENSION:
@@ -1381,10 +1403,17 @@ def _verified_mechanics_case_ids(case_reports: list[dict[str, Any]]) -> dict[str
         case_id = report.get("case_id")
         if isinstance(case_id, str):
             reports_by_case.setdefault(case_id, []).append(report)
-    return {
-        case_id: bool(reports) and all(report["status"] == "tested" for report in reports)
-        for case_id, reports in reports_by_case.items()
-    }
+    required = set(required_runtimes)
+    verified: dict[str, bool] = {}
+    for case_id, reports in reports_by_case.items():
+        present = {str(report.get("runtime")) for report in reports}
+        if required and not required <= present:
+            verified[case_id] = False
+            continue
+        verified[case_id] = bool(reports) and all(
+            report["status"] == "tested" for report in reports
+        )
+    return verified
 
 
 def _family_is_verified(family: dict[str, Any], verified_cases: dict[str, bool]) -> bool:
@@ -1405,7 +1434,9 @@ def _dimension_status(
             families = effect_families(catalog)
         except CoverageError:
             families = []
-        verified_cases = _verified_mechanics_case_ids(case_reports)
+        verified_cases = _verified_mechanics_case_ids(
+            case_reports, _expanded_required_runtimes(catalog)
+        )
         tested = 0
         planned = 0
         excluded = 0
@@ -1799,7 +1830,9 @@ def _move_effects_summary(
     except CoverageError:
         return {"families": [], "current_selector": {}}
     move_effects = catalog.get("move_effects", {})
-    verified_cases = _verified_mechanics_case_ids(case_reports or [])
+    verified_cases = _verified_mechanics_case_ids(
+        case_reports or [], _expanded_required_runtimes(catalog)
+    )
     verified_tested = sum(
         1
         for family in families
