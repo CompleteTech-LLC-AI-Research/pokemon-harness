@@ -46,6 +46,15 @@ _ROLES = ("listen", "connect")
 _VERSIONS = ("red", "blue", "yellow")
 _TRANSPORTS = ("local", "remote")
 _SCOPES = ("tested", "planned_unverified", "deliberately_excluded")
+# Tool-owned mandatory runtimes keyed by coverage scope version. The catalog
+# declares requirements, but these pins are data the tool owns: a catalog edit
+# can never remove a runtime the coverage scope version requires.
+_MANDATORY_RUNTIMES_BY_COVERAGE_VERSION: dict[int, tuple[str, ...]] = {
+    1: ("source", "cython"),
+}
+# Report status for a case whose catalog declaration is structurally invalid.
+# It is never a terminal pytest outcome and can never count as tested.
+_CATALOG_STATUS = "catalog"
 # Internal report sentinel for a fully-evidenced required case. It is never a
 # terminal pytest outcome and must stay distinct from any result status.
 _CASE_SENTINEL = "tested"
@@ -69,6 +78,7 @@ _INCOMPLETE_STATUSES = frozenset(
         "timed_out",
         "interrupted",
         "not_run",
+        _CATALOG_STATUS,
     }
 )
 _GATE_STATUS = {
@@ -127,6 +137,19 @@ def _coverage(catalog: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(coverage, dict):
         raise CoverageError("catalog.coverage must be an object")
     return coverage
+
+
+def _mandatory_runtimes(catalog: dict[str, Any]) -> tuple[str, ...]:
+    """Return the tool-owned runtimes every required case must satisfy.
+
+    The mandatory runtimes are keyed to the declared coverage scope version and
+    are not read from the catalog's dimension declarations, so removing a
+    runtime from the catalog can never weaken the scope requirement.
+    """
+    coverage = catalog.get("coverage")
+    version = coverage.get("coverage_version") if isinstance(coverage, dict) else None
+    mandatory = _MANDATORY_RUNTIMES_BY_COVERAGE_VERSION.get(version)
+    return mandatory if mandatory is not None else _RUNTIMES
 
 
 def dimensions(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -367,6 +390,67 @@ def _authoritative_selectors() -> frozenset[str]:
     return frozenset(_MATRIX["STRICT_BATTLE_NODEIDS"])
 
 
+def _case_declaration_error(
+    prefix: str,
+    case: dict[str, Any],
+    known_dimensions: dict[str, dict[str, Any]],
+    fixtures: set[str],
+    scenarios_by_fixture: dict[str, dict[str, Any]],
+    battle_by_version: dict[str, dict[str, Any]],
+) -> str | None:
+    """Return the first structural catalog error for one case, or ``None``.
+
+    This mirrors the per-case checks in :func:`validate_catalog` so a report can
+    refuse to credit a case whose declaration is invalid. Runtime completeness
+    is enforced separately against the tool-owned mandatory runtimes.
+    """
+    case_id = case.get("case_id")
+    if not isinstance(case_id, str) or not case_id:
+        return f"{prefix}.case_id is required"
+    dimension_id = case.get("dimension_id")
+    if dimension_id not in known_dimensions:
+        return f"{prefix}.dimension_id is unknown: {dimension_id!r}"
+    if case.get("operation") != "battle":
+        return f"{prefix}.operation must be battle"
+    if case.get("transport") not in _TRANSPORTS:
+        return f"{prefix}.transport is invalid"
+    versions = case.get("game_versions")
+    if not isinstance(versions, list) or not versions:
+        return f"{prefix}.game_versions must be a non-empty list"
+    if any(version not in _VERSIONS for version in versions):
+        return f"{prefix}.game_versions has an unknown version"
+    roles = case.get("roles")
+    if not isinstance(roles, list) or not roles:
+        return f"{prefix}.roles must be a non-empty list"
+    if any(role not in _ROLES for role in roles):
+        return f"{prefix}.roles has an unknown role"
+    case_runtimes = case.get("runtimes")
+    if not isinstance(case_runtimes, list) or not case_runtimes:
+        return f"{prefix}.runtimes must be a non-empty list"
+    if any(runtime not in _RUNTIMES for runtime in case_runtimes):
+        return f"{prefix}.runtimes has an unknown runtime"
+    fixture_id = case.get("fixture_id")
+    if fixture_id not in fixtures:
+        return f"{prefix}.fixture_id is unknown: {fixture_id!r}"
+    try:
+        _validate_case_fixture(prefix, case, scenarios_by_fixture[fixture_id], battle_by_version)
+    except CoverageError as exc:
+        return str(exc)
+    declared_effect = case.get("effect_id")
+    if declared_effect is not None and (
+        isinstance(declared_effect, bool) or not isinstance(declared_effect, int)
+    ):
+        return f"{prefix}.effect_id must be an integer"
+    if not isinstance(case.get("oracle"), str) or not case["oracle"].strip():
+        return f"{prefix}.oracle is required"
+    selector = case.get("selector")
+    if not isinstance(selector, str) or "::" not in selector:
+        return f"{prefix}.selector must be a pytest node ID"
+    if case.get("status") != "required":
+        return f"{prefix}.status must be required"
+    return None
+
+
 def validate_catalog(catalog: dict[str, Any]) -> None:
     """Validate the additive coverage/effects dimension, raising on defects."""
     coverage = _coverage(catalog)
@@ -404,6 +488,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
     fixtures = _scenario_fixture_ids(catalog)
     scenarios_by_fixture = _scenarios_by_fixture_id(catalog)
     battle_by_version = _canonical_battle_scenarios(catalog)
+    mandatory_runtimes = _mandatory_runtimes(catalog)
+    version = coverage.get("coverage_version")
     seen_case_ids: set[str] = set()
     seen_selectors: set[tuple[str, str]] = set()
     role_coverage: dict[str, set[str]] = {dimension_id: set() for dimension_id in known_dimensions}
@@ -417,49 +503,32 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         if case_id in seen_case_ids:
             raise CoverageError(f"duplicate case_id: {case_id}")
         seen_case_ids.add(case_id)
+        error = _case_declaration_error(
+            prefix,
+            case,
+            known_dimensions,
+            fixtures,
+            scenarios_by_fixture,
+            battle_by_version,
+        )
+        if error is not None:
+            raise CoverageError(error)
         dimension_id = case.get("dimension_id")
-        if dimension_id not in known_dimensions:
-            raise CoverageError(f"{prefix}.dimension_id is unknown: {dimension_id!r}")
-        if case.get("operation") != "battle":
-            raise CoverageError(f"{prefix}.operation must be battle")
-        if case.get("transport") not in _TRANSPORTS:
-            raise CoverageError(f"{prefix}.transport is invalid")
-        versions = case.get("game_versions")
-        if not isinstance(versions, list) or not versions:
-            raise CoverageError(f"{prefix}.game_versions must be a non-empty list")
-        if any(version not in _VERSIONS for version in versions):
-            raise CoverageError(f"{prefix}.game_versions has an unknown version")
-        roles = case.get("roles")
-        if not isinstance(roles, list) or not roles:
-            raise CoverageError(f"{prefix}.roles must be a non-empty list")
-        if any(role not in _ROLES for role in roles):
-            raise CoverageError(f"{prefix}.roles has an unknown role")
         case_runtimes = case.get("runtimes")
-        if not isinstance(case_runtimes, list) or not case_runtimes:
-            raise CoverageError(f"{prefix}.runtimes must be a non-empty list")
-        if any(runtime not in _RUNTIMES for runtime in case_runtimes):
-            raise CoverageError(f"{prefix}.runtimes has an unknown runtime")
-        fixture_id = case.get("fixture_id")
-        if fixture_id not in fixtures:
-            raise CoverageError(f"{prefix}.fixture_id is unknown: {fixture_id!r}")
-        _validate_case_fixture(prefix, case, scenarios_by_fixture[fixture_id], battle_by_version)
-        declared_effect = case.get("effect_id")
-        if declared_effect is not None and (
-            isinstance(declared_effect, bool) or not isinstance(declared_effect, int)
-        ):
-            raise CoverageError(f"{prefix}.effect_id must be an integer")
-        if not isinstance(case.get("oracle"), str) or not case["oracle"].strip():
-            raise CoverageError(f"{prefix}.oracle is required")
+        missing_runtimes = [
+            runtime for runtime in mandatory_runtimes if runtime not in case_runtimes
+        ]
+        if missing_runtimes:
+            raise CoverageError(
+                f"{prefix}.runtimes omits mandatory runtime(s) for coverage_version "
+                f"{version!r}: {', '.join(missing_runtimes)}"
+            )
         selector = case.get("selector")
-        if not isinstance(selector, str) or "::" not in selector:
-            raise CoverageError(f"{prefix}.selector must be a pytest node ID")
         normalized = normalize_nodeid(selector)
         if (dimension_id, normalized) in seen_selectors:
             raise CoverageError(f"duplicate case selector: {selector}")
         seen_selectors.add((dimension_id, normalized))
-        if case.get("status") != "required":
-            raise CoverageError(f"{prefix}.status must be required")
-        role_coverage.setdefault(dimension_id, set()).update(roles)
+        role_coverage.setdefault(dimension_id, set()).update(case.get("roles"))
         if dimension_id == COVERAGE_DIMENSION:
             declared_pairing.add(normalized)
 
@@ -473,6 +542,16 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 raise CoverageError(
                     f"dimension {dimension_id!r} has no case for roles: {', '.join(missing_roles)}"
                 )
+        dimension_runtimes = dimension.get("required_runtimes")
+        dimension_runtimes = dimension_runtimes if isinstance(dimension_runtimes, list) else []
+        missing_runtimes = [
+            runtime for runtime in mandatory_runtimes if runtime not in dimension_runtimes
+        ]
+        if missing_runtimes:
+            raise CoverageError(
+                f"dimension {dimension_id!r} omits mandatory runtime(s) for "
+                f"coverage_version {version!r}: {', '.join(missing_runtimes)}"
+            )
 
     expected_pairing = _authoritative_selectors()
     if declared_pairing != expected_pairing:
@@ -1373,16 +1452,13 @@ def _evaluate_case(
 
 
 def _expanded_required_runtimes(catalog: dict[str, Any]) -> tuple[str, ...]:
-    """Return the runtimes every expanded_mechanics case must be tested under."""
-    dimensions = catalog.get("coverage", {}).get("dimensions", [])
-    if not isinstance(dimensions, list):
-        return ()
-    for dimension in dimensions:
-        if isinstance(dimension, dict) and dimension.get("dimension_id") == EXPANDED_DIMENSION:
-            runtimes = dimension.get("required_runtimes", [])
-            if isinstance(runtimes, list):
-                return tuple(str(runtime) for runtime in runtimes)
-    return ()
+    """Return the tool-owned runtimes every expanded_mechanics case must meet.
+
+    The mandatory runtimes come from the coverage scope version rather than the
+    catalog declaration, so a catalog edit that removes a runtime cannot make a
+    family tested with partial evidence.
+    """
+    return _mandatory_runtimes(catalog)
 
 
 def _verified_mechanics_case_ids(
@@ -1614,12 +1690,33 @@ def build_report(
 
     fixtures = _scenario_fixture_ids(document)
     scenarios_by_fixture = _scenarios_by_fixture_id(document)
+    battle_by_version = _canonical_battle_scenarios(document)
     for case in cases:
         fixture_id = case.get("fixture_id")
         if fixture_id not in fixtures:
             problems.append(
                 f"case {case.get('case_id')!r} references unknown fixture {fixture_id!r}"
             )
+
+    case_catalog_errors: dict[str, str] = {}
+    catalog_error_dimensions: set[str] = set()
+    for index, case in enumerate(cases):
+        case_id = case.get("case_id")
+        if not isinstance(case_id, str) or case_id in case_catalog_errors:
+            continue
+        error = _case_declaration_error(
+            f"coverage.required_cases[{index}]",
+            case,
+            known_dimensions,
+            fixtures,
+            scenarios_by_fixture,
+            battle_by_version,
+        )
+        if error is not None:
+            case_catalog_errors[case_id] = error
+            dimension_id = case.get("dimension_id")
+            if isinstance(dimension_id, str):
+                catalog_error_dimensions.add(dimension_id)
 
     policy = _evidence_policy(document)
     declared_pairing = {
@@ -1641,7 +1738,7 @@ def build_report(
         case_runtimes = case_runtimes if isinstance(case_runtimes, list) else []
         case_roles = case.get("roles")
         case_roles = case_roles if isinstance(case_roles, list) else []
-        for runtime in dimension.get("required_runtimes", []):
+        for runtime in _mandatory_runtimes(document):
             if runtime not in case_runtimes:
                 problems.append(
                     f"case {case.get('case_id')!r} is missing required runtime {runtime!r}"
@@ -1691,12 +1788,14 @@ def build_report(
     case_reports: list[dict[str, Any]] = []
     summary: Counter[str] = Counter()
     for case in cases:
+        case_id = case.get("case_id")
         selectors = case.get("selector")
         if not isinstance(selectors, str):
             continue
         scenario = scenarios_by_fixture.get(case.get("fixture_id"))
         declared_hashes = _declared_input_hashes(scenario)
         declared_sha1 = declared_hashes.get("fixture")
+        catalog_error = case_catalog_errors.get(case_id) if isinstance(case_id, str) else None
         for runtime in case.get("runtimes", []):
             if not isinstance(runtime, str):
                 continue
@@ -1705,7 +1804,9 @@ def build_report(
                 runtime, records, results, expected_commit, policy, selectors
             )
             observed_hashes = dict(records[0].input_hashes) if len(records) == 1 else {}
-            if status == _CASE_SENTINEL:
+            if catalog_error is not None:
+                status, reason = _CATALOG_STATUS, catalog_error
+            elif status == _CASE_SENTINEL:
                 input_result = _check_case_inputs(document, case, observed_hashes)
                 if input_result is not None:
                     status, reason = input_result
@@ -1738,10 +1839,11 @@ def build_report(
         dimension_id: _dimension_status(dimension_id, case_reports, document)
         for dimension_id in known_dimensions
     }
-    if not catalog_valid or incomplete_dimensions:
+    if not catalog_valid or incomplete_dimensions or catalog_error_dimensions:
         for dimension_id, dimension_report in dimension_reports.items():
-            if dimension_report.get("status") == "COMPLETE" and (
-                not catalog_valid or dimension_id in incomplete_dimensions
+            if dimension_id in catalog_error_dimensions or (
+                dimension_report.get("status") == "COMPLETE"
+                and (not catalog_valid or dimension_id in incomplete_dimensions)
             ):
                 dimension_report["status"] = "INCOMPLETE"
     if results is None:

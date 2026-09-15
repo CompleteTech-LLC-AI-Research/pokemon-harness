@@ -866,6 +866,12 @@ def _mechanics_status(catalog: dict, report: dict, runtime: str) -> dict:
     )
 
 
+def _dimension(catalog: dict, dimension_id: str) -> dict:
+    return next(
+        item for item in catalog["coverage"]["dimensions"] if item["dimension_id"] == dimension_id
+    )
+
+
 def test_expanded_mechanics_family_becomes_tested_only_with_dual_runtime_evidence(
     catalog: dict,
 ) -> None:
@@ -959,6 +965,81 @@ def test_mechanics_family_stays_unverified_with_missing_hashes(catalog: dict) ->
 
     assert _mechanics_status(catalog, report, "source")["status"] == "unidentified"
     assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+
+
+def test_mandatory_runtime_cannot_be_removed_from_mechanics_declaration(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    _mechanics_case(mutated)["runtimes"] = ["source"]
+    _dimension(mutated, coverage.EXPANDED_DIMENSION)["required_runtimes"] = ["source"]
+
+    with pytest.raises(coverage.CoverageError, match="mandatory runtime"):
+        coverage.validate_catalog(mutated)
+
+    results = coverage.result_set_from_document(_mechanics_document(mutated, runtimes=("source",)))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+    assert report["dimensions"]["expanded_mechanics"]["status"] != "COMPLETE"
+    assert report["overall"] == "INCOMPLETE"
+
+
+def test_dimension_must_declare_every_mandatory_runtime(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    _dimension(mutated, coverage.EXPANDED_DIMENSION)["required_runtimes"] = ["source"]
+
+    with pytest.raises(coverage.CoverageError, match="mandatory runtime"):
+        coverage.validate_catalog(mutated)
+
+
+def test_mandatory_runtime_cannot_be_removed_from_pairing_declaration(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    for case in mutated["coverage"]["required_cases"]:
+        if case["dimension_id"] == coverage.COVERAGE_DIMENSION:
+            case["runtimes"] = ["source"]
+    _dimension(mutated, coverage.COVERAGE_DIMENSION)["required_runtimes"] = ["source"]
+
+    with pytest.raises(coverage.CoverageError, match="mandatory runtime"):
+        coverage.validate_catalog(mutated)
+
+    results = coverage.result_set_from_document(_passing_document(catalog, runtimes=("source",)))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    assert report["dimensions"]["one_turn_pairing"]["status"] != "COMPLETE"
+    assert report["overall"] == "INCOMPLETE"
+
+
+def test_catalog_invalid_fixture_makes_mechanics_case_untested(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    _mechanics_case(mutated)["fixture_id"] = "yellow-cgb-ordinary"
+
+    with pytest.raises(coverage.CoverageError):
+        coverage.validate_catalog(mutated)
+    results = coverage.result_set_from_document(_mechanics_document(mutated))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    for runtime in ("source", "cython"):
+        assert _mechanics_status(mutated, report, runtime)["status"] != "tested"
+    assert report["dimensions"]["expanded_mechanics"]["status"] == "INCOMPLETE"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+    assert report["move_effects"]["tested"] == 0
+
+
+def test_catalog_invalid_role_makes_mechanics_case_untested(catalog: dict) -> None:
+    mutated = copy.deepcopy(catalog)
+    case = _mechanics_case(mutated)
+    case["roles"] = ["listen"]
+    case["game_versions"] = ["red"]
+
+    with pytest.raises(coverage.CoverageError):
+        coverage.validate_catalog(mutated)
+    results = coverage.result_set_from_document(_mechanics_document(mutated))
+    report = coverage.build_report(mutated, results, expected_commit="a" * 40)
+
+    for runtime in ("source", "cython"):
+        assert _mechanics_status(mutated, report, runtime)["status"] != "tested"
+    assert report["dimensions"]["expanded_mechanics"]["status"] == "INCOMPLETE"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+    assert report["move_effects"]["tested"] == 0
 
 
 def test_gate_output_settlement_rows_verify_the_declared_effect(catalog: dict) -> None:
