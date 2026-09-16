@@ -136,7 +136,12 @@ class ProcessClient:
                 while True:
                     line = await self.process.stdout.readline()
                     assert line, f"unexpected server EOF: {self.diagnostics()}"
-                    response = json.loads(line)
+                    text = line.decode("utf-8", "replace").strip()
+                    if not text or not text.startswith("{"):
+                        # Ignore blank or non-protocol diagnostic lines; JSON-RPC
+                        # is line-delimited and only objects carry responses.
+                        continue
+                    response = json.loads(text)
                     assert response["jsonrpc"] == "2.0", response
                     if "id" not in response:
                         assert "method" in response, response

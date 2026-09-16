@@ -41,6 +41,30 @@ the return to the next command boundary from the public
 ``pokered://game-state`` resource.  It then issues and cancels an outstanding
 ``link_step`` request, proving a bounded client-side ``CancelledError``, a
 still-responsive server and clean owned-process teardown at ``client.eof()``.
+
+The same active, still-paired battle is then used to exercise the two
+server-visible concurrency paths the public stdio surface exposes:
+
+* **Concurrent resource read.**  A public ``tools/call link_step`` with a large
+  finite count is written, and a public ``resources/read pokered://game-state``
+  is written immediately after it, before either reply is read.  The read
+  serializes on the session's emulator lock, so it observes a coherent
+  pre- or post-step snapshot (the ``epoch.tick`` is exactly one of those two
+  boundary values, never a torn mid-step value) with the documented battle
+  fields and validity.
+* **Server-visible cancellation.**  A long public ``link_step`` is written and
+  then cancelled with the MCP cancellation notification
+  ``{"jsonrpc": "2.0", "method": "notifications/cancelled", "params":
+  {"requestId": <id>, "reason": ...}}``.  The MCP SDK's receive loop marks the
+  in-flight ``_call_tool`` task cancelled and answers with the JSON-RPC error
+  ``{"code": 0, "message": "Request cancelled"}``; the server's
+  ``_await_blocking_task`` shield then leaves the emulator worker alive until
+  it settles.  The test asserts the bounded error terminal, that the full
+  finite count still completed (so no owned emulator work was orphaned), that
+  a later ``resources/read`` and ``link_status`` remain responsive, that the
+  link is still paired and steppable, and that ``client.eof()`` still tears
+  every owned process down cleanly.
+
 Forced replacement and a terminal return are not reachable from these
 fixtures within a reasonable finite bound (six full-HP party mons, same-type
 reduced damage and limited lead-move PP); the test therefore asserts the
@@ -106,6 +130,18 @@ TERMINAL_RETURN_PHASE = 5
 # enough that the server's eventual response is drained within CALL_BOUND.
 OUTSTANDING_STEP_FRAMES = 20
 OUTSTANDING_CANCEL_DELAY = 0.2
+# A concurrent resource read is issued while a long finite ``link_step`` is
+# still outstanding.  The read serializes on the session emulator lock, so it
+# returns the coherent post-step snapshot (or the pre-step snapshot if it wins
+# the race); the tick is one of the two boundary values, never torn.
+CONCURRENT_STEP_FRAMES = 40
+# A server-visible cancellation reuses the public MCP cancellation
+# notification with the outstanding request id.  The count is large enough to
+# guarantee the request is still in flight when the notification arrives, yet
+# bounded so the shielded emulator worker (and the read that follows it)
+# settles within the transport deadline.
+SERVER_CANCEL_STEP_FRAMES = 40
+CANCEL_REASON = "battle-state cancellation coverage"
 
 LINK_MENU_MAX_ITEMS = (2, 3)
 MENU_WATCHED_A = 0x01
@@ -601,12 +637,139 @@ async def _read_response_for(client, request_id, *, bound):
         while True:
             line = await client.process.stdout.readline()
             assert line, f"server EOF while awaiting response {request_id}"
-            response = json.loads(line)
+            text = line.decode("utf-8", "replace").strip()
+            if not text or not text.startswith("{"):
+                # Ignore blank or non-protocol diagnostic lines; JSON-RPC is
+                # line-delimited and only objects carry responses.
+                continue
+            response = json.loads(text)
             assert response.get("jsonrpc") == "2.0", response
             if "id" not in response:
                 continue
             if response["id"] == request_id:
                 return response
+
+
+async def _read_responses_for(client, request_ids, *, bound):
+    """Read stdout until every request id in ``request_ids`` has a reply.
+
+    Requests are written before any reply is read, so the server handles them
+    concurrently; replies are matched by id rather than arrival order.
+    """
+    pending = set(request_ids)
+    responses = {}
+    async with asyncio.timeout(bound):
+        while pending:
+            line = await client.process.stdout.readline()
+            assert line, f"server EOF while awaiting responses {sorted(pending)}"
+            text = line.decode("utf-8", "replace").strip()
+            if not text or not text.startswith("{"):
+                continue
+            response = json.loads(text)
+            assert response.get("jsonrpc") == "2.0", response
+            if "id" not in response or response["id"] not in pending:
+                continue
+            pending.discard(response["id"])
+            responses[response["id"]] = response
+    return responses
+
+
+async def _read_state_during_outstanding_step(client, *, frames, label):
+    """Read ``pokered://game-state`` while a long ``link_step`` is outstanding.
+
+    Both public requests are written before either reply is read.  The resource
+    read serializes on the same session emulator lock the paired step holds, so
+    it observes a coherent pre- or post-step snapshot.  The returned ``tick`` is
+    asserted to be exactly one of those two boundary values, never a torn
+    mid-step value, and the documented battle fields are validated.
+    """
+    before = await _request(client, "pokered://game-state")
+    before_tick = before["epoch"]["tick"]
+    step_id = await _send_raw_request(
+        client, "tools/call", {"name": "link_step", "arguments": {"count": frames}}
+    )
+    read_id = await _send_raw_request(client, "resources/read", {"uri": "pokered://game-state"})
+    responses = await _read_responses_for(client, (step_id, read_id), bound=CALL_BOUND)
+    step_response = responses[step_id]
+    read_response = responses[read_id]
+    assert "error" not in step_response, step_response
+    assert "error" not in read_response, read_response
+    step_result = json.loads(step_response["result"]["content"][0]["text"])
+    snapshot = json.loads(read_response["result"]["contents"][0]["text"])
+    assert isinstance(step_result, dict), step_result
+    assert isinstance(snapshot, dict), snapshot
+    tick = snapshot["epoch"]["tick"]
+    assert tick in (before_tick, before_tick + frames), (before_tick, tick, frames, snapshot)
+    _assert_battle_observations(snapshot, label=label)
+    _log(
+        "concurrent_read",
+        f"step_id={step_id} read_id={read_id} frames={frames} tick={before_tick}->{tick}",
+    )
+    return {
+        "step_id": step_id,
+        "read_id": read_id,
+        "before_tick": before_tick,
+        "tick": tick,
+        "step_result": step_result,
+        "snapshot": snapshot,
+    }
+
+
+async def _server_visible_cancel(client, *, frames, label):
+    """Cancel an outstanding public ``link_step`` with ``notifications/cancelled``.
+
+    Protocol messages used (exact JSON-RPC):
+
+    * request: ``{"jsonrpc": "2.0", "id": <id>, "method": "tools/call",
+      "params": {"name": "link_step", "arguments": {"count": frames}}}``
+    * cancel: ``{"jsonrpc": "2.0", "method": "notifications/cancelled",
+      "params": {"requestId": <id>, "reason": <reason>}}``
+
+    The SDK receive loop marks the in-flight request cancelled, cancels the
+    ``_call_tool`` task and answers with the bounded JSON-RPC error
+    ``{"code": 0, "message": "Request cancelled"}``.  The server's
+    ``_await_blocking_task`` shield keeps the thread-backed emulator worker
+    alive, so the full finite count still completes; the follow-up read
+    serializes behind it and proves the tick advanced by exactly ``frames``.
+    """
+    before = await _request(client, "pokered://game-state")
+    before_tick = before["epoch"]["tick"]
+    request_id = await _send_raw_request(
+        client, "tools/call", {"name": "link_step", "arguments": {"count": frames}}
+    )
+    # Let the server admit the request (its SDK request-task is created) before
+    # the cancellation notification arrives; the count keeps it outstanding.
+    await asyncio.sleep(OUTSTANDING_CANCEL_DELAY)
+    await client.send(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": request_id, "reason": CANCEL_REASON},
+        }
+    )
+    response = await _read_response_for(client, request_id, bound=CALL_BOUND)
+    assert "error" in response, response
+    error = response["error"]
+    assert error["code"] == 0, error
+    assert error["message"] == "Request cancelled", error
+    # The read below serializes behind the cancelled-but-shielded worker, so
+    # its coherent snapshot proves the worker was not orphaned mid-step.
+    after = await _request(client, "pokered://game-state")
+    after_tick = after["epoch"]["tick"]
+    assert after_tick == before_tick + frames, (before_tick, after_tick, frames)
+    _assert_battle_observations(after, label=label)
+    _log(
+        "server_cancellation",
+        f"request_id={request_id} frames={frames} "
+        f"tick={before_tick}->{after_tick} error={error['message']}",
+    )
+    return {
+        "request_id": request_id,
+        "error": error,
+        "before_tick": before_tick,
+        "after_tick": after_tick,
+        "state": after,
+    }
 
 
 async def _pair(client):
@@ -947,6 +1110,56 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
             f"tick={responsive_before['epoch']['tick']}->{responsive_after['epoch']['tick']}",
         )
 
+        # -- resource read during an outstanding operation -------------------
+        # A public game-state read is written while a long finite ``link_step``
+        # is still outstanding.  The read serializes on the session emulator
+        # lock, so it returns a coherent pre-/post-step snapshot (never a torn
+        # mid-step tick) with the documented battle fields and validity.
+        concurrent = await _read_state_during_outstanding_step(
+            client, frames=CONCURRENT_STEP_FRAMES, label=labels[0]
+        )
+        # The following state is still coherent and monotonic.
+        coherent_after = await _request(client, "pokered://game-state")
+        _assert_battle_observations(coherent_after, label=labels[0])
+        assert coherent_after["epoch"]["tick"] >= concurrent["tick"], (
+            concurrent["tick"],
+            coherent_after["epoch"],
+        )
+
+        # -- server-visible cancellation -------------------------------------
+        # Canonical MCP cancellation: ``notifications/cancelled`` naming the
+        # outstanding request id.  The server cancels its ``_call_tool`` task,
+        # returns the bounded "Request cancelled" error, and its
+        # ``_await_blocking_task`` shield lets the worker settle the full
+        # finite step, so no owned emulator work is orphaned.
+        server_cancel = await _server_visible_cancel(
+            client, frames=SERVER_CANCEL_STEP_FRAMES, label=labels[0]
+        )
+        # The server is still responsive and the link is still owned/usable:
+        # a subsequent resource read, status poll and paired step all succeed.
+        responsive_after_cancel = await _request(client, "pokered://game-state")
+        _assert_battle_observations(responsive_after_cancel, label=labels[0])
+        assert responsive_after_cancel["epoch"]["tick"] == server_cancel["after_tick"], (
+            server_cancel["after_tick"],
+            responsive_after_cancel["epoch"],
+        )
+        link_status = await client.tool("link_status")
+        assert link_status["paired"] is True, link_status
+        assert link_status["link_backend"] == "bit_accurate", link_status
+        stepped_after_cancel = await client.tool("link_step", {"count": 4})
+        assert stepped_after_cancel["primary_tick"] == server_cancel["after_tick"] + 4, (
+            server_cancel["after_tick"],
+            stepped_after_cancel,
+        )
+        # A structured tool error remains preserved on the post-cancel link.
+        # The error body is not asserted to be JSON: only that the server still
+        # answers a public request with a bounded tool error (never a crash).
+        preserved = await client.request(
+            "tools/call", {"name": "link_step", "arguments": {"count": 0}}
+        )
+        assert preserved.get("isError") is True, preserved
+        responsive_after = responsive_after_cancel
+
         # -- forced replacement / terminal return (documented absent) --------
         # Reaching a knockout/terminal in these fixtures needs ~130 further
         # turns: six full-HP level-53/54 party mons, same-type matchups that
@@ -994,6 +1207,19 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
                         "step_frames": OUTSTANDING_STEP_FRAMES,
                         "terminal": "asyncio.CancelledError",
                         "response_result": True,
+                    },
+                    "concurrent_read": {
+                        "step_frames": CONCURRENT_STEP_FRAMES,
+                        "before_tick": concurrent["before_tick"],
+                        "observed_tick": concurrent["tick"],
+                    },
+                    "server_cancellation": {
+                        "step_frames": SERVER_CANCEL_STEP_FRAMES,
+                        "request_id": server_cancel["request_id"],
+                        "error_code": server_cancel["error"]["code"],
+                        "error_message": server_cancel["error"]["message"],
+                        "before_tick": server_cancel["before_tick"],
+                        "after_tick": server_cancel["after_tick"],
                     },
                     "terminal_absent": {
                         "raw_is_in_battle": final_battle["raw_is_in_battle"],
