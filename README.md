@@ -700,6 +700,12 @@ owner's own lock, a public client can compare both owners' intended receiving
 slots and unrelated records without conflating owners. Timed remote mode has
 no local peer, so the peer resource is rejected there.
 
+The exact-exchange audit takes outgoing slot indexes. Gen I removes each
+selected record, compacts survivors in order, and appends the incoming record
+to the final occupied slot. The audit checks those receiving positions and
+all survivor bytes; an in-place replacement of a nonfinal slot is rejected.
+This is a record observation contract, not proof of animation or room return.
+
 Evidence from the pre-fix implementation/runtime snapshot
 includes six real MCP integration checks in 13.11 seconds with one SDL warning
 and 104 MCP dispatch tests. Ordinary MCP calls drove a real Red session from

@@ -629,10 +629,13 @@ def audit_exact_party_exchange(
     slot_a: int,
     slot_b: int,
 ) -> ExchangeAudit:
-    """Audit a byte-exact record swap between two owners' intended slots.
+    """Audit a byte-exact trade of two owners' selected outgoing slots.
 
-    ``valid is True`` only when the full 44-byte records moved exactly between
-    the intended slots and every unrelated record is byte-identical.  Missing
+    Gen I removes each selected record, compacts the surviving records, then
+    appends the received record. Receiving slots are therefore each owner's
+    final occupied slot, independently of the selected outgoing indexes.
+    ``valid is True`` only when the full 44-byte records arrive there and every
+    survivor remains byte-identical in its source-defined order. Missing
     symbols return ``valid is None``; an out-of-range slot or a record that is
     not 44 bytes is an explicit ``valid is False``.  A same-species pair is
     still compared by raw record identity, never by species alone.
@@ -673,10 +676,10 @@ def audit_exact_party_exchange(
             )
 
     a_before_slot = owner_a_before.records[slot_a]
-    a_after_slot = owner_a_after.records[slot_a]
+    a_after_slot = owner_a_after.records[-1]
     b_before_slot = owner_b_before.records[slot_b]
-    b_after_slot = owner_b_after.records[slot_b]
-    involved = (a_before_slot, a_after_slot, b_before_slot, b_after_slot)
+    b_after_slot = owner_b_after.records[-1]
+    involved = tuple(record for _, party, _ in positions for record in party.records)
 
     size_ok = all(record.size == PARTY_STRUCT_SIZE for record in involved)
     intended_swap = a_after_slot.raw == b_before_slot.raw and b_after_slot.raw == a_before_slot.raw
@@ -697,14 +700,14 @@ def audit_exact_party_exchange(
         ExchangeCheck(
             "intended_slots_swapped",
             intended_swap,
-            "the intended slots did not receive each other's exact record"
+            "the final slots did not receive the selected outgoing records"
             if not intended_swap
             else "",
         ),
         ExchangeCheck(
             "unrelated_records_unchanged",
             unrelated_unchanged,
-            "a record outside the intended slots changed" if not unrelated_unchanged else "",
+            "surviving records changed or did not compact in order" if not unrelated_unchanged else "",
         ),
         ExchangeCheck(
             "same_species_distinguished",
@@ -756,9 +759,8 @@ def _other_records_unchanged(
 ) -> bool:
     if len(before.records) != len(after.records):
         return False
-    for index, (old, new) in enumerate(zip(before.records, after.records)):
-        if index == intended_slot:
-            continue
-        if old.raw != new.raw:
-            return False
-    return True
+    survivors = before.records[:intended_slot] + before.records[intended_slot + 1 :]
+    return all(
+        old.raw == new.raw
+        for old, new in zip(survivors, after.records[:-1], strict=True)
+    )

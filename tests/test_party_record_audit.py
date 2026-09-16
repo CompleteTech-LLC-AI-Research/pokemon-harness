@@ -121,9 +121,9 @@ def test_audit_exact_swap_between_intended_slots():
     b1 = _record(0x02, 12)
     audit = audit_exact_party_exchange(
         owner_a_before=_view([a0, a1]),
-        owner_a_after=_view([b0, a1]),
+        owner_a_after=_view([a1, b0]),
         owner_b_before=_view([b0, b1]),
-        owner_b_after=_view([a0, b1]),
+        owner_b_after=_view([b1, a0]),
         slot_a=0,
         slot_b=0,
     )
@@ -141,9 +141,9 @@ def test_audit_rejects_changed_unrelated_record():
     b1 = _record(0x02, 12)
     audit = audit_exact_party_exchange(
         owner_a_before=_view([a0, a1]),
-        owner_a_after=_view([b0, _record(0x77, 99)]),
+        owner_a_after=_view([_record(0x77, 99), b0]),
         owner_b_before=_view([b0, b1]),
-        owner_b_after=_view([a0, b1]),
+        owner_b_after=_view([b1, a0]),
         slot_a=0,
         slot_b=0,
     )
@@ -168,6 +168,55 @@ def test_two_same_species_members_distinguished_by_slot():
     )
     assert audit.valid is True
     assert audit.check("same_species_distinguished") is True
+
+
+@pytest.mark.parametrize("slot_a,slot_b", [(0, 0), (1, 0), (2, 1)])
+def test_trade_compacts_unequal_parties_and_appends_same_species_records(slot_a, slot_b):
+    a = [_record(0x99, index) for index in (1, 2, 3)]
+    b = [_record(0x99, index) for index in (4, 5)]
+    audit = audit_exact_party_exchange(
+        owner_a_before=_view(a),
+        owner_a_after=_view(a[:slot_a] + a[slot_a + 1:] + [b[slot_b]]),
+        owner_b_before=_view(b),
+        owner_b_after=_view(b[:slot_b] + b[slot_b + 1:] + [a[slot_a]]),
+        slot_a=slot_a,
+        slot_b=slot_b,
+    )
+    assert audit.is_exact
+    assert audit.check("same_species_distinguished") is True
+
+
+def test_trade_rejects_in_place_replacement_of_nonfinal_outgoing_slot():
+    a = [_record(0x99, 1), _record(0x99, 2)]
+    b = [_record(0x99, 3), _record(0x99, 4)]
+    audit = audit_exact_party_exchange(
+        owner_a_before=_view(a),
+        owner_a_after=_view([b[0], a[1]]),
+        owner_b_before=_view(b),
+        owner_b_after=_view([a[0], b[1]]),
+        slot_a=0,
+        slot_b=0,
+    )
+    assert audit.valid is False
+    assert audit.check("intended_slots_swapped") is False
+    assert audit.check("unrelated_records_unchanged") is False
+
+
+@pytest.mark.parametrize("survivors", [(2, 1), (1,), (1, 2, 2)])
+def test_trade_rejects_reordered_missing_or_extra_survivors(survivors):
+    a = [_record(0x99, index) for index in (1, 2, 3)]
+    b = [_record(0x25, 4)]
+    audit = audit_exact_party_exchange(
+        owner_a_before=_view(a),
+        owner_a_after=_view([a[index] for index in survivors] + b),
+        owner_b_before=_view(b),
+        owner_b_after=_view([a[0]]),
+        slot_a=0,
+        slot_b=0,
+    )
+    assert audit.valid is False
+    assert audit.check("intended_slots_swapped") is True
+    assert audit.check("unrelated_records_unchanged") is False
 
 
 def test_audit_rejects_species_only_match():
