@@ -19,7 +19,14 @@ from typing import Any
 
 _HASH_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_PROVENANCE_STATUSES = {"partial", "unknown", "verified"}
+# ``verified`` means the exact bytes were reproduced from the recorded source;
+# ``captured`` means the bytes are a real-play drive recorded with a full
+# provenance chain (same required fields) but not a reproduction.  Both are
+# strict: only the incomplete ``partial``/``unknown`` statuses may omit the
+# runtime/capture/verification fields.
+_PROVENANCE_STATUSES = {"partial", "unknown", "verified", "captured"}
+_STRICT_PROVENANCE_STATUSES = {"verified", "captured"}
+_FIXTURE_KINDS = {"ordinary", "battle", "boundary"}
 _MANIFEST_PATH = Path(__file__).resolve().parents[1] / "release-evidence" / "fixture-manifest.json"
 
 
@@ -102,7 +109,7 @@ def _validate_schema(document: dict[str, Any]) -> list[dict[str, Any]]:
         _require(relative_path not in seen_paths, f"duplicate fixture path: {relative_path}")
         seen_paths.add(relative_path)
 
-        _require(fixture.get("kind") in {"ordinary", "battle"}, f"{prefix}.kind is invalid")
+        _require(fixture.get("kind") in _FIXTURE_KINDS, f"{prefix}.kind is invalid")
         _validate_text(fixture.get("version"), f"{prefix}.version")
         _validate_text(fixture.get("variant"), f"{prefix}.variant")
         size = fixture.get("size_bytes")
@@ -140,7 +147,7 @@ def _validate_schema(document: dict[str, Any]) -> list[dict[str, Any]]:
                 value is None or (isinstance(value, str) and value.strip()),
                 f"{prefix}.provenance.{field} must be null or a non-empty string",
             )
-        if provenance["status"] == "verified":
+        if provenance["status"] in _STRICT_PROVENANCE_STATUSES:
             for field in ("runtime_identity", "captured_at_utc", "verification_method"):
                 _validate_text(provenance[field], f"{prefix}.provenance.{field}")
 
