@@ -86,6 +86,17 @@ COMMAND_MENU_MAX_ITEM = 1
 MOVE_MENU_MAX_ITEM = 5
 MENU_WATCHED_A = 0x01
 
+# ``wMenuWatchedKeys`` the ROM installs for the battle command menu, both
+# columns of it: ``engine/battle/core.asm:2177`` writes ``PAD_RIGHT | PAD_A``
+# for the left column and ``:2210`` writes ``PAD_LEFT | PAD_A`` for the right
+# column, each with ``wMaxMenuItem == 1``.  The command menu's cursor geometry
+# is not unique on its own -- a battle party menu that has already taken its
+# input leaves ``wMaxMenuItem == wPartyCount - 1`` and
+# ``wMenuWatchedKeys == PAD_A | PAD_B`` behind, which for a two-mon party is
+# the command menu's geometry exactly -- so the mask, not the geometry, is what
+# proves the command menu is the live one.
+COMMAND_MENU_WATCHED_KEYS = (0x11, 0x21)
+
 # ``wMenuWatchedKeys`` is the ROM's own per-menu key mask and the only byte of
 # the three menu bytes that differs between the two menus whose cursor geometry
 # collides, so it is what separates them.  ``home/pokemon.asm:225-240`` installs
@@ -239,7 +250,11 @@ def _battle_menu_input_ready(session) -> bool:
     if fields is None:
         return False
     current, maximum, watched_keys = fields
-    return 0 <= current <= 1 and maximum == 1 and watched_keys & 0x01
+    return (
+        0 <= current <= 1
+        and maximum == COMMAND_MENU_MAX_ITEM
+        and watched_keys in COMMAND_MENU_WATCHED_KEYS
+    )
 
 
 def _move_menu_input_ready(session) -> bool:
@@ -540,7 +555,10 @@ def _menu_awaiting_a(session) -> str | None:
     party menu and driven with the wrong buttons.  The move branch is gated on
     the move menu's own ``MOVE_MENU_WATCHED_KEYS`` mask for the same reason: a
     closed party menu leaves move-menu geometry behind, and only the mask says
-    which of the two menus is live.
+    which of the two menus is live.  The command branch is gated on
+    ``COMMAND_MENU_WATCHED_KEYS`` for exactly the same reason: the battle party
+    menu of a two-mon party leaves ``current=0..1, max=1`` behind, which is the
+    command menu's geometry, and only the mask separates the two.
     """
     fields = _menu_fields(session)
     if fields is None:
@@ -550,7 +568,11 @@ def _menu_awaiting_a(session) -> str | None:
         return None
     if _party_menu_ready(session):
         return "party"
-    if 0 <= current <= 1 and maximum == COMMAND_MENU_MAX_ITEM:
+    if (
+        0 <= current <= 1
+        and maximum == COMMAND_MENU_MAX_ITEM
+        and watched_keys in COMMAND_MENU_WATCHED_KEYS
+    ):
         return "command"
     if watched_keys == MOVE_MENU_WATCHED_KEYS and 1 <= current < maximum <= MOVE_MENU_MAX_ITEM:
         return "move"
