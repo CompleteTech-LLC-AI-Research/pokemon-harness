@@ -1248,6 +1248,99 @@ def test_run_command_preserves_failure_with_live_grandchild(tmp_path: Path):
     assert _wait_for_dead(grandchild)
 
 
+def _write_detached_grandchild_command(
+    tmp_path: Path, exit_code: int, pidfile: Path, *, parent_sleeps: bool = False
+) -> list[str]:
+    """Build a command whose grandchild detaches into its own session.
+
+    ``start_new_session=True`` moves the grandchild out of the command's process
+    group, which is the round-6 finding: the process-group sweep cannot see it,
+    so it survives even though the command's group is empty.
+
+    ``parent_sleeps`` keeps the parent alive after the detached grandchild
+    starts, so the command itself hits its deadline instead of exiting first.
+    """
+
+    grandchild = tmp_path / "detached_grandchild.py"
+    grandchild.write_text(
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        f"Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    if pidfile.exists():
+        pidfile.unlink()
+    tail = "time.sleep(120)\n" if parent_sleeps else ""
+    code = (
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "with open(os.devnull, 'wb') as null:\n"
+        f"    subprocess.Popen([sys.executable, {str(grandchild)!r}], "
+        "stdin=null, stdout=null, stderr=null, start_new_session=True)\n"
+        "deadline = time.monotonic() + 20\n"
+        f"while not Path({str(pidfile)!r}).exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.05)\n"
+        f"{tail}"
+        f"sys.exit({exit_code})\n"
+    )
+    return [sys.executable, "-c", code]
+
+
+def test_run_command_sweeps_detached_grandchild_after_success(tmp_path: Path):
+    """A descendant that calls ``start_new_session`` must still be contained."""
+
+    pidfile = tmp_path / "detached.pid"
+    command = _write_detached_grandchild_command(tmp_path, 0, pidfile)
+    process = runner.run_command(command, tmp_path)
+    assert process.returncode == 0
+    assert pidfile.exists()
+    detached = int(pidfile.read_text(encoding="utf-8"))
+    assert _wait_for_dead(detached), "the detached grandchild was not contained"
+    assert detached not in runner._LEFTOVER_OWNED_PIDS
+
+
+def test_run_command_preserves_failure_with_detached_grandchild(tmp_path: Path):
+    """Detached-descendant cleanup must preserve the original failing status."""
+
+    pidfile = tmp_path / "detached.pid"
+    command = _write_detached_grandchild_command(tmp_path, 9, pidfile)
+    process = runner.run_command(command, tmp_path)
+    assert process.returncode == 9
+    assert pidfile.exists()
+    detached = int(pidfile.read_text(encoding="utf-8"))
+    assert _wait_for_dead(detached)
+
+
+def test_run_command_timeout_contains_detached_grandchild(tmp_path: Path):
+    """The timeout path must contain detached descendants too, not only the group."""
+
+    pidfile = tmp_path / "detached.pid"
+    command = _write_detached_grandchild_command(tmp_path, 0, pidfile, parent_sleeps=True)
+    process = runner.run_command(command, tmp_path, timeout=0.75)
+    assert process.returncode == runner._TIMEOUT_RETURNCODE
+    assert pidfile.exists()
+    detached = int(pidfile.read_text(encoding="utf-8"))
+    assert _wait_for_dead(detached)
+
+
+def test_run_command_does_not_touch_preexisting_children(tmp_path: Path):
+    """A child that existed before the command is not the command's descendant."""
+
+    bystander = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    try:
+        assert bystander.pid in runner._direct_child_pids(os.getpid())
+        process = runner.run_command([sys.executable, "-c", "pass"], tmp_path, timeout=30)
+        assert process.returncode == 0
+        assert bystander.poll() is None, "an unrelated pre-existing child was terminated"
+    finally:
+        if bystander.poll() is None:
+            bystander.kill()
+            bystander.wait(timeout=5)
+
+
 def test_release_is_blocked_while_owned_leftovers_survive(tmp_path: Path):
     if not _LOCK_OBSERVATION_SUPPORTED:
         pytest.skip("kernel lock table is not observable in this sandbox")
@@ -1318,6 +1411,123 @@ def test_cpuset_reservation_unsupported_when_affinity_unobservable(tmp_path: Pat
     facts.foreign_process_affinity = None
     results = runner.evaluate_resources(declaration, facts, tmp_path)
     assert statuses(results)["reservation-evidence"] == "unsupported"
+
+
+def test_foreign_process_affinity_fails_closed_when_process_unreadable(monkeypatch):
+    """An unreadable process must not be silently dropped from the competitor set."""
+
+    real_observed = runner._observed_affinity
+    real_zombie = runner._pid_is_zombie
+    real_entries = list(Path("/proc").iterdir())
+
+    class _Entry:
+        def __init__(self, name: str):
+            self.name = name
+
+    monkeypatch.setattr(
+        runner.Path,
+        "iterdir",
+        lambda self: real_entries if str(self) != "/proc" else [_Entry("1"), _Entry("self")],
+    )
+    monkeypatch.setattr(runner, "_pid_is_zombie", lambda pid: False)
+    monkeypatch.setattr(runner, "_observed_affinity", lambda pid: None)
+    monkeypatch.setattr(runner, "_pid_exists", lambda pid: True)
+    try:
+        assert runner._foreign_process_affinity() is None
+    finally:
+        monkeypatch.setattr(runner, "_observed_affinity", real_observed)
+        monkeypatch.setattr(runner, "_pid_is_zombie", real_zombie)
+
+
+def test_foreign_process_affinity_skips_exited_process(monkeypatch):
+    """A process that exited between enumeration and read is not a competitor."""
+
+    entries = list(Path("/proc").iterdir())
+
+    class _Entry:
+        def __init__(self, name: str):
+            self.name = name
+
+    monkeypatch.setattr(
+        runner.Path,
+        "iterdir",
+        lambda self: entries if str(self) != "/proc" else [_Entry("999999")],
+    )
+    monkeypatch.setattr(runner, "_observed_affinity", lambda pid: None)
+    monkeypatch.setattr(runner, "_pid_exists", lambda pid: False)
+    assert runner._foreign_process_affinity() == {}
+
+
+def test_cgroup_sibling_competitors_detects_populated_descendant(tmp_path: Path):
+    """A sibling whose own process list is empty but whose child is busy counts."""
+
+    root = tmp_path / "cgroup"
+    allocation = root / "user.slice" / "session.scope"
+    sibling_leaf = root / "user.slice" / "other.scope" / "child.scope"
+    allocation.mkdir(parents=True)
+    sibling_leaf.mkdir(parents=True)
+    for directory in (root, root / "user.slice", root / "user.slice" / "other.scope"):
+        (directory / "cgroup.controllers").write_text("cpu\n", encoding="utf-8")
+        (directory / "cgroup.procs").write_text("", encoding="utf-8")
+    (allocation / "cgroup.controllers").write_text("cpu\n", encoding="utf-8")
+    (allocation / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
+    (sibling_leaf / "cgroup.controllers").write_text("cpu\n", encoding="utf-8")
+    (sibling_leaf / "cgroup.procs").write_text("4242\n", encoding="utf-8")
+
+    competitors = runner._cgroup_sibling_competitors(str(allocation))
+    assert competitors == ["other.scope"]
+
+
+def test_cgroup_sibling_competitors_detects_ancestor_sibling(tmp_path: Path):
+    """A busy cgroup beside an ancestor also competes for the same CPUs."""
+
+    root = tmp_path / "cgroup"
+    allocation = root / "user.slice" / "session.scope"
+    outer = root / "system.slice"
+    allocation.mkdir(parents=True)
+    outer.mkdir(parents=True)
+    for directory in (root, root / "user.slice", outer):
+        (directory / "cgroup.controllers").write_text("cpu\n", encoding="utf-8")
+        (directory / "cgroup.procs").write_text("", encoding="utf-8")
+    (allocation / "cgroup.controllers").write_text("cpu\n", encoding="utf-8")
+    (allocation / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
+    (outer / "cgroup.procs").write_text("31337\n", encoding="utf-8")
+
+    competitors = runner._cgroup_sibling_competitors(str(allocation))
+    assert competitors == ["system.slice"]
+
+
+def test_cgroup_sibling_competitors_accepts_quiet_tree(tmp_path: Path):
+    root = tmp_path / "cgroup"
+    allocation = root / "user.slice" / "session.scope"
+    allocation.mkdir(parents=True)
+    for directory in (root, root / "user.slice", allocation):
+        (directory / "cgroup.controllers").write_text("cpu\n", encoding="utf-8")
+        (directory / "cgroup.procs").write_text("", encoding="utf-8")
+    (allocation / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
+    assert runner._cgroup_sibling_competitors(str(allocation)) == []
+
+
+def test_cgroup_sibling_competitors_unsupported_when_unreadable(tmp_path: Path, monkeypatch):
+    root = tmp_path / "cgroup"
+    allocation = root / "user.slice" / "session.scope"
+    allocation.mkdir(parents=True)
+    (root / "cgroup.controllers").write_text("cpu\n", encoding="utf-8")
+    (root / "cgroup.procs").write_text("", encoding="utf-8")
+    (root / "user.slice" / "cgroup.controllers").write_text("cpu\n", encoding="utf-8")
+    (root / "user.slice" / "cgroup.procs").write_text("", encoding="utf-8")
+    (allocation / "cgroup.controllers").write_text("cpu\n", encoding="utf-8")
+    (allocation / "cgroup.procs").write_text("", encoding="utf-8")
+
+    real_iterdir = Path.iterdir
+
+    def _iterdir(self):
+        if self == root:
+            raise PermissionError("hidden")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _iterdir)
+    assert runner._cgroup_sibling_competitors(str(allocation)) is None
 
 
 def test_validate_asset_inputs_rejects_unrelated_only(tmp_path: Path):

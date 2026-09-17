@@ -297,7 +297,23 @@ def _observed_affinity(pid: int) -> list[int] | None:
     return None
 
 
-def _foreign_process_affinity() -> dict[int, list[int]]:
+def _pid_exists(pid: int) -> bool:
+    """Return whether *pid* names a live or zombie process, not its affinity."""
+
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # PermissionError and friends: the entry exists but is not inspectable,
+        # which is exactly the case that must not be read as "no competitor".
+        return True
+    return True
+
+
+def _foreign_process_affinity() -> dict[int, list[int]] | None:
     """Return the allowed CPUs of every live process outside this job's tree.
 
     A cpuset is only an exclusive reservation when nothing else is allowed to
@@ -305,6 +321,12 @@ def _foreign_process_affinity() -> dict[int, list[int]]:
     not move a competitor off those CPUs.  Enumerating ``/proc`` and comparing
     each foreign process's ``Cpus_allowed_list`` against the declared cpuset is
     the observable evidence that the CPUs are not shared.
+
+    ``None`` means competing affinity could not be fully observed, so the
+    caller must fail closed.  An unreadable process is *not* evidence that the
+    CPUs are free: omitting it silently would turn a permission error into a
+    passing reservation.  Only a process that has genuinely exited or that is
+    an exited zombie is skipped, because neither can consume CPU time.
     """
 
     owned = set(_process_tree_pids(os.getpid()))
@@ -312,16 +334,21 @@ def _foreign_process_affinity() -> dict[int, list[int]]:
     try:
         entries = list(Path("/proc").iterdir())
     except OSError:
-        return foreign
+        return None
     for entry in entries:
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
         if pid in owned or pid == os.getpid():
             continue
+        if _pid_is_zombie(pid):
+            continue
         cpus = _observed_affinity(pid)
-        if cpus is not None:
-            foreign[pid] = cpus
+        if cpus is None:
+            if _pid_exists(pid):
+                return None
+            continue
+        foreign[pid] = cpus
     return foreign
 
 
@@ -702,41 +729,108 @@ def _cgroup_descendant_counts(cgroup_dir: str | None) -> dict[str, int] | None:
     return counters or None
 
 
+def _is_cgroup_directory(directory: Path) -> bool | None:
+    """Return whether *directory* exposes the cgroup kernel interface files.
+
+    ``None`` means the directory could not be inspected, which the caller must
+    propagate as unobservable rather than treat as "not a cgroup" (which would
+    silently end the ancestor walk and hide competing cgroups).
+    """
+
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return None
+    return any(entry.name.startswith("cgroup.") for entry in entries)
+
+
+def _cgroup_subtree_populated(directory: Path, seen: set[tuple[int, int]]) -> bool | None:
+    """Return whether *directory* or any descendant cgroup holds a live process.
+
+    ``None`` means the population could not be established, so the caller must
+    fail closed.  Checking only a sibling's own ``cgroup.procs`` is not enough:
+    a sibling scope often holds no processes directly while its children do,
+    and those children compete for the same CPUs as the declared allocation.
+    """
+
+    try:
+        stats = directory.stat()
+    except OSError:
+        return None
+    key = (stats.st_dev, stats.st_ino)
+    if key in seen:
+        # A bind-mount or symlink cycle must not loop forever.
+        return False
+    seen.add(key)
+    raw = _read_text(directory / "cgroup.procs")
+    if raw is None:
+        return None
+    if raw.strip():
+        return True
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.is_dir() or not _is_cgroup_directory(entry):
+            continue
+        nested = _cgroup_subtree_populated(entry, seen)
+        if nested is None:
+            return None
+        if nested:
+            return True
+    return False
+
+
 def _cgroup_sibling_competitors(cgroup_dir: str | None) -> list[str] | None:
-    """Return sibling cgroups that contain live processes, or ``None`` if hidden.
+    """Return cgroups outside the allocation that contain live processes.
 
     A CPU quota limits the cgroup it is set on; it does not stop a sibling
     cgroup on the same CPUs from consuming run queue time.  The declared
-    allocation is only exclusive when the allocation cgroup's parent has no
-    other populated child cgroups.  ``None`` means the parent directory could
-    not be enumerated, so the caller must fail closed rather than assume
-    exclusivity.
+    allocation is only exclusive when no cgroup outside the allocation subtree
+    holds a process.  That means checking the *whole* subtree of every sibling
+    at every ancestor level, because a quota sibling or an ancestor's sibling
+    can be empty directly while its descendants are busy.
+
+    ``None`` means the cgroup tree could not be enumerated, so the caller must
+    fail closed rather than assume exclusivity.
     """
 
     if not cgroup_dir:
         return None
-    directory = Path(cgroup_dir)
-    parent = directory.parent
-    if parent == directory:
-        # A hierarchy root has no siblings to compare against.
-        return []
-    try:
-        entries = list(parent.iterdir())
-    except OSError:
-        return None
+    current = Path(cgroup_dir)
     competitors: list[str] = []
-    for entry in entries:
-        if entry == directory or not entry.is_dir():
-            continue
-        procs = entry / "cgroup.procs"
-        if not procs.is_file():
-            continue
-        raw = _read_text(procs)
-        if raw is None:
+    seen: set[tuple[int, int]] = set()
+    while True:
+        parent = current.parent
+        if parent == current:
+            # Reached the filesystem root; there is nothing above it.
+            break
+        parent_is_cgroup = _is_cgroup_directory(parent)
+        if parent_is_cgroup is None:
             return None
-        if raw.strip():
-            competitors.append(entry.name)
-    return sorted(competitors)
+        if not parent_is_cgroup:
+            # The parent is outside the cgroup hierarchy, so the walk is done.
+            break
+        try:
+            entries = sorted(parent.iterdir())
+        except OSError:
+            return None
+        for entry in entries:
+            if entry == current or not entry.is_dir():
+                continue
+            entry_is_cgroup = _is_cgroup_directory(entry)
+            if entry_is_cgroup is None:
+                return None
+            if not entry_is_cgroup:
+                continue
+            populated = _cgroup_subtree_populated(entry, seen)
+            if populated is None:
+                return None
+            if populated:
+                competitors.append(entry.name)
+        current = parent
+    return sorted(set(competitors))
 
 
 def _read_psi_cpu() -> float | None:
@@ -2204,8 +2298,12 @@ class _adopted_descendants:
     def __enter__(self) -> Self:
         self._previous = _child_subreaper_state()
         self._enabled = False
+        # A process that is already a subreaper is still a subreaper for the
+        # command's orphans, so adoption is observable in that case too.
+        self.active = self._previous == 1
         if self._previous != 1:
             self._enabled = _set_child_subreaper(True)
+            self.active = self._enabled
         return self
 
     def __exit__(self, *_exc: object) -> bool:
@@ -2287,6 +2385,117 @@ def _terminate_process_group(pgid: int, grace: float | None = None) -> tuple[boo
                 break
             time.sleep(0.05)
     return False, _process_group_members(pgid)
+
+
+def _adopted_orphan_pids(exclude: set[int] | None = None) -> list[int]:
+    """Return live orphaned children of this process that are not tracked.
+
+    A command that detaches a grandchild with ``start_new_session=True`` moves
+    that grandchild into a different process group, so the process-group sweep
+    cannot see it.  Because the runner is a child subreaper, such an orphan is
+    reparented to this process when its parent exits, which makes it a *direct*
+    child here.  Restricting the scan to direct children is deliberate: it
+    reaches exactly the adopted orphans, and it cannot touch an unrelated
+    process that merely shares this subtree.
+
+    ``exclude`` holds pids observed before the command started, so a
+    pre-existing child of the runner is never mistaken for the command's
+    descendant.  Zombies are reaped rather than reported, because a reaped
+    orphan holds no CPU capacity.
+    """
+
+    excluded = set(exclude or ())
+    excluded.update(process.pid for process in _OWNED_PROCESSES if process.poll() is None)
+    me = os.getpid()
+    owned: list[int] = []
+    for pid in _direct_child_pids(me):
+        if pid in excluded:
+            continue
+        if _pid_is_zombie(pid):
+            _reap_zombie(pid)
+            continue
+        if _pid_alive(pid):
+            owned.append(pid)
+    return sorted(owned)
+
+
+def _direct_child_pids(parent_pid: int | None = None) -> list[int]:
+    """Return the pids whose parent is *parent_pid* (default: this process)."""
+
+    if parent_pid is None:
+        parent_pid = os.getpid()
+    children: list[int] = []
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return children
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == parent_pid:
+            continue
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+        closing = raw.rfind(")")
+        if closing == -1:
+            continue
+        fields = raw[closing + 1 :].split()
+        if len(fields) < 2:
+            continue
+        try:
+            if int(fields[1]) == parent_pid:
+                children.append(pid)
+        except ValueError:
+            continue
+    return sorted(children)
+
+
+def _terminate_pids(pids: list[int], grace: float | None = None) -> tuple[bool, list[int]]:
+    """Terminate *pids* outside a shared process group and confirm they exited.
+
+    Detached descendants do not share the command's process group, so they are
+    signalled individually.  The escalation and confirmation mirror
+    ``_terminate_process_group`` so that a surviving descendant keeps the lease
+    instead of being reported as released capacity.
+    """
+
+    if os.name == "nt":
+        return True, []
+    grace = _CHILD_TERMINATION_GRACE_SECONDS if grace is None else grace
+    remaining = sorted({pid for pid in pids if _pid_alive(pid)})
+    if not remaining:
+        return True, []
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in remaining:
+            if _pid_is_zombie(pid):
+                _reap_zombie(pid)
+                continue
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                try:
+                    os.killpg(os.getpgid(pid), sig)
+                except OSError:
+                    continue
+        deadline = time.monotonic() + grace
+        while True:
+            surviving: list[int] = []
+            for pid in remaining:
+                if _pid_is_zombie(pid):
+                    _reap_zombie(pid)
+                    continue
+                if _pid_alive(pid):
+                    surviving.append(pid)
+            remaining = surviving
+            if not remaining:
+                return True, []
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+    return False, remaining
 
 
 def _sweep_leftover_owned_processes() -> list[int]:
@@ -2422,15 +2631,22 @@ def run_command(
     defaults to the bounded prerequisite deadline; callers running a
     qualification command pass their own deadline.
 
-    When the command itself exits cleanly it may still have left descendants
-    running in its process group.  Those descendants are swept before this
-    function returns, and any that cannot be confirmed gone are recorded on
-    ``_LEFTOVER_OWNED_PIDS`` so the caller refuses to release the lease.  The
-    original exit status and captured output are preserved either way.
+    When the command itself exits (cleanly, failing, or on timeout) it may
+    still have left descendants running.  Two sweeps cover both shapes: the
+    command's whole process group, and any descendant that detached into its
+    own session/process group with ``start_new_session``.  Detached orphans are
+    adopted because the runner is a child subreaper, so they stay visible in
+    this process's tree.  Any descendant that cannot be confirmed gone is
+    recorded on ``_LEFTOVER_OWNED_PIDS`` so the caller refuses to release the
+    lease.  The original exit status and captured output are preserved either
+    way.
     """
 
     timeout = _command_timeout() if timeout is None else timeout
-    with _adopted_descendants():
+    timed_out = False
+    notes: list[str] = []
+    with _adopted_descendants() as adoption:
+        preexisting = set(_direct_child_pids(os.getpid()))
         try:
             process = subprocess.Popen(
                 command,
@@ -2443,33 +2659,47 @@ def run_command(
             )
         except OSError as exc:
             return subprocess.CompletedProcess(command, 127, "", f"{type(exc).__name__}: {exc}")
+        preexisting.discard(process.pid)
         _register_owned(process)
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            timed_out = True
             _terminate_owned_process(process)
             try:
                 stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
             except (subprocess.TimeoutExpired, OSError):
                 stdout, stderr = "", ""
-            note = (
-                f"\n[qualification-runner] command exceeded {timeout:g}s; "
-                "its owned process group was terminated"
-            )
-            return subprocess.CompletedProcess(
-                command, _TIMEOUT_RETURNCODE, stdout, (stderr or "") + note
-            )
         finally:
             _unregister_owned(process)
-    confirmed, leftovers = _terminate_process_group(process.pid)
-    if not confirmed:
+
+        group_confirmed, group_leftovers = _terminate_process_group(process.pid)
+        detached = _adopted_orphan_pids(preexisting)
+        detached_confirmed, detached_leftovers = _terminate_pids(detached)
+        if not adoption.active:
+            notes.append(
+                "the runner could not become a child subreaper, so descendants that "
+                "detached into a new session could not be observed or contained; "
+                "this run's containment is unproven"
+            )
+
+    leftovers = sorted(set(group_leftovers) | set(detached_leftovers))
+    if not group_confirmed or not detached_confirmed:
         _LEFTOVER_OWNED_PIDS.update(leftovers)
-    if leftovers:
-        stderr = (stderr or "") + (
-            f"\n[qualification-runner] {len(leftovers)} owned descendant(s) remained "
-            "after the command exited; capacity must not be released"
+    if timed_out:
+        notes.insert(
+            0,
+            f"command exceeded {timeout:g}s; its owned process group was terminated",
         )
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if leftovers:
+        notes.append(
+            f"{len(leftovers)} owned descendant(s) remained after the command exited; "
+            "capacity must not be released"
+        )
+    returncode = _TIMEOUT_RETURNCODE if timed_out else process.returncode
+    for note in notes:
+        stderr = (stderr or "") + f"\n[qualification-runner] {note}"
+    return subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
 
 def _sha1_of_file(path: Path) -> str:

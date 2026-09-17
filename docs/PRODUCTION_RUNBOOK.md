@@ -590,6 +590,12 @@ Choose one reservation mechanism:
   quota on one cgroup is a ceiling, not a reservation, while child or sibling
   cgroups are allowed to compete for the same CPUs. The allocation cgroup's
   parent must contain no other populated child cgroups for the same reason.
+  "Populated" is decided over each competing cgroup's **whole subtree**, and
+  the walk continues through every ancestor level, not just the immediate
+  parent. A sibling scope frequently holds no processes directly while its
+  child scope is busy, and a busy cgroup beside an ancestor competes for the
+  same CPUs just the same; checking only a sibling's own `cgroup.procs` would
+  miss both.
 - `cpuset-affinity`: the job's observed affinity exactly equals a reserved
   cpuset that is a strict subset of the host CPUs, and no other live process
   has an allowed-CPU list that intersects that cpuset. Affinity only confines
@@ -607,7 +613,13 @@ Choose one reservation mechanism:
 
 When the competing-affinity data or the cgroup descendant counters cannot be
 read, the check reports `unsupported` and admission fails closed; it never
-assumes exclusivity it could not observe.
+assumes exclusivity it could not observe. In particular, a process whose
+`Cpus_allowed_list` cannot be read is **not** omitted from the competitor set:
+an unreadable process is unproven, not absent, so a permission error, an
+unreadable `cgroup.procs`, or an unenumerable cgroup directory all surface as
+`unsupported` rather than as a passing reservation. Only a process that has
+exited, or that is an exited zombie awaiting reaping, is skipped, because
+neither can consume CPU time.
 
 `POKERED_QUALIFICATION_FOREIGN_SAMPLE_SECONDS` (default `2`) sets the
 competing-CPU sampling window used by the `dedicated-host` check;
@@ -698,13 +710,19 @@ owned process group is terminated without discarding the original failure; the
 `86400`).
 
 The runner installs itself as a child subreaper (`PR_SET_CHILD_SUBREAPER`) and
-sweeps the command's whole process group after the parent exits, not only on
-timeout. A command that returns `0` or a failure while leaving a sleeping
-grandchild behind therefore no longer counts as a completed job: the descendant
-is terminated and confirmed gone, and if any owned descendant cannot be
-confirmed gone the pids are retained and `--release` reports `blocked` instead
-of relinquishing capacity that is still in use. The original exit status and
-captured output are preserved.
+contains descendants on every command exit path, not only on timeout. Two
+sweeps run after the parent exits: the command's whole process group, and the
+orphans the runner adopted as subreaper. The second sweep matters because a
+command can detach a grandchild with `start_new_session=True`, which moves it
+out of the command's process group; such an orphan is reparented to the
+subreaper and is therefore still reachable and containable. A command that
+returns `0` or a failure while leaving a descendant behind no longer counts as
+a completed job: the descendant is terminated and confirmed gone, and if any
+owned descendant cannot be confirmed gone the pids are retained and `--release`
+reports `blocked` instead of relinquishing capacity that is still in use. When
+the runner cannot become a subreaper at all, the result carries an explicit
+note that containment is unproven rather than a silent pass. The original exit
+status and captured output are preserved.
 
 Both peers of every TCP pair stay on the host because the supported transport
 is loopback-only. Provisioning new paid infrastructure or uploading
@@ -741,6 +759,25 @@ no competing load). Because no such allocation exists on this host, those
 acceptance runs are **BLOCKED** and are not claimed as passing. This section is
 a provisioning status record, not release evidence, and it must not be used to
 promote any qualification result.
+
+#### 3b-1. Functional acceptance retained, capacity qualification withheld
+
+The unchanged comparison and the complete nine-orientation timed MCP matrix
+were executed from this branch's head and their sanitized terminal results are
+retained at
+`release-evidence/feature-qualification/pr112-acceptance-409ba11/`. Both
+runtimes passed all `143` collected tests with `0` failures, errors, or skips,
+and all nine ordered orientations passed in each runtime, ending
+`mode=connected` with both peers at `returncode=0` and `group_alive=false`.
+
+That bundle is deliberately read as **functional** acceptance only. The same
+bundle records the host-wide capacity samples taken before, during, and after
+those runs: `9.44`, `10.72`, and `10.72` busy cores out of `12`. Competing
+tenants were therefore active for the whole measurement, so the run does not
+satisfy issue #85's "under that allocation" clause and cannot be promoted to a
+capacity-qualified or release-qualified result. Retaining a passing functional
+result beside an explicit capacity-blocked status is the honest state; a
+prepared runner and a green functional matrix are still not a passing gate.
 
 ## 4. Run the evidence tiers
 
