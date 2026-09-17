@@ -135,14 +135,31 @@ def _counters(main):
     return {"MainInBattleLoop": list(main)}
 
 
-def test_turn_restarted_tracks_the_roms_own_turn_loop_entry():
-    """``MainInBattleLoop`` is entered once per turn, even for a skipped menu."""
+def _counters_with_selection(main, select_enemy):
+    return {
+        "MainInBattleLoop": list(main),
+        "MainInBattleLoop.selectEnemyMove": list(select_enemy),
+    }
 
-    baseline = {"main": [7, 9]}
-    assert producer._turn_restarted(_counters([7, 9]), 0, baseline) is False
-    assert producer._turn_restarted(_counters([7, 9]), 1, baseline) is False
-    # One side restarting its turn is not enough for the caller's gate, and
-    # the predicate is per side so the caller can say which one moved.
-    assert producer._turn_restarted(_counters([8, 9]), 0, baseline) is True
-    assert producer._turn_restarted(_counters([8, 9]), 1, baseline) is False
-    assert producer._turn_restarted(_counters([8, 10]), 1, baseline) is True
+
+def test_committed_move_tracks_the_roms_own_move_selection_entry():
+    """``MainInBattleLoop.selectEnemyMove`` proves a side moved past its menu.
+
+    ``MainInBattleLoop`` is entered once per turn too, but ~20 frames before
+    that side's command menu is live, so it cannot prove the side is done with
+    its menu.  The selection label is only reached after the side answers (or
+    skips) its command menu, so only its increment makes the peer's menu safe
+    to answer.
+    """
+
+    baseline = {"select_enemy": [7, 9]}
+    counters = _counters_with_selection([20, 20], [7, 9])
+    assert producer._committed_move(counters, 0, baseline) is False
+    assert producer._committed_move(counters, 1, baseline) is False
+    # The predicate is per side, so the caller can always say which peer has
+    # committed; one side advancing must never open the gate for its own menu.
+    counters = _counters_with_selection([20, 20], [8, 9])
+    assert producer._committed_move(counters, 0, baseline) is True
+    assert producer._committed_move(counters, 1, baseline) is False
+    counters = _counters_with_selection([20, 20], [8, 10])
+    assert producer._committed_move(counters, 1, baseline) is True

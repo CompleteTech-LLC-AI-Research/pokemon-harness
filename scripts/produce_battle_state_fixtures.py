@@ -504,16 +504,30 @@ def _faint_deltas(counters: dict, index: int, before: dict) -> tuple[int, int]:
     return player, enemy
 
 
-def _turn_restarted(counters: dict, index: int, baseline: dict) -> bool:
-    """True once ``index``'s ROM has re-entered its battle turn loop.
+def _committed_move(counters: dict, index: int, baseline: dict) -> bool:
+    """True once ``index``'s ROM has moved past its own command menu this turn.
 
-    ``MainInBattleLoop`` is entered once per turn even for a side the ROM skips
-    ``DisplayBattleMenu`` for, because the skip is inside the function
-    (``engine/battle/core.asm:289-314``), so a counter increment is the ROM's
-    own witness that this side's menu is a fresh one rather than the leftovers
-    of the menu the previous turn already answered.
+    ``MainInBattleLoop.selectEnemyMove`` (``engine/battle/core.asm:347``) is
+    reached once per turn, after the side has answered its command menu -- or
+    straight after the skip for a charging, thrashing, recharging or trapped
+    side, because that skip jumps to the same label.  An increment is therefore
+    the ROM's own witness that this side has committed to the turn's move and
+    can no longer be sent backwards to a command menu, which is exactly the
+    fact a peer needs before it is safe to answer its own command menu.
+
+    ``MainInBattleLoop`` itself is *not* enough: it is entered at the top of the
+    function, ~20 frames before ``DisplayBattleMenu`` makes a side's command
+    menu live, so gating on it (as an earlier revision did) opened the gate
+    while the peer's menu was still two frames from existing and let a
+    just-replaced side run ahead of its peer.  Measured on the blue faint pair:
+    the peer's own command menu appeared at t=200 with no input at all, while
+    the turn-loop gate opened at t=180 and pressed the other side 20 frames too
+    early, wedging the pair (``SVBK == 2``, unreadable party, junk HP).
     """
-    return _counters(counters, "MainInBattleLoop", index) > baseline["main"][index]
+    return (
+        _counters(counters, "MainInBattleLoop.selectEnemyMove", index)
+        > baseline["select_enemy"][index]
+    )
 
 
 def _baseline(counters: dict) -> dict:
@@ -763,20 +777,25 @@ def _settle_turn(
         # both at a command menu is a boundary and is left untouched for the
         # caller to snapshot.
         if (keep_alive or not require_counter) and not both_command:
-            # Both sides must be in the same turn before either command menu is
-            # answered.  A command menu can open for one side while its peer is
-            # still finishing the previous turn's loss text, and answering it
-            # then sends that side into its move menu ahead of the peer, which
-            # then never reaches the menu the next exchange needs.
-            pair_restarted = all(_turn_restarted(counters, index, baseline) for index in (0, 1))
+            # A side's command menu is answered only once its *peer* has
+            # committed to this turn's move.  The turn-loop entry alone is not
+            # enough: a side re-enters ``MainInBattleLoop`` ~20 frames before
+            # its own command menu is live, so a gate on that let a side whose
+            # peer was still walking to its menu be pressed a frame early and
+            # wedged (blue turn 9's in-turn replacement).  Requiring the peer's
+            # ``MainInBattleLoop.selectEnemyMove`` increment -- reached after
+            # the peer answers, or skips, its own command menu -- proves the
+            # peer can no longer be sent backwards to a command menu, which is
+            # the only state in which answering this side is safe.
             for index, session in enumerate((a, b)):
+                peer = 1 - index
                 deadline, began, slot = _pump_menu_input(
                     session,
                     next_press=next_press[index],
                     spent=spent,
                     target_slot=slots[index],
                     started=started[index],
-                    command_fresh=pair_restarted,
+                    command_fresh=_committed_move(counters, peer, baseline),
                 )
                 next_press[index] = deadline
                 if began:
@@ -879,6 +898,15 @@ def _choose_healthy_replacement(session, link, *, step_frames, frame_budget, chu
     describe.  Waiting costs nothing: the success test is the ROM's own, so the
     routine returns as soon as the replacement is out whether or not that
     instant arrived with a button.
+
+    The success reading is taken only while ``0xD000``-``0xDFFF`` still maps to
+    the ROM's own WRAM bank: ``wBattleMonHP`` lives there and a wedged partner
+    leaves ``SVBK == 2``, under which the same address reads another bank's
+    bytes.  An earlier revision trusted that read and reported a completed
+    replacement on a side whose battle had already degenerated, which then
+    fabricated a boundary from garbage rather than failing; an unreadable bank
+    is therefore treated as "not yet replaced" and the caller's own budget
+    decides.
     """
     spent = 0
     next_press = 0
@@ -890,7 +918,7 @@ def _choose_healthy_replacement(session, link, *, step_frames, frame_budget, chu
                 return False
         else:
             ended_frames = 0
-        if _word(session, "wBattleMonHP") > 0:
+        if _banked_readable(session) and _word(session, "wBattleMonHP") > 0:
             return True
         healthy = [slot for slot, value in enumerate(_party_hp_or_empty(session)) if value > 0]
         if healthy and _party_menu_ready(session):
@@ -907,7 +935,7 @@ def _choose_healthy_replacement(session, link, *, step_frames, frame_budget, chu
         chunk = min(step_frames, frame_budget - spent)
         link.step_interleaved(chunk, chunk_cycles=chunk_cycles)
         spent += chunk
-    return _word(session, "wBattleMonHP") > 0
+    return _banked_readable(session) and _word(session, "wBattleMonHP") > 0
 
 
 def _drive_next_turn(
