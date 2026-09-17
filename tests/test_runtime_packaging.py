@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -441,9 +442,95 @@ def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
     assert '"--python", sys.executable' in bootstrap
     assert '"--no-deps"' in bootstrap
     assert "nullcontext(ROOT)" in bootstrap
-    assert "_native_build_source()" in bootstrap
+    assert "_native_build_source(staged_inputs)" in bootstrap
+    assert '"--build-evidence"' in bootstrap
+    assert "_write_build_evidence(" in bootstrap
     assert "apply_external_edge" in bootstrap
     assert "cython_compiled" in bootstrap
+
+
+def test_bootstrap_build_evidence_record_is_self_identifying(tmp_path) -> None:
+    """The emitted record must carry what only the executed build produces."""
+
+    module = _load_bootstrap()
+    target = tmp_path / "evidence" / "native-build.json"
+    identity = {
+        "python": "3.11.9",
+        "version": "2.7.0",
+        "revision": EXPECTED_PYBOY_REVISION,
+        "cython_compiled": True,
+        "modules": {"pyboy.utils": {"kind": "cython", "sha256": "d" * 64}},
+    }
+    module._write_build_evidence(
+        target,
+        mode="cython",
+        staged_inputs_sha256="b" * 64,
+        status="complete",
+        identity=identity,
+    )
+    document = json.loads(target.read_text(encoding="utf-8"))
+    assert document["evidence_version"] == module.BUILD_EVIDENCE_VERSION
+    assert document["procedure"] == "bootstrap_pyboy --mode cython"
+    assert document["mode"] == "cython"
+    assert document["status"] == "complete"
+    assert document["build_inputs_sha256"] == "b" * 64
+    assert document["runtime_identity"] == identity
+    assert document["installed_fingerprint"] == module._runtime_fingerprint(identity)
+    producer = document["producer"]
+    assert producer["script"] == "scripts/bootstrap_pyboy.py"
+    assert (
+        producer["script_sha256"]
+        == hashlib.sha256((ROOT / "scripts" / "bootstrap_pyboy.py").read_bytes()).hexdigest()
+    )
+
+
+def test_bootstrap_build_evidence_is_written_atomically(tmp_path) -> None:
+    module = _load_bootstrap()
+    target = tmp_path / "native-build.json"
+    module._write_build_evidence(
+        target,
+        mode="cython",
+        staged_inputs_sha256="b" * 64,
+        status="complete",
+        identity={"python": "3.11.9"},
+    )
+    left_behind = [path.name for path in tmp_path.iterdir() if path.name != target.name]
+    assert left_behind == []
+    assert json.loads(target.read_text(encoding="utf-8"))["status"] == "complete"
+
+
+def test_bootstrap_rejects_build_evidence_with_check(monkeypatch, tmp_path) -> None:
+    module = _load_bootstrap()
+    monkeypatch.setattr(module, "_validate_source", lambda: None)
+    monkeypatch.setattr(module, "_verify_runtime", lambda mode: None)
+    with pytest.raises(SystemExit, match="cannot be combined with --check"):
+        module.main(
+            [
+                "--mode",
+                "cython",
+                "--check",
+                "--build-evidence",
+                str(tmp_path / "evidence.json"),
+            ]
+        )
+
+
+def test_bootstrap_does_not_emit_evidence_when_build_fails(monkeypatch, tmp_path) -> None:
+    """A failed build must not leave a record that could be read as success."""
+
+    module = _load_bootstrap()
+    monkeypatch.setattr(module, "_validate_source", lambda: None)
+    monkeypatch.setattr(module, "_metadata_was_present", lambda: True)
+    monkeypatch.setattr(module, "_pip_command", lambda: [sys.executable, "-m", "pip"])
+    monkeypatch.setattr(
+        module,
+        "_run_bounded",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1),
+    )
+    target = tmp_path / "evidence.json"
+    exit_code = module.main(["--mode", "cython", "--build-evidence", str(target)])
+    assert exit_code == 1
+    assert not target.exists()
 
 
 def test_bootstrap_pins_build_dependencies_and_disables_implicit_resolution() -> None:

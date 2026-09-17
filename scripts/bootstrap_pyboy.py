@@ -24,6 +24,7 @@ import hashlib
 import importlib
 import importlib.machinery
 import importlib.metadata
+import json
 import os
 import shutil
 import signal
@@ -33,6 +34,7 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +88,7 @@ CYTHON_MODULES = tuple(name for name in RUNTIME_MODULES if name not in {"pyboy",
 NATIVE_INPUT_SUFFIXES = frozenset(
     {".py", ".pyx", ".pxd", ".pxi", ".txt", ".bin", ".md", ".in", ".toml"}
 )
+BUILD_EVIDENCE_VERSION = 2
 
 
 def _process_group_options() -> dict[str, object]:
@@ -306,7 +309,7 @@ def _validate_source() -> None:
 
 
 @contextmanager
-def _native_build_source() -> Iterator[Path]:
+def _native_build_source(digest_sink: list[str] | None = None) -> Iterator[Path]:
     """Build every extension from one source-only snapshot.
 
     Cython extension types share method tables across modules. Reusing old
@@ -314,6 +317,10 @@ def _native_build_source() -> Iterator[Path]:
     runtime even when every import succeeds. The vendored package contains
     Python/Cython sources and resources; its C, headers, and binaries are all
     generated output, so they must never enter this fresh build directory.
+
+    ``digest_sink``, when supplied, receives the staged-inputs digest. The
+    caller uses it to bind retained build evidence to the exact bytes that
+    were handed to the compiler instead of a value it supplied itself.
     """
     build_root = ROOT / "build"
     build_root.mkdir(exist_ok=True)
@@ -345,7 +352,10 @@ def _native_build_source() -> Iterator[Path]:
                 # Hash the staged bytes, which are the compiler's inputs.
                 digest.update(relative.as_posix().encode("utf-8") + b"\0")
                 digest.update(hashlib.sha256(target.read_bytes()).digest())
-        print(f"PyBoy native build inputs SHA-256: {digest.hexdigest()}", flush=True)
+        staged_digest = digest.hexdigest()
+        if digest_sink is not None:
+            digest_sink.append(staged_digest)
+        print(f"PyBoy native build inputs SHA-256: {staged_digest}", flush=True)
         yield destination
 
 
@@ -408,6 +418,116 @@ def _new_serial_instance() -> object:
     from pyboy.core.serial import Serial
 
     return Serial(False)
+
+
+def _runtime_identity() -> dict[str, object]:
+    """Return the installed runtime identity used for consistent-build binding.
+
+    This mirrors the identity recomputed by the qualification runner's native
+    probe so the retained evidence fingerprints the same fields.
+    """
+
+    modules = {name: importlib.import_module(name) for name in RUNTIME_MODULES}
+    import pyboy
+    from pyboy import utils
+
+    report: dict[str, object] = {}
+    for name, module in modules.items():
+        filename = str(getattr(module, "__file__", "") or "")
+        digest = None
+        if filename:
+            try:
+                with open(filename, "rb") as stream:
+                    digest = hashlib.sha256(stream.read()).hexdigest()
+            except OSError:
+                digest = None
+        report[name] = {"kind": _module_kind(module), "sha256": digest}
+    return {
+        "python": sys.version.split()[0],
+        "version": getattr(pyboy, "__version__", None),
+        "revision": getattr(pyboy, "__pokered_harness_revision__", None),
+        "cython_compiled": bool(getattr(utils, "cython_compiled", False)),
+        "modules": report,
+    }
+
+
+def _runtime_fingerprint(identity: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _write_build_evidence(
+    path: Path,
+    *,
+    mode: str,
+    staged_inputs_sha256: str | None,
+    status: str,
+    identity: dict[str, object] | None,
+    detail: str = "",
+) -> None:
+    """Retain the fresh-build procedure's own record for later verification.
+
+    Only the executed build can emit this document: the staged-inputs digest
+    comes from the bytes copied for the compiler, the fingerprint comes from
+    the runtime installed by this run, and the producer digest identifies the
+    bootstrap that ran. The record is written atomically so a partial write
+    can never be mistaken for a completed build.
+    """
+
+    try:
+        script = Path(__file__).resolve().relative_to(ROOT)
+        script_name = script.as_posix()
+    except ValueError:
+        script_name = Path(__file__).name
+    document: dict[str, object] = {
+        "evidence_version": BUILD_EVIDENCE_VERSION,
+        "procedure": f"bootstrap_pyboy --mode {mode}",
+        "mode": mode,
+        "status": status,
+        "build_inputs_sha256": staged_inputs_sha256,
+        "interpreter": {
+            "python_version": sys.version.split()[0],
+            "prefix_name": Path(sys.prefix).name,
+        },
+        "producer": {
+            "script": script_name,
+            "script_sha256": hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest(),
+        },
+        "completed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if identity is not None:
+        document["runtime_identity"] = identity
+        document["installed_fingerprint"] = _runtime_fingerprint(identity)
+    else:
+        document["runtime_identity"] = None
+        document["installed_fingerprint"] = None
+    if detail:
+        document["detail"] = detail
+
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_temporary = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".partial"
+    )
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _metadata_was_present() -> bool:
@@ -586,9 +706,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="verify the active PyBoy runtime without reinstalling it",
     )
+    parser.add_argument(
+        "--build-evidence",
+        metavar="PATH",
+        help=(
+            "retain the fresh-build procedure's own evidence record at PATH; "
+            "only a completed build emits this document"
+        ),
+    )
     args = parser.parse_args(argv)
 
     _validate_source()
+    if args.check and args.build_evidence:
+        raise SystemExit("--build-evidence cannot be combined with --check")
     if args.check:
         _verify_runtime(args.mode)
         return 0
@@ -640,7 +770,10 @@ def main(argv: list[str] | None = None) -> int:
             if project_result.returncode:
                 return project_result.returncode
 
-        source_context = nullcontext(ROOT) if args.mode == "source" else _native_build_source()
+        staged_inputs: list[str] = []
+        source_context = (
+            nullcontext(ROOT) if args.mode == "source" else _native_build_source(staged_inputs)
+        )
         with source_context as install_target:
             command = [
                 *pip_install,
@@ -665,6 +798,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return result.returncode
         _verify_runtime(args.mode)
+        if args.build_evidence:
+            _write_build_evidence(
+                Path(args.build_evidence),
+                mode=args.mode,
+                staged_inputs_sha256=staged_inputs[0] if staged_inputs else None,
+                status="complete",
+                identity=_runtime_identity(),
+            )
         return 0
     except subprocess.TimeoutExpired as exc:
         print(

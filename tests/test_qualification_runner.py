@@ -55,6 +55,12 @@ def make_facts(**overrides):
 
 
 def make_declaration(**overrides):
+    declaration = _make_declaration_base()
+    declaration.update(overrides)
+    return declaration
+
+
+def _make_declaration_base():
     declaration = {
         "declaration_version": runner.SCHEMA_VERSION,
         "runner_id": "test-runner",
@@ -78,7 +84,7 @@ def make_declaration(**overrides):
             "source": sys.executable,
             "native": sys.executable,
             "native_build_inputs_sha256": "b" * 64,
-            "native_fingerprint": "c" * 64,
+            "native_fingerprint": NATIVE_FINGERPRINT,
         },
         "assets": {
             "rom_root": "/tmp/rom",
@@ -91,8 +97,26 @@ def make_declaration(**overrides):
             ],
         },
     }
-    declaration.update(overrides)
     return declaration
+
+
+def native_identity() -> dict:
+    """The installed-runtime identity a genuine native build would report."""
+
+    return {
+        "python": "3.11.9",
+        "version": "2.7.0",
+        "revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "cython_compiled": True,
+        "modules": {
+            name: {"kind": "cython", "sha256": "d" * 64}
+            for name in runner._EXTENSION_BACKED_MODULES
+        },
+    }
+
+
+NATIVE_IDENTITY = native_identity()
+NATIVE_FINGERPRINT = runner._native_build_fingerprint(NATIVE_IDENTITY)
 
 
 _HELD_FDS: list[int] = []
@@ -132,6 +156,9 @@ def held_reservation(tmp_path: Path, mechanism: str = "cgroup-quota", **override
     lock_fd = os.open(host_lock, os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     _HELD_FDS.append(lock_fd)
+    identity = runner._lock_identity(host_lock)
+    assert identity is not None
+    runner._HELD_LEASE_FDS.setdefault((identity["device"], identity["inode"]), []).append(lock_fd)
 
     if mechanism == "cgroup-quota":
         affinity = [0, 1, 2, 3]
@@ -163,6 +190,7 @@ def held_reservation(tmp_path: Path, mechanism: str = "cgroup-quota", **override
         "holder_pid": os.getpid(),
         "holder_start_time": runner._process_start_time(os.getpid()),
         "lock_path": str(host_lock),
+        "lock_identity": identity,
         "cgroup_path": "/user.slice/session.scope",
         "cpuset": affinity,
         "cpu_quota_cores": quota,
@@ -582,16 +610,9 @@ class Completed:
         self.stderr = stderr
 
 
-def _probe_payload(fingerprint: str) -> dict:
+def _probe_payload(fingerprint: str, identity: dict | None = None) -> dict:
     return {
-        "identity": {
-            "revision": "c565df66c3731fad2856169a90f6bbec99925915",
-            "cython_compiled": True,
-            "modules": {
-                name: {"kind": "cython", "sha256": "d" * 64}
-                for name in runner._EXTENSION_BACKED_MODULES
-            },
-        },
+        "identity": dict(identity if identity is not None else NATIVE_IDENTITY),
         "fingerprint": fingerprint,
     }
 
@@ -612,15 +633,34 @@ def with_native_evidence(
     declaration: dict,
     tmp_path: Path,
     build_inputs: str = "b" * 64,
-    fingerprint: str = "c" * 64,
+    fingerprint: str = NATIVE_FINGERPRINT,
     procedure: str = runner._NATIVE_BUILD_EVIDENCE_PROCEDURE,
     status: str = "complete",
+    evidence_version: int = runner._NATIVE_BUILD_EVIDENCE_VERSION,
+    mode: str = "cython",
+    identity: dict | None = None,
+    producer: dict | None = None,
 ) -> dict:
+    """Write retained evidence shaped like the real bootstrap's own record."""
+
+    if identity is None:
+        identity = dict(NATIVE_IDENTITY)
+    if producer is None:
+        producer = {
+            "script": "scripts/bootstrap_pyboy.py",
+            "script_sha256": hashlib.sha256(
+                (REPO_ROOT / "scripts" / "bootstrap_pyboy.py").read_bytes()
+            ).hexdigest(),
+        }
     document = {
+        "evidence_version": evidence_version,
         "procedure": procedure,
+        "mode": mode,
         "status": status,
         "build_inputs_sha256": build_inputs,
         "installed_fingerprint": fingerprint,
+        "runtime_identity": identity,
+        "producer": producer,
         "completed_at": "2026-01-01T00:00:00Z",
     }
     path = tmp_path / "native-build-evidence.json"
@@ -655,7 +695,7 @@ def test_prerequisite_checks_use_injected_runner(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(runner, "_required_asset_entries", lambda decl, root: requirements)
     monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
     monkeypatch.setattr(runner, "_asset_tree_writable", lambda root: False)
-    probe_payload = _probe_payload("c" * 64)
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
     fake_runner, calls = _prerequisite_runner(probe_payload)
     results = runner.prerequisite_checks(declaration, tmp_path, runner=fake_runner)
     assert runner.overall_status(results) == "ok"
@@ -692,7 +732,7 @@ def test_native_build_evidence_accepts_consistent_build(tmp_path: Path, monkeypa
     monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
     declaration = make_declaration()
     with_native_evidence(declaration, tmp_path)
-    probe_payload = _probe_payload("c" * 64)
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
     fake_runner, _calls = _prerequisite_runner(probe_payload)
     results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
     assert statuses(results)["native-build-inputs"] == "ok"
@@ -703,18 +743,132 @@ def test_native_build_evidence_accepts_consistent_build(tmp_path: Path, monkeypa
 def test_native_build_evidence_requires_retained_evidence(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
     declaration = make_declaration()
-    probe_payload = _probe_payload("c" * 64)
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
     fake_runner, _calls = _prerequisite_runner(probe_payload)
     results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
     assert statuses(results)["native-build-evidence"] == "unsupported"
     assert runner.overall_status(results) != "ok"
 
 
+def test_native_build_evidence_rejects_invented_record(tmp_path: Path, monkeypatch):
+    """A hand-written record with matching hashes must not pass.
+
+    This is the round-4 finding: the previous validator accepted an operator's
+    own JSON carrying a procedure string, ``status="complete"``, and matching
+    digests, because a fabricated summary could satisfy every field. The record
+    is now required to carry the producer identity and the full runtime
+    identity that only an executed build emits.
+    """
+
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration(
+        interpreters={
+            "source": sys.executable,
+            "native": sys.executable,
+            "native_build_inputs_sha256": "b" * 64,
+            "native_fingerprint": NATIVE_FINGERPRINT,
+        }
+    )
+    invented = {
+        "procedure": runner._NATIVE_BUILD_EVIDENCE_PROCEDURE,
+        "status": "complete",
+        "build_inputs_sha256": "b" * 64,
+        "installed_fingerprint": NATIVE_FINGERPRINT,
+        "completed_at": "2026-01-01T00:00:00Z",
+    }
+    path = tmp_path / "invented-build-evidence.json"
+    path.write_text(json.dumps(invented), encoding="utf-8")
+    declaration["interpreters"]["native_build_evidence"] = str(path)
+    declaration["interpreters"]["native_build_evidence_sha256"] = runner._sha256_of_file(path)
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    assert statuses(results)["native-build-evidence"] == "fail"
+    assert runner.overall_status(results) != "ok"
+
+
+def test_native_build_evidence_rejects_forged_producer_digest(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration()
+    with_native_evidence(
+        declaration,
+        tmp_path,
+        producer={"script": "scripts/bootstrap_pyboy.py", "script_sha256": "a" * 64},
+    )
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    assert statuses(results)["native-build-evidence"] == "fail"
+
+
+def test_native_build_evidence_rejects_reused_identity_for_other_fingerprint(
+    tmp_path: Path, monkeypatch
+):
+    """A record whose identity and fingerprint disagree must not pass."""
+
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration(
+        interpreters={
+            "source": sys.executable,
+            "native": sys.executable,
+            "native_build_inputs_sha256": "b" * 64,
+            "native_fingerprint": "e" * 64,
+        }
+    )
+    with_native_evidence(declaration, tmp_path, fingerprint="e" * 64)
+    probe_payload = _probe_payload("e" * 64)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    assert statuses(results)["native-build-evidence"] == "fail"
+
+
+def test_native_build_evidence_rejects_unsupported_evidence_version(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration()
+    with_native_evidence(declaration, tmp_path, evidence_version=1)
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    assert statuses(results)["native-build-evidence"] == "fail"
+
+
+def test_native_build_evidence_rejects_wrong_mode(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration()
+    with_native_evidence(declaration, tmp_path, mode="source")
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    assert statuses(results)["native-build-evidence"] == "fail"
+
+
+def test_native_build_evidence_rejects_identity_mismatch(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration()
+    other_identity = dict(NATIVE_IDENTITY)
+    other_identity["modules"] = {
+        name: {"kind": "cython", "sha256": "9" * 64} for name in runner._EXTENSION_BACKED_MODULES
+    }
+    with_native_evidence(
+        declaration,
+        tmp_path,
+        fingerprint=runner._native_build_fingerprint(other_identity),
+        identity=other_identity,
+    )
+    declaration["interpreters"]["native_fingerprint"] = runner._native_build_fingerprint(
+        other_identity
+    )
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    assert statuses(results)["native-build-evidence"] == "fail"
+
+
 def test_native_build_evidence_rejects_mixed_build_evidence(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
     declaration = make_declaration()
     with_native_evidence(declaration, tmp_path, fingerprint="e" * 64)
-    probe_payload = _probe_payload("c" * 64)
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
     fake_runner, _calls = _prerequisite_runner(probe_payload)
     results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
     assert statuses(results)["native-build-evidence"] == "fail"
@@ -725,7 +879,7 @@ def test_native_build_evidence_rejects_incomplete_build(tmp_path: Path, monkeypa
     monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
     declaration = make_declaration()
     with_native_evidence(declaration, tmp_path, status="in-progress")
-    probe_payload = _probe_payload("c" * 64)
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
     fake_runner, _calls = _prerequisite_runner(probe_payload)
     results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
     assert statuses(results)["native-build-evidence"] == "fail"
@@ -734,7 +888,7 @@ def test_native_build_evidence_rejects_incomplete_build(tmp_path: Path, monkeypa
 def test_native_build_evidence_rejects_source_mismatch(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(runner, "_native_source_digest", lambda root: "z" * 64)
     declaration = make_declaration()
-    probe_payload = _probe_payload("c" * 64)
+    probe_payload = _probe_payload(NATIVE_FINGERPRINT)
     fake_runner, _calls = _prerequisite_runner(probe_payload)
     results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
     assert statuses(results)["native-build-inputs"] == "fail"
@@ -864,7 +1018,12 @@ def test_recover_removes_stale_allocation(tmp_path: Path):
     descriptor_path = job_dir / "allocation.json"
     descriptor_path.write_text(
         json.dumps(
-            {"holder_pid": 2**31 - 1, "holder_start_time": "0", "lock_path": str(lock_path)}
+            {
+                "holder_pid": 2**31 - 1,
+                "holder_start_time": "0",
+                "lock_path": str(lock_path),
+                "lock_identity": runner._lock_identity(lock_path),
+            }
         ),
         encoding="utf-8",
     )
@@ -1270,6 +1429,179 @@ def test_release_refuses_when_lock_unobservable(tmp_path: Path, monkeypatch):
     status, _message = runner._release_allocation(declaration, tmp_path)
     assert status == "blocked"
     assert descriptor_path.exists()
+
+
+def _recreate_lock_at_same_path(declaration: dict) -> Path:
+    """Replace the recorded lock pathname with a fresh, uncontended inode.
+
+    This reproduces the round-4 reproduction: the original inode is still held,
+    but the pathname now names a different inode that no allocation contends
+    for. Anything that keys mutual exclusion on the path alone is defeated.
+    """
+
+    lock_path = Path(declaration["reservation"]["host_lock_path"])
+    original_inode = lock_path.stat().st_ino
+    # Build the replacement under a distinct name so the filesystem cannot
+    # hand back the same inode number for the recreated pathname.
+    replacement = lock_path.with_suffix(lock_path.suffix + ".new")
+    fd = os.open(replacement, os.O_CREAT | os.O_RDWR, 0o600)
+    os.close(fd)
+    os.replace(replacement, lock_path)
+    assert lock_path.stat().st_ino != original_inode
+    return lock_path
+
+
+def test_release_refuses_recreated_lock_inode(tmp_path: Path):
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    _recreate_lock_at_same_path(declaration)
+    status, message = runner._release_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert "different allocation" in message or "inode" in message
+    assert descriptor_path.exists()
+
+
+def test_recover_refuses_recreated_lock_inode(tmp_path: Path, monkeypatch):
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    _recreate_lock_at_same_path(declaration)
+    monkeypatch.setattr(runner, "_pid_alive", lambda pid: False)
+    status, _message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert descriptor_path.exists()
+
+
+def test_lease_status_rejects_recreated_lock_inode(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor = json.loads(
+        Path(declaration["reservation"]["descriptor_path"]).read_text(encoding="utf-8")
+    )
+    job_dir = Path(declaration["reservation"]["job_dir"])
+    _recreate_lock_at_same_path(declaration)
+    status, detail = runner._descriptor_lease_status(descriptor, facts, job_dir)
+    assert status == "fail"
+    assert "recreated" in detail
+
+
+def test_lease_status_rejects_descriptor_without_lock_identity(tmp_path: Path):
+    """A pathname-only lease cannot prove exclusivity against a recreated inode."""
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor = json.loads(
+        Path(declaration["reservation"]["descriptor_path"]).read_text(encoding="utf-8")
+    )
+    job_dir = Path(declaration["reservation"]["job_dir"])
+    descriptor.pop("lock_identity")
+    status, detail = runner._descriptor_lease_status(descriptor, facts, job_dir)
+    assert status == "fail"
+    assert "does not record the allocation lock identity" in detail
+
+
+def test_release_preserves_shared_lock_and_marker(tmp_path: Path):
+    """Release must remove only the private descriptor.
+
+    Deleting the host lock would let the next allocation create a fresh,
+    uncontended inode while this one is still held, which is the round-4
+    finding. The operator-owned exclusive marker likewise outlives the job.
+    """
+
+    declaration, _facts = held_reservation(tmp_path, "dedicated-host")
+    reservation = declaration["reservation"]
+    lock_path = Path(reservation["host_lock_path"])
+    marker_path = Path(reservation["exclusive_marker_path"])
+    descriptor_path = Path(reservation["descriptor_path"])
+    status, message = runner._release_allocation(declaration, tmp_path)
+    assert status == "ok", message
+    assert not descriptor_path.exists()
+    assert lock_path.exists()
+    assert marker_path.exists()
+    assert runner._lock_identity(lock_path) is not None
+
+
+def test_terminate_and_confirm_reports_failure_when_holder_survives(monkeypatch):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    monkeypatch.setattr(runner, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(runner, "_CHILD_TERMINATION_GRACE_SECONDS", 0.05)
+    try:
+        terminated, detail = runner._terminate_and_confirm(child.pid)
+        assert terminated is False
+        assert "still running" in detail
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+def test_terminate_and_confirm_succeeds_when_holder_exits(monkeypatch):
+    monkeypatch.setattr(runner, "_pid_alive", lambda pid: False)
+    terminated, detail = runner._terminate_and_confirm(2**31 - 1)
+    assert terminated is True
+    assert detail == ""
+
+
+def test_release_keeps_state_when_termination_unconfirmed(tmp_path: Path, monkeypatch):
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        rewrite_descriptor(
+            declaration,
+            {
+                "holder_pid": child.pid,
+                "holder_start_time": runner._process_start_time(child.pid),
+            },
+        )
+        # The holder must be treated as an owned lease for release to attempt
+        # termination at all; this test isolates the confirmation step.
+        monkeypatch.setattr(runner, "_holder_is_owned", lambda holder, start: True)
+        monkeypatch.setattr(runner, "_terminate_and_confirm", lambda pid: (False, "still running"))
+        status, message = runner._release_allocation(declaration, tmp_path)
+        assert status == "blocked"
+        assert message == "still running"
+        assert descriptor_path.exists()
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+def test_reserve_allocation_rejects_unidentifiable_lock(tmp_path: Path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    target = tmp_path / "host.lock"
+    target.write_text("", encoding="utf-8")
+    link = tmp_path / "host-link.lock"
+    link.symlink_to(target)
+    declaration = make_declaration()
+    declaration["reservation"]["host_lock_path"] = str(link)
+    with pytest.raises(ValueError):
+        runner._reserve_allocation(declaration, tmp_path, job_dir, make_facts())
+
+
+def test_lock_identity_rejects_symlink_and_non_regular(tmp_path: Path):
+    target = tmp_path / "target.lock"
+    target.write_text("", encoding="utf-8")
+    link = tmp_path / "link.lock"
+    link.symlink_to(target)
+    directory = tmp_path / "dir.lock"
+    directory.mkdir()
+    assert runner._lock_identity(link) is None
+    assert runner._lock_identity(directory) is None
+    assert runner._lock_identity(tmp_path / "missing.lock") is None
+
+
+def test_lock_identity_mismatch_detects_recreated_inode(tmp_path: Path):
+    lock_path = tmp_path / "host.lock"
+    lock_path.write_text("", encoding="utf-8")
+    recorded = runner._lock_identity(lock_path)
+    assert recorded is not None
+    other_path = tmp_path / "other.lock"
+    other_path.write_text("", encoding="utf-8")
+    other = runner._lock_identity(other_path)
+    assert other is not None
+    assert other["inode"] != recorded["inode"]
+    assert not runner._lock_identity_matches(recorded, other)
+    assert runner._lock_identity_matches(recorded, runner._lock_identity(lock_path))
+    assert not runner._lock_identity_matches(None, recorded)
+    assert not runner._lock_identity_matches(recorded, None)
 
 
 def test_qualification_timeout_is_separate_from_prerequisite(monkeypatch):

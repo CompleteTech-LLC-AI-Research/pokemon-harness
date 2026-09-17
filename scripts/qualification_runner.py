@@ -66,8 +66,15 @@ _QUALIFICATION_TIMEOUT_ENV = "POKERED_QUALIFICATION_RUN_TIMEOUT_SECONDS"
 _DEFAULT_PROBE_TIMEOUT_SECONDS = 300.0
 _DEFAULT_QUALIFICATION_TIMEOUT_SECONDS = 86400.0
 _NATIVE_BUILD_EVIDENCE_PROCEDURE = "bootstrap_pyboy --mode cython"
+_NATIVE_BUILD_EVIDENCE_VERSION = 2
 _TIMEOUT_RETURNCODE = 124
 _CHILD_TERMINATION_GRACE_SECONDS = 5.0
+
+# Descriptors this process holds open for an allocation lease, keyed by the
+# lock's kernel identity.  Release must explicitly close them: removing the
+# state file while a descriptor still pins the flock would report a released
+# lease that this process still holds.
+_HELD_LEASE_FDS: dict[tuple[int, int], list[int]] = {}
 _RUNTIME_MODULES = (
     "pyboy",
     "pyboy.pyboy",
@@ -294,6 +301,61 @@ def _observe_flock_holders(lock_path: Path) -> set[int] | None:
     if not exists:
         return set()
     return _flock_holder_pids(lock_path)
+
+
+def _lock_identity(path: Path) -> dict[str, Any] | None:
+    """Return the stable kernel identity of an allocation lock file.
+
+    Path equality is not lock identity: a recreated pathname is a different
+    inode, so two allocations that each create "the same" lock path can hold
+    independent locks.  Recording ``(device, inode)`` lets a later check prove
+    that the observed lock is the very inode whose bytes were pinned, rather
+    than a look-alike that merely shares a name.
+    """
+
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    return {"device": info.st_dev, "inode": info.st_ino}
+
+
+def _lock_identity_matches(expected: Any, observed: dict[str, Any] | None) -> bool:
+    if not isinstance(expected, dict) or observed is None:
+        return False
+    return expected.get("device") == observed.get("device") and expected.get(
+        "inode"
+    ) == observed.get("inode")
+
+
+def _lock_owned_by_this_process(lock_path: Path) -> bool:
+    """Report whether this process holds the flock, re-observed from the kernel."""
+
+    holders = _observe_flock_holders(lock_path)
+    return holders is not None and os.getpid() in holders
+
+
+def _close_held_lease_descriptors(identity: dict[str, Any] | None) -> list[int]:
+    """Close and report the lease descriptors this process opened for *identity*.
+
+    The lock file itself is never unlinked, so relinquishing the lease means
+    releasing the kernel lock.  Returning the closed descriptors lets the
+    caller confirm from the lock table that this process no longer holds it.
+    """
+
+    if not isinstance(identity, dict):
+        return []
+    key = (identity.get("device"), identity.get("inode"))
+    closed: list[int] = []
+    for fd in _HELD_LEASE_FDS.pop(key, []):
+        try:
+            os.close(fd)
+        except OSError:
+            continue
+        closed.append(fd)
+    return closed
 
 
 def _descriptor_is_private(path: Path) -> bool:
@@ -1030,6 +1092,25 @@ def _descriptor_lease_status(
         return "fail", "the allocation lock is private to the job, not a host-wide allocation lock"
     if lock.is_symlink() or not lock.is_file():
         return "fail", "the lease lock file is missing"
+    observed_identity = _lock_identity(lock)
+    if observed_identity is None:
+        return "unsupported", "the allocation lock identity is not observable on this host"
+    if not isinstance(descriptor.get("lock_identity"), dict):
+        return (
+            "fail",
+            (
+                "the descriptor does not record the allocation lock identity; a lease keyed on a "
+                "pathname alone is not provably exclusive"
+            ),
+        )
+    if not _lock_identity_matches(descriptor.get("lock_identity"), observed_identity):
+        return (
+            "fail",
+            (
+                "the allocation lock pathname was recreated; it is a different inode than the "
+                "recorded lease, so overlapping allocations would not contend on it"
+            ),
+        )
     holders = _observe_flock_holders(lock)
     if holders is None:
         return "unsupported", "the kernel lock table is unavailable, so holding is unproven"
@@ -2373,7 +2454,12 @@ def _native_build_evidence(
         )
     results.append(
         _native_build_evidence_check(
-            interpreters, repo_root, expected_inputs, expected_fingerprint, fingerprint
+            interpreters,
+            repo_root,
+            expected_inputs,
+            expected_fingerprint,
+            fingerprint,
+            identity,
         )
     )
     return results
@@ -2385,6 +2471,7 @@ def _native_build_evidence_check(
     expected_inputs: Any,
     expected_fingerprint: Any,
     probe_fingerprint: str,
+    probe_identity: dict[str, Any],
 ) -> CheckResult:
     """Require retained evidence from the complete fresh native build procedure.
 
@@ -2394,6 +2481,16 @@ def _native_build_evidence_check(
     retain the fresh-build procedure's own record connecting the staged inputs,
     build completion, and installed outputs; absent that record the check is
     ``unsupported`` rather than a pass.
+
+    The record is only meaningful if a hand-written document cannot pass.  The
+    validator therefore requires the fields that the executed procedure alone
+    emits -- the evidence format version, the producing script's own digest, and
+    a full runtime identity whose canonical fingerprint must equal both the
+    recorded fingerprint and the fingerprint observed in the live runtime --
+    and recomputes every derivable value instead of trusting the document's own
+    summary.  This binds the record to the on-host bootstrap and to the exact
+    installed extension bytes; it is not a cryptographic attestation against a
+    determined operator that has already read those same bytes.
     """
 
     evidence_path = _resolve_declared_path(interpreters.get("native_build_evidence"), repo_root)
@@ -2437,15 +2534,43 @@ def _native_build_evidence_check(
     if document is None:
         return _result(name, "fail", "valid retained evidence JSON", None, error)
     problems: list[str] = []
+    if document.get("evidence_version") != _NATIVE_BUILD_EVIDENCE_VERSION:
+        problems.append(
+            "the retained evidence does not declare the supported evidence format version"
+        )
     if document.get("procedure") != _NATIVE_BUILD_EVIDENCE_PROCEDURE:
         problems.append(
             "the retained evidence was not produced by the fresh native build procedure"
         )
+    if document.get("mode") != "cython":
+        problems.append("the retained evidence does not record a cython-mode build")
     if document.get("status") != "complete":
         problems.append("the retained evidence does not record a completed native build")
-    if document.get("build_inputs_sha256") != expected_inputs:
+    recorded_inputs = document.get("build_inputs_sha256")
+    if recorded_inputs != expected_inputs:
         problems.append("the retained evidence staged inputs do not match the pinned build inputs")
+    source_digest = _native_source_digest(repo_root)
+    if source_digest is not None and recorded_inputs != source_digest:
+        problems.append(
+            "the retained evidence staged inputs do not match the vendored build inputs"
+        )
+    problems.extend(_build_evidence_producer_problems(document))
+
+    recorded_identity = document.get("runtime_identity")
     recorded_fingerprint = document.get("installed_fingerprint")
+    if not isinstance(recorded_identity, dict):
+        problems.append("the retained evidence does not record the installed runtime identity")
+    else:
+        derived = _native_build_fingerprint(recorded_identity)
+        if derived != recorded_fingerprint:
+            problems.append(
+                "the retained evidence runtime identity does not correspond to its recorded "
+                "fingerprint"
+            )
+        if recorded_identity != probe_identity:
+            problems.append(
+                "the retained evidence runtime identity does not match the installed runtime"
+            )
     if recorded_fingerprint != expected_fingerprint:
         problems.append(
             "the retained evidence installed outputs do not match the pinned fingerprint"
@@ -2469,6 +2594,42 @@ def _native_build_evidence_check(
         recorded_fingerprint,
         "the retained evidence ties the pinned inputs and completed build to the installed outputs",
     )
+
+
+def _build_evidence_producer_problems(document: dict[str, Any]) -> list[str]:
+    """Verify the record identifies the bootstrap script that actually ran.
+
+    A document that omits the producer entry, or pins a digest that does not
+    match the checked-in bootstrap, was not emitted by this host's build
+    procedure.  The script bytes are recomputed here rather than trusted from
+    the declaration.
+    """
+
+    producer = document.get("producer")
+    if not isinstance(producer, dict):
+        return ["the retained evidence does not identify the producing build script"]
+    problems: list[str] = []
+    if producer.get("script") != "scripts/bootstrap_pyboy.py":
+        problems.append("the retained evidence names an unrecognized producing build script")
+    script_path = Path(__file__).resolve().parent / "bootstrap_pyboy.py"
+    try:
+        actual_script_sha = _sha256_of_file(script_path)
+    except OSError:
+        return problems + ["the checked-in bootstrap script could not be read"]
+    if producer.get("script_sha256") != actual_script_sha:
+        problems.append("the retained evidence was not produced by the checked-in bootstrap script")
+    return problems
+
+
+def _native_build_fingerprint(identity: dict[str, Any]) -> str:
+    """Recompute the canonical native runtime fingerprint from an identity.
+
+    This mirrors the digest calculation in ``_NATIVE_PROBE`` so a recorded
+    identity can be checked against the fingerprint claimed for it.
+    """
+
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _asset_tree_writable(root: Path) -> bool:
@@ -2850,6 +3011,13 @@ def _reserve_allocation(
     weight = declaration.get("cpu_weight")
     if weight is None:
         weight = facts.cpu_weight
+    lock_identity = _lock_identity(host_lock)
+    if lock_identity is None:
+        os.close(lock_fd)
+        raise ValueError("the host-wide allocation lock could not be identified")
+    _HELD_LEASE_FDS.setdefault((lock_identity["device"], lock_identity["inode"]), []).append(
+        lock_fd
+    )
     descriptor: dict[str, Any] = {
         "descriptor_version": _DESCRIPTOR_VERSION,
         "allocation_id": declaration.get("runner_id"),
@@ -2860,6 +3028,7 @@ def _reserve_allocation(
         "holder_pid": os.getpid(),
         "holder_start_time": _process_start_time(os.getpid()),
         "lock_path": str(host_lock),
+        "lock_identity": lock_identity,
         "cgroup_path": reservation.get("cgroup_path") or facts.cgroup_relative_path,
         "cpuset": cpuset,
         "cpu_quota_cores": quota,
@@ -2910,18 +3079,49 @@ def _allocation_descriptor_path(declaration: dict[str, Any], repo_root: Path) ->
     return _resolve_declared_path(reservation.get("descriptor_path"), repo_root)
 
 
-def _remove_allocation_state(descriptor: dict[str, Any], descriptor_path: Path) -> None:
-    for key in ("lock_path", "exclusive_marker_path"):
-        raw = descriptor.get(key)
-        if isinstance(raw, str) and raw:
-            try:
-                Path(raw).unlink()
-            except OSError:
-                pass
+def _remove_allocation_state(descriptor_path: Path) -> None:
+    """Remove only the private per-job descriptor.
+
+    The host-wide allocation lock and any operator-owned exclusive marker are
+    reservation infrastructure that outlives a single job.  Unlinking them
+    would let a later allocation create a fresh pathname (and therefore a
+    fresh, uncontended lock inode) while the original inode is still held,
+    destroying mutual exclusion.  Ownership of the lease is relinquished by
+    closing the descriptor, never by deleting the shared path.
+    """
+
     try:
         descriptor_path.unlink()
     except OSError:
         pass
+
+
+def _terminate_and_confirm(pid: int) -> tuple[bool, str]:
+    """Terminate an owned holder and positively confirm it is gone.
+
+    A kill request is not evidence of termination.  Report success only after
+    the process is observed to have exited; otherwise the lease state is kept
+    so cleanup can be retried instead of silently reporting a released lease.
+    """
+
+    signals = (signal.SIGTERM, signal.SIGKILL)
+    for index, sig in enumerate(signals):
+        if not _pid_alive(pid):
+            return True, ""
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return True, ""
+        except OSError as exc:
+            return False, f"could not signal the lease holder: {exc}"
+        deadline = time.monotonic() + _CHILD_TERMINATION_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if not _pid_alive(pid):
+                return True, ""
+            time.sleep(0.05)
+        if index == len(signals) - 1:
+            break
+    return False, "the lease holder is still running after SIGKILL"
 
 
 def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[str, str]:
@@ -2939,24 +3139,37 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
             "the recorded holder is not an owned qualification-runner lease; refusing to remove state",
         )
     raw = descriptor.get("lock_path")
-    lock_holders = _observe_flock_holders(Path(raw)) if isinstance(raw, str) and raw else None
+    lock_path = Path(raw) if isinstance(raw, str) and raw else None
+    lock_holders = _observe_flock_holders(lock_path) if lock_path is not None else None
     if lock_holders is None:
         return "blocked", "lock ownership is not observable; refusing to remove state"
-    if holder != os.getpid() and (_pid_alive(holder) or holder in lock_holders):
-        try:
-            os.kill(holder, signal.SIGTERM)
-        except OSError:
-            pass
-        deadline = time.monotonic() + _CHILD_TERMINATION_GRACE_SECONDS
-        while time.monotonic() < deadline and _pid_alive(holder):
-            time.sleep(0.05)
-        if _pid_alive(holder):
-            try:
-                os.kill(holder, signal.SIGKILL)
-            except OSError:
-                pass
-    _remove_allocation_state(descriptor, descriptor_path)
-    return "ok", "the owned lease holder was terminated and the lease removed"
+    if lock_path is not None:
+        observed_identity = _lock_identity(lock_path)
+        if observed_identity is None:
+            return "blocked", "the allocation lock identity is not observable; refusing to release"
+        if not _lock_identity_matches(descriptor.get("lock_identity"), observed_identity):
+            return (
+                "blocked",
+                (
+                    "the allocation lock pathname no longer names the recorded lease inode; "
+                    "refusing to release, because this state belongs to a different allocation"
+                ),
+            )
+    if holder == os.getpid():
+        if lock_path is not None and not _lock_owned_by_this_process(lock_path):
+            return "blocked", "this process does not hold the recorded allocation lock"
+        _close_held_lease_descriptors(descriptor.get("lock_identity"))
+        if lock_path is not None and _lock_owned_by_this_process(lock_path):
+            return "blocked", "this process still holds the allocation lock after releasing it"
+    else:
+        if _pid_alive(holder) or holder in lock_holders:
+            terminated, detail = _terminate_and_confirm(holder)
+            if not terminated:
+                return "blocked", detail
+        if lock_path is not None and holder in (_observe_flock_holders(lock_path) or set()):
+            return "blocked", "the recorded holder still holds the allocation lock"
+    _remove_allocation_state(descriptor_path)
+    return "ok", "the owned lease was relinquished and the private job state removed"
 
 
 def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[str, str]:
@@ -2971,9 +3184,21 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
     raw = descriptor.get("lock_path")
     if not isinstance(raw, str) or not raw.strip():
         return "blocked", "the lease lock path is unknown; refusing to remove state"
-    lock_holders = _observe_flock_holders(Path(raw))
+    lock_path = Path(raw)
+    lock_holders = _observe_flock_holders(lock_path)
     if lock_holders is None:
         return "blocked", "lock ownership is not observable; refusing to remove state"
+    observed_identity = _lock_identity(lock_path)
+    if observed_identity is None:
+        return "blocked", "the allocation lock identity is not observable; refusing to remove state"
+    if not _lock_identity_matches(descriptor.get("lock_identity"), observed_identity):
+        return (
+            "blocked",
+            (
+                "the allocation lock pathname no longer names the recorded lease inode; "
+                "refusing to remove state that belongs to a different allocation"
+            ),
+        )
     if holder_valid and _pid_alive(holder):
         return "fail", "the recorded holder is still running; refusing to remove state"
     if holder_valid and holder in lock_holders:
@@ -2983,7 +3208,7 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
             "blocked",
             "the lease lock is held by an unrecognized process; refusing to remove state",
         )
-    _remove_allocation_state(descriptor, descriptor_path)
+    _remove_allocation_state(descriptor_path)
     return "ok", "removed stale allocation state whose owner is gone"
 
 

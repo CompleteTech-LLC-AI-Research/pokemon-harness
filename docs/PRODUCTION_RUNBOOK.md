@@ -596,7 +596,13 @@ Every mechanism also requires `reservation.host_lock_path`: one host-wide lock
 file that concurrent jobs contend on. A lock inside the per-job directory is
 rejected, because two overlapping jobs could then hold independent leases. The
 kernel must report the recorded holder as the only holder, so a competing
-unregistered process fails the lease.
+unregistered process fails the lease. The descriptor also records the lock's
+kernel identity (`device`, `inode`). Pathname equality alone is not mutual
+exclusion: if the path were removed and recreated, a second job would lock a
+different inode while the original holder still held the old one. Every lease
+and release check therefore re-observes the identity and fails closed when the
+pathname no longer names the recorded inode, so operators must keep the lock
+file in place and never delete it.
 
 The declaration is operator-owned and external to the repository. It records
 `reservation_mechanism`, the allocation facts, the source/native interpreters
@@ -634,7 +640,11 @@ python scripts/qualification_runner.py --recover \
 A standalone `--check` without a live lease fails closed, because the
 declared capacity is not held. `--reserve` is what writes and pins the
 descriptor; `--release` and `--recover` only ever touch resources whose owner
-is identifiable.
+is identifiable. They remove only the private per-job `allocation.json`; the
+host-wide lock and any operator-created exclusive marker are shared allocation
+infrastructure that outlives the job and are never unlinked. Relinquishing a
+lease means releasing the kernel lock held by this process's descriptor and
+confirming from the lock table that it is gone, not deleting the lock path.
 
 `--reserve` validates the declaration and runtime/asset prerequisites, then
 acquires the host-wide lock, verifies the observed allocation, and only then
@@ -651,7 +661,11 @@ expected to be read-only shared inputs; a writable asset root fails the
 prerequisite check. `--release` refuses to touch state it cannot attribute to an
 owned qualification-runner lease, and `--recover` preserves state and fails
 closed whenever the holder is still alive, still holds the lock, or lock
-ownership cannot be observed. Interrupted prerequisite subprocesses are bounded
+ownership cannot be observed. Before reporting a released lease, `--release`
+terminates the recorded holder when it is not this process, waits for positive
+confirmation that it has exited, and re-checks the lock table; an unconfirmed
+termination or a still-held lock keeps the state and reports blocked cleanup
+instead of a false success. Interrupted prerequisite subprocesses are bounded
 by `POKERED_QUALIFICATION_COMMAND_TIMEOUT_SECONDS` (default `300`) and their
 owned process group is terminated without discarding the original failure; the
 `--run` qualification command has its own deadline,
