@@ -57,6 +57,9 @@ UNIT_MODULES = frozenset(
     {
         "test_agent_sync.py",
         "test_battle_menu_liveness.py",
+        "test_battle_coverage.py",
+        "test_battle_item_evidence.py",
+        "test_battle_scenario_fixtures.py",
         "test_battle_turn_evidence.py",
         "test_config.py",
         "test_coordinator_detach_callback.py",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from pokered_harness.link.network_backend import (
     _OP_EDGE_RESP,
     NetworkBackend,
     NetworkBackendError,
+    _InboundEdge,
 )
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_coordinator import SerialOperationGate
@@ -253,6 +255,103 @@ def test_rearming_alone_does_not_release_held_byte():
         assert case.errors == []
         assert case.responses == [0x3C]
         assert case.backend.debug_snapshot()["pending_edge_requests"] == 0
+
+
+def test_released_response_is_flushed_before_new_master_edge():
+    """A completed frame can release the held byte before it is on the wire.
+
+    The held reference is cleared the moment the owner frame completes, but the
+    response worker may not have written the EDGE_RESP yet. A subsequent local
+    master edge must still wait for that released response, or the peer sees a
+    new EDGE_REQ before the prior EDGE_RESP and answers from the wrong bit.
+    """
+    peer, backend = NetworkBackend.pair()
+    backend._edge_queue = _ObservedEdgeQueue(threading.Event(), maxsize=256)
+    core = Serial()
+    try:
+        peer.start_receiver(local_core=None)
+        backend.start_receiver(
+            core,
+            serial_gate=SerialOperationGate(),
+            dispatch_to_owner=True,
+            defer_byte_responses=True,
+        )
+        token = _InboundEdge(
+            peer_bit=0,
+            response_bit=1,
+            completed=True,
+            response_finished=threading.Event(),
+        )
+        with backend._close_lock:
+            backend._held_owner_byte_response = token
+        backend._edge_pending = 1
+
+        worker_entered = threading.Event()
+        allow_send = threading.Event()
+        sent: list[int] = []
+        original_send = backend._send_edge_response
+
+        def gated_send(request):
+            worker_entered.set()
+            assert allow_send.wait(2.0)
+            sent.append(request.response_bit)
+
+        backend._send_edge_response = gated_send
+        try:
+            # Release the byte exactly as a completed owner frame does. The
+            # response is now queued but the worker is held before it writes.
+            backend.finish_owner_frame(token)
+            assert worker_entered.wait(2.0)
+            assert backend._held_owner_byte_response is None
+            assert backend._owner_response_pending == 1
+
+            flushed = threading.Event()
+
+            def flush_before_master_edge():
+                backend._finish_held_response_before_master_edge(time.monotonic() + 5.0)
+                flushed.set()
+
+            flusher = threading.Thread(target=flush_before_master_edge, daemon=True)
+            flusher.start()
+            # The defect returned immediately here, letting the new edge pass
+            # the still-unsent response. The fix must block on the receipt.
+            assert not flushed.wait(0.3)
+            assert sent == []
+            allow_send.set()
+            flusher.join(timeout=2.0)
+            assert flushed.is_set()
+            assert sent == [1]
+            assert backend._owner_response_pending == 0
+        finally:
+            backend._send_edge_response = original_send
+    finally:
+        assert backend.stop(timeout_s=1.0)
+        assert peer.stop(timeout_s=1.0)
+
+
+def test_closed_abandonment_retires_released_response_accounting():
+    """A close that wins the publication race must retire the counted receipt."""
+    peer, backend = NetworkBackend.pair()
+    try:
+        token = _InboundEdge(
+            peer_bit=0,
+            response_bit=1,
+            completed=True,
+            response_finished=threading.Event(),
+        )
+        backend._held_owner_byte_response = token
+        backend._edge_pending = 1
+        # Count the released response, then let a deadline-aware close publish
+        # terminal state before the response worker can queue it.
+        backend._begin_owner_response()
+        assert backend._owner_response_pending == 1
+        backend._mark_closed(NetworkBackendError("close won the publication race"))
+        backend._publish_owner_response(token)
+        assert backend._owner_response_pending == 0
+        assert token.response_finished.is_set()
+    finally:
+        assert backend.stop(timeout_s=1.0)
+        assert peer.stop(timeout_s=1.0)
 
 
 @pytest.mark.parametrize("operation", ["stop", "detach_local_core"])

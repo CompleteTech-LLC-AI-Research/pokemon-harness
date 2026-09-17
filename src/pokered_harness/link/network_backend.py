@@ -440,6 +440,13 @@ class NetworkBackend:
         self._completed_edge_queue: queue.Queue[_InboundEdge | None] = queue.Queue(maxsize=256)
         self._defer_owner_byte_responses = False
         self._held_owner_byte_response: _InboundEdge | None = None
+        # Deferred owner byte responses are counted from release until the
+        # response worker has written the frame. A completed owner frame can
+        # clear the held reference before the worker transmits it, so a new
+        # local master edge must wait on this count rather than only on the
+        # held reference, or it can overtake the prior EDGE_RESP on the wire.
+        self._owner_response_condition = threading.Condition()
+        self._owner_response_pending = 0
         # Counts EDGE_REQ frames from enqueue until their response has been
         # written.  A phase barrier can therefore wait for the wire work
         # already admitted by the reader without mistaking an armed-but-idle
@@ -1437,6 +1444,8 @@ class NetworkBackend:
         snap["consecutive_armed_edges"] = self._consecutive_armed_edges
         with self._edge_pending_condition:
             snap["pending_edge_requests"] = self._edge_pending
+        with self._owner_response_condition:
+            snap["owner_response_pending"] = self._owner_response_pending
         if pre_close is not None:
             pre_close_copy = dict(pre_close)
             last_keepalive = pre_close_copy.get("last_keepalive_state")
@@ -2267,6 +2276,7 @@ class NetworkBackend:
                     self._decrement_edge_pending()
                     if request.response_finished is not None:
                         request.response_finished.set()
+                        self._settle_owner_response()
 
     def _reserve_queued_master_collision(self) -> _InboundEdge | None:
         """Answer a peer master edge admitted before this owner's edge.
@@ -2477,6 +2487,12 @@ class NetworkBackend:
         """Queue a completed edge for transport-only response transmission."""
         if self._closed:
             self._decrement_edge_pending()
+            if request.response_finished is not None:
+                # A deferred response counted at release is abandoned here
+                # because a deadline-aware close won the race. Retire the
+                # receipt so outstanding-work accounting stays truthful.
+                request.response_finished.set()
+                self._settle_owner_response()
             return
         try:
             self._completed_edge_queue.put_nowait(request)
@@ -2504,33 +2520,63 @@ class NetworkBackend:
         with self._serial_gate, self._local_core_access(), self._owner_dispatch_lock:
             self._release_owner_byte_response(token)
 
+    def _begin_owner_response(self) -> None:
+        """Count one released response that still owes a wire transmission."""
+        with self._owner_response_condition:
+            self._owner_response_pending += 1
+            self._owner_response_condition.notify_all()
+
+    def _settle_owner_response(self) -> None:
+        """Retire one response after its frame has been written or abandoned."""
+        with self._owner_response_condition:
+            if self._owner_response_pending > 0:
+                self._owner_response_pending -= 1
+            self._owner_response_condition.notify_all()
+
     def _release_owner_byte_response(self, token: _InboundEdge) -> None:
         """Release one token while the owner retains dispatch admission."""
         with self._close_lock:
             if self._closed or self._held_owner_byte_response is not token:
                 return
             self._held_owner_byte_response = None
-        self._publish_owner_response(token)
+            self._begin_owner_response()
+        try:
+            self._publish_owner_response(token)
+        except BaseException:
+            # The response was counted but never queued; retire the receipt so
+            # a waiter learns about the failure through close, not by hanging.
+            self._settle_owner_response()
+            raise
 
     def _finish_held_response_before_master_edge(self, deadline: float) -> None:
-        if self._held_owner_byte_response is None:
+        if self._held_owner_byte_response is None and self._owner_response_pending == 0:
+            # Transport-only peers have no local serial core; never touch the
+            # core-access gate when there is nothing outstanding.
             return
         with self._serial_gate, self._local_core_access(), self._owner_dispatch_lock:
             request = self._held_owner_byte_response
-            if request is None:
-                return
-            self._release_owner_byte_response(request)
-        receipt = request.response_finished
-        assert receipt is not None
-        while not receipt.is_set():
+            if request is not None:
+                self._release_owner_byte_response(request)
+        # A completed owner frame can release the held byte before the response
+        # worker writes it. Wait for every outstanding deferred response, not
+        # just the currently held reference, so a new EDGE_REQ cannot precede
+        # the prior EDGE_RESP on the wire.
+        timed_out = False
+        while True:
             if self._closed_event.is_set():
                 raise NetworkBackendError("backend closed while completing prior byte response")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                error = NetworkBackendError("prior byte response exceeded EDGE_REQ deadline")
-                self._mark_closed(error)
-                raise error
-            receipt.wait(min(_SEND_POLL_SECONDS, remaining))
+            with self._owner_response_condition:
+                if self._owner_response_pending == 0:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                self._owner_response_condition.wait(min(_SEND_POLL_SECONDS, remaining))
+        if timed_out:
+            error = NetworkBackendError("prior byte response exceeded EDGE_REQ deadline")
+            self._mark_closed(error)
+            raise error
         if self._closed_event.is_set():
             raise NetworkBackendError("backend closed while completing prior byte response")
 
