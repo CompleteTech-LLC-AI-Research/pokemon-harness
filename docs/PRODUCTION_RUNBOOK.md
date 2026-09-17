@@ -585,12 +585,33 @@ Choose one reservation mechanism:
 
 - `cgroup-quota`: the job runs in a non-root cgroup with a finite `cpu.max`
   quota narrower than the host, and that cgroup contains only the lease holder
-  and its job descendants.
+  and its job descendants. The cgroup must also have no descendant cgroups
+  (`cgroup.stat` `nr_descendants` and `nr_dying_descendants` both `0`); a
+  quota on one cgroup is a ceiling, not a reservation, while child or sibling
+  cgroups are allowed to compete for the same CPUs. The allocation cgroup's
+  parent must contain no other populated child cgroups for the same reason.
 - `cpuset-affinity`: the job's observed affinity exactly equals a reserved
-  cpuset that is a strict subset of the host CPUs.
+  cpuset that is a strict subset of the host CPUs, and no other live process
+  has an allowed-CPU list that intersects that cpuset. Affinity only confines
+  where this job may run; it does not move a competing workload off those CPUs,
+  so the check enumerates foreign processes' `Cpus_allowed_list` and fails when
+  any of them overlaps the reserved set.
 - `dedicated-host`: the allocation owns every host CPU, records no competing
   quota or weight, and carries an operator-created exclusive marker whose
-  contents match an operator-issued exclusive token, plus a held lease.
+  contents match an operator-issued exclusive token, plus a held lease. Because
+  affinity and a marker are both labels, admission also samples host-wide
+  `/proc/stat` CPU accounting before the job starts and requires the measured
+  busy cores to be within `competing_cpu_cores_max` (descriptor, then
+  declaration, then the default `0.25`). When host CPU accounting is
+  unreadable the check reports `unsupported` and admission fails closed.
+
+When the competing-affinity data or the cgroup descendant counters cannot be
+read, the check reports `unsupported` and admission fails closed; it never
+assumes exclusivity it could not observe.
+
+`POKERED_QUALIFICATION_FOREIGN_SAMPLE_SECONDS` (default `2`) sets the
+competing-CPU sampling window used by the `dedicated-host` check;
+`competing_cpu_cores_max` in the descriptor or declaration sets its tolerance.
 
 Every mechanism also requires `reservation.host_lock_path`: one host-wide lock
 file that concurrent jobs contend on. A lock inside the per-job directory is
@@ -651,7 +672,11 @@ acquires the host-wide lock, verifies the observed allocation, and only then
 launches `--run`. It refuses to launch when admission fails. The `--run` child
 receives `TMPDIR` under the job's private `tmp/`, plus
 `POKERED_QUALIFICATION_JOB_DIR` and `POKERED_QUALIFICATION_EVIDENCE_DIR` for its
-evidence. It writes an owner-only `allocation.json` inside the private job
+evidence. Disk admission is resolved against the job directory first and checks
+free space on the job's real `tmp/` and `evidence/` filesystems (reported as
+`disk-free-temp` and `disk-free-job-evidence`), because an external job or
+evidence filesystem can be full even when the caller's `TMPDIR` is not. It
+writes an owner-only `allocation.json` inside the private job
 directory, pins its SHA-256 in the declaration, and holds the host-wide lease
 lock while the command executes as a descendant of the holder. A lease is
 accepted only when the recorded holder is alive, its start time matches, the
@@ -672,11 +697,50 @@ owned process group is terminated without discarding the original failure; the
 `POKERED_QUALIFICATION_RUN_TIMEOUT_SECONDS` or `--run-timeout` (default
 `86400`).
 
+The runner installs itself as a child subreaper (`PR_SET_CHILD_SUBREAPER`) and
+sweeps the command's whole process group after the parent exits, not only on
+timeout. A command that returns `0` or a failure while leaving a sleeping
+grandchild behind therefore no longer counts as a completed job: the descendant
+is terminated and confirmed gone, and if any owned descendant cannot be
+confirmed gone the pids are retained and `--release` reports `blocked` instead
+of relinquishing capacity that is still in use. The original exit status and
+captured output are preserved.
+
 Both peers of every TCP pair stay on the host because the supported transport
 is loopback-only. Provisioning new paid infrastructure or uploading
 ROM-derived inputs requires separate operator authorization; this procedure
 does not grant it. A prepared runner is not a passing gate: keep provisioning
 status, test status, and release qualification separate.
+
+### 3b. Current host provisioning status (BLOCKED, not a pass)
+
+The shared Linux host this repository currently runs on does not provide an
+exclusive allocation, and the above checks correctly report that. Observed,
+sanitized facts from `qualification_runner.py --report` on this host:
+
+| Fact | Observed | Consequence |
+| --- | --- | --- |
+| `cgroup_version` | `v2` | `cpu.max`/`cpu.stat` exist but are read-only |
+| `cgroup_relative_path` | `/` | the job runs in the root cgroup, not a child allocation |
+| `cpu_quota_cores` | `null` (`cpu.max` = `max 100000`) | no finite quota to reserve |
+| `cgroup_member_pids` | 87 processes | many unrelated processes share the cgroup |
+| `affinity_cpus` | `0-11` (all 12 CPUs) | no narrower cpuset is available |
+| `cgroup_sibling_competitors` | `[]` at the root | root cgroup is the whole hierarchy |
+| `/sys/fs/cgroup` mount | `ro,nosuid,nodev,noexec` | a child quota/cpuset cannot be created |
+| user namespaces | `unshare` → `EPERM` | cannot isolate a writable cgroup namespace |
+| capabilities | `CapEff=0` | cannot delegate a controller or write `cgroup.procs` |
+
+Every reservation mechanism therefore fails admission here, which is the
+correct, fail-closed outcome: `cpuset-affinity` has overlapping foreign
+processes, `cgroup-quota` has no non-root cgroup and no finite quota, and
+`dedicated-host` measures competing CPU cores far above the tolerance. The
+`source`/`native` Red/Red MCP comparison and the nine-orientation timed MCP
+matrix required by issue #85 must be executed under an operator-provisioned
+allocation (a writable cgroup2 leaf with `cpu.max`, or an exclusive host with
+no competing load). Because no such allocation exists on this host, those
+acceptance runs are **BLOCKED** and are not claimed as passing. This section is
+a provisioning status record, not release evidence, and it must not be used to
+promote any qualification result.
 
 ## 4. Run the evidence tiers
 

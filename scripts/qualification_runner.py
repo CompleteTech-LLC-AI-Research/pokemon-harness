@@ -52,7 +52,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 SCHEMA_VERSION = 3
 _DECLARATION_ENV = "POKERED_QUALIFICATION_DECLARATION"
@@ -69,6 +69,9 @@ _NATIVE_BUILD_EVIDENCE_PROCEDURE = "bootstrap_pyboy --mode cython"
 _NATIVE_BUILD_EVIDENCE_VERSION = 2
 _TIMEOUT_RETURNCODE = 124
 _CHILD_TERMINATION_GRACE_SECONDS = 5.0
+_FOREIGN_SAMPLE_ENV = "POKERED_QUALIFICATION_FOREIGN_SAMPLE_SECONDS"
+_DEFAULT_FOREIGN_SAMPLE_SECONDS = 2.0
+_DEFAULT_FOREIGN_CPU_CORES_TOLERANCE = 0.25
 
 # Descriptors this process holds open for an allocation lease, keyed by the
 # lock's kernel identity.  Release must explicitly close them: removing the
@@ -223,8 +226,38 @@ def _pid_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
-    return True
+        # Visibility is restricted, but the pid still exists; a zombie check
+        # needs /proc/<pid>/stat, which may itself be unreadable.
+        return not _pid_is_zombie(pid)
+    return not _pid_is_zombie(pid)
+
+
+def _pid_is_zombie(pid: int) -> bool:
+    """Return ``True`` when *pid* has exited but has not been reaped.
+
+    As a child subreaper this process is the parent of adopted orphans, so an
+    exited orphan stays visible as a zombie until it is waited on.  A zombie
+    consumes no CPU, so it must not count as live capacity.
+    """
+
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    closing = raw.rfind(")")
+    if closing == -1:
+        return False
+    fields = raw[closing + 1 :].split()
+    return bool(fields) and fields[0] == "Z"
+
+
+def _reap_zombie(pid: int) -> None:
+    """Best-effort reap of an adopted zombie child."""
+
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        return
 
 
 def _process_tree_pids(root_pid: int | None = None) -> list[int]:
@@ -246,6 +279,106 @@ def _process_tree_pids(root_pid: int | None = None) -> list[int]:
         if root_pid in _process_ancestor_pids(pid):
             tree.add(pid)
     return sorted(tree)
+
+
+def _observed_affinity(pid: int) -> list[int] | None:
+    """Return *pid*'s allowed CPU list, or ``None`` when it is unobservable."""
+
+    text = _read_text(Path(f"/proc/{pid}/status"))
+    if text is None:
+        return None
+    for line in text.splitlines():
+        if line.startswith("Cpus_allowed_list:"):
+            _, _, value = line.partition(":")
+            try:
+                return parse_cpuset(value.strip())
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _foreign_process_affinity() -> dict[int, list[int]]:
+    """Return the allowed CPUs of every live process outside this job's tree.
+
+    A cpuset is only an exclusive reservation when nothing else is allowed to
+    run on it.  Affinity alone restricts where *this* process may run; it does
+    not move a competitor off those CPUs.  Enumerating ``/proc`` and comparing
+    each foreign process's ``Cpus_allowed_list`` against the declared cpuset is
+    the observable evidence that the CPUs are not shared.
+    """
+
+    owned = set(_process_tree_pids(os.getpid()))
+    foreign: dict[int, list[int]] = {}
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return foreign
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid in owned or pid == os.getpid():
+            continue
+        cpus = _observed_affinity(pid)
+        if cpus is not None:
+            foreign[pid] = cpus
+    return foreign
+
+
+def _host_cpu_totals() -> tuple[int, int] | None:
+    """Return ``(busy_ticks, total_ticks)`` across all CPUs from ``/proc/stat``.
+
+    ``/proc/stat`` is kernel-wide accounting, so it is independent of which
+    process tree a competing workload belongs to.  Per-pid enumeration would
+    miss a competitor spawned as a descendant of the measuring process, which
+    is exactly how a reviewer-supplied negative control is usually launched.
+    """
+
+    raw = _read_text(Path("/proc/stat"))
+    if raw is None:
+        return None
+    for line in raw.splitlines():
+        if not line.startswith("cpu "):
+            continue
+        fields = line.split()[1:]
+        if len(fields) < 4:
+            return None
+        try:
+            values = [int(value) for value in fields]
+        except ValueError:
+            return None
+        # user, nice, system, idle, iowait, irq, softirq, steal, guest...
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        total = sum(values)
+        return total - idle, total
+    return None
+
+
+def _measure_competing_cpu_cores(
+    interval: float | None = None, clock_ticks: int | None = None
+) -> tuple[float | None, float]:
+    """Measure host-wide busy CPU cores over *interval* seconds.
+
+    "Dedicated host" is a claim about competing load, not just about this
+    process's affinity.  Admission samples the host before the job starts, so
+    any busy cores observed belong to something other than this job.  Returns
+    ``(cores_or_None, measured_interval)``.
+    """
+
+    interval = _foreign_sample_seconds() if interval is None else interval
+    hz = clock_ticks if clock_ticks is not None else _clock_ticks_per_second()
+    first = _host_cpu_totals()
+    started = time.monotonic()
+    time.sleep(interval)
+    elapsed = time.monotonic() - started
+    second = _host_cpu_totals()
+    if first is None or second is None or hz <= 0 or elapsed <= 0:
+        return None, elapsed
+    busy = max(0, second[0] - first[0])
+    total = max(0, second[1] - first[1])
+    if total <= 0:
+        return None, elapsed
+    return busy / (hz * elapsed), elapsed
 
 
 def _flock_holder_pids(lock_path: Path) -> set[int] | None:
@@ -545,6 +678,67 @@ def _read_memory_facts() -> tuple[int | None, int | None]:
     return total, available
 
 
+def _cgroup_descendant_counts(cgroup_dir: str | None) -> dict[str, int] | None:
+    """Return ``cgroup.stat`` counters for *cgroup_dir*, or ``None`` if unreadable.
+
+    A quota that applies to one cgroup says nothing about sibling or child
+    cgroups that are allowed to run on the same CPUs.  ``cgroup.stat`` reports
+    how many descendants exist below the allocation cgroup; any non-zero count
+    means competing workloads can consume the same CPU time, so a finite
+    ``cpu.max`` there is a ceiling, not a reservation.
+    """
+
+    if not cgroup_dir:
+        return None
+    raw = _read_text(Path(cgroup_dir) / "cgroup.stat")
+    if raw is None:
+        return None
+    counters: dict[str, int] = {}
+    for line in raw.splitlines():
+        key, _, value = line.partition(" ")
+        value = value.strip()
+        if key and value.isdigit():
+            counters[key] = int(value)
+    return counters or None
+
+
+def _cgroup_sibling_competitors(cgroup_dir: str | None) -> list[str] | None:
+    """Return sibling cgroups that contain live processes, or ``None`` if hidden.
+
+    A CPU quota limits the cgroup it is set on; it does not stop a sibling
+    cgroup on the same CPUs from consuming run queue time.  The declared
+    allocation is only exclusive when the allocation cgroup's parent has no
+    other populated child cgroups.  ``None`` means the parent directory could
+    not be enumerated, so the caller must fail closed rather than assume
+    exclusivity.
+    """
+
+    if not cgroup_dir:
+        return None
+    directory = Path(cgroup_dir)
+    parent = directory.parent
+    if parent == directory:
+        # A hierarchy root has no siblings to compare against.
+        return []
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return None
+    competitors: list[str] = []
+    for entry in entries:
+        if entry == directory or not entry.is_dir():
+            continue
+        procs = entry / "cgroup.procs"
+        if not procs.is_file():
+            continue
+        raw = _read_text(procs)
+        if raw is None:
+            return None
+        if raw.strip():
+            competitors.append(entry.name)
+    return sorted(competitors)
+
+
 def _read_psi_cpu() -> float | None:
     raw = _read_text(Path("/proc/pressure/cpu"))
     if raw is None:
@@ -571,6 +765,8 @@ class RunnerFacts:
     cgroup_relative_path: str | None = None
     cgroup_dir: str | None = None
     cgroup_member_pids: list[int] | None = None
+    cgroup_descendants: dict[str, int] | None = None
+    cgroup_sibling_competitors: list[str] | None = None
     cpu_quota_cores: float | None = None
     cpu_weight: int | None = None
     cpu_throttled: dict[str, int] | None = None
@@ -580,6 +776,10 @@ class RunnerFacts:
     psi_cpu_some_avg300: float | None = None
     repo_disk_free_bytes: int | None = None
     temp_disk_free_bytes: int | None = None
+    job_tmp_path: str | None = None
+    job_tmp_disk_free_bytes: int | None = None
+    job_evidence_path: str | None = None
+    job_evidence_disk_free_bytes: int | None = None
     shm_path: str = "/dev/shm"
     shm_size_bytes: int | None = None
     shm_writable: bool = False
@@ -587,6 +787,7 @@ class RunnerFacts:
     process_ancestor_pids: list[int] = field(default_factory=list)
     process_tree_pids: list[int] = field(default_factory=list)
     process_start_time: str | None = None
+    foreign_process_affinity: dict[int, list[int]] | None = None
     unsupported: list[str] = field(default_factory=list)
 
 
@@ -630,6 +831,7 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
     facts.process_start_time = _process_start_time(os.getpid())
     facts.process_ancestor_pids = _process_ancestor_pids()
     facts.process_tree_pids = _process_tree_pids()
+    facts.foreign_process_affinity = _foreign_process_affinity()
 
     if hasattr(os, "sched_getaffinity"):
         try:
@@ -681,6 +883,8 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
     facts.cgroup_relative_path = cgroup["cgroup_relative_path"]
     facts.cgroup_dir = cgroup["cgroup_dir"]
     facts.cgroup_member_pids = cgroup["cgroup_member_pids"]
+    facts.cgroup_descendants = _cgroup_descendant_counts(cgroup["cgroup_dir"])
+    facts.cgroup_sibling_competitors = _cgroup_sibling_competitors(cgroup["cgroup_dir"])
     facts.cpu_quota_cores = cgroup["cpu_quota_cores"]
     facts.cpu_weight = cgroup["cpu_weight"]
     facts.cpu_throttled = cgroup["cpu_throttled"]
@@ -1018,6 +1222,19 @@ def validate_declaration(declaration: dict[str, Any]) -> list[CheckResult]:
                 "cpu_quota_cores must be positive",
             )
         )
+    competing = declaration.get("competing_cpu_cores_max")
+    if competing is not None and (
+        isinstance(competing, bool) or not isinstance(competing, (int, float)) or competing < 0
+    ):
+        results.append(
+            _result(
+                "competing-cpu-cores-value",
+                "fail",
+                "non-negative number or null",
+                competing,
+                "competing_cpu_cores_max must be non-negative",
+            )
+        )
     weight = declaration.get("cpu_weight")
     if weight is not None and (
         isinstance(weight, bool) or not isinstance(weight, int) or weight <= 0
@@ -1351,6 +1568,46 @@ def _verify_cgroup_reservation(descriptor: dict[str, Any], facts: RunnerFacts) -
             facts.cgroup_member_pids,
             "competing processes share the declared allocation cgroup",
         )
+    descendants = facts.cgroup_descendants
+    if descendants is None:
+        return _result(
+            "reservation-evidence",
+            "unsupported",
+            "an allocation cgroup with no competing descendant cgroups",
+            None,
+            "the allocation cgroup's descendant count is not observable",
+        )
+    if descendants.get("nr_descendants", 0) or descendants.get("nr_dying_descendants", 0):
+        return _result(
+            "reservation-evidence",
+            "fail",
+            "an allocation cgroup with no competing descendant cgroups",
+            descendants,
+            (
+                "competing child cgroups share the declared allocation's CPU; a quota "
+                "on this cgroup does not reserve capacity against sibling workloads"
+            ),
+        )
+    siblings = facts.cgroup_sibling_competitors
+    if siblings is None:
+        return _result(
+            "reservation-evidence",
+            "unsupported",
+            "an allocation cgroup with no populated sibling cgroups",
+            None,
+            "the allocation cgroup's sibling cgroups are not observable",
+        )
+    if siblings:
+        return _result(
+            "reservation-evidence",
+            "fail",
+            "an allocation cgroup with no populated sibling cgroups",
+            siblings[:16],
+            (
+                "populated sibling cgroups share the declared allocation's CPUs; a quota "
+                "on this cgroup does not reserve capacity against them"
+            ),
+        )
     return _result(
         "reservation-evidence",
         "ok",
@@ -1396,6 +1653,29 @@ def _verify_cpuset_reservation(descriptor: dict[str, Any], facts: RunnerFacts) -
             f"< {facts.logical_cpus} cpus",
             sorted(descriptor_cpuset),
             "a cpuset spanning every host CPU is not an allocation",
+        )
+    foreign = facts.foreign_process_affinity
+    if foreign is None:
+        return _result(
+            "reservation-evidence",
+            "unsupported",
+            sorted(descriptor_cpuset),
+            None,
+            "competing process affinity cannot be observed; refusing to claim exclusivity",
+        )
+    overlapping = sorted(
+        pid for pid, cpus in foreign.items() if descriptor_cpuset.intersection(cpus)
+    )
+    if overlapping:
+        return _result(
+            "reservation-evidence",
+            "fail",
+            sorted(descriptor_cpuset),
+            overlapping[:16],
+            (
+                "unrelated processes are allowed to run on the reserved cpuset; "
+                "affinity alone does not move competing workloads off the CPUs"
+            ),
         )
     return _result(
         "reservation-evidence",
@@ -1497,12 +1777,43 @@ def _verify_dedicated_reservation(
             marker_value[:64],
             "the operator exclusive marker does not match the declared token",
         )
+    tolerance = descriptor.get("competing_cpu_cores_max")
+    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or tolerance < 0:
+        tolerance = declaration.get("competing_cpu_cores_max")
+    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or tolerance < 0:
+        tolerance = _DEFAULT_FOREIGN_CPU_CORES_TOLERANCE
+    measured, interval = _measure_competing_cpu_cores()
+    if measured is None:
+        return _result(
+            "reservation-evidence",
+            "unsupported",
+            tolerance,
+            None,
+            (
+                "competing CPU consumption could not be measured; refusing to "
+                "claim a dedicated host on a label alone"
+            ),
+        )
+    if measured > tolerance:
+        return _result(
+            "reservation-evidence",
+            "fail",
+            tolerance,
+            round(measured, 4),
+            (
+                f"non-job processes consumed {measured:.3f} cores over {interval:.1f}s, "
+                "so the host is not dedicated to this allocation"
+            ),
+        )
     return _result(
         "reservation-evidence",
         "ok",
         facts.affinity_cpus,
         marker.name,
-        "dedicated host owns every CPU with a matching exclusive marker and held lease",
+        (
+            "dedicated host owns every CPU with a matching exclusive marker, a held lease, "
+            f"and ≤{tolerance} competing cores measured over {interval:.1f}s"
+        ),
     )
 
 
@@ -1691,17 +2002,41 @@ def evaluate_resources(
         )
 
     declared_disk = int(declaration.get("disk_free_bytes_min") or 0)
-    for name, observed in (
-        ("disk-free-repo", facts.repo_disk_free_bytes),
-        ("disk-free-temp", facts.temp_disk_free_bytes),
+    for name, observed, detail in (
+        ("disk-free-repo", facts.repo_disk_free_bytes, "free disk bytes"),
+        (
+            "disk-free-temp",
+            facts.job_tmp_disk_free_bytes
+            if facts.job_tmp_path is not None
+            else facts.temp_disk_free_bytes,
+            "free disk bytes on the job temporary filesystem"
+            if facts.job_tmp_path is not None
+            else "free disk bytes",
+        ),
+        (
+            "disk-free-job-evidence",
+            facts.job_evidence_disk_free_bytes,
+            "free disk bytes on the job evidence filesystem",
+        ),
     ):
         if declared_disk <= 0:
             results.append(_result(name, "skipped", declared_disk, observed, "no minimum declared"))
             continue
+        if name == "disk-free-job-evidence" and facts.job_evidence_path is None:
+            results.append(
+                _result(
+                    name,
+                    "skipped",
+                    declared_disk,
+                    None,
+                    "no resolved job evidence filesystem",
+                )
+            )
+            continue
         status = (
             "unsupported" if observed is None else ("ok" if observed >= declared_disk else "fail")
         )
-        results.append(_result(name, status, declared_disk, observed, "free disk bytes"))
+        results.append(_result(name, status, declared_disk, observed, detail))
 
     declared_shm = int(declaration.get("shm_bytes_min") or 0)
     if declared_shm <= 0:
@@ -1760,6 +2095,24 @@ def _command_timeout() -> float:
     return value if value > 0 else _DEFAULT_PROBE_TIMEOUT_SECONDS
 
 
+def _foreign_sample_seconds() -> float:
+    raw = os.environ.get(_FOREIGN_SAMPLE_ENV)
+    if raw is None:
+        return _DEFAULT_FOREIGN_SAMPLE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_FOREIGN_SAMPLE_SECONDS
+    return value if value > 0 else _DEFAULT_FOREIGN_SAMPLE_SECONDS
+
+
+def _clock_ticks_per_second() -> int:
+    try:
+        return int(os.sysconf("SC_CLK_TCK"))
+    except (ValueError, OSError):
+        return 100
+
+
 def _qualification_timeout(override: float | None = None) -> float:
     """Return the qualification-command deadline, distinct from prerequisites."""
 
@@ -1792,7 +2145,183 @@ def _process_group_options() -> dict[str, Any]:
 
 
 _OWNED_PROCESSES: set[subprocess.Popen[str]] = set()
+# Descendants of an owned command that survived the group sweep.  While this is
+# non-empty the capacity is still in use and the lease must not be released.
+_LEFTOVER_OWNED_PIDS: set[int] = set()
 _SIGNAL_HANDLERS_INSTALLED = False
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
+
+
+def _libc_prctl() -> Any:
+    import ctypes
+
+    return ctypes.CDLL("libc.so.6", use_errno=True)
+
+
+def _set_child_subreaper(enabled: bool) -> bool:
+    """Set ``PR_SET_CHILD_SUBREAPER``, returning whether it took effect."""
+
+    if os.name == "nt":
+        return False
+    try:
+        return _libc_prctl().prctl(_PR_SET_CHILD_SUBREAPER, 1 if enabled else 0, 0, 0, 0) == 0
+    except Exception:  # noqa: BLE001 - best-effort subreaper
+        return False
+
+
+def _child_subreaper_state() -> int | None:
+    """Return the current child-subreaper flag, or ``None`` if unreadable."""
+
+    if os.name == "nt":
+        return None
+    try:
+        import ctypes
+
+        libc = _libc_prctl()
+        value = ctypes.c_int(0)
+        if libc.prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(value), 0, 0, 0) != 0:
+            return None
+        return value.value
+    except Exception:  # noqa: BLE001 - best-effort subreaper
+        return None
+
+
+class _adopted_descendants:
+    """Temporarily become the reaper for a command's orphaned descendants.
+
+    Without ``PR_SET_CHILD_SUBREAPER`` a grandchild that outlives the direct
+    command is reparented to init and disappears from this process's tree,
+    which makes "the command completed, so the capacity is free" a false
+    statement.  As a subreaper this process is the reaper for those orphans and
+    can find, terminate, and reap them before the lease is released.
+
+    The flag is process-wide, so the previous value is restored on exit.  A
+    caller that is itself a subreaper (or a test process that must keep its own
+    reaping semantics) is unaffected.
+    """
+
+    def __enter__(self) -> Self:
+        self._previous = _child_subreaper_state()
+        self._enabled = False
+        if self._previous != 1:
+            self._enabled = _set_child_subreaper(True)
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        if self._enabled and self._previous is not None:
+            _set_child_subreaper(bool(self._previous))
+        return False
+
+
+def _process_group_members(pgid: int) -> list[int]:
+    """Return every live pid whose process group is *pgid* (excluding self)."""
+
+    if pgid <= 0:
+        return []
+    me = os.getpid()
+    members: list[int] = []
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return members
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == me:
+            continue
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+        closing = raw.rfind(")")
+        if closing == -1:
+            continue
+        fields = raw[closing + 1 :].split()
+        if len(fields) < 3:
+            continue
+        if fields[0] == "Z":
+            # An exited descendant awaiting reaping holds no CPU capacity.
+            _reap_zombie(pid)
+            continue
+        try:
+            if int(fields[2]) == pgid:
+                members.append(pid)
+        except ValueError:
+            continue
+    return sorted(members)
+
+
+def _terminate_process_group(pgid: int, grace: float | None = None) -> tuple[bool, list[int]]:
+    """Terminate every remaining member of *pgid* and confirm they exited.
+
+    A completed parent does not imply its descendants exited.  This sweeps the
+    process group the command created, escalates SIGTERM -> SIGKILL, and only
+    reports success after the group is observed empty.  Remaining pids are
+    returned so the caller can keep the lease instead of releasing capacity
+    that is still in use.
+    """
+
+    if os.name == "nt":
+        return True, []
+    grace = _CHILD_TERMINATION_GRACE_SECONDS if grace is None else grace
+    remaining = _process_group_members(pgid)
+    if not remaining:
+        return True, []
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            for pid in remaining:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    continue
+        deadline = time.monotonic() + grace
+        while True:
+            remaining = _process_group_members(pgid)
+            if not remaining:
+                return True, []
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+    return False, _process_group_members(pgid)
+
+
+def _sweep_leftover_owned_processes() -> list[int]:
+    """Re-sweep recorded leftover descendants and return the survivors.
+
+    Returning an empty list means every recorded pid is gone and the capacity
+    can be released.  A non-empty list means owned work is still running, so
+    the caller must keep the lease and report blocked cleanup.
+    """
+
+    still_alive: list[int] = []
+    for pid in sorted(_LEFTOVER_OWNED_PIDS):
+        if _pid_is_zombie(pid):
+            _reap_zombie(pid)
+            _LEFTOVER_OWNED_PIDS.discard(pid)
+            continue
+        if not _pid_alive(pid):
+            _LEFTOVER_OWNED_PIDS.discard(pid)
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            _LEFTOVER_OWNED_PIDS.discard(pid)
+            continue
+        except OSError:
+            still_alive.append(pid)
+            continue
+        deadline = time.monotonic() + _CHILD_TERMINATION_GRACE_SECONDS
+        while time.monotonic() < deadline and _pid_alive(pid):
+            time.sleep(0.05)
+        if _pid_alive(pid):
+            still_alive.append(pid)
+        else:
+            _LEFTOVER_OWNED_PIDS.discard(pid)
+    return still_alive
 
 
 def _register_owned(process: subprocess.Popen[str]) -> None:
@@ -1892,39 +2421,54 @@ def run_command(
     a distinct terminal result without discarding captured output.  *timeout*
     defaults to the bounded prerequisite deadline; callers running a
     qualification command pass their own deadline.
+
+    When the command itself exits cleanly it may still have left descendants
+    running in its process group.  Those descendants are swept before this
+    function returns, and any that cannot be confirmed gone are recorded on
+    ``_LEFTOVER_OWNED_PIDS`` so the caller refuses to release the lease.  The
+    original exit status and captured output are preserved either way.
     """
 
     timeout = _command_timeout() if timeout is None else timeout
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            **_process_group_options(),
-        )
-    except OSError as exc:
-        return subprocess.CompletedProcess(command, 127, "", f"{type(exc).__name__}: {exc}")
-    _register_owned(process)
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _terminate_owned_process(process)
+    with _adopted_descendants():
         try:
-            stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
-        except (subprocess.TimeoutExpired, OSError):
-            stdout, stderr = "", ""
-        note = (
-            f"\n[qualification-runner] command exceeded {timeout:g}s; "
-            "its owned process group was terminated"
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                **_process_group_options(),
+            )
+        except OSError as exc:
+            return subprocess.CompletedProcess(command, 127, "", f"{type(exc).__name__}: {exc}")
+        _register_owned(process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_owned_process(process)
+            try:
+                stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
+            except (subprocess.TimeoutExpired, OSError):
+                stdout, stderr = "", ""
+            note = (
+                f"\n[qualification-runner] command exceeded {timeout:g}s; "
+                "its owned process group was terminated"
+            )
+            return subprocess.CompletedProcess(
+                command, _TIMEOUT_RETURNCODE, stdout, (stderr or "") + note
+            )
+        finally:
+            _unregister_owned(process)
+    confirmed, leftovers = _terminate_process_group(process.pid)
+    if not confirmed:
+        _LEFTOVER_OWNED_PIDS.update(leftovers)
+    if leftovers:
+        stderr = (stderr or "") + (
+            f"\n[qualification-runner] {len(leftovers)} owned descendant(s) remained "
+            "after the command exited; capacity must not be released"
         )
-        return subprocess.CompletedProcess(
-            command, _TIMEOUT_RETURNCODE, stdout, (stderr or "") + note
-        )
-    finally:
-        _unregister_owned(process)
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
@@ -2941,6 +3485,31 @@ def _prepare_job_directory(job_dir: Path) -> None:
         os.chmod(child, 0o700)
 
 
+def _populate_job_filesystem_facts(facts: RunnerFacts, job_dir: Path) -> None:
+    """Record free space on the filesystems the job will actually write to.
+
+    Admission must measure the destination, not the caller's ``TMPDIR``.  The
+    spawned job receives ``TMPDIR=<job-dir>/tmp`` and writes evidence under
+    ``<job-dir>/evidence``; either can live on a different filesystem from
+    ``/tmp``.  The directories are created first (a private job directory is
+    about to be prepared anyway) so ``statvfs`` measures the real target.
+    """
+
+    for label, path in (
+        ("job_tmp", job_dir / "tmp"),
+        ("job_evidence", job_dir / "evidence"),
+    ):
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            path = path.parent
+        setattr(facts, f"{label}_path", str(path))
+        try:
+            setattr(facts, f"{label}_disk_free_bytes", shutil.disk_usage(path).free)
+        except OSError:
+            setattr(facts, f"{label}_disk_free_bytes", None)
+
+
 def _holder_is_owned(holder: Any, start_time: Any) -> bool:
     if not isinstance(holder, int) or isinstance(holder, bool) or holder <= 0:
         return False
@@ -3125,6 +3694,16 @@ def _terminate_and_confirm(pid: int) -> tuple[bool, str]:
 
 
 def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[str, str]:
+    live_leftovers = _sweep_leftover_owned_processes()
+    if live_leftovers:
+        return (
+            "blocked",
+            (
+                "owned descendants are still running "
+                f"({len(live_leftovers)} pid(s)); the lease is kept because the "
+                "allocation is still in use"
+            ),
+        )
     descriptor_path = _allocation_descriptor_path(declaration, repo_root)
     if descriptor_path is None or not descriptor_path.is_file():
         return "blocked", "no pinned allocation descriptor to release"
@@ -3268,7 +3847,10 @@ def _do_reserve(
             {"checks": [asdict(item) for item in prerequisites]},
         )
 
+    # Resolve the job directory before admission so disk checks measure the
+    # filesystems the job will actually write to, not the caller's TMPDIR.
     job_dir = _job_directory(args, declaration, repo_root)
+    _populate_job_filesystem_facts(facts, job_dir)
     try:
         descriptor_path, _descriptor, _lock_fd = _reserve_allocation(
             declaration, repo_root, job_dir, facts
@@ -3331,8 +3913,16 @@ def main(argv: list[str] | None = None) -> int:
     _install_signal_handlers()
     repo_root = args.repo_root.resolve()
     facts = collect_facts(repo_root)
-    facts_payload = asdict(facts)
-    facts_payload["shm_path"] = _sanitize_path(facts.shm_path, repo_root)
+
+    def facts_payload() -> dict[str, Any]:
+        payload = asdict(facts)
+        payload["shm_path"] = _sanitize_path(facts.shm_path, repo_root)
+        for key in ("job_tmp_path", "job_evidence_path"):
+            value = payload.get(key)
+            if value is not None:
+                payload[key] = _sanitize_path(value, repo_root)
+        return payload
+
     mode = "report"
     for candidate in ("check", "setup", "reserve", "release", "recover"):
         if getattr(args, candidate):
@@ -3343,7 +3933,7 @@ def main(argv: list[str] | None = None) -> int:
         "declaration_version": SCHEMA_VERSION,
         "repo_root": _sanitize_path(repo_root, repo_root),
         "checks": [],
-        "facts": facts_payload,
+        "facts": facts_payload(),
         "overall": "report" if mode == "report" else "blocked",
     }
 
@@ -3369,6 +3959,7 @@ def main(argv: list[str] | None = None) -> int:
         if declaration is None:
             payload["message"] = error
         elif mode == "check":
+            _populate_job_filesystem_facts(facts, _job_directory(args, declaration, repo_root))
             checks.extend(validate_declaration(declaration))
             if overall_status(checks) == "ok":
                 checks.extend(evaluate_resources(declaration, facts, repo_root))
@@ -3423,6 +4014,7 @@ def main(argv: list[str] | None = None) -> int:
     if mode in {"check", "setup"}:
         payload["overall"] = overall_status(checks) if declaration is not None else "blocked"
     payload["checks"] = [asdict(item) for item in checks]
+    payload["facts"] = facts_payload()
     payload = _redact_payload(
         payload, _collect_redactions(repo_root, declaration, declaration_path)
     )

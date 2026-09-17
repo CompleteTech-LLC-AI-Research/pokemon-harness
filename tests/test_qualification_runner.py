@@ -32,6 +32,8 @@ def make_facts(**overrides):
         cgroup_relative_path="/user.slice/session.scope",
         cgroup_dir="/sys/fs/cgroup/user.slice/session.scope",
         cgroup_member_pids=[os.getpid()],
+        cgroup_descendants={"nr_descendants": 0, "nr_dying_descendants": 0},
+        cgroup_sibling_competitors=[],
         cpu_quota_cores=8.0,
         cpu_weight=100,
         cpu_throttled={"nr_throttled": 0},
@@ -48,6 +50,7 @@ def make_facts(**overrides):
         process_ancestor_pids=[],
         process_tree_pids=[os.getpid()],
         process_start_time=runner._process_start_time(os.getpid()),
+        foreign_process_affinity={},
     )
     for key, value in overrides.items():
         setattr(facts, key, value)
@@ -425,6 +428,27 @@ def test_dedicated_reservation_rejects_partial_host(tmp_path: Path):
     assert statuses(results)["reservation-evidence"] == "fail"
 
 
+def test_dedicated_reservation_rejects_competing_cpu_load(tmp_path: Path, monkeypatch):
+    declaration, facts = held_reservation(tmp_path, "dedicated-host")
+    monkeypatch.setattr(runner, "_measure_competing_cpu_cores", lambda interval=None: (4.5, 1.0))
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "fail"
+
+
+def test_dedicated_reservation_fails_closed_when_cpu_unmeasurable(tmp_path: Path, monkeypatch):
+    declaration, facts = held_reservation(tmp_path, "dedicated-host")
+    monkeypatch.setattr(runner, "_measure_competing_cpu_cores", lambda interval=None: (None, 1.0))
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "unsupported"
+
+
+def test_dedicated_reservation_accepts_quiet_host(tmp_path: Path, monkeypatch):
+    declaration, facts = held_reservation(tmp_path, "dedicated-host")
+    monkeypatch.setattr(runner, "_measure_competing_cpu_cores", lambda interval=None: (0.05, 1.0))
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "ok"
+
+
 def test_cpuset_reservation_rejects_full_host_affinity(tmp_path: Path):
     declaration, facts = held_reservation(tmp_path, "cpuset-affinity")
     facts.affinity_cpus = list(range(16))
@@ -438,6 +462,36 @@ def test_cgroup_reservation_rejects_competing_members(tmp_path: Path):
     facts.cgroup_member_pids = [os.getpid(), 999999]
     results = runner.evaluate_resources(declaration, facts, tmp_path)
     assert statuses(results)["reservation-evidence"] == "fail"
+
+
+def test_cgroup_reservation_rejects_competing_descendant_cgroups(tmp_path: Path):
+    """A quota on one cgroup is not a reservation while sibling cgroups compete."""
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    facts.cgroup_descendants = {"nr_descendants": 3, "nr_dying_descendants": 0}
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "fail"
+
+
+def test_cgroup_reservation_unsupported_when_descendants_unobservable(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    facts.cgroup_descendants = None
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "unsupported"
+
+
+def test_cgroup_reservation_rejects_populated_sibling_cgroups(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    facts.cgroup_sibling_competitors = ["session-a.scope", "session-b.scope"]
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "fail"
+
+
+def test_cgroup_reservation_unsupported_when_siblings_unobservable(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    facts.cgroup_sibling_competitors = None
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "unsupported"
 
 
 def test_evaluate_resources_fails_when_cpus_are_insufficient(tmp_path: Path):
@@ -514,7 +568,8 @@ def test_evaluate_resources_marks_affinity_unsupported(tmp_path: Path):
     assert statuses(results)["affinity"] == "unsupported"
 
 
-def test_evaluate_resources_skips_quota_for_verified_dedicated_host(tmp_path: Path):
+def test_evaluate_resources_skips_quota_for_verified_dedicated_host(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(runner, "_measure_competing_cpu_cores", lambda interval=None: (0.05, 1.0))
     declaration, facts = held_reservation(tmp_path, "dedicated-host")
     results = runner.evaluate_resources(declaration, facts, tmp_path)
     assert statuses(results)["cpu-quota"] == "skipped"
@@ -586,11 +641,18 @@ def test_cgroup_v2_detected_below_hierarchy_root(tmp_path: Path):
     child.mkdir(parents=True)
     (child / "cpu.max").write_text("200000 100000\n", encoding="utf-8")
     (child / "cgroup.procs").write_text(str(os.getpid()), encoding="utf-8")
+    (child / "cgroup.stat").write_text(
+        "nr_descendants 0\nnr_dying_descendants 0\n", encoding="utf-8"
+    )
     facts = runner._read_cgroup_facts(tmp_path, "0::/user.slice/session.scope\n")
     assert facts["cgroup_version"] == "v2"
     assert facts["cpu_quota_cores"] == 2.0
     assert facts["cgroup_relative_path"] == "/user.slice/session.scope"
     assert facts["cgroup_member_pids"] == [os.getpid()]
+    assert runner._cgroup_descendant_counts(facts["cgroup_dir"]) == {
+        "nr_descendants": 0,
+        "nr_dying_descendants": 0,
+    }
 
 
 def test_cgroup_v1_detected_below_hierarchy_root(tmp_path: Path):
@@ -1121,6 +1183,141 @@ def test_run_command_child_dies_with_parent(tmp_path: Path):
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+
+
+def _write_grandchild_command(tmp_path: Path, exit_code: int, pidfile: Path) -> list[str]:
+    """Build a command that forks a sleeping grandchild, waits for it, then exits.
+
+    The grandchild redirects its own stdio and survives its parent, which is the
+    exact shape of the round-5 finding: ``run_command`` returns the parent's
+    status while a descendant is still consuming the allocation.
+    """
+
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text(
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        f"Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    if pidfile.exists():
+        pidfile.unlink()
+    code = (
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "with open(os.devnull, 'wb') as null:\n"
+        f"    subprocess.Popen([sys.executable, {str(grandchild)!r}], "
+        "stdin=null, stdout=null, stderr=null)\n"
+        f"deadline = time.monotonic() + 20\n"
+        f"while not Path({str(pidfile)!r}).exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.05)\n"
+        f"sys.exit({exit_code})\n"
+    )
+    return [sys.executable, "-c", code]
+
+
+def _wait_for_dead(pid: int, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and runner._pid_alive(pid):
+        time.sleep(0.05)
+    return not runner._pid_alive(pid)
+
+
+def test_run_command_sweeps_grandchild_after_successful_parent_exit(tmp_path: Path):
+    """A command that exits 0 must not leave a live descendant running."""
+
+    pidfile = tmp_path / "grandchild.pid"
+    command = _write_grandchild_command(tmp_path, 0, pidfile)
+    process = runner.run_command(command, tmp_path)
+    assert process.returncode == 0
+    assert pidfile.exists()
+    grandchild = int(pidfile.read_text(encoding="utf-8"))
+    assert _wait_for_dead(grandchild), "the surviving grandchild was not swept"
+
+
+def test_run_command_preserves_failure_with_live_grandchild(tmp_path: Path):
+    """Descendant cleanup must preserve the original failing exit status."""
+
+    pidfile = tmp_path / "grandchild.pid"
+    command = _write_grandchild_command(tmp_path, 7, pidfile)
+    process = runner.run_command(command, tmp_path)
+    assert process.returncode == 7
+    assert pidfile.exists()
+    grandchild = int(pidfile.read_text(encoding="utf-8"))
+    assert _wait_for_dead(grandchild)
+
+
+def test_release_is_blocked_while_owned_leftovers_survive(tmp_path: Path):
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True
+    )
+    try:
+        runner._LEFTOVER_OWNED_PIDS.add(sleeper.pid)
+        real_pid_alive = runner._pid_alive
+        real_terminate = runner._terminate_process_group
+        try:
+            # Simulate a descendant that cannot be confirmed gone.
+            runner._pid_alive = lambda pid: True
+            runner._terminate_process_group = lambda pgid, grace=None: (False, [sleeper.pid])
+            status, message = runner._release_allocation(declaration, tmp_path)
+        finally:
+            runner._pid_alive = real_pid_alive
+            runner._terminate_process_group = real_terminate
+        assert status == "blocked"
+        assert "still running" in message
+    finally:
+        runner._LEFTOVER_OWNED_PIDS.discard(sleeper.pid)
+        if sleeper.poll() is None:
+            sleeper.kill()
+            sleeper.wait(timeout=5)
+
+
+def test_collect_facts_measures_job_filesystems(tmp_path: Path):
+    """Disk admission must target the job's tmp/evidence, not the caller TMPDIR."""
+
+    job_dir = tmp_path / "job"
+    facts = runner.collect_facts(tmp_path, temp_root=tmp_path)
+    runner._populate_job_filesystem_facts(facts, job_dir)
+    assert facts.job_tmp_path == str(job_dir / "tmp")
+    assert facts.job_evidence_path == str(job_dir / "evidence")
+    assert facts.job_tmp_disk_free_bytes is not None
+    assert facts.job_evidence_disk_free_bytes is not None
+    assert (job_dir / "tmp").is_dir()
+    assert (job_dir / "evidence").is_dir()
+
+
+def test_evaluate_resources_fails_on_job_evidence_filesystem(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    runner._populate_job_filesystem_facts(facts, Path(declaration["reservation"]["job_dir"]))
+    facts.job_evidence_disk_free_bytes = 1
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["disk-free-job-evidence"] == "fail"
+
+
+def test_evaluate_resources_fails_on_job_tmp_filesystem(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    runner._populate_job_filesystem_facts(facts, Path(declaration["reservation"]["job_dir"]))
+    facts.job_tmp_disk_free_bytes = 1
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["disk-free-temp"] == "fail"
+
+
+def test_cpuset_reservation_rejects_competing_foreign_affinity(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "cpuset-affinity")
+    facts.foreign_process_affinity = {999999: [0, 1]}
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "fail"
+
+
+def test_cpuset_reservation_unsupported_when_affinity_unobservable(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "cpuset-affinity")
+    facts.foreign_process_affinity = None
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["reservation-evidence"] == "unsupported"
 
 
 def test_validate_asset_inputs_rejects_unrelated_only(tmp_path: Path):
