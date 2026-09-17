@@ -504,6 +504,18 @@ def _faint_deltas(counters: dict, index: int, before: dict) -> tuple[int, int]:
     return player, enemy
 
 
+def _turn_restarted(counters: dict, index: int, baseline: dict) -> bool:
+    """True once ``index``'s ROM has re-entered its battle turn loop.
+
+    ``MainInBattleLoop`` is entered once per turn even for a side the ROM skips
+    ``DisplayBattleMenu`` for, because the skip is inside the function
+    (``engine/battle/core.asm:289-314``), so a counter increment is the ROM's
+    own witness that this side's menu is a fresh one rather than the leftovers
+    of the menu the previous turn already answered.
+    """
+    return _counters(counters, "MainInBattleLoop", index) > baseline["main"][index]
+
+
 def _baseline(counters: dict) -> dict:
     return {
         "main": [int(value) for value in counters["MainInBattleLoop"]],
@@ -586,6 +598,7 @@ def _pump_menu_input(
     spent: int,
     target_slot: int | None,
     started: bool,
+    command_fresh: bool,
 ):
     """Issue at most one input toward the ROM menu that is waiting for it.
 
@@ -602,6 +615,18 @@ def _pump_menu_input(
     prove a menu is live, and a stray queued A would be consumed by the *next*
     command menu and silently consume a boundary.  The caller's planned slot is
     only ever a steering *target*; it never opens the move branch.
+
+    The command menu is answered only while ``command_fresh`` is true, which
+    the caller sets once *both* sides have re-entered their own turn loop this
+    turn.  A command menu can open for one side before the *peer* restarts its
+    turn, and answering it at that point sends that side into its move menu
+    while the peer is still finishing the previous turn's loss text; the peer
+    then walks away from the menu the next exchange needs.  Observed on the
+    blue faint pair: answering b's command menu at t=100 -- after b's own turn
+    had restarted but ~100 frames before a restarted at t=200 -- left b parked
+    in ``(1, 5, 195)`` and settled as a timeout, while the same pair driven
+    with no input at all reached a real both-command boundary at t=200 with
+    both sides healthy.
 
     Returns ``(deadline, began_turn, slot)``.  ``began_turn`` is true when the
     press opened a turn's move selection (A on FIGHT); ``slot`` names the move
@@ -638,6 +663,8 @@ def _pump_menu_input(
         session.press("down" if current < want else "up", duration=4)
         return spent + 8, False, None
     # command menu: FIGHT is entry 0, ITEM is entry 1 and must never be chosen.
+    if not command_fresh:
+        return next_press, False, None
     current = _byte(session, "wCurrentMenuItem")
     session.press("a" if current == 0 else "up", duration=4)
     return spent + 12, current == 0, None
@@ -736,6 +763,12 @@ def _settle_turn(
         # both at a command menu is a boundary and is left untouched for the
         # caller to snapshot.
         if (keep_alive or not require_counter) and not both_command:
+            # Both sides must be in the same turn before either command menu is
+            # answered.  A command menu can open for one side while its peer is
+            # still finishing the previous turn's loss text, and answering it
+            # then sends that side into its move menu ahead of the peer, which
+            # then never reaches the menu the next exchange needs.
+            pair_restarted = all(_turn_restarted(counters, index, baseline) for index in (0, 1))
             for index, session in enumerate((a, b)):
                 deadline, began, slot = _pump_menu_input(
                     session,
@@ -743,6 +776,7 @@ def _settle_turn(
                     spent=spent,
                     target_slot=slots[index],
                     started=started[index],
+                    command_fresh=pair_restarted,
                 )
                 next_press[index] = deadline
                 if began:

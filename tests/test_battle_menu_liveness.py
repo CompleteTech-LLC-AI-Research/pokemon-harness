@@ -129,3 +129,20 @@ def test_move_menu_geometry_is_not_named_a_command_menu():
     assert producer._move_menu_input_ready(session)
     assert not producer._battle_menu_input_ready(session)
     assert producer._menu_awaiting_a(session) == "move"
+
+
+def _counters(main):
+    return {"MainInBattleLoop": list(main)}
+
+
+def test_turn_restarted_tracks_the_roms_own_turn_loop_entry():
+    """``MainInBattleLoop`` is entered once per turn, even for a skipped menu."""
+
+    baseline = {"main": [7, 9]}
+    assert producer._turn_restarted(_counters([7, 9]), 0, baseline) is False
+    assert producer._turn_restarted(_counters([7, 9]), 1, baseline) is False
+    # One side restarting its turn is not enough for the caller's gate, and
+    # the predicate is per side so the caller can say which one moved.
+    assert producer._turn_restarted(_counters([8, 9]), 0, baseline) is True
+    assert producer._turn_restarted(_counters([8, 9]), 1, baseline) is False
+    assert producer._turn_restarted(_counters([8, 10]), 1, baseline) is True
