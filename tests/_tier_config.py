@@ -42,6 +42,7 @@ REAL_ROM_MODULES = frozenset(
         "test_link_symbols_real_roms.py",
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
+        "test_mcp_trade_records_rom.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
@@ -206,6 +207,7 @@ ROM_FREE_TESTS = frozenset(
 LOCAL_LINK_MODULES = frozenset(
     {
         "test_link_integration.py",
+        "test_mcp_trade_records_rom.py",
         "test_pyboy_link_session_roms.py",
     }
 )
@@ -219,7 +221,13 @@ REMOTE_LINK_MODULES = frozenset(
     }
 )
 
-MCP_STDIO_MODULES = frozenset({"test_mcp_stdio_integration.py", "test_mcp_timed_rom.py"})
+MCP_STDIO_MODULES = frozenset(
+    {
+        "test_mcp_stdio_integration.py",
+        "test_mcp_timed_rom.py",
+        "test_mcp_trade_records_rom.py",
+    }
+)
 
 # The broad trade set keeps ROM milestones visible in diagnostics. The strict
 # acceptance set below is deliberately narrower and is what the production
