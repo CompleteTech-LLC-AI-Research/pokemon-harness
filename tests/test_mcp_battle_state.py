@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +39,8 @@ from pokered_harness.state.party import parse_battle_combatant
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
 from tests.conftest import DictMemory
 from tests.fakes import FakePyBoy
+
+ROOT = Path(__file__).resolve().parents[1]
 
 # Enemy fields are placed at relocated, non-canonical addresses using the
 # engine's real battle-struct offsets (PP=25, MaxHP=15).  The party-struct
@@ -67,6 +73,7 @@ _FULL_SYM = """\
 00:C00B wPlayerSelectedMove
 00:C00C wEnemySelectedMove
 00:C00D wCurrentMenuItem
+00:D00E wBattleMonHP
 00:C018 wPlayerMonAttackMod
 00:C019 wPlayerMonDefenseMod
 00:C01A wPlayerMonSpeedMod
@@ -107,6 +114,9 @@ _MIMIC_CLOSE_HOOK = (0x0F, 0x3725)
 _PLAYER_STAT_MOD_BASE = 0xC018
 _ENEMY_STAT_MOD_BASE = 0xC01E
 _CURRENT_MENU_ITEM = 0xC00D
+# ``wBattleMonHP`` is big-endian; the synthetic table places it in the
+# switchable WRAM half so the read exercises the bank-1 path.
+_PLAYER_BATTLE_MON_HP = 0xD00E
 
 _TRANSIENT_SYMBOLS = {
     "wBattleResult",
@@ -242,9 +252,49 @@ def test_phase_forced_replacement_when_player_faint_handler_is_set():
     sym = _symbols()
     mem[0xC000] = 2
     mem[0xC002] = 1  # wInHandlePlayerMonFainted
+    # RemoveFaintedPlayerMon zeroes the active combatant before the party menu
+    # opens, so a genuine replacement has wBattleMonHP == 0.
+    mem[_PLAYER_BATTLE_MON_HP] = 0
+    mem[_PLAYER_BATTLE_MON_HP + 1] = 0
     state = parse_battle(mem, sym)
     assert state.phase is BattlePhase.FORCED_REPLACEMENT
     assert state.phase_valid is True
+
+
+def test_phase_stale_faint_flag_with_living_combatant_is_not_forced_replacement():
+    # HandlePlayerMonFainted sets wInHandlePlayerMonFainted and only
+    # HandleEnemyMonFainted clears it, so the byte survives ChooseNextMon
+    # returning to the battle loop.  A healthy combatant (non-zero HP) at the
+    # command menu is therefore stale evidence, not a live replacement.
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 2
+    mem[0xC002] = 1  # stale wInHandlePlayerMonFainted
+    mem[_PLAYER_BATTLE_MON_HP] = 0x00
+    mem[_PLAYER_BATTLE_MON_HP + 1] = 35  # living combatant
+    state = parse_battle(mem, sym)
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
+    assert state.in_handle_player_mon_fainted == 1
+
+
+def test_phase_faint_flag_without_hp_symbol_fails_closed():
+    # Without wBattleMonHP the derivation cannot tell a live replacement from a
+    # stale flag, so it must not name FORCED_REPLACEMENT.
+    sym = load_sym_text(
+        """
+        00:C000 wIsInBattle
+        00:C001 wBattleResult
+        00:C002 wInHandlePlayerMonFainted
+        00:C003 wMoveMenuType
+        00:C004 wPlayerMoveListIndex
+        00:C005 wActionResultOrTookBattleTurn
+        """
+    )
+    mem = DictMemory({0xC000: 2, 0xC002: 1})
+    state = parse_battle(mem, sym)
+    assert state.phase is None
+    assert state.phase_valid is False
 
 
 @pytest.mark.parametrize("result", [0, 1, 2])
@@ -909,6 +959,42 @@ def test_replacement_sessions_have_distinct_identities():
     assert read_resource(first, "pokered://state-epoch") != read_resource(
         second, "pokered://state-epoch"
     )
+
+
+def test_session_identities_are_distinct_across_process_restarts():
+    """Two fresh processes must not report the same first-session identity.
+
+    A bare per-process counter restarts at 1 in every process, so a client
+    comparing epochs across a server restart could accept a stale snapshot.
+    """
+    code = (
+        "import json;"
+        "from pokered_harness.events import EventBus;"
+        "from pokered_harness.session import Session;"
+        "from pokered_harness.symbols.loader import load_sym_text;"
+        "from tests.conftest import DictMemory;"
+        "from tests.fakes import FakePyBoy;"
+        "s = Session(pyboy=FakePyBoy(DictMemory()),"
+        " symbols=load_sym_text('00:C000 wIsInBattle'), event_bus=EventBus());"
+        "print(json.dumps({'session_id': s.session_id, 'epoch': "
+        "s.read_epoch().session_id}))"
+    )
+    runs = [
+        json.loads(
+            subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=ROOT,
+                env={**os.environ, "PYTHONPATH": f"{ROOT / 'src'}{os.pathsep}{ROOT}"},
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        for _ in range(2)
+    ]
+    for run in runs:
+        assert run["session_id"] == run["epoch"]
+    assert runs[0]["session_id"] != runs[1]["session_id"], runs
 
 
 def test_peer_game_state_resource_embeds_peer_epoch():

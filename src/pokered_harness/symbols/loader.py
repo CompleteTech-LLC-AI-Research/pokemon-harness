@@ -58,6 +58,62 @@ WRAM_SWITCHABLE_START = 0xD000
 WRAM_SWITCHABLE_END = 0xE000
 WRAM_BATTLE_BANK = 1
 
+# A backing store either exposes the bank dimension (PyBoy's emulator memory,
+# which accepts ``memory[bank, addr]``) or is a flat address space (the plain
+# dict/bytearray stores the loader documents and tests against).  Only these
+# failures mean "this store cannot answer a bank-qualified read"; anything else
+# is a real error and must propagate rather than silently fall back to a read
+# that would return another bank's bytes.
+#
+#   * ``TypeError``   -- ``bytearray``/``bytes``/``list`` reject the tuple key.
+#   * ``KeyError``    -- a sparse ``dict`` has no ``(bank, addr)`` entry.
+#   * ``PyBoyInvalidInputException`` -- PyBoy on DMG ("Selecting bank of WRAM
+#     is only supported for CGB mode"); a DMG has no bank register, so the
+#     ordinary mapped read is the correct one.
+#
+# The set is deliberately narrow: a store that raises anything else (for
+# example a real out-of-bounds bank) must propagate instead of silently
+# falling back to a read that could return another bank's bytes.
+_NO_BANK_DIMENSION_BASE: tuple[type[BaseException], ...] = (
+    TypeError,
+    KeyError,
+)
+
+_no_bank_dimension_cache: tuple[type[BaseException], ...] | None = None
+
+
+def _no_bank_dimension_exceptions() -> tuple[type[BaseException], ...]:
+    """Exceptions meaning "this backing store has no bank dimension".
+
+    Resolved once, lazily: PyBoy is an optional dependency of this module, so
+    it is imported only when a bank-qualified read is actually attempted, and
+    its DMG refusal (``Selecting bank of WRAM is only supported for CGB
+    mode``) joins the set when available.
+    """
+    global _no_bank_dimension_cache
+    if _no_bank_dimension_cache is None:
+        try:
+            from pyboy.utils import PyBoyInvalidInputException
+        except ImportError:  # pragma: no cover - PyBoy absent in asset-free checkouts
+            extra: tuple[type[BaseException], ...] = ()
+        else:
+            extra = (PyBoyInvalidInputException,)
+        _no_bank_dimension_cache = (*_NO_BANK_DIMENSION_BASE, *extra)
+    return _no_bank_dimension_cache
+
+
+def _read_banked(memory: MemoryLike, address: int) -> int | None:
+    """Read ``address`` from the battle WRAM bank, or ``None`` if unbanked.
+
+    ``None`` means the backing store has no bank dimension at all, so the
+    caller must use the ordinary mapped read instead of treating the absence
+    as a failure.
+    """
+    try:
+        return int(memory[WRAM_BATTLE_BANK, address]) & 0xFF  # type: ignore[index]
+    except _no_bank_dimension_exceptions():
+        return None
+
 
 def read_wram_u8(memory: MemoryLike, address: int) -> int:
     """One byte of the ROM's own battle WRAM, independent of the ``SVBK`` window.
@@ -66,9 +122,16 @@ def read_wram_u8(memory: MemoryLike, address: int) -> int:
     assigns the battle WRAM section, so the read survives the ROM banking
     another region into that window.  The fixed ``0xC000``-``0xCFFF`` range has
     no bank register and keeps its ordinary mapped read.
+
+    Flat backing stores with no bank dimension (a plain ``dict`` or
+    ``bytearray``, as the module documents) keep working: when the store
+    cannot answer a bank-qualified read, the ordinary mapped read is used,
+    which is the same byte on a single-bank store.
     """
     if WRAM_SWITCHABLE_START <= address < WRAM_SWITCHABLE_END:
-        return int(memory[WRAM_BATTLE_BANK, address]) & 0xFF  # type: ignore[index]
+        banked = _read_banked(memory, address)
+        if banked is not None:
+            return banked
     return int(memory[address]) & 0xFF  # type: ignore[arg-type]
 
 

@@ -96,6 +96,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -106,7 +107,7 @@ from pathlib import Path
 import pytest
 
 from scripts.probe_timed_rom_pair import resolve_assets
-from tests._rom_assets import find_rom_root, fixture_path, rom_path, sym_path
+from tests._rom_assets import find_fixture_root, find_rom_root, fixture_path
 from tests.test_mcp_timed_rom import PIPE_CAP, RomClient
 from tests.test_mcp_timed_stdio import CALL_BOUND
 
@@ -247,6 +248,7 @@ BATTLE_TRANSIENT_FIELDS = (
 CHILD = r"""
 import asyncio
 import contextlib
+import os
 import sys
 from pathlib import Path
 
@@ -259,6 +261,25 @@ async def _serve():
     peer_rom = Path(sys.argv[5])
     peer_sym = Path(sys.argv[6])
     peer_state = Path(sys.argv[7])
+    # The acceptance evidence claims which PyBoy runtime produced it, so the
+    # child proves its own runtime instead of trusting the parent's label: the
+    # native runtime must load the compiled extension and the source runtime
+    # must load the vendored ``.py`` tree from *this* checkout.
+    import pyboy
+    import pyboy.core.serial as _serial
+
+    expected = os.environ.get("POKERED_EXPECT_PYBOY_KIND")
+    vendor = repo / "vendor" / "pyboy-src"
+    for label, module in (("pyboy", pyboy), ("pyboy.core.serial", _serial)):
+        origin = Path(module.__file__).resolve()
+        if expected == "compiled":
+            assert origin.suffix == ".so", (label, origin)
+            assert not origin.is_relative_to(repo), (label, origin)
+        elif expected == "source":
+            assert origin.suffix == ".py", (label, origin)
+            assert origin.is_relative_to(vendor), (label, origin)
+        else:
+            raise SystemExit(f"missing POKERED_EXPECT_PYBOY_KIND for {label}")
     with contextlib.redirect_stdout(sys.stderr):
         sys.path.insert(0, str(repo / "src"))
         from pokered_harness.config import load_versions
@@ -302,30 +323,111 @@ asyncio.run(_serve())
 
 
 def _battle_assets(version):
-    """Return validated pinned assets plus the immutable battle fixture bytes."""
+    """Return validated pinned assets plus the immutable battle fixture bytes.
+
+    The battle fixture is admitted through its fixture-manifest row exactly
+    like a boundary pair member: the row records the size, SHA-1, and SHA-256
+    of the immutable bytes and the ROM/symbol pair it was captured on, and the
+    bytes on disk must match.  Validating only the ordinary ``cable_club``
+    fixture and then substituting different battle bytes would let a modified
+    fixture into the session unchecked.
+    """
     family = version.split("_")[0]
-    paths = [
-        rom_path(family, color=family != "yellow", project_root=ROOT),
-        sym_path(family, ROOT),
-        fixture_path(family, "cable_club.state", project_root=ROOT),
-        fixture_path(family, "cable_club-battle.state", project_root=ROOT),
-    ]
-    missing = [str(path) for path in paths if not path.exists()]
+    variant = VARIANT_BY_FAMILY[family]
+    rows = _manifest_rows()
+    row = rows.get(f"{family}-{variant}-battle")
+    assert row is not None, f"no admitted battle fixture row for {family}"
+    assert row["kind"] == "battle", row
+
+    assets = resolve_assets(version, ROOT)
+    rom = assets["rom"]
+    sym = assets["sym"]
+    rom_relative, sym_relative = _pinned_relatives(rom, sym)
+    battle_path = fixture_path(family, Path(row["path"]).name, project_root=ROOT)
+    assert Path(row["path"]) == Path(family) / battle_path.name, row["path"]
+    missing = [str(path) for path in (rom, sym, battle_path) if not path.is_file()]
     if missing:
         pytest.skip("missing BYO battle assets: " + ", ".join(missing))
-    # resolve_assets validates the pinned ROM/SYM and the ordinary fixture
-    # against the canonical registry; the caller only needs the battle bytes.
-    assets = resolve_assets(version, ROOT)
-    assets["state"] = fixture_path(
-        family, "cable_club-battle.state", project_root=ROOT
-    ).read_bytes()
+    assets["state"] = _admit_fixture(
+        row, battle_path, rom_relative, sym_relative, rom, sym
+    )
     return assets
+
+
+def _pinned_relatives(rom, sym):
+    """Return the manifest-relative ROM and symbol paths for a pinned pair."""
+    rom_root = find_rom_root(ROOT)
+    return (
+        (Path("rom") / rom.relative_to(rom_root)).as_posix(),
+        (Path("rom") / sym.relative_to(rom_root)).as_posix(),
+    )
+
+
+def _admit_fixture(row, path, rom_relative, sym_relative, rom, sym):
+    """Validate one immutable fixture against its manifest row; return bytes.
+
+    The row is the admission contract: size, SHA-1, SHA-256, and the exact
+    ROM/symbol bindings must all match the bytes and pinned assets on disk.
+    A mismatch is an input-contract violation (tampered or stale fixture
+    bytes), so it raises ``ValueError`` rather than asserting.
+    """
+    payload = path.read_bytes()
+    if len(payload) != row["size_bytes"]:
+        raise ValueError(
+            f"fixture size mismatch for {path}: "
+            f"{len(payload)} bytes on disk, manifest declares {row['size_bytes']}"
+        )
+    digest_sha1 = hashlib.sha1(payload).hexdigest()
+    if digest_sha1 != row["sha1"]:
+        raise ValueError(
+            f"fixture sha1 mismatch for {path}: "
+            f"{digest_sha1} on disk, manifest declares {row['sha1']}"
+        )
+    digest_sha256 = hashlib.sha256(payload).hexdigest()
+    if digest_sha256 != row["sha256"]:
+        raise ValueError(
+            f"fixture sha256 mismatch for {path}: "
+            f"{digest_sha256} on disk, manifest declares {row['sha256']}"
+        )
+    rom_sha1 = hashlib.sha1(rom.read_bytes()).hexdigest()
+    sym_sha1 = hashlib.sha1(sym.read_bytes()).hexdigest()
+    if row["expected_rom"] != {"path": rom_relative, "sha1": rom_sha1}:
+        raise ValueError(
+            f"fixture ROM binding mismatch for {path}: "
+            f"manifest declares {row['expected_rom']}, "
+            f"resolved {rom_relative} ({rom_sha1})"
+        )
+    if row["expected_symbols"] != {"path": sym_relative, "sha1": sym_sha1}:
+        raise ValueError(
+            f"fixture symbol binding mismatch for {path}: "
+            f"manifest declares {row['expected_symbols']}, "
+            f"resolved {sym_relative} ({sym_sha1})"
+        )
+    return payload
 
 
 def _manifest_rows():
     """Return the fixture-manifest rows keyed by id."""
     document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     return {row["id"]: row for row in document["fixtures"]}
+
+
+def _pyboy_runtime_kind() -> str:
+    """Which PyBoy runtime this test process loaded: ``compiled`` or ``source``.
+
+    The acceptance evidence records the runtime that produced it, so the
+    parent must not label the pair from the interpreter path alone: it asks the
+    import system what ``pyboy`` actually resolves to.  A compiled extension
+    (``.so``) is the native runtime; a vendored ``.py`` tree is the source
+    runtime.  The child re-checks the same fact so a mislabelled run fails
+    instead of publishing mislabelled evidence.
+    """
+    origin = Path(importlib.util.find_spec("pyboy").origin).resolve()
+    if origin.suffix == ".so":
+        return "compiled"
+    if origin.suffix == ".py":
+        return "source"
+    raise AssertionError(f"unexpected PyBoy origin: {origin}")
 
 
 def _boundary_assets(version, slug):
@@ -350,9 +452,7 @@ def _boundary_assets(version, slug):
     assets = resolve_assets(version, ROOT)
     rom = assets["rom"]
     sym = assets["sym"]
-    rom_root = find_rom_root(ROOT)
-    rom_relative = (Path("rom") / rom.relative_to(rom_root)).as_posix()
-    sym_relative = (Path("rom") / sym.relative_to(rom_root)).as_posix()
+    rom_relative, sym_relative = _pinned_relatives(rom, sym)
     primary_path = fixture_path(family, Path(primary_row["path"]).name, project_root=ROOT)
     peer_path = fixture_path(family, Path(peer_row["path"]).name, project_root=ROOT)
     assert Path(primary_row["path"]) == Path(family) / primary_path.name, primary_row["path"]
@@ -363,21 +463,16 @@ def _boundary_assets(version, slug):
     if missing:
         pytest.skip("missing admitted boundary assets: " + ", ".join(missing))
 
-    rom_sha1 = hashlib.sha1(rom.read_bytes()).hexdigest()
-    sym_sha1 = hashlib.sha1(sym.read_bytes()).hexdigest()
-    for row, path in ((primary_row, primary_path), (peer_row, peer_path)):
-        payload = path.read_bytes()
-        assert len(payload) == row["size_bytes"], (path, row["size_bytes"])
-        assert hashlib.sha1(payload).hexdigest() == row["sha1"], path
-        assert hashlib.sha256(payload).hexdigest() == row["sha256"], path
-        assert row["expected_rom"] == {"path": rom_relative, "sha1": rom_sha1}, (path, row)
-        assert row["expected_symbols"] == {"path": sym_relative, "sha1": sym_sha1}, (path, row)
+    primary = _admit_fixture(
+        primary_row, primary_path, rom_relative, sym_relative, rom, sym
+    )
+    peer = _admit_fixture(peer_row, peer_path, rom_relative, sym_relative, rom, sym)
     return {
         "family": family,
         "rom": rom,
         "sym": sym,
-        "primary": primary_path.read_bytes(),
-        "peer": peer_path.read_bytes(),
+        "primary": primary,
+        "peer": peer,
         "row": primary_row,
         "peer_row": peer_row,
     }
@@ -401,7 +496,18 @@ async def _stdio_server(tmp_path, asset, *, name="server"):
     peer_state = directory / "peer-cable_club-battle.state"
     peer_state.write_bytes(asset.get("peer", asset.get("state")))
     env = {key: value for key, value in os.environ.items() if not key.startswith("POKERED_")}
-    env["PYTHONPATH"] = os.pathsep.join((str(ROOT / "src"), str(ROOT / "vendor/pyboy-src")))
+    # PyBoy runtime selection follows the interpreter, not a hard-coded
+    # PYTHONPATH: the native runtime must load its compiled extension, and the
+    # source runtime must load this checkout's vendored ``.py`` tree.  Pinning
+    # ``vendor/pyboy-src`` unconditionally made the "native" acceptance run
+    # silently execute source PyBoy, so the path is added only for the source
+    # runtime and the child re-verifies the origin of every PyBoy module.
+    runtime_kind = _pyboy_runtime_kind()
+    pythonpath = [str(ROOT / "src")]
+    if runtime_kind == "source":
+        pythonpath.insert(0, str(ROOT / "vendor" / "pyboy-src"))
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    env["POKERED_EXPECT_PYBOY_KIND"] = runtime_kind
     env["PYTHONUNBUFFERED"] = "1"
     client = None
     try:
@@ -1251,6 +1357,39 @@ async def _prelink(client, asset):
     )
 
 
+@pytest.mark.parametrize("version", FAMILIES)
+def test_battle_fixture_is_admitted_against_its_manifest_row(tmp_path, monkeypatch, version):
+    """A tampered battle fixture must be rejected, not loaded.
+
+    ``_battle_assets`` validates the actual battle bytes against the manifest
+    row (size, SHA-1, SHA-256, ROM/symbol bindings) instead of validating the
+    ordinary ``cable_club`` fixture and substituting unchecked battle bytes.
+    The tampering is done in a temporary fixture root so no repository or
+    private fixture byte is touched.
+    """
+    if os.environ.get("POKERED_SKIP_SHA1"):
+        pytest.fail("POKERED_SKIP_SHA1 must not be used for real-ROM evidence")
+    original_root = find_fixture_root(ROOT)
+
+    # The untampered bytes pass admission.
+    assets = _battle_assets(version)
+    assert assets["state"] != b""
+
+    family = version.split("_")[0]
+    if not (original_root / family / "cable_club-battle.state").is_file():
+        pytest.skip(f"missing BYO battle fixture for {family}")
+    tampered_root = tmp_path / "fixtures"
+    shutil.copytree(original_root, tampered_root)
+    battle = tampered_root / family / "cable_club-battle.state"
+    battle.write_bytes(battle.read_bytes() + b"\x00")
+    monkeypatch.setenv("POKERED_FIXTURE_ROOT", str(tampered_root))
+
+    # An appended byte no longer matches the row's size and digests, so the
+    # loader must refuse the bytes rather than hand them to a session.
+    with pytest.raises(ValueError, match="mismatch"):
+        _battle_assets(version)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("version", FAMILIES)
 async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
@@ -1696,6 +1835,13 @@ async def test_real_rom_mcp_terminal_return_drive_reads(tmp_path, version):
             assert _command_menu_ready(state), (label, state["menu"])
             active = _active_mon(state)
             assert active is not None and active["hp"] > 0, (label, active)
+            # A healthy combatant at the command menu must not be reported as a
+            # forced replacement.  The ROM leaves
+            # ``wInHandlePlayerMonFainted`` set after ``ChooseNextMon`` returns
+            # to the battle loop, so a derivation that trusted that byte alone
+            # named phase 4 here for all three games (Red 35 HP, Blue 9 HP,
+            # Yellow 102 HP).
+            assert battle["phase"] != FORCED_REPLACEMENT_PHASE, (label, battle)
         _log(
             "boundary_reload",
             f"version={version} fixture={assets['row']['path']} plan={plan}",

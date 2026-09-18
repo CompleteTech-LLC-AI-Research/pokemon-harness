@@ -198,6 +198,18 @@ _PHASE_TRANSIENT_SYMBOLS = (
     "wActionResultOrTookBattleTurn",
 )
 
+# The player faint handler sets ``wInHandlePlayerMonFainted`` on entry and only
+# the *enemy* faint path clears it, so the byte stays set after ``ChooseNextMon``
+# returns to the battle loop (verified in ``engine/battle/core.asm``:
+# ``HandlePlayerMonFainted`` writes 1, ``HandleEnemyMonFainted`` writes 0).  A
+# surviving non-zero byte therefore does not by itself prove the player is
+# *currently* choosing a replacement -- at a healthy command boundary it is
+# stale, and the ROM leaves it set in exactly that state.  The live signal is
+# the zeroed active combatant: ``RemoveFaintedPlayerMon`` (called before the
+# replacement menu opens) zeroes ``wBattleMonHP``, so a genuine forced
+# replacement has ``wInHandlePlayerMonFainted != 0`` *and* ``wBattleMonHP == 0``.
+_FORCED_REPLACEMENT_HP_SYMBOL = "wBattleMonHP"
+
 # Raw ``wBattleResult`` bytes with an engine writer (end_of_battle.asm maps
 # 0 to a win, 1 to a loss, and 2 to a draw in link battles).  0 is also
 # written at battle start, on a link EnemyRan, on every enemy faint, on a
@@ -462,6 +474,15 @@ def _derive_phase(
       block is *not* enough to claim ``INTRO``: absence of the other flags
       does not prove the intro animation is playing.
 
+    ``wInHandlePlayerMonFainted`` alone never proves ``FORCED_REPLACEMENT``:
+    the ROM sets it in ``HandlePlayerMonFainted`` and clears it only in
+    ``HandleEnemyMonFainted``, so it stays set after ``ChooseNextMon`` returns
+    to the battle loop and reads stale at a healthy command boundary.  The
+    phase requires the ROM's current-replacement signal as well -- a zeroed
+    ``wBattleMonHP``, which ``RemoveFaintedPlayerMon`` writes before the party
+    menu opens.  When the flag is set but that HP symbol is absent the result
+    is ``None``/``False`` (fail closed).
+
     ``wBattleResult`` only emits ``TERMINAL_RETURN`` on the observed
     battle-end transition (``battle_ended``); its reset value 0 and its
     mid-battle writes are never terminal on their own.  ``wMoveMenuType``
@@ -493,23 +514,54 @@ def _derive_phase(
     evidence.extend(_PHASE_TRANSIENT_SYMBOLS)
     _extend_unique(evidence, menu.evidence if menu is not None else ())
 
-    forced = symbols.read_u8(memory, "wInHandlePlayerMonFainted") != 0
+    forced = _forced_replacement_is_current(memory, symbols)
     action = symbols.read_u8(memory, "wActionResultOrTookBattleTurn") != 0
     menu_open = menu is not None and menu.open is True
 
     observed: set[BattlePhase] = set()
-    if forced:
+    if forced is True:
         observed.add(BattlePhase.FORCED_REPLACEMENT)
     if action:
         observed.add(BattlePhase.ACTION_RESOLUTION)
     if menu_open:
         observed.add(BattlePhase.COMMAND_SELECTION)
 
+    # ``None`` means the faint flag is set but the evidence cannot say whether
+    # the replacement is current, so no observed phase may be reported.
+    if forced is None:
+        return None, False, tuple(evidence)
     if len(observed) > 1:
         return None, False, tuple(evidence)
     if observed:
         return next(iter(observed)), True, tuple(evidence)
     return BattlePhase.UNKNOWN, False, tuple(evidence)
+
+
+def _forced_replacement_is_current(
+    memory: MemoryLike, symbols: SymbolTable
+) -> bool | None:
+    """Whether a forced player replacement is happening *right now*.
+
+    ``wInHandlePlayerMonFainted`` is set by ``HandlePlayerMonFainted`` and
+    cleared only by ``HandleEnemyMonFainted``, so the byte survives
+    ``ChooseNextMon`` returning to the battle loop.  A non-zero byte alone is
+    therefore stale evidence at a healthy command boundary.
+
+    The ROM's own current-replacement signal is the zeroed active combatant:
+    ``RemoveFaintedPlayerMon`` zeroes ``wBattleMonHP`` before the party menu
+    opens, so ``wInHandlePlayerMonFainted != 0`` together with
+    ``wBattleMonHP == 0`` proves the player is choosing a replacement.  A
+    non-zero ``wBattleMonHP`` proves the flag is stale.
+
+    Returns ``True``/``False`` when the pair of symbols decides it, and
+    ``None`` when the flag is set but the HP symbol is absent -- the caller
+    must then fail closed rather than assert a replacement it cannot prove.
+    """
+    if symbols.read_u8(memory, "wInHandlePlayerMonFainted") == 0:
+        return False
+    if _FORCED_REPLACEMENT_HP_SYMBOL not in symbols:
+        return None
+    return symbols.read_u16_be(memory, _FORCED_REPLACEMENT_HP_SYMBOL) == 0
 
 
 def _extend_unique(target: list[str], extra: tuple[str, ...]) -> None:

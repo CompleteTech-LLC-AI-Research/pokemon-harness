@@ -2842,7 +2842,7 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
         raise McpHarnessError("link_teardown_failed", details)
 
 
-def _epoch_payload(epoch: SessionEpoch) -> dict[str, int]:
+def _epoch_payload(epoch: SessionEpoch) -> dict[str, int | str]:
     return {
         "tick": epoch.tick,
         "load_generation": epoch.load_generation,
@@ -2959,8 +2959,9 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
                 "tick advances with stepping; the load generation advances on "
                 "every `load_state` and the reset generation on every "
                 "`reset_tick`, so a rewound clock remains detectable; "
-                "`session_id` distinguishes a replacement session. Compare "
-                "successive reads to reject stale snapshots."
+                "`session_id` distinguishes a replacement session, including "
+                "across a server restart. Compare successive reads to reject "
+                "stale snapshots."
             ),
             mimeType="application/json",
         ),

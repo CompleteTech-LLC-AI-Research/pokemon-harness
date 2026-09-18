@@ -110,16 +110,19 @@ def test_local_step_holds_both_locks_through_bookkeeping(monkeypatch, side, oper
         for session in (primary, peer):
             session._pyboy.tick(count, render=render)
 
-    reset_tick = primary.reset_tick
+    advance_tick = primary._advance_tick
 
-    def paused_reset(value):
-        # Pause after current_tick()+count was calculated, exposing lost
-        # ordinary increments if the compound operation drops its lock.
+    def paused_advance(count):
+        # Pause inside the bookkeeping step (both owner locks are held here),
+        # exposing lost ordinary increments if the compound operation drops
+        # its lock.  The interleaved path advances the clock through
+        # ``_advance_tick`` rather than ``reset_tick`` so that stepping does
+        # not invalidate the battle/menu observations recorded while stepping.
         pause()
-        reset_tick(value)
+        return advance_tick(count)
 
     if pause_at == "bookkeeping":
-        monkeypatch.setattr(primary, "reset_tick", paused_reset)
+        monkeypatch.setattr(primary, "_advance_tick", paused_advance)
     link.local_link_session = SimpleNamespace(step_interleaved=step)
     result = _contend(primary, peer, side, operation,
         lambda: dispatch_tool(primary, "link_step", {"count": 2}, link=link), entered, release)

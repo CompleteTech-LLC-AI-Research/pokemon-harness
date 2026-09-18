@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
+import os
 import re
 import threading
 import time
@@ -121,17 +122,36 @@ class SymbolHashMismatch(VersionMismatch):
 
 _DEFAULT_CLOSE_TIMEOUT_S = 5.0
 
-# Process-local monotonic identity for each Session.  A replacement session
-# (a new Session object over a fresh emulator) must not be able to reuse the
-# tick/load-generation pair of the session it replaced, so the identity is
-# included in every epoch snapshot.
+# Monotonic identity for each Session.  A replacement session (a new Session
+# object over a fresh emulator) must not be able to reuse the tick/load
+# generation pair of the session it replaced, so the identity is included in
+# every epoch snapshot.
+#
+# A bare per-process counter is not enough: it restarts at 1 in every new
+# process, so two fresh processes would report the same ``session_id`` for
+# their first session and a client comparing epochs across a restart could
+# accept a stale snapshot.
+#
+# The id is therefore a string naming the process lifetime and the in-process
+# session index:
+#
+#     <pid>-<process-start-ns>-<index>
+#
+# ``pid`` separates concurrent processes, and the system-wide monotonic clock
+# separates sequential process lifetimes that reuse a pid.  A string (rather
+# than a packed integer) keeps both components exact: a 53-bit float-safe
+# integer cannot hold a nanosecond timestamp together with a pid and a
+# counter without mangling one of them, and JSON transports numbers through
+# IEEE-754 doubles.
+_PROCESS_START_NS = time.monotonic_ns()
+_PROCESS_LIFETIME_ID = f"{os.getpid()}-{_PROCESS_START_NS}"
 _SESSION_ID_SEQUENCE = itertools.count(1)
 _SESSION_ID_LOCK = threading.Lock()
 
 
-def _next_session_id() -> int:
+def _next_session_id() -> str:
     with _SESSION_ID_LOCK:
-        return next(_SESSION_ID_SEQUENCE)
+        return f"{_PROCESS_LIFETIME_ID}-{next(_SESSION_ID_SEQUENCE)}"
 
 
 # ROM labels whose execution brackets the battle command/move menu.  There is
@@ -172,13 +192,14 @@ class SessionEpoch:
     load, so the pair alone can repeat); ``reset_generation`` advances on
     every :meth:`Session.reset_tick` (which can intentionally rewind the
     tick); ``session_id`` distinguishes a replacement :class:`Session` from
-    the one it replaced.
+    the one it replaced, including across process restarts (it names the
+    process lifetime and the in-process session index).
     """
 
     tick: int
     load_generation: int
     reset_generation: int
-    session_id: int
+    session_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,7 +276,7 @@ class Session:
         self._tick: int = 0
         self._load_generation: int = 0
         self._reset_generation: int = 0
-        self._session_id: int = _next_session_id()
+        self._session_id: str = _next_session_id()
         self._battle_lifecycle = BattleLifecycle()
         # The owner registry is shared with raw link providers.  Keep the
         # Session-facing ``_lock`` property below for compatibility with
@@ -862,8 +883,13 @@ class Session:
             return self._load_generation
 
     @property
-    def session_id(self) -> int:
-        """Process-local identity that distinguishes replacement sessions."""
+    def session_id(self) -> str:
+        """Identity naming the process lifetime and in-process session index.
+
+        Distinct across replacement sessions in one process *and* across
+        process restarts, so a client comparing epochs across a server restart
+        cannot accept a stale snapshot.
+        """
         return self._session_id
 
     def _epoch_locked(self) -> SessionEpoch:
