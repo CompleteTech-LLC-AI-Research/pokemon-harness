@@ -2,6 +2,11 @@
 
 Commit: `63615e139f5a8c712bd2e2680d4780aaa0e87bc0`  Branch: `work/battle-state-88`
 
+> **SUPERSEDED by `pr113-boundary-3f0f971`.** This run is still an accurate
+> record of `63615e1`, but round 11 of review then hardened the epoch, stdio,
+> and provenance paths. The current evidence for this branch is
+> `release-evidence/feature-qualification/pr113-boundary-3f0f971/`.
+
 Sanitized from the `MCP_BATTLE_BOUNDARY` payloads printed by
 `tests/test_mcp_battle_phase_rom.py`, plus the junit summary of each cell.
 Twelve cells, twelve passes, zero skips, zero failures.

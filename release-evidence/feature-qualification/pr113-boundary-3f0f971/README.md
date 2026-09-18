@@ -1,15 +1,6 @@
 # PR #113 real-ROM Cable Club boundary and terminal evidence
 
-Commit: `925a38aba5fe8e78ad6a588f01cfcc4a2bf8a1f4`  Branch: `work/battle-state-88`
-
-> **SUPERSEDED by `pr113-boundary-3f0f971`.** This run is still an accurate
-> record of `925a38a`, but round 10 of review then changed the phase and
-> terminal contracts: the forced-replacement guard now also requires a living
-> party member (so a final faint is no longer reported as a replacement) and
-> `phase_evidence` reports the party symbols it consulted, and a terminal
-> result is only promoted from bytes sampled at the ROM's own `EndOfBattle`.
-> The current evidence for this branch is
-> `release-evidence/feature-qualification/pr113-boundary-3f0f971/`.
+Commit: `3f0f971fb7a40ee3c92e9dc9ace49551633c0f5c`  Branch: `work/battle-state-88`
 
 Sanitized from the `MCP_BATTLE_BOUNDARY` payloads printed by
 `tests/test_mcp_battle_phase_rom.py`, plus the junit summary of each cell.
@@ -34,12 +25,12 @@ really did use different runtimes.
 
 | runtime | game | boundary (junit) | terminal drive (junit) | drive frames |
 |---|---|---|---|---|
-| native | red_color | PASS 1.64s | PASS 57.96s | 1216 |
-| native | yellow | PASS 1.84s | PASS 60.49s | 2576 |
-| native | blue_color | PASS 1.59s | PASS 75.60s | 1592 |
-| source | red_color | PASS 1.70s | PASS 264.56s | 1216 |
-| source | yellow | PASS 2.05s | PASS 268.28s | 2576 |
-| source | blue_color | PASS 1.63s | PASS 332.95s | 1592 |
+| native | red_color | PASS 1.66s | PASS 60.37s | 1216 |
+| native | yellow | PASS 2.37s | PASS 74.01s | 2576 |
+| native | blue_color | PASS 1.82s | PASS 98.72s | 1592 |
+| source | red_color | PASS 2.43s | PASS 330.91s | 1216 |
+| source | yellow | PASS 2.30s | PASS 320.82s | 2576 |
+| source | blue_color | PASS 6.66s | PASS 348.19s | 1592 |
 
 ## What each cell observes
 
