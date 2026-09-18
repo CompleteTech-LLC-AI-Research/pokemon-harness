@@ -199,26 +199,50 @@ def _repo_commit(repo_root: Path) -> str | None:
 
 
 def _byte(session, name: str) -> int:
-    return int(session._pyboy.memory[session.symbols.addr_of(name)])
+    return _wram_byte(session, session.symbols.addr_of(name))
 
 
 def _word(session, name: str) -> int:
     address = session.symbols.addr_of(name)
-    return (int(session._pyboy.memory[address]) << 8) | int(session._pyboy.memory[address + 1])
+    return (_wram_byte(session, address) << 8) | _wram_byte(session, address + 1)
 
 
-# Every address in ``0xD000``-``0xDFFF`` is remapped by the CGB WRAM bank
-# register rather than read directly: PyBoy indexes ``internal_ram0`` at
-# ``i - 0xC000 + (bank - 1) * 0x1000`` with ``bank == 0`` folded to ``1``, so a
-# read is the ROM's own bank-1 byte only while ``SVBK`` names bank 0 or 1.  The
-# ROM banks other WRAM regions in and out as it works, and the color-patched
-# Red/Blue build was observed to sit at ``SVBK == 2`` on a wedged link partner,
-# which silently turns every banked read into another bank's bytes (there
-# ``wIsInBattle``, ``wPartyCount`` and the whole party read back as zero).  The
-# banked observations below therefore fail closed instead of reporting bytes of
-# a bank the ROM is not using, and the bank is recorded with each fixture so
-# the admission evidence names the window the reads were taken in.
+# ``0xC000``-``0xCFFF`` is fixed WRAM bank 0, but every address in
+# ``0xD000``-``0xDFFF`` is remapped by the CGB WRAM bank register: PyBoy
+# indexes ``internal_ram0`` at ``i - 0xC000 + (bank - 1) * 0x1000`` with
+# ``bank == 0`` folded to ``1``, so an unqualified ``memory[addr]`` read
+# follows ``SVBK`` and can name a bank the ROM is not using for its battle
+# state.
+#
+# The linker places the battle WRAM section that holds ``wIsInBattle``,
+# ``wBattleMonHP``, ``wPartyCount`` and ``wPartyMons`` in the ``$D000``-
+# ``$DFFF`` half of WRAM bank 1 (``ram/wram.asm:198`` "WRAM" WRAM0,
+# ``:1720`` "Party Data" WRAM0), and PyBoy's bank-indexed read
+# ``memory[1, addr]`` returns that bank's own byte regardless of ``SVBK``
+# (verified first-hand against a live session: with ``SVBK == 2`` mapped,
+# ``wIsInBattle`` reads 0 through the mapped window and 2 through bank 1).
+# Those variables therefore stay authoritative while the ROM has bank 2
+# mapped for its own scratch use -- ``SVBK == 2`` is a legitimate ROM state,
+# not a degenerated one.  Reading the bank-1 bytes directly is what keeps the
+# driver able to see a live battle party menu behind an ``SVBK == 2`` window
+# instead of failing closed and starving the pair.
 WRAM_BANK_PORT = 0xFF70
+WRAM_SWITCHABLE_START = 0xD000
+WRAM_SWITCHABLE_END = 0xE000
+WRAM_BATTLE_BANK = 1
+
+
+def _wram_byte(session, address: int) -> int:
+    """One byte of the ROM's own battle WRAM, independent of the ``SVBK`` window.
+
+    ``0xD000``-``0xDFFF`` is resolved from WRAM bank 1, the bank the linker
+    assigns the battle WRAM section to, so the read survives the ROM banking
+    another region into that window.  The fixed ``0xC000``-``0xCFFF`` range has
+    no bank register and keeps its ordinary mapped read.
+    """
+    if WRAM_SWITCHABLE_START <= address < WRAM_SWITCHABLE_END:
+        return int(session._pyboy.memory[WRAM_BATTLE_BANK, address])
+    return int(session._pyboy.memory[address])
 
 
 def _wram_bank(session) -> int | None:
@@ -230,8 +254,15 @@ def _wram_bank(session) -> int | None:
 
 
 def _banked_readable(session) -> bool:
-    """True while ``0xD000``-``0xDFFF`` still maps to the ROM's WRAM bank 1."""
-    return _wram_bank(session) in (0, 1)
+    """True while the ROM's battle WRAM bank is readable.
+
+    The battle observations are taken from WRAM bank 1 directly rather than
+    through the ``SVBK`` window, so the bank register no longer decides whether
+    they are trustworthy and there is no window to fail closed on.  The
+    predicate is retained as the named admission point for those reads and to
+    keep the recorded ``wram_bank`` meaningful as a window annotation.
+    """
+    return True
 
 
 def _menu_fields(session) -> tuple[int, int, int] | None:
@@ -320,8 +351,8 @@ def _party_hp(session) -> list[int]:
     base = session.symbols.addr_of("wPartyMons")
     count = _byte(session, "wPartyCount")
     return [
-        (int(session._pyboy.memory[base + slot * PARTY_MON_SIZE + 1]) << 8)
-        | int(session._pyboy.memory[base + slot * PARTY_MON_SIZE + 2])
+        (_wram_byte(session, base + slot * PARTY_MON_SIZE + 1) << 8)
+        | _wram_byte(session, base + slot * PARTY_MON_SIZE + 2)
         for slot in range(count)
     ]
 
@@ -356,7 +387,7 @@ def _battle_ended(session) -> bool:
 def _party_summary(session) -> dict:
     count = _byte(session, "wPartyCount")
     species_addr = session.symbols.addr_of("wPartySpecies")
-    species = [int(session._pyboy.memory[species_addr + slot]) for slot in range(count)]
+    species = [_wram_byte(session, species_addr + slot) for slot in range(count)]
     hp = _party_hp_or_empty(session)
     active_hp, active_max = _active_hp(session)
     return {
@@ -899,14 +930,12 @@ def _choose_healthy_replacement(session, link, *, step_frames, frame_budget, chu
     routine returns as soon as the replacement is out whether or not that
     instant arrived with a button.
 
-    The success reading is taken only while ``0xD000``-``0xDFFF`` still maps to
-    the ROM's own WRAM bank: ``wBattleMonHP`` lives there and a wedged partner
-    leaves ``SVBK == 2``, under which the same address reads another bank's
-    bytes.  An earlier revision trusted that read and reported a completed
-    replacement on a side whose battle had already degenerated, which then
-    fabricated a boundary from garbage rather than failing; an unreadable bank
-    is therefore treated as "not yet replaced" and the caller's own budget
-    decides.
+    ``wBattleMonHP`` lives in WRAM bank 1, and the success reading resolves
+    that bank directly rather than through the ``SVBK`` window, so it stays
+    authoritative while the ROM has another bank mapped (see ``_wram_byte``).
+    The earlier "fail closed on ``SVBK != 0/1``" rule read the wrong bank and
+    made a live party menu invisible, which starved the pair; the read
+    primitive is now bank-correct instead.
     """
     spent = 0
     next_press = 0
