@@ -218,6 +218,11 @@ PHASE_EVIDENCE_SYMBOLS = frozenset(
         "wMoveMenuType",
         "wPlayerMoveListIndex",
         "wActionResultOrTookBattleTurn",
+        # Consulted only by the forced-replacement guard, which requires a
+        # living party member so a final faint is not read as a replacement.
+        "wBattleMonHP",
+        "wPartyCount",
+        "wPartyMon1HP",
     }
 )
 # Public MCP tools the test is permitted to call.  There is no memory, RAM,
