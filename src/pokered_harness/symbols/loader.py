@@ -40,7 +40,7 @@ class MemoryLike(Protocol):
     dict/bytearray backing store.
     """
 
-    def __getitem__(self, key: int | slice) -> int | Iterable[int]: ...
+    def __getitem__(self, key: int | slice | tuple[int, int]) -> int | Iterable[int]: ...
 
 
 # ``0xC000``-``0xCFFF`` is fixed WRAM bank 0, but ``0xD000``-``0xDFFF`` is
@@ -142,15 +142,17 @@ class SymbolTable:
     # --- typed reads (WRAM/HRAM CPU-space) -------------------------------
 
     def read_u8(self, memory: MemoryLike, name: str) -> int:
-        value = memory[self.addr_of(name)]
-        return int(value) & 0xFF
+        # ``0xD000``-``0xDFFF`` is remapped by ``SVBK``, and the ROM banks its
+        # own scratch region into that window during a link battle, so a
+        # symbol read must name the bank the linker assigned instead of
+        # following whatever the ROM currently has mapped.  See
+        # :func:`read_wram_u8`.
+        return read_wram_u8(memory, self.addr_of(name))
 
     def read_bytes(self, memory: MemoryLike, name: str, length: int) -> bytes:
         if length <= 0:
             raise ValueError(f"length must be positive, got {length}")
-        addr = self.addr_of(name)
-        raw = memory[addr : addr + length]
-        return bytes(raw)  # type: ignore[arg-type]
+        return read_wram_bytes(memory, self.addr_of(name), length)
 
     def read_u16_le(self, memory: MemoryLike, name: str) -> int:
         lo, hi = self.read_bytes(memory, name, 2)

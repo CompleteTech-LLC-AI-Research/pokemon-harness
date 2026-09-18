@@ -1,9 +1,13 @@
 # External fixture evidence
 
-[`fixture-manifest.json`](fixture-manifest.json) records the 10 save-state
+[`fixture-manifest.json`](fixture-manifest.json) records the 28 save-state
 files observed in the operator-managed `tests/fixtures/link` root. It records
 file size, SHA-1, SHA-256, the expected ROM/symbol pins, and the provenance
-known at the time of the audit.
+known at the time of the audit: six `verified` canonical rows, four `partial`
+vanilla rows, and eighteen `captured` boundary rows (a forced-replacement
+party menu, the last command boundary before the deciding knockout, and the
+terminal return, each with a peer sibling) driven from the admitted battle
+fixtures.
 
 [`current-audit-2026-08-31.md`](current-audit-2026-08-31.md) records the
 current isolated-candidate gate counts, runtime identity, explicit-ROM MCP

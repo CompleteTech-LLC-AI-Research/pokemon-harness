@@ -44,12 +44,23 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 class DictMemory:
-    """Sparse dict-backed MemoryLike — defaults to 0 for unset addresses."""
+    """Sparse dict-backed MemoryLike — defaults to 0 for unset addresses.
+
+    Models PyBoy's WRAM read contract for ``0xC000``-``0xDFFF``: the fixed
+    ``0xC000``-``0xCFFF`` half reads back directly, while the
+    ``0xD000``-``0xDFFF`` half is remapped by ``SVBK`` and the bank-indexed
+    form ``memory[bank, addr]`` returns that bank's own byte.  Tests write the
+    plain address (the linker's bank 1 view), so an unqualified read of a
+    banked symbol is a bug rather than a coincidence.
+    """
 
     def __init__(self, initial: dict[int, int] | None = None) -> None:
         self._m: dict[int, int] = dict(initial or {})
 
     def __getitem__(self, key):
+        if isinstance(key, tuple):
+            _bank, address = key
+            return self._m.get(int(address), 0)
         if isinstance(key, slice):
             start, stop, step = key.start, key.stop, key.step or 1
             return [self._m.get(a, 0) for a in range(start, stop, step)]

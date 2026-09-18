@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import merge_battle_boundary_scenarios as boundary_merge
 from scripts import produce_battle_scenario as producer
 from scripts import validate_battle_scenarios as validator
 
@@ -52,7 +53,9 @@ def _scenario(catalog: dict, scenario_id: str) -> dict:
 def test_catalog_validates_against_the_fixture_manifest() -> None:
     catalog = _load_catalog()
     scenarios = validator._validate_schema(catalog, _load_manifest())
-    assert len(scenarios) == 10
+    # One scenario per admitted manifest row: the six canonical/vanilla
+    # ordinary and battle rows plus the eighteen captured boundary rows.
+    assert len(scenarios) == len(_load_manifest()["fixtures"]) == 28
     assert {scenario["fixture"]["fixture_id"] for scenario in scenarios} == {
         fixture["id"] for fixture in _load_manifest()["fixtures"]
     }
@@ -72,6 +75,7 @@ def test_catalog_copies_provenance_statuses_truthfully_and_has_no_execution_clai
     assert observed == expected
     assert sum(status == "verified" for status in observed.values()) == 6
     assert sum(status == "partial" for status in observed.values()) == 4
+    assert sum(status == "captured" for status in observed.values()) == 18
     assert all(
         scenario["evidence_class"]["real_rom_execution"] is None
         for scenario in catalog["scenarios"]
@@ -176,6 +180,127 @@ def test_partial_and_unknown_provenance_stay_visible() -> None:
     }
     for status in ("partial", "unknown"):
         validator._validate_provenance({**base, "status": status}, "provenance")
+
+
+def test_captured_provenance_requires_the_full_chain_and_input_binding() -> None:
+    """A captured row must carry the verified fields plus its input pin."""
+    base = {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "red-color-battle",
+        "input_fixture_sha1": "a" * 40,
+        "input_sequence": "real-play Cable Club link drive to the faint boundary",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime",
+        "captured_at_utc": "2026-09-18T04:38:03Z",
+        "verification_method": "reload-validated against the boundary invariants",
+    }
+    validator._validate_provenance(base, "provenance")
+
+    # ``captured`` is as strict as ``verified``: every recorded identity field
+    # is mandatory, and the drive must name and pin the admitted input.
+    for field in ("runtime_identity", "captured_at_utc", "verification_method"):
+        with pytest.raises(ValueError, match=f"{field} is required for captured provenance"):
+            validator._validate_provenance({**base, field: None}, "provenance")
+    with pytest.raises(ValueError, match="source_fixture_id is required"):
+        validator._validate_provenance({**base, "source_fixture_id": None}, "provenance")
+    with pytest.raises(ValueError, match="input_fixture_sha1 is required"):
+        validator._validate_provenance({**base, "input_fixture_sha1": None}, "provenance")
+    with pytest.raises(ValueError, match="input_sequence is required"):
+        validator._validate_provenance({**base, "input_sequence": None}, "provenance")
+
+
+def test_boundary_scenario_bounds_are_the_real_replay_geometry() -> None:
+    """The declared bounds must be the drive constants the tests actually use."""
+    from scripts import production_gate
+    from tests import test_mcp_battle_phase_rom as boundary_tests
+
+    bounds = boundary_merge._bounds()
+    assert bounds["max_frames"] == boundary_tests.BOUNDARY_DRIVE_BUDGET
+    assert bounds["max_wall_seconds"] == production_gate.DEFAULT_TIMEOUT_SECONDS["local"]
+    # One input per owner at most every ``BOUNDARY_INPUT_SPACING`` frames.
+    assert bounds["max_inputs"] == 2 * (boundary_tests.BOUNDARY_DRIVE_BUDGET // 8 + 1)
+    producer.validate_bounds(**bounds)
+
+
+def test_every_admitted_boundary_fixture_is_declared() -> None:
+    """No admitted boundary row may be missing its catalog scenario."""
+    catalog = _load_catalog()
+    manifest = _load_manifest()
+    declared = {
+        scenario["fixture"]["fixture_id"]: scenario
+        for scenario in catalog["scenarios"]
+        if scenario["battle"]["type"] == boundary_merge._BOUNDARY_BATTLE_TYPE
+    }
+    expected = {row["id"] for row in manifest["fixtures"] if row["kind"] == "boundary"}
+    assert set(declared) == expected
+    assert len(declared) == 18
+
+    for row in manifest["fixtures"]:
+        if row["kind"] != "boundary":
+            continue
+        scenario = declared[row["id"]]
+        # The scenario is derived from the manifest row, not restated by hand.
+        assert scenario["fixture"]["sha1"] == row["sha1"]
+        assert scenario["fixture"]["sha256"] == row["sha256"]
+        assert scenario["fixture"]["size_bytes"] == row["size_bytes"]
+        assert scenario["game"]["rom_sha1"] == row["expected_rom"]["sha1"]
+        assert scenario["game"]["sym_sha1"] == row["expected_symbols"]["sha1"]
+        assert scenario["provenance"]["status"] == row["provenance"]["status"] == "captured"
+        assert scenario["provenance"]["runtime_identity"] == row["provenance"]["runtime_identity"]
+        # A captured row names and pins the admitted battle input it was driven
+        # from, and declares the boundary kind the producer recorded.
+        assert scenario["provenance"]["source_fixture_id"] == (
+            f"{row['version']}-{row['variant']}-battle"
+        )
+        assert scenario["capture_boundary"]["stage"] == row["provenance"]["boundary"]
+
+
+def test_boundary_scenario_merge_refreshes_in_place_without_reshuffling() -> None:
+    """Re-running the declaration must be idempotent and preserve order."""
+    catalog = _load_catalog()
+    manifest = _load_manifest()
+    ids = [scenario["scenario_id"] for scenario in catalog["scenarios"]]
+    assert len(ids) == len(set(ids)) == 28
+
+    # The file stays grouped by game, with each version's committed
+    # ordinary/battle rows first and its boundary rows appended after them.
+    committed = [
+        "red_color_ordinary",
+        "red_vanilla_ordinary",
+        "red_color_battle",
+        "red_vanilla_battle",
+        "blue_color_ordinary",
+        "blue_vanilla_ordinary",
+        "blue_color_battle",
+        "blue_vanilla_battle",
+        "yellow_cgb_ordinary",
+        "yellow_cgb_battle",
+    ]
+    boundary_ids = [scenario_id for scenario_id in ids if scenario_id not in committed]
+    assert len(boundary_ids) == 18
+    for version in ("red", "blue", "yellow"):
+        block = [scenario_id for scenario_id in ids if scenario_id.startswith(version)]
+        # The committed rows appear in their original relative order, and every
+        # boundary row of that version follows the last committed one.
+        assert [scenario_id for scenario_id in block if scenario_id in committed] == [
+            scenario_id for scenario_id in committed if scenario_id.startswith(version)
+        ]
+        last_committed = max(
+            index for index, scenario_id in enumerate(block) if scenario_id in committed
+        )
+        assert all(scenario_id not in committed for scenario_id in block[last_committed + 1 :])
+    # The canonical settled-battle scenario per version is still the one the
+    # coverage dimension resolves its pairing cases from.
+    from scripts import coverage_report
+
+    canonical = coverage_report._canonical_battle_scenarios(catalog)
+    assert {version: item["scenario_id"] for version, item in canonical.items()} == {
+        "red": "red_color_battle",
+        "blue": "blue_color_battle",
+        "yellow": "yellow_cgb_battle",
+    }
+    assert validator._validate_schema(catalog, manifest)
 
 
 @pytest.mark.parametrize("value", [0, -1, math.inf, -math.inf, math.nan, True, "4"])

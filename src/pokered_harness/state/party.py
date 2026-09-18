@@ -49,7 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pokered_harness.state.base import StatusCondition, parse_status
-from pokered_harness.symbols.loader import MemoryLike, SymbolTable
+from pokered_harness.symbols.loader import MemoryLike, SymbolTable, read_wram_u8
 
 PARTY_STRUCT_SIZE = 44
 MAX_PARTY_SLOTS = 6
@@ -433,7 +433,10 @@ def _combine_validity(*values: bool | None) -> bool | None:
 
 
 def _read_u8(memory: MemoryLike, addr: int) -> int:
-    return int(memory[addr]) & 0xFF
+    # Party structs live in the ``SVBK``-remapped half of WRAM (``wPartyMons``
+    # at ``$D16B``), so every field read names the linker's bank instead of
+    # following whichever bank the ROM has mapped into the window.
+    return read_wram_u8(memory, addr)
 
 
 def _read_u16_be(memory: MemoryLike, addr: int) -> int:

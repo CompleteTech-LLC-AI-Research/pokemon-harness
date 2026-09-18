@@ -50,6 +50,35 @@ _EXPECTED_FIXTURE_ROWS = {
     "yellow-cgb-ordinary": ("yellow/cable_club.state", "yellow", "cgb", "ordinary"),
     "yellow-cgb-battle": ("yellow/cable_club-battle.state", "yellow", "cgb", "battle"),
 }
+# Boundary fixtures are real-play drives captured by
+# ``scripts/produce_battle_state_fixtures.py``: a forced-replacement party
+# menu, the last ROM command boundary before the deciding knockout, and the
+# terminal return itself.  Each named fixture has a ``-peer`` sibling captured
+# at the same emulated instant.
+_BOUNDARY_SLUGS = {
+    "battle-faint": "cable_club-battle-faint",
+    "battle-faint-peer": "cable_club-battle-faint-peer",
+    "battle-pre-terminal": "cable_club-pre-terminal",
+    "battle-pre-terminal-peer": "cable_club-pre-terminal-peer",
+    "battle-terminal-return": "cable_club-terminal",
+    "battle-terminal-return-peer": "cable_club-terminal-peer",
+}
+_FORMAT_BY_VERSION = {"red": "color", "blue": "color", "yellow": "cgb"}
+_EXPECTED_FIXTURE_ROWS |= {
+    f"{version}-{variant}-{slug}": (
+        f"{version}/{stem}.state",
+        version,
+        variant,
+        "boundary",
+    )
+    for version, variant in _FORMAT_BY_VERSION.items()
+    for slug, stem in _BOUNDARY_SLUGS.items()
+}
+_CAPTURED_FIXTURE_IDS = frozenset(
+    f"{version}-{variant}-{slug}"
+    for version, variant in _FORMAT_BY_VERSION.items()
+    for slug in _BOUNDARY_SLUGS
+)
 _BATTLE_RECIPES = {
     "red-color-battle": "red_color",
     "red-vanilla-battle": "red_gb",
@@ -105,7 +134,7 @@ def test_battle_fixture_generator_covers_each_supported_rom_variant() -> None:
 def test_release_manifest_records_all_external_fixture_bytes_and_provenance() -> None:
     document = _load_manifest()
     fixtures = document["fixtures"]
-    assert len(fixtures) == 10
+    assert len(fixtures) == 28
     assert all(fixture["repository_distributed"] is False for fixture in fixtures)
     assert all("provenance" in fixture for fixture in fixtures)
     assert all("source_state" in fixture["provenance"] for fixture in fixtures)
@@ -131,6 +160,12 @@ def test_manifest_has_exact_supported_fixture_matrix_and_status_boundary() -> No
     assert {
         fixture["id"] for fixture in fixtures if fixture["provenance"]["status"] == "partial"
     } == _VANILLA_FIXTURE_IDS
+    assert {
+        fixture["id"] for fixture in fixtures if fixture["provenance"]["status"] == "captured"
+    } == _CAPTURED_FIXTURE_IDS
+    assert {fixture["id"] for fixture in fixtures if fixture["kind"] == "boundary"} == (
+        _CAPTURED_FIXTURE_IDS
+    )
     assert {fixture["id"] for fixture in fixtures if fixture["kind"] == "battle"} == set(
         _BATTLE_RECIPES
     )
@@ -175,6 +210,80 @@ def test_battle_provenance_binds_each_derived_state_to_ordinary_input() -> None:
         assert str(recipe["rom"]) == battle["expected_rom"]["path"].removeprefix("rom/")
         assert str(recipe["symbols"]) == battle["expected_symbols"]["path"].removeprefix("rom/")
         assert f"--variants {recipe_key}" in battle_provenance["capture_command_template"]
+
+
+def test_boundary_provenance_binds_each_captured_pair_to_admitted_battle_input() -> None:
+    document = _load_manifest()
+    by_id = {fixture["id"]: fixture for fixture in document["fixtures"]}
+
+    for fixture in document["fixtures"]:
+        if fixture["kind"] != "boundary":
+            continue
+        source = by_id[f"{fixture['version']}-{fixture['variant']}-battle"]
+        provenance = fixture["provenance"]
+
+        assert provenance["status"] == "captured"
+        assert provenance["producer"] == "scripts/produce_battle_state_fixtures.py"
+        assert f"external {source['path']};" in provenance["source_state"]
+        assert _source_digests(provenance["source_state"]) == (
+            source["sha1"],
+            source["sha256"],
+        )
+        assert all(
+            isinstance(provenance[field], str) and provenance[field].strip()
+            for field in ("runtime_identity", "captured_at_utc", "verification_method")
+        )
+        # The captured pair is pinned to the exact ROM/symbol pair of the
+        # admitted battle input it was driven from, and stays external.
+        assert fixture["expected_rom"] == source["expected_rom"]
+        assert fixture["expected_symbols"] == source["expected_symbols"]
+        assert fixture["repository_distributed"] is False
+
+    # Every named boundary fixture has a peer sibling captured at the same
+    # emulated instant, so a consumer can reload the pair consistently.
+    for fixture_id in _CAPTURED_FIXTURE_IDS:
+        if fixture_id.endswith("-peer"):
+            continue
+        primary = by_id[fixture_id]
+        counterpart = by_id[f"{fixture_id}-peer"]
+        # Only the pre-terminal and terminal-return pairs carry a replay
+        # capture; every pair still shares one capture instant.
+        assert counterpart.get("capture") == primary.get("capture"), fixture_id
+        captured_at = primary["provenance"]["captured_at_utc"]
+        assert counterpart["provenance"]["captured_at_utc"] == captured_at, fixture_id
+
+
+def test_captured_boundary_rows_pin_the_replayable_terminal_turn() -> None:
+    document = _load_manifest()
+    by_id = {fixture["id"]: fixture for fixture in document["fixtures"]}
+
+    for version, variant in _FORMAT_BY_VERSION.items():
+        boundary_capture = by_id[f"{version}-{variant}-battle-pre-terminal"]["capture"]
+        terminal_capture = by_id[f"{version}-{variant}-battle-terminal-return"]["capture"]
+
+        # ``cable_club-pre-terminal`` is the last ROM command boundary before
+        # the deciding knockout, so both rows describe the same driven turn,
+        # which is the plan the MCP terminal-return scenario replays.
+        plan = terminal_capture["terminal_turn_plan"]
+        assert type(boundary_capture["boundary_turn"]) is int
+        assert boundary_capture["terminal_turn"] == terminal_capture["terminal_turn"]
+        assert boundary_capture["terminal_turn_plan"] == plan
+        assert isinstance(plan, list) and len(plan) == 2
+        for entry in plan:
+            assert type(entry["slot"]) is int and 0 <= entry["slot"] < 4
+            assert type(entry["move"]) is int and entry["move"] != 0
+            assert isinstance(entry["policy"], str) and entry["policy"]
+
+        # The terminal capture's own party summary proves the battle ended on
+        # both sessions, so the admitted terminal bytes are a real return and
+        # not a mid-battle snapshot.
+        party = terminal_capture["party"]
+        assert set(party) == {"primary", "peer"}
+        for summary in party.values():
+            assert summary["is_in_battle"] == 0
+            assert summary["party_count"] == 6
+            assert len(summary["party_hp"]) == 6
+            assert summary["battle_result"] in (0, 1, 2)
 
 
 def test_vanilla_provenance_remains_fail_closed_through_derived_states() -> None:

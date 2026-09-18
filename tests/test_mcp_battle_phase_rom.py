@@ -65,14 +65,24 @@ server-visible concurrency paths the public stdio surface exposes:
   link is still paired and steppable, and that ``client.eof()`` still tears
   every owned process down cleanly.
 
-Forced replacement and a terminal return are not reachable from these
-fixtures within a reasonable finite bound (six full-HP party mons, same-type
-reduced damage and limited lead-move PP); the test therefore asserts the
-documented fail-closed behavior instead of fabricating a terminal result: the
-battle stays active and ``terminal_result`` stays ``None``.  A normal FIGHT
-move also leaves ``wActionResultOrTookBattleTurn`` at zero (``ExecutePlayerMoveDone``
-resets it), so ``ACTION_RESOLUTION`` is correctly never derived for this turn;
-the test asserts that fail-closed outcome and records every observed phase.
+Forced replacement and the terminal return are exercised by two further
+scenarios over their own admitted immutable fixtures (``kind: boundary`` rows
+of ``release-evidence/fixture-manifest.json``, produced by
+``scripts/produce_battle_state_fixtures.py``).  ``cable_club-battle-faint`` is
+a real forced-replacement boundary (the owner's own combatant is at zero HP
+with ``wInHandlePlayerMonFainted`` set and the battle party menu open) and
+``cable_club-terminal`` is a real terminal return, and both are read through
+``resources/read`` after a public ``load_state``; ``cable_club-pre-terminal``
+is the last ROM command boundary before the deciding knockout, which the test
+drives into ``EndOfBattle`` with public input only, folding in the forced
+replacement the deciding knockout can open from the party HP list the payload
+exposes, so the terminal return is observed as a live falling edge rather than
+asserted from a loaded byte.  This
+scenario's own fixture is a plain battle state, so a settled FIGHT turn
+legitimately leaves the battle live with ``terminal_result`` unset; a normal
+FIGHT move also leaves ``wActionResultOrTookBattleTurn`` at zero
+(``ExecutePlayerMoveDone`` resets it), so ``ACTION_RESOLUTION`` is correctly
+never derived for this turn and the test records every observed phase.
 
 Runs inside the harness child with a preloaded peer; the child reuses the
 existing peer-preload harness approach.
@@ -85,6 +95,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -95,12 +106,27 @@ from pathlib import Path
 import pytest
 
 from scripts.probe_timed_rom_pair import resolve_assets
-from tests._rom_assets import fixture_path, rom_path, sym_path
+from tests._rom_assets import find_rom_root, fixture_path, rom_path, sym_path
 from tests.test_mcp_timed_rom import PIPE_CAP, RomClient
 from tests.test_mcp_timed_stdio import CALL_BOUND
 
 ROOT = Path(__file__).resolve().parents[1]
 FAMILIES = ("red_color", "blue_color", "yellow")
+MANIFEST_PATH = ROOT / "release-evidence" / "fixture-manifest.json"
+# Fixture-manifest variant for the ROM a boundary pair was captured on: the
+# color-patched Red/Blue ROM and the canonical Yellow CGB ROM, i.e. the same
+# ROM/SYM pair ``tests/test_pyboy_link_session_roms._ROM_PATHS`` opens.
+VARIANT_BY_FAMILY = {"red": "color", "blue": "color", "yellow": "cgb"}
+FORCED_REPLACEMENT_PHASE = 4
+# Boundary-drive geometry and finite budget.  The drive stops as soon as both
+# reads show the battle ended; the budget only bounds a stalled scenario.  The
+# deciding knockout is one ordinary ROM turn, but the drive that reaches it
+# from the admitted boundary can span a few of them, because the knockout may
+# open a forced replacement first, so the cap covers the whole drive.
+BOUNDARY_STEP = 4
+BOUNDARY_INPUT_SPACING = 8
+BOUNDARY_DRIVE_BUDGET = 10000
+MOVE_MENU_MAX_ITEM = 5
 
 # Finite frame budgets.  Each is a hard cap on emulated frames for one phase;
 # exceeding it fails the phase instead of spinning forever.
@@ -145,6 +171,24 @@ CANCEL_REASON = "battle-state cancellation coverage"
 
 LINK_MENU_MAX_ITEMS = (2, 3)
 MENU_WATCHED_A = 0x01
+# Key masks the ROM watches in the battle command menu, one per column
+# (``engine/battle/core.asm:2177`` PAD_RIGHT|PAD_A, ``:2210`` PAD_LEFT|PAD_A),
+# each written with ``wMaxMenuItem == 1``.  A battle party menu that has
+# already taken its input leaves its own ``A|B`` mask and
+# ``wMaxMenuItem == wPartyCount - 1`` behind, which for a two-mon party is the
+# command menu's geometry exactly, so the mask is what separates the two for a
+# consumer that only has the public payload after a reload.
+COMMAND_MENU_WATCHED_KEYS = (0x11, 0x21)
+# Key mask the ROM watches in the battle party menu (A|B).  Together with the
+# move menu's mask (UP|DOWN|A|B) it is what separates the two menus for a
+# consumer that only has the public payload after a reload.
+PARTY_MENU_WATCHED_KEYS = 0x03
+# Key mask the ROM watches in the battle move menu (UP|DOWN|A|B).  The move
+# menu's cursor geometry is not enough on its own: a battle party menu that has
+# just confirmed a replacement leaves ``current=1, max=5`` behind, which is
+# exactly the geometry the move branch below steers, so a stale party menu would
+# otherwise be driven at as if it were a live move menu.
+MOVE_MENU_WATCHED_KEYS = 0xC3
 CABLE_CLUB_MAP_ID = 64
 COLOSSEUM_MAP_ID = 0xF0
 BATTLE_KINDS = (1, 2)
@@ -278,18 +322,84 @@ def _battle_assets(version):
     return assets
 
 
+def _manifest_rows():
+    """Return the fixture-manifest rows keyed by id."""
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    return {row["id"]: row for row in document["fixtures"]}
+
+
+def _boundary_assets(version, slug):
+    """Return the pinned ROM/SYM plus one admitted boundary fixture pair.
+
+    The fixture-manifest row is the admission contract: the row records the
+    size, SHA-1, and SHA-256 of every immutable pair member and the exact
+    ROM/symbol pair the pair was captured on.  The bytes on disk must match the
+    row, and the resolved ROM/symbol file must be the pinned pair the row names
+    (``resolve_assets`` validates that pair against ``VERSIONS.md``); a
+    mismatch fails the test instead of loading unverified bytes.
+    """
+    family = version.split("_")[0]
+    variant = VARIANT_BY_FAMILY[family]
+    rows = _manifest_rows()
+    primary_row = rows.get(f"{family}-{variant}-{slug}")
+    peer_row = rows.get(f"{family}-{variant}-{slug}-peer")
+    assert primary_row is not None, f"no admitted boundary fixture row for {family} {slug}"
+    assert peer_row is not None, f"no admitted boundary peer row for {family} {slug}"
+    assert primary_row["kind"] == peer_row["kind"] == "boundary", (primary_row, peer_row)
+
+    assets = resolve_assets(version, ROOT)
+    rom = assets["rom"]
+    sym = assets["sym"]
+    rom_root = find_rom_root(ROOT)
+    rom_relative = (Path("rom") / rom.relative_to(rom_root)).as_posix()
+    sym_relative = (Path("rom") / sym.relative_to(rom_root)).as_posix()
+    primary_path = fixture_path(family, Path(primary_row["path"]).name, project_root=ROOT)
+    peer_path = fixture_path(family, Path(peer_row["path"]).name, project_root=ROOT)
+    assert Path(primary_row["path"]) == Path(family) / primary_path.name, primary_row["path"]
+    assert Path(peer_row["path"]) == Path(family) / peer_path.name, peer_row["path"]
+
+    paths = [rom, sym, primary_path, peer_path]
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        pytest.skip("missing admitted boundary assets: " + ", ".join(missing))
+
+    rom_sha1 = hashlib.sha1(rom.read_bytes()).hexdigest()
+    sym_sha1 = hashlib.sha1(sym.read_bytes()).hexdigest()
+    for row, path in ((primary_row, primary_path), (peer_row, peer_path)):
+        payload = path.read_bytes()
+        assert len(payload) == row["size_bytes"], (path, row["size_bytes"])
+        assert hashlib.sha1(payload).hexdigest() == row["sha1"], path
+        assert hashlib.sha256(payload).hexdigest() == row["sha256"], path
+        assert row["expected_rom"] == {"path": rom_relative, "sha1": rom_sha1}, (path, row)
+        assert row["expected_symbols"] == {"path": sym_relative, "sha1": sym_sha1}, (path, row)
+    return {
+        "family": family,
+        "rom": rom,
+        "sym": sym,
+        "primary": primary_path.read_bytes(),
+        "peer": peer_path.read_bytes(),
+        "row": primary_row,
+        "peer_row": peer_row,
+    }
+
+
 @asynccontextmanager
-async def _stdio_server(tmp_path, asset):
-    """Launch one stdio server with an in-process peer on the battle fixture."""
+async def _stdio_server(tmp_path, asset, *, name="server"):
+    """Launch one stdio server whose child preloads the peer fixture bytes.
+
+    The public MCP tool surface has no peer-load operation, so the peer state
+    is preloaded by the child before it serves.  The primary fixture is always
+    loaded through the public ``load_state`` tool by the test itself.
+    """
     family = asset["family"]
-    directory = tmp_path / "server"
+    directory = tmp_path / name
     directory.mkdir()
     copied = {}
-    for name in ("rom", "sym"):
-        copied[name] = directory / asset[name].name
-        shutil.copyfile(asset[name], copied[name])
+    for key in ("rom", "sym"):
+        copied[key] = directory / asset[key].name
+        shutil.copyfile(asset[key], copied[key])
     peer_state = directory / "peer-cable_club-battle.state"
-    peer_state.write_bytes(asset["state"])
+    peer_state.write_bytes(asset.get("peer", asset.get("state")))
     env = {key: value for key, value in os.environ.items() if not key.startswith("POKERED_")}
     env["PYTHONPATH"] = os.pathsep.join((str(ROOT / "src"), str(ROOT / "vendor/pyboy-src")))
     env["PYTHONUNBUFFERED"] = "1"
@@ -517,6 +627,188 @@ def _at_command_boundary(state):
         and type(menu.get("max_item")) is int
         and menu["max_item"] <= COMMAND_MENU_MAX_ITEM
     )
+
+
+# --- admitted battle-boundary scenarios ------------------------------------
+#
+# The boundary helpers below drive a *reloaded* pair.  A load resets the
+# session's observational menu state to unknown, so the drive cannot use the
+# hook-derived ``menu_open`` flag the way the live-entry scenarios do; it uses
+# the ROM's own menu geometry (``wCurrentMenuItem``/``wMaxMenuItem``/
+# ``wMenuWatchedKeys``) read through the public ``pokered://game-state``
+# resource, which is the same ROM-owned evidence the capture producer used to
+# snapshot the boundary.
+
+
+def _menu_fields(state):
+    """Return ``(current_item, max_item, watched_keys)`` from the public payload."""
+    menu = _menu(state)
+    current = menu.get("current_item")
+    maximum = menu.get("max_item")
+    watched = menu.get("watched_keys")
+    if type(current) is int and type(maximum) is int and type(watched) is int:
+        return current, maximum, watched
+    return None
+
+
+def _command_menu_ready(state):
+    """True when the ROM's battle command menu geometry is live."""
+    fields = _menu_fields(state)
+    return (
+        fields is not None
+        and 0 <= fields[0] <= 1
+        and fields[1] == COMMAND_MENU_MAX_ITEM
+        and fields[2] in COMMAND_MENU_WATCHED_KEYS
+    )
+
+
+def _replacement_slot(state):
+    """Index of the first living party slot while this owner is choosing one.
+
+    ``None`` means the ROM is not asking this owner to replace a combatant:
+    either its own combatant still has HP, or the battle party has no living
+    member left to send out.
+    """
+    active = _active_mon(state)
+    if active is None or active["hp"] != 0:
+        return None
+    living = [slot for slot, mon in enumerate(state["party"]["mons"]) if mon["hp"] > 0]
+    return living[0] if living else None
+
+
+def _replacement_button(state):
+    """Return the next button for a live battle party menu, or ``None``.
+
+    ``wMenuWatchedKeys`` is the key mask the ROM itself is watching, and it is
+    what tells the two menus apart after a reload: ``3`` (A|B) is the battle
+    party menu and ``195`` (UP|DOWN|A|B) is the move menu.  A party menu needs a
+    *party* target rather than the move slot :func:`_boundary_button` steers to:
+    confirming the move slot selects a fainted combatant, which the ROM refuses,
+    and the side then never leaves the menu.  The living slot the capture
+    producer used is derivable from public data alone (``party.mons[].hp``), so
+    the drive stays on the public surface.
+    """
+    fields = _menu_fields(state)
+    if fields is None or fields[2] != PARTY_MENU_WATCHED_KEYS:
+        return None
+    target = _replacement_slot(state)
+    if target is None:
+        return None
+    current = fields[0]
+    if current == target:
+        return "a"
+    return "down" if current < target else "up"
+
+
+def _boundary_button(state, target_slot):
+    """Return the next public button to inject for one owner, or ``None``.
+
+    The cursor geometry is the ROM's own: FIGHT is entry 0 of the command menu
+    (entry 1 is ITEM) and the move menu cursor is one past the move slot the
+    ROM confirms.  The move branch additionally requires the move menu's own
+    ``MOVE_MENU_WATCHED_KEYS`` mask, because the geometry above also matches the
+    leftovers of a battle party menu that has already taken its input; without
+    that witness the drive would press A on a closed menu and the stray input
+    would be consumed by the next command menu.  The command branch requires
+    the command menu's own mask (``COMMAND_MENU_WATCHED_KEYS``) for the same
+    reason: a closed battle party menu of a two-mon party leaves command-menu
+    geometry behind, and only the mask separates the two.  ``None`` means no
+    menu is currently taking A input, so nothing is injected and the ROM keeps
+    running its own animation or text.
+    """
+    fields = _menu_fields(state)
+    if fields is None or not fields[2] & MENU_WATCHED_A:
+        return None
+    current, maximum, watched = fields
+    if (
+        0 <= current <= 1
+        and maximum == COMMAND_MENU_MAX_ITEM
+        and watched in COMMAND_MENU_WATCHED_KEYS
+    ):
+        # Never confirm ITEM: the admitted pair is replayed as a FIGHT turn.
+        return "a" if current == 0 else "up"
+    if watched == MOVE_MENU_WATCHED_KEYS and 1 <= current < maximum <= MOVE_MENU_MAX_ITEM:
+        target = target_slot + 1
+        if current == target:
+            return "a"
+        return "down" if current < target else "up"
+    return None
+
+
+async def _drive_boundary_turn(client, plan, *, budget=BOUNDARY_DRIVE_BUDGET):
+    """Drive the reloaded pre-terminal pair until both owners leave the battle.
+
+    Both owners are folded back into their own ROM command/move menus with the
+    public ``press`` / ``link_peer_press`` / ``link_step`` tools only, and every
+    decision is taken from a public ``pokered://game-state`` read.  An owner
+    stops being driven as soon as its own read reports that ``wIsInBattle``
+    left the live battle kinds, so that read stays the observed falling edge of
+    the battle the session tracks; the other owner keeps being driven until its
+    own read shows the same.
+
+    A knockout that opens a forced replacement is folded in rather than
+    abandoned: while the ROM is watching its party menu, the cursor is steered
+    onto the first living slot (``_replacement_button``), which is the same
+    target the capture producer drove the recorded turn with.  The drive
+    therefore covers every ROM turn between the admitted boundary and the
+    terminal return, bounded by ``budget``.
+    """
+    slots = [entry["slot"] for entry in plan]
+    terminal = [None, None]
+    injected = [[], []]
+    frames = 0
+    realign = [0, 0]
+    while frames < budget and any(entry is None for entry in terminal):
+        states = await _states(client)
+        for index, state in enumerate(states):
+            if terminal[index] is not None:
+                continue
+            if _battle(state)["raw_is_in_battle"] not in BATTLE_KINDS:
+                terminal[index] = {
+                    "frames": frames,
+                    "state": state,
+                    "buttons": tuple(injected[index]),
+                }
+        for index, state in enumerate(states):
+            if terminal[index] is not None or frames < realign[index]:
+                continue
+            button = _replacement_button(state)
+            if button is None:
+                button = _boundary_button(state, slots[index])
+            if button is None:
+                continue
+            if index == 0:
+                await _press(client, button)
+            else:
+                await _peer_press(client, button)
+            injected[index].append(button)
+            realign[index] = frames + BOUNDARY_INPUT_SPACING
+        if all(entry is not None for entry in terminal):
+            break
+        await _link_step(client, BOUNDARY_STEP)
+        frames += BOUNDARY_STEP
+    if any(entry is None for entry in terminal):
+        states = await _states(client)
+        raise AssertionError(
+            "the admitted pre-terminal pair never reached the terminal return "
+            f"within {budget} paired frames: " + json.dumps([state["battle"] for state in states])
+        )
+    return {"terminal": terminal, "frames": frames, "injected": injected}
+
+
+def _assert_terminal_return(state, *, label):
+    """Assert the documented terminal-return derivation for one owner."""
+    battle = _battle(state)
+    assert battle["raw_is_in_battle"] == 0, (label, battle)
+    assert battle["kind"] == 0, (label, battle)
+    assert battle["phase"] == TERMINAL_RETURN_PHASE, (label, battle)
+    assert battle["phase_valid"] is True, (label, battle)
+    assert {"wIsInBattle", "wBattleResult"} <= set(battle["phase_evidence"]), (label, battle)
+    raw = battle["raw_battle_result"]
+    assert type(raw) is int, (label, battle)
+    expected = raw if raw in (1, 2) else None
+    assert battle["terminal_result"] == expected, (label, battle)
+    return battle
 
 
 async def _settle_selected_move(client, *, before, budget=SETTLEMENT_BUDGET):
@@ -1160,18 +1452,19 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
         assert preserved.get("isError") is True, preserved
         responsive_after = responsive_after_cancel
 
-        # -- forced replacement / terminal return (documented absent) --------
-        # Reaching a knockout/terminal in these fixtures needs ~130 further
-        # turns: six full-HP level-53/54 party mons, same-type matchups that
-        # reduce the observed per-turn damage to ~7-31 HP, and a lead move with
-        # as little as 2 PP.  That is not a reasonable finite path for this
-        # scenario, so the documented fail-closed contract is asserted instead:
-        # the battle remains active and terminal_result stays None.
+        # -- forced replacement / terminal return ----------------------------
+        # This scenario's fixture is a plain battle state, so it legitimately
+        # ends the settled turn still in a live battle.  The forced-replacement
+        # and terminal-return boundaries are separate admitted immutable
+        # fixtures exercised end to end by
+        # ``test_real_rom_mcp_boundary_reads_fail_closed`` (loaded pairs) and
+        # ``test_real_rom_mcp_terminal_return_drive_reads`` (the deciding turn
+        # driven into EndOfBattle).  Here only the live-battle contract is
+        # asserted: an active battle never reports a terminal outcome.
         final_battle = _battle(responsive_after)
         assert final_battle["raw_is_in_battle"] in BATTLE_KINDS, final_battle
         assert final_battle["terminal_result"] is None, final_battle
         assert final_battle["phase"] != TERMINAL_RETURN_PHASE, final_battle
-        assert final_battle["in_handle_player_mon_fainted"] == 0, final_battle
         # A transient TERMINAL_RETURN during the turn is only valid as the
         # documented unconfirmed falling edge: wIsInBattle read as zero with no
         # surviving non-zero outcome, so terminal_result must stay None.
@@ -1221,7 +1514,7 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
                         "before_tick": server_cancel["before_tick"],
                         "after_tick": server_cancel["after_tick"],
                     },
-                    "terminal_absent": {
+                    "settled_live_battle": {
                         "raw_is_in_battle": final_battle["raw_is_in_battle"],
                         "terminal_result": final_battle["terminal_result"],
                         "phase": final_battle["phase"],
@@ -1229,6 +1522,231 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
                     "primary_epoch": states[0]["epoch"],
                     "peer_epoch": states[1]["epoch"],
                 },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+        await client.eof()
+
+
+def _boundary_payload(kind, version, **fields):
+    """Build one boundary evidence line payload."""
+    return {"kind": kind, "version": version, "transport": "stdio_local_pair", **fields}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", FAMILIES)
+async def test_real_rom_mcp_boundary_reads_fail_closed(tmp_path, version):
+    """Read the admitted forced-replacement and terminal pairs over stdio.
+
+    ``cable_club-battle-faint.state`` is a real forced-replacement boundary:
+    the owner's own combatant is at zero HP with living replacements left in
+    the party, ``wInHandlePlayerMonFainted`` is set and the battle party menu
+    is open.  ``cable_club-terminal.state`` is a real terminal return:
+    ``wIsInBattle`` is zero after ``EndOfBattle`` while the pair still carries
+    a non-zero ``wBattleResult`` on the owner whose combatant fainted.  Both
+    pairs are admitted through fail-closed manifest rows and *loaded* with the
+    public ``load_state`` tool, so neither session has observed a battle end
+    here: the boundary evidence is reported (forced-replacement phase, inactive
+    phase) and the leading non-zero outcome byte is never promoted to
+    ``terminal_result``.
+    """
+    if os.environ.get("POKERED_SKIP_SHA1"):
+        pytest.fail("POKERED_SKIP_SHA1 must not be used for real-ROM evidence")
+
+    faint = _boundary_assets(version, "battle-faint")
+    async with _stdio_server(tmp_path, faint, name="faint") as client:
+        await client.initialize()
+        payload = base64.b64encode(faint["primary"]).decode("ascii")
+        assert await client.tool("load_state", {"data": payload}) == {"ok": True}
+        primary, peer = await _states(client)
+        _assert_battle_observations(primary, label=f"{version}-faint-primary")
+        battle = _battle(primary)
+        # A load cannot fabricate menu evidence, and the forced-replacement
+        # signal itself is ROM-owned.
+        assert battle["menu_open"] is None, battle
+        assert battle["in_handle_player_mon_fainted"] != 0, battle
+        assert "wInHandlePlayerMonFainted" in battle["phase_evidence"], battle
+        # The derivation either names the documented forced-replacement phase
+        # or fails closed on contradictory co-signals (a persisting action
+        # flag); it must never name an unrelated phase.
+        assert (battle["phase"], battle["phase_valid"]) in (
+            (FORCED_REPLACEMENT_PHASE, True),
+            (None, False),
+        ), battle
+        assert battle["raw_battle_result"] in (1, 2), battle
+        assert battle["terminal_result"] is None, battle
+        active = _active_mon(primary)
+        assert active is not None and active["hp"] == 0, active
+        party_hp = [mon["hp"] for mon in primary["party"]["mons"]]
+        assert 0 in party_hp and any(hp > 0 for hp in party_hp), party_hp
+        # The paired owner is still in the same live battle.
+        peer_battle = _battle(peer)
+        assert peer_battle["raw_is_in_battle"] in BATTLE_KINDS, peer_battle
+        assert peer_battle["terminal_result"] is None, peer_battle
+        print(
+            "MCP_BATTLE_BOUNDARY "
+            + json.dumps(
+                _boundary_payload(
+                    "forced_replacement",
+                    version,
+                    fixture=faint["row"]["path"],
+                    fixture_sha1=faint["row"]["sha1"],
+                    primary=battle,
+                    peer=peer_battle,
+                    party_hp=party_hp,
+                ),
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+    terminal = _boundary_assets(version, "battle-terminal-return")
+    async with _stdio_server(tmp_path, terminal, name="terminal") as client:
+        await client.initialize()
+        payload = base64.b64encode(terminal["primary"]).decode("ascii")
+        assert await client.tool("load_state", {"data": payload}) == {"ok": True}
+        primary, peer = await _states(client)
+        observed = []
+        for index, state in enumerate((primary, peer)):
+            label = f"{version}-terminal-{index}"
+            battle = _battle(state)
+            assert battle["raw_is_in_battle"] == 0, (label, battle)
+            assert battle["kind"] == 0, (label, battle)
+            assert battle["phase"] == 0 and battle["phase_valid"] is True, (label, battle)
+            assert "wIsInBattle" in battle["phase_evidence"], (label, battle)
+            assert battle["menu_open"] is None, (label, battle)
+            assert battle["enemy_mon"] is None, (label, battle)
+            assert type(battle["raw_battle_result"]) is int, (label, battle)
+            assert battle["terminal_result"] is None, (label, battle)
+            observed.append(battle)
+        # The fainted owner's outcome byte survived teardown, and the harness
+        # still refuses to promote it: promotion requires an observed battle
+        # end in this session, which a load cannot provide.
+        raw_results = [battle["raw_battle_result"] for battle in observed]
+        assert any(value != 0 for value in raw_results), raw_results
+        print(
+            "MCP_BATTLE_BOUNDARY "
+            + json.dumps(
+                _boundary_payload(
+                    "terminal_loaded",
+                    version,
+                    fixture=terminal["row"]["path"],
+                    fixture_sha1=terminal["row"]["sha1"],
+                    primary=observed[0],
+                    peer=observed[1],
+                    raw_results=raw_results,
+                ),
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", FAMILIES)
+async def test_real_rom_mcp_terminal_return_drive_reads(tmp_path, version):
+    """Drive the admitted pre-terminal pair into the terminal return.
+
+    ``cable_club-pre-terminal.state`` is captured at the last ROM command
+    boundary before the deciding knockout.  The test loads the pair through the
+    public surface and drives it to ``EndOfBattle`` with
+    ``press``/``link_peer_press``/``link_step`` calls only, taking every
+    decision from a ``pokered://game-state`` read: both owners are folded back
+    into their own command/move menus using the move slots the capture
+    recorded, and the forced replacement the deciding knockout can open is
+    answered from the party HP list the payload exposes.  The drive therefore
+    covers the ROM turns between that boundary and the terminal return rather
+    than a single exchange, and its bounded frame count is reported.  The first
+    post-battle resource read for each owner must report ``TERMINAL_RETURN``
+    with its documented validity and the ``wIsInBattle`` + ``wBattleResult``
+    evidence, promote a surviving non-zero outcome byte to ``terminal_result``,
+    and the next read must report the plain ``INACTIVE`` phase with no terminal
+    result (the documented single-shot falling edge).
+    """
+    if os.environ.get("POKERED_SKIP_SHA1"):
+        pytest.fail("POKERED_SKIP_SHA1 must not be used for real-ROM evidence")
+
+    assets = _boundary_assets(version, "battle-pre-terminal")
+    capture = assets["row"].get("capture")
+    assert isinstance(capture, dict), assets["row"]
+    plan = capture.get("terminal_turn_plan")
+    assert isinstance(plan, list) and len(plan) == 2, plan
+    assert all(type(entry["slot"]) is int for entry in plan), plan
+
+    async with _stdio_server(tmp_path, assets, name="pre-terminal") as client:
+        await client.initialize()
+        payload = base64.b64encode(assets["primary"]).decode("ascii")
+        assert await client.tool("load_state", {"data": payload}) == {"ok": True}
+        # The pair is reloaded into an in-progress Cable Club battle, so the
+        # serial bridge must be installed before the deciding turn is driven:
+        # the two ROMs exchange the turn over the link cable, exactly as the
+        # capture did.
+        await _pair(client)
+        boundary = await _states(client)
+        for index, state in enumerate(boundary):
+            label = f"{version}-boundary-{index}"
+            battle = _battle(state)
+            assert battle["raw_is_in_battle"] in BATTLE_KINDS, (label, battle)
+            assert battle["terminal_result"] is None, (label, battle)
+            assert battle["menu_open"] is None, (label, battle)
+            # The pair really is at a ROM command boundary (FIGHT/ITEM), which
+            # is what makes the recorded move plan replayable.
+            assert _command_menu_ready(state), (label, state["menu"])
+            active = _active_mon(state)
+            assert active is not None and active["hp"] > 0, (label, active)
+        _log(
+            "boundary_reload",
+            f"version={version} fixture={assets['row']['path']} plan={plan}",
+        )
+
+        drive = await _drive_boundary_turn(client, plan)
+        terminal = [entry["state"] for entry in drive["terminal"]]
+        observed = [
+            _assert_terminal_return(state, label=f"{version}-terminal-{index}")
+            for index, state in enumerate(terminal)
+        ]
+        raw_results = [battle["raw_battle_result"] for battle in observed]
+        # At least one owner's non-zero outcome byte survived the teardown, so
+        # this is a genuine confirmed outcome and not an ambiguous zero.
+        assert any(value != 0 for value in raw_results), raw_results
+
+        # The falling edge is single-shot: the next read of each owner is the
+        # documented plain INACTIVE phase with no terminal result.
+        follow_up = await _states(client)
+        follow_up_battles = []
+        for index, state in enumerate(follow_up):
+            label = f"{version}-follow-up-{index}"
+            battle = _battle(state)
+            assert battle["raw_is_in_battle"] == 0, (label, battle)
+            assert battle["kind"] == 0, (label, battle)
+            assert battle["phase"] == 0 and battle["phase_valid"] is True, (label, battle)
+            assert battle["terminal_result"] is None, (label, battle)
+            follow_up_battles.append(battle)
+
+        print(
+            "MCP_BATTLE_BOUNDARY "
+            + json.dumps(
+                _boundary_payload(
+                    "terminal_drive",
+                    version,
+                    fixture=assets["row"]["path"],
+                    fixture_sha1=assets["row"]["sha1"],
+                    boundary_turn=capture.get("boundary_turn"),
+                    terminal_turn=capture.get("terminal_turn"),
+                    plan=plan,
+                    drive_frames=drive["frames"],
+                    injected={
+                        str(index): list(buttons) for index, buttons in enumerate(drive["injected"])
+                    },
+                    boundary=[state["battle"] for state in boundary],
+                    terminal=[
+                        dict(battle, frames=drive["terminal"][index]["frames"])
+                        for index, battle in enumerate(observed)
+                    ],
+                    follow_up=follow_up_battles,
+                ),
                 sort_keys=True,
             ),
             flush=True,

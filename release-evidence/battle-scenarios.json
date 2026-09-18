@@ -8,7 +8,7 @@
     "repository_distributed": false,
     "schema_validation_command": "python scripts/validate_battle_scenarios.py --schema-only",
     "fixture_bytes_command": "python scripts/validate_battle_scenarios.py --fixture-root <fixture-root>",
-    "provenance_policy": "verified requires runtime_identity, captured_at_utc, and verification_method; derived requires source_fixture_id and input_sequence; partial/unknown never feed a PASS"
+    "provenance_policy": "verified or captured requires runtime_identity, captured_at_utc, and verification_method; captured and derived additionally require source_fixture_id and input_sequence; partial/unknown never feed a PASS"
   },
   "scenarios": [
     {
@@ -316,6 +316,506 @@
           "immutable preparation leaves party count 6 with active slot 0; acceptance loads the derived bytes without in-RAM preparation"
         ],
         "authored_tests": [],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "red_color_battle_faint",
+      "game": {
+        "version": "red",
+        "variant": "color",
+        "rom_path": "rom/red/pokemon-red-color.gb",
+        "rom_sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+        "sym_path": "rom/red/pokemon-red.sym",
+        "sym_sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "red/cable_club-battle-faint.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "forced-replacement",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 4,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "red/cable_club-battle-faint.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "3e669f36fa63b398b0d0c551ec637599a4fca5b0",
+        "sha256": "ccf1ec096c0814a8581fa32a9cce55bbd6852b91554c7584c6046bb5addb6f57",
+        "fixture_id": "red-color-battle-faint"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "red-color-battle",
+        "input_fixture_sha1": "4343278b018187ed4bf7c4eda3b202097456f048",
+        "input_sequence": "real-play Cable Club link drive from red-color-battle to the forced replacement boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:38:03Z",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted red-color-battle bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "red_color_battle_faint_peer",
+      "game": {
+        "version": "red",
+        "variant": "color",
+        "rom_path": "rom/red/pokemon-red-color.gb",
+        "rom_sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+        "sym_path": "rom/red/pokemon-red.sym",
+        "sym_sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "red/cable_club-battle-faint-peer.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "forced-replacement",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "red/cable_club-battle-faint-peer.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "2f261e0ff4accf1bf795e52063c283641e4d1381",
+        "sha256": "2be02dda0136cfa6e43f72e5508c766afaa3838191b26eec910405b95ae7b95b",
+        "fixture_id": "red-color-battle-faint-peer"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "red-color-battle",
+        "input_fixture_sha1": "4343278b018187ed4bf7c4eda3b202097456f048",
+        "input_sequence": "real-play Cable Club link drive from red-color-battle to the forced replacement boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:38:03Z",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted red-color-battle bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "red_color_battle_pre_terminal",
+      "game": {
+        "version": "red",
+        "variant": "color",
+        "rom_path": "rom/red/pokemon-red-color.gb",
+        "rom_sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+        "sym_path": "rom/red/pokemon-red.sym",
+        "sym_sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "red/cable_club-pre-terminal.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "pre-terminal",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "red/cable_club-pre-terminal.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "b6a5d674def9b567a19ff3488b5abdb4de87c29a",
+        "sha256": "9ff8fb6d00f3b0580b7149f6236067b331b6f0731552f2c2eeb39ad1d9d6258e",
+        "fixture_id": "red-color-battle-pre-terminal"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "red-color-battle",
+        "input_fixture_sha1": "4343278b018187ed4bf7c4eda3b202097456f048",
+        "input_sequence": "real-play Cable Club link drive from red-color-battle to the pre terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:40:48Z",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted red-color-battle bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "red_color_battle_pre_terminal_peer",
+      "game": {
+        "version": "red",
+        "variant": "color",
+        "rom_path": "rom/red/pokemon-red-color.gb",
+        "rom_sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+        "sym_path": "rom/red/pokemon-red.sym",
+        "sym_sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "red/cable_club-pre-terminal-peer.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "pre-terminal",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "red/cable_club-pre-terminal-peer.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "2528e133a8bae489afba30e19fd1fcefa562bba8",
+        "sha256": "317ee0adcba827c4c86d5c4173dbdc166000dc89f4f7ca5bddf8e750263b594b",
+        "fixture_id": "red-color-battle-pre-terminal-peer"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "red-color-battle",
+        "input_fixture_sha1": "4343278b018187ed4bf7c4eda3b202097456f048",
+        "input_sequence": "real-play Cable Club link drive from red-color-battle to the pre terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:40:48Z",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted red-color-battle bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "red_color_battle_terminal_return",
+      "game": {
+        "version": "red",
+        "variant": "color",
+        "rom_path": "rom/red/pokemon-red-color.gb",
+        "rom_sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+        "sym_path": "rom/red/pokemon-red.sym",
+        "sym_sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "red/cable_club-terminal.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "terminal",
+        "when": "post_battle",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "in_cable_club"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "red/cable_club-terminal.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "e263470468fd12b83f7d6fa7d8fe5ece4ece440f",
+        "sha256": "cbf66ade6f5e300b0ad2cc47ab6a96fe4c873c427fc8cb565cef0e0236ac4cb3",
+        "fixture_id": "red-color-battle-terminal-return"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "red-color-battle",
+        "input_fixture_sha1": "4343278b018187ed4bf7c4eda3b202097456f048",
+        "input_sequence": "real-play Cable Club link drive from red-color-battle to the terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:42:46Z",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted red-color-battle bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed",
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "red_color_battle_terminal_return_peer",
+      "game": {
+        "version": "red",
+        "variant": "color",
+        "rom_path": "rom/red/pokemon-red-color.gb",
+        "rom_sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+        "sym_path": "rom/red/pokemon-red.sym",
+        "sym_sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "red/cable_club-terminal-peer.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "terminal",
+        "when": "post_battle",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "in_cable_club"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "red/cable_club-terminal-peer.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "741a8e2e7bf94ca252506e2b839095cb23507425",
+        "sha256": "1aa1e606fab87ba13aa5c5d5aed9e1854c9f6eebf58b9060c1450fcb7094a7a8",
+        "fixture_id": "red-color-battle-terminal-return-peer"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "red-color-battle",
+        "input_fixture_sha1": "4343278b018187ed4bf7c4eda3b202097456f048",
+        "input_sequence": "real-play Cable Club link drive from red-color-battle to the terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:42:46Z",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted red-color-battle bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed",
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
         "real_rom_execution": null
       }
     },
@@ -628,6 +1128,506 @@
       }
     },
     {
+      "scenario_id": "blue_color_battle_faint",
+      "game": {
+        "version": "blue",
+        "variant": "color",
+        "rom_path": "rom/blue/pokemon-blue-color.gb",
+        "rom_sha1": "5f4b05725a860e04077045462176d3e2771c5022",
+        "sym_path": "rom/blue/pokemon-blue.sym",
+        "sym_sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "blue/cable_club-battle-faint.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "forced-replacement",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 4,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "blue/cable_club-battle-faint.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "8d06732843bf070eafcd37531ab6c6e827aedf71",
+        "sha256": "f7da26bfddc80b8be2c2c556468e032be161596e708d20fdb6a0a4e7cc474cff",
+        "fixture_id": "blue-color-battle-faint"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "blue-color-battle",
+        "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "input_sequence": "real-play Cable Club link drive from blue-color-battle to the forced replacement boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T05:05:27Z",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted blue-color-battle bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "blue_color_battle_faint_peer",
+      "game": {
+        "version": "blue",
+        "variant": "color",
+        "rom_path": "rom/blue/pokemon-blue-color.gb",
+        "rom_sha1": "5f4b05725a860e04077045462176d3e2771c5022",
+        "sym_path": "rom/blue/pokemon-blue.sym",
+        "sym_sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "blue/cable_club-battle-faint-peer.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "forced-replacement",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "blue/cable_club-battle-faint-peer.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "cbfdd7238f1e9c5bf1e4b500e5a11d698a854b8c",
+        "sha256": "bd6605509583b7311a35f4471d30ee60cb94c7cf82350b1e5d5703e12c520e79",
+        "fixture_id": "blue-color-battle-faint-peer"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "blue-color-battle",
+        "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "input_sequence": "real-play Cable Club link drive from blue-color-battle to the forced replacement boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T05:05:27Z",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted blue-color-battle bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "blue_color_battle_pre_terminal",
+      "game": {
+        "version": "blue",
+        "variant": "color",
+        "rom_path": "rom/blue/pokemon-blue-color.gb",
+        "rom_sha1": "5f4b05725a860e04077045462176d3e2771c5022",
+        "sym_path": "rom/blue/pokemon-blue.sym",
+        "sym_sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "blue/cable_club-pre-terminal.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "pre-terminal",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "blue/cable_club-pre-terminal.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "01ca20eabaa33e0e6cfcd87136432db9b84911f2",
+        "sha256": "fbadf039316e0d3e2c768729ce2c0f19bf8749e446e65b7942e00803c4c7929d",
+        "fixture_id": "blue-color-battle-pre-terminal"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "blue-color-battle",
+        "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "input_sequence": "real-play Cable Club link drive from blue-color-battle to the pre terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T05:14:09Z",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted blue-color-battle bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "blue_color_battle_pre_terminal_peer",
+      "game": {
+        "version": "blue",
+        "variant": "color",
+        "rom_path": "rom/blue/pokemon-blue-color.gb",
+        "rom_sha1": "5f4b05725a860e04077045462176d3e2771c5022",
+        "sym_path": "rom/blue/pokemon-blue.sym",
+        "sym_sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "blue/cable_club-pre-terminal-peer.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "pre-terminal",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "blue/cable_club-pre-terminal-peer.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "ed9c680cff2af1e64c66a78132685411d2497a38",
+        "sha256": "5f260032875cad72e422b2e020054749bc1aba8c80fafcc3d201459130293156",
+        "fixture_id": "blue-color-battle-pre-terminal-peer"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "blue-color-battle",
+        "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "input_sequence": "real-play Cable Club link drive from blue-color-battle to the pre terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T05:14:09Z",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted blue-color-battle bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "blue_color_battle_terminal_return",
+      "game": {
+        "version": "blue",
+        "variant": "color",
+        "rom_path": "rom/blue/pokemon-blue-color.gb",
+        "rom_sha1": "5f4b05725a860e04077045462176d3e2771c5022",
+        "sym_path": "rom/blue/pokemon-blue.sym",
+        "sym_sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "blue/cable_club-terminal.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "terminal",
+        "when": "post_battle",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "in_cable_club"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "blue/cable_club-terminal.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "4cbc31c960742c362d75ee016a52273889b734b7",
+        "sha256": "d380a19f2295982f51128f4d0e7576d870603426c59fc271395fb83f5a33040f",
+        "fixture_id": "blue-color-battle-terminal-return"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "blue-color-battle",
+        "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "input_sequence": "real-play Cable Club link drive from blue-color-battle to the terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T05:16:29Z",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted blue-color-battle bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed",
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "blue_color_battle_terminal_return_peer",
+      "game": {
+        "version": "blue",
+        "variant": "color",
+        "rom_path": "rom/blue/pokemon-blue-color.gb",
+        "rom_sha1": "5f4b05725a860e04077045462176d3e2771c5022",
+        "sym_path": "rom/blue/pokemon-blue.sym",
+        "sym_sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "blue/cable_club-terminal-peer.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "terminal",
+        "when": "post_battle",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "in_cable_club"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "blue/cable_club-terminal-peer.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "d2c6d3a6fe75e80b295949f3c66c3db27479c94e",
+        "sha256": "3490607ed2435b14586724da80be687e6b5e67533c9f721a8753588697dab66d",
+        "fixture_id": "blue-color-battle-terminal-return-peer"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "blue-color-battle",
+        "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "input_sequence": "real-play Cable Club link drive from blue-color-battle to the terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T05:16:29Z",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted blue-color-battle bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed",
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
       "scenario_id": "yellow_cgb_ordinary",
       "game": {
         "version": "yellow",
@@ -778,6 +1778,506 @@
           "immutable preparation leaves party count 6 with active slot 0; acceptance loads the derived bytes without in-RAM preparation"
         ],
         "authored_tests": [],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "yellow_cgb_battle_faint",
+      "game": {
+        "version": "yellow",
+        "variant": "cgb",
+        "rom_path": "rom/yellow/pokemon-yellow.gbc",
+        "rom_sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+        "sym_path": "rom/yellow/pokemon-yellow.sym",
+        "sym_sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "yellow/cable_club-battle-faint.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "forced-replacement",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 4,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "yellow/cable_club-battle-faint.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "e28a61e83da08fc8d4617a516534019135d8e7aa",
+        "sha256": "14e4bf66f1a36097e4ffbadb136586f68c12616228a82a42a29f4f49c0a283e3",
+        "fixture_id": "yellow-cgb-battle-faint"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "yellow-cgb-battle",
+        "input_fixture_sha1": "78c7d0b32006b11baa9ac9c71efc73b0a8d807b9",
+        "input_sequence": "real-play Cable Club link drive from yellow-cgb-battle to the forced replacement boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:18:34Z",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted yellow-cgb-battle bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "yellow_cgb_battle_faint_peer",
+      "game": {
+        "version": "yellow",
+        "variant": "cgb",
+        "rom_path": "rom/yellow/pokemon-yellow.gbc",
+        "rom_sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+        "sym_path": "rom/yellow/pokemon-yellow.sym",
+        "sym_sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "yellow/cable_club-battle-faint-peer.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "forced-replacement",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "yellow/cable_club-battle-faint-peer.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "1274cd78b8a0cb307c4848e37040cc84e808e4a7",
+        "sha256": "a01e9bce13181eea2d8cbe43bd8b1426dc0ffc8db0abf6661df7a310085480c8",
+        "fixture_id": "yellow-cgb-battle-faint-peer"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "yellow-cgb-battle",
+        "input_fixture_sha1": "78c7d0b32006b11baa9ac9c71efc73b0a8d807b9",
+        "input_sequence": "real-play Cable Club link drive from yellow-cgb-battle to the forced replacement boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:18:34Z",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted yellow-cgb-battle bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "yellow_cgb_battle_pre_terminal",
+      "game": {
+        "version": "yellow",
+        "variant": "cgb",
+        "rom_path": "rom/yellow/pokemon-yellow.gbc",
+        "rom_sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+        "sym_path": "rom/yellow/pokemon-yellow.sym",
+        "sym_sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "yellow/cable_club-pre-terminal.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "pre-terminal",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "yellow/cable_club-pre-terminal.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "798d79c8b6e6fba2c807ae77c45ca85a33ec9cbe",
+        "sha256": "87fffc23a0768631c38d52c33183d146b0d43b5034052987bb3db001918af914",
+        "fixture_id": "yellow-cgb-battle-pre-terminal"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "yellow-cgb-battle",
+        "input_fixture_sha1": "78c7d0b32006b11baa9ac9c71efc73b0a8d807b9",
+        "input_sequence": "real-play Cable Club link drive from yellow-cgb-battle to the pre terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:18:40Z",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted yellow-cgb-battle bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "yellow_cgb_battle_pre_terminal_peer",
+      "game": {
+        "version": "yellow",
+        "variant": "cgb",
+        "rom_path": "rom/yellow/pokemon-yellow.gbc",
+        "rom_sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+        "sym_path": "rom/yellow/pokemon-yellow.sym",
+        "sym_sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "yellow/cable_club-pre-terminal-peer.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "pre-terminal",
+        "when": "pre_command",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "battling"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "yellow/cable_club-pre-terminal-peer.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "e4cb97370e616358b78943e879ac24ac87304604",
+        "sha256": "018432233bac4252ba203587d894548a1f612e5f1594e308fdcceef2cf527151",
+        "fixture_id": "yellow-cgb-battle-pre-terminal-peer"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "yellow-cgb-battle",
+        "input_fixture_sha1": "78c7d0b32006b11baa9ac9c71efc73b0a8d807b9",
+        "input_sequence": "real-play Cable Club link drive from yellow-cgb-battle to the pre terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:18:40Z",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted yellow-cgb-battle bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "yellow_cgb_battle_terminal_return",
+      "game": {
+        "version": "yellow",
+        "variant": "cgb",
+        "rom_path": "rom/yellow/pokemon-yellow.gbc",
+        "rom_sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+        "sym_path": "rom/yellow/pokemon-yellow.sym",
+        "sym_sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "yellow/cable_club-terminal.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "terminal",
+        "when": "post_battle",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "in_cable_club"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "yellow/cable_club-terminal.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "a4dfb7afb6684a2a6c95894bbcaca173cca595cd",
+        "sha256": "53e87421f02849d9b3ff7568feba8de0c82ab822084572df95ccda9221c03d46",
+        "fixture_id": "yellow-cgb-battle-terminal-return"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "yellow-cgb-battle",
+        "input_fixture_sha1": "78c7d0b32006b11baa9ac9c71efc73b0a8d807b9",
+        "input_sequence": "real-play Cable Club link drive from yellow-cgb-battle to the terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:20:16Z",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted yellow-cgb-battle bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed",
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
+        "real_rom_execution": null
+      }
+    },
+    {
+      "scenario_id": "yellow_cgb_battle_terminal_return_peer",
+      "game": {
+        "version": "yellow",
+        "variant": "cgb",
+        "rom_path": "rom/yellow/pokemon-yellow.gbc",
+        "rom_sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+        "sym_path": "rom/yellow/pokemon-yellow.sym",
+        "sym_sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "battle": {
+        "type": "link_battle_boundary",
+        "mode": "colosseum",
+        "roles": [
+          "listen",
+          "connect"
+        ],
+        "paths": [
+          "yellow/cable_club-terminal-peer.state"
+        ]
+      },
+      "capture_boundary": {
+        "stage": "terminal",
+        "when": "post_battle",
+        "region": "colosseum",
+        "map_id": 240,
+        "link_state": "in_cable_club"
+      },
+      "party": {
+        "count": 6,
+        "active_slot": 5,
+        "mons": []
+      },
+      "inventory": null,
+      "opponent": null,
+      "runtime": {
+        "python": "3.11.2",
+        "pyboy_version": "2.7.0",
+        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "role": null
+      },
+      "required_prior_actions": [
+        "reload the admitted primary/peer pair through the public load_state tool",
+        "install the serial bridge before driving any further ROM turn"
+      ],
+      "capture_bounds": {
+        "max_frames": 10000,
+        "max_wall_seconds": 3600.0,
+        "max_inputs": 2502
+      },
+      "fixture": {
+        "path": "yellow/cable_club-terminal-peer.state",
+        "repository_distributed": false,
+        "size_bytes": 200548,
+        "sha1": "5e2ac879818071e36121b2b18d2312597ffd7b2d",
+        "sha256": "5a388124c3c97d24e165ddcf7ea59a59d93266c0b9f326e438ca22c59bd75708",
+        "fixture_id": "yellow-cgb-battle-terminal-return-peer"
+      },
+      "provenance": {
+        "status": "captured",
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "source_fixture_id": "yellow-cgb-battle",
+        "input_fixture_sha1": "78c7d0b32006b11baa9ac9c71efc73b0a8d807b9",
+        "input_sequence": "real-play Cable Club link drive from yellow-cgb-battle to the terminal boundary (no RAM writes)",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 a59ce9e9a5307b11014404372cef75886061561d",
+        "captured_at_utc": "2026-09-18T04:20:16Z",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits"
+      },
+      "evidence_class": {
+        "expectations": [
+          "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
+          "the pair was driven from the admitted yellow-cgb-battle bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9) and is not a byte-for-byte reproduction of an external state",
+          "party count, active slot, map id, and link state are measured from the admitted bytes through a pinned ROM session, not asserted from memory",
+          "the declared bounds are the real-ROM boundary drive geometry: 10000 paired frames, at most 2502 owner inputs, and the local tier wall cap of 3600s",
+          "the scenario is declared for observation only; replay loads the immutable bytes and performs no runtime RAM, party, move, PP, or serial mutation"
+        ],
+        "authored_tests": [
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_boundary_reads_fail_closed",
+          "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_terminal_return_drive_reads"
+        ],
         "real_rom_execution": null
       }
     }

@@ -342,7 +342,8 @@ def test_fixture_manifest_schema_validation_uses_selected_interpreter(tmp_path):
 
     assert result["status"] == "PASS"
     assert result["mode"] == "schema"
-    assert result["entries"] == 10
+    # Every admitted row is reported, including the captured boundary rows.
+    assert result["entries"] == 28
 
 
 def test_fixture_manifest_provenance_requires_certified_entries(tmp_path):
