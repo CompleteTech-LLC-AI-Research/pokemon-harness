@@ -208,6 +208,13 @@ OBSERVATIONAL_MENU_HOOKS = frozenset(
         "MainInBattleLoop",
         "MainInBattleLoop.selectEnemyMove",
         "LoadScreenTilesFromBuffer1",
+        # Move-execution brackets: the ROM-owned proof that an ordinary FIGHT
+        # turn is being resolved right now (``wActionResultOrTookBattleTurn``
+        # is cleared by ExecutePlayerMoveDone, so RAM alone cannot report it).
+        "ExecutePlayerMove",
+        "ExecuteEnemyMove",
+        "ExecutePlayerMoveDone",
+        "ExecuteEnemyMoveDone",
     }
 )
 PHASE_EVIDENCE_SYMBOLS = frozenset(
@@ -218,9 +225,11 @@ PHASE_EVIDENCE_SYMBOLS = frozenset(
         "wMoveMenuType",
         "wPlayerMoveListIndex",
         "wActionResultOrTookBattleTurn",
-        # Consulted only by the forced-replacement guard, which requires a
-        # living party member so a final faint is not read as a replacement.
-        "wBattleMonHP",
+        # Consulted only by the forced-replacement guard, which requires the
+        # ROM's live battle party menu (the only positive proof that
+        # ChooseNextMon is awaiting input) and a living party member.
+        "wPartyMenuTypeOrMessageID",
+        "wPartyMenuAnimMonEnabled",
         "wPartyCount",
         "wPartyMon1HP",
     }
@@ -307,12 +316,18 @@ async def _serve():
         peer = _open(peer_rom, peer_sym)
         register_default_hooks(primary)
         assert primary.enable_battle_menu_observation()
+        # The ACTION_RESOLUTION phase is only observable through the session's
+        # move-execution hooks, so the child must install them exactly like
+        # ``mcp_server.main`` does; otherwise the phase could never be read
+        # over the public surface even while the ROM executes a move.
+        assert primary.enable_battle_resolution_observation()
         # The terminal result is only promoted from the bytes the ROM itself
         # held at ``EndOfBattle`` entry, so the harness must install that hook
         # exactly like ``mcp_server.main`` does.
         assert primary.enable_battle_end_observation()
         register_default_hooks(peer)
         assert peer.enable_battle_menu_observation()
+        assert peer.enable_battle_resolution_observation()
         assert peer.enable_battle_end_observation()
         peer.load_state(peer_state.read_bytes())
     try:
@@ -949,6 +964,7 @@ async def _settle_selected_move(client, *, before, budget=SETTLEMENT_BUDGET):
     selected = [None] * labels
     phases_seen = set()
     actions_seen = set()
+    resolution_evidence = set()
     terminal_observations = []
     raw_values = set()
     spent = 0
@@ -971,6 +987,7 @@ async def _settle_selected_move(client, *, before, budget=SETTLEMENT_BUDGET):
                     }
                 )
             actions_seen.add(battle.get("action_result_or_took_turn"))
+            resolution_evidence.update(battle.get("resolution_evidence") or ())
             if decremented[index] is None:
                 changed = _pp_decrements(pp_before[index], _active_pp(state))
                 if changed:
@@ -1025,6 +1042,7 @@ async def _settle_selected_move(client, *, before, budget=SETTLEMENT_BUDGET):
         "selected": tuple(selected),
         "phases_seen": tuple(sorted(value for value in phases_seen if value is not None)),
         "actions_seen": tuple(sorted(value for value in actions_seen if value is not None)),
+        "resolution_evidence": tuple(sorted(resolution_evidence)),
         "raw_values": tuple(sorted(value for value in raw_values if value is not None)),
         "terminal_observations": terminal_observations,
         "boundary": boundary,
@@ -1505,20 +1523,17 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
             f"phases={settlement['phases_seen']} actions={settlement['actions_seen']}",
         )
 
-        # Action/phase fail-closed.  A regular FIGHT move resets
-        # wActionResultOrTookBattleTurn to zero in ExecutePlayerMoveDone and no
-        # item/switch/run path runs here, so the derived ACTION_RESOLUTION phase
-        # is correctly absent.  If a non-zero flag or ACTION_RESOLUTION *were*
-        # observed we require the documented value to be present; otherwise the
-        # observed all-zero contract is asserted rather than fabricating
-        # resolution evidence.
-        if 3 in settlement["phases_seen"] or any(
-            value != 0 for value in settlement["actions_seen"]
-        ):
-            assert any(value != 0 for value in settlement["actions_seen"]), settlement
-        else:
-            assert all(value == 0 for value in settlement["actions_seen"]), settlement
-            assert 3 not in settlement["phases_seen"], settlement
+        # Action resolution must be *observed*, not assumed.  A regular FIGHT
+        # move resets wActionResultOrTookBattleTurn to zero in
+        # ExecutePlayerMoveDone, so the flag alone can never report this turn;
+        # the session's move-execution hook is the ROM-owned proof, and the
+        # drive samples states while the move is executing.  Issue #88 requires
+        # the phase distinction, so a drive that never observes
+        # ACTION_RESOLUTION is a failure rather than an accepted outcome.
+        assert 3 in settlement["phases_seen"], settlement
+        resolution_evidence = settlement["resolution_evidence"]
+        assert resolution_evidence, settlement
+        assert set(resolution_evidence) <= OBSERVATIONAL_MENU_HOOKS, settlement
 
         # -- outstanding request / asyncio cancellation ----------------------
         # Issue a paired link request, cancel it while it is still outstanding,

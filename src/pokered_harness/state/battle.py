@@ -166,6 +166,29 @@ class BattleMenuObservation:
     evidence: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class BattleResolutionObservation:
+    """Session execution-hook evidence for ROM move execution.
+
+    ``open`` is ``True`` while the ROM is inside its move-execution routines
+    (``ExecutePlayerMove`` / ``ExecuteEnemyMove``) and has not yet reached the
+    matching ``*Done`` exit; ``None`` when the hooks are not installed (so
+    resolution is unknown) or after a load/reset, which invalidates the
+    observation.  ``evidence`` names the exact ROM labels whose execution was
+    hooked.
+
+    ``wActionResultOrTookBattleTurn`` cannot report an ordinary FIGHT move:
+    ``ExecutePlayerMoveDone`` clears it to zero as it returns, so a client
+    polling at any interval only ever sees the flag set for the item / switch
+    / run turns that never execute a move.  The hook is the ROM-owned proof
+    that a move is being resolved right now, so it is the only source of
+    :attr:`BattlePhase.ACTION_RESOLUTION` for a normal attack turn.
+    """
+
+    open: bool | None
+    evidence: tuple[str, ...] = ()
+
+
 class BattlePhase(IntEnum):
     """Best-effort derived battle sub-phase.
 
@@ -199,34 +222,58 @@ _PHASE_TRANSIENT_SYMBOLS = (
     "wActionResultOrTookBattleTurn",
 )
 
-# The player faint handler sets ``wInHandlePlayerMonFainted`` on entry and only
-# the *enemy* faint path clears it, so the byte stays set after ``ChooseNextMon``
-# returns to the battle loop (verified in ``engine/battle/core.asm``:
-# ``HandlePlayerMonFainted`` writes 1, ``HandleEnemyMonFainted`` writes 0).  A
-# surviving non-zero byte therefore does not by itself prove the player is
-# *currently* choosing a replacement -- at a healthy command boundary it is
-# stale, and the ROM leaves it set in exactly that state.  The live signal is
-# the zeroed active combatant: ``RemoveFaintedPlayerMon`` (called before the
-# replacement menu opens) zeroes ``wBattleMonHP``, so a genuine forced
-# replacement has ``wInHandlePlayerMonFainted != 0`` *and* ``wBattleMonHP == 0``
-# *and* at least one living party member left to send out.
+# The ROM's own live signal for "the player is choosing a replacement right
+# now" is the battle party menu.  ``ChooseNextMon`` writes
+# ``BATTLE_PARTY_MENU`` (2) to ``wPartyMenuTypeOrMessageID`` and calls
+# ``DisplayPartyMenu``, whose input loop (``HandlePartyMenuInput``, reached
+# from ``DisplayPartyMenu``) raises ``wPartyMenuAnimMonEnabled`` to ``$40``
+# for as long as the menu is awaiting input and clears it on the way out
+# (``home/pokemon.asm``).  ``$40`` is the only non-zero value any engine
+# writer stores there, so the pair is live menu evidence rather than a stale
+# leftover: the type byte alone survives the menu, the animation flag does
+# not.
 #
-# The zeroed combatant alone is still not enough, because the *final* faint
-# takes the same ``RemoveFaintedPlayerMon`` path: ``HandlePlayerMonFainted``
-# immediately calls ``AnyPartyAlive`` and jumps to ``HandlePlayerBlackOut``
-# when no member survives (``core.asm`` lines 971-976), so the party menu never
-# opens.  Requiring a living party member is what separates the two, and the
-# party is read from the linker's own ``wPartyMon1HP`` block so a banked-out
-# ``0xD000`` window cannot hide it.
-_FORCED_REPLACEMENT_HP_SYMBOL = "wBattleMonHP"
+# ``BATTLE_PARTY_MENU`` has exactly two in-battle writers in ``core.asm``:
+# ``ChooseNextMon`` (:1086, the forced replacement after a faint or a forced
+# switch) and the trainer shift-in prompt in ``EnemySendOutFirstMon``
+# (:1389, "about to use X, will you switch?").  Both are the player being
+# made to pick a party mon mid-battle, which is the phase's contract.  The
+# *voluntary* battle-menu switch and the Run->party path store
+# ``NORMAL_PARTY_MENU`` (0) at :2316/:2335 instead, and the optional
+# shift-in prompt is skipped entirely in a link battle (``wLinkState``
+# check at :1372), so neither is reported here.
+#
+# The faint flag and the zeroed combatant are *not* sufficient and are not
+# equivalent to this signal.  ``wInHandlePlayerMonFainted`` is set by
+# ``HandlePlayerMonFainted`` and cleared only by ``HandleEnemyMonFainted``
+# (``core.asm``), so it reads stale at a healthy command boundary; and both
+# paths reach ``ChooseNextMon``, including the enemy-faint path that *clears*
+# the flag before opening the menu, so a real replacement can have the flag at
+# zero.  Conversely the final-faint path sets the flag, zeroes the combatant,
+# and then jumps to ``HandlePlayerBlackOut``/``TrainerBattleVictory`` without
+# ever opening the menu.  Reading the menu itself separates those cases, which
+# the flag triple cannot.
+#
+# ``AnyPartyAlive`` corroborates: ``HandlePlayerMonFainted`` jumps to
+# ``HandlePlayerBlackOut`` when nothing survives, so a live party menu with a
+# proven all-fainted party is contradictory and must not be reported as a
+# replacement.  The party is read from the linker's own ``wPartyMon1HP`` block
+# so a banked-out ``0xD000`` window cannot hide it.
+_PARTY_MENU_TYPE_SYMBOL = "wPartyMenuTypeOrMessageID"
+_PARTY_MENU_ANIM_SYMBOL = "wPartyMenuAnimMonEnabled"
+# ``BATTLE_PARTY_MENU`` in ``constants/menu_constants.asm``.
+_BATTLE_PARTY_MENU_TYPE = 2
+# ``HandlePartyMenuInput`` stores ``$40``; ``HandleMenuInput`` and the
+# ``HandlePartyMenuInput`` exit path store 0.
+_PARTY_MENU_ANIM_ACTIVE = 0x40
 _PARTY_COUNT_SYMBOL = "wPartyCount"
 _PARTY_HP_SYMBOL = "wPartyMon1HP"
 
-# Symbols the replacement decision consults beyond the phase flags.  They are
-# reported through ``phase_evidence`` so a caller can see exactly what the
-# derivation relied on.
+# Symbols the replacement decision consults.  They are reported through
+# ``phase_evidence`` so a caller can see exactly what the derivation relied on.
 _FORCED_REPLACEMENT_EVIDENCE_SYMBOLS = (
-    _FORCED_REPLACEMENT_HP_SYMBOL,
+    _PARTY_MENU_TYPE_SYMBOL,
+    _PARTY_MENU_ANIM_SYMBOL,
     _PARTY_COUNT_SYMBOL,
     _PARTY_HP_SYMBOL,
 )
@@ -337,6 +384,8 @@ class BattleState:
     enemy_stat_stages: StatStages | None = None
     menu_open: bool | None = None
     menu_evidence: tuple[str, ...] = ()
+    resolution_open: bool | None = None
+    resolution_evidence: tuple[str, ...] = ()
 
     @property
     def active(self) -> bool:
@@ -364,6 +413,7 @@ def parse_battle(
     *,
     lifecycle: BattleLifecycle | None = None,
     menu: BattleMenuObservation | None = None,
+    resolution: BattleResolutionObservation | None = None,
 ) -> BattleState:
     raw = symbols.read_u8(memory, "wIsInBattle")
     kind = _safe_enum(BattleKind, raw)
@@ -404,6 +454,7 @@ def parse_battle(
         kind=kind,
         battle_ended=battle_ended,
         menu=menu,
+        resolution=resolution,
     )
     in_battle = kind is BattleKind.WILD or kind is BattleKind.TRAINER
     return BattleState(
@@ -436,6 +487,10 @@ def parse_battle(
         enemy_stat_stages=(_parse_stat_stages(memory, symbols, "wEnemyMon") if in_battle else None),
         menu_open=(menu.open if menu is not None else None),
         menu_evidence=(menu.evidence if menu is not None else ()),
+        resolution_open=(resolution.open if resolution is not None else None),
+        resolution_evidence=(
+            resolution.evidence if resolution is not None else ()
+        ),
     )
 
 
@@ -488,15 +543,22 @@ def _parse_enemy_mon(
     observed fields are still exposed when the symbols exist.  A trainer
     battle additionally requires ``wEnemyMonPartyPos`` in ``0..5``.  An
     inactive or undecodable battle leaves both values unknown.
+
+    ``None`` means the evidence is unavailable: an inactive or undecodable
+    battle, an absent ``wEnemyMon*`` symbol family, or a missing
+    ``wEnemyMonPartyPos``.  ``False`` is reserved for an *observed* invalid
+    value -- a present slot outside ``0..5``, or a combatant whose own
+    validity check failed -- so a client can never mistake "the harness
+    could not read this" for "the harness read it and it is wrong".
     """
     if kind is not BattleKind.WILD and kind is not BattleKind.TRAINER:
         return None, None
     if "wEnemyMonPartyPos" not in symbols:
-        return None, False
+        return None, None
     slot = symbols.read_u8(memory, "wEnemyMonPartyPos")
     mon = parse_battle_combatant(memory, symbols, "wEnemyMon", slot=slot)
     if mon is None:
-        return None, False
+        return None, None
     if kind is BattleKind.WILD:
         return mon, None
     return mon, mon.valid is True and 0 <= slot < MAX_PARTY_SLOTS
@@ -510,6 +572,7 @@ def _derive_phase(
     kind: IntEnum | None,
     battle_ended: bool = False,
     menu: BattleMenuObservation | None = None,
+    resolution: BattleResolutionObservation | None = None,
 ) -> tuple[BattlePhase | None, bool, tuple[str, ...]]:
     """Derive a battle phase candidate from ROM-owned observations.
 
@@ -534,10 +597,16 @@ def _derive_phase(
     the ROM sets it in ``HandlePlayerMonFainted`` and clears it only in
     ``HandleEnemyMonFainted``, so it stays set after ``ChooseNextMon`` returns
     to the battle loop and reads stale at a healthy command boundary.  The
-    phase requires the ROM's current-replacement signal as well -- a zeroed
-    ``wBattleMonHP``, which ``RemoveFaintedPlayerMon`` writes before the party
-    menu opens.  When the flag is set but that HP symbol is absent the result
-    is ``None``/``False`` (fail closed).
+    flag is also *cleared* on the enemy-faint path before that path calls
+    ``ChooseNextMon``, so the byte is absent during a genuine replacement as
+    well.  The phase therefore requires the ROM's own current-replacement
+    signal: the battle party menu itself
+    (``wPartyMenuTypeOrMessageID == BATTLE_PARTY_MENU`` while
+    ``wPartyMenuAnimMonEnabled == $40``), which only ``ChooseNextMon``'s
+    ``DisplayPartyMenu`` raises and only its exit clears.  That also excludes
+    the final-faint path, which reaches ``HandlePlayerBlackOut`` /
+    ``TrainerBattleVictory`` without opening the menu, and the enemy-faint
+    path's simultaneous double knockout, which does open it.
 
     ``wBattleResult`` only emits ``TERMINAL_RETURN`` on the observed
     battle-end transition (``battle_ended``); its reset value 0 and its
@@ -546,6 +615,14 @@ def _derive_phase(
     alone: no value proves move selection is currently active.  The only
     positive source of ``COMMAND_SELECTION`` is a session hook observation
     (``menu``) that proves the menu routine was entered and not yet left.
+
+    ``ACTION_RESOLUTION`` has two sources.  A non-zero
+    ``wActionResultOrTookBattleTurn`` proves an item / switch / run turn
+    consumed the action, but an ordinary FIGHT move is invisible in RAM:
+    ``ExecutePlayerMoveDone`` clears the flag to zero on the way out, so any
+    client polling interval can miss it.  The session's move-execution hook
+    observation (``resolution``) is the ROM-owned proof that the engine is
+    inside ``ExecutePlayerMove``/``ExecuteEnemyMove`` right now.
     """
     if raw == 0:
         if battle_ended:
@@ -571,10 +648,14 @@ def _derive_phase(
     _extend_unique(evidence, menu.evidence if menu is not None else ())
 
     forced = _forced_replacement_is_current(memory, symbols)
-    # The replacement decision consults the party block as well as the faint
-    # flag, so name those symbols whenever the derivation actually looked at
-    # them.  A caller can then see whether the living-party guard was applied.
-    if symbols.read_u8(memory, "wInHandlePlayerMonFainted") != 0:
+    # The replacement decision consults the party menu and the party block as
+    # well as the faint flag, so name those symbols whenever the derivation
+    # actually looked at them.  A caller can then see whether the live-menu
+    # signal and the living-party corroboration were applied.
+    if (
+        symbols.read_u8(memory, "wInHandlePlayerMonFainted") != 0
+        or _battle_party_menu_is_live(memory, symbols) is True
+    ):
         _extend_unique(
             evidence,
             tuple(
@@ -585,11 +666,17 @@ def _derive_phase(
         )
     action = symbols.read_u8(memory, "wActionResultOrTookBattleTurn") != 0
     menu_open = menu is not None and menu.open is True
+    resolving = resolution is not None and resolution.open is True
+    if resolving:
+        _extend_unique(
+            evidence,
+            tuple(resolution.evidence) if resolution is not None else (),
+        )
 
     observed: set[BattlePhase] = set()
     if forced is True:
         observed.add(BattlePhase.FORCED_REPLACEMENT)
-    if action:
+    if action or resolving:
         observed.add(BattlePhase.ACTION_RESOLUTION)
     if menu_open:
         observed.add(BattlePhase.COMMAND_SELECTION)
@@ -610,40 +697,72 @@ def _forced_replacement_is_current(
 ) -> bool | None:
     """Whether a forced player replacement is happening *right now*.
 
-    ``wInHandlePlayerMonFainted`` is set by ``HandlePlayerMonFainted`` and
-    cleared only by ``HandleEnemyMonFainted``, so the byte survives
-    ``ChooseNextMon`` returning to the battle loop.  A non-zero byte alone is
-    therefore stale evidence at a healthy command boundary.
+    The decisive signal is the ROM's battle party menu
+    (see :func:`_battle_party_menu_is_live`), because it is the only evidence
+    that positively identifies the ``ChooseNextMon`` input wait.  The faint
+    flag alone cannot: ``wInHandlePlayerMonFainted`` is *set* on the
+    player-faint path and cleared only by the enemy-faint path, so it reads
+    stale after the menu closes, and it is *cleared* on the enemy-faint path
+    before that same path calls ``ChooseNextMon`` -- so a genuine replacement
+    can also have the flag at zero.  The zeroed combatant alone cannot
+    either: the final faint zeroes ``wBattleMonHP`` and then branches to
+    ``HandlePlayerBlackOut`` / ``TrainerBattleVictory`` without opening a menu.
 
-    The ROM's own current-replacement signal is the zeroed active combatant:
-    ``RemoveFaintedPlayerMon`` zeroes ``wBattleMonHP`` before the party menu
-    opens, so ``wInHandlePlayerMonFainted != 0`` together with
-    ``wBattleMonHP == 0`` proves the player is choosing a replacement.  A
-    non-zero ``wBattleMonHP`` proves the flag is stale.
+    When the menu is live, ``AnyPartyAlive`` corroborates: the ROM jumps to
+    ``HandlePlayerBlackOut`` instead of opening the menu when no member
+    survives, so a live menu over a proven all-fainted party is contradictory
+    and is not reported as a replacement.
 
-    A zeroed combatant is still not sufficient: the *final* faint runs the same
-    ``RemoveFaintedPlayerMon`` path and then jumps to ``HandlePlayerBlackOut``
-    instead of opening the menu (``HandlePlayerMonFainted`` calls
-    ``AnyPartyAlive`` and jumps on zero).  The derivation therefore also
-    requires at least one living party member, which is exactly the condition
-    the ROM itself tests before ``ChooseNextMon``.
-
-    Returns ``True``/``False`` when the pair of symbols decides it, and
-    ``None`` when the flag is set but the symbols needed to prove a live
-    replacement are absent or cannot be read -- the caller must then fail
-    closed rather than assert a replacement it cannot prove.
+    Returns ``True``/``False`` when the symbols decide it, and ``None`` when
+    the faint handler ran but the menu evidence needed to resolve the question
+    is absent -- the caller must then fail closed rather than assert a
+    replacement it cannot prove.
     """
-    if symbols.read_u8(memory, "wInHandlePlayerMonFainted") == 0:
+    live = _battle_party_menu_is_live(memory, symbols)
+    if live is None:
+        # The menu cannot be read.  A raised faint flag means the ROM may be
+        # waiting on ``ChooseNextMon`` right now, so the caller must not claim
+        # either answer.
+        if symbols.read_u8(memory, "wInHandlePlayerMonFainted") != 0:
+            return None
         return False
-    if _FORCED_REPLACEMENT_HP_SYMBOL not in symbols:
-        return None
-    if symbols.read_u16_be(memory, _FORCED_REPLACEMENT_HP_SYMBOL) != 0:
-        # A living combatant proves the faint flag is stale.
+    if live is False:
         return False
     living = _party_has_living_member(memory, symbols)
     if living is None:
         return None
     return living
+
+
+def _battle_party_menu_is_live(
+    memory: MemoryLike, symbols: SymbolTable
+) -> bool | None:
+    """Whether the ROM's battle party menu is open and awaiting input.
+
+    ``ChooseNextMon`` writes ``BATTLE_PARTY_MENU`` to
+    ``wPartyMenuTypeOrMessageID`` and calls ``DisplayPartyMenu``; the menu's
+    input loop raises ``wPartyMenuAnimMonEnabled`` to ``$40`` while it awaits
+    input and clears it on exit (``home/pokemon.asm``).  The type byte left
+    behind after the menu closes is stale, so both are required: the type
+    proves *which* menu, the animation flag proves it is *live*.  The only
+    other in-battle writer of the type byte is the trainer shift-in prompt
+    (``EnemySendOutFirstMon``), which is also a mid-battle party selection
+    and is skipped in link battles; the voluntary switch and Run->party
+    paths store ``NORMAL_PARTY_MENU`` (0) and so are never matched.
+
+    Returns ``None`` when either symbol is absent, so a caller can
+    distinguish "the harness cannot read the menu" from "the menu is shut".
+    """
+    if (
+        _PARTY_MENU_TYPE_SYMBOL not in symbols
+        or _PARTY_MENU_ANIM_SYMBOL not in symbols
+    ):
+        return None
+    if symbols.read_u8(memory, _PARTY_MENU_TYPE_SYMBOL) != _BATTLE_PARTY_MENU_TYPE:
+        return False
+    return (
+        symbols.read_u8(memory, _PARTY_MENU_ANIM_SYMBOL) == _PARTY_MENU_ANIM_ACTIVE
+    )
 
 
 def _party_has_living_member(memory: MemoryLike, symbols: SymbolTable) -> bool | None:

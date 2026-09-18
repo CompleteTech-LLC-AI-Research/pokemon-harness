@@ -713,6 +713,9 @@ Identity and combatants:
   and `battle.enemy_mon_valid`: `true`/`false` where a trainer slot can be
   checked, `null` for a wild battle with no meaningful slot; `null` whenever
   the `wEnemyMon*` symbols are absent.
+  `false` is reserved for a value the harness actually read and rejected
+  (a party slot outside `0..5`, or a combatant whose own validity check
+  failed); unavailable evidence is always `null`, never `false`.
 - `battle.player_stat_stages` / `battle.enemy_stat_stages`: the six
   `w*MonStatMods` bytes decoded as Gen-1 stages in `-6..+6` (`raw - 7`,
   where `7` is neutral), with `valid` `true` when all six are present and in
@@ -740,6 +743,29 @@ Phase and terminal state:
   only when `menu_open` is `true`; the evidence names the hooked ROM labels.
   `menu_open` is `null` when observation is unavailable and after a
   `load_state`/`reset_tick` until the next hook event.
+- `battle.resolution_open` / `battle.resolution_evidence`: the
+  session-maintained execution-hook state for ROM move execution
+  (`ExecutePlayerMove`/`ExecuteEnemyMove` entered and their matching `*Done`
+  exit not yet reached). An ordinary FIGHT turn is otherwise unobservable:
+  `ExecutePlayerMoveDone` clears `wActionResultOrTookBattleTurn` to zero on
+  the way out, so a client polling at any interval only ever sees that flag
+  set for the item/switch/run turns that never execute a move.
+  `action_resolution` is reported when the flag is non-zero *or* the hook
+  shows the engine is resolving a move; `resolution_open` is `null` when
+  observation is unavailable and after a `load_state`/`reset_tick` until the
+  next hook event.
+
+Forced replacement is reported from the ROM's own live replacement-menu
+signal: `ChooseNextMon` writes `BATTLE_PARTY_MENU` to
+`wPartyMenuTypeOrMessageID` and `DisplayPartyMenu`'s input loop raises
+`wPartyMenuAnimMonEnabled` to `$40` while it awaits input, clearing it on
+exit. Both must hold, and the party must have a living member
+(`AnyPartyAlive` corroboration). The faint flag
+`wInHandlePlayerMonFainted` is *not* sufficient and not required: it is
+cleared on the enemy-faint path before that path calls `ChooseNextMon` (so a
+genuine replacement can have it at zero), it can read stale after the menu
+closes, and the final-faint path sets it while jumping to blackout or victory
+without ever opening a menu.
 
 Transient mechanics:
 
@@ -748,12 +774,17 @@ Transient mechanics:
   `battle.enemy_selected_move`, `battle.action_result_or_took_turn`, and
   `battle.in_handle_player_mon_fainted`.
 
-Per-mode availability: the primary MCP server enables the menu observation on
-its session and its configured peer at startup. The observation is installed
-only when `SelectMenuItem`, `DisplayBattleMenu.handleBattleMenuInput`,
-`MainInBattleLoop`, and `MainInBattleLoop.selectEnemyMove` all exist in that
-session's symbol table (they do in the pinned Red/Blue/Yellow `.sym` files);
-otherwise `menu_open` is `null` and `command_selection` is never emitted. Each
+Per-mode availability: the primary MCP server enables the menu, move-execution,
+and battle-end observations on its session and its configured peer at startup.
+The menu observation is installed only when `SelectMenuItem`,
+`DisplayBattleMenu.handleBattleMenuInput`, `MainInBattleLoop`, and
+`MainInBattleLoop.selectEnemyMove` all exist in that session's symbol table
+(they do in the pinned Red/Blue/Yellow `.sym` files); otherwise `menu_open` is
+`null` and `command_selection` is never emitted. The move-execution
+observation needs `ExecutePlayerMove`, `ExecuteEnemyMove`,
+`ExecutePlayerMoveDone`, and `ExecuteEnemyMoveDone`; otherwise
+`resolution_open` is `null` and `action_resolution` can only come from a
+non-zero `wActionResultOrTookBattleTurn`. Each
 session observes only its own emulator, so `pokered://peer-game-state`
 reflects the peer's hooks. Timed remote mode has no local peer resource; its
 `pokered://game-state` is read through the timed owner.

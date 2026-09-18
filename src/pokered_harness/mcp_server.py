@@ -3820,6 +3820,7 @@ def main() -> None:
             )
             register_default_hooks(session)
             session.enable_battle_menu_observation()
+            session.enable_battle_resolution_observation()
             session.enable_battle_end_observation()
             if peer_rom is not None and peer_sym is not None:
                 peer_session = Session.from_files(
@@ -3832,6 +3833,7 @@ def main() -> None:
                 )
                 register_default_hooks(peer_session)
                 peer_session.enable_battle_menu_observation()
+                peer_session.enable_battle_resolution_observation()
                 peer_session.enable_battle_end_observation()
 
         timed_options: dict[str, Any] = {}

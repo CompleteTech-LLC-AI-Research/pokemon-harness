@@ -35,6 +35,7 @@ from pokered_harness.state import (
     BattleKind,
     BattleLifecycle,
     BattleMenuObservation,
+    BattleResolutionObservation,
     GameState,
     parse_battle,
     parse_game_state,
@@ -186,6 +187,21 @@ _BATTLE_MENU_CLOSE_SYMBOLS = (
     # closes the observation on the shared post-menu redraw path.
     "LoadScreenTilesFromBuffer1",
 )
+# Move execution brackets, used to observe ``ACTION_RESOLUTION`` for an
+# ordinary FIGHT turn.  ``wActionResultOrTookBattleTurn`` cannot report it:
+# ``ExecutePlayerMoveDone`` clears the byte as it returns, so a client polling
+# at any interval only ever sees the flag set for the item/switch/run turns
+# that never execute a move.  Both combatants' routines are bracketed because
+# either side can be resolving when a client reads, and both exits are shared
+# tails that the corresponding entry always reaches.
+_BATTLE_RESOLUTION_OPEN_SYMBOLS = (
+    "ExecutePlayerMove",
+    "ExecuteEnemyMove",
+)
+_BATTLE_RESOLUTION_CLOSE_SYMBOLS = (
+    "ExecutePlayerMoveDone",
+    "ExecuteEnemyMoveDone",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +322,13 @@ class Session:
         self._battle_menu_observed = False
         self._battle_menu_open: bool | None = None
         self._battle_menu_evidence: tuple[str, ...] = ()
+        # Move-execution entry/exit state, maintained by execution hooks when
+        # ``enable_battle_resolution_observation`` succeeds.  ``None`` means
+        # the hooks are not installed, so ACTION_RESOLUTION for an ordinary
+        # FIGHT turn stays unknown.
+        self._battle_resolution_observed = False
+        self._battle_resolution_open: bool | None = None
+        self._battle_resolution_evidence: tuple[str, ...] = ()
         # Battle-end outcome evidence, sampled by an ``EndOfBattle`` execution
         # hook when ``enable_battle_end_observation`` succeeds.  ``None`` means
         # no ROM-observed end is pending, so the result byte cannot be
@@ -1048,6 +1071,60 @@ class Session:
             evidence=self._battle_menu_evidence,
         )
 
+    def enable_battle_resolution_observation(self) -> bool:
+        """Install execution hooks that bracket ROM move execution.
+
+        Returns ``True`` when the hooks are (now) installed.  The observation
+        is unavailable, and ``ACTION_RESOLUTION`` is then only derivable from a
+        non-zero ``wActionResultOrTookBattleTurn``, when any bracketing label is
+        absent from the loaded ``.sym``.
+
+        An ordinary FIGHT move is otherwise unobservable: the flag
+        ``ExecutePlayerMoveDone`` clears to zero on the way out is the only
+        byte the engine writes around a normal attack turn, so a client
+        polling at any interval can miss it entirely.  The hooks only read the
+        program counter: they write no RAM, press no input, and advance no
+        frame.  They are closed with the session.
+        """
+        self._ensure_open()
+        with self._emulator_access():
+            self._ensure_open()
+            if self._battle_resolution_observed:
+                return True
+            labels = (
+                _BATTLE_RESOLUTION_OPEN_SYMBOLS + _BATTLE_RESOLUTION_CLOSE_SYMBOLS
+            )
+            if any(name not in self._symbols for name in labels):
+                return False
+
+            def _mark_resolving(_ctx: object) -> None:
+                self._battle_resolution_open = True
+
+            def _mark_resolved(_ctx: object) -> None:
+                self._battle_resolution_open = False
+
+            for name in _BATTLE_RESOLUTION_OPEN_SYMBOLS:
+                bank, addr = self._symbols.bank_addr(name)
+                self._register_event_hook_at_locked(bank, addr, _mark_resolving)
+            for name in _BATTLE_RESOLUTION_CLOSE_SYMBOLS:
+                bank, addr = self._symbols.bank_addr(name)
+                self._register_event_hook_at_locked(bank, addr, _mark_resolved)
+            self._battle_resolution_observed = True
+            self._battle_resolution_open = False
+            self._battle_resolution_evidence = labels
+            return True
+
+    def _battle_resolution_observation(
+        self,
+    ) -> BattleResolutionObservation | None:
+        """Current hook-derived move-execution state, or ``None`` if unknown."""
+        if not self._battle_resolution_observed:
+            return None
+        return BattleResolutionObservation(
+            open=self._battle_resolution_open,
+            evidence=self._battle_resolution_evidence,
+        )
+
     def enable_battle_end_observation(self) -> bool:
         """Install an execution hook that samples the ROM's ``EndOfBattle``.
 
@@ -1129,6 +1206,8 @@ class Session:
         self._battle_end_escaped = False
         if self._battle_menu_observed:
             self._battle_menu_open = None
+        if self._battle_resolution_observed:
+            self._battle_resolution_open = None
 
     def _register_event_hook_at_locked(
         self,
@@ -1512,6 +1591,7 @@ class Session:
             self._symbols,
             lifecycle=previous,
             menu=self._battle_menu_observation(),
+            resolution=self._battle_resolution_observation(),
         )
         if qualified.kind in (BattleKind.WILD, BattleKind.TRAINER):
             # Accumulate outcome-specific evidence while a battle is live.

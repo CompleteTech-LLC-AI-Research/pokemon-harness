@@ -74,6 +74,8 @@ _FULL_SYM = """\
 00:C00C wEnemySelectedMove
 00:C00D wCurrentMenuItem
 00:C024 wPartyCount
+00:C02E wPartyMenuTypeOrMessageID
+00:C02F wPartyMenuAnimMonEnabled
 00:D00E wBattleMonHP
 00:D130 wPartyMon1HP
 00:C018 wPlayerMonAttackMod
@@ -103,6 +105,10 @@ _FULL_SYM = """\
 0F:4F1A DisplayBattleMenu.handleBattleMenuInput
 0F:52FE SelectMenuItem
 0F:3725 LoadScreenTilesFromBuffer1
+0F:565E ExecutePlayerMove
+0F:580A ExecutePlayerMoveDone
+0F:66BC ExecuteEnemyMove
+0F:688C ExecuteEnemyMoveDone
 04:77AA EndOfBattle
 """
 
@@ -122,6 +128,15 @@ _CURRENT_MENU_ITEM = 0xC00D
 # ``wBattleMonHP`` is big-endian; the synthetic table places it in the
 # switchable WRAM half so the read exercises the bank-1 path.
 _PLAYER_BATTLE_MON_HP = 0xD00E
+# ``ChooseNextMon`` writes BATTLE_PARTY_MENU (2) to the type byte and
+# ``DisplayPartyMenu``'s input loop raises the animation flag to ``$40`` while
+# the menu keeps awaiting input; the exit path clears the flag.
+_PARTY_MENU_TYPE = 0xC02E
+_PARTY_MENU_ANIM = 0xC02F
+_PARTY_MENU_SYMBOLS = ("wPartyMenuTypeOrMessageID", "wPartyMenuAnimMonEnabled")
+# Move-execution brackets the session installs to observe ACTION_RESOLUTION.
+_RESOLUTION_OPEN_HOOKS = ((0x0F, 0x565E), (0x0F, 0x66BC))
+_RESOLUTION_CLOSE_HOOKS = ((0x0F, 0x580A), (0x0F, 0x688C))
 
 _TRANSIENT_SYMBOLS = {
     "wBattleResult",
@@ -257,12 +272,12 @@ def test_phase_forced_replacement_when_player_faint_handler_is_set():
     sym = _symbols()
     mem[0xC000] = 2
     mem[0xC002] = 1  # wInHandlePlayerMonFainted
-    # RemoveFaintedPlayerMon zeroes the active combatant before the party menu
-    # opens, so a genuine replacement has wBattleMonHP == 0.  The ROM also
-    # requires AnyPartyAlive to be non-zero (HandlePlayerMonFainted jumps to
-    # HandlePlayerBlackOut otherwise), so a living replacement must exist.
-    mem[_PLAYER_BATTLE_MON_HP] = 0
-    mem[_PLAYER_BATTLE_MON_HP + 1] = 0
+    # ChooseNextMon writes BATTLE_PARTY_MENU and DisplayPartyMenu's input loop
+    # raises wPartyMenuAnimMonEnabled to $40 while the menu awaits input; the
+    # ROM also requires AnyPartyAlive to be non-zero (HandlePlayerMonFainted
+    # jumps to HandlePlayerBlackOut otherwise).
+    mem[_PARTY_MENU_TYPE] = 2
+    mem[_PARTY_MENU_ANIM] = 0x40
     mem[0xC024] = 6  # wPartyCount
     mem[0xD130] = 0  # wPartyMon1HP (slot 0) high byte
     mem[0xD131] = 0  # ... low byte: fainted
@@ -271,19 +286,60 @@ def test_phase_forced_replacement_when_player_faint_handler_is_set():
     state = parse_battle(mem, sym)
     assert state.phase is BattlePhase.FORCED_REPLACEMENT
     assert state.phase_valid is True
+    assert set(_PARTY_MENU_SYMBOLS) <= set(state.phase_evidence)
+
+
+def test_phase_live_replacement_after_simultaneous_knockout_without_faint_flag():
+    # HandleEnemyMonFainted clears wInHandlePlayerMonFainted and then calls
+    # ChooseNextMon itself when the player's combatant also hit zero, so a real
+    # replacement menu can be open with the faint flag at zero.  Requiring the
+    # flag reported UNKNOWN for a live replacement; the menu is the real signal.
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 2
+    mem[0xC002] = 0  # cleared by HandleEnemyMonFainted
+    mem[_PARTY_MENU_TYPE] = 2  # BATTLE_PARTY_MENU
+    mem[_PARTY_MENU_ANIM] = 0x40  # live menu input loop
+    mem[0xC024] = 2  # wPartyCount
+    mem[0xD130] = 0
+    mem[0xD131] = 0  # slot 0 fainted
+    mem[0xD130 + 44] = 0x00
+    mem[0xD130 + 44 + 1] = 100  # slot 1 living
+    state = parse_battle(mem, sym)
+    assert state.phase is BattlePhase.FORCED_REPLACEMENT
+    assert state.phase_valid is True
+
+
+def test_phase_final_enemy_knockout_does_not_open_a_replacement_menu():
+    # When the enemy's last mon faints beside the player, HandlePlayerMonFainted
+    # jumps to TrainerBattleVictory before any menu opens.  The faint flag and a
+    # zeroed combatant are both present, yet there is no live party menu, so the
+    # phase must not claim a replacement.
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 2
+    mem[0xC002] = 1  # set by HandlePlayerMonFainted
+    mem[_PLAYER_BATTLE_MON_HP] = 0
+    mem[_PLAYER_BATTLE_MON_HP + 1] = 0
+    # No live menu: wPartyMenuTypeOrMessageID/AnimMonEnabled stay at their
+    # defaults, i.e. the menu either never opened or has already closed.
+    mem[0xC024] = 6
+    state = parse_battle(mem, sym)
+    assert state.phase is not BattlePhase.FORCED_REPLACEMENT
+    assert state.phase_valid is False
 
 
 def test_phase_final_faint_with_no_living_party_is_not_forced_replacement():
-    # The final faint runs the same RemoveFaintedPlayerMon path as a mid-battle
-    # faint, but HandlePlayerMonFainted calls AnyPartyAlive and jumps to
-    # HandlePlayerBlackOut when nothing survives, so no replacement menu opens.
-    # All six slots at zero HP must therefore not be reported as a replacement.
+    # HandlePlayerMonFainted calls AnyPartyAlive and jumps to
+    # HandlePlayerBlackOut when nothing survives, so the ROM does not open the
+    # menu.  Even if a stale menu signal were somehow present, an all-fainted
+    # party is contradictory and must not be reported as a replacement.
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 2
     mem[0xC002] = 1  # wInHandlePlayerMonFainted
-    mem[_PLAYER_BATTLE_MON_HP] = 0
-    mem[_PLAYER_BATTLE_MON_HP + 1] = 0
+    mem[_PARTY_MENU_TYPE] = 2
+    mem[_PARTY_MENU_ANIM] = 0x40
     mem[0xC024] = 6  # wPartyCount
     # Every slot's HP bytes stay zero (DictMemory defaults to 0).
     state = parse_battle(mem, sym)
@@ -295,23 +351,23 @@ def test_phase_final_faint_with_no_living_party_is_not_forced_replacement():
 def test_phase_stale_faint_flag_with_living_combatant_is_not_forced_replacement():
     # HandlePlayerMonFainted sets wInHandlePlayerMonFainted and only
     # HandleEnemyMonFainted clears it, so the byte survives ChooseNextMon
-    # returning to the battle loop.  A healthy combatant (non-zero HP) at the
-    # command menu is therefore stale evidence, not a live replacement.
+    # returning to the battle loop.  With the party menu closed (the anim flag
+    # is cleared on exit) it is stale evidence, not a live replacement.
     mem = DictMemory()
     sym = _symbols()
     mem[0xC000] = 2
     mem[0xC002] = 1  # stale wInHandlePlayerMonFainted
-    mem[_PLAYER_BATTLE_MON_HP] = 0x00
-    mem[_PLAYER_BATTLE_MON_HP + 1] = 35  # living combatant
+    mem[_PARTY_MENU_TYPE] = 2  # type byte left behind after the menu closed
+    mem[_PARTY_MENU_ANIM] = 0  # HandlePartyMenuInput cleared it on exit
     state = parse_battle(mem, sym)
     assert state.phase is BattlePhase.UNKNOWN
     assert state.phase_valid is False
     assert state.in_handle_player_mon_fainted == 1
 
 
-def test_phase_faint_flag_without_hp_symbol_fails_closed():
-    # Without wBattleMonHP the derivation cannot tell a live replacement from a
-    # stale flag, so it must not name FORCED_REPLACEMENT.
+def test_phase_faint_flag_without_menu_symbols_fails_closed():
+    # Without the party-menu symbols the derivation cannot tell a live
+    # replacement from a stale flag, so it must not name FORCED_REPLACEMENT.
     sym = load_sym_text(
         """
         00:C000 wIsInBattle
@@ -452,7 +508,16 @@ def test_phase_lifecycle_active_but_still_in_battle_is_not_terminal():
 @pytest.mark.parametrize(
     "flags",
     [
-        {"wInHandlePlayerMonFainted": 1, "wActionResultOrTookBattleTurn": 1},
+        # A live replacement menu and a consumed action are contradictory: the
+        # ROM opens the party menu only after the turn's action is finished.
+        # The faint flag is deliberately not part of this case -- it can be
+        # zero during a genuine replacement (HandleEnemyMonFainted clears it
+        # before calling ChooseNextMon), so it is not a replacement signal.
+        {
+            "wPartyMenuTypeOrMessageID": 2,
+            "wPartyMenuAnimMonEnabled": 0x40,
+            "wActionResultOrTookBattleTurn": 1,
+        },
     ],
 )
 def test_phase_contradictory_flags_fail_closed_to_none(flags):
@@ -464,6 +529,8 @@ def test_phase_contradictory_flags_fail_closed_to_none(flags):
         "wInHandlePlayerMonFainted": 0xC002,
         "wMoveMenuType": 0xC003,
         "wActionResultOrTookBattleTurn": 0xC005,
+        "wPartyMenuTypeOrMessageID": _PARTY_MENU_TYPE,
+        "wPartyMenuAnimMonEnabled": _PARTY_MENU_ANIM,
     }
     for name, value in flags.items():
         mem[addresses[name]] = value
@@ -563,6 +630,60 @@ def test_command_selection_closes_on_mimic_submenu_return():
     closed = session.read_game_state().battle
     assert closed.phase is not BattlePhase.COMMAND_SELECTION
     assert closed.menu_open is False
+
+
+# --- action resolution via session execution hooks --------------------------
+
+
+def test_action_resolution_derived_from_move_execution_hook_entry():
+    # An ordinary FIGHT move leaves wActionResultOrTookBattleTurn at zero
+    # (ExecutePlayerMoveDone clears it), so the flag can never report this
+    # turn.  The move-execution hook is the ROM-owned evidence.
+    session = _session()
+    session._pyboy.memory[0xC000] = 2  # trainer battle
+    session._pyboy.memory[0xC005] = 0  # flag already cleared by *Done
+
+    before = session.read_game_state().battle
+    assert before.phase is not BattlePhase.ACTION_RESOLUTION
+    assert before.resolution_open is False
+
+    session._pyboy.fire(*_RESOLUTION_OPEN_HOOKS[0])
+    resolving = session.read_game_state().battle
+    assert resolving.phase is BattlePhase.ACTION_RESOLUTION
+    assert resolving.phase_valid is True
+    assert resolving.resolution_open is True
+    assert "ExecutePlayerMove" in resolving.phase_evidence
+
+    session._pyboy.fire(*_RESOLUTION_CLOSE_HOOKS[0])
+    resolved = session.read_game_state().battle
+    assert resolved.phase is not BattlePhase.ACTION_RESOLUTION
+    assert resolved.resolution_open is False
+
+
+def test_action_resolution_observed_for_enemy_move_execution():
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    session._pyboy.memory[0xC005] = 0
+    session._pyboy.fire(*_RESOLUTION_OPEN_HOOKS[1])
+    resolving = session.read_game_state().battle
+    assert resolving.phase is BattlePhase.ACTION_RESOLUTION
+    assert resolving.resolution_open is True
+    assert "ExecuteEnemyMove" in resolving.phase_evidence
+    session._pyboy.fire(*_RESOLUTION_CLOSE_HOOKS[1])
+    assert session.read_game_state().battle.resolution_open is False
+
+
+def test_resolution_observation_invalidated_by_reset_tick():
+    # A load/reset starts a new observation epoch; the previous epoch's
+    # in-flight resolution must not survive into it.
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    session._pyboy.fire(*_RESOLUTION_OPEN_HOOKS[0])
+    assert session.read_game_state().battle.resolution_open is True
+    session.reset_tick()
+    after = session.read_game_state().battle
+    assert after.resolution_open is None
+    assert after.phase is not BattlePhase.ACTION_RESOLUTION
 
 
 def test_advance_tick_preserves_observation_but_reset_tick_invalidates():
@@ -823,7 +944,10 @@ def test_enemy_mon_missing_fields_is_unknown_not_zero():
     mem = DictMemory({0xC000: 2})
     state = parse_battle(mem, sym)
     assert state.enemy_mon is None
-    assert state.enemy_mon_valid is False
+    # The whole wEnemyMon* family is absent, so the data is unavailable rather
+    # than observed-invalid: the contract reserves False for a value the
+    # harness actually read and rejected.
+    assert state.enemy_mon_valid is None
     assert state.terminal_result is None
 
 
@@ -846,7 +970,7 @@ def test_enemy_mon_absent_slot_symbol_is_unknown():
     _write_enemy(mem)
     state = parse_battle(mem, sym)
     assert state.enemy_mon is None
-    assert state.enemy_mon_valid is False
+    assert state.enemy_mon_valid is None
 
 
 def test_enemy_mon_wild_validity_is_unknown_not_slot_zero():
@@ -922,6 +1046,7 @@ def _session(*, observe: bool = True) -> Session:
     )
     if observe:
         assert session.enable_battle_menu_observation() is True
+        assert session.enable_battle_resolution_observation() is True
         assert session.enable_battle_end_observation() is True
     return session
 
