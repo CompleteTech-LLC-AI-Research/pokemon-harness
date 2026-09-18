@@ -11,4 +11,17 @@ Commit: `edab6d0192d277f12457992c96faf4e614629b86`  Branch: `work/battle-state-8
 | source | red_color | PASS | [[2, 32, 7, 0], [2, 32, 7, 0]] -> [[1, 32, 7, 0], [1, 32, 7, 0]] | bounded |
 | source | yellow | PASS | [[12, 40, 30, 30], [12, 40, 30, 30]] -> [[11, 40, 30, 30], [11, 40, 30, 30]] | bounded |
 
-Each case drives a real Cable Club link battle through the public MCP stdio server and reads `pokered://game-state` for both owners. Covered: paired enemy/phase observations, `COMMAND_SELECTION` from the observational menu hooks *while still paired*, one settled move (PP decrement + damage + return to the command boundary), an outstanding `link_step` cancelled client-side with the server remaining responsive, and the documented fail-closed terminal contract (`terminal_result` stays `null`; no fabricated win). Forced replacement and terminal return are not reachable from these fixtures within a reasonable bound and are asserted as fail-closed, not simulated.
+Each case drives a real Cable Club link battle through the public MCP stdio server and reads `pokered://game-state` for both owners. Covered: paired enemy/phase observations, `COMMAND_SELECTION` from the observational menu hooks *while still paired*, one settled move (PP decrement + damage + return to the command boundary), an outstanding `link_step` cancelled client-side with the server remaining responsive, and the documented fail-closed terminal contract (`terminal_result` stays `null`; no fabricated win).
+
+Status of the two boundaries this bundle could not reach: they are no longer
+asserted as merely unreachable. Admitted immutable fixtures now capture the
+forced-replacement boundary (`cable_club-battle-faint.state`), the loaded
+terminal state (`cable_club-terminal.state`), and the last command boundary
+before the deciding knockout (`cable_club-pre-terminal.state`) for red, blue,
+and yellow. The loaded-boundary reads stay fail-closed by contract, while the
+pre-terminal pair is *driven* through the ROM turns to `EndOfBattle`, where the
+first post-battle read reports `TERMINAL_RETURN` with a promoted
+`terminal_result` and the next read reports the plain `INACTIVE` phase (the
+documented single-shot falling edge). That drive passes on both runtimes for
+all three families; see the boundary evidence bundles recorded against later
+heads.
