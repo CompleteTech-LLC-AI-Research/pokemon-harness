@@ -170,6 +170,11 @@ _BATTLE_MENU_OPEN_SYMBOLS = (
     "SelectMenuItem",
     "DisplayBattleMenu.handleBattleMenuInput",
 )
+# The routine every battle end funnels through (``core.asm``:
+# ``_InitBattleCommon`` calls ``callfar EndOfBattle``).  Its entry is the last
+# instant the outcome bytes are still meaningful, so the session samples them
+# there rather than trusting a client-timed read.
+_BATTLE_END_SYMBOL = "EndOfBattle"
 _BATTLE_MENU_CLOSE_SYMBOLS = (
     "MainInBattleLoop",
     "MainInBattleLoop.selectEnemyMove",
@@ -301,6 +306,13 @@ class Session:
         self._battle_menu_observed = False
         self._battle_menu_open: bool | None = None
         self._battle_menu_evidence: tuple[str, ...] = ()
+        # Battle-end outcome evidence, sampled by an ``EndOfBattle`` execution
+        # hook when ``enable_battle_end_observation`` succeeds.  ``None`` means
+        # no ROM-observed end is pending, so the result byte cannot be
+        # attributed to a battle end (see ``BattleLifecycle.end_observed``).
+        self._battle_end_observed = False
+        self._battle_end_result: int | None = None
+        self._battle_end_escaped = False
         # ``view`` is stashed for introspection; the actual wiring into the
         # PyBoy factory happens in ``from_files`` where the ROM is loaded.
         self._view = view
@@ -1036,6 +1048,71 @@ class Session:
             evidence=self._battle_menu_evidence,
         )
 
+    def enable_battle_end_observation(self) -> bool:
+        """Install an execution hook that samples the ROM's ``EndOfBattle``.
+
+        Returns ``True`` when the hook is (now) installed.  The observation is
+        unavailable when the ``EndOfBattle`` label is absent from the loaded
+        ``.sym``; without it a terminal outcome is never promoted, because a
+        client-timed read cannot tell which event wrote the result byte.
+
+        ``EndOfBattle`` is the last instant ``wBattleResult`` and
+        ``wEscapedFromBattle`` are both meaningful: the routine clears the
+        escape flag itself, and it never writes the result byte, so a byte
+        left from an earlier faint in the same battle survives teardown.  The
+        hook samples both bytes at entry and writes no RAM, presses no input,
+        and advances no frame.  It is closed with the session.
+        """
+        self._ensure_open()
+        with self._emulator_access():
+            self._ensure_open()
+            if self._battle_end_observed:
+                return True
+            if _BATTLE_END_SYMBOL not in self._symbols:
+                return False
+            if (
+                "wBattleResult" not in self._symbols
+                or "wEscapedFromBattle" not in self._symbols
+            ):
+                return False
+
+            def _sample_end(_ctx: object) -> None:
+                # ``EndOfBattle`` runs for every battle end, including an
+                # escape whose cleanup happens entirely between two client
+                # reads, so this is the one place the outcome bytes can be
+                # attributed to *this* end.
+                self._battle_end_result = self._symbols.read_u8(
+                    self._pyboy.memory, "wBattleResult"
+                )
+                self._battle_end_escaped = (
+                    self._symbols.read_u8(self._pyboy.memory, "wEscapedFromBattle") != 0
+                )
+
+            bank, addr = self._symbols.bank_addr(_BATTLE_END_SYMBOL)
+            self._register_event_hook_at_locked(
+                bank,
+                addr,
+                _sample_end,
+                symbol_name=_BATTLE_END_SYMBOL,
+            )
+            self._battle_end_observed = True
+            return True
+
+    def _take_battle_end_observation(self) -> tuple[int | None, bool]:
+        """Claim the sampled ``EndOfBattle`` bytes for the falling edge.
+
+        The hook fires on ``EndOfBattle`` entry, while ``wIsInBattle`` is still
+        non-zero (the routine clears it later), so a read may legitimately
+        arrive between the sample and the observed end.  The sample is
+        therefore only claimed by the read that actually reports the end;
+        earlier reads leave it pending.
+        """
+        result = self._battle_end_result
+        escaped = self._battle_end_escaped
+        self._battle_end_result = None
+        self._battle_end_escaped = False
+        return result, escaped
+
     def _register_event_hook_at_locked(
         self,
         bank: int,
@@ -1400,6 +1477,19 @@ class Session:
         if battle is None:
             return state
         previous = self._battle_lifecycle
+        # When the ``EndOfBattle`` hook is installed the outcome may only come
+        # from the bytes the ROM held at that routine's entry, so a
+        # client-timed read can never promote a byte left by an earlier faint
+        # in the same battle (see ``enable_battle_end_observation``).  A read
+        # that does not report the end leaves the sample pending.
+        if self._battle_end_observed and previous.was_active and battle.raw_is_in_battle == 0:
+            end_result, end_escaped = self._take_battle_end_observation()
+            previous = replace(
+                previous,
+                end_observed=True,
+                end_result=end_result,
+                end_escaped=end_escaped,
+            )
         qualified = parse_battle(
             memory,
             self._symbols,

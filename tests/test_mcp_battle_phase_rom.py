@@ -301,9 +301,14 @@ async def _serve():
         primary = _open(primary_rom, primary_sym)
         peer = _open(peer_rom, peer_sym)
         register_default_hooks(primary)
-        primary.enable_battle_menu_observation()
+        assert primary.enable_battle_menu_observation()
+        # The terminal result is only promoted from the bytes the ROM itself
+        # held at ``EndOfBattle`` entry, so the harness must install that hook
+        # exactly like ``mcp_server.main`` does.
+        assert primary.enable_battle_end_observation()
         register_default_hooks(peer)
-        peer.enable_battle_menu_observation()
+        assert peer.enable_battle_menu_observation()
+        assert peer.enable_battle_end_observation()
         peer.load_state(peer_state.read_bytes())
     try:
         await serve_stdio(

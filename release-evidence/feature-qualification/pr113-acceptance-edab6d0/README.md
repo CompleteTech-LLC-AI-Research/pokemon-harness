@@ -2,6 +2,16 @@
 
 Commit: `edab6d0192d277f12457992c96faf4e614629b86`  Branch: `work/battle-state-88`
 
+> **SUPERSEDED - the `native` label in this bundle is wrong.** At this commit
+> the stdio child unconditionally prepended `vendor/pyboy-src` to `sys.path`,
+> so the `native` rows ran the vendored source PyBoy exactly like the `source`
+> rows. Nothing here proves a compiled-PyBoy run. The runtime-origin-verified
+> re-run at a later head is
+> `release-evidence/feature-qualification/pr113-acceptance-native-<tag>/`, where
+> each child asserts its own `pyboy`/`pyboy.core.serial` module origins against
+> `POKERED_EXPECT_PYBOY_KIND`. This directory is retained only as the
+> historical record of the pre-fix run.
+
 | runtime | game | result | settlement pp before->after | cancelled request |
 |---|---|---|---|---|
 | native | blue_color | PASS | [[10, 21, 10, 7], [10, 21, 10, 7]] -> [[9, 21, 10, 7], [9, 21, 10, 7]] | bounded |

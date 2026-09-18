@@ -73,7 +73,9 @@ _FULL_SYM = """\
 00:C00B wPlayerSelectedMove
 00:C00C wEnemySelectedMove
 00:C00D wCurrentMenuItem
+00:C024 wPartyCount
 00:D00E wBattleMonHP
+00:D130 wPartyMon1HP
 00:C018 wPlayerMonAttackMod
 00:C019 wPlayerMonDefenseMod
 00:C01A wPlayerMonSpeedMod
@@ -101,6 +103,7 @@ _FULL_SYM = """\
 0F:4F1A DisplayBattleMenu.handleBattleMenuInput
 0F:52FE SelectMenuItem
 0F:3725 LoadScreenTilesFromBuffer1
+04:77AA EndOfBattle
 """
 
 # Execution-hook addresses the session installs for the battle command/move
@@ -111,6 +114,8 @@ _MENU_CLOSE_HOOKS = ((0x0F, 0x4233), (0x0F, 0x42A6))
 # The shared post-menu redraw path fired on the regular move-selection return
 # and on the Mimic submenu return into animation/result text.
 _MIMIC_CLOSE_HOOK = (0x0F, 0x3725)
+# ``EndOfBattle`` entry, where the session samples the outcome bytes.
+_BATTLE_END_HOOK = (0x04, 0x77AA)
 _PLAYER_STAT_MOD_BASE = 0xC018
 _ENEMY_STAT_MOD_BASE = 0xC01E
 _CURRENT_MENU_ITEM = 0xC00D
@@ -253,12 +258,38 @@ def test_phase_forced_replacement_when_player_faint_handler_is_set():
     mem[0xC000] = 2
     mem[0xC002] = 1  # wInHandlePlayerMonFainted
     # RemoveFaintedPlayerMon zeroes the active combatant before the party menu
-    # opens, so a genuine replacement has wBattleMonHP == 0.
+    # opens, so a genuine replacement has wBattleMonHP == 0.  The ROM also
+    # requires AnyPartyAlive to be non-zero (HandlePlayerMonFainted jumps to
+    # HandlePlayerBlackOut otherwise), so a living replacement must exist.
     mem[_PLAYER_BATTLE_MON_HP] = 0
     mem[_PLAYER_BATTLE_MON_HP + 1] = 0
+    mem[0xC024] = 6  # wPartyCount
+    mem[0xD130] = 0  # wPartyMon1HP (slot 0) high byte
+    mem[0xD131] = 0  # ... low byte: fainted
+    mem[0xD130 + 5 * 44] = 0x00  # slot 5 high byte
+    mem[0xD130 + 5 * 44 + 1] = 148  # slot 5 low byte: living replacement
     state = parse_battle(mem, sym)
     assert state.phase is BattlePhase.FORCED_REPLACEMENT
     assert state.phase_valid is True
+
+
+def test_phase_final_faint_with_no_living_party_is_not_forced_replacement():
+    # The final faint runs the same RemoveFaintedPlayerMon path as a mid-battle
+    # faint, but HandlePlayerMonFainted calls AnyPartyAlive and jumps to
+    # HandlePlayerBlackOut when nothing survives, so no replacement menu opens.
+    # All six slots at zero HP must therefore not be reported as a replacement.
+    mem = DictMemory()
+    sym = _symbols()
+    mem[0xC000] = 2
+    mem[0xC002] = 1  # wInHandlePlayerMonFainted
+    mem[_PLAYER_BATTLE_MON_HP] = 0
+    mem[_PLAYER_BATTLE_MON_HP + 1] = 0
+    mem[0xC024] = 6  # wPartyCount
+    # Every slot's HP bytes stay zero (DictMemory defaults to 0).
+    state = parse_battle(mem, sym)
+    assert state.phase is BattlePhase.UNKNOWN
+    assert state.phase_valid is False
+    assert state.in_handle_player_mon_fainted == 1
 
 
 def test_phase_stale_faint_flag_with_living_combatant_is_not_forced_replacement():
@@ -303,7 +334,15 @@ def test_phase_ended_battle_reports_terminal_phase(result):
     sym = _symbols()
     mem[0xC000] = 0  # wIsInBattle: battle has ended
     mem[0xC001] = result  # wBattleResult: win / lose / draw
-    state = parse_battle(mem, sym, lifecycle=BattleLifecycle(was_active=True))
+    # Promotion needs the bytes the ROM held at EndOfBattle entry; a plain
+    # falling edge cannot attribute the byte to this end.
+    state = parse_battle(
+        mem,
+        sym,
+        lifecycle=BattleLifecycle(
+            was_active=True, end_observed=True, end_result=result
+        ),
+    )
     assert state.phase is BattlePhase.TERMINAL_RETURN
     assert state.phase_valid is True
     assert state.raw_battle_result == result
@@ -883,6 +922,7 @@ def _session(*, observe: bool = True) -> Session:
     )
     if observe:
         assert session.enable_battle_menu_observation() is True
+        assert session.enable_battle_end_observation() is True
     return session
 
 
@@ -1082,11 +1122,54 @@ def test_read_game_state_confirms_surviving_nonzero_outcome():
     session._pyboy.memory[0xC000] = 2
     session._pyboy.memory[0xC001] = 1  # player-faint marker while active
     assert session.read_game_state().battle.terminal_result is None
+    # The ROM's own EndOfBattle is what attributes the surviving byte to this
+    # end; the session samples the outcome bytes at that routine's entry.
+    session._pyboy.fire(*_BATTLE_END_HOOK)
     session._pyboy.memory[0xC000] = 0
     session._pyboy.memory[0xC001] = 1  # survived teardown
     ended = session.read_game_state()
     assert ended.battle is not None
     assert ended.battle.terminal_result == 1
+
+
+def test_read_game_state_requires_rom_observed_end_to_promote_result():
+    # Without the EndOfBattle hook a client-timed read cannot attribute a
+    # surviving byte to this end, so promotion stays disabled.
+    mem = DictMemory({0xC000: 2, 0xC001: 1})
+    session = Session(pyboy=FakePyBoy(mem), symbols=_symbols(), event_bus=EventBus())
+    assert session.enable_battle_end_observation() is True
+    assert session.read_game_state().battle.terminal_result is None
+    # No hook fired: the falling edge alone must not promote the stale byte.
+    session._pyboy.memory[0xC000] = 0
+    ended = session.read_game_state()
+    assert ended.battle is not None
+    assert ended.battle.phase is BattlePhase.TERMINAL_RETURN
+    assert ended.battle.terminal_result is None
+
+
+def test_unsampled_escape_does_not_promote_stale_player_faint_result():
+    """An escape that finishes between two reads must not confirm a faint.
+
+    ``SwitchAndTeleportEffect``/``ItemUsePokeDoll`` set ``wEscapedFromBattle``
+    and ``EndOfBattle`` clears it on the way out without touching
+    ``wBattleResult``.  A player faint earlier in the same battle leaves a
+    ``1`` there, so a reader that only compares snapshots would promote that
+    stale byte as if the escape had been a loss.
+    """
+    session = _session()
+    session._pyboy.memory[0xC000] = 1  # live wild battle
+    session._pyboy.memory[0xC001] = 1  # earlier player-faint result byte
+    assert session.read_game_state().battle.terminal_result is None
+    # Escape flag is set and then cleared again entirely between reads; the
+    # session's EndOfBattle hook still samples both bytes for this end.
+    session._pyboy.memory[0xC006] = 1  # wEscapedFromBattle
+    session._pyboy.fire(*_BATTLE_END_HOOK)
+    session._pyboy.memory[0xC000] = 0  # EndOfBattle clears wIsInBattle
+    session._pyboy.memory[0xC006] = 0  # ... and wEscapedFromBattle
+    ended = session.read_game_state()
+    assert ended.battle is not None
+    assert ended.battle.phase is BattlePhase.TERMINAL_RETURN
+    assert ended.battle.terminal_result is None
 
 
 def test_read_game_state_blackout_zero_does_not_confirm_win():

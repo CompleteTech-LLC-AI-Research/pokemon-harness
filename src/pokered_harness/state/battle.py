@@ -82,10 +82,11 @@ from enum import IntEnum
 
 from pokered_harness.state.party import (
     MAX_PARTY_SLOTS,
+    PARTY_STRUCT_SIZE,
     PartyMon,
     parse_battle_combatant,
 )
-from pokered_harness.symbols.loader import MemoryLike, SymbolTable
+from pokered_harness.symbols.loader import MemoryLike, SymbolTable, read_wram_u8
 
 
 class BattleKind(IntEnum):
@@ -207,8 +208,28 @@ _PHASE_TRANSIENT_SYMBOLS = (
 # stale, and the ROM leaves it set in exactly that state.  The live signal is
 # the zeroed active combatant: ``RemoveFaintedPlayerMon`` (called before the
 # replacement menu opens) zeroes ``wBattleMonHP``, so a genuine forced
-# replacement has ``wInHandlePlayerMonFainted != 0`` *and* ``wBattleMonHP == 0``.
+# replacement has ``wInHandlePlayerMonFainted != 0`` *and* ``wBattleMonHP == 0``
+# *and* at least one living party member left to send out.
+#
+# The zeroed combatant alone is still not enough, because the *final* faint
+# takes the same ``RemoveFaintedPlayerMon`` path: ``HandlePlayerMonFainted``
+# immediately calls ``AnyPartyAlive`` and jumps to ``HandlePlayerBlackOut``
+# when no member survives (``core.asm`` lines 971-976), so the party menu never
+# opens.  Requiring a living party member is what separates the two, and the
+# party is read from the linker's own ``wPartyMon1HP`` block so a banked-out
+# ``0xD000`` window cannot hide it.
 _FORCED_REPLACEMENT_HP_SYMBOL = "wBattleMonHP"
+_PARTY_COUNT_SYMBOL = "wPartyCount"
+_PARTY_HP_SYMBOL = "wPartyMon1HP"
+
+# Symbols the replacement decision consults beyond the phase flags.  They are
+# reported through ``phase_evidence`` so a caller can see exactly what the
+# derivation relied on.
+_FORCED_REPLACEMENT_EVIDENCE_SYMBOLS = (
+    _FORCED_REPLACEMENT_HP_SYMBOL,
+    _PARTY_COUNT_SYMBOL,
+    _PARTY_HP_SYMBOL,
+)
 
 # Raw ``wBattleResult`` bytes with an engine writer (end_of_battle.asm maps
 # 0 to a win, 1 to a loss, and 2 to a draw in link battles).  0 is also
@@ -244,12 +265,33 @@ class BattleLifecycle:
     cleanup: ``wEscapedFromBattle`` set while a battle was active
     (``SwitchAndTeleportEffect`` / item escape).  An escape leaves or clears
     the result byte, so an outcome that coincides with it stays unknown.
-    Both fields are cleared once the battle is no longer active so evidence
+
+    ``end_observed`` records that the session watched the ROM's own
+    ``EndOfBattle`` routine for this battle instead of inferring the end from
+    a client-timed reading.  A client can poll at any interval, so an escape
+    that happens entirely between two reads is invisible to the reader: the
+    engine clears ``wEscapedFromBattle`` on its way out and the stale result
+    byte from an *earlier* faint in the same battle survives.  Without the
+    ROM-observed end the result byte cannot be attributed to this end, so
+    promotion stays disabled.
+
+    ``end_result`` and ``end_escaped`` are the ``wBattleResult`` and
+    ``wEscapedFromBattle`` bytes sampled at that ``EndOfBattle`` entry, which is
+    the last instant both are still meaningful: ``EndOfBattle`` itself clears
+    the escape flag, and the outcome byte is only ever written for the event
+    that ended the battle.  Promotion uses ``end_result`` rather than a later
+    read of the same address, so a byte overwritten between the ROM's end and
+    the client's next read cannot be misattributed.
+
+    All fields are cleared once the battle is no longer active so evidence
     cannot leak into a later encounter.
     """
 
     was_active: bool = False
     escaped: bool = False
+    end_observed: bool = False
+    end_result: int | None = None
+    end_escaped: bool = False
 
 
 # ``wMoveMenuType`` is a mode selector, not an open/closed flag: 0 is written
@@ -336,11 +378,25 @@ def parse_battle(
     # no escape evidence was captured before cleanup.
     battle_ended = lifecycle is not None and lifecycle.was_active and raw == 0
     escaped = bool(escaped_from_battle) or (lifecycle.escaped if lifecycle is not None else False)
-    terminal_result = (
-        raw_battle_result
-        if battle_ended and raw_battle_result in _CONFIRMED_BATTLE_RESULTS and not escaped
-        else None
-    )
+    # An outcome is only promoted from evidence the ROM itself produced for
+    # *this* battle end.  ``EndOfBattle`` is the last instant the escape flag
+    # and the result byte are both meaningful, and the session samples both at
+    # its entry (``lifecycle.end_observed``).  Without that sample a client
+    # polling interval can hide an entire escape -- ``EndOfBattle`` clears
+    # ``wEscapedFromBattle`` on the way out and never touches
+    # ``wBattleResult``, so a stale byte written for an earlier faint in the
+    # same battle would otherwise be attributed to this end.  Absent the
+    # ROM-observed end the outcome stays unknown rather than guessed.
+    if battle_ended and lifecycle is not None and lifecycle.end_observed:
+        end_escaped = escaped or lifecycle.end_escaped
+        end_result = lifecycle.end_result
+        terminal_result = (
+            end_result
+            if end_result in _CONFIRMED_BATTLE_RESULTS and not end_escaped
+            else None
+        )
+    else:
+        terminal_result = None
     phase, phase_valid, phase_evidence = _derive_phase(
         memory,
         symbols,
@@ -515,6 +571,18 @@ def _derive_phase(
     _extend_unique(evidence, menu.evidence if menu is not None else ())
 
     forced = _forced_replacement_is_current(memory, symbols)
+    # The replacement decision consults the party block as well as the faint
+    # flag, so name those symbols whenever the derivation actually looked at
+    # them.  A caller can then see whether the living-party guard was applied.
+    if symbols.read_u8(memory, "wInHandlePlayerMonFainted") != 0:
+        _extend_unique(
+            evidence,
+            tuple(
+                name
+                for name in _FORCED_REPLACEMENT_EVIDENCE_SYMBOLS
+                if name in symbols
+            ),
+        )
     action = symbols.read_u8(memory, "wActionResultOrTookBattleTurn") != 0
     menu_open = menu is not None and menu.open is True
 
@@ -553,15 +621,57 @@ def _forced_replacement_is_current(
     ``wBattleMonHP == 0`` proves the player is choosing a replacement.  A
     non-zero ``wBattleMonHP`` proves the flag is stale.
 
+    A zeroed combatant is still not sufficient: the *final* faint runs the same
+    ``RemoveFaintedPlayerMon`` path and then jumps to ``HandlePlayerBlackOut``
+    instead of opening the menu (``HandlePlayerMonFainted`` calls
+    ``AnyPartyAlive`` and jumps on zero).  The derivation therefore also
+    requires at least one living party member, which is exactly the condition
+    the ROM itself tests before ``ChooseNextMon``.
+
     Returns ``True``/``False`` when the pair of symbols decides it, and
-    ``None`` when the flag is set but the HP symbol is absent -- the caller
-    must then fail closed rather than assert a replacement it cannot prove.
+    ``None`` when the flag is set but the symbols needed to prove a live
+    replacement are absent or cannot be read -- the caller must then fail
+    closed rather than assert a replacement it cannot prove.
     """
     if symbols.read_u8(memory, "wInHandlePlayerMonFainted") == 0:
         return False
     if _FORCED_REPLACEMENT_HP_SYMBOL not in symbols:
         return None
-    return symbols.read_u16_be(memory, _FORCED_REPLACEMENT_HP_SYMBOL) == 0
+    if symbols.read_u16_be(memory, _FORCED_REPLACEMENT_HP_SYMBOL) != 0:
+        # A living combatant proves the faint flag is stale.
+        return False
+    living = _party_has_living_member(memory, symbols)
+    if living is None:
+        return None
+    return living
+
+
+def _party_has_living_member(memory: MemoryLike, symbols: SymbolTable) -> bool | None:
+    """Whether the party block holds a living member, or ``None`` if unknown.
+
+    Mirrors the ROM's ``AnyPartyAlive`` (``core.asm``): it ORs the two HP bytes
+    of every ``party_struct`` from ``wPartyMon1HP`` and tests the result, so the
+    party's *living* member is what decides whether a faint leads to a
+    replacement menu or to ``HandlePlayerBlackOut``.
+
+    ``None`` means the symbols needed for the scan are absent or the count is
+    outside the engine's ``PARTY_LENGTH`` invariant, so no answer can be given
+    and the caller must fail closed.
+    """
+    if _PARTY_COUNT_SYMBOL not in symbols or _PARTY_HP_SYMBOL not in symbols:
+        return None
+    count = symbols.read_u8(memory, _PARTY_COUNT_SYMBOL)
+    if not 0 < count <= MAX_PARTY_SLOTS:
+        return None
+    base = symbols.addr_of(_PARTY_HP_SYMBOL)
+    for slot in range(count):
+        offset = base + slot * PARTY_STRUCT_SIZE
+        # Party HP is a big-endian u16 in the ``SVBK``-remapped WRAM half, so
+        # both bytes are read from the linker's bank rather than the mapped
+        # window (the same rule :mod:`pokered_harness.state.party` follows).
+        if (read_wram_u8(memory, offset) | read_wram_u8(memory, offset + 1)) != 0:
+            return True
+    return False
 
 
 def _extend_unique(target: list[str], extra: tuple[str, ...]) -> None:
