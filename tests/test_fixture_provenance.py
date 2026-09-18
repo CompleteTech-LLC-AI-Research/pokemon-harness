@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from pathlib import Path, PureWindowsPath
@@ -9,6 +10,8 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 from pokered_harness.config import load_versions
+from scripts import merge_battle_boundary_scenarios as catalog_merge
+from scripts import merge_fixture_manifest_rows as manifest_merge
 from scripts import produce_cable_club_fixture as producer
 from scripts import validate_fixture_manifest as fixture_manifest
 from scripts.prepare_battle_cable_club_fixtures import VARIANTS
@@ -419,3 +422,56 @@ def test_fixture_producer_rejects_unbounded_configuration(tmp_path) -> None:
         producer.produce(source, rom, sym, out, timeout_seconds=0)
     with pytest.raises(ValueError, match="max_movement_steps"):
         producer.produce(source, rom, sym, out, max_movement_steps=0)
+
+
+def test_boundary_admission_rejects_a_mutated_capture_input() -> None:
+    """A row whose captured input changed must not be admitted.
+
+    ``provenance.source_state`` records the exact bytes the boundary pair was
+    driven from.  The catalog derives its declared ``input_fixture_sha1`` from
+    the admitted source row, so if admission ignored the recorded identity a
+    capture from different input could be relabelled as the canonical one.
+    Replacing the recorded source digests with zeros must fail closed.
+    """
+    document = _load_manifest()
+    rows = [dict(row) for row in document["fixtures"] if row["kind"] == "boundary"]
+    row = next(
+        copy.deepcopy(entry) for entry in rows if entry["id"] == "red-color-battle-faint"
+    )
+    source = next(
+        entry for entry in document["fixtures"] if entry["id"] == "red-color-battle"
+    )
+    row["provenance"]["source_state"] = (
+        row["provenance"]["source_state"]
+        .replace(source["sha1"], "0" * 40)
+        .replace(source["sha256"], "0" * 64)
+    )
+
+    with pytest.raises(ValueError, match="capture input"):
+        manifest_merge.merge(copy.deepcopy(document), [row])
+
+
+def test_catalog_declares_the_captured_input_identity_not_a_lookup() -> None:
+    """The declared capture identity comes from the capture record itself.
+
+    Building the scenario must fail closed when the recorded input does not
+    match the admitted source row, rather than quietly publishing the canonical
+    row's digests.
+    """
+    document = _load_manifest()
+    row = copy.deepcopy(
+        next(entry for entry in document["fixtures"] if entry["id"] == "red-color-battle-faint")
+    )
+    source = next(
+        entry for entry in document["fixtures"] if entry["id"] == "red-color-battle"
+    )
+    measured = {"party_count": 6, "active_slot": 5, "link_state": 1, "map_id": 0xF0}
+
+    scenario = catalog_merge.build_scenario(row, measured, source)
+    assert scenario["provenance"]["input_fixture_sha1"] == source["sha1"]
+
+    row["provenance"]["source_state"] = row["provenance"]["source_state"].replace(
+        source["sha1"], "1" * 40
+    )
+    with pytest.raises(ValueError, match="capture input SHA-1"):
+        catalog_merge.build_scenario(row, measured, source)

@@ -1113,6 +1113,23 @@ class Session:
         self._battle_end_escaped = False
         return result, escaped
 
+    def _invalidate_battle_observations(self) -> None:
+        """Drop every battle observation tied to the current epoch.
+
+        Called when an operation starts a new observation epoch (``load_state``
+        or ``reset_tick``).  The pending ``EndOfBattle`` sample must go with the
+        lifecycle history: it was taken while the *previous* emulated instant
+        was running, so if it survived, a later read that merely crosses the
+        active->inactive transition would promote the old epoch's outcome and
+        report a battle end this epoch never observed.  Menu entry/exit state
+        is equally stale and becomes unknown until a fresh hook event fires.
+        """
+        self._battle_lifecycle = BattleLifecycle()
+        self._battle_end_result = None
+        self._battle_end_escaped = False
+        if self._battle_menu_observed:
+            self._battle_menu_open = None
+
     def _register_event_hook_at_locked(
         self,
         bank: int,
@@ -1556,9 +1573,7 @@ class Session:
             # terminal outcome afterwards.  Menu entry/exit state recorded
             # before the load is equally stale, so it becomes unknown until
             # a fresh hook event is observed.
-            self._battle_lifecycle = BattleLifecycle()
-            if self._battle_menu_observed:
-                self._battle_menu_open = None
+            self._invalidate_battle_observations()
 
     def reset_tick(self, value: int = 0) -> None:
         if self._timed_endpoint is not None:
@@ -1578,9 +1593,7 @@ class Session:
             self._reset_generation += 1
             # A tick reset starts a distinct observation epoch; stale battle
             # history must not span it.
-            self._battle_lifecycle = BattleLifecycle()
-            if self._battle_menu_observed:
-                self._battle_menu_open = None
+            self._invalidate_battle_observations()
 
     def _advance_tick(self, count: int) -> int:
         """Advance the bookkeeping clock for an interleaved link step.

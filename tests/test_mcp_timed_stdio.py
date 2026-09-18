@@ -14,6 +14,7 @@ import socket
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -136,12 +137,7 @@ class ProcessClient:
                 while True:
                     line = await self.process.stdout.readline()
                     assert line, f"unexpected server EOF: {self.diagnostics()}"
-                    text = line.decode("utf-8", "replace").strip()
-                    if not text or not text.startswith("{"):
-                        # Ignore blank or non-protocol diagnostic lines; JSON-RPC
-                        # is line-delimited and only objects carry responses.
-                        continue
-                    response = json.loads(text)
+                    response = json.loads(line)
                     assert response["jsonrpc"] == "2.0", response
                     if "id" not in response:
                         assert "method" in response, response
@@ -410,3 +406,41 @@ async def test_authored_timed_stdio_expected_peer_mismatch(tmp_path):
         assert all(status["remote_mode"] == "idle" for status in statuses), statuses
         reports = await _both(left.eof(), right.eof())
         assert all(report["frames"] == report["initial"]["frames"] == 1 for report in reports)
+
+
+class _PipeWriter:
+    def write(self, data):
+        return len(data)
+
+    async def drain(self):
+        return None
+
+
+@pytest.mark.parametrize("contamination", [b"DIAGNOSTIC LEAK\n", b"\xff\xfe not utf-8\n"])
+def test_protocol_stdout_contamination_is_rejected(contamination):
+    """A non-protocol stdout line must fail the acceptance client.
+
+    ``stdio_server`` keeps JSON-RPC on the inherited stdout while the harness
+    redirects Python-level prints to stderr, so stdout is protocol-only.  If the
+    client quietly skipped unknown lines, a leaked diagnostic (or a
+    mis-encoded byte) could ride along with a valid reply and the contamination
+    would go unnoticed.  This pins the strict decoding that makes such a leak a
+    test failure rather than a silent pass.
+    """
+
+    async def exercise():
+        stdout, stderr = asyncio.StreamReader(), asyncio.StreamReader()
+        stdout.feed_data(contamination + b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n')
+        stdout.feed_eof()
+        stderr.feed_eof()
+        process = SimpleNamespace(
+            stdin=_PipeWriter(), stdout=stdout, stderr=stderr, pid=0, returncode=0
+        )
+        client = ProcessClient(process)
+        try:
+            with pytest.raises((ValueError, AssertionError, UnicodeDecodeError)):
+                await client.request("resources/read", {"uri": "pokered://game-state"})
+        finally:
+            await client.stderr_task
+
+    asyncio.run(exercise())

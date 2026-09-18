@@ -1172,6 +1172,39 @@ def test_unsampled_escape_does_not_promote_stale_player_faint_result():
     assert ended.battle.terminal_result is None
 
 
+@pytest.mark.parametrize("transition", ["load", "reset"])
+def test_pending_end_sample_cannot_cross_an_epoch(transition):
+    """A sampled ``EndOfBattle`` outcome must not outlive its epoch.
+
+    ``load_state`` and ``reset_tick`` start a new observation epoch and drop the
+    battle lifecycle, but the pending ``EndOfBattle`` sample was taken while the
+    *previous* emulated instant was running.  If it survived, a later read that
+    merely crosses the active->inactive transition would promote the old
+    epoch's outcome -- reporting a battle end this epoch never observed.
+    """
+    session = _session()
+    try:
+        session._pyboy.memory[0xC000] = 2  # live link battle
+        session._pyboy.memory[0xC001] = 1  # wBattleResult: player loss
+        session.read_game_state()
+        session._pyboy.fire(*_BATTLE_END_HOOK)
+        if transition == "load":
+            session.load_state(b"state loaded after EndOfBattle entry")
+        else:
+            session.reset_tick(0)
+        # The new epoch is already past EndOfBattle entry, so its routine never
+        # runs again and the pre-epoch sample must not be attributed to it.
+        session._pyboy.memory[0xC001] = 0
+        assert session.read_game_state().battle.terminal_result is None
+        session._pyboy.memory[0xC000] = 0
+        ended = session.read_game_state()
+        assert ended.battle is not None
+        assert ended.battle.raw_battle_result == 0
+        assert ended.battle.terminal_result is None
+    finally:
+        session.close()
+
+
 def test_read_game_state_blackout_zero_does_not_confirm_win():
     session = _session()
     session._pyboy.memory[0xC000] = 2

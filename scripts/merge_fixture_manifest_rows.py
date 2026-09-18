@@ -57,6 +57,15 @@ _CAPTURED_POLICY = (
 # Admission refuses a row whose recorded revision is not the committed tool, so
 # the manifest can never claim a producer digest the repository does not have.
 _RUNTIME_PRODUCER_RE = re.compile(r"producer (?P<path>\S+) SHA-1 (?P<sha1>[0-9a-f]{40})")
+# A captured boundary row records the input it was driven from as
+# ``external <path>; SHA-1 <sha1>; SHA-256 <sha256>; ...``.  Admission binds
+# that recorded identity to the admitted source fixture of the same version, so
+# a row cannot claim canonical bytes it was not actually captured from.
+_SOURCE_STATE_RE = re.compile(
+    r"^external (?P<path>\S+); SHA-1 (?P<sha1>[0-9a-f]{40}); "
+    r"SHA-256 (?P<sha256>[0-9a-f]{64});"
+)
+_SOURCE_FIXTURE_SUFFIX = "-battle"
 
 
 def _load_rows(paths: list[Path]) -> list[dict[str, Any]]:
@@ -90,6 +99,7 @@ def _validate_row(document: dict[str, Any], row: dict[str, Any]) -> None:
     if row.get("kind") != "boundary":
         raise ValueError(f"only kind=boundary rows may be merged: {row.get('id')}")
     _verify_producer_revision(row)
+    _verify_captured_source(document, row)
     synthetic = {
         "manifest_id": document["manifest_id"],
         "manifest_version": document["manifest_version"],
@@ -119,6 +129,59 @@ def _verify_producer_revision(row: dict[str, Any]) -> None:
             f"SHA-1 {match.group('sha1')} but the committed producer is {actual}; "
             "re-capture the fixtures with the committed producer"
         )
+
+
+def _verify_captured_source(document: dict[str, Any], row: dict[str, Any]) -> None:
+    """Bind the row's recorded capture input to the admitted source fixture.
+
+    The producer writes the driven input's path, SHA-1, and SHA-256 into
+    ``provenance.source_state``.  Nothing else checks those bytes: the catalog
+    builder derives ``input_fixture_sha1`` from the *canonical* manifest row of
+    the same version, so a row whose capture input silently changed would still
+    be relabelled as the admitted canonical input.  Admission therefore
+    requires the recorded identity to name the version's admitted ``*-battle``
+    fixture and to carry that row's exact digests.
+    """
+
+    fixture_id = row.get("id")
+    source_state = row.get("provenance", {}).get("source_state")
+    if not isinstance(source_state, str):
+        raise TypeError(f"boundary row has no recorded capture input: {fixture_id}")
+    match = _SOURCE_STATE_RE.match(source_state)
+    if match is None:
+        raise ValueError(
+            f"boundary row {fixture_id} does not record its capture input path, "
+            "SHA-1, and SHA-256"
+        )
+
+    source_id = f"{row.get('version')}-{row.get('variant')}{_SOURCE_FIXTURE_SUFFIX}"
+    source = next(
+        (
+            entry
+            for entry in document.get("fixtures", [])
+            if entry.get("id") == source_id
+        ),
+        None,
+    )
+    if source is None:
+        raise ValueError(
+            f"boundary row {fixture_id} names capture input {source_id}, which is "
+            "not an admitted fixture"
+        )
+    if source.get("path") != match.group("path"):
+        raise ValueError(
+            f"boundary row {fixture_id} was captured from {match.group('path')} but "
+            f"the admitted {source_id} is {source.get('path')}; re-capture the fixtures"
+        )
+    for algorithm, group in (("sha1", "sha1"), ("sha256", "sha256")):
+        recorded = match.group(group)
+        admitted = source.get(algorithm)
+        if recorded != admitted:
+            raise ValueError(
+                f"boundary row {fixture_id} records capture input {source_id} "
+                f"{algorithm.upper()} {recorded} but the admitted bytes are {admitted}; "
+                "the capture input changed, so re-capture the fixtures"
+            )
 
 
 def merge(document: dict[str, Any], rows: list[dict[str, Any]]) -> int:

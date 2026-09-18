@@ -71,6 +71,14 @@ _BOUNDARY_REGION = "colosseum"
 # (``constants/serial_constants.asm``): 1 is IN_CABLE_CLUB, 4 is BATTLING.
 _LINK_STATE_NAMES = {1: "in_cable_club", 4: "battling"}
 _BATTLE_KINDS = (1, 2)
+# ``provenance.source_state`` records the driven input as
+# ``external <path>; SHA-1 <sha1>; SHA-256 <sha256>; ...``.  The declared
+# capture identity is read from that record, never re-derived from the manifest
+# lookup, so the catalog restates only what the capture actually names.
+_SOURCE_STATE_RE = re.compile(
+    r"^external (?P<path>\S+); SHA-1 (?P<sha1>[0-9a-f]{40}); "
+    r"SHA-256 (?P<sha256>[0-9a-f]{64});"
+)
 
 # The consumer replay geometry, read from the real-ROM boundary tests that
 # drive these admitted bytes (``tests/test_mcp_battle_phase_rom.py``), and the
@@ -192,6 +200,47 @@ def _source_fixture_id(row: dict[str, Any]) -> str:
     return f"{row['version']}-{row['variant']}-battle"
 
 
+def _verified_capture_identity(row: dict[str, Any], source: dict[str, Any]) -> str:
+    """Return the capture input's SHA-1 after proving it is the admitted source.
+
+    The catalog declares the input a boundary pair was driven from.  That
+    identity must come from the *capture*, not from a same-version lookup: if
+    the builder simply took ``source["sha1"]``, a row whose recorded capture
+    input had changed would still be declared as the canonical admitted input.
+    The recorded ``provenance.source_state`` is therefore parsed and bound to
+    the admitted source fixture (path and both digests) before it is published,
+    so the catalog can only ever restate an identity the manifest admits.
+    """
+    fixture_id = row["id"]
+    source_id = _source_fixture_id(row)
+    source_state = row.get("provenance", {}).get("source_state")
+    _require(
+        isinstance(source_state, str),
+        f"{fixture_id} has no recorded capture input",
+    )
+    match = _SOURCE_STATE_RE.match(source_state)
+    _require(
+        match is not None,
+        f"{fixture_id} does not record its capture input path, SHA-1, and SHA-256",
+    )
+    _require(
+        match.group("path") == source["path"],
+        f"{fixture_id} was captured from {match.group('path')} but the admitted "
+        f"{source_id} is {source['path']}",
+    )
+    _require(
+        match.group("sha1") == source["sha1"],
+        f"{fixture_id} records capture input SHA-1 {match.group('sha1')} but the "
+        f"admitted {source_id} is {source['sha1']}",
+    )
+    _require(
+        match.group("sha256") == source["sha256"],
+        f"{fixture_id} records capture input SHA-256 {match.group('sha256')} but the "
+        f"admitted {source_id} is {source['sha256']}",
+    )
+    return match.group("sha1")
+
+
 def build_scenario(
     row: dict[str, Any],
     measured: dict[str, Any],
@@ -203,7 +252,7 @@ def build_scenario(
     boundary = provenance["boundary"]
     _require(boundary in _BOUNDARY_WHEN, f"{fixture_id} has unknown boundary {boundary!r}")
     source_id = _source_fixture_id(row)
-    source_sha1 = source["sha1"]
+    source_sha1 = _verified_capture_identity(row, source)
     bounds = _bounds()
     expectations = [
         "fixture size, SHA-1, and SHA-256 match release-evidence/fixture-manifest.json",
