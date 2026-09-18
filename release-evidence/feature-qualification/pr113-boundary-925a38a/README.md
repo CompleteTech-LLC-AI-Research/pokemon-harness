@@ -1,32 +1,36 @@
 # PR #113 real-ROM Cable Club boundary and terminal evidence
 
-Commit: `dd2000624a8913e59e56c30d6cc78570e867afdc`  Branch: `work/battle-state-88`
-
-> **SUPERSEDED - the `native` label in this bundle is wrong.** Round 9 of
-> review proved that all twelve cells below ran **source** PyBoy: the source
-> runtime prepends `vendor/pyboy-src` to `sys.path` and that entry won for the
-> Cython interpreter too, so the two rows are the same runtime. The
-> `native`/`source` split and the `native` durations in this table must not be
-> read as evidence of a compiled-PyBoy run. The re-run at `925a38a`, whose
-> labels are asserted by each child process against its own module origins, is
-> `release-evidence/feature-qualification/pr113-boundary-925a38a/`. This
-> directory is retained only as the historical record of the pre-fix run.
+Commit: `925a38aba5fe8e78ad6a588f01cfcc4a2bf8a1f4`  Branch: `work/battle-state-88`
 
 Sanitized from the `MCP_BATTLE_BOUNDARY` payloads printed by
-`tests/test_mcp_battle_phase_rom.py`, plus the junit summary of each cell. The
-source matrix ran under the source interpreter (`PYBOY_NO_CYTHON=1`) and the
-native matrix under the Cython interpreter, both at the pinned PyBoy
-`2.7.0` / revision `c565df66c3731fad2856169a90f6bbec99925915`. Twelve cells,
-twelve passes, zero skips, zero failures.
+`tests/test_mcp_battle_phase_rom.py`, plus the junit summary of each cell.
+Twelve cells, twelve passes, zero skips, zero failures.
+
+## Runtime labels are proven, not assumed
+
+Round 9 of review found that the earlier `pr113-boundary-dd20006` matrix
+labelled all twelve cells "native" while every cell actually ran **source**
+PyBoy: the source runtime prepends `vendor/pyboy-src` to `sys.path`, and that
+entry silently won for the Cython interpreter too. That bundle's native label
+is wrong and it is superseded by this one.
+
+This matrix pins the label to the interpreter's own imports. Each child process
+asserts the origin of its `pyboy` and `pyboy.core.serial` modules against
+`POKERED_EXPECT_PYBOY_KIND`: the compiled cells must resolve to a `.so` outside
+the checkout and the source cells to a `.py` inside `vendor/pyboy-src`, so a
+mislabelled run fails instead of publishing. The compiled cells here run
+roughly 4x faster than the source cells on the identical drive
+(red 57.96s vs 264.56s), which independently corroborates that the two rows
+really did use different runtimes.
 
 | runtime | game | boundary (junit) | terminal drive (junit) | drive frames |
 |---|---|---|---|---|
-| native | red_color | PASS 1.67s | PASS 259.33s | 1216 |
-| native | yellow | PASS 1.90s | PASS 271.82s | 2576 |
-| native | blue_color | PASS 1.55s | PASS 336.52s | 1592 |
-| source | red_color | PASS 2.49s | PASS 259.45s | 1216 |
-| source | yellow | PASS 2.05s | PASS 271.26s | 2576 |
-| source | blue_color | PASS 1.67s | PASS 346.60s | 1592 |
+| native | red_color | PASS 1.64s | PASS 57.96s | 1216 |
+| native | yellow | PASS 1.84s | PASS 60.49s | 2576 |
+| native | blue_color | PASS 1.59s | PASS 75.60s | 1592 |
+| source | red_color | PASS 1.70s | PASS 264.56s | 1216 |
+| source | yellow | PASS 2.05s | PASS 268.28s | 2576 |
+| source | blue_color | PASS 1.63s | PASS 332.95s | 1592 |
 
 ## What each cell observes
 
@@ -56,7 +60,7 @@ link battle rather than a synthetic memory double.
   `wBattleResult` byte is non-zero also gets it promoted to `terminal_result`
   (`1` in every cell), while the owner reading a zero byte correctly keeps
   `terminal_result = null` rather than fabricating a win. The next read of
-  each owner reports phase `0` with `terminal_result` back to `null` — the
+  each owner reports phase `0` with `terminal_result` back to `null` - the
   documented single-shot falling edge. Bounded drive: 1216 frames red (boundary
   turn 36), 2576 yellow (turn 20), 1592 blue (turn 44).
 
