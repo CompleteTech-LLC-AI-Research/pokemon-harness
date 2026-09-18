@@ -43,6 +43,42 @@ class MemoryLike(Protocol):
     def __getitem__(self, key: int | slice) -> int | Iterable[int]: ...
 
 
+# ``0xC000``-``0xCFFF`` is fixed WRAM bank 0, but ``0xD000``-``0xDFFF`` is
+# remapped by the CGB WRAM bank register (``SVBK``, ``0xFF70``): an
+# unqualified ``memory[addr]`` read follows whichever bank the ROM has
+# currently mapped there.  The linker places the battle WRAM section holding
+# ``wIsInBattle``, ``wBattleMonHP``, ``wPartyCount``, ``wPartyMons`` and the
+# battle mon's move/PP block in the ``$D000``-``$DFFF`` half of WRAM bank 1
+# (``ram/wram.asm:198`` "WRAM" WRAM0, ``:1720`` "Party Data" WRAM0), and the
+# color Red/Blue build banks its own scratch region into that window while a
+# link battle is in the faint/replacement exchange.  Reading those addresses
+# through the mapped window therefore returns another bank's bytes at exactly
+# the moment the battle state matters most.
+WRAM_SWITCHABLE_START = 0xD000
+WRAM_SWITCHABLE_END = 0xE000
+WRAM_BATTLE_BANK = 1
+
+
+def read_wram_u8(memory: MemoryLike, address: int) -> int:
+    """One byte of the ROM's own battle WRAM, independent of the ``SVBK`` window.
+
+    ``0xD000``-``0xDFFF`` is resolved from WRAM bank 1, where the linker
+    assigns the battle WRAM section, so the read survives the ROM banking
+    another region into that window.  The fixed ``0xC000``-``0xCFFF`` range has
+    no bank register and keeps its ordinary mapped read.
+    """
+    if WRAM_SWITCHABLE_START <= address < WRAM_SWITCHABLE_END:
+        return int(memory[WRAM_BATTLE_BANK, address]) & 0xFF  # type: ignore[index]
+    return int(memory[address]) & 0xFF  # type: ignore[arg-type]
+
+
+def read_wram_bytes(memory: MemoryLike, address: int, length: int) -> bytes:
+    """``length`` bytes of the ROM's own battle WRAM (see :func:`read_wram_u8`)."""
+    if length <= 0:
+        raise ValueError(f"length must be positive, got {length}")
+    return bytes(read_wram_u8(memory, address + index) for index in range(length))
+
+
 _SYM_LINE = re.compile(
     r"""
     ^\s*

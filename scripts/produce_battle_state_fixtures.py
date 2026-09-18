@@ -207,25 +207,12 @@ def _word(session, name: str) -> int:
     return (_wram_byte(session, address) << 8) | _wram_byte(session, address + 1)
 
 
-# ``0xC000``-``0xCFFF`` is fixed WRAM bank 0, but every address in
-# ``0xD000``-``0xDFFF`` is remapped by the CGB WRAM bank register: PyBoy
-# indexes ``internal_ram0`` at ``i - 0xC000 + (bank - 1) * 0x1000`` with
-# ``bank == 0`` folded to ``1``, so an unqualified ``memory[addr]`` read
-# follows ``SVBK`` and can name a bank the ROM is not using for its battle
-# state.
-#
-# The linker places the battle WRAM section that holds ``wIsInBattle``,
-# ``wBattleMonHP``, ``wPartyCount`` and ``wPartyMons`` in the ``$D000``-
-# ``$DFFF`` half of WRAM bank 1 (``ram/wram.asm:198`` "WRAM" WRAM0,
-# ``:1720`` "Party Data" WRAM0), and PyBoy's bank-indexed read
-# ``memory[1, addr]`` returns that bank's own byte regardless of ``SVBK``
-# (verified first-hand against a live session: with ``SVBK == 2`` mapped,
-# ``wIsInBattle`` reads 0 through the mapped window and 2 through bank 1).
-# Those variables therefore stay authoritative while the ROM has bank 2
-# mapped for its own scratch use -- ``SVBK == 2`` is a legitimate ROM state,
-# not a degenerated one.  Reading the bank-1 bytes directly is what keeps the
-# driver able to see a live battle party menu behind an ``SVBK == 2`` window
-# instead of failing closed and starving the pair.
+# The battle WRAM reads below resolve WRAM bank 1 rather than the ``SVBK``
+# window; see ``pokered_harness.symbols.loader.read_wram_u8`` for why that is
+# the ROM's own battle state.  ``SVBK == 2`` is a legitimate ROM state, not a
+# degenerated one, and reading the bank-1 bytes directly is what keeps the
+# driver able to see a live battle party menu behind it instead of failing
+# closed and starving the pair.
 WRAM_BANK_PORT = 0xFF70
 WRAM_SWITCHABLE_START = 0xD000
 WRAM_SWITCHABLE_END = 0xE000
@@ -240,9 +227,9 @@ def _wram_byte(session, address: int) -> int:
     another region into that window.  The fixed ``0xC000``-``0xCFFF`` range has
     no bank register and keeps its ordinary mapped read.
     """
-    if WRAM_SWITCHABLE_START <= address < WRAM_SWITCHABLE_END:
-        return int(session._pyboy.memory[WRAM_BATTLE_BANK, address])
-    return int(session._pyboy.memory[address])
+    from pokered_harness.symbols.loader import read_wram_u8
+
+    return read_wram_u8(session._pyboy.memory, address)
 
 
 def _wram_bank(session) -> int | None:

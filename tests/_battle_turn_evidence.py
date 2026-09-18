@@ -15,6 +15,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from pokered_harness.symbols.loader import read_wram_bytes, read_wram_u8
+
 # Keep the move catalog in one place with the existing bounded diagnostic.  It
 # has no import-time emulator or asset side effects.
 from scripts._timed_battle_probe import (
@@ -77,8 +79,16 @@ def _integer(value: Any, low: int, high: int, label: str) -> int:
 
 
 def _read(session: Any, name: str, size: int = 1) -> int | list[int]:
+    """Read a ROM-owned WRAM symbol, resolving the battle bank explicitly.
+
+    Every symbol named here lives in ``0xD000``-``0xDFFF``, which the CGB WRAM
+    bank register remaps.  The color build banks its own scratch region into
+    that window mid-battle, so an unqualified read reports another bank's bytes
+    -- observed as ``invalid party count: 0`` while the ROM was demonstrably in
+    a live battle.  Resolving WRAM bank 1 keeps the ROM's own state visible.
+    """
     address = session.symbols.addr_of(name)
-    values = [int(session._pyboy.memory[address + index]) for index in range(size)]
+    values = [read_wram_u8(session._pyboy.memory, address + index) for index in range(size)]
     if any(type(value) is not int or not 0 <= value <= 255 for value in values):
         raise ValueError(f"invalid {name} memory byte")
     return values[0] if size == 1 else values
@@ -109,8 +119,11 @@ def _party(session: Any) -> dict[str, Any]:
     species = list(_read(session, "wPartySpecies", count + 1))
     base = session.symbols.addr_of("wPartyMons")
     records = [
-        bytes(int(session._pyboy.memory[base + index * PARTY_MON_SIZE + offset])
-              for offset in range(PARTY_MON_SIZE)).hex()
+        read_wram_bytes(
+            session._pyboy.memory,
+            base + index * PARTY_MON_SIZE,
+            PARTY_MON_SIZE,
+        ).hex()
         for index in range(count)
     ]
     return {"count": count, "species": species, "mon_species": species[:-1], "mon_records": records}
