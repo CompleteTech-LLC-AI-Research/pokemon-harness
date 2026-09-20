@@ -50,12 +50,19 @@ def _scenario(catalog: dict, scenario_id: str) -> dict:
 
 
 def test_catalog_validates_against_the_fixture_manifest() -> None:
-    catalog = _load_catalog()
-    scenarios = validator._validate_schema(catalog, _load_manifest())
+    manifest = _load_manifest()
+    scenarios = validator._validate_schema(_load_catalog(), manifest)
     assert len(scenarios) == 10
-    assert {scenario["fixture"]["fixture_id"] for scenario in scenarios} == {
-        fixture["id"] for fixture in _load_manifest()["fixtures"]
+    expected_ids = {
+        fixture["id"]
+        for fixture in manifest["fixtures"]
+        if fixture["kind"] in validator._BATTLE_CATALOG_KINDS
     }
+    assert {scenario["fixture"]["fixture_id"] for scenario in scenarios} == expected_ids
+    # The six-member ``slots`` rows are trade-acceptance fixtures, not battle
+    # pairing sources, so the catalog deliberately does not model them.
+    slots_ids = {fixture["id"] for fixture in manifest["fixtures"] if fixture["kind"] == "slots"}
+    assert slots_ids and slots_ids.isdisjoint(expected_ids)
 
 
 def test_catalog_copies_provenance_statuses_truthfully_and_has_no_execution_claim() -> None:
@@ -68,6 +75,7 @@ def test_catalog_copies_provenance_statuses_truthfully_and_has_no_execution_clai
     expected = {
         fixture["id"].replace("-", "_"): fixture["provenance"]["status"]
         for fixture in manifest["fixtures"]
+        if fixture["kind"] in validator._BATTLE_CATALOG_KINDS
     }
     assert observed == expected
     assert sum(status == "verified" for status in observed.values()) == 6

@@ -249,15 +249,33 @@ def parse_args(argv=None):
     return args
 
 
+def _fixture_kind(name: str) -> str:
+    """Return the manifest ``kind`` a fixture basename belongs to.
+
+    The producer writes exactly one ``verified`` row per family and kind, so the
+    basename is the whole selector: ``cable_club.state`` is the ``ordinary``
+    pre-connection trade fixture, ``cable_club-battle.state`` is the behaviour-
+    identical six-member battle-start fixture, and ``cable_club-slots.state`` is
+    the six-member fixture whose slots are pairwise distinct so a wrong-slot
+    copy is detectable.
+    """
+    for token, kind in (("slots", "slots"), ("battle", "battle")):
+        if token in name:
+            return kind
+    return "ordinary"
+
+
 def resolve_assets(version, repo_root, fixture="cable_club.state"):
     """Validate a selected canonical fixture and both input hashes.
 
     ``fixture`` names the manifest-registered state file to admit.  It defaults
     to the ordinary pre-connection trade fixture; passing a
     ``cable_club-battle.state`` selects the battle-record fixture that shares
-    the same ROM/symbol pins but carries a six-member party.  The manifest row
-    still has to be ``verified`` for the selected kind, so a partial or
-    mismatched fixture fails closed instead of skipping.
+    the same ROM/symbol pins but carries a six-member party, and passing a
+    ``cable_club-slots.state`` selects the six-member party whose 44-byte
+    records are pairwise distinct.  The manifest row still has to be
+    ``verified`` for the selected kind, so a partial or mismatched fixture
+    fails closed instead of skipping.
     """
     from pokered_harness.config import load_versions
     from scripts.validate_fixture_manifest import _load_manifest, _validate_schema
@@ -265,7 +283,7 @@ def resolve_assets(version, repo_root, fixture="cable_club.state"):
     if version not in VERSIONS:
         raise ValueError("only canonical color Red/Blue and Yellow are supported")
     family = version.split("_")[0]
-    kind = "battle" if "battle" in Path(fixture).name else "ordinary"
+    kind = _fixture_kind(Path(fixture).name)
     manifest = _load_manifest(repo_root / "release-evidence" / "fixture-manifest.json")
     rows = _validate_schema(manifest)
     selected = [

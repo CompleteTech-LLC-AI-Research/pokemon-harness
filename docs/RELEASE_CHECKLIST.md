@@ -152,7 +152,7 @@ The prior-candidate asset-backed local real-ROM tier passed source `47/47` in
 source `16/16` in `35.6044s` and native `16/16` in `30.8627s`. These are
 historical scoped runtime results, not current-head strict gameplay evidence.
 
-Fixture provenance remains partial: six canonical entries are verified, while
+Fixture provenance remains partial: nine canonical entries are verified, while
 four vanilla-derived entries remain `PARTIAL` because their vanilla source
 provenance is not established.
 
@@ -412,7 +412,7 @@ release readiness.
 
 ## Fixture provenance and generation
 
-- [x] `release-evidence/fixture-manifest.json` records ten external state
+- [x] `release-evidence/fixture-manifest.json` records thirteen external state
   entries with sizes, SHA-1/SHA-256 values, expected ROM/SYM pins, source-state
   records, runtime identity, and command templates.
 - [ ] Deterministic reproduction of the four vanilla-derived fixture bytes is
@@ -424,9 +424,10 @@ release readiness.
 - [x] `scripts/produce_cable_club_fixture.py` validates pins and has bounded
   defaults of 180 seconds and 64 movement steps.
 - [x] `scripts/prepare_battle_cable_club_fixtures.py` is tracked and produces
-  immutable derived battle fixtures; acceptance does not prepare party state
-  in emulator RAM.
-- [x] Provenance is verified for six canonical fixture entries.
+  immutable derived battle fixtures and six-member `slots` fixtures whose party
+  records are pairwise distinct; acceptance does not prepare party state in
+  emulator RAM.
+- [x] Provenance is verified for nine canonical fixture entries.
 - [ ] Provenance for the four vanilla-derived entries is verified. Their
   vanilla source states are not proven to match the vanilla ROM; replay against
   the retained source failed at the 64-step bound, and the manifest's ordinary

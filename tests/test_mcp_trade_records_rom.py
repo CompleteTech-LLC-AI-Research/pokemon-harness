@@ -21,19 +21,25 @@ shadowed ``PYTHONPATH`` fails loudly instead of silently substituting the other
 runtime.
 
 Two admitted-immutable-fixture limits are handled explicitly rather than hidden.
-The registry (``release-evidence/fixture-manifest.json``) admits exactly one
-``verified`` party per family, and the ``battle`` row of Red and of Yellow
-reproduces that family's ordinary 44-byte record byte-for-byte, so a Red/Red or
-Yellow/Yellow row cannot offer two different records from admitted inputs.  Those
-rows therefore rest on a ROM-owned marker instead of a byte change: the produced
-server registers ``_AddEnemyMonToPlayerParty`` -- the Trade Center routine that
-appends the received record to the player's own party -- as the
-``trade_received`` event, and *every* row, identical or distinct, requires that
-event on each owner before the exchange is accepted.  A party that never copied
-a record never runs the routine, so a skipped copy is rejected instead of
-passing on an unchanged-bytes comparison.  Blue is the one family whose admitted
-``battle`` row holds a different record from its ``ordinary`` row; the Blue/Blue
-row pairs them so a same-family row also carries a byte-exact exchange proof.
+The registry (``release-evidence/fixture-manifest.json``) admits, per family, one
+``verified`` single-member ``ordinary`` party, one ``verified`` ``battle``
+party, and one ``verified`` six-member ``slots`` party whose six 44-byte records
+are pairwise distinct (they differ only in the two-byte OT id at record offset
+12).  The ``battle`` row of Red and of Yellow reproduces that family's ordinary
+44-byte record byte-for-byte, so a Red/Red or Yellow/Yellow row cannot offer two
+different records from those two rows.  Those rows therefore rest on a ROM-owned
+marker instead of a byte change: the produced server registers
+``_AddEnemyMonToPlayerParty`` -- the Trade Center routine that appends the
+received record to the player's own party -- as the ``trade_received`` event, and
+*every* row, identical or distinct, requires that event on each owner before the
+exchange is accepted.  A party that never copied a record never runs the routine,
+so a skipped copy is rejected instead of passing on an unchanged-bytes
+comparison.  Blue is the one family whose admitted ``battle`` row holds a
+different record from its ``ordinary`` row; the Blue/Blue row pairs them so a
+same-family row also carries a byte-exact exchange proof.  The nonzero-slot rows
+are driven from the pairwise-distinct ``slots`` parties, so a copy that ignores
+the selected cursor produces a different digest list and the acceptance oracle
+rejects it instead of accepting a wrong-slot mutation on uniform bytes.
 
 The cross-family rows pair two distinct canonical games, so the two source
 records are *different bytes of the same species*.  That makes the digest swap a
@@ -52,14 +58,16 @@ launch contract.
 The ordinary fixture is a single-member party (``party_count == 1``), where the
 ROM's ``.playerMonMenu`` bounds ``wMaxMenuItem`` by ``wPartyCount`` and no
 second slot can be selected.  The nonzero sender/receiver *slot* rows are
-therefore driven from the registered ``cable_club-battle.state`` fixture: the
-manifest pins that row as ``kind: battle``, but its observable state is the same
+therefore driven from the registered ``cable_club-slots.state`` fixture: the
+manifest pins that row as ``kind: slots``, and its observable state is the same
 pre-connection Cable Club attendant tile as the ordinary fixture
 (``map_id == 64``, ``(11, 3)``, ``wIsInBattle == 0``) carrying a six-member
-party with independently pinned 44-byte records.  Using an admitted immutable
-fixture keeps the row real; no party is fabricated at runtime.  Those rows
-assert both the cursor slot the client actually selected (observed on the ROM
-menu before it confirmed) and the ROM's remove/compact/append receiving slot.
+party whose six independently pinned 44-byte records are pairwise distinct.
+Using an admitted immutable fixture keeps the row real; no party is fabricated
+at runtime.  Those rows assert both the cursor slot the client actually selected
+(observed on the ROM menu before it confirmed) and the ROM's remove/compact/append
+receiving slot, and because the six admitted records differ a copy that ignores
+the selected cursor is rejected rather than passing on uniform bytes.
 
 ``POKERED_SKIP_SHA1`` is rejected: real-ROM evidence must validate the pinned
 ROM/SYM and fixture bytes.  Missing assets skip so partial BYO-ROM checkouts
@@ -100,14 +108,20 @@ def _orientation_id(orientation):
     return f"{orientation[0]}-{orientation[1]}"
 
 
-# Manifest-registered fixture (``kind: battle``) that starts on the same
-# pre-connection Cable Club attendant tile as the ordinary trade fixture while
-# carrying a six-member party, so the issue's nonzero sender/receiver slot rows
-# are driven from an admitted immutable fixture instead of an authored double.
-# The pins are still checked by ``resolve_assets``: only the unique verified
-# ``battle`` row for each family whose basename matches is admitted.
 ORDINARY_FIXTURE = "cable_club.state"
-MULTI_MEMBER_FIXTURE = "cable_club-battle.state"
+# Manifest-registered battle-start fixture (``kind: battle``).  It starts on the
+# same pre-connection tile as the ordinary fixture, and for Blue its own lead
+# record differs from Blue's ordinary lead, so the Blue/Blue orientation pairs
+# the two for a same-family byte-exact exchange proof.
+BATTLE_FIXTURE = "cable_club-battle.state"
+# Manifest-registered six-member fixture (``kind: slots``) that starts on the
+# same pre-connection Cable Club attendant tile as the ordinary trade fixture
+# while carrying a party whose six 44-byte records are pairwise distinct, so the
+# issue's nonzero sender/receiver slot rows are driven from an admitted
+# immutable fixture and the oracle can tell an intended slot from any other.
+# The pins are still checked by ``resolve_assets``: only the unique verified
+# ``slots`` row for each family whose basename matches is admitted.
+MULTI_MEMBER_FIXTURE = "cable_club-slots.state"
 MULTI_MEMBER_PARTY_COUNT = 6
 # Both ordered slot roles: in the first row the primary owner offers a nonzero
 # slot and receives at the appended slot, in the second the roles are reversed.
@@ -126,18 +140,23 @@ def _multi_member_id(row):
 def _orientation_fixtures(primary, peer):
     """Return the admitted fixture pair an orientation row offers.
 
-    The manifest admits exactly one ``verified`` ordinary party per family and
-    one ``verified`` battle party per family.  Blue is the only family whose two
-    admitted rows hold different 44-byte records (its ordinary lead digest
-    ``b23fd6f9...`` against its battle record ``27d4b207...``), so pairing
-    Blue's ordinary row with Blue's battle row is the one way a *same-family*
-    orientation can offer two distinct admitted records.  Every other
-    orientation pairs the ordinary rows; the same-family Red/Red and
-    Yellow/Yellow rows then offer byte-identical records and lean on the
-    ROM-owned ``trade_received`` marker, as the module docstring describes.
+    The manifest admits exactly one ``verified`` ordinary party, one ``verified``
+    battle party, and one ``verified`` six-member ``slots`` party per family.
+    Blue is the only family whose two *ordinary-sized* admitted rows hold
+    different 44-byte records (its ordinary lead digest
+    ``b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0`` against
+    its battle record
+    ``27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd``), so
+    pairing Blue's ordinary row with Blue's battle row is the one way a
+    *same-family* orientation can offer two distinct admitted single-member
+    records.  Every other orientation pairs the ordinary rows; the same-family
+    Red/Red and Yellow/Yellow rows then offer byte-identical records and lean on
+    the ROM-owned ``trade_received`` marker, as the module docstring describes.
+    The nonzero-slot rows pull the pairwise-distinct ``slots`` party through
+    ``MULTI_MEMBER_FIXTURE`` instead.
     """
     if primary == peer == "blue_color":
-        return (ORDINARY_FIXTURE, MULTI_MEMBER_FIXTURE)
+        return (ORDINARY_FIXTURE, BATTLE_FIXTURE)
     return (ORDINARY_FIXTURE, ORDINARY_FIXTURE)
 
 
@@ -1067,6 +1086,19 @@ def _compaction_expected_digests(before, outgoing_slot, incoming_digest):
     return [record["digest"] for record in survivors] + [incoming_digest]
 
 
+def _compacted_records(before, outgoing_slot, incoming_record):
+    """Return the source-defined post-trade record list for one owner.
+
+    Same remove/compact/append model as ``_compaction_expected_digests`` but at
+    the record level, so a fabricated observation carries the received record's
+    species and level (which the oracle also checks) instead of a digest alone.
+    """
+    survivors = before[:outgoing_slot] + before[outgoing_slot + 1 :]
+    renumbered = [{**record, "slot": index} for index, record in enumerate(survivors)]
+    receiving = len(before) - 1
+    return renumbered + [{**incoming_record, "slot": receiving}]
+
+
 async def _drive_trade(
     pair, *, party_counts, primary_before, peer_before, primary_slot=0, peer_slot=0
 ):
@@ -1514,6 +1546,50 @@ def _skipped_copy_run(primary_before, peer_before, *, received=(0, 0)):
     )
 
 
+def _wrong_slot_run(
+    primary_before,
+    peer_before,
+    *,
+    copied_primary_slot,
+    copied_peer_slot,
+    claimed_offered,
+    received=(1, 1),
+):
+    """Fabricate the observation a driver that copied the *wrong* slots leaves.
+
+    ``copied_*_slot`` are the slots the response actually moved; the run claims
+    ``claimed_offered``.  This expresses the independent review's diagnostic
+    mutation -- copying slots ``(0, 1)`` while claiming ``(2, 0)`` -- as an
+    observation, so the acceptance oracle can be *required* to reject it.  With
+    six pairwise-distinct records the wrong-slot compaction produces a different
+    digest list than the claimed-slot compaction, so the copy snapshot and the
+    exact-exchange assertions no longer both hold.
+    """
+    primary_after = _compacted_records(
+        primary_before, copied_primary_slot, peer_before[copied_peer_slot]
+    )
+    peer_after = _compacted_records(
+        peer_before, copied_peer_slot, primary_before[copied_primary_slot]
+    )
+    return TradeRun(
+        final_records=[
+            _record_payload(primary_after),
+            _record_payload(peer_after, source="peer-party-records"),
+        ],
+        copy_records=[
+            _record_payload(primary_after),
+            _record_payload(peer_after, source="peer-party-records"),
+        ],
+        copy_states=[],
+        final_states=[],
+        post_frames=0,
+        evolution=[1, 1],
+        offered=dict(claimed_offered),
+        back_outs=0,
+        received=list(received),
+    )
+
+
 def test_paired_exchange_oracle_rejects_identical_skipped_copy():
     """The byte-identical orientation must not pass on unchanged records.
 
@@ -1595,6 +1671,133 @@ def test_paired_exchange_oracle_accepts_identical_completion():
         run, primary_before=primary_before, peer_before=peer_before, label="identical-accept"
     )
     assert verdict["distinct_records"] is False, verdict
+
+
+def _distinct_party(prefix):
+    """Six same-species records whose 44-byte digests are pairwise distinct."""
+    return [
+        _record(slot, (prefix + str(slot)).ljust(64, "0"))
+        for slot in range(MULTI_MEMBER_PARTY_COUNT)
+    ]
+
+
+def test_paired_exchange_oracle_rejects_wrong_slot_copy():
+    """The review's wrong-slot mutation must fail on pairwise-distinct records.
+
+    Six same-species records per owner make every slot digest distinct, so a
+    response that copied slots ``(0, 1)`` yields a different compaction result
+    than the required ``(2, 0)`` and the exact-exchange assertion rejects it.
+    With the earlier six *identical* records per owner this mutation satisfied
+    every assertion; the control fails closed only once the records differ.
+    """
+    primary_before = _distinct_party("p")
+    peer_before = _distinct_party("q")
+    run = _wrong_slot_run(
+        primary_before,
+        peer_before,
+        copied_primary_slot=0,
+        copied_peer_slot=1,
+        claimed_offered={0: 2, 1: 0},
+    )
+    assert run.offered == {0: 2, 1: 0}, run.offered
+    with pytest.raises(AssertionError):
+        assert_paired_exchange(
+            run,
+            primary_before=primary_before,
+            peer_before=peer_before,
+            primary_slot=2,
+            peer_slot=0,
+            label="wrong-slot",
+        )
+
+
+def test_paired_exchange_oracle_accepts_the_required_slot_copy():
+    """Positive control: the oracle accepts the *required* slot copy.
+
+    Without this control a wrong-slot test that raised for every input could not
+    be told apart from an oracle that also accepts the correct exchange.
+    """
+    primary_before = _distinct_party("p")
+    peer_before = _distinct_party("q")
+    run = _wrong_slot_run(
+        primary_before,
+        peer_before,
+        copied_primary_slot=2,
+        copied_peer_slot=0,
+        claimed_offered={0: 2, 1: 0},
+    )
+    verdict = assert_paired_exchange(
+        run,
+        primary_before=primary_before,
+        peer_before=peer_before,
+        primary_slot=2,
+        peer_slot=0,
+        label="required-slot",
+    )
+    assert verdict["distinct_records"] is True, verdict
+
+
+def _survivor_run(primary_after, peer_before, primary_before, *, received=(1, 1)):
+    """Wrap one mutated primary digest list in an otherwise-complete run."""
+    peer_after = _compacted_records(peer_before, 0, primary_before[2])
+    primary_after = [
+        {**record, "slot": index} for index, record in enumerate(primary_after)
+    ]
+    return TradeRun(
+        final_records=[
+            _record_payload(primary_after),
+            _record_payload(peer_after, source="peer-party-records"),
+        ],
+        copy_records=[
+            _record_payload(primary_after),
+            _record_payload(peer_after, source="peer-party-records"),
+        ],
+        copy_states=[],
+        final_states=[],
+        post_frames=0,
+        evolution=[1, 1],
+        offered={0: 2, 1: 0},
+        back_outs=0,
+        received=list(received),
+    )
+
+
+def test_paired_exchange_oracle_rejects_reordered_or_substituted_survivors():
+    """Survivor mutations must fail once the six records are pairwise distinct.
+
+    With six identical records per owner the compaction oracle could not see a
+    reordering or a substitution among the survivors: every permutation produced
+    the same digest list.  Distinct records make each survivor identifiable, so
+    the exact list comparison rejects both mutations while the ROM-owned append
+    marker and the copy-snapshot equality still hold.
+    """
+    primary_before = _distinct_party("p")
+    peer_before = _distinct_party("q")
+    required = _compacted_records(primary_before, 2, peer_before[0])
+    swapped = [required[0], required[1], required[3], required[2], required[4], required[5]]
+    substituted = [required[0], required[1], required[2], required[0], required[4], required[5]]
+    for label, mutated in (("reordered", swapped), ("substituted", substituted)):
+        run = _survivor_run(mutated, peer_before, primary_before)
+        with pytest.raises(AssertionError):
+            assert_paired_exchange(
+                run,
+                primary_before=primary_before,
+                peer_before=peer_before,
+                primary_slot=2,
+                peer_slot=0,
+                label=f"survivor-{label}",
+            )
+    # Positive control: the unmutated required list is accepted, so the two
+    # rejections above are not an oracle that simply raises for every input.
+    verdict = assert_paired_exchange(
+        _survivor_run(required, peer_before, primary_before),
+        primary_before=primary_before,
+        peer_before=peer_before,
+        primary_slot=2,
+        peer_slot=0,
+        label="survivor-required",
+    )
+    assert verdict["distinct_records"] is True, verdict
 
 
 def _stage_assets(directory, primary_asset, peer_asset):
@@ -1836,15 +2039,19 @@ async def test_real_rom_mcp_trade_exchanges_multi_member_slot_records(
     44-byte record at the final occupied slot, so an in-place replacement model
     is wrong for any party larger than one.
 
-    This row is driven from the registered ``cable_club-battle.state`` fixture,
+    This row is driven from the registered ``cable_club-slots.state`` fixture,
     whose observable state is the same pre-connection Cable Club attendant tile
-    as the ordinary fixture with a six-member party.  Both claims are checked
-    separately and against ROM-owned reads: the cursor slot each owner actually
-    rested on when it confirmed the offer is observed on the live
-    ``.playerMonMenu`` before the press, and the post-trade digest list must
-    equal the source-defined compaction result.  The naive in-place model is
-    computed in the test and required to *disagree*, so the oracle cannot pass
-    by accident on a party whose records happen to be uniform.
+    as the ordinary fixture with a six-member party of pairwise-distinct records.
+    Both claims are checked separately and against ROM-owned reads: the cursor
+    slot each owner actually rested on when it confirmed the offer is observed
+    on the live ``.playerMonMenu`` before the press, and the post-trade digest
+    list must equal the source-defined compaction result.  Three independent
+    controls make the row falsifiable rather than incidental: before a single
+    input the six admitted digests per owner are required to be pairwise
+    distinct; the naive in-place model is computed in the test and required to
+    *disagree*; and the review's wrong-slot mutation -- copying slots ``(0, 1)``
+    while claiming ``(2, 0)`` -- is replayed against these real digests and
+    required to fail the acceptance oracle.
     """
     if os.environ.get("POKERED_SKIP_SHA1"):
         pytest.fail("POKERED_SKIP_SHA1 must not be used for real-ROM evidence")
@@ -1866,6 +2073,35 @@ async def test_real_rom_mcp_trade_exchanges_multi_member_slot_records(
             version,
             peer_version,
         )
+        # The fixture's own reason for existing: six same-species records whose
+        # digests are pairwise distinct, so any copy that ignores the selected
+        # cursor changes the digest list instead of matching the required one.
+        for owner, records in enumerate((primary_before, peer_before)):
+            digests = _digests(records)
+            assert len(set(digests)) == MULTI_MEMBER_PARTY_COUNT, (owner, digests)
+            assert {record["species"] for record in records} == {records[0]["species"]}, (
+                owner,
+                records,
+            )
+        # Replay the independent review's diagnostic mutation on these actual
+        # digests: a response that copied slots (0, 1) must not satisfy the
+        # oracle invoked with the required slots (2, 0).
+        wrong_slot = _wrong_slot_run(
+            primary_before,
+            peer_before,
+            copied_primary_slot=0,
+            copied_peer_slot=1,
+            claimed_offered={0: 2, 1: 0},
+        )
+        with pytest.raises(AssertionError):
+            assert_paired_exchange(
+                wrong_slot,
+                primary_before=primary_before,
+                peer_before=peer_before,
+                primary_slot=2,
+                peer_slot=0,
+                label=f"wrong-slot-{version}-{peer_version}",
+            )
 
         await _enter_trade_flow(pair)
         run = await _drive_trade(
@@ -1917,6 +2153,8 @@ async def test_real_rom_mcp_trade_exchanges_multi_member_slot_records(
                 "offered_slots": {str(owner): slot for owner, slot in sorted(run.offered.items())},
                 "submenu_back_outs": run.back_outs,
                 "in_place_model_differs": True,
+                "wrong_slot_control_rejected": True,
+                "distinct_slot_digests": True,
                 "copy_primary_map": _overworld(run.copy_states[0])["map_id"],
                 "copy_peer_map": _overworld(run.copy_states[1])["map_id"],
                 "primary_map": _overworld(run.final_states[0])["map_id"],

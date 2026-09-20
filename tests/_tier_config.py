@@ -269,6 +269,10 @@ TRADE_TESTS = frozenset(
         ),
         (
             "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
             "test_real_rom_mcp_trade_exchanges_multi_member_slot_records",
         ),
         (
@@ -282,6 +286,10 @@ TRADE_TESTS = frozenset(
         (
             "test_mcp_trade_records_rom.py",
             "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly",
         ),
     }
 )
@@ -325,6 +333,10 @@ TRADE_ACCEPTANCE_TESTS = frozenset(
         ),
         (
             "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
             "test_real_rom_mcp_trade_exchanges_multi_member_slot_records",
         ),
         (
@@ -338,6 +350,10 @@ TRADE_ACCEPTANCE_TESTS = frozenset(
         (
             "test_mcp_trade_records_rom.py",
             "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly",
         ),
     }
 )

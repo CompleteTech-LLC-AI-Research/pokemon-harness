@@ -326,6 +326,15 @@ def _manifest_index(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {fixture["id"]: fixture for fixture in fixtures}
 
 
+# The battle catalog models the battle-relevant state kinds (``ordinary`` and
+# ``battle``): each scenario is a one-turn pairing source.  The six-member
+# ``slots`` rows are trade-acceptance fixtures whose party records are pairwise
+# distinct so the sender/receiver slot rows are falsifiable; they are not battle
+# pairing sources, so they are not required to appear in this catalog even
+# though the fixture manifest pins and byte-validates them.
+_BATTLE_CATALOG_KINDS = frozenset({"ordinary", "battle"})
+
+
 def _validate_cross_references(scenarios: list[dict[str, Any]], manifest: dict[str, Any]) -> None:
     manifest_by_id = _manifest_index(manifest)
     referenced: set[str] = set()
@@ -377,7 +386,12 @@ def _validate_cross_references(scenarios: list[dict[str, Any]], manifest: dict[s
                 f"{prefix}.provenance.input_fixture_sha1 requires a source_fixture_id",
             )
 
-    missing = sorted(set(manifest_by_id) - referenced)
+    required = {
+        fixture_id
+        for fixture_id, fixture in manifest_by_id.items()
+        if fixture.get("kind") in _BATTLE_CATALOG_KINDS
+    }
+    missing = sorted(required - referenced)
     _require(not missing, f"catalog is missing manifest fixtures: {', '.join(missing)}")
 
 

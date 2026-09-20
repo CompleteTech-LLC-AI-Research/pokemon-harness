@@ -49,6 +49,9 @@ _EXPECTED_FIXTURE_ROWS = {
     ),
     "yellow-cgb-ordinary": ("yellow/cable_club.state", "yellow", "cgb", "ordinary"),
     "yellow-cgb-battle": ("yellow/cable_club-battle.state", "yellow", "cgb", "battle"),
+    "red-color-slots": ("red/cable_club-slots.state", "red", "color", "slots"),
+    "blue-color-slots": ("blue/cable_club-slots.state", "blue", "color", "slots"),
+    "yellow-cgb-slots": ("yellow/cable_club-slots.state", "yellow", "cgb", "slots"),
 }
 _BATTLE_RECIPES = {
     "red-color-battle": "red_color",
@@ -56,6 +59,11 @@ _BATTLE_RECIPES = {
     "blue-color-battle": "blue_color",
     "blue-vanilla-battle": "blue_gb",
     "yellow-cgb-battle": "yellow",
+}
+_SLOTS_RECIPES = {
+    "red-color-slots": "red_color_slots",
+    "blue-color-slots": "blue_color_slots",
+    "yellow-cgb-slots": "yellow_slots",
 }
 _ORDINARY_SOURCE_PREFIXES = {
     "red": "external walkthrough_red/milestones/cerulean_pc.state;",
@@ -70,6 +78,9 @@ _VERIFIED_FIXTURE_IDS = frozenset(
         "blue-color-battle",
         "yellow-cgb-ordinary",
         "yellow-cgb-battle",
+        "red-color-slots",
+        "blue-color-slots",
+        "yellow-cgb-slots",
     }
 )
 _VANILLA_FIXTURE_IDS = frozenset(
@@ -113,9 +124,7 @@ def test_battle_fixture_generator_covers_each_supported_rom_variant() -> None:
     # Only the six-member *slot* rows must hold pairwise-distinct records; the
     # battle rows stay byte-for-byte lead copies so the pinned battle bytes keep
     # reproducing the admitted ``battle`` fixture rows.
-    assert {
-        variant for variant, config in VARIANTS.items() if config["distinct_slots"]
-    } == {
+    assert {variant for variant, config in VARIANTS.items() if config["distinct_slots"]} == {
         "red_color_slots",
         "blue_color_slots",
         "yellow_slots",
@@ -125,7 +134,7 @@ def test_battle_fixture_generator_covers_each_supported_rom_variant() -> None:
 def test_release_manifest_records_all_external_fixture_bytes_and_provenance() -> None:
     document = _load_manifest()
     fixtures = document["fixtures"]
-    assert len(fixtures) == 10
+    assert len(fixtures) == 13
     assert all(fixture["repository_distributed"] is False for fixture in fixtures)
     assert all("provenance" in fixture for fixture in fixtures)
     assert all("source_state" in fixture["provenance"] for fixture in fixtures)
@@ -153,6 +162,9 @@ def test_manifest_has_exact_supported_fixture_matrix_and_status_boundary() -> No
     } == _VANILLA_FIXTURE_IDS
     assert {fixture["id"] for fixture in fixtures if fixture["kind"] == "battle"} == set(
         _BATTLE_RECIPES
+    )
+    assert {fixture["id"] for fixture in fixtures if fixture["kind"] == "slots"} == set(
+        _SLOTS_RECIPES
     )
 
 
@@ -195,6 +207,45 @@ def test_battle_provenance_binds_each_derived_state_to_ordinary_input() -> None:
         assert str(recipe["rom"]) == battle["expected_rom"]["path"].removeprefix("rom/")
         assert str(recipe["symbols"]) == battle["expected_symbols"]["path"].removeprefix("rom/")
         assert f"--variants {recipe_key}" in battle_provenance["capture_command_template"]
+
+
+def test_slots_provenance_binds_each_six_member_row_to_its_ordinary_input() -> None:
+    """Every ``slots`` row is a verified derivation of its own ordinary row.
+
+    These rows exist so a wrong-slot copy is detectable, so the row has to
+    record the distinctness contract it is admitted under: the recipe must be a
+    ``distinct_slots`` recipe, its output must be the ``slots`` basename, and
+    the admitted bytes must not be the byte-identical ``battle`` row sitting
+    beside it in the same family.
+    """
+
+    document = _load_manifest()
+    by_id = {fixture["id"]: fixture for fixture in document["fixtures"]}
+
+    for slots_id, recipe_key in _SLOTS_RECIPES.items():
+        slots = by_id[slots_id]
+        ordinary = by_id[slots_id.replace("-slots", "-ordinary")]
+        battle = by_id[slots_id.replace("-slots", "-battle")]
+        provenance = slots["provenance"]
+        recipe = VARIANTS[recipe_key]
+
+        assert slots["kind"] == "slots"
+        assert provenance["status"] == "verified"
+        assert provenance["producer"] == "scripts/prepare_battle_cable_club_fixtures.py"
+        assert _source_digests(provenance["source_state"]) == (
+            ordinary["sha1"],
+            ordinary["sha256"],
+        )
+        assert f"external {ordinary['path']};" in provenance["source_state"]
+        assert recipe["distinct_slots"] is True
+        assert recipe["fixture_version"] == slots["version"]
+        assert recipe["source"] == Path(ordinary["path"]).name
+        assert recipe["output"] == Path(slots["path"]).name
+        assert str(recipe["rom"]) == slots["expected_rom"]["path"].removeprefix("rom/")
+        assert str(recipe["symbols"]) == slots["expected_symbols"]["path"].removeprefix("rom/")
+        assert f"--variants {recipe_key}" in provenance["capture_command_template"]
+        assert "pairwise distinct" in provenance["verification_method"]
+        assert slots["sha1"] != battle["sha1"]
 
 
 def test_vanilla_provenance_remains_fail_closed_through_derived_states() -> None:
@@ -306,7 +357,7 @@ def test_manifest_pins_and_provenance_boundaries_match_tracked_contract() -> Non
         if fixture["variant"] == "vanilla":
             assert provenance["status"] == "partial"
 
-        if fixture["kind"] == "battle":
+        if fixture["kind"] in {"battle", "slots"}:
             ordinary_id = f"{fixture['version']}-{fixture['variant']}-ordinary"
             ordinary = by_id[ordinary_id]
             if ordinary["provenance"]["status"] != "verified":

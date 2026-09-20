@@ -71,6 +71,7 @@ def _harness_sym() -> str:
         00:35EC YesNoChoice
         0E:6D0E TryEvolvingMon
         01:7078 SetLastBlackoutMap
+        03:749D _AddEnemyMonToPlayerParty
     """
 
 
