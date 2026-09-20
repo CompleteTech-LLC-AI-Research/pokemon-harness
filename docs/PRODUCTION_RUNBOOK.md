@@ -813,6 +813,36 @@ comparison and the nine-orientation timed matrix required by issue #85 remain
 **BLOCKED**, and no result from the shared host may be promoted to a
 capacity-qualified or release-qualified outcome.
 
+#### 3c-1. Why this host cannot supply the allocation itself
+
+The two acceptance criteria that require an *available* allocation and the
+comparison/matrix executed *under* it are unmet because supplying that
+allocation needs host privilege this job does not have. The delivery contract
+for this work item accepts an operator-supplied declaration validated against
+observable facts in place of an observed reservation, and requires every fact
+the host cannot observe to be reported `unsupported`/`blocked` rather than
+assumed; §3b and §3c are that record. The blocking facts are observable and
+sanitized:
+
+| Provisioning prerequisite | Observed on this host | Effect |
+| --- | --- | --- |
+| `cgroup2` mount options | `ro,nosuid,nodev,noexec` | no writable leaf with `cpu.max` can be created |
+| process identity | `uid=1000` (`agent`) | the job is not the host owner |
+| effective/bounding capabilities | `CapEff=0`, `CapBnd=0` | cannot delegate a controller or write `cgroup.procs` |
+| privilege escalation path | no `sudo`, no setuid helper | the missing privilege cannot be acquired |
+| unprivileged user namespaces | `unshare --map-root-user -m` → `EPERM` | cannot bind-mount a private `cgroup2` |
+| host-wide competition | `9.44`–`10.72` busy cores of `12` during the retained runs | `dedicated-host` admission fails |
+
+The comparison and the nine-orientation matrix were nonetheless executed and
+their sanitized terminal results are retained at
+`release-evidence/feature-qualification/pr112-acceptance-409ba11/`, where they
+are read as functional acceptance only. Issue #85 itself reserves provisioning
+(paid infrastructure or ROM-derived uploads) as separate operator
+authorization, so a job that does not own the host cannot turn these criteria
+green: their status stays **BLOCKED** until an operator provisions the
+allocation declared in §3c. Nothing here may be used to promote a shared-host
+result to capacity qualification.
+
 ## 4. Run the evidence tiers
 
 Run the tiers in order and save the complete output with the commit and

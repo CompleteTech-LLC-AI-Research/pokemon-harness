@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -1341,6 +1342,112 @@ def test_run_command_does_not_touch_preexisting_children(tmp_path: Path):
             bystander.wait(timeout=5)
 
 
+def test_decode_failure_still_contains_detached_descendant(tmp_path: Path):
+    """A stream-decoding error must not skip the containment sweeps.
+
+    A reviewer ran a command that wrote a non-UTF-8 byte, exited 7, and left a
+    detached child.  ``run_command`` raised ``UnicodeDecodeError`` before either
+    sweep, so the child survived and the leftover registry stayed empty.  The
+    original error must still surface, but only after containment confirms the
+    detached descendant is gone.
+    """
+
+    pidfile = tmp_path / "detached.json"
+    code = (
+        "import json, os, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+        "start_new_session=True)\n"
+        f"Path({str(pidfile)!r}).write_text(json.dumps({{'pid': child.pid}}))\n"
+        "os.write(1, b'\\xff')\n"
+        "sys.exit(7)\n"
+    )
+    child_pid: int | None = None
+    try:
+        with pytest.raises(UnicodeDecodeError):
+            runner.run_command([sys.executable, "-c", code], tmp_path, timeout=10)
+        assert pidfile.exists(), "the owned command did not record its detached child"
+        child_pid = json.loads(pidfile.read_text())["pid"]
+        assert not runner._pid_alive(child_pid), (
+            "UnicodeDecodeError bypassed containment; "
+            f"detached child {child_pid} is alive and leftovers={runner._LEFTOVER_OWNED_PIDS}"
+        )
+    finally:
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        runner._LEFTOVER_OWNED_PIDS.discard(child_pid)
+
+
+def test_release_contains_holder_descendants(tmp_path: Path, monkeypatch):
+    """Release must not report ok while a holder descendant is still alive.
+
+    A reviewer used a SIGTERM-resistant holder that owned a detached sleeper.
+    Release escalated to SIGKILL, returned ``ok``, removed the descriptor, and
+    left the sleeper alive.  Confirmed cleanup must gate the release, and the
+    detached descendant must be gone before the descriptor is removed.
+    """
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    ready = tmp_path / "holder-ready.json"
+    holder_code = (
+        "import json, os, signal, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "detached = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+        "start_new_session=True)\n"
+        f"Path({str(ready)!r}).write_text(json.dumps({{'detached': detached.pid}}))\n"
+        "time.sleep(120)\n"
+    )
+    holder = subprocess.Popen(
+        [sys.executable, "-c", holder_code],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    detached_pid: int | None = None
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "the holder did not start its detached descendant"
+        detached_pid = json.loads(ready.read_text())["detached"]
+        rewrite_descriptor(
+            declaration,
+            {
+                "holder_pid": holder.pid,
+                "holder_start_time": runner._process_start_time(holder.pid),
+            },
+        )
+        monkeypatch.setattr(runner, "_holder_is_owned", lambda holder, start: True)
+        status, message = runner._release_allocation(declaration, tmp_path)
+        assert status == "ok", message
+        assert not runner._pid_alive(holder.pid), "the holder survived release"
+        assert not runner._pid_alive(detached_pid), (
+            f"release reported {status} while its detached descendant "
+            f"{detached_pid} was still alive"
+        )
+        assert not descriptor_path.exists(), "the released descriptor was retained"
+    finally:
+        runner._LEFTOVER_OWNED_PIDS.discard(detached_pid)
+        runner._LEFTOVER_OWNED_PIDS.discard(holder.pid)
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5)
+        if detached_pid is not None:
+            try:
+                os.kill(detached_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_release_is_blocked_while_owned_leftovers_survive(tmp_path: Path):
     if not _LOCK_OBSERVATION_SUPPORTED:
         pytest.skip("kernel lock table is not observable in this sandbox")
@@ -1649,6 +1756,83 @@ def test_immutable_asset_check_rejects_writable_root(tmp_path: Path):
     )
     results = runner._immutable_asset_checks(declaration, tmp_path)
     assert statuses(results)["assets-immutable-rom_root"] == "fail"
+
+
+def test_immutable_asset_check_rejects_writable_nested_directory(tmp_path: Path):
+    """A read-only root with a writable nested directory is not immutable.
+
+    A reviewer kept the root at mode 0555 and the asset file at 0444, but made
+    the containing subdirectory writable; the check reported ``ok`` and the
+    reviewer then deleted and replaced the protected file through that parent.
+    The writable nested directory must fail the admission.
+    """
+
+    rom_root = tmp_path / "rom"
+    nested = rom_root / "red"
+    nested.mkdir(parents=True)
+    (nested / "pokemon-red.gb").write_bytes(b"dummy")
+    for path in (nested / "pokemon-red.gb", nested, rom_root):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    nested.chmod(0o755)
+    declaration = make_declaration(
+        assets={"rom_root": str(rom_root), "fixture_root": str(tmp_path / "fixtures")}
+    )
+    try:
+        results = runner._immutable_asset_checks(declaration, tmp_path)
+        assert statuses(results)["assets-immutable-rom_root"] == "fail"
+    finally:
+        # Restore writability so pytest can remove the temporary tree.
+        nested.chmod(0o755)
+        rom_root.chmod(0o755)
+
+
+def test_observed_task_affinities_unions_every_thread(tmp_path: Path, monkeypatch):
+    """A worker thread's affinity must not be hidden by its leader's."""
+
+    observed: dict[int, list[int]] = {}
+
+    class _Entry:
+        def __init__(self, name: str):
+            self.name = name
+
+    monkeypatch.setattr(runner, "_observed_affinity", lambda pid: observed.get(pid))
+    real_iterdir = runner.Path.iterdir
+
+    def fake_iterdir(self):
+        if str(self).endswith("/task"):
+            return [_Entry("100"), _Entry("101")]
+        return real_iterdir(self)
+
+    monkeypatch.setattr(runner.Path, "iterdir", fake_iterdir)
+    observed[100] = [1]
+    observed[101] = [0]
+    assert runner._observed_task_affinities(999) == [0, 1]
+    # An unobservable thread fails closed rather than dropping the competitor.
+    observed.pop(101)
+    assert runner._observed_task_affinities(999) is None
+
+
+def test_foreign_process_affinity_spans_worker_threads(monkeypatch):
+    """``_foreign_process_affinity`` must report the union across threads."""
+
+    class _Entry:
+        def __init__(self, name: str):
+            self.name = name
+
+    real_iterdir = runner.Path.iterdir
+
+    def fake_iterdir(self):
+        if str(self) == "/proc":
+            return [_Entry("5000")]
+        if str(self).endswith("/task"):
+            return [_Entry("5001"), _Entry("5002")]
+        return real_iterdir(self)
+
+    monkeypatch.setattr(runner.Path, "iterdir", fake_iterdir)
+    monkeypatch.setattr(runner, "_process_tree_pids", lambda pid=None: [os.getpid()])
+    monkeypatch.setattr(runner, "_pid_is_zombie", lambda pid: False)
+    monkeypatch.setattr(runner, "_observed_affinity", lambda pid: {5001: [1], 5002: [0]}.get(pid))
+    assert runner._foreign_process_affinity() == {5000: [0, 1]}
 
 
 def test_redact_payload_scrubs_interpreter_paths():

@@ -314,6 +314,39 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
+def _observed_task_affinities(pid: int) -> list[int] | None:
+    """Return the union of every thread's allowed CPUs for *pid*.
+
+    ``Cpus_allowed_list`` in ``/proc/<pid>/status`` reports only the process
+    leader.  A foreign process can confine its leader to one CPU while a
+    worker thread remains allowed on the reserved CPU, so reading the leader
+    alone would miss a real competitor.  Every thread under
+    ``/proc/<pid>/task`` is inspected and the allowed sets are unioned.
+
+    ``None`` means at least one thread's affinity could not be observed, so
+    the caller must fail closed rather than assume the reserved CPUs are free.
+    """
+
+    task_dir = Path(f"/proc/{pid}/task")
+    try:
+        entries = list(task_dir.iterdir())
+    except OSError:
+        return None
+    if not entries:
+        return None
+    union: set[int] = set()
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        cpus = _observed_affinity(int(entry.name))
+        if cpus is None:
+            return None
+        union.update(cpus)
+    if not union:
+        return None
+    return sorted(union)
+
+
 def _foreign_process_affinity() -> dict[int, list[int]] | None:
     """Return the allowed CPUs of every live process outside this job's tree.
 
@@ -327,7 +360,10 @@ def _foreign_process_affinity() -> dict[int, list[int]] | None:
     caller must fail closed.  An unreadable process is *not* evidence that the
     CPUs are free: omitting it silently would turn a permission error into a
     passing reservation.  Only a process that has genuinely exited or that is
-    an exited zombie is skipped, because neither can consume CPU time.
+    an exited zombie is skipped, because neither can consume CPU time.  The
+    reported set for each process spans every thread, since a leader confined
+    away from the reserved CPUs can still own a worker that is allowed on
+    them.
     """
 
     owned = set(_process_tree_pids(os.getpid()))
@@ -344,7 +380,7 @@ def _foreign_process_affinity() -> dict[int, list[int]] | None:
             continue
         if _pid_is_zombie(pid):
             continue
-        cpus = _observed_affinity(pid)
+        cpus = _observed_task_affinities(pid)
         if cpus is None:
             if _pid_exists(pid):
                 return None
@@ -2774,6 +2810,19 @@ def run_command(
                     KeyboardInterrupt, SystemExit, OSError, subprocess.TimeoutExpired
                 ):
                     stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
+            except BaseException as exc:  # noqa: BLE001 - containment must run first
+                # A decoding failure (``UnicodeDecodeError``) or any other
+                # error raised while reading the child's streams must not skip
+                # containment.  The command may still have detached
+                # descendants, so tear it down and remember the original error
+                # to re-raise only after both sweeps have run.  The original
+                # exception is preserved as the raised exception, so callers
+                # still see the real failure.
+                pending_error = exc
+                _terminate_owned_process(process)
+                stdout, stderr = "", ""
+                with contextlib.suppress(BaseException, OSError, subprocess.TimeoutExpired):
+                    stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
         finally:
             _unregister_owned(process)
 
@@ -3520,7 +3569,11 @@ def _asset_tree_writable(root: Path) -> bool:
         return True
     try:
         for entry in root.rglob("*"):
-            if entry.is_file() and os.access(entry, os.W_OK):
+            # A read-only directory containing a writable subdirectory is not
+            # immutable: the owner can delete or replace a protected file via
+            # that parent.  Check directories as well as files so a writable
+            # nested directory fails the admission instead of passing.
+            if os.access(entry, os.W_OK):
                 return True
     except OSError:
         return True
@@ -4032,6 +4085,48 @@ def _terminate_and_confirm(pid: int) -> tuple[bool, str]:
     return False, "the lease holder is still running after SIGKILL"
 
 
+def _release_confirm_holder_tree(holder: int) -> tuple[bool, str]:
+    """Terminate the lease holder and confirm its whole tree is gone.
+
+    Killing the holder is not evidence that its capacity is free: a
+    SIGTERM-resistant command can own a detached descendant that keeps
+    consuming the allocation after the holder exits.  The holder's tree is
+    snapshotted *before* it is signalled, every member is confirmed gone, and
+    any adopted descendant or recorded leftover is contained and re-checked.
+    Release must never report ``ok`` while a descendant survives.
+    """
+
+    tree = set(_process_tree_pids(holder)) - {os.getpid()}
+    terminated, detail = _terminate_and_confirm(holder)
+    if not terminated:
+        return False, detail
+    # A detached descendant reparents onto this subreaper; contain both the
+    # snapshotted tree and anything that arrived as an adopted orphan.
+    remaining = sorted(
+        pid for pid in tree if pid != holder and _pid_alive(pid) and not _pid_is_zombie(pid)
+    )
+    if remaining:
+        confirmed, survivors = _terminate_pids(remaining)
+        if not confirmed:
+            return False, (
+                "the lease holder's descendants are still running after SIGKILL: "
+                + ", ".join(str(pid) for pid in survivors[:16])
+            )
+    adopted_confirmed, adopted_survivors = _contain_adopted_descendants()
+    if not adopted_confirmed:
+        return False, (
+            "adopted descendants survived containment: "
+            + ", ".join(str(pid) for pid in adopted_survivors[:16])
+        )
+    live_leftovers = _sweep_leftover_owned_processes()
+    if live_leftovers:
+        return False, (
+            "owned descendants are still running after releasing the holder: "
+            + ", ".join(str(pid) for pid in live_leftovers[:16])
+        )
+    return True, ""
+
+
 def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[str, str]:
     live_leftovers = _sweep_leftover_owned_processes()
     if live_leftovers:
@@ -4081,11 +4176,28 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
             return "blocked", "this process still holds the allocation lock after releasing it"
     else:
         if _pid_alive(holder) or holder in lock_holders:
-            terminated, detail = _terminate_and_confirm(holder)
+            terminated, detail = _release_confirm_holder_tree(holder)
             if not terminated:
                 return "blocked", detail
+        else:
+            # The holder already exited, but it may have detached a descendant
+            # that is still consuming the allocation.  Confirm containment
+            # before any state is removed.
+            adopted_confirmed, adopted_survivors = _contain_adopted_descendants()
+            if not adopted_confirmed:
+                return "blocked", (
+                    "descendants of the exited holder survived containment: "
+                    + ", ".join(str(pid) for pid in adopted_survivors[:16])
+                )
         if lock_path is not None and holder in (_observe_flock_holders(lock_path) or set()):
             return "blocked", "the recorded holder still holds the allocation lock"
+    live_leftovers = _sweep_leftover_owned_processes()
+    if live_leftovers:
+        return "blocked", (
+            "owned descendants are still running after release "
+            f"({len(live_leftovers)} pid(s)); including "
+            + ", ".join(str(pid) for pid in live_leftovers[:16])
+        )
     _remove_allocation_state(descriptor_path)
     return "ok", "the owned lease was relinquished and the private job state removed"
 
