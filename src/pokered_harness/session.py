@@ -192,8 +192,22 @@ _BATTLE_MENU_CLOSE_SYMBOLS = (
 # ``ExecutePlayerMoveDone`` clears the byte as it returns, so a client polling
 # at any interval only ever sees the flag set for the item/switch/run turns
 # that never execute a move.  Both combatants' routines are bracketed because
-# either side can be resolving when a client reads, and both exits are shared
-# tails that the corresponding entry always reaches.
+# either side can be resolving when a client reads.
+#
+# ``Execute*MoveDone`` is not the only exit.  A status or residual move jumps
+# straight to ``JumpMoveEffect`` (``engine/battle/effects.asm``), whose handler
+# returns to the caller of ``Execute*Move``, and the damage paths return
+# directly once the target's HP reaches zero (``core.asm``: the player routine
+# returns with ``ret z`` beside the faint check).  Those returns bypass both
+# ``*Done`` labels, so the bracket would stay open while the ROM moved on,
+# turning the next command or replacement menu into a spurious contradiction.
+# The exits therefore also include the post-move continuations that every one
+# of those returns lands on: ``HandlePoisonBurnLeechSeed`` runs immediately
+# after either move routine returns, ``HandlePlayerMonFainted`` /
+# ``HandleEnemyMonFainted`` are the faint continuations (they run *before*
+# ``ChooseNextMon`` opens the replacement menu), ``MainInBattleLoop`` is the
+# per-turn entry every finished turn comes back to, and ``EndOfBattle`` is the
+# escape/run tail that returns out of the loop without re-entering it.
 _BATTLE_RESOLUTION_OPEN_SYMBOLS = (
     "ExecutePlayerMove",
     "ExecuteEnemyMove",
@@ -201,6 +215,11 @@ _BATTLE_RESOLUTION_OPEN_SYMBOLS = (
 _BATTLE_RESOLUTION_CLOSE_SYMBOLS = (
     "ExecutePlayerMoveDone",
     "ExecuteEnemyMoveDone",
+    "HandlePoisonBurnLeechSeed",
+    "HandlePlayerMonFainted",
+    "HandleEnemyMonFainted",
+    "MainInBattleLoop",
+    "EndOfBattle",
 )
 
 
@@ -373,8 +392,7 @@ class Session:
         except TimeoutError as exc:
             timeout = timeout_s if timeout_s is not None else 0.0
             raise SessionLockTimeout(
-                "could not acquire the emulator lock before the "
-                f"{timeout:g}s deadline"
+                f"could not acquire the emulator lock before the {timeout:g}s deadline"
             ) from exc
         try:
             if not allow_closed:
@@ -410,34 +428,26 @@ class Session:
         if not rom_path.is_file():
             raise RomNotFoundError(f"ROM file not found: {rom_path}")
         if not sym_path.is_file():
-            raise SymbolNotFoundError(
-                f"symbol file not found: {sym_path}"
-            )
+            raise SymbolNotFoundError(f"symbol file not found: {sym_path}")
 
         if expected_rom_sha1 is not None:
             expected_rom_sha1 = _normalise_sha1(expected_rom_sha1)
             try:
                 actual = sha1_of_file(rom_path)
             except OSError as exc:
-                raise RomNotFoundError(
-                    f"unable to read ROM file {rom_path}: {exc}"
-                ) from exc
+                raise RomNotFoundError(f"unable to read ROM file {rom_path}: {exc}") from exc
             if actual.lower() != expected_rom_sha1.lower():
                 raise RomHashMismatch(
-                    f"ROM SHA-1 mismatch: expected {expected_rom_sha1}, "
-                    f"got {actual} for {rom_path}"
+                    f"ROM SHA-1 mismatch: expected {expected_rom_sha1}, got {actual} for {rom_path}"
                 )
 
         if expected_symbol_sha1 is not None:
-            expected_symbol_sha1 = _normalise_sha1(
-                expected_symbol_sha1, label="symbol SHA-1"
-            )
+            expected_symbol_sha1 = _normalise_sha1(expected_symbol_sha1, label="symbol SHA-1")
             try:
                 actual = sha1_of_file(sym_path)
             except OSError as exc:
                 raise SymbolNotFoundError(
-                    f"unable to read symbol file {sym_path} for SHA-1 "
-                    f"verification: {exc}"
+                    f"unable to read symbol file {sym_path} for SHA-1 verification: {exc}"
                 ) from exc
             if actual.lower() != expected_symbol_sha1.lower():
                 raise SymbolHashMismatch(
@@ -445,31 +455,22 @@ class Session:
                     f"got {actual} for {sym_path}"
                 )
 
-        if (
-            expected_pyboy_version is not None
-            or expected_pyboy_revision is not None
-        ):
+        if expected_pyboy_version is not None or expected_pyboy_revision is not None:
             import pyboy as _pyboy_module
 
             if expected_pyboy_version is not None:
                 if not isinstance(expected_pyboy_version, str):
-                    raise SessionConfigurationError(
-                        "expected PyBoy version must be a string"
-                    )
+                    raise SessionConfigurationError("expected PyBoy version must be a string")
                 expected_pyboy_version = expected_pyboy_version.strip()
                 if not expected_pyboy_version:
-                    raise SessionConfigurationError(
-                        "expected PyBoy version must not be empty"
-                    )
+                    raise SessionConfigurationError("expected PyBoy version must not be empty")
                 actual_version = getattr(_pyboy_module, "__version__", None)
                 if actual_version != expected_pyboy_version:
                     raise VersionMismatch(
                         f"PyBoy version mismatch: expected {expected_pyboy_version}, "
                         f"got {actual_version}"
                     )
-            actual_revision = getattr(
-                _pyboy_module, "__pokered_harness_revision__", None
-            )
+            actual_revision = getattr(_pyboy_module, "__pokered_harness_revision__", None)
             if not actual_revision:
                 raise VersionMismatch(
                     "PyBoy runtime is not the pinned pokered-harness build; "
@@ -488,9 +489,7 @@ class Session:
         try:
             symbols = load_sym_file(sym_path)
         except FileNotFoundError as exc:
-            raise SymbolNotFoundError(
-                f"symbol file not found: {sym_path}"
-            ) from exc
+            raise SymbolNotFoundError(f"symbol file not found: {sym_path}") from exc
         except (OSError, UnicodeError) as exc:
             raise SessionConfigurationError(
                 f"unable to load symbol file {sym_path}: {exc}"
@@ -501,9 +500,7 @@ class Session:
             try:
                 pyboy = pyboy_factory(str(rom_path))
             except FileNotFoundError as exc:
-                raise RomNotFoundError(
-                    f"unable to open ROM file {rom_path}: {exc}"
-                ) from exc
+                raise RomNotFoundError(f"unable to open ROM file {rom_path}: {exc}") from exc
             except Exception as exc:  # Wrap factory errors at the session boundary.
                 raise SessionConfigurationError(
                     f"unable to create emulator for {rom_path}: {exc}"
@@ -513,9 +510,7 @@ class Session:
             # SDL2 for a visible window, otherwise stays headless ("null").
             window = "SDL2" if view else "null"
             try:
-                pyboy = _default_pyboy_factory(
-                    str(rom_path), window=window, cgb=True
-                )
+                pyboy = _default_pyboy_factory(str(rom_path), window=window, cgb=True)
             except Exception as exc:  # Wrap factory errors at the session boundary.
                 raise SessionConfigurationError(
                     f"unable to create emulator for {rom_path}: {exc}"
@@ -524,9 +519,7 @@ class Session:
 
     # --- lifecycle -----------------------------------------------------
 
-    def close(
-        self, save: bool = False, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
-    ) -> None:
+    def close(self, save: bool = False, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S) -> None:
         """Stop the emulator exactly once with a retryable bounded contract.
 
         The closed flag is published before waiting for ``_lock`` so new
@@ -608,10 +601,7 @@ class Session:
         # own completion event would deadlock until the outer deadline.  Fail
         # the recursive cleanup immediately; the outer worker publishes this
         # typed failure and a later close can retry.
-        if (
-            close_done is not None
-            and self._stop_thread is threading.current_thread()
-        ):
+        if close_done is not None and self._stop_thread is threading.current_thread():
             raise SessionCloseTimeout(
                 "recursive emulator shutdown cannot wait for its own stop worker"
             )
@@ -625,10 +615,7 @@ class Session:
                 "cleanup deferred until the current emulator operation exits"
             )
             with self._lifecycle_lock:
-                if (
-                    self._close_owner == current_thread_id
-                    and self._stop_thread is None
-                ):
+                if self._close_owner == current_thread_id and self._stop_thread is None:
                     self._stop_error = error
                     if attempt is not None and not attempt.done.is_set():
                         attempt.error = error
@@ -644,10 +631,7 @@ class Session:
                 "cleanup deferred until other emulator ownership scopes exit"
             )
             with self._lifecycle_lock:
-                if (
-                    self._close_owner == current_thread_id
-                    and self._stop_thread is None
-                ):
+                if self._close_owner == current_thread_id and self._stop_thread is None:
                     self._stop_error = error
                     if attempt is not None and not attempt.done.is_set():
                         attempt.error = error
@@ -664,9 +648,7 @@ class Session:
                 # ordering explicit (and lets instrumented locks observe the
                 # bounded hand-off) without ever running a second ``stop``.
                 remaining = max(0.0, stop_deadline - time.monotonic())
-                acquired = self._lock.acquire(
-                    timeout=min(remaining, 0.01)
-                )
+                acquired = self._lock.acquire(timeout=min(remaining, 0.01))
                 if not acquired:
                     # The stop worker may legitimately hold the lock for the
                     # whole runtime-defined cleanup interval.  The immutable
@@ -675,9 +657,7 @@ class Session:
                     pass
                 else:
                     self._lock.release()
-                if not close_done.wait(
-                    timeout=max(0.0, stop_deadline - time.monotonic())
-                ):
+                if not close_done.wait(timeout=max(0.0, stop_deadline - time.monotonic())):
                     raise SessionCloseTimeout(
                         "another session close is still in progress before the "
                         f"{timeout_s:g}s shutdown deadline (cleanup deadline)"
@@ -721,9 +701,7 @@ class Session:
         lock_acquired = False
         close_failure: BaseException | None = None
         try:
-            if not self._lock.acquire(
-                timeout=max(0.0, stop_deadline - time.monotonic())
-            ):
+            if not self._lock.acquire(timeout=max(0.0, stop_deadline - time.monotonic())):
                 raise SessionCloseTimeout(
                     "an emulator operation is still active after "
                     f"the {timeout_s:g}s shutdown deadline (cleanup deadline)"
@@ -745,9 +723,7 @@ class Session:
                 error: BaseException | None = None
                 acquired = self._lock.acquire(timeout=0.1)
                 if not acquired:
-                    error = SessionCloseTimeout(
-                        "emulator lock became busy during shutdown"
-                    )
+                    error = SessionCloseTimeout("emulator lock became busy during shutdown")
                 else:
                     try:
                         with self._owner.access():
@@ -801,9 +777,7 @@ class Session:
                     self._close_owner = None
                     self._close_done.set()
                 raise
-            if not attempt.done.wait(
-                timeout=max(0.0, stop_deadline - time.monotonic())
-            ):
+            if not attempt.done.wait(timeout=max(0.0, stop_deadline - time.monotonic())):
                 raise SessionCloseTimeout(
                     "PyBoy.stop did not return before the "
                     f"{timeout_s:g}s shutdown deadline (cleanup deadline)"
@@ -1091,9 +1065,7 @@ class Session:
             self._ensure_open()
             if self._battle_resolution_observed:
                 return True
-            labels = (
-                _BATTLE_RESOLUTION_OPEN_SYMBOLS + _BATTLE_RESOLUTION_CLOSE_SYMBOLS
-            )
+            labels = _BATTLE_RESOLUTION_OPEN_SYMBOLS + _BATTLE_RESOLUTION_CLOSE_SYMBOLS
             if any(name not in self._symbols for name in labels):
                 return False
 
@@ -1147,10 +1119,7 @@ class Session:
                 return True
             if _BATTLE_END_SYMBOL not in self._symbols:
                 return False
-            if (
-                "wBattleResult" not in self._symbols
-                or "wEscapedFromBattle" not in self._symbols
-            ):
+            if "wBattleResult" not in self._symbols or "wEscapedFromBattle" not in self._symbols:
                 return False
 
             def _sample_end(_ctx: object) -> None:
@@ -1158,9 +1127,7 @@ class Session:
                 # escape whose cleanup happens entirely between two client
                 # reads, so this is the one place the outcome bytes can be
                 # attributed to *this* end.
-                self._battle_end_result = self._symbols.read_u8(
-                    self._pyboy.memory, "wBattleResult"
-                )
+                self._battle_end_result = self._symbols.read_u8(self._pyboy.memory, "wBattleResult")
                 self._battle_end_escaped = (
                     self._symbols.read_u8(self._pyboy.memory, "wEscapedFromBattle") != 0
                 )
@@ -1286,9 +1253,7 @@ class Session:
             self._pyboy.hook_register(bank, addr, _guarded_callback, context)
             self._serial_hooks.append((state, bank, addr, symbol_name))
 
-    def deactivate_serial_hooks(
-        self, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S
-    ) -> int:
+    def deactivate_serial_hooks(self, *, timeout_s: float = _DEFAULT_CLOSE_TIMEOUT_S) -> int:
         """Disable all raw serial callbacks previously registered here.
 
         PyBoy 2.7 does not expose a stable per-callback removal API. The
@@ -1309,8 +1274,7 @@ class Session:
                 return count
         except SessionLockTimeout as exc:
             raise SessionLockTimeout(
-                "could not acquire the emulator lock before the "
-                f"{timeout:g}s deactivation deadline"
+                f"could not acquire the emulator lock before the {timeout:g}s deactivation deadline"
             ) from exc
 
     def deactivate_hooks_at(
@@ -1345,8 +1309,7 @@ class Session:
                 ]
         except SessionLockTimeout as exc:
             raise SessionLockTimeout(
-                "could not acquire the emulator lock before the "
-                f"{timeout:g}s deactivation deadline"
+                f"could not acquire the emulator lock before the {timeout:g}s deactivation deadline"
             ) from exc
 
     # --- actions -------------------------------------------------------
@@ -1397,9 +1360,7 @@ class Session:
         """
         timeout_s = _validate_timeout(timeout_s, "timeout_s")
         self._check_timed_owner()
-        with self.locked(
-            timeout_s=min(timeout_s, threading.TIMEOUT_MAX), allow_closed=True
-        ):
+        with self.locked(timeout_s=min(timeout_s, threading.TIMEOUT_MAX), allow_closed=True):
             if endpoint is not self._timed_endpoint or endpoint is None:
                 raise SessionError("timed execution endpoint does not match binding")
             self._check_timed_owner()
@@ -1459,7 +1420,10 @@ class Session:
         timed._check()
         if timed._pyboy is not self._pyboy or timed._board is None:
             raise SessionError("timed endpoint is not attached to this Session emulator")
-        if type(getattr(self._pyboy, "frame_count", None)) is not int or self._pyboy.frame_count < 0:
+        if (
+            type(getattr(self._pyboy, "frame_count", None)) is not int
+            or self._pyboy.frame_count < 0
+        ):
             raise SessionError("timed execution requires the native public frame_count")
         timed._verify_registration()
 
@@ -1686,9 +1650,7 @@ class Session:
         intentional-rewind path that invalidates that evidence.
         """
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            raise ValueError(
-                f"advance must be a non-negative integer, got {count!r}"
-            )
+            raise ValueError(f"advance must be a non-negative integer, got {count!r}")
         self._ensure_open()
         with self._emulator_access():
             self._ensure_open()
@@ -1737,9 +1699,7 @@ class Session:
                 for name in wanted:
                     evt = self._events.latest(name)
                     if evt is not None and evt.tick > start_tick:
-                        return RunUntilResult(
-                            event=evt, ticks_spent=self._tick - start_tick
-                        )
+                        return RunUntilResult(event=evt, ticks_spent=self._tick - start_tick)
 
                 ticks_left = deadline - self._tick
                 previous_tick = self._tick
@@ -1751,9 +1711,7 @@ class Session:
             for name in wanted:
                 evt = self._events.latest(name)
                 if evt is not None and evt.tick > start_tick:
-                    return RunUntilResult(
-                        event=evt, ticks_spent=self._tick - start_tick
-                    )
+                    return RunUntilResult(event=evt, ticks_spent=self._tick - start_tick)
             return RunUntilResult(event=None, ticks_spent=self._tick - start_tick)
 
     def _ensure_open(self) -> None:
@@ -1787,11 +1745,7 @@ def locked_sessions(
     with owner_group(
         (session._owner for session in sessions),
         allow_closed=allow_closed,
-        timeout=(
-            None
-            if timeout_s is None
-            else _validate_timeout(timeout_s, "timeout_s")
-        ),
+        timeout=(None if timeout_s is None else _validate_timeout(timeout_s, "timeout_s")),
     ):
         if not allow_closed:
             for session in sessions:
@@ -1838,9 +1792,7 @@ def _validate_close_timeout(value: float) -> float:
             "timeout_s must be finite and positive, at most threading.TIMEOUT_MAX"
         ) from exc
     if not math.isfinite(candidate) or candidate <= 0:
-        raise ValueError(
-            "timeout_s must be finite and positive, at most threading.TIMEOUT_MAX"
-        )
+        raise ValueError("timeout_s must be finite and positive, at most threading.TIMEOUT_MAX")
     # ``threading.Lock.acquire`` rejects values above TIMEOUT_MAX even though
     # a caller may legitimately use a very large finite deadline.  Preserve
     # that public contract by clamping after validation; integer conversion
@@ -1866,9 +1818,7 @@ def _validate_positive_int(value: int, name: str) -> None:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")
 
 
-def _default_pyboy_factory(
-    rom_path: str, *, window: str = "null", cgb: bool = True
-) -> PyBoyLike:
+def _default_pyboy_factory(rom_path: str, *, window: str = "null", cgb: bool = True) -> PyBoyLike:
     from pyboy import PyBoy
 
     # ``window`` is configurable: "null" (headless, ADR default — MCP/tests

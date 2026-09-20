@@ -102,6 +102,9 @@ _FULL_SYM = """\
 00:C119 wEnemyMonPP
 0F:4233 MainInBattleLoop
 0F:42A6 MainInBattleLoop.selectEnemyMove
+0F:43BD HandlePoisonBurnLeechSeed
+0F:4525 HandleEnemyMonFainted
+0F:4700 HandlePlayerMonFainted
 0F:4F1A DisplayBattleMenu.handleBattleMenuInput
 0F:52FE SelectMenuItem
 0F:3725 LoadScreenTilesFromBuffer1
@@ -136,7 +139,18 @@ _PARTY_MENU_ANIM = 0xC02F
 _PARTY_MENU_SYMBOLS = ("wPartyMenuTypeOrMessageID", "wPartyMenuAnimMonEnabled")
 # Move-execution brackets the session installs to observe ACTION_RESOLUTION.
 _RESOLUTION_OPEN_HOOKS = ((0x0F, 0x565E), (0x0F, 0x66BC))
-_RESOLUTION_CLOSE_HOOKS = ((0x0F, 0x580A), (0x0F, 0x688C))
+# The first two are the ordinary ``Execute*MoveDone`` tails; the rest are the
+# post-move continuations a status move (``JumpMoveEffect``) or a lethal hit
+# (the direct faint return) reaches instead of those tails.
+_RESOLUTION_CLOSE_HOOKS = (
+    (0x0F, 0x580A),
+    (0x0F, 0x688C),
+    (0x0F, 0x43BD),
+    (0x0F, 0x4700),
+    (0x0F, 0x4525),
+    (0x0F, 0x4233),
+    (0x04, 0x77AA),
+)
 
 _TRANSIENT_SYMBOLS = {
     "wBattleResult",
@@ -395,9 +409,7 @@ def test_phase_ended_battle_reports_terminal_phase(result):
     state = parse_battle(
         mem,
         sym,
-        lifecycle=BattleLifecycle(
-            was_active=True, end_observed=True, end_result=result
-        ),
+        lifecycle=BattleLifecycle(was_active=True, end_observed=True, end_result=result),
     )
     assert state.phase is BattlePhase.TERMINAL_RETURN
     assert state.phase_valid is True
@@ -684,6 +696,60 @@ def test_resolution_observation_invalidated_by_reset_tick():
     after = session.read_game_state().battle
     assert after.resolution_open is None
     assert after.phase is not BattlePhase.ACTION_RESOLUTION
+
+
+def test_status_move_early_return_does_not_poison_the_next_command_menu():
+    # ``core.asm`` jumps to ``JumpMoveEffect`` for the ResidualEffects1/2
+    # families; that helper returns to the caller of ``Execute*Move`` without
+    # reaching ``Execute*MoveDone``.  The next control flow is the per-turn
+    # ``MainInBattleLoop``, then the command menu, and neither may be reported
+    # as contradicting an in-flight resolution.
+    session = _session()
+    session._pyboy.memory[0xC000] = 2  # trainer battle
+    session._pyboy.fire(*_RESOLUTION_OPEN_HOOKS[0])
+    assert session.read_game_state().battle.resolution_open is True
+
+    session._pyboy.fire(*_RESOLUTION_CLOSE_HOOKS[2])  # HandlePoisonBurnLeechSeed
+    session._pyboy.fire(*_RESOLUTION_CLOSE_HOOKS[5])  # MainInBattleLoop
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[1])  # SelectMenuItem
+    state = session.read_game_state().battle
+    assert state.resolution_open is False
+    assert state.phase is BattlePhase.COMMAND_SELECTION
+    assert state.phase_valid is True
+
+
+def test_knockout_early_return_does_not_mask_a_live_replacement():
+    # A lethal hit returns from ``Execute*Move`` with the faint flag beside the
+    # ``ret z`` and jumps straight to ``Handle*MonFainted``, which opens the
+    # replacement menu through ``ChooseNextMon`` before ``Execute*MoveDone``
+    # would ever have run.
+    session = _session()
+    mem = session._pyboy.memory
+    mem[0xC000] = 2
+    mem[0xC002] = 1  # wInHandlePlayerMonFainted
+    mem[0xC024] = 2  # two party members
+    mem[0xD130 + 44 + 1] = 20  # a surviving party member
+    mem[_PARTY_MENU_TYPE] = 2
+    mem[_PARTY_MENU_ANIM] = 0x40
+    session._pyboy.fire(*_RESOLUTION_OPEN_HOOKS[1])
+
+    state = session.read_game_state().battle
+    assert state.resolution_open is False
+    assert state.phase is BattlePhase.FORCED_REPLACEMENT
+    assert state.phase_valid is True
+
+
+def test_live_command_menu_closes_a_stale_resolution_bracket():
+    # Defence in depth for the same invariant: if a close label were missed,
+    # a live command menu still proves the move routine has returned.
+    session = _session()
+    session._pyboy.memory[0xC000] = 2
+    session._pyboy.fire(*_RESOLUTION_OPEN_HOOKS[0])
+    assert session.read_game_state().battle.resolution_open is True
+    session._pyboy.fire(*_MENU_OPEN_HOOKS[1])
+    state = session.read_game_state().battle
+    assert state.resolution_open is False
+    assert state.phase is BattlePhase.COMMAND_SELECTION
 
 
 def test_advance_tick_preserves_observation_but_reset_tick_invalidates():

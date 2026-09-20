@@ -435,12 +435,8 @@ def test_boundary_admission_rejects_a_mutated_capture_input() -> None:
     """
     document = _load_manifest()
     rows = [dict(row) for row in document["fixtures"] if row["kind"] == "boundary"]
-    row = next(
-        copy.deepcopy(entry) for entry in rows if entry["id"] == "red-color-battle-faint"
-    )
-    source = next(
-        entry for entry in document["fixtures"] if entry["id"] == "red-color-battle"
-    )
+    row = next(copy.deepcopy(entry) for entry in rows if entry["id"] == "red-color-battle-faint")
+    source = next(entry for entry in document["fixtures"] if entry["id"] == "red-color-battle")
     row["provenance"]["source_state"] = (
         row["provenance"]["source_state"]
         .replace(source["sha1"], "0" * 40)
@@ -462,9 +458,7 @@ def test_catalog_declares_the_captured_input_identity_not_a_lookup() -> None:
     row = copy.deepcopy(
         next(entry for entry in document["fixtures"] if entry["id"] == "red-color-battle-faint")
     )
-    source = next(
-        entry for entry in document["fixtures"] if entry["id"] == "red-color-battle"
-    )
+    source = next(entry for entry in document["fixtures"] if entry["id"] == "red-color-battle")
     measured = {"party_count": 6, "active_slot": 5, "link_state": 1, "map_id": 0xF0}
 
     scenario = catalog_merge.build_scenario(row, measured, source)

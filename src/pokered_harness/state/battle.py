@@ -77,7 +77,7 @@ a value is never guessed.  The stat-stage aggregate additionally reports a
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 
 from pokered_harness.state.party import (
@@ -441,12 +441,19 @@ def parse_battle(
         end_escaped = escaped or lifecycle.end_escaped
         end_result = lifecycle.end_result
         terminal_result = (
-            end_result
-            if end_result in _CONFIRMED_BATTLE_RESULTS and not end_escaped
-            else None
+            end_result if end_result in _CONFIRMED_BATTLE_RESULTS and not end_escaped else None
         )
     else:
         terminal_result = None
+    # A live battle menu is proof the move routine has already returned: both
+    # the command menu (``MainInBattleLoop`` -> ``DisplayBattleMenu`` /
+    # ``SelectMenuItem``) and the replacement menu (``ChooseNextMon`` ->
+    # ``DisplayPartyMenu``) are only reached from the post-move continuation.
+    # The bracket is a control-flow observation, so it must not be reported
+    # open once that continuation has run, even if a close hook was missed.
+    resolution = _resolution_bracket_ended_by_menu(
+        memory, symbols, menu=menu, resolution=resolution
+    )
     phase, phase_valid, phase_evidence = _derive_phase(
         memory,
         symbols,
@@ -488,9 +495,7 @@ def parse_battle(
         menu_open=(menu.open if menu is not None else None),
         menu_evidence=(menu.evidence if menu is not None else ()),
         resolution_open=(resolution.open if resolution is not None else None),
-        resolution_evidence=(
-            resolution.evidence if resolution is not None else ()
-        ),
+        resolution_evidence=(resolution.evidence if resolution is not None else ()),
     )
 
 
@@ -562,6 +567,38 @@ def _parse_enemy_mon(
     if kind is BattleKind.WILD:
         return mon, None
     return mon, mon.valid is True and 0 <= slot < MAX_PARTY_SLOTS
+
+
+def _resolution_bracket_ended_by_menu(
+    memory: MemoryLike,
+    symbols: SymbolTable,
+    *,
+    menu: BattleMenuObservation | None,
+    resolution: BattleResolutionObservation | None,
+) -> BattleResolutionObservation | None:
+    """Close a move-execution bracket the ROM has already left.
+
+    A live battle menu is proof that the move routine returned: the command
+    menu is entered from ``MainInBattleLoop``, which is only reached after
+    ``ExecutePlayerMove`` / ``ExecuteEnemyMove`` has returned (a status move
+    returns through ``JumpMoveEffect`` and a lethal hit returns straight to
+    the faint check, so neither necessarily reaches ``Execute*MoveDone``), and
+    the replacement menu is opened by ``ChooseNextMon`` from the faint
+    continuations that run after that same return.  ``ChooseNextMon`` and
+    ``DisplayPartyMenu`` report their wait through RAM
+    (:func:`_battle_party_menu_is_live`), not through a hook, so a bracket left
+    open by a missed close label is reconciled here rather than reported as
+    contradicting the menu.  The bracket stays untouched while the ROM is
+    genuinely inside a move, so a later command or replacement menu still
+    cannot be mistaken for resolution.
+    """
+    if resolution is None or resolution.open is not True:
+        return resolution
+    if menu is not None and menu.open is True:
+        return replace(resolution, open=False)
+    if _battle_party_menu_is_live(memory, symbols) is True:
+        return replace(resolution, open=False)
+    return resolution
 
 
 def _derive_phase(
@@ -658,11 +695,7 @@ def _derive_phase(
     ):
         _extend_unique(
             evidence,
-            tuple(
-                name
-                for name in _FORCED_REPLACEMENT_EVIDENCE_SYMBOLS
-                if name in symbols
-            ),
+            tuple(name for name in _FORCED_REPLACEMENT_EVIDENCE_SYMBOLS if name in symbols),
         )
     action = symbols.read_u8(memory, "wActionResultOrTookBattleTurn") != 0
     menu_open = menu is not None and menu.open is True
@@ -692,9 +725,7 @@ def _derive_phase(
     return BattlePhase.UNKNOWN, False, tuple(evidence)
 
 
-def _forced_replacement_is_current(
-    memory: MemoryLike, symbols: SymbolTable
-) -> bool | None:
+def _forced_replacement_is_current(memory: MemoryLike, symbols: SymbolTable) -> bool | None:
     """Whether a forced player replacement is happening *right now*.
 
     The decisive signal is the ROM's battle party menu
@@ -734,9 +765,7 @@ def _forced_replacement_is_current(
     return living
 
 
-def _battle_party_menu_is_live(
-    memory: MemoryLike, symbols: SymbolTable
-) -> bool | None:
+def _battle_party_menu_is_live(memory: MemoryLike, symbols: SymbolTable) -> bool | None:
     """Whether the ROM's battle party menu is open and awaiting input.
 
     ``ChooseNextMon`` writes ``BATTLE_PARTY_MENU`` to
@@ -753,16 +782,11 @@ def _battle_party_menu_is_live(
     Returns ``None`` when either symbol is absent, so a caller can
     distinguish "the harness cannot read the menu" from "the menu is shut".
     """
-    if (
-        _PARTY_MENU_TYPE_SYMBOL not in symbols
-        or _PARTY_MENU_ANIM_SYMBOL not in symbols
-    ):
+    if _PARTY_MENU_TYPE_SYMBOL not in symbols or _PARTY_MENU_ANIM_SYMBOL not in symbols:
         return None
     if symbols.read_u8(memory, _PARTY_MENU_TYPE_SYMBOL) != _BATTLE_PARTY_MENU_TYPE:
         return False
-    return (
-        symbols.read_u8(memory, _PARTY_MENU_ANIM_SYMBOL) == _PARTY_MENU_ANIM_ACTIVE
-    )
+    return symbols.read_u8(memory, _PARTY_MENU_ANIM_SYMBOL) == _PARTY_MENU_ANIM_ACTIVE
 
 
 def _party_has_living_member(memory: MemoryLike, symbols: SymbolTable) -> bool | None:

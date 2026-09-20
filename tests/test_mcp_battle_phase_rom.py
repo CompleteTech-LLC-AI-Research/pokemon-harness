@@ -128,6 +128,14 @@ BOUNDARY_STEP = 4
 BOUNDARY_INPUT_SPACING = 8
 BOUNDARY_DRIVE_BUDGET = 10000
 MOVE_MENU_MAX_ITEM = 5
+# ``ResidualEffects1``/``ResidualEffects2`` moves execute by jumping to
+# ``JumpMoveEffect`` from ``ExecutePlayerMove``/``ExecuteEnemyMove``; the
+# handler returns straight to the caller, so those turns never reach
+# ``Execute*MoveDone``.  Growl (45) is exposed by the admitted Blue and Yellow
+# pre-terminal pairs at the same slot on both owners, so one real shared turn
+# can be settled without any RAM write: the move lowering the attacker's stat
+# stage and the bracket closing again are the ROM-owned proof.
+STATUS_MOVE_ID = 45
 
 # Finite frame budgets.  Each is a hard cap on emulated frames for one phase;
 # exceeding it fails the phase instead of spinning forever.
@@ -215,6 +223,38 @@ OBSERVATIONAL_MENU_HOOKS = frozenset(
         "ExecuteEnemyMove",
         "ExecutePlayerMoveDone",
         "ExecuteEnemyMoveDone",
+        # ``Execute*MoveDone`` is not the only return from either move routine:
+        # a status move (``ResidualEffects1``/``2``) jumps to ``JumpMoveEffect``
+        # and returns from there, and a lethal hit returns beside the faint
+        # check, so the bracket also closes on the post-move continuations those
+        # returns land on -- ``HandlePoisonBurnLeechSeed`` (called after each
+        # move returns), the faint handlers (which run before ``ChooseNextMon``
+        # opens the replacement menu), ``MainInBattleLoop`` (the per-turn entry
+        # a finished turn jumps back to) and ``EndOfBattle`` (the escape/run
+        # tail).  These are observations of the same session, not new inputs.
+        "HandlePoisonBurnLeechSeed",
+        "HandlePlayerMonFainted",
+        "HandleEnemyMonFainted",
+        "EndOfBattle",
+    }
+)
+# The close labels a move routine can reach *without* ever touching
+# ``Execute*MoveDone``.  ``HandlePoisonBurnLeechSeed`` is the call every move
+# return lands in, the two faint handlers are the lethal-hit continuations
+# that run ``ChooseNextMon`` before the replacement menu appears,
+# ``MainInBattleLoop`` is the per-turn entry a finished turn jumps back to, and
+# ``EndOfBattle`` is the escape/run tail.  The whole set is asserted as a
+# subset of the session's registered evidence so that dropping any one of them
+# fails here instead of silently falling back on the parser's menu
+# reconciliation, which is what let a real status move or knockout report a
+# contradictory phase before.
+_RESOLUTION_CONTINUATION_LABELS = frozenset(
+    {
+        "HandlePoisonBurnLeechSeed",
+        "HandlePlayerMonFainted",
+        "HandleEnemyMonFainted",
+        "MainInBattleLoop",
+        "EndOfBattle",
     }
 )
 PHASE_EVIDENCE_SYMBOLS = frozenset(
@@ -373,9 +413,7 @@ def _battle_assets(version):
     missing = [str(path) for path in (rom, sym, battle_path) if not path.is_file()]
     if missing:
         pytest.skip("missing BYO battle assets: " + ", ".join(missing))
-    assets["state"] = _admit_fixture(
-        row, battle_path, rom_relative, sym_relative, rom, sym
-    )
+    assets["state"] = _admit_fixture(row, battle_path, rom_relative, sym_relative, rom, sym)
     return assets
 
 
@@ -488,9 +526,7 @@ def _boundary_assets(version, slug):
     if missing:
         pytest.skip("missing admitted boundary assets: " + ", ".join(missing))
 
-    primary = _admit_fixture(
-        primary_row, primary_path, rom_relative, sym_relative, rom, sym
-    )
+    primary = _admit_fixture(primary_row, primary_path, rom_relative, sym_relative, rom, sym)
     peer = _admit_fixture(peer_row, peer_path, rom_relative, sym_relative, rom, sym)
     return {
         "family": family,
@@ -864,6 +900,155 @@ def _boundary_button(state, target_slot):
             return "a"
         return "down" if current < target else "up"
     return None
+
+
+async def _drive_effect_turn(client, slots, *, budget=SETTLEMENT_BUDGET):
+    """Drive both owners through one shared turn that selects ``slots``.
+
+    The buttons and every decision come from the public ``press`` /
+    ``link_peer_press`` / ``link_step`` tools and the public
+    ``pokered://game-state`` resource, exactly like the boundary drive.  The
+    loop stops when each owner's own read shows the selected slot's PP
+    decremented *and* a live command menu, which is the ROM-owned return
+    boundary the resolution observation must not contradict.
+    """
+    before = await _states(client)
+    pp_before = [_active_pp(state) for state in before]
+    hp_before = [_active_hp(state) for state in before]
+    assert len(slots) == len(before), (slots, before)
+    assert all(value is not None for value in pp_before), before
+    assert all(value is not None for value in hp_before), before
+
+    consumed = [False] * len(before)
+    phases_seen = set()
+    next_input = [0] * len(before)
+    boundary = None
+    frames = 0
+    while frames < budget:
+        states = await _states(client)
+        for index, state in enumerate(states):
+            battle = _battle(state)
+            if battle["phase_valid"] is True:
+                phases_seen.add(battle["phase"])
+            if consumed[index]:
+                continue
+            after = _active_pp(state)
+            if after is not None and after[slots[index]] < pp_before[index][slots[index]]:
+                consumed[index] = True
+        if all(consumed) and all(
+            _command_menu_ready(state) and _battle(state)["menu_open"] is True for state in states
+        ):
+            boundary = states
+            break
+        for index, state in enumerate(states):
+            if consumed[index] or frames < next_input[index]:
+                continue
+            button = _boundary_button(state, slots[index])
+            if button is None:
+                continue
+            if index == 0:
+                await _press(client, button)
+            else:
+                await _peer_press(client, button)
+            next_input[index] = frames + BOUNDARY_INPUT_SPACING
+        await _link_step(client, BOUNDARY_STEP)
+        frames += BOUNDARY_STEP
+    if boundary is None:
+        states = await _states(client)
+        raise AssertionError(
+            "the selected turn never returned both owners to a command menu "
+            f"within {budget} paired frames: " + json.dumps([state["battle"] for state in states])
+        )
+    return {
+        "frames": frames,
+        "pp_before": pp_before,
+        "hp_before": hp_before,
+        "phases_seen": tuple(sorted(value for value in phases_seen if value is not None)),
+        "boundary": boundary,
+    }
+
+
+async def _drive_through_live_replacement(client, slots, *, budget=BOUNDARY_DRIVE_BUDGET):
+    """Drive the admitted pair through one live knockout and its replacement.
+
+    The drive stops as soon as every owner that opened the ROM's battle party
+    menu has answered it and is back in the live battle with a healthy
+    combatant, so the regression covers the nonterminal knockout path (the
+    fainted combatant is replaced and the battle continues) instead of the
+    whole terminal drive.  ``replacements`` holds one row per read of a live
+    battle party menu; ``answered[index]`` is the first read after that owner
+    answered its menu, and stays ``None`` for an owner that never opened one.
+    """
+    replacements = []
+    answered = [None] * len(slots)
+    opened = [False] * len(slots)
+    next_input = [0] * len(slots)
+    frames = 0
+    while frames < budget:
+        states = await _states(client)
+        for index, state in enumerate(states):
+            battle = _battle(state)
+            live = battle["raw_is_in_battle"] in BATTLE_KINDS
+            if live and _replacement_button(state) is not None:
+                opened[index] = True
+                replacements.append(
+                    {
+                        "side": index,
+                        "frames": frames,
+                        "tick": state["epoch"]["tick"],
+                        "phase": battle["phase"],
+                        "phase_valid": battle["phase_valid"],
+                        "resolution_open": battle["resolution_open"],
+                        "raw_is_in_battle": battle["raw_is_in_battle"],
+                        "active_hp": _active_hp(state),
+                        "party_hp": [mon["hp"] for mon in state["party"]["mons"]],
+                        "menu_evidence": battle["menu_evidence"],
+                        "phase_evidence": battle["phase_evidence"],
+                        "resolution_evidence": battle["resolution_evidence"],
+                    }
+                )
+            elif (
+                opened[index] and answered[index] is None and live and (_active_hp(state) or 0) > 0
+            ):
+                answered[index] = {
+                    "side": index,
+                    "frames": frames,
+                    "tick": state["epoch"]["tick"],
+                    "phase": battle["phase"],
+                    "phase_valid": battle["phase_valid"],
+                    "resolution_open": battle["resolution_open"],
+                    "raw_is_in_battle": battle["raw_is_in_battle"],
+                    "active_hp": _active_hp(state),
+                    "party_hp": [mon["hp"] for mon in state["party"]["mons"]],
+                    "phase_evidence": battle["phase_evidence"],
+                }
+        if any(opened) and all(
+            answered[index] is not None for index, flag in enumerate(opened) if flag
+        ):
+            break
+        for index, state in enumerate(states):
+            if opened[index] and answered[index] is not None:
+                continue
+            if frames < next_input[index]:
+                continue
+            button = _replacement_button(state)
+            if button is None:
+                button = _boundary_button(state, slots[index])
+            if button is None:
+                continue
+            if index == 0:
+                await _press(client, button)
+            else:
+                await _peer_press(client, button)
+            next_input[index] = frames + BOUNDARY_INPUT_SPACING
+        await _link_step(client, BOUNDARY_STEP)
+        frames += BOUNDARY_STEP
+    return {
+        "frames": frames,
+        "opened": tuple(opened),
+        "replacements": replacements,
+        "answered": answered,
+    }
 
 
 async def _drive_boundary_turn(client, plan, *, budget=BOUNDARY_DRIVE_BUDGET):
@@ -1686,6 +1871,199 @@ async def test_real_rom_mcp_link_battle_reads_additive_state(tmp_path, version):
                     "primary_epoch": states[0]["epoch"],
                     "peer_epoch": states[1]["epoch"],
                 },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+        await client.eof()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", FAMILIES)
+async def test_real_rom_mcp_status_move_returns_to_command_selection(tmp_path, version):
+    """A real status move must close the bracket and reach the command menu.
+
+    ``ResidualEffects1`` moves (Growl here) jump to ``JumpMoveEffect`` from
+    ``ExecutePlayerMove``/``ExecuteEnemyMove`` and return from the effect
+    handler, so the turn never reaches ``Execute*MoveDone``.  Before the
+    observation covered those returns the bracket stayed open and the next
+    command menu was reported as a contradiction
+    (``phase=null``/``phase_valid=false``).  This regression settles one real
+    shared Growl turn on the admitted pre-terminal pair with public input only
+    and requires the ROM's own return boundary to be reported: the selected
+    move, the PP decrement on that slot, unchanged HP, the lowered attack
+    stage, a live command menu, ``ACTION_RESOLUTION`` observed while the move
+    executed, and a valid ``COMMAND_SELECTION`` phase with the bracket closed.
+
+    The admitted Red pair exposes no status move at any slot, so that family
+    skips with the observed move list instead of claiming coverage it does not
+    have; Blue and Yellow expose Growl at the same slot on both owners.
+    """
+    if os.environ.get("POKERED_SKIP_SHA1"):
+        pytest.fail("POKERED_SKIP_SHA1 must not be used for real-ROM evidence")
+
+    assets = _boundary_assets(version, "battle-pre-terminal")
+    async with _stdio_server(tmp_path, assets, name="status-move") as client:
+        await client.initialize()
+        payload = base64.b64encode(assets["primary"]).decode("ascii")
+        assert await client.tool("load_state", {"data": payload}) == {"ok": True}
+        await _pair(client)
+        boundary = await _states(client)
+        slots = []
+        for state in boundary:
+            moves = _active_moves(state) or ()
+            slots.append(
+                next((slot for slot, move in enumerate(moves) if move == STATUS_MOVE_ID), None)
+            )
+        if any(slot is None for slot in slots):
+            pytest.skip(
+                "the admitted pre-terminal pair exposes no status move "
+                f"{STATUS_MOVE_ID}: "
+                + json.dumps([list(_active_moves(state) or ()) for state in boundary])
+            )
+
+        drive = await _drive_effect_turn(client, slots)
+        observed = []
+        for index, state in enumerate(drive["boundary"]):
+            label = f"{version}-status-{index}"
+            battle = _battle(state)
+            assert _active_pp(state)[slots[index]] < drive["pp_before"][index][slots[index]], (
+                label,
+                state,
+            )
+            assert battle["player_selected_move"] == STATUS_MOVE_ID, (label, battle)
+            assert battle["menu_open"] is True, (label, battle)
+            assert battle["resolution_open"] is False, (label, battle)
+            assert battle["phase"] == 2 and battle["phase_valid"] is True, (label, battle)
+            assert "SelectMenuItem" in battle["phase_evidence"], (label, battle)
+            # Growl deals no damage, so the HP the ROM reported before the turn
+            # must be exactly what the post-turn read reports.
+            assert _active_hp(state) == drive["hp_before"][index], (label, state)
+            stages = battle["player_stat_stages"]
+            assert isinstance(stages, dict) and stages.get("attack") == -1, (label, battle)
+            # The early return is covered by real close labels, not only by the
+            # menu reconciliation the parser applies on top of them.
+            assert _RESOLUTION_CONTINUATION_LABELS <= set(battle["resolution_evidence"]), (
+                label,
+                battle,
+            )
+            observed.append(battle)
+        # Positive coverage: the same turn really did report the resolution
+        # phase while the move was executing, so closing it is an observation
+        # and not a phase that was never derived at all.
+        assert 3 in drive["phases_seen"], drive["phases_seen"]
+
+        print(
+            "MCP_BATTLE_BOUNDARY "
+            + json.dumps(
+                _boundary_payload(
+                    "status_move",
+                    version,
+                    fixture=assets["row"]["path"],
+                    fixture_sha1=assets["row"]["sha1"],
+                    move=STATUS_MOVE_ID,
+                    slots=list(slots),
+                    drive_frames=drive["frames"],
+                    phases_seen=list(drive["phases_seen"]),
+                    observed=observed,
+                ),
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+        await client.eof()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", FAMILIES)
+async def test_real_rom_mcp_nonterminal_knockout_keeps_valid_replacement(tmp_path, version):
+    """A live knockout must report a valid replacement with the bracket closed.
+
+    A lethal hit returns from ``Execute*Move`` beside the faint check and jumps
+    straight to ``Handle*MonFainted``, which runs ``ChooseNextMon`` before
+    ``Execute*MoveDone`` would ever be reached.  This regression drives the
+    admitted pre-terminal pair through the first knockout that opens the ROM's
+    battle party menu, answers it with public input, and requires both sides of
+    that nonterminal knockout to be reported from ROM-owned evidence: the live
+    menu read must be ``FORCED_REPLACEMENT`` with ``phase_valid=true`` and the
+    bracket closed, and the read after the replacement must show a healthy
+    combatant still in the live battle with a valid phase.
+
+    A family whose fixture never opens a replacement menu within the drive
+    budget skips with that observation instead of reporting an empty set as
+    coverage.
+    """
+    if os.environ.get("POKERED_SKIP_SHA1"):
+        pytest.fail("POKERED_SKIP_SHA1 must not be used for real-ROM evidence")
+
+    assets = _boundary_assets(version, "battle-pre-terminal")
+    capture = assets["row"].get("capture")
+    assert isinstance(capture, dict), assets["row"]
+    plan = capture.get("terminal_turn_plan")
+    assert isinstance(plan, list) and len(plan) == 2, plan
+    slots = [entry["slot"] for entry in plan]
+    assert all(type(slot) is int for slot in slots), plan
+
+    async with _stdio_server(tmp_path, assets, name="nonterminal-knockout") as client:
+        await client.initialize()
+        payload = base64.b64encode(assets["primary"]).decode("ascii")
+        assert await client.tool("load_state", {"data": payload}) == {"ok": True}
+        await _pair(client)
+        boundary = await _states(client)
+        assert all(_battle(state)["raw_is_in_battle"] in BATTLE_KINDS for state in boundary), (
+            boundary
+        )
+
+        drive = await _drive_through_live_replacement(client, slots)
+        if not any(drive["opened"]):
+            pytest.skip(
+                "the admitted pre-terminal pair opened no live battle party menu "
+                f"within {BOUNDARY_DRIVE_BUDGET} paired frames: "
+                + json.dumps([state["battle"] for state in boundary])
+            )
+
+        assert drive["replacements"], drive
+        for row in drive["replacements"]:
+            assert row["raw_is_in_battle"] in BATTLE_KINDS, row
+            assert row["phase"] == FORCED_REPLACEMENT_PHASE, row
+            assert row["phase_valid"] is True, row
+            assert row["resolution_open"] is False, row
+            assert row["active_hp"] == 0, row
+            assert any(hp > 0 for hp in row["party_hp"]), row
+            assert "wPartyMenuTypeOrMessageID" in row["phase_evidence"], row
+            assert _RESOLUTION_CONTINUATION_LABELS <= set(row["resolution_evidence"]), row
+
+        answered = []
+        for index, opened in enumerate(drive["opened"]):
+            if not opened:
+                continue
+            row = drive["answered"][index]
+            assert row is not None, (index, drive)
+            # The knockout was nonterminal: the same owner is still in the
+            # live battle with the replacement it sent out.
+            assert row["raw_is_in_battle"] in BATTLE_KINDS, row
+            assert (row["active_hp"] or 0) > 0, row
+            assert row["phase_valid"] is True, row
+            assert row["resolution_open"] is False, row
+            answered.append(row)
+        assert answered, drive
+
+        print(
+            "MCP_BATTLE_BOUNDARY "
+            + json.dumps(
+                _boundary_payload(
+                    "nonterminal_knockout",
+                    version,
+                    fixture=assets["row"]["path"],
+                    fixture_sha1=assets["row"]["sha1"],
+                    plan=plan,
+                    drive_frames=drive["frames"],
+                    opened=list(drive["opened"]),
+                    replacements=drive["replacements"],
+                    answered=answered,
+                ),
                 sort_keys=True,
             ),
             flush=True,
