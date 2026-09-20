@@ -779,6 +779,40 @@ capacity-qualified or release-qualified result. Retaining a passing functional
 result beside an explicit capacity-blocked status is the honest state; a
 prepared runner and a green functional matrix are still not a passing gate.
 
+### 3c. Operator-supplied allocation declaration (contract, not evidence)
+
+The delivery contract for issue #85 assumes an operator provisions a writable
+exclusive allocation. To make that contract concrete and checkable, a realistic
+declaration is retained as an **operator-supplied** artifact:
+
+```
+release-evidence/feature-qualification/pr112-allocation/operator-allocation.json
+```
+
+It is synthesized for the declared `cgroup-quota` mechanism (a writable
+`cgroup2` leaf with `cpu.max`, the operator's pinned source/native interpreters,
+and the operator's ROM/fixture roots) and it is *not* host-observed reservation
+evidence. It is validated the only way this host allows, by running the
+runner's fail-closed admission against it; every fact the host cannot observe is
+reported as `unsupported`/`fail` rather than assumed:
+
+```bash
+python scripts/qualification_runner.py --check \
+  --declaration release-evidence/feature-qualification/pr112-allocation/operator-allocation.json \
+  --json
+```
+
+The sanitized terminal result is retained beside it as `check-report.json`. On
+this host the check ends `overall = fail`, with the allocation-specific rows
+(`cpu-quota`, `reservation-evidence`, `shm`, the operator interpreter roots, and
+the pinned native fingerprint) all rejected. That outcome is the correct,
+fail-closed reading: the declaration documents what an operator must provide,
+and the runner refuses to promote an unobserved allocation to a reservation.
+Until an operator supplies the real allocation described here, the source/native
+comparison and the nine-orientation timed matrix required by issue #85 remain
+**BLOCKED**, and no result from the shared host may be promoted to a
+capacity-qualified or release-qualified outcome.
+
 ## 4. Run the evidence tiers
 
 Run the tiers in order and save the complete output with the commit and

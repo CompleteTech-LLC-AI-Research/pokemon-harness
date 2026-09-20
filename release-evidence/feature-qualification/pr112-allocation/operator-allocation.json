@@ -1,0 +1,51 @@
+{
+  "declaration_version": 3,
+  "runner_id": "operator-qual-1",
+  "reservation_mechanism": "cgroup-quota",
+  "reservation": {
+    "allocation_id": "operator-qual-1",
+    "job_dir": "target/qualification-runs/operator-qual-1",
+    "descriptor_path": "target/qualification-runs/operator-qual-1/allocation.json",
+    "descriptor_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "host_lock_path": "target/qualification-runs/host.lock",
+    "cgroup_path": "/sys/fs/cgroup/qualification/operator-qual-1"
+  },
+  "logical_cpus": 12,
+  "affinity_cpus": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "cpu_quota_cores": 12.0,
+  "cpu_weight": 100,
+  "memory_bytes": 8589934592,
+  "disk_free_bytes_min": 1000000000,
+  "shm_bytes_min": 100000000,
+  "interpreters": {
+    "source": "/opt/qualification/venvs/source/bin/python",
+    "native": "/opt/qualification/venvs/native/bin/python",
+    "native_build_inputs_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "native_fingerprint": "15598a21b672f4e8e838a118ed56cb3c64eebf80f722e9f8784433cc09665d1e"
+  },
+  "assets": {
+    "rom_root": "/opt/qualification/assets/rom",
+    "fixture_root": "/opt/qualification/assets/fixtures",
+    "inputs": [
+      {
+        "path": "rom/red/pokemon-red.gb",
+        "sha1": "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
+      }
+    ]
+  },
+  "supplied_by": "operator",
+  "supply_note": "Operator-supplied declaration for the issue #85 allocation contract. Synthesized per the delivery prompt; not host-observed reservation evidence."
+}

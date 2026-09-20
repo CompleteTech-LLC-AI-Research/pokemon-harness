@@ -35,6 +35,7 @@ are emitted relative to the repository root or reduced to their basename.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -792,6 +793,12 @@ def _cgroup_sibling_competitors(cgroup_dir: str | None) -> list[str] | None:
     at every ancestor level, because a quota sibling or an ancestor's sibling
     can be empty directly while its descendants are busy.
 
+    An ancestor's *own* ``cgroup.procs`` is inspected as well: a process can be
+    recorded directly in an ancestor (the hierarchy root is the common case),
+    where it is a competitor that no sibling scan would ever see.  The
+    allocation's own directory is skipped, because the runner and the command
+    it owns legitimately live there.
+
     ``None`` means the cgroup tree could not be enumerated, so the caller must
     fail closed rather than assume exclusivity.
     """
@@ -812,6 +819,14 @@ def _cgroup_sibling_competitors(cgroup_dir: str | None) -> list[str] | None:
         if not parent_is_cgroup:
             # The parent is outside the cgroup hierarchy, so the walk is done.
             break
+        parent_own = _read_text(parent / "cgroup.procs")
+        if parent_own is None:
+            return None
+        if parent_own.strip():
+            # A process recorded directly in an ancestor competes for the same
+            # CPUs as the allocation, whether or not that ancestor has any
+            # populated descendant cgroup.
+            competitors.append(parent.name)
         try:
             entries = sorted(parent.iterdir())
         except OSError:
@@ -1445,6 +1460,26 @@ def _cgroup_members_are_owned(facts: RunnerFacts, holder_pid: Any = None) -> boo
     return set(members).issubset(owned)
 
 
+def _reservation_owned_pids(descriptor: dict[str, Any], facts: RunnerFacts) -> set[int]:
+    """Return the processes owned by the verified lease holder's job tree.
+
+    A ``--check`` nested under the documented ``--reserve --run`` flow is a
+    child of the holder, so the checker's own descendants are not the whole
+    owned set: the *holder's* job tree is.  Everything in it (the holder, the
+    checker, the command the holder runs) shares the declared allocation by
+    design.  A process outside that tree is a genuine competitor and is still
+    counted.  When the descriptor records no usable holder the caller's own
+    tree is used, which is the narrowest honest fallback.
+    """
+
+    owned: set[int] = {os.getpid()}
+    holder = descriptor.get("holder_pid")
+    if isinstance(holder, int) and not isinstance(holder, bool) and holder > 0:
+        owned.update(_process_tree_pids(holder))
+    owned.update(facts.process_tree_pids)
+    return owned
+
+
 def evaluate_reservation(
     declaration: dict[str, Any], facts: RunnerFacts, repo_root: Path | None = None
 ) -> CheckResult:
@@ -1757,8 +1792,16 @@ def _verify_cpuset_reservation(descriptor: dict[str, Any], facts: RunnerFacts) -
             None,
             "competing process affinity cannot be observed; refusing to claim exclusivity",
         )
+    # The holder's job tree legitimately runs on the reserved cpuset: a
+    # ``--check`` nested under ``--reserve --run`` is a descendant of the
+    # holder, and reading the checker's own descendants as the owned set would
+    # classify that holder as a foreign overlapping process.  Everything
+    # outside the holder's tree is still a competitor and still fails here.
+    owned = _reservation_owned_pids(descriptor, facts)
     overlapping = sorted(
-        pid for pid, cpus in foreign.items() if descriptor_cpuset.intersection(cpus)
+        pid
+        for pid, cpus in foreign.items()
+        if pid not in owned and descriptor_cpuset.intersection(cpus)
     )
     if overlapping:
         return _result(
@@ -2533,6 +2576,45 @@ def _sweep_leftover_owned_processes() -> list[int]:
     return still_alive
 
 
+def _contain_adopted_descendants(
+    exclude: set[int] | None = None,
+    *,
+    deadline_seconds: float | None = None,
+) -> tuple[bool, list[int]]:
+    """Terminate every adopted orphan within a bounded deadline.
+
+    One snapshot of this process's direct children is not enough.  Killing an
+    adopted process reparents the descendants *it* had detached into its own
+    session, so a nested orphan only becomes a direct child after the first
+    sweep.  The adopted set is therefore rescanned until it stays empty, and a
+    pid that cannot be confirmed gone is returned as a survivor so the caller
+    keeps the lease instead of reporting released capacity.
+    """
+
+    if os.name == "nt":
+        return True, []
+    budget = _CHILD_TERMINATION_GRACE_SECONDS if deadline_seconds is None else deadline_seconds
+    deadline = time.monotonic() + budget
+    confirmed = True
+    survivors: set[int] = set()
+    while True:
+        # A short per-batch grace keeps a deep detached chain inside the
+        # overall deadline instead of multiplying the escalation wait.
+        per_batch = max(0.2, min(budget, 1.0))
+        candidates = _adopted_orphan_pids(exclude)
+        if candidates:
+            batch_confirmed, remaining = _terminate_pids(candidates, grace=per_batch)
+            if not batch_confirmed:
+                confirmed = False
+                survivors.update(remaining)
+        remaining_now = _adopted_orphan_pids(exclude)
+        if not remaining_now:
+            return confirmed, sorted(survivors)
+        if time.monotonic() >= deadline:
+            return False, sorted(survivors | set(remaining_now))
+        time.sleep(0.05)
+
+
 def _register_owned(process: subprocess.Popen[str]) -> None:
     _OWNED_PROCESSES.add(process)
 
@@ -2640,11 +2722,20 @@ def run_command(
     recorded on ``_LEFTOVER_OWNED_PIDS`` so the caller refuses to release the
     lease.  The original exit status and captured output are preserved either
     way.
+
+    The sweeps run on the cancellation path too.  The installed signal handlers
+    raise ``SystemExit`` from inside ``communicate``, so containment is not left
+    to the normal-return path: a command interrupted by SIGINT/SIGTERM still
+    has its whole group and every adopted descendant terminated and confirmed
+    before the signal is allowed to end the process.
     """
 
     timeout = _command_timeout() if timeout is None else timeout
     timed_out = False
     notes: list[str] = []
+    group_leftovers: list[int] = []
+    detached_leftovers: list[int] = []
+    pending_error: BaseException | None = None
     with _adopted_descendants() as adoption:
         preexisting = set(_direct_child_pids(os.getpid()))
         try:
@@ -2662,20 +2753,34 @@ def run_command(
         preexisting.discard(process.pid)
         _register_owned(process)
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _terminate_owned_process(process)
             try:
-                stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
-            except (subprocess.TimeoutExpired, OSError):
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _terminate_owned_process(process)
+                try:
+                    stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
+                except (subprocess.TimeoutExpired, OSError):
+                    stdout, stderr = "", ""
+            except (KeyboardInterrupt, SystemExit) as exc:
+                # A signal that interrupts the wait must not skip containment:
+                # collect the command's output opportunistically, tear the
+                # command down, and remember the exception to re-raise once the
+                # owned process group and every adopted descendant are gone.
+                pending_error = exc
+                _terminate_owned_process(process)
                 stdout, stderr = "", ""
+                with contextlib.suppress(
+                    KeyboardInterrupt, SystemExit, OSError, subprocess.TimeoutExpired
+                ):
+                    stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
         finally:
             _unregister_owned(process)
 
+        # Containment runs on every path, including the cancellation path, so a
+        # signal cannot leave an owned descendant holding the allocation.
         group_confirmed, group_leftovers = _terminate_process_group(process.pid)
-        detached = _adopted_orphan_pids(preexisting)
-        detached_confirmed, detached_leftovers = _terminate_pids(detached)
+        detached_confirmed, detached_leftovers = _contain_adopted_descendants(preexisting)
         if not adoption.active:
             notes.append(
                 "the runner could not become a child subreaper, so descendants that "
@@ -2686,6 +2791,10 @@ def run_command(
     leftovers = sorted(set(group_leftovers) | set(detached_leftovers))
     if not group_confirmed or not detached_confirmed:
         _LEFTOVER_OWNED_PIDS.update(leftovers)
+    if pending_error is not None:
+        # The signal or interrupt still terminates the run, but only after the
+        # descendant sweeps above have run; a survivor keeps the lease.
+        raise pending_error
     if timed_out:
         notes.insert(
             0,
@@ -3985,6 +4094,20 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
     descriptor_path = _allocation_descriptor_path(declaration, repo_root)
     if descriptor_path is None or not descriptor_path.is_file():
         return "ok", "no allocation descriptor to recover"
+    # A recovery removes the lease state, so it must first prove no owned work
+    # survived a cancelled command: a rejected signal path can leave a detached
+    # descendant that would otherwise keep consuming the allocation after the
+    # state was deleted and the lease reported free.
+    live_leftovers = _sweep_leftover_owned_processes()
+    if live_leftovers:
+        return (
+            "blocked",
+            (
+                "owned descendants are still running "
+                f"({len(live_leftovers)} pid(s)); refusing to remove lease state "
+                "while the allocation is still in use"
+            ),
+        )
     descriptor, error = _load_allocation_descriptor(descriptor_path)
     if descriptor is None:
         return "blocked", f"the descriptor could not be read; refusing to remove state ({error})"

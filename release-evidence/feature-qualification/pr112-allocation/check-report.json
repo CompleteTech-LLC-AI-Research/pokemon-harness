@@ -1,0 +1,115 @@
+{
+  "note": "Operator-supplied allocation declaration, synthesized for the delivery prompt's CAPACITY ALLOCATION contract and validated against observable host facts. It is NOT host-observed reservation evidence: it records the allocation an operator would provide, and the runner reports every fact this host cannot observe as unsupported/fail.",
+  "mode": "check",
+  "declaration_schema_version": 3,
+  "declaration_path": "release-evidence/feature-qualification/pr112-allocation/operator-allocation.json",
+  "repo_root": ".",
+  "overall": "fail",
+  "checks": [
+    {
+      "name": "declaration-fields",
+      "status": "ok",
+      "detail": "declaration fields present"
+    },
+    {
+      "name": "reservation-allocation",
+      "status": "ok",
+      "detail": "runner is bound to a declared allocation"
+    },
+    {
+      "name": "reservation-evidence",
+      "status": "fail",
+      "detail": "the allocation descriptor is writable or not a regular file"
+    },
+    {
+      "name": "logical-cpus",
+      "status": "ok",
+      "detail": "effective CPUs available: min(affinity, cgroup quota)"
+    },
+    {
+      "name": "affinity",
+      "status": "ok",
+      "detail": "declared affinity must be usable by this process and no larger than the allocation"
+    },
+    {
+      "name": "cpu-quota",
+      "status": "fail",
+      "detail": "no cgroup CPU quota in effect"
+    },
+    {
+      "name": "cpu-weight",
+      "status": "ok",
+      "detail": "CPU weight is a share, not a reservation"
+    },
+    {
+      "name": "memory",
+      "status": "ok",
+      "detail": "total memory bytes"
+    },
+    {
+      "name": "disk-free-repo",
+      "status": "ok",
+      "detail": "free disk bytes"
+    },
+    {
+      "name": "disk-free-temp",
+      "status": "ok",
+      "detail": "free disk bytes on the job temporary filesystem"
+    },
+    {
+      "name": "disk-free-job-evidence",
+      "status": "ok",
+      "detail": "free disk bytes on the job evidence filesystem"
+    },
+    {
+      "name": "shm",
+      "status": "fail",
+      "detail": "writable shared memory bytes"
+    },
+    {
+      "name": "interpreter-source",
+      "status": "fail",
+      "detail": "interpreter not found"
+    },
+    {
+      "name": "interpreter-native",
+      "status": "fail",
+      "detail": "interpreter not found"
+    },
+    {
+      "name": "native-build-inputs",
+      "status": "fail",
+      "detail": "the vendored native build inputs do not match the pinned digest"
+    },
+    {
+      "name": "native-runtime-fingerprint",
+      "status": "fail",
+      "detail": "FileNotFoundError: [Errno 2] No such file or directory: 'python'"
+    },
+    {
+      "name": "assets-rom-root",
+      "status": "fail",
+      "detail": "rom_root is not a directory"
+    },
+    {
+      "name": "assets-fixture-root",
+      "status": "fail",
+      "detail": "fixture_root is not a directory"
+    },
+    {
+      "name": "assets-input-0",
+      "status": "ok",
+      "detail": "asset input is in the pinned scope"
+    },
+    {
+      "name": "fixture-manifest-schema",
+      "status": "ok",
+      "detail": "fixture manifest schema validation passed: 10 entries"
+    },
+    {
+      "name": "fixture-manifest-bytes",
+      "status": "fail",
+      "detail": "fixture manifest validation failed: fixture root not found: fixtures"
+    }
+  ]
+}
