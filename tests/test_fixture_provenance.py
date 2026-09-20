@@ -95,10 +95,30 @@ def _source_digests(source_state: str) -> tuple[str, str]:
 
 
 def test_battle_fixture_generator_covers_each_supported_rom_variant() -> None:
-    assert set(VARIANTS) == {"red_gb", "red_color", "blue_gb", "blue_color", "yellow"}
+    assert set(VARIANTS) == {
+        "red_gb",
+        "red_color",
+        "blue_gb",
+        "blue_color",
+        "yellow",
+        "red_color_slots",
+        "blue_color_slots",
+        "yellow_slots",
+    }
     assert {config["output"] for config in VARIANTS.values()} == {
         "cable_club-battle.state",
         "cable_club-battle-vanilla.state",
+        "cable_club-slots.state",
+    }
+    # Only the six-member *slot* rows must hold pairwise-distinct records; the
+    # battle rows stay byte-for-byte lead copies so the pinned battle bytes keep
+    # reproducing the admitted ``battle`` fixture rows.
+    assert {
+        variant for variant, config in VARIANTS.items() if config["distinct_slots"]
+    } == {
+        "red_color_slots",
+        "blue_color_slots",
+        "yellow_slots",
     }
 
 
