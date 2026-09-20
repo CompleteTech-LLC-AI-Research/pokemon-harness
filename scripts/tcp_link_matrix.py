@@ -117,16 +117,30 @@ STRICT_TRADE_NODEIDS |= frozenset(
     )
 )
 # Real-ROM MCP stdio trade rows owned by tests/test_mcp_trade_records_rom.py:
-# the nine canonical ordered local orientations (same-family and cross-family),
-# the two multi-member sender/receiver slot rows, the cancel-before-commitment
-# row, and the two EOF/disconnect rows.  These are declared required rows - the
-# standalone audit proves they are collected and the production gate executes
-# them; collection alone is never a pass.
-MCP_TRADE_ORIENTATION_NODEIDS = frozenset(
+# the nine canonical ordered *local* orientations (same-family and
+# cross-family), the nine canonical ordered *TCP* orientations driven through
+# two independent linked servers, the two multi-member sender/receiver slot
+# rows, the cancel-before-commitment row, and the three EOF/disconnect rows
+# (during setup, during an active exchange, and after commitment).  These are
+# declared required rows - the standalone audit proves they are collected and
+# the production gate executes them; collection alone is never a pass.  The two
+# orientation sets are declared separately so a dropped TCP row cannot hide
+# behind the local rows.
+MCP_TRADE_LOCAL_ORIENTATION_NODEIDS = frozenset(
     _nodeid(
         (
             "tests/test_mcp_trade_records_rom.py",
             "test_real_rom_mcp_trade_exchanges_party_records",
+        ),
+        f"{_CANONICAL_PROFILE[primary]}-{_CANONICAL_PROFILE[peer]}",
+    )
+    for primary, peer in SUPPORTED_VERSION_PAIRS
+)
+MCP_TRADE_TCP_ORIENTATION_NODEIDS = frozenset(
+    _nodeid(
+        (
+            "tests/test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records_over_tcp",
         ),
         f"{_CANONICAL_PROFILE[primary]}-{_CANONICAL_PROFILE[peer]}",
     )
@@ -153,9 +167,14 @@ MCP_TRADE_SCENARIO_NODEIDS = frozenset(
         "test_real_rom_mcp_trade_cancel_before_commitment_keeps_records",
         "test_real_rom_mcp_trade_eof_during_setup_exits_cleanly",
         "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
+        "test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly",
     )
 )
-STRICT_TRADE_NODEIDS |= MCP_TRADE_ORIENTATION_NODEIDS | MCP_TRADE_SCENARIO_NODEIDS
+STRICT_TRADE_NODEIDS |= (
+    MCP_TRADE_LOCAL_ORIENTATION_NODEIDS
+    | MCP_TRADE_TCP_ORIENTATION_NODEIDS
+    | MCP_TRADE_SCENARIO_NODEIDS
+)
 STRICT_BATTLE_NODEIDS = frozenset(
     _nodeid(
         (

@@ -73,11 +73,20 @@ _TRADE = _strict_nodes(
     "test_subprocess_pair_completes_trade_over_tcp",
 )
 # The real-ROM MCP stdio trade rows are required strict rows as well: nine
-# canonical ordered local orientations, the two multi-member slot rows, the
-# cancel-before-commitment row, and the two EOF/disconnect rows.
-_MCP_TRADE_ORIENTATIONS = frozenset(
+# canonical ordered local orientations, nine canonical ordered TCP
+# orientations, the two multi-member slot rows, the cancel-before-commitment
+# row, and the three EOF/disconnect rows.  The local and TCP orientation sets
+# are kept in separate constants so a dropped TCP row cannot hide behind the
+# local rows.
+_MCP_TRADE_LOCAL_ORIENTATIONS = frozenset(
     "tests/test_mcp_trade_records_rom.py::"
     f"test_real_rom_mcp_trade_exchanges_party_records[{primary}-{peer}]"
+    for primary in _PROFILES
+    for peer in _PROFILES
+)
+_MCP_TRADE_TCP_ORIENTATIONS = frozenset(
+    "tests/test_mcp_trade_records_rom.py::"
+    f"test_real_rom_mcp_trade_exchanges_party_records_over_tcp[{primary}-{peer}]"
     for primary in _PROFILES
     for peer in _PROFILES
 )
@@ -95,9 +104,15 @@ _MCP_TRADE_SCENARIOS = frozenset(
         "test_real_rom_mcp_trade_cancel_before_commitment_keeps_records",
         "test_real_rom_mcp_trade_eof_during_setup_exits_cleanly",
         "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
+        "test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly",
     )
 )
-_MCP_TRADE = _MCP_TRADE_ORIENTATIONS | _MCP_TRADE_MULTI_MEMBER | _MCP_TRADE_SCENARIOS
+_MCP_TRADE = (
+    _MCP_TRADE_LOCAL_ORIENTATIONS
+    | _MCP_TRADE_TCP_ORIENTATIONS
+    | _MCP_TRADE_MULTI_MEMBER
+    | _MCP_TRADE_SCENARIOS
+)
 _TRADE = _TRADE | _MCP_TRADE
 _BATTLE = _strict_nodes(
     "test_pair_completes_battle_turn",

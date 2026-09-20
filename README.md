@@ -751,6 +751,21 @@ export POKERED_PEER_ROM_SHA1=cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1
 Then call `link_pair`, use `link_step`, and call `link_unpair` when finished.
 The exact fixture, runtime, and game-flow requirements are in the runbook.
 
+The public tool surface can load only the *primary* session's state, so a peer
+that must start from an admitted save-state fixture uses the entry point's
+documented launch contract instead of a private call:
+
+```bash
+export POKERED_PEER_STATE_PATH=tests/fixtures/link/blue/cable_club.state
+export POKERED_PEER_STATE_SHA1=<40-character SHA-1 of that fixture>
+```
+
+`POKERED_PEER_STATE_PATH` and `POKERED_PEER_STATE_SHA1` are required together
+and need a configured peer session (`POKERED_PEER_ROM_PATH` and
+`POKERED_PEER_SYM_PATH`). The digest and size are verified before the bytes
+reach the emulator, a mismatch fails closed at startup, and the pair is still
+linked explicitly with `link_pair`.
+
 ### Remote TCP pair
 
 Two independent MCP servers can use `link_listen` and `link_connect`. The
