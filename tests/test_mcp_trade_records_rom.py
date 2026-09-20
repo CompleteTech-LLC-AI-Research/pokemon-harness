@@ -20,10 +20,22 @@ Coverage limits are explicit.  This file implements the real-ROM MCP stdio
 *local* pair across all nine ordered canonical orientations (every ordered
 combination of Red/Blue/Yellow, including the same-family rows), the
 cancel-before-commitment case, the multi-member sender/receiver slot rows, and
-the EOF/disconnect cases during setup and during the live trade flow.  It does
-not implement the TCP/remote transport rows or a native runtime run; those
-remain separate declared work (see the production-gate manifest).  The
-trade-centre navigator reads only public ``menu``/``overworld`` fields and
+the EOF/disconnect cases during setup and during the live trade flow.  Every
+row runs under either runtime; the server child asserts which PyBoy modules it
+imported, so a shadowed ``PYTHONPATH`` fails loudly instead of silently
+substituting the other runtime.
+
+The nine ordered *TCP* canonical orientations remain an excluded, declared
+row set.  They are not implemented here, and the exclusion is not a pass: the
+repository's own two-process remote driver records that only the first
+post-menu exchange is reliably drivable over TCP, because the byte-exact
+``PlayerDataBlock``/``PartyMonsPatchList`` exchanges desync between the two
+daemon threads (``tests/test_link_integration_remote.py::
+test_remote_exchange_bytes_fires_in_trade_center_blue_blue``).  A byte-exact
+two-process record swap is therefore not yet reachable, so this file does not
+claim it; ``scripts/tcp_link_matrix.py`` keeps the local MCP stdio rows in the
+required-trade declaration while the TCP trade rows stay visible as absent.
+The trade-centre navigator reads only public ``menu``/``overworld`` fields and
 derives every button from the mask and bounds the ROM itself published
 (engine/link/cable_club.asm), so no private hook, RAM read, or RAM write is used
 by the acceptance client.  Nothing here writes RAM, bypasses a ROM hash,
@@ -459,6 +471,89 @@ async def _press_both(client, button, *, duration=4):
     await _peer_press(client, button, duration=duration)
 
 
+async def _press_actions(client, primary_action, peer_action, *, duration=4):
+    """Press each owner's button, treating ``None`` as "send no input".
+
+    The completion driver must leave an owner that has already reached the
+    restored trade-center selection loop untouched: ``_trade_action`` would
+    return ``"a"`` there and start a *second* trade, which desynchronises the
+    pair before its peer arrives at the same milestone.
+
+    An action is either a button name or a ``(button, hold)`` pair.  The hold
+    length matters while a menu can still open under the keystroke: the ROM's
+    menu loop reads the key state of its first frames, so an ``A`` that is still
+    held when the trade party menu appears is consumed as that menu's own
+    selection and the offer is confirmed without ever being observed.  Dialogue
+    presses therefore use a one-frame hold while menu navigation keeps the
+    proven four-frame hold.
+    """
+    for action, press in ((primary_action, _press), (peer_action, _peer_press)):
+        if action is None:
+            continue
+        button, hold = action if isinstance(action, tuple) else (action, duration)
+        await press(client, button, duration=hold)
+
+
+async def _approach_action(state, party_count):
+    """Return one owner's approach action on the way to the trade party menu.
+
+    An owner resting on the live ``.playerMonMenu`` receives no input, so its
+    peer can catch up.  An owner that is already inside the STATS/TRADE sub-menu
+    was driven there by an input the caller aimed at the preceding dialogue (the
+    held ``A`` is consumed by the freshly opened menu); ``B`` is the ROM's
+    return key for that sub-menu, so backing out restores the live menu the
+    caller has to observe instead of pressing on and committing unobserved.
+    Everything else is the pre-menu dialogue and the waiting prompt, which
+    advance on ``A``; the one-frame hold keeps that press from reaching a menu
+    that opens underneath it.
+    """
+    if _player_mon_menu_live(state, party_count):
+        return None
+    if _overworld(state)["map_id"] != TRADE_CENTER_MAP_ID:
+        return ("a", 1)
+    if _menu(state)["watched_keys"] in (STATS_MENU_KEYS, TRADE_MENU_KEYS):
+        return ("b", 4)
+    return ("a", 1)
+
+
+async def _owner_trade_action(client, owner, state, *, party_count, target_slot, confirmed):
+    """Return one owner's ``(button, hold)`` action and any freshly read offer.
+
+    The ROM's ``.playerMonMenu`` publishes ``wCurrentMenuItem``/``wMaxMenuItem``
+    and closes as soon as its entry is confirmed, so an offer is only accepted
+    from a *fresh* read taken after the cursor has settled on the intended slot
+    and before the confirming press.  A sample that already showed the intended
+    slot is not enough on its own: the cursor can move between the sample and
+    the press, which is exactly the gap that let an earlier revision of this
+    driver confirm owner 0 without ever reading its live menu.
+
+    An owner that reaches the STATS/TRADE sub-menu without a recorded offer is
+    returned to the live menu through the ROM's sub-menu back key rather than
+    being confirmed unobserved.
+    """
+    if _overworld(state)["map_id"] != TRADE_CENTER_MAP_ID:
+        # Outside the trade center the drive is still in the Cable Club walk.
+        return ("a", 1), None
+    menu = _menu(state)
+    if not confirmed and _player_mon_menu_live(state, party_count):
+        item = menu["current_item"]
+        if item != target_slot:
+            # Player-mon menu: walk the published cursor to the intended slot.
+            return (("down" if item < target_slot else "up"), 4), None
+        fresh = (await _game_states(client))[owner]
+        if (
+            _player_mon_menu_live(fresh, party_count)
+            and _menu(fresh)["current_item"] == target_slot
+        ):
+            return ("a", 4), item
+        # The menu moved between the sample and the confirming press; keep
+        # driving from the fresh reading instead of confirming what was not read.
+        return _trade_action(fresh, party_count, target_slot), None
+    if not confirmed and menu["watched_keys"] in (STATS_MENU_KEYS, TRADE_MENU_KEYS):
+        return ("b", 4), None
+    return _trade_action(state, party_count, target_slot), None
+
+
 async def _advance_until(client, predicate, *, budget, prompt):
     """Advance the pair in bounded chunks until ``predicate`` holds."""
     spent = 0
@@ -701,21 +796,32 @@ async def _drive_trade(
     later, ROM-owned completion milestone before returning.  Every phase is
     bounded, and a bound that lapses fails closed with the observed state
     instead of spinning.
+
+    A *byte-identity orientation* (a same-family pair whose two offered records
+    are the same 44 bytes, which is what the canonical same-family rows are) has
+    no observable record copy at all: the post-trade party list equals the
+    pre-trade list, so the digest comparison would be satisfied before a single
+    input was sent.  Those rows take the flow path instead -- the observed
+    intended-slot offers, the ROM's own trade sequence, and its terminal
+    completion milestone -- and the identity is asserted by the caller so the
+    limitation is reported rather than hidden behind a vacuous comparison.
     """
     primary_incoming = peer_before[peer_slot]["digest"]
     peer_incoming = primary_before[primary_slot]["digest"]
     expected_primary = _compaction_expected_digests(primary_before, primary_slot, primary_incoming)
     expected_peer = _compaction_expected_digests(peer_before, peer_slot, peer_incoming)
+    byte_identity = primary_incoming == peer_incoming
     spent = 0
     milestones = []
     swap_records = None
     swap_states = None
     pre_evolution = 0
+    back_outs = 0
     # Cursor slot each owner was resting on when it confirmed the offer.  The
     # ROM's ``.playerMonMenu`` publishes ``wCurrentMenuItem``/``wMaxMenuItem``,
     # so the intended slot is observed through the public menu read rather than
-    # inferred from the result.  The first time an owner's live player-mon menu
-    # rests on its target slot is the offer this drive confirms.
+    # inferred from the result.  The offer is recorded from the fresh read that
+    # immediately precedes the confirming press (``_owner_trade_action``).
     offered: dict[int, int] = {}
     targets = (primary_slot, peer_slot)
     while spent < TRADE_BUDGET:
@@ -723,7 +829,8 @@ async def _drive_trade(
         primary_after = _records_from_payload(records[0])
         peer_after = _records_from_payload(records[1])
         if (
-            primary_after
+            not byte_identity
+            and primary_after
             and peer_after
             and [record["digest"] for record in primary_after] == expected_primary
             and [record["digest"] for record in peer_after] == expected_peer
@@ -740,36 +847,50 @@ async def _drive_trade(
         ]
         if not milestones or milestones[-1] != observed:
             milestones.append(observed)
+        # The copy is not observable for a byte-identity orientation, so the
+        # drive hands over once both owners have confirmed an *observed* offer
+        # and left the live menu into the trade sequence.
+        if (
+            byte_identity
+            and len(offered) == 2
+            and all(_menu(state)["watched_keys"] != PARTY_MENU_KEYS for state in states)
+        ):
+            swap_states = states
+            pre_evolution = (await _event_names(client)).count(EVOLUTION_EVENT)
+            break
+        actions = []
         for owner, state in enumerate(states):
-            if owner in offered:
-                continue
-            menu = _menu(state)
-            if (
-                _overworld(state)["map_id"] == TRADE_CENTER_MAP_ID
-                and menu["watched_keys"] == PARTY_MENU_KEYS
-                and type(menu["current_item"]) is int
-                and type(menu["max_item"]) is int
-                and menu["max_item"] == party_count
-                and menu["current_item"] == targets[owner]
-            ):
-                offered[owner] = menu["current_item"]
-        actions = [
-            _trade_action(states[0], party_count, primary_slot),
-            _trade_action(states[1], party_count, peer_slot),
-        ]
-        await _press(client, actions[0], duration=4)
-        await _peer_press(client, actions[1], duration=4)
+            action, observation = await _owner_trade_action(
+                client,
+                owner,
+                state,
+                party_count=party_count,
+                target_slot=targets[owner],
+                confirmed=owner in offered,
+            )
+            if action is not None and action[0] == "b":
+                back_outs += 1
+            if observation is not None:
+                offered[owner] = observation
+            actions.append(action)
+        await _press_actions(client, actions[0], actions[1])
         await _link_step(client, STEP_CHUNK)
         spent += STEP_CHUNK
-    if swap_records is None:
+    # A byte-identity row that confirmed both observed offers is a flow row: the
+    # ROM's own completion sequence is the terminal milestone and the records are
+    # read after it.  Anything else that failed to reach the copy fails closed.
+    flow_only = swap_records is None and byte_identity and len(offered) == 2
+    if swap_records is None and not flow_only:
         records = await _party_records(client)
         states = await _game_states(client)
         raise AssertionError(
             "trade never produced the exact paired digest exchange within "
-            f"{TRADE_BUDGET} frames; primary={json.dumps(records[0])} "
+            f"{TRADE_BUDGET} frames; offered={offered} "
+            f"primary={json.dumps(records[0])} "
             f"peer={json.dumps(records[1])} states={json.dumps(states)}"
         )
-    _log("trade_copy", f"frames={spent} milestones={milestones}")
+    if not flow_only:
+        _log("trade_copy", f"frames={spent} milestones={milestones}")
     final_states, post_frames, evolution = await _drive_trade_completion(
         client,
         party_count=party_count,
@@ -779,8 +900,23 @@ async def _drive_trade(
     )
     assert offered.get(0) == primary_slot, (offered, primary_slot)
     assert offered.get(1) == peer_slot, (offered, peer_slot)
-    _log("offers", f"primary={primary_slot} peer={peer_slot} observed={offered}")
-    return swap_records, swap_states, final_states, post_frames, evolution, offered
+    _log(
+        "offers",
+        f"primary={primary_slot} peer={peer_slot} observed={offered} "
+        f"byte_identity={byte_identity} submenu_back_outs={back_outs}",
+    )
+    if flow_only:
+        swap_records = await _party_records(client)
+    return (
+        swap_records,
+        swap_states,
+        final_states,
+        post_frames,
+        evolution,
+        offered,
+        byte_identity,
+        back_outs,
+    )
 
 
 async def _drive_trade_completion(
@@ -813,12 +949,18 @@ async def _drive_trade_completion(
         ]
         if not milestones or milestones[-1] != observed:
             milestones.append(observed)
+        # An owner that has already reached the restored selection loop must
+        # receive no further input: ``_trade_action`` returns ``"a"`` there and
+        # would start a *second* trade, desynchronising it from a peer that is
+        # still finishing the first one.  Holding the settled owner still lets
+        # its peer arrive at the same milestone.
         actions = [
-            _trade_action(states[0], party_count, primary_slot),
-            _trade_action(states[1], party_count, peer_slot),
+            None
+            if _selection_loop_ready(state, party_count)
+            else _trade_action(state, party_count, slot)
+            for state, slot in zip(states, (primary_slot, peer_slot), strict=True)
         ]
-        await _press(client, actions[0], duration=4)
-        await _peer_press(client, actions[1], duration=4)
+        await _press_actions(client, actions[0], actions[1], duration=4)
         await _link_step(client, STEP_CHUNK)
         spent += STEP_CHUNK
     states = await _game_states(client)
@@ -887,16 +1029,31 @@ async def _enter_trade_flow(client):
 
 
 async def _await_party_menu(client, party_count, *, budget=TRADE_BUDGET):
-    """Advance until both owners publish the live trade party menu."""
+    """Advance until both owners publish the live trade party menu.
+
+    An owner that already publishes the live menu receives no further input, and
+    an owner that was driven into the STATS/TRADE sub-menu by an input aimed at
+    the preceding dialogue is backed out of it (the ROM's ``B`` return key)
+    instead of being pressed on: ``_trade_action`` would confirm the offer from
+    the sub-menu, which leaves the state the caller is waiting for.  Because the
+    two owners reach the menu a few frames apart, pressing both keeps them
+    alternating between the menu and the sub-menu and the predicate never holds
+    for the pair; holding the settled owner still lets its peer catch up.
+    """
     spent = 0
+    back_outs = 0
     while spent < budget:
         states = await _game_states(client)
         if all(_player_mon_menu_live(state, party_count) for state in states):
-            _log("party_menu", f"frames={spent}")
+            _log("party_menu", f"frames={spent} submenu_back_outs={back_outs}")
             return states, spent
-        actions = [_trade_action(state, party_count, 0) for state in states]
-        await _press(client, actions[0], duration=4)
-        await _peer_press(client, actions[1], duration=4)
+        actions = []
+        for state in states:
+            action = await _approach_action(state, party_count)
+            if action is not None and action[0] == "b":
+                back_outs += 1
+            actions.append(action)
+        await _press_actions(client, actions[0], actions[1])
         await _link_step(client, STEP_CHUNK)
         spent += STEP_CHUNK
     states = await _game_states(client)
@@ -946,6 +1103,8 @@ async def test_real_rom_mcp_trade_exchanges_party_records(tmp_path, version, pee
             post_frames,
             evolution,
             offered,
+            byte_identity,
+            back_outs,
         ) = await _drive_trade(
             client,
             party_count=party_count,
@@ -955,37 +1114,59 @@ async def test_real_rom_mcp_trade_exchanges_party_records(tmp_path, version, pee
         primary_after = _records_from_payload(records[0])
         peer_after = _records_from_payload(records[1])
 
-        # Byte-exact remove/compact/append exchange under the ROM's own
-        # semantics; the receiving slot is the final occupied slot.
-        assert primary_before[0]["digest"] != peer_before[0]["digest"], (
-            version,
+        # The canonical same-family rows pin the *same* admitted fixture on both
+        # owners, so the two offered records are the same 44 bytes and no digest
+        # comparison can distinguish the exchange from standing still.  That is
+        # asserted here instead of being hidden: the row then rests on the
+        # flow-level proof (each offer read from a fresh live ROM menu at the
+        # intended slot, the ROM's trade sequence, and its terminal
+        # ``evolution_check`` completion milestone with both owners restored to
+        # the selection loop).  A cross-family row keeps the byte-exact oracle.
+        identity_orientation = primary_before[0]["digest"] == peer_before[0]["digest"]
+        assert byte_identity is identity_orientation, (
+            byte_identity,
             primary_before[0],
             peer_before[0],
         )
-        if _same_species_leads(version, peer_version):
-            # Same species, different 44-byte records: the exchange is proved by
-            # raw record identity rather than by a species change.
-            assert primary_before[0]["species"] == peer_before[0]["species"], (
+        assert offered == {0: 0, 1: 0}, offered
+        if identity_orientation:
+            assert _digests(primary_after) == _digests(primary_before), primary_after
+            assert _digests(peer_after) == _digests(peer_before), peer_after
+            assert len(primary_after) == len(primary_before), primary_after
+            assert len(peer_after) == len(peer_before), peer_after
+            assert evolution >= 1, evolution
+        else:
+            # Byte-exact remove/compact/append exchange under the ROM's own
+            # semantics; the receiving slot is the final occupied slot.
+            assert primary_before[0]["digest"] != peer_before[0]["digest"], (
                 version,
                 primary_before[0],
                 peer_before[0],
             )
-        _assert_exact_exchange(
-            primary_before,
-            primary_after,
-            outgoing_slot=0,
-            incoming_digest=peer_before[0]["digest"],
-            incoming_species=peer_before[0]["species"],
-            label="primary",
-        )
-        _assert_exact_exchange(
-            peer_before,
-            peer_after,
-            outgoing_slot=0,
-            incoming_digest=primary_before[0]["digest"],
-            incoming_species=primary_before[0]["species"],
-            label="peer",
-        )
+            if _same_species_leads(version, peer_version):
+                # Same species, different 44-byte records: the exchange is proved
+                # by raw record identity rather than by a species change.
+                assert primary_before[0]["species"] == peer_before[0]["species"], (
+                    version,
+                    primary_before[0],
+                    peer_before[0],
+                )
+            _assert_exact_exchange(
+                primary_before,
+                primary_after,
+                outgoing_slot=0,
+                incoming_digest=peer_before[0]["digest"],
+                incoming_species=peer_before[0]["species"],
+                label="primary",
+            )
+            _assert_exact_exchange(
+                peer_before,
+                peer_after,
+                outgoing_slot=0,
+                incoming_digest=primary_before[0]["digest"],
+                incoming_species=primary_before[0]["species"],
+                label="peer",
+            )
 
         print(
             "MCP_TRADE_RECORDS_ROM "
@@ -1000,14 +1181,21 @@ async def test_real_rom_mcp_trade_exchanges_party_records(tmp_path, version, pee
                     "peer_fixture_sha1": _fixture_sha1(peer_asset),
                     "outgoing_slot": 0,
                     "offered_slots": {str(owner): slot for owner, slot in sorted(offered.items())},
+                    "byte_identity_orientation": bool(byte_identity),
+                    "submenu_back_outs": back_outs,
                     "receiving_slot": len(primary_after) - 1,
                     "party_count": party_count,
                     "primary_before": primary_before,
                     "primary_after": primary_after,
                     "peer_before": peer_before,
                     "peer_after": peer_after,
-                    "copy_primary_map": _overworld(swap_states[0])["map_id"],
-                    "copy_peer_map": _overworld(swap_states[1])["map_id"],
+                    "copy_milestone_observed": not byte_identity,
+                    "copy_primary_map": (
+                        None if byte_identity else _overworld(swap_states[0])["map_id"]
+                    ),
+                    "copy_peer_map": (
+                        None if byte_identity else _overworld(swap_states[1])["map_id"]
+                    ),
                     "primary_map": _overworld(final_states[0])["map_id"],
                     "peer_map": _overworld(final_states[1])["map_id"],
                     "post_trade_frames": post_frames,
@@ -1088,6 +1276,8 @@ async def test_real_rom_mcp_trade_exchanges_multi_member_slot_records(
             post_frames,
             evolution,
             offered,
+            byte_identity,
+            back_outs,
         ) = await _drive_trade(
             client,
             party_count=party_count,
@@ -1102,6 +1292,7 @@ async def test_real_rom_mcp_trade_exchanges_multi_member_slot_records(
         # The intended slot was observed on the ROM menu, not inferred from the
         # result: ``offered`` is recorded before the confirming press.
         assert offered == {0: primary_slot, 1: peer_slot}, offered
+        assert byte_identity is False, (byte_identity, primary_slot, peer_slot)
 
         _assert_exact_exchange(
             primary_before,
@@ -1147,6 +1338,8 @@ async def test_real_rom_mcp_trade_exchanges_multi_member_slot_records(
                     "peer_outgoing_slot": peer_slot,
                     "receiving_slot": len(primary_after) - 1,
                     "offered_slots": {str(owner): slot for owner, slot in sorted(offered.items())},
+                    "byte_identity_orientation": bool(byte_identity),
+                    "submenu_back_outs": back_outs,
                     "primary_before": primary_before,
                     "primary_after": primary_after,
                     "peer_before": peer_before,
@@ -1264,6 +1457,8 @@ async def test_real_rom_mcp_trade_cancel_before_commitment_keeps_records(
             post_frames,
             evolution,
             offered,
+            byte_identity,
+            back_outs,
         ) = await _drive_trade(
             client,
             party_count=party_count,
@@ -1272,6 +1467,7 @@ async def test_real_rom_mcp_trade_cancel_before_commitment_keeps_records(
         )
         primary_after = _records_from_payload(records[0])
         peer_after = _records_from_payload(records[1])
+        assert byte_identity is False, (byte_identity, primary_before[0], peer_before[0])
         _assert_exact_exchange(
             primary_before,
             primary_after,
@@ -1312,6 +1508,8 @@ async def test_real_rom_mcp_trade_cancel_before_commitment_keeps_records(
                     "peer_before": peer_before,
                     "peer_after": peer_after,
                     "offered_slots": {str(owner): slot for owner, slot in sorted(offered.items())},
+                    "byte_identity_orientation": bool(byte_identity),
+                    "submenu_back_outs": back_outs,
                     "copy_primary_map": _overworld(swap_states[0])["map_id"],
                     "copy_peer_map": _overworld(swap_states[1])["map_id"],
                     "primary_map": _overworld(final_states[0])["map_id"],
