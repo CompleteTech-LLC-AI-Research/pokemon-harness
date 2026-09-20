@@ -469,6 +469,19 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
             },
         ),
         mcp_types.Tool(
+            name="link_frame_barrier",
+            description=(
+                "Enable or disable the network frame barrier on a connected "
+                "remote link. Both endpoints must call this at the same "
+                "ROM-owned boundary; the ROM still owns all serial registers."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"enabled": {"type": "boolean"}},
+                "required": ["enabled"],
+            },
+        ),
+        mcp_types.Tool(
             name="link_peer_press",
             description="Press a button on the PEER session.",
             inputSchema={
@@ -1311,6 +1324,30 @@ def _dispatch_link_tool(
         peer = _require_peer(link)
         peer.release(arguments["button"])
         return {"ok": True}
+
+    if name == "link_frame_barrier":
+        enabled = arguments.get("enabled")
+        if type(enabled) is not bool:
+            raise McpHarnessError(
+                "invalid_argument", "enabled must be a boolean"
+            )
+        _refresh_remote_state(link, session)
+        with link.state():
+            network_session = link.network_session
+            remote_mode = link.remote_mode
+        if network_session is None or remote_mode != "connected":
+            raise McpHarnessError(
+                "not_connected",
+                "link_frame_barrier requires a connected remote link",
+            )
+        with session.locked(timeout_s=_DEFAULT_CLEANUP_TIMEOUT_S):
+            network_session.set_network_frame_barrier(enabled)
+            applied = network_session.network_frame_barrier()
+        return {
+            "enabled": enabled,
+            "network_frame_barrier": applied,
+            "remote_mode": remote_mode,
+        }
 
     if name == "link_status":
         # Surface listener-thread failures lazily on status checks so

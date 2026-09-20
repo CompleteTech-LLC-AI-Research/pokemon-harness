@@ -829,6 +829,92 @@ def test_link_listen_then_connect_updates_status():
     dispatch_tool(s_listener, "link_disconnect", {}, link=link_l)
 
 
+def _connected_endpoint_pair():
+    """Join two endpoint sessions over a real localhost socket.
+
+    Mirrors ``test_link_listen_then_connect_updates_status``: the listener
+    binds, the connector attaches, and both report ``connected`` before the
+    caller touches the link.  Each call reserves its own port, so tests stay
+    order-independent.
+    """
+    s_listener, _ = _endpoint_session()
+    s_connector, _ = _endpoint_session()
+    link_l = LinkState(primary_version="blue")
+    link_c = LinkState(primary_version="yellow")
+    port = _free_port()
+    listening = dispatch_tool(s_listener, "link_listen", {"port": port}, link=link_l)
+    assert listening["remote_mode"] == "listening", listening
+    connected = dispatch_tool(
+        s_connector,
+        "link_connect",
+        {"host": "127.0.0.1", "port": port, "rom_version": "yellow"},
+        link=link_c,
+    )
+    assert connected["remote_mode"] == "connected", connected
+    _wait_remote_mode(link_l, "connected")
+    assert link_c.remote_mode == "connected"
+    return s_listener, link_l, s_connector, link_c
+
+
+def _disconnect_endpoint_pair(s_listener, link_l, s_connector, link_c):
+    """Tear the pair down connector-first, as the lifecycle contract requires."""
+    dispatch_tool(s_connector, "link_disconnect", {}, link=link_c)
+    dispatch_tool(s_listener, "link_disconnect", {}, link=link_l)
+
+
+def test_link_frame_barrier_arms_and_clears_a_connected_remote_link():
+    s_listener, link_l, s_connector, link_c = _connected_endpoint_pair()
+    try:
+        for session, link in ((s_listener, link_l), (s_connector, link_c)):
+            network = link.network_session
+            assert network is not None
+            armed = dispatch_tool(
+                session, "link_frame_barrier", {"enabled": True}, link=link
+            )
+            assert armed == {
+                "enabled": True,
+                "network_frame_barrier": True,
+                "remote_mode": "connected",
+            }, armed
+            # The applied flag is read back from the session itself rather than
+            # reported from the request, so a silently-ignored call fails here.
+            assert network.network_frame_barrier() is True
+            cleared = dispatch_tool(
+                session, "link_frame_barrier", {"enabled": False}, link=link
+            )
+            assert cleared == {
+                "enabled": False,
+                "network_frame_barrier": False,
+                "remote_mode": "connected",
+            }, cleared
+            assert network.network_frame_barrier() is False
+    finally:
+        _disconnect_endpoint_pair(s_listener, link_l, s_connector, link_c)
+
+
+def test_link_frame_barrier_requires_a_connected_remote_link():
+    s, _ = _endpoint_session()
+    link = LinkState(primary_version="red")
+    with pytest.raises(McpHarnessError, match="connected remote link") as exc_info:
+        dispatch_tool(s, "link_frame_barrier", {"enabled": True}, link=link)
+    assert exc_info.value.code == "not_connected"
+
+
+def test_link_frame_barrier_rejects_a_non_boolean_argument():
+    s_listener, link_l, s_connector, link_c = _connected_endpoint_pair()
+    try:
+        for value in ("yes", 1, None):
+            with pytest.raises(McpHarnessError, match="boolean") as exc_info:
+                dispatch_tool(
+                    s_listener, "link_frame_barrier", {"enabled": value}, link=link_l
+                )
+            assert exc_info.value.code == "invalid_argument"
+        # A rejected call must not have applied anything.
+        assert link_l.network_session.network_frame_barrier() is False
+    finally:
+        _disconnect_endpoint_pair(s_listener, link_l, s_connector, link_c)
+
+
 def test_listener_rejects_bad_peer_and_accepts_next_peer():
     s_listener, _ = _endpoint_session()
     link = LinkState(primary_version="blue")

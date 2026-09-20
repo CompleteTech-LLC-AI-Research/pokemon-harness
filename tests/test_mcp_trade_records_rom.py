@@ -80,6 +80,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
 import socket
 import sys
@@ -185,6 +186,11 @@ LINK_MENU_MAX_ITEMS = (2, 3)
 # deadline; a local pair runs at roughly 2.5-4 frames/s here, so a ten-frame
 # chunk keeps each RPC at a few seconds even on a busy host.
 STEP_CHUNK = 10
+# ``link_up`` form the pair through the public tools, and the listener's accept
+# thread can still be booting its ROM when ``link_connect`` returns, so the
+# client polls both ends for the published ``connected`` mode before walking.
+LINK_UP_STATUS_TIMEOUT = 180.0
+LINK_UP_STATUS_POLL_INTERVAL = 0.25
 RECEPTIONIST_WALK_FRAMES = 60
 LINK_MENU_BUDGET = 1600
 LINK_MENU_QUIET_FRAMES = 100
@@ -192,6 +198,22 @@ LINK_MENU_BURST_ATTEMPTS = 1
 WARP_BUDGET = 1200
 WALK_ATTEMPTS = 4
 WALK_STEP_FRAMES = 20
+# Quiet trade-center rendezvous.  The repository's own two-process driver
+# cannot walk onto the Cable Club trigger until the ROM has finished its entry
+# script, so it drains the wire before walking
+# (``tests/_tcp_trade_peer.py``: ``wait_for_wire_idle(stable_checks=4)`` plus a
+# cooperative release rendezvous at the same boundary).  The public surface has
+# no wire-idle reading, so this pair waits for the same condition the only way
+# it can observe it: it keeps advancing both owners, without any input, until
+# the ROM-owned trade-center state has stopped changing for
+# ``WALK_STABLE_CHECKS`` consecutive slices and only then presses the facing
+# direction.  Without this rendezvous a faster runtime can press while the
+# entry script still owns input: the press is consumed, the ``ANY_FACING``
+# hidden-event trigger never fires, and the row stalls at ``offered={}`` for
+# its whole trade budget.
+WALK_SETTLE_SLICE = 10
+WALK_STABLE_CHECKS = 3
+WALK_SETTLE_BUDGET = 400
 TRADE_BUDGET = 4000
 # Completion budget *after* the paired record copy.  The copy precedes a
 # 100-frame delay, the trade animation, a forced evolution check
@@ -462,6 +484,10 @@ class LocalPair:
     def __init__(self, client, runtime_mode):
         self.client = client
         self.runtime_mode = runtime_mode
+        # Set by :func:`_walk_to_trade_trigger`; reported in the row payload and
+        # in the captured walk log so the evidence records how long the
+        # ROM-owned trade-center rendezvous actually took.
+        self.walk_settle_frames = None
 
     async def initialize(self):
         await self.client.initialize()
@@ -502,7 +528,14 @@ class LocalPair:
         )
         assert loaded == {"ok": True}, loaded
 
-    async def link_up(self):
+    async def link_up(self, *, arm_barrier=None):
+        """Pair the two in-process sessions.
+
+        ``arm_barrier`` is the remote-transport pacing knob.  This pair runs on
+        the bit-accurate backend with no remote edge transport, so there is no
+        network frame barrier to arm and the argument is ignored.
+        """
+        del arm_barrier
         paired = await self.client.tool("link_pair")
         assert paired["paired"] is True, paired
         status = await self.client.tool("link_status")
@@ -579,6 +612,54 @@ class TcpPair:
         self.clients = list(clients)
         self.versions = tuple(versions)
         self.runtime_mode = runtime_mode
+        # Set by :meth:`arm_network_frame_barrier`; reported in the row
+        # payload so the terminal evidence records that this client armed the
+        # documented pacing control rather than inferring it from a pass.
+        self.network_frame_barrier_armed = False
+        # Set by :func:`_walk_to_trade_trigger`; same reporting contract.
+        self.walk_settle_frames = None
+
+    async def arm_network_frame_barrier(self):
+        """Arm the documented network frame barrier on both owners.
+
+        HELLO negotiation deliberately leaves Yellow's input-sensitive
+        preamble (and every cross-family pair) on native edge pacing, which
+        requires the peer to answer each edge from inside its own tick.  This
+        client advances exactly one frame per owner per turn, so that
+        unpaced exchange lapses: the waiting endpoint blocks on a peer response
+        that the paced step never delivers, the calling process latches the
+        fatal ``serial_backend_error``, and the row can never reach the
+        LinkMenu.  The unarmed row is exercised by
+        ``test_real_rom_mcp_trade_over_tcp_yellow_needs_the_frame_barrier``.
+
+        The repository's own two-process trade driver arms the same control at
+        the Cable Club attendant, before the first ``A`` press
+        (``tests/_tcp_trade_peer.py``).  This client cannot arm at that
+        boundary because its first two moves are still inside the same
+        preamble it has to protect, so it arms at the earliest documented
+        boundary it can observe: both ends already report ``connected``.  That
+        is the public-tool equivalent, so the arm is a documented rendezvous,
+        not a private hook, RAM read, or RAM write.  Both owners are armed
+        while no frame is in flight, and the ROM keeps ownership of every
+        serial register and role change.
+        """
+        for client in self.clients:
+            payload = await client.tool("link_frame_barrier", {"enabled": True})
+            assert payload["enabled"] is True, payload
+            assert payload["network_frame_barrier"] is True, payload
+            assert payload["remote_mode"] == "connected", payload
+        self.network_frame_barrier_armed = True
+
+    def needs_network_frame_barrier(self):
+        """Whether this pair is one HELLO leaves on native edge pacing.
+
+        A pair that involves Yellow keeps native edge transport until the
+        coordinator arms the barrier, so it must be armed before the first
+        link-menu frame.  A Red/Blue pair already negotiates the pacing it
+        needs, so this row leaves it exactly as negotiated rather than
+        overriding a working setting.
+        """
+        return "yellow" in self.versions
 
     async def initialize(self):
         for client in self.clients:
@@ -621,7 +702,13 @@ class TcpPair:
         )
         assert loaded == {"ok": True}, loaded
 
-    async def link_up(self):
+    async def link_up(self, *, arm_barrier=None):
+        """Form the TCP pair, then arm the barrier this pair needs.
+
+        ``arm_barrier=None`` applies :meth:`needs_network_frame_barrier`; an
+        explicit boolean overrides it so the negative control can prove the
+        arm is load-bearing.
+        """
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
@@ -648,10 +735,29 @@ class TcpPair:
             },
         )
         assert connected["remote_mode"] == "connected", connected
-        for role, client in zip(("listener", "connector"), self.clients, strict=True):
-            status = await client.tool("link_status")
-            mode = status.get("remote_mode") or status.get("mode")
-            assert mode == "connected", (role, status)
+        # ``link_connect`` reports the connector's own view.  The listener's
+        # accept thread can still be inside its first ROM boot when that
+        # returns, so poll both ends until each publishes ``connected``; a pair
+        # that never links fails closed on the deadline instead of walking a
+        # half-linked transport.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + LINK_UP_STATUS_TIMEOUT
+        while True:
+            statuses = [await client.tool("link_status") for client in self.clients]
+            modes = [status.get("remote_mode") or status.get("mode") for status in statuses]
+            if all(mode == "connected" for mode in modes):
+                break
+            if loop.time() > deadline:
+                raise AssertionError(("link_up never reported connected", modes))
+            await asyncio.sleep(LINK_UP_STATUS_POLL_INTERVAL)
+        # Both ends now agree on a connected remote link, so this is the
+        # ROM-owned boundary at which the repository's own two-process driver
+        # arms the same pacing control.  Arming here keeps every edge-paced row
+        # on one documented rendezvous instead of letting it lapse into the
+        # transport's ten-second ``EDGE_RESP`` deadline.
+        wanted = self.needs_network_frame_barrier() if arm_barrier is None else arm_barrier
+        if wanted:
+            await self.arm_network_frame_barrier()
 
     async def press(self, owner, button, *, duration=4):
         await self.clients[owner].tool(
@@ -1009,7 +1115,15 @@ async def _walk_to_trade_trigger(pair):
     one frame at a time: one owner can enter ``CableClub_DoBattleOrTrade``
     during this loop, and ticking twenty frames on that side before its peer
     advances would let the first serial transfers use stale handshake bytes.
+
+    Before the first press both owners are advanced quietly until the
+    ROM-owned trade-center state has stopped changing (see
+    ``WALK_STABLE_CHECKS``): the Cable Club entry script keeps the overworld
+    input for its own handshake, so a press offered during it is consumed
+    instead of walking onto the trigger.  The quiet rendezvous is bounded, so
+    an unsettled pair still walks and fails its own budget rather than hanging.
     """
+    settle_frames = await _settle_trade_center(pair)
     states = await _all_states(pair)
     directions = ["right" if _overworld(state)["x"] < 5 else "left" for state in states]
     for _ in range(WALK_ATTEMPTS):
@@ -1017,7 +1131,55 @@ async def _walk_to_trade_trigger(pair):
         await _peer_press(pair, directions[1], duration=8)
         for _ in range(WALK_STEP_FRAMES):
             await _link_step(pair, 1)
-    _log("walk", f"directions={directions}")
+    pair.walk_settle_frames = settle_frames
+    _log("walk", f"directions={directions} settle_frames={settle_frames}")
+
+
+def _trade_center_fingerprint(state):
+    """Return the public trade-center observation used for quiescence.
+
+    Every field is read from a resource the acceptance surface already
+    publishes, so the rendezvous is a statement about ROM-owned state rather
+    than about host scheduling.
+    """
+    overworld = _overworld(state)
+    menu = _menu(state)
+    text = state["text"]
+    return (
+        overworld["map_id"],
+        overworld["x"],
+        overworld["y"],
+        overworld["direction"],
+        overworld["walk_counter"],
+        overworld["current_map_script"],
+        overworld["map_script_flags"],
+        menu["watched_keys"],
+        menu["max_item"],
+        text["suppress_prompt_wait"],
+    )
+
+
+async def _settle_trade_center(pair):
+    """Advance both owners quietly until their trade-center state is stable.
+
+    Returns the number of frames spent.  ``WALK_STABLE_CHECKS`` identical
+    consecutive readings of :func:`_trade_center_fingerprint` are required, and
+    the whole wait is bounded by ``WALK_SETTLE_BUDGET`` so a pair that never
+    settles still walks and fails closed on its own budget.
+    """
+    spent = 0
+    previous = None
+    stable = 0
+    while spent < WALK_SETTLE_BUDGET and stable < WALK_STABLE_CHECKS:
+        states = await _all_states(pair)
+        current = tuple(_trade_center_fingerprint(state) for state in states)
+        stable = stable + 1 if current == previous else 0
+        previous = current
+        if stable >= WALK_STABLE_CHECKS:
+            break
+        await _link_step(pair, WALK_SETTLE_SLICE)
+        spent += WALK_SETTLE_SLICE
+    return spent
 
 
 def _trade_action(state, party_count, target_slot=0):
@@ -1342,9 +1504,13 @@ def _assert_exact_exchange(
         assert _digests(before) != _digests(after), (label, before, after)
 
 
-async def _enter_trade_flow(pair):
-    """Drive the public flow from the loaded fixture into the Trade Center."""
-    await pair.link_up()
+async def _enter_trade_flow(pair, *, arm_barrier=None):
+    """Drive the public flow from the loaded fixture into the Trade Center.
+
+    ``arm_barrier`` is forwarded to :meth:`TcpPair.link_up` so a caller can
+    override the pair's own pacing decision (the negative control does).
+    """
+    await pair.link_up(arm_barrier=arm_barrier)
     await _drive_to_link_menu(pair)
     await _select_trade_center(pair)
     await _walk_to_trade_trigger(pair)
@@ -1857,6 +2023,28 @@ async def _tcp_pair_servers(tmp_path, primary_asset, peer_asset):
                 )
 
 
+# The transfer contract's stable failure code, read from the client's own
+# latched structured error rather than from a child's stderr ring.
+_MCP_ERROR_CODE = re.compile(r'"code":\s*"([A-Za-z_]+)"')
+
+
+def _latched_error_code(failure_text):
+    """Return the structured MCP error code one tool failure latched.
+
+    The negative control reads the client's own observation: the structured
+    error the calling process latched when the unpaced transport failed.  An
+    arm that is not load-bearing fails here, because the unarmed pair would
+    either complete the trade or fail with some unrelated code.
+    """
+    match = _MCP_ERROR_CODE.search(failure_text)
+    if match is None:
+        raise AssertionError(
+            "unarmed pair did not latch a structured MCP error: "
+            + failure_text[:400]
+        )
+    return match.group(1)
+
+
 def _emit_row(runtime_mode, payload):
     """Emit one acceptance row: invoking runtime origins, then the payload.
 
@@ -1924,6 +2112,10 @@ async def test_real_rom_mcp_trade_exchanges_party_records(tmp_path, version, pee
             {
                 "transport": "local_pair",
                 "scenario": "ordered_orientation",
+                # Frames spent in the quiet trade-center rendezvous before the
+                # first facing press, straight from the pair, so the row shows
+                # the ROM-owned state it actually waited on.
+                "walk_settle_frames": pair.walk_settle_frames,
                 "party_count": len(primary_before),
                 "peer_party_count": len(peer_before),
                 "outgoing_slot": 0,
@@ -1995,6 +2187,14 @@ async def test_real_rom_mcp_trade_exchanges_party_records_over_tcp(tmp_path, ver
             {
                 "transport": "tcp_pair",
                 "scenario": "ordered_orientation",
+                # Recorded straight from the pair, so the row proves it armed
+                # the documented pacing control on both owners rather than
+                # leaving a reader to infer it from the row passing.
+                "network_frame_barrier": pair.network_frame_barrier_armed,
+                # Same contract for the walk rendezvous: the frames this row
+                # actually spent waiting for the ROM-owned trade-center state
+                # to stop changing before it pressed the facing direction.
+                "walk_settle_frames": pair.walk_settle_frames,
                 "party_count": len(primary_before),
                 "peer_party_count": len(peer_before),
                 "outgoing_slot": 0,
@@ -2020,6 +2220,64 @@ async def test_real_rom_mcp_trade_exchanges_party_records_over_tcp(tmp_path, ver
         payload.update(verdict)
         _emit_row(payload["runtime_mode"], payload)
         await pair.eof()
+
+
+@pytest.mark.asyncio
+async def test_real_rom_mcp_trade_over_tcp_yellow_needs_the_frame_barrier(tmp_path):
+    """Negative control: the Yellow TCP row dies without the documented arm.
+
+    The passing ``over_tcp`` rows above arm ``link_frame_barrier`` right after
+    the pair reports ``connected``.  Without that arm the same pair, the same
+    fixtures, and the same driver never leave the link-menu preamble: one owner
+    blocks waiting for a peer response that this client's frame-paced step
+    never delivers, and the calling process latches the transfer contract's
+    fatal ``serial_backend_error`` before either ROM appends a received record.
+
+    This test is the control that makes the arm falsifiable.  It withholds
+    exactly one thing -- the arm -- and requires the row to fail *and* the
+    client to observe that stable error code with no ROM-owned copy, so a row
+    that passed above cannot also pass here for an unrelated reason, and an arm
+    that is not load-bearing makes this control fail instead of silently
+    passing.
+    """
+    if os.environ.get("POKERED_SKIP_SHA1"):
+        pytest.fail("POKERED_SKIP_SHA1 must not be used for real-ROM evidence")
+
+    version = peer_version = "yellow"
+    primary_fixture, peer_fixture = _orientation_fixtures(version, peer_version)
+    primary_asset = _require_assets(version, primary_fixture)
+    peer_asset = _require_assets(peer_version, peer_fixture)
+
+    async with _tcp_pair_servers(tmp_path, primary_asset, peer_asset) as pair:
+        assert pair.needs_network_frame_barrier() is True, pair.versions
+        await _fixture_pair(pair, primary_asset, peer_asset, fixture=primary_fixture)
+        with pytest.raises(AssertionError) as exc_info:
+            await _enter_trade_flow(pair, arm_barrier=False)
+        assert pair.network_frame_barrier_armed is False, pair.versions
+        # The failing call is the remote serial step, so the client's own
+        # observation is already the latched backend failure: the structured
+        # MCP error carries the stable code plus the transport's message.
+        failure_text = str(exc_info.value)
+        observed = _latched_error_code(failure_text)
+        assert observed == "serial_backend_error", failure_text
+        # Withholding the arm must also withhold every ROM-owned copy: the row
+        # died in the link-menu preamble, so neither owner appended a received
+        # record.
+        assert await _trade_received_counts(pair) == [0, 0], pair.versions
+        payload = _base_row_payload(
+            version, peer_version, primary_asset, peer_asset, primary_fixture, peer_fixture
+        )
+        payload.update(
+            {
+                "transport": "tcp_pair",
+                "scenario": "unarmed_barrier_negative_control",
+                "network_frame_barrier_armed": False,
+                "expected_failure": "latched serial_backend_error before any copy",
+                "observed_failure": observed,
+                "trade_received": await _trade_received_counts(pair),
+            }
+        )
+        _emit_row(payload["runtime_mode"], payload)
 
 
 @pytest.mark.asyncio
