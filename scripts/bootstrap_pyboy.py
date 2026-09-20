@@ -424,12 +424,24 @@ def _runtime_identity() -> dict[str, object]:
     """Return the installed runtime identity used for consistent-build binding.
 
     This mirrors the identity recomputed by the qualification runner's native
-    probe so the retained evidence fingerprints the same fields.
+    probe so the retained evidence fingerprints the same fields.  The identity
+    covers the *complete* installed output set, not only the named entry
+    modules: a compiled module the module list never names (for example
+    ``pyboy/core/cpu*.so``) must change the fingerprint when it is replaced.
     """
 
     modules = {name: importlib.import_module(name) for name in RUNTIME_MODULES}
     import pyboy
     from pyboy import utils
+
+    package_root = Path(pyboy.__file__).resolve().parent
+
+    def _relative(filename: str) -> str:
+        path = Path(filename)
+        try:
+            return path.resolve().relative_to(package_root).as_posix()
+        except ValueError:
+            return path.name
 
     report: dict[str, object] = {}
     for name, module in modules.items():
@@ -441,13 +453,30 @@ def _runtime_identity() -> dict[str, object]:
                     digest = hashlib.sha256(stream.read()).hexdigest()
             except OSError:
                 digest = None
-        report[name] = {"kind": _module_kind(module), "sha256": digest}
+        report[name] = {
+            "kind": _module_kind(module),
+            "sha256": digest,
+            "artifact": _relative(filename) if filename else None,
+        }
+    artifacts: dict[str, str] = {}
+    for entry in sorted(package_root.rglob("*")):
+        if "__pycache__" in entry.parts or entry.suffix in (".pyc", ".pyo"):
+            continue
+        if not entry.is_file():
+            continue
+        try:
+            with open(entry, "rb") as stream:
+                payload = stream.read()
+        except OSError as exc:
+            raise RuntimeError(f"unreadable installed artifact {entry.name}: {exc}") from exc
+        artifacts[entry.relative_to(package_root).as_posix()] = hashlib.sha256(payload).hexdigest()
     return {
         "python": sys.version.split()[0],
         "version": getattr(pyboy, "__version__", None),
         "revision": getattr(pyboy, "__pokered_harness_revision__", None),
         "cython_compiled": bool(getattr(utils, "cython_compiled", False)),
         "modules": report,
+        "artifacts": artifacts,
     }
 
 

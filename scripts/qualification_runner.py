@@ -95,8 +95,26 @@ _EXTENSION_BACKED_MODULES = (
 )
 _NATIVE_PROBE = """\
 import hashlib, importlib, importlib.machinery, json, sys
+from pathlib import Path
 
 names = %(modules)r
+try:
+    import pyboy
+except Exception as exc:
+    print(json.dumps({"error": f"pyboy: {type(exc).__name__}: {exc}"}))
+    raise SystemExit(2)
+
+package_root = Path(pyboy.__file__).resolve().parent
+
+
+def _relative(filename):
+    path = Path(filename)
+    try:
+        return path.resolve().relative_to(package_root).as_posix()
+    except ValueError:
+        return path.name
+
+
 report = {}
 for name in names:
     try:
@@ -117,9 +135,29 @@ for name in names:
                 digest = hashlib.sha256(stream.read()).hexdigest()
         except OSError:
             digest = None
-    report[name] = {"kind": kind, "sha256": digest}
+    report[name] = {
+        "kind": kind,
+        "sha256": digest,
+        "artifact": _relative(filename) if filename else None,
+    }
 
-import pyboy
+# The complete installed output set, not only the named entry modules: a mixed
+# build can replace a compiled module the module list never names (for example
+# ``pyboy/core/cpu*.so``) while every listed module stays byte-identical.
+artifacts = {}
+for entry in sorted(package_root.rglob("*")):
+    if "__pycache__" in entry.parts or entry.suffix in (".pyc", ".pyo"):
+        continue
+    if not entry.is_file():
+        continue
+    try:
+        artifacts[entry.relative_to(package_root).as_posix()] = hashlib.sha256(
+            entry.read_bytes()
+        ).hexdigest()
+    except OSError:
+        print(json.dumps({"error": f"unreadable installed artifact: {entry.name}"}))
+        raise SystemExit(3)
+
 from pyboy import utils
 
 identity = {
@@ -128,6 +166,7 @@ identity = {
     "revision": getattr(pyboy, "__pokered_harness_revision__", None),
     "cython_compiled": bool(getattr(utils, "cython_compiled", False)),
     "modules": report,
+    "artifacts": artifacts,
 }
 fingerprint = hashlib.sha256(
     json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -629,6 +668,37 @@ def _iter_cgroup_paths(base: Path, relative: str | None) -> list[Path]:
     return paths
 
 
+def _cgroup_memory_limit(paths: list[Path], filename: str) -> tuple[int | None, bool]:
+    """Return the tightest finite memory limit for *paths* and its observability.
+
+    The second element is ``False`` when a limit file exists but could not be
+    read.  Admission must treat that as an unknown bound rather than as an
+    unlimited one, because a job admitted against an unknown limit can be
+    started with no headroom at all.
+    """
+
+    limits: list[int] = []
+    observable = True
+    for path in paths:
+        candidate = path / filename
+        if not candidate.exists():
+            continue
+        raw = _read_text(candidate)
+        if raw is None:
+            observable = False
+            continue
+        value = raw.strip()
+        if not value or value == "max" or not value.isdigit():
+            # ``max`` (cgroup v2) and the v1 sentinel mean this level imposes
+            # no finite limit; the walk continues to the other ancestors.
+            continue
+        number = int(value)
+        if number >= 1 << 60:
+            continue
+        limits.append(number)
+    return (min(limits) if limits else None), observable
+
+
 def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None) -> dict[str, Any]:
     """Read the cgroup facts for this process.
 
@@ -643,6 +713,8 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
     weight: int | None = None
     throttled: dict[str, int] | None = None
     relative: str | None = None
+    memory_limit_bytes: int | None = None
+    memory_limit_observable = True
 
     v2_relative = _cgroup_relative_path(None, cgroup_text)
     v2_paths = _iter_cgroup_paths(base, v2_relative)
@@ -692,6 +764,22 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
         stat_paths = v2_paths
         primary = v2_paths[0] if v2_paths else None
 
+    # The memory bound is read independently of the CPU controller: a hierarchy
+    # that exposes ``memory.max`` without a delegated ``cpu.max`` still bounds
+    # the allocation, and treating that as unbounded would admit a job the
+    # cgroup will kill.
+    if version == "v1":
+        memory_paths = _iter_cgroup_paths(
+            base / "memory", _cgroup_relative_path("memory", cgroup_text)
+        )
+        memory_filename = "memory.limit_in_bytes"
+    else:
+        memory_paths = v2_paths
+        memory_filename = "memory.max"
+    memory_limit_bytes, memory_limit_observable = _cgroup_memory_limit(
+        memory_paths, memory_filename
+    )
+
     for path in stat_paths:
         stat_raw = _read_text(path / "cpu.stat")
         if not stat_raw:
@@ -721,6 +809,8 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
         "cgroup_relative_path": relative,
         "cgroup_dir": cgroup_dir,
         "cgroup_member_pids": member_pids,
+        "memory_limit_bytes": memory_limit_bytes,
+        "memory_limit_observable": memory_limit_observable,
     }
 
 
@@ -809,7 +899,16 @@ def _cgroup_subtree_populated(directory: Path, seen: set[tuple[int, int]]) -> bo
     except OSError:
         return None
     for entry in entries:
-        if not entry.is_dir() or not _is_cgroup_directory(entry):
+        if not entry.is_dir():
+            continue
+        entry_is_cgroup = _is_cgroup_directory(entry)
+        if entry_is_cgroup is None:
+            # An unreadable nested directory cannot be classified.  Treating it
+            # as "not a cgroup" would silently drop a competing subtree, so the
+            # population of this subtree is unobservable and the caller must
+            # fail closed.
+            return None
+        if not entry_is_cgroup:
             continue
         nested = _cgroup_subtree_populated(entry, seen)
         if nested is None:
@@ -917,6 +1016,8 @@ class RunnerFacts:
     cpu_throttled: dict[str, int] | None = None
     memory_total_bytes: int | None = None
     memory_available_bytes: int | None = None
+    memory_limit_bytes: int | None = None
+    memory_limit_observable: bool = True
     load_average: list[float] | None = None
     psi_cpu_some_avg300: float | None = None
     repo_disk_free_bytes: int | None = None
@@ -1033,6 +1134,8 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
     facts.cpu_quota_cores = cgroup["cpu_quota_cores"]
     facts.cpu_weight = cgroup["cpu_weight"]
     facts.cpu_throttled = cgroup["cpu_throttled"]
+    facts.memory_limit_bytes = cgroup["memory_limit_bytes"]
+    facts.memory_limit_observable = cgroup["memory_limit_observable"]
     facts.psi_cpu_some_avg300 = _read_psi_cpu()
     return facts
 
@@ -1990,6 +2093,39 @@ def _verify_dedicated_reservation(
     )
 
 
+def _usable_memory_bytes(facts: RunnerFacts) -> tuple[int | None, str]:
+    """Return the memory this job can actually use, and how it was derived.
+
+    A host's ``MemTotal`` is the same on an idle host and a host with no free
+    memory, and it ignores any cgroup memory limit the allocation is placed
+    under.  The usable figure is therefore the tightest of the observable
+    bounds: host total, ``MemAvailable``, and the allocation/ancestor cgroup
+    limit.  A bound that cannot be observed is reported as unobservable instead
+    of being assumed away, so admission fails closed rather than admitting a
+    job against an unknown limit.
+    """
+
+    if facts.memory_total_bytes is None:
+        return None, "the host's total memory is not observable"
+    if facts.memory_available_bytes is None:
+        return None, "the memory available on this host is not observable"
+    if not facts.memory_limit_observable:
+        return None, "the allocation's cgroup memory limit could not be read"
+    bounds: dict[str, int] = {
+        "host-total": facts.memory_total_bytes,
+        "host-available": facts.memory_available_bytes,
+    }
+    if facts.memory_limit_bytes is not None:
+        bounds["cgroup-limit"] = facts.memory_limit_bytes
+        detail = "usable memory bytes (the lowest of host-total, host-available, cgroup-limit)"
+    else:
+        detail = (
+            "usable memory bytes (the lowest of host-total, host-available; "
+            "no finite cgroup memory limit is observable)"
+        )
+    return min(bounds.values()), detail
+
+
 def evaluate_resources(
     declaration: dict[str, Any], facts: RunnerFacts, repo_root: Path | None = None
 ) -> list[CheckResult]:
@@ -2164,15 +2300,13 @@ def evaluate_resources(
             )
         )
     else:
-        observed_memory = facts.memory_total_bytes
+        usable_memory, memory_detail = _usable_memory_bytes(facts)
         status = (
             "unsupported"
-            if observed_memory is None
-            else ("ok" if observed_memory >= declared_memory else "fail")
+            if usable_memory is None
+            else ("ok" if usable_memory >= declared_memory else "fail")
         )
-        results.append(
-            _result("memory", status, declared_memory, observed_memory, "total memory bytes")
-        )
+        results.append(_result("memory", status, declared_memory, usable_memory, memory_detail))
 
     declared_disk = int(declaration.get("disk_free_bytes_min") or 0)
     for name, observed, detail in (
@@ -2321,6 +2455,80 @@ _OWNED_PROCESSES: set[subprocess.Popen[str]] = set()
 # Descendants of an owned command that survived the group sweep.  While this is
 # non-empty the capacity is still in use and the lease must not be released.
 _LEFTOVER_OWNED_PIDS: set[int] = set()
+# A durable record of the command a lease is actually running.  It lives in the
+# job directory so a later ``--recover``/``--release`` process can identify the
+# job's own process group and session even after its holder died.
+_JOB_RUN_RECORD_NAME = "job-run.json"
+
+
+@dataclass(frozen=True)
+class CommandContainment:
+    """The observed containment outcome of one ``run_command`` call.
+
+    ``proven`` is the only claim a caller may act on.  It is true only when the
+    command's process group *and* every adopted descendant were observed gone;
+    a host that cannot adopt detached descendants reports ``proven=False`` even
+    when no survivor was seen, because an unobserved survivor cannot be ruled
+    out.
+    """
+
+    proven: bool
+    detail: str
+    adoption_active: bool
+    leftovers: tuple[int, ...] = ()
+
+
+_LAST_COMMAND_CONTAINMENT: CommandContainment | None = None
+
+
+def last_command_containment() -> CommandContainment | None:
+    """Return the containment outcome of the most recent ``run_command``."""
+
+    return _LAST_COMMAND_CONTAINMENT
+
+
+def _timeout_partial_streams(exc: subprocess.TimeoutExpired) -> tuple[str, str]:
+    """Return the child's output observed before a stream wait timed out.
+
+    ``subprocess.TimeoutExpired`` carries whatever ``communicate`` had read when
+    the deadline expired.  The previous behaviour replaced that with empty
+    strings, which discarded the command's own failure diagnostics whenever a
+    detached descendant kept the output pipe open past the deadline.
+    """
+
+    def decode(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", "replace")
+        return str(value)
+
+    raw_stdout = getattr(exc, "stdout", None)
+    if raw_stdout is None:
+        raw_stdout = getattr(exc, "output", None)
+    return decode(raw_stdout), decode(getattr(exc, "stderr", None))
+
+
+def _drain_after_termination(
+    process: subprocess.Popen[str], fallback: tuple[str, str] = ("", "")
+) -> tuple[str, str]:
+    """Collect a terminated command's streams without discarding partial output.
+
+    Retrying ``communicate`` after a timeout does not lose output, so the retry
+    normally returns everything the child wrote.  When the stream is still held
+    open the retry times out as well and its own partial snapshot is used; an
+    unreadable stream falls back to whatever was already captured.
+    """
+
+    try:
+        return process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        partial = _timeout_partial_streams(exc)
+        return partial if any(partial) else fallback
+    except (OSError, ValueError):
+        return fallback
+
+
 _SIGNAL_HANDLERS_INSTALLED = False
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
@@ -2740,6 +2948,7 @@ def run_command(
     cwd: Path,
     timeout: float | None = None,
     env: dict[str, str] | None = None,
+    on_start: Callable[[subprocess.Popen[str]], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run *command* under a deadline with owned-process cleanup.
 
@@ -2759,6 +2968,10 @@ def run_command(
     lease.  The original exit status and captured output are preserved either
     way.
 
+    *on_start*, when given, is called with the live ``Popen`` immediately after
+    the command has started, so a lease can persist durable job ownership
+    before the command outlives its holder.
+
     The sweeps run on the cancellation path too.  The installed signal handlers
     raise ``SystemExit`` from inside ``communicate``, so containment is not left
     to the normal-return path: a command interrupted by SIGINT/SIGTERM still
@@ -2767,12 +2980,17 @@ def run_command(
     """
 
     timeout = _command_timeout() if timeout is None else timeout
+    # The containment outcome is published for the caller that owns the lease,
+    # so the assignment below must reach the module global rather than a local.
+    global _LAST_COMMAND_CONTAINMENT
     timed_out = False
+    output_stream_held = False
     notes: list[str] = []
     group_leftovers: list[int] = []
     detached_leftovers: list[int] = []
     pending_error: BaseException | None = None
     with _adopted_descendants() as adoption:
+        adoption_active = adoption.active
         preexisting = set(_direct_child_pids(os.getpid()))
         try:
             process = subprocess.Popen(
@@ -2785,19 +3003,33 @@ def run_command(
                 **_process_group_options(),
             )
         except OSError as exc:
+            _LAST_COMMAND_CONTAINMENT = CommandContainment(
+                proven=True,
+                detail="the command could not be started, so no descendant exists",
+                adoption_active=adoption_active,
+            )
             return subprocess.CompletedProcess(command, 127, "", f"{type(exc).__name__}: {exc}")
         preexisting.discard(process.pid)
         _register_owned(process)
+        if on_start is not None:
+            on_start(process)
         try:
             try:
                 stdout, stderr = process.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _terminate_owned_process(process)
-                try:
-                    stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
-                except (subprocess.TimeoutExpired, OSError):
-                    stdout, stderr = "", ""
+            except subprocess.TimeoutExpired as exc:
+                # ``communicate`` waits for EOF as well as for the command to
+                # exit.  A descendant that inherited the output pipe keeps it
+                # open after the command itself finished, so this timeout is not
+                # by itself proof that the command ran too long.  Whatever the
+                # command wrote before the deadline is retained instead of being
+                # replaced by empty strings.
+                stdout, stderr = _timeout_partial_streams(exc)
+                if process.poll() is None:
+                    timed_out = True
+                    _terminate_owned_process(process)
+                else:
+                    output_stream_held = True
+                stdout, stderr = _drain_after_termination(process, (stdout, stderr))
             except (KeyboardInterrupt, SystemExit) as exc:
                 # A signal that interrupts the wait must not skip containment:
                 # collect the command's output opportunistically, tear the
@@ -2806,10 +3038,8 @@ def run_command(
                 pending_error = exc
                 _terminate_owned_process(process)
                 stdout, stderr = "", ""
-                with contextlib.suppress(
-                    KeyboardInterrupt, SystemExit, OSError, subprocess.TimeoutExpired
-                ):
-                    stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
+                with contextlib.suppress(KeyboardInterrupt, SystemExit):
+                    stdout, stderr = _drain_after_termination(process)
             except BaseException as exc:  # noqa: BLE001 - containment must run first
                 # A decoding failure (``UnicodeDecodeError``) or any other
                 # error raised while reading the child's streams must not skip
@@ -2821,8 +3051,8 @@ def run_command(
                 pending_error = exc
                 _terminate_owned_process(process)
                 stdout, stderr = "", ""
-                with contextlib.suppress(BaseException, OSError, subprocess.TimeoutExpired):
-                    stdout, stderr = process.communicate(timeout=_CHILD_TERMINATION_GRACE_SECONDS)
+                with contextlib.suppress(BaseException):
+                    stdout, stderr = _drain_after_termination(process)
         finally:
             _unregister_owned(process)
 
@@ -2830,7 +3060,7 @@ def run_command(
         # signal cannot leave an owned descendant holding the allocation.
         group_confirmed, group_leftovers = _terminate_process_group(process.pid)
         detached_confirmed, detached_leftovers = _contain_adopted_descendants(preexisting)
-        if not adoption.active:
+        if not adoption_active:
             notes.append(
                 "the runner could not become a child subreaper, so descendants that "
                 "detached into a new session could not be observed or contained; "
@@ -2840,6 +3070,31 @@ def run_command(
     leftovers = sorted(set(group_leftovers) | set(detached_leftovers))
     if not group_confirmed or not detached_confirmed:
         _LEFTOVER_OWNED_PIDS.update(leftovers)
+    containment_proven = bool(group_confirmed and detached_confirmed and adoption_active)
+    if not adoption_active:
+        containment_detail = (
+            "the runner could not become a child subreaper, so detached descendants "
+            "could not be observed or contained"
+        )
+    elif leftovers:
+        containment_detail = (
+            f"{len(leftovers)} owned descendant(s) survived containment "
+            "(" + ", ".join(str(pid) for pid in leftovers[:16]) + ")"
+        )
+    elif not group_confirmed:
+        containment_detail = "the command's process group still has live members"
+    elif not detached_confirmed:
+        containment_detail = "adopted descendants survived containment"
+    else:
+        containment_detail = (
+            "the command's process group and every adopted descendant were observed gone"
+        )
+    _LAST_COMMAND_CONTAINMENT = CommandContainment(
+        proven=containment_proven,
+        detail=containment_detail,
+        adoption_active=adoption_active,
+        leftovers=tuple(leftovers),
+    )
     if pending_error is not None:
         # The signal or interrupt still terminates the run, but only after the
         # descendant sweeps above have run; a survivor keeps the lease.
@@ -2848,6 +3103,11 @@ def run_command(
         notes.insert(
             0,
             f"command exceeded {timeout:g}s; its owned process group was terminated",
+        )
+    if output_stream_held:
+        notes.append(
+            "the command exited but a descendant kept its output stream open; "
+            "the captured output may be truncated"
         )
     if leftovers:
         notes.append(
@@ -3339,11 +3599,22 @@ def _native_build_evidence(
         problems.append("the installed runtime does not report compiled extensions")
     modules = identity.get("modules")
     modules = modules if isinstance(modules, dict) else {}
+    artifacts = identity.get("artifacts")
+    artifacts = artifacts if isinstance(artifacts, dict) else {}
+    if not artifacts:
+        problems.append(
+            "the installed runtime did not report its complete installed output set, "
+            "so a replaced compiled module could go undetected"
+        )
     for name in _EXTENSION_BACKED_MODULES:
         entry = modules.get(name)
         kind = entry.get("kind") if isinstance(entry, dict) else None
         if kind != "cython":
             problems.append(f"{name} is not an installed extension")
+        artifact = entry.get("artifact") if isinstance(entry, dict) else None
+        digest = entry.get("sha256") if isinstance(entry, dict) else None
+        if not isinstance(artifact, str) or artifacts.get(artifact) != digest:
+            problems.append(f"{name} is not covered by the reported complete installed output set")
     if problems:
         results.append(
             _result(
@@ -4057,6 +4328,152 @@ def _remove_allocation_state(descriptor_path: Path) -> None:
         pass
 
 
+def _read_job_run_record(job_dir: Path) -> tuple[dict[str, Any] | None, str]:
+    """Return the durable record of the job a lease launched, if any.
+
+    ``(None, "")`` means the lease never launched a job.  A non-empty error
+    means a record exists but cannot be trusted, which callers must treat as
+    unobservable rather than as "no job ran".
+    """
+
+    path = job_dir / _JOB_RUN_RECORD_NAME
+    if not path.exists():
+        return None, ""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"the recorded job ownership could not be read: {exc}"
+    if not isinstance(document, dict):
+        return None, "the recorded job ownership is not a JSON object"
+    return document, ""
+
+
+def _write_job_run_record(
+    job_dir: Path, process: subprocess.Popen[str], *, containment_confirmed: bool
+) -> None:
+    """Persist verifiable ownership of the job running under a lease.
+
+    The in-process leftover pid set cannot survive the holder's death, so a
+    later ``--recover`` has no way to tell whether a dead holder left a
+    descendant consuming the allocation.  The record ties the job directory to
+    the launched job's own pid/start time and its process group/session, and
+    ``containment_confirmed`` is set only after the runner proved every
+    descendant was gone.
+    """
+
+    try:
+        process_group = os.getpgid(process.pid)
+    except (OSError, AttributeError):
+        process_group = process.pid
+    try:
+        session = os.getsid(process.pid)
+    except (OSError, AttributeError):
+        session = process.pid
+    record = {
+        "record_version": 1,
+        "job_pid": process.pid,
+        "job_start_time": _process_start_time(process.pid),
+        "job_process_group": process_group,
+        "job_session": session,
+        "containment_confirmed": containment_confirmed,
+        "recorded_at": _iso_now(),
+    }
+    path = job_dir / _JOB_RUN_RECORD_NAME
+    try:
+        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError:
+        # The lease is still valid; the run path reports the missing record as
+        # unobservable ownership rather than silently claiming containment.
+        pass
+
+
+def _update_job_run_record(job_dir: Path, *, containment_confirmed: bool) -> None:
+    """Record whether the launched job's descendant containment was proven."""
+
+    record, error = _read_job_run_record(job_dir)
+    if record is None or error:
+        return
+    record["containment_confirmed"] = containment_confirmed
+    record["confirmed_at"] = _iso_now()
+    path = job_dir / _JOB_RUN_RECORD_NAME
+    try:
+        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError:
+        # An unreadable record already fails closed in recovery; rewriting it is
+        # best effort so a missing marker can never be mistaken for containment.
+        pass
+
+
+def _confirm_recorded_job_containment(
+    job_dir: Path, *, contain_adopted: bool = True
+) -> tuple[bool, str]:
+    """Terminate and positively confirm the recorded job's descendants are gone.
+
+    Recovery and release both destroy the lease state, so neither may proceed on
+    an assumption.  The recorded job's process group/session is swept, adopted
+    orphans are contained, and a record that never confirmed containment keeps
+    the lease blocked unless *this* process can positively adopt and account for
+    the orphans.
+    """
+
+    record, error = _read_job_run_record(job_dir)
+    if error:
+        return False, error
+    if record is not None:
+        job_pid = record.get("job_pid")
+        start_time = record.get("job_start_time")
+        if (
+            isinstance(job_pid, int)
+            and not isinstance(job_pid, bool)
+            and job_pid > 0
+            and _pid_alive(job_pid)
+            and _process_start_time(job_pid) == start_time
+        ):
+            return False, f"the recorded qualification job (pid {job_pid}) is still running"
+        groups = {
+            value
+            for value in (record.get("job_process_group"), record.get("job_session"))
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        }
+        for pgid in sorted(groups):
+            confirmed, survivors = _terminate_process_group(pgid)
+            if not confirmed:
+                return (
+                    False,
+                    "the recorded qualification job's process group still has live members: "
+                    + ", ".join(str(pid) for pid in survivors[:16]),
+                )
+    if contain_adopted:
+        adopted_confirmed, adopted_survivors = _contain_adopted_descendants()
+        if not adopted_confirmed:
+            return (
+                False,
+                "descendants of the recorded holder survived containment: "
+                + ", ".join(str(pid) for pid in adopted_survivors[:16]),
+            )
+    if record is not None and not record.get("containment_confirmed"):
+        if not contain_adopted:
+            return (
+                False,
+                (
+                    "the recorded qualification job never confirmed descendant containment; "
+                    "refusing to release the lease while its capacity may still be in use"
+                ),
+            )
+        if _child_subreaper_state() != 1:
+            return (
+                False,
+                (
+                    "the recorded qualification job never confirmed descendant containment "
+                    "and this process cannot adopt its orphans; refusing to report the "
+                    "allocation free"
+                ),
+            )
+    return True, ""
+
+
 def _terminate_and_confirm(pid: int) -> tuple[bool, str]:
     """Terminate an owned holder and positively confirm it is gone.
 
@@ -4171,6 +4588,11 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
     if holder == os.getpid():
         if lock_path is not None and not _lock_owned_by_this_process(lock_path):
             return "blocked", "this process does not hold the recorded allocation lock"
+        recorded_ok, recorded_detail = _confirm_recorded_job_containment(
+            descriptor_path.parent, contain_adopted=False
+        )
+        if not recorded_ok:
+            return "blocked", recorded_detail
         _close_held_lease_descriptors(descriptor.get("lock_identity"))
         if lock_path is not None and _lock_owned_by_this_process(lock_path):
             return "blocked", "this process still holds the allocation lock after releasing it"
@@ -4251,6 +4673,23 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
         return (
             "blocked",
             "the lease lock is held by an unrecognized process; refusing to remove state",
+        )
+    # A dead holder is not evidence that its capacity is free: it may have left
+    # a detached descendant consuming the allocation.  The durable job record
+    # and the adopted-orphan sweep must both positively confirm otherwise before
+    # the state is deleted and the allocation reported free.
+    confirmed, detail = _confirm_recorded_job_containment(descriptor_path.parent)
+    if not confirmed:
+        return "blocked", detail
+    live_leftovers = _sweep_leftover_owned_processes()
+    if live_leftovers:
+        return (
+            "blocked",
+            (
+                "owned descendants are still running after containment "
+                f"({len(live_leftovers)} pid(s)): "
+                + ", ".join(str(pid) for pid in live_leftovers[:16])
+            ),
         )
     _remove_allocation_state(descriptor_path)
     return "ok", "removed stale allocation state whose owner is gone"
@@ -4356,16 +4795,40 @@ def _do_reserve(
     ):
         child.mkdir(parents=True, exist_ok=True)
         child_env[name] = str(child)
+
+    # Durable job ownership is written before the command runs, so a holder that
+    # dies mid-run still leaves a verifiable record of what it launched.
+    def _record_start(process: subprocess.Popen[str]) -> None:
+        _write_job_run_record(job_dir, process, containment_confirmed=False)
+
     process = run_command(
         command,
         repo_root,
         timeout=_qualification_timeout(getattr(args, "run_timeout", None)),
         env=child_env,
+        on_start=_record_start,
     )
+    containment = last_command_containment()
+    containment_proven = containment is not None and containment.proven
+    _update_job_run_record(job_dir, containment_confirmed=containment_proven)
     if process.stdout:
         print(process.stdout, end="")
     if process.stderr:
         print(process.stderr, end="", file=sys.stderr)
+    if not containment_proven:
+        detail = (
+            containment.detail
+            if containment is not None
+            else "the command's containment outcome was not observed"
+        )
+        return (
+            "blocked",
+            (
+                "the leased command's descendant containment could not be proven "
+                f"({detail}); the lease is kept because the allocation may still be in use"
+            ),
+            extra,
+        )
     release_status, _release_message = _release_allocation(declaration, repo_root)
     if release_status != "ok":
         return "fail", f"leased command exited {process.returncode}; {_release_message}", extra

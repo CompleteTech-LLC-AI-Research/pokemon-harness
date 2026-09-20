@@ -107,15 +107,27 @@ def _make_declaration_base():
 def native_identity() -> dict:
     """The installed-runtime identity a genuine native build would report."""
 
+    artifacts = {
+        f"{name.replace('.', '/')}.cpython-311-x86_64-linux-gnu.so": "d" * 64
+        for name in runner._EXTENSION_BACKED_MODULES
+    }
+    # The installed output set is wider than the named entry modules: a mixed
+    # build can replace a compiled module this list never names.
+    artifacts["core/cpu.cpython-311-x86_64-linux-gnu.so"] = "a" * 64
     return {
         "python": "3.11.9",
         "version": "2.7.0",
         "revision": "c565df66c3731fad2856169a90f6bbec99925915",
         "cython_compiled": True,
         "modules": {
-            name: {"kind": "cython", "sha256": "d" * 64}
+            name: {
+                "kind": "cython",
+                "sha256": "d" * 64,
+                "artifact": f"{name.replace('.', '/')}.cpython-311-x86_64-linux-gnu.so",
+            }
             for name in runner._EXTENSION_BACKED_MODULES
         },
+        "artifacts": artifacts,
     }
 
 
@@ -545,6 +557,111 @@ def test_evaluate_resources_fails_on_insufficient_memory(tmp_path: Path):
     declaration, facts = held_reservation(tmp_path, "cgroup-quota", memory_bytes=10**15)
     results = runner.evaluate_resources(declaration, facts, tmp_path)
     assert statuses(results)["memory"] == "fail"
+
+
+def test_evaluate_resources_memory_uses_available_not_only_total(tmp_path: Path):
+    """A host's ``MemTotal`` is not evidence the job can allocate that much.
+
+    The round-9 finding admitted an 8 GiB requirement against a host reporting
+    1 byte available, because admission compared ``memory_total_bytes`` only.
+    """
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    facts.memory_total_bytes = 8 * 1024**3
+    facts.memory_available_bytes = 1
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    memory = next(item for item in results if item.name == "memory")
+    assert memory.status == "fail"
+    assert memory.observed == 1
+
+
+def test_evaluate_resources_memory_respects_the_allocation_cgroup_limit(tmp_path: Path):
+    """A cgroup limit below the declared requirement must fail admission."""
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    facts.memory_total_bytes = 64 * 1024**3
+    facts.memory_available_bytes = 32 * 1024**3
+    facts.memory_limit_bytes = 2 * 1024**3
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    memory = next(item for item in results if item.name == "memory")
+    assert memory.status == "fail"
+    assert memory.observed == 2 * 1024**3
+    assert "cgroup-limit" in memory.detail
+
+
+def test_evaluate_resources_memory_fails_closed_on_unreadable_limit(tmp_path: Path):
+    """An unreadable cgroup limit is unknown capacity, not unlimited capacity."""
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    facts.memory_total_bytes = 64 * 1024**3
+    facts.memory_available_bytes = 32 * 1024**3
+    facts.memory_limit_observable = False
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    memory = next(item for item in results if item.name == "memory")
+    assert memory.status == "unsupported"
+    assert "could not be read" in memory.detail
+
+
+def test_cgroup_memory_limit_reads_the_tightest_ancestor_limit(tmp_path: Path):
+    """``memory.max`` is walked across ancestors and the tightest finite wins."""
+
+    root = tmp_path / "cgroup"
+    leaf = root / "user.slice" / "session.scope"
+    leaf.mkdir(parents=True)
+    (root / "memory.max").write_text("max\n", encoding="utf-8")
+    (root / "user.slice" / "memory.max").write_text(str(4 * 1024**3) + "\n", encoding="utf-8")
+    (leaf / "memory.max").write_text(str(2 * 1024**3) + "\n", encoding="utf-8")
+    paths = runner._iter_cgroup_paths(root, "/user.slice/session.scope")
+    limit, observable = runner._cgroup_memory_limit(paths, "memory.max")
+    assert observable is True
+    assert limit == 2 * 1024**3
+
+
+def test_cgroup_memory_limit_reports_an_unreadable_level(tmp_path: Path, monkeypatch):
+    """A limit file that exists but cannot be read must not look like ``max``."""
+
+    root = tmp_path / "cgroup"
+    leaf = root / "user.slice" / "session.scope"
+    leaf.mkdir(parents=True)
+    (leaf / "memory.max").write_text(str(2 * 1024**3) + "\n", encoding="utf-8")
+    paths = runner._iter_cgroup_paths(root, "/user.slice/session.scope")
+    real_read_text = runner._read_text
+
+    def unreadable(path: Path) -> str | None:
+        if path.name == "memory.max" and path.parent == leaf:
+            return None
+        return real_read_text(path)
+
+    monkeypatch.setattr(runner, "_read_text", unreadable)
+    limit, observable = runner._cgroup_memory_limit(paths, "memory.max")
+    assert observable is False
+    assert limit is None
+
+
+def test_read_cgroup_facts_reports_the_memory_bound(tmp_path: Path):
+    """The v2 walk must publish both the limit and its observability."""
+
+    base = tmp_path / "cgroup"
+    leaf = base / "user.slice" / "session.scope"
+    leaf.mkdir(parents=True)
+    (leaf / "cpu.max").write_text("200000 100000\n", encoding="utf-8")
+    (base / "user.slice" / "memory.max").write_text(str(6 * 1024**3) + "\n", encoding="utf-8")
+    facts = runner._read_cgroup_facts(base, "0::/user.slice/session.scope\n")
+    assert facts["cgroup_version"] == "v2"
+    assert facts["memory_limit_bytes"] == 6 * 1024**3
+    assert facts["memory_limit_observable"] is True
+
+
+def test_read_cgroup_facts_bounds_memory_without_a_cpu_controller(tmp_path: Path):
+    """A memory-only hierarchy still bounds admission when ``cpu.max`` is absent."""
+
+    base = tmp_path / "cgroup"
+    leaf = base / "user.slice" / "session.scope"
+    leaf.mkdir(parents=True)
+    (leaf / "memory.max").write_text(str(3 * 1024**3) + "\n", encoding="utf-8")
+    facts = runner._read_cgroup_facts(base, "0::/user.slice/session.scope\n")
+    assert facts["cgroup_version"] == "unavailable"
+    assert facts["memory_limit_bytes"] == 3 * 1024**3
 
 
 def test_evaluate_resources_fails_on_insufficient_disk(tmp_path: Path):
@@ -1033,6 +1150,121 @@ def test_cli_setup_prepares_private_job_directory(monkeypatch, capsys, tmp_path:
     assert (job_dir / "evidence").is_dir()
 
 
+_FAKE_PYBOY_SOURCES = {
+    "__init__.py": '__version__ = "2.7.0"\n__pokered_harness_revision__ = "' + "c" * 40 + '"\n',
+    "pyboy.py": "from pyboy import utils  # noqa: F401\n",
+    "utils.py": "cython_compiled = True\n",
+    "link.py": "LINK = True\n",
+    "core/__init__.py": "",
+    "core/mb.py": "MB = True\n",
+    "core/serial.py": "SERIAL = True\n",
+    "core/cpu.py": "CPU = True\n",
+}
+
+
+def _write_fake_pyboy(root: Path) -> Path:
+    """Create a stand-in installed ``pyboy`` package for the native probe."""
+
+    package = root / "pyboy"
+    for relative, content in _FAKE_PYBOY_SOURCES.items():
+        path = package / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    return package
+
+
+def _run_native_probe(fake_root: Path, cwd: Path) -> dict:
+    """Execute the real probe script against the stand-in installed runtime."""
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(fake_root)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    probe = runner._NATIVE_PROBE % {"modules": runner._RUNTIME_MODULES}
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return json.loads(completed.stdout)
+
+
+def test_native_probe_covers_the_complete_installed_output_set(tmp_path: Path):
+    """A compiled module the module list never names must change the identity.
+
+    The round-9 finding mutated ``pyboy.core.cpu`` inside an otherwise identical
+    installed runtime.  The reported identity and fingerprint did not change,
+    because only the six named entry modules were hashed, so a mixed build could
+    be admitted as a consistent one.
+    """
+
+    fake_root = tmp_path / "site"
+    _write_fake_pyboy(fake_root)
+    identity = _run_native_probe(fake_root, tmp_path)["identity"]
+    covered = identity["artifacts"]
+    assert "core/cpu.py" in covered
+    for name in runner._RUNTIME_MODULES:
+        entry = identity["modules"][name]
+        assert covered[entry["artifact"]] == entry["sha256"]
+
+    original = _run_native_probe(fake_root, tmp_path)
+    (fake_root / "pyboy" / "core" / "cpu.py").write_text("CPU = False\n", encoding="utf-8")
+    mutated = _run_native_probe(fake_root, tmp_path)
+    assert mutated["identity"]["artifacts"]["core/cpu.py"] != covered["core/cpu.py"]
+    assert mutated["fingerprint"] != original["fingerprint"]
+
+
+def test_native_probe_and_bootstrap_publish_the_same_artifact_set(tmp_path: Path):
+    """Both identity producers must describe the installed output set identically."""
+
+    fake_root = tmp_path / "site"
+    _write_fake_pyboy(fake_root)
+    probe_identity = _run_native_probe(fake_root, tmp_path)["identity"]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(fake_root)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    code = (
+        "import json, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import bootstrap_pyboy\n"
+        "print(json.dumps(bootstrap_pyboy._runtime_identity()))\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", code, str(REPO_ROOT / "scripts")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    bootstrap_identity = json.loads(completed.stdout)
+    assert bootstrap_identity["artifacts"] == probe_identity["artifacts"]
+    assert runner._native_build_fingerprint(bootstrap_identity) == runner._native_build_fingerprint(
+        probe_identity
+    )
+
+
+def test_native_build_evidence_rejects_uncovered_extension_module(tmp_path: Path, monkeypatch):
+    """An identity whose artifact map misses a named extension is rejected."""
+
+    monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
+    declaration = make_declaration()
+    with_native_evidence(declaration, tmp_path)
+    identity = native_identity()
+    del identity["artifacts"]["pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"]
+    fingerprint = runner._native_build_fingerprint(identity)
+    with_native_evidence(declaration, tmp_path, fingerprint=fingerprint, identity=identity)
+    probe_payload = _probe_payload(fingerprint, identity)
+    fake_runner, _calls = _prerequisite_runner(probe_payload)
+    results = runner._native_build_evidence(declaration, tmp_path, fake_runner)
+    status = statuses(results)["native-runtime-fingerprint"]
+    assert status == "fail"
+
+
 def test_cli_reserve_run_holds_and_releases_lease(monkeypatch, capsys, tmp_path: Path):
     if not _LOCK_OBSERVATION_SUPPORTED:
         pytest.skip("kernel lock table is not observable in this sandbox")
@@ -1109,6 +1341,128 @@ def test_recover_keeps_active_lease(tmp_path: Path):
     status, _message = runner._recover_allocation(declaration, tmp_path)
     assert status == "fail"
     assert descriptor_path.exists()
+
+
+class _StubProcess:
+    """The minimum of ``Popen`` that durable job ownership needs to record."""
+
+    def __init__(self, pid: int):
+        self.pid = pid
+
+
+def _stale_job_dir(tmp_path: Path, record: dict | None) -> tuple[dict, Path, Path]:
+    """Build a stale lease whose holder is gone, optionally with a job record."""
+
+    job_dir = tmp_path / "stale-job"
+    job_dir.mkdir()
+    os.chmod(job_dir, 0o700)
+    lock_path = job_dir / "allocation.lock"
+    lock_path.write_text("", encoding="utf-8")
+    descriptor_path = job_dir / "allocation.json"
+    descriptor_path.write_text(
+        json.dumps(
+            {
+                "holder_pid": 2**31 - 1,
+                "holder_start_time": "0",
+                "lock_path": str(lock_path),
+                "lock_identity": runner._lock_identity(lock_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    if record is not None:
+        (job_dir / runner._JOB_RUN_RECORD_NAME).write_text(json.dumps(record), encoding="utf-8")
+    declaration = make_declaration(
+        reservation={
+            "allocation_id": "test-runner",
+            "job_dir": str(job_dir),
+            "descriptor_path": str(descriptor_path),
+            "descriptor_sha256": "a" * 64,
+        }
+    )
+    return declaration, descriptor_path, job_dir
+
+
+def _job_record(**overrides) -> dict:
+    record = {
+        "record_version": 1,
+        "job_pid": 2**31 - 1,
+        "job_start_time": "0",
+        "job_process_group": 2**31 - 1,
+        "job_session": 2**31 - 1,
+        "containment_confirmed": True,
+        "recorded_at": "2026-01-01T00:00:00Z",
+    }
+    record.update(overrides)
+    return record
+
+
+def test_recover_refuses_while_the_recorded_job_still_runs(tmp_path: Path):
+    """A dead holder is not free capacity while its recorded job is alive."""
+
+    record = _job_record(
+        job_pid=os.getpid(),
+        job_start_time=runner._process_start_time(os.getpid()),
+        job_process_group=os.getpid(),
+        job_session=os.getpid(),
+    )
+    declaration, descriptor_path, _job_dir = _stale_job_dir(tmp_path, record)
+    status, message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert "still running" in message
+    assert descriptor_path.exists()
+
+
+def test_recover_refuses_unconfirmed_containment_it_cannot_verify(tmp_path: Path, monkeypatch):
+    """A record that never proved containment keeps the lease unless proven now."""
+
+    declaration, descriptor_path, job_dir = _stale_job_dir(
+        tmp_path, _job_record(containment_confirmed=False)
+    )
+    monkeypatch.setattr(runner, "_child_subreaper_state", lambda: 0)
+    monkeypatch.setattr(runner, "_contain_adopted_descendants", lambda *a, **k: (True, []))
+    status, message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert "never confirmed descendant containment" in message
+    assert descriptor_path.exists()
+    assert (job_dir / runner._JOB_RUN_RECORD_NAME).exists()
+
+
+def test_recover_refuses_when_adopted_descendants_survive(tmp_path: Path, monkeypatch):
+    """An orphaned survivor keeps the lease even when the holder is gone."""
+
+    declaration, descriptor_path, _job_dir = _stale_job_dir(tmp_path, _job_record())
+    monkeypatch.setattr(runner, "_contain_adopted_descendants", lambda *a, **k: (False, [4242]))
+    status, message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert "4242" in message
+    assert descriptor_path.exists()
+
+
+def test_recover_removes_state_for_a_confirmed_contained_job(tmp_path: Path, monkeypatch):
+    """A recorded, confirmed, no-longer-running job releases the stale state."""
+
+    declaration, descriptor_path, _job_dir = _stale_job_dir(tmp_path, _job_record())
+    monkeypatch.setattr(runner, "_contain_adopted_descendants", lambda *a, **k: (True, []))
+    status, message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "ok", message
+    assert not descriptor_path.exists()
+
+
+def test_release_refuses_when_the_job_record_never_confirmed_containment(tmp_path: Path):
+    """The recorded holder only releases a lease it proved was contained."""
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    job_dir = Path(declaration["reservation"]["job_dir"])
+    (job_dir / runner._JOB_RUN_RECORD_NAME).write_text(
+        json.dumps(_job_record(containment_confirmed=False)), encoding="utf-8"
+    )
+    status, message = runner._release_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert "never confirmed descendant containment" in message
+    assert Path(declaration["reservation"]["descriptor_path"]).exists()
 
 
 def rewrite_descriptor(declaration: dict, changes: dict) -> None:
@@ -1323,6 +1677,64 @@ def test_run_command_timeout_contains_detached_grandchild(tmp_path: Path):
     assert pidfile.exists()
     detached = int(pidfile.read_text(encoding="utf-8"))
     assert _wait_for_dead(detached)
+
+
+def test_run_command_retains_output_when_a_descendant_holds_the_stream(tmp_path: Path):
+    """Returning 124 with empty output hid the command's own diagnostics.
+
+    A detached descendant that inherits the output pipe keeps it open after the
+    command exits, so both ``communicate`` calls can raise ``TimeoutExpired``.
+    The round-9 finding replaced the partial output captured by the first
+    timeout with empty strings and reported 124 for a command that exited 7.
+    """
+
+    runner._LAST_COMMAND_CONTAINMENT = None
+    code = (
+        "import subprocess, sys\n"
+        "subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        "    start_new_session=True,\n"
+        ")\n"
+        "print('diagnostic: stdout retained')\n"
+        "sys.stderr.write('diagnostic: stderr retained\\n')\n"
+        "sys.exit(7)\n"
+    )
+    process = runner.run_command([sys.executable, "-c", code], tmp_path, timeout=2.0)
+    assert process.returncode == 7, process
+    assert "diagnostic: stdout retained" in process.stdout
+    assert "diagnostic: stderr retained" in process.stderr
+    assert "kept its output stream open" in process.stderr
+    containment = runner.last_command_containment()
+    assert containment is not None
+    assert containment.proven is True
+
+
+def test_run_command_publishes_proven_containment(tmp_path: Path):
+    """A contained command publishes the outcome its lease depends on."""
+
+    runner._LAST_COMMAND_CONTAINMENT = None
+    process = runner.run_command([sys.executable, "-c", "pass"], tmp_path, timeout=30)
+    assert process.returncode == 0
+    containment = runner.last_command_containment()
+    assert containment is not None
+    assert containment.proven is True
+    assert containment.adoption_active is True
+    assert containment.leftovers == ()
+
+
+def test_run_command_reports_unproven_containment_without_a_subreaper(tmp_path: Path, monkeypatch):
+    """Without subreaper adoption a detached survivor cannot be ruled out."""
+
+    monkeypatch.setattr(runner, "_child_subreaper_state", lambda: 0)
+    monkeypatch.setattr(runner, "_set_child_subreaper", lambda enabled: False)
+    runner._LAST_COMMAND_CONTAINMENT = None
+    process = runner.run_command([sys.executable, "-c", "pass"], tmp_path, timeout=30)
+    assert process.returncode == 0
+    containment = runner.last_command_containment()
+    assert containment is not None
+    assert containment.proven is False
+    assert containment.adoption_active is False
+    assert "subreaper" in containment.detail
 
 
 def test_run_command_does_not_touch_preexisting_children(tmp_path: Path):
@@ -2242,9 +2654,15 @@ def test_reserve_run_configures_private_paths_and_timeout(monkeypatch, tmp_path:
     job_dir = tmp_path / "job"
     captured: dict = {}
 
-    def fake_run(command, cwd, timeout=None, env=None):
+    def fake_run(command, cwd, timeout=None, env=None, on_start=None):
         captured["timeout"] = timeout
         captured["env"] = env
+        captured["on_start"] = on_start
+        # ``_do_reserve`` only releases the lease on a *proven* containment
+        # outcome, so the stub publishes one exactly as ``run_command`` does.
+        runner._LAST_COMMAND_CONTAINMENT = runner.CommandContainment(
+            proven=True, detail="stub command contained", adoption_active=True
+        )
         return Completed(0, "", "")
 
     monkeypatch.setattr(runner, "run_command", fake_run)
@@ -2264,8 +2682,58 @@ def test_reserve_run_configures_private_paths_and_timeout(monkeypatch, tmp_path:
     )
     assert status == "ok", message
     assert captured["timeout"] == 5.0
+    assert callable(captured["on_start"])
     assert captured["env"]["TMPDIR"] == str(job_dir / "tmp")
     assert captured["env"]["POKERED_QUALIFICATION_EVIDENCE_DIR"] == str(job_dir / "evidence")
+
+
+def test_reserve_run_keeps_the_lease_when_containment_is_unproven(monkeypatch, tmp_path: Path):
+    """A run whose descendant containment was not proven must not release.
+
+    The durable job record is written before the command can outlive its
+    holder, and an unproven outcome keeps the lease so a later ``--recover``
+    still has the state it needs to contain the survivors.
+    """
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration = make_declaration()
+    declaration["reservation"]["host_lock_path"] = str(tmp_path / "host.lock")
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    job_dir = tmp_path / "job"
+    recorded: dict = {}
+
+    def fake_run(command, cwd, timeout=None, env=None, on_start=None):
+        assert on_start is not None, "durable ownership must be recorded before the run"
+        on_start(_StubProcess(os.getpid()))
+        recorded["record"] = json.loads(
+            (job_dir / runner._JOB_RUN_RECORD_NAME).read_text(encoding="utf-8")
+        )
+        runner._LAST_COMMAND_CONTAINMENT = runner.CommandContainment(
+            proven=False, detail="stub adoption unavailable", adoption_active=False
+        )
+        return Completed(0, "ran", "")
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+    monkeypatch.setattr(
+        runner,
+        "prerequisite_checks",
+        lambda decl, root: [runner.CheckResult("stub", "ok", 1, 1, "")],
+    )
+    monkeypatch.setattr(
+        runner,
+        "evaluate_resources",
+        lambda decl, facts, root: [runner.CheckResult("stub", "ok", 1, 1, "")],
+    )
+    args = argparse.Namespace(job_dir=job_dir, run=[sys.executable, "-c", "pass"], run_timeout=5.0)
+    status, message, _extra = runner._do_reserve(
+        args, declaration, declaration_path, tmp_path, make_facts()
+    )
+    assert status == "blocked", message
+    assert "could not be proven" in message
+    assert recorded["record"]["containment_confirmed"] is False
+    assert (job_dir / "allocation.json").exists(), "the unproven lease was released"
 
 
 def test_scrub_absolute_paths_redacts_build_diagnostics():

@@ -779,22 +779,24 @@ capacity-qualified or release-qualified result. Retaining a passing functional
 result beside an explicit capacity-blocked status is the honest state; a
 prepared runner and a green functional matrix are still not a passing gate.
 
-### 3c. Operator-supplied allocation declaration (contract, not evidence)
+### 3c. Required allocation declaration shape (not evidence)
 
-The delivery contract for issue #85 assumes an operator provisions a writable
-exclusive allocation. To make that contract concrete and checkable, a realistic
-declaration is retained as an **operator-supplied** artifact:
+Issue #85's acceptance requires capacities measured under an operator-provisioned
+writable exclusive allocation. No such allocation exists on this host, so a
+representative declaration *shape* is retained only to make the requirement
+checkable. It is a synthetic example, not an operator-supplied artifact and not
+reservation evidence:
 
 ```
 release-evidence/feature-qualification/pr112-allocation/operator-allocation.json
 ```
 
-It is synthesized for the declared `cgroup-quota` mechanism (a writable
-`cgroup2` leaf with `cpu.max`, the operator's pinned source/native interpreters,
-and the operator's ROM/fixture roots) and it is *not* host-observed reservation
-evidence. It is validated the only way this host allows, by running the
-runner's fail-closed admission against it; every fact the host cannot observe is
-reported as `unsupported`/`fail` rather than assumed:
+It describes the declared `cgroup-quota` mechanism (a writable `cgroup2` leaf
+with `cpu.max`, the operator's pinned source/native interpreters, and the
+operator's ROM/fixture roots) and it is *not* host-observed reservation
+evidence. The only thing this host can do with it is run the runner's
+fail-closed admission against it; every fact the host cannot observe is reported
+as `unsupported`/`fail` rather than assumed:
 
 ```bash
 python scripts/qualification_runner.py --check \
@@ -806,23 +808,24 @@ The sanitized terminal result is retained beside it as `check-report.json`. On
 this host the check ends `overall = fail`, with the allocation-specific rows
 (`cpu-quota`, `reservation-evidence`, `shm`, the operator interpreter roots, and
 the pinned native fingerprint) all rejected. That outcome is the correct,
-fail-closed reading: the declaration documents what an operator must provide,
-and the runner refuses to promote an unobserved allocation to a reservation.
-Until an operator supplies the real allocation described here, the source/native
-comparison and the nine-orientation timed matrix required by issue #85 remain
-**BLOCKED**, and no result from the shared host may be promoted to a
+fail-closed reading: the example documents what an operator must provide, and
+the runner refuses to promote an unobserved allocation to a reservation. The
+example is not a substitute for the allocation, and nothing in this repository
+claims one. Until an operator provisions the real allocation described here, the
+source/native comparison and the nine-orientation timed matrix required by issue
+#85 remain **BLOCKED**, and no result from the shared host may be promoted to a
 capacity-qualified or release-qualified outcome.
 
 #### 3c-1. Why this host cannot supply the allocation itself
 
 The two acceptance criteria that require an *available* allocation and the
 comparison/matrix executed *under* it are unmet because supplying that
-allocation needs host privilege this job does not have. The delivery contract
-for this work item accepts an operator-supplied declaration validated against
-observable facts in place of an observed reservation, and requires every fact
-the host cannot observe to be reported `unsupported`/`blocked` rather than
-assumed; §3b and §3c are that record. The blocking facts are observable and
-sanitized:
+allocation needs host privilege this job does not have. No substitute satisfies
+those criteria and none is claimed here; §3b and §3c record the blocking facts
+and the fail-closed admission the runner performs against the declaration an
+operator must supply. Neither record is reservation evidence, and the runner
+reports every fact it cannot observe as `unsupported`/`blocked` rather than
+assuming it. The blocking facts are observable and sanitized:
 
 | Provisioning prerequisite | Observed on this host | Effect |
 | --- | --- | --- |
@@ -836,12 +839,11 @@ sanitized:
 The comparison and the nine-orientation matrix were nonetheless executed and
 their sanitized terminal results are retained at
 `release-evidence/feature-qualification/pr112-acceptance-409ba11/`, where they
-are read as functional acceptance only. Issue #85 itself reserves provisioning
-(paid infrastructure or ROM-derived uploads) as separate operator
-authorization, so a job that does not own the host cannot turn these criteria
-green: their status stays **BLOCKED** until an operator provisions the
-allocation declared in §3c. Nothing here may be used to promote a shared-host
-result to capacity qualification.
+are read as functional acceptance only. Because the job does not own the host,
+it cannot turn these criteria green: their status stays **BLOCKED** until an
+operator provisions the allocation declared in §3c, which is an action outside
+this job's authority. Nothing here may be used to promote a shared-host result
+to capacity qualification.
 
 ## 4. Run the evidence tiers
 
