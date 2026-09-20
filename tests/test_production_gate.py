@@ -497,7 +497,9 @@ def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert len(REMOTE_VERSION_PAIR_NODEIDS) == 9
     assert len(REMOTE_REVERSED_ROLE_NODEIDS) == 6
     assert len(LOCAL_VARIANT_NODEIDS) == 9
-    assert len(TIER_REQUIRED_NODEIDS["trade"]) == 19
+    # 19 pre-existing strict trade rows plus the 14 real-ROM MCP stdio rows
+    # declared by tests/test_mcp_trade_records_rom.py.
+    assert len(TIER_REQUIRED_NODEIDS["trade"]) == 33
     assert len(TIER_REQUIRED_NODEIDS["battle"]) == 19
     assert any("[red-blue]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
     assert any("[blue-red]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])

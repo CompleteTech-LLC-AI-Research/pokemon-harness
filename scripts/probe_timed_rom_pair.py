@@ -249,27 +249,38 @@ def parse_args(argv=None):
     return args
 
 
-def resolve_assets(version, repo_root):
-    """Validate selected canonical ordinary fixture and both input hashes."""
+def resolve_assets(version, repo_root, fixture="cable_club.state"):
+    """Validate a selected canonical fixture and both input hashes.
+
+    ``fixture`` names the manifest-registered state file to admit.  It defaults
+    to the ordinary pre-connection trade fixture; passing a
+    ``cable_club-battle.state`` selects the battle-record fixture that shares
+    the same ROM/symbol pins but carries a six-member party.  The manifest row
+    still has to be ``verified`` for the selected kind, so a partial or
+    mismatched fixture fails closed instead of skipping.
+    """
     from pokered_harness.config import load_versions
     from scripts.validate_fixture_manifest import _load_manifest, _validate_schema
 
     if version not in VERSIONS:
         raise ValueError("only canonical color Red/Blue and Yellow are supported")
     family = version.split("_")[0]
+    kind = "battle" if "battle" in Path(fixture).name else "ordinary"
     manifest = _load_manifest(repo_root / "release-evidence" / "fixture-manifest.json")
     rows = _validate_schema(manifest)
     selected = [
         row
         for row in rows
         if row["version"] == family
-        and row["kind"] == "ordinary"
+        and row["kind"] == kind
         and row["provenance"]["status"] == "verified"
         and (family == "yellow" or row["variant"] == "color")
     ]
     if len(selected) != 1:
         raise ValueError("canonical fixture registry selection is not unique")
     row = selected[0]
+    if Path(row["path"]).name != Path(fixture).name:
+        raise ValueError(f"requested fixture {fixture!r} is not the registered {kind!r} row")
     rom_root = find_rom_root(repo_root)
     rom = rom_root / Path(row["expected_rom"]["path"]).relative_to("rom")
     sym = rom_root / Path(row["expected_symbols"]["path"]).relative_to("rom")

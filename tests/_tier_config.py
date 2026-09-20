@@ -263,6 +263,26 @@ TRADE_TESTS = frozenset(
             "test_pyboy_link_session_subprocess.py",
             "test_subprocess_pair_completes_trade_over_tcp",
         ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_multi_member_slot_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_cancel_before_commitment_keeps_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_setup_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
+        ),
     }
 )
 
@@ -298,6 +318,26 @@ TRADE_ACCEPTANCE_TESTS = frozenset(
         (
             "test_pyboy_link_session_subprocess.py",
             "test_subprocess_pair_completes_trade_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_multi_member_slot_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_cancel_before_commitment_keeps_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_setup_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
         ),
     }
 )

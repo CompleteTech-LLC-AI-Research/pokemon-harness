@@ -176,9 +176,9 @@ def test_trade_compacts_unequal_parties_and_appends_same_species_records(slot_a,
     b = [_record(0x99, index) for index in (4, 5)]
     audit = audit_exact_party_exchange(
         owner_a_before=_view(a),
-        owner_a_after=_view(a[:slot_a] + a[slot_a + 1:] + [b[slot_b]]),
+        owner_a_after=_view(a[:slot_a] + a[slot_a + 1 :] + [b[slot_b]]),
         owner_b_before=_view(b),
-        owner_b_after=_view(b[:slot_b] + b[slot_b + 1:] + [a[slot_a]]),
+        owner_b_after=_view(b[:slot_b] + b[slot_b + 1 :] + [a[slot_a]]),
         slot_a=slot_a,
         slot_b=slot_b,
     )
