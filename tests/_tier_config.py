@@ -43,6 +43,7 @@ REAL_ROM_MODULES = frozenset(
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
         "test_mcp_trade_records_rom.py",
+        "test_battle_healing_items_rom.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
@@ -213,6 +214,27 @@ ROM_FREE_TESTS = frozenset(
         (
             "test_mcp_timed_rom.py",
             "test_rom_client_load_state_timeout_redacts_data",
+        ),
+    }
+    | {
+        # This module drives a real ROM for its capture assertions, but its
+        # manifest cross-check, its producer guards, and its turn-timeline
+        # negative control touch no asset and have no skip path, so they belong
+        # in the always-selected unit tier rather than being masked by the
+        # module's `real_rom` classification.  The two asset-consuming tests stay
+        # in `real_rom`: they skip when the operator fixture or the BYO ROM/SYM
+        # is absent, and the unit tier fails closed on any skip.
+        (
+            "test_battle_healing_items_rom.py",
+            "test_release_evidence_names_the_pinned_assets_and_producer",
+        ),
+        (
+            "test_battle_healing_items_rom.py",
+            "test_producer_refuses_existing_output_and_unpinned_assets",
+        ),
+        (
+            "test_battle_healing_items_rom.py",
+            "test_turn_evidence_is_required_rather_than_supplied",
         ),
     }
 )
