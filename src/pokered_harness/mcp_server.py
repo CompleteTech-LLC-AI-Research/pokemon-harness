@@ -154,6 +154,14 @@ _LOCAL_LINK_TOOL_NAMES = frozenset(
         "link_peer_release",
     }
 )
+# Tools that are advertised on a ROM-owned remote link but that the timed owner
+# cannot perform.  ``link_frame_barrier`` toggles the connected network
+# session's ROM-owned pacing control; the timed owner replaces that pacing model
+# with its own policy and rejects the name unconditionally
+# (``timed_unsupported_tool``), so timed ``tools/list`` must not offer it.  This
+# is a mode boundary, not a permission: the legacy tool stays advertised and
+# dispatched for every non-timed remote link.
+_TIMED_UNSUPPORTED_TOOL_NAMES = frozenset({"link_frame_barrier"})
 
 # Default hooks registered at session start. Keep this list short — each
 # entry is a semantic event downstream agents are expected to react to.
@@ -3424,7 +3432,8 @@ def build_server(
             specs = [
                 spec
                 for spec in _tool_specs(has_peer=True)
-                if spec.name not in _LOCAL_LINK_TOOL_NAMES or spec.name == "link_step"
+                if spec.name not in _TIMED_UNSUPPORTED_TOOL_NAMES
+                and (spec.name == "link_step" or spec.name not in _LOCAL_LINK_TOOL_NAMES)
             ]
             for spec in specs:
                 if spec.name in {"link_listen", "link_connect"}:

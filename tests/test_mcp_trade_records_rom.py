@@ -595,6 +595,27 @@ class LocalPair:
         await self.client.cleanup()
 
 
+# Every tool this file's TCP client invokes on a single-session server.  A
+# single-session process publishes ``_tool_specs(has_peer=False)``, which drops
+# ``_LOCAL_LINK_TOOL_NAMES`` because there is no second in-process session to
+# drive; the advertised equivalent of the two-session ``link_step`` is ``step``.
+# ``TcpPair.assert_surface`` requires the process it drives to publish every
+# name in this set and ``TcpPair._call`` refuses any other name, so a row cannot
+# exercise a private or undiscovered operation while reporting that it drove the
+# documented public surface.
+_TCP_DRIVER_TOOL_NAMES = frozenset(
+    {
+        "load_state",
+        "step",
+        "press",
+        "link_listen",
+        "link_connect",
+        "link_status",
+        "link_frame_barrier",
+    }
+)
+
+
 class TcpPair:
     """Two MCP stdio servers linked over a localhost TCP serial cable.
 
@@ -612,12 +633,33 @@ class TcpPair:
         self.clients = list(clients)
         self.versions = tuple(versions)
         self.runtime_mode = runtime_mode
+        # Per-owner ``tools/list`` records captured by :meth:`assert_surface`.
+        # Empty until then, so a driver call made before discovery fails closed.
+        self._advertised = ()
         # Set by :meth:`arm_network_frame_barrier`; reported in the row
         # payload so the terminal evidence records that this client armed the
         # documented pacing control rather than inferring it from a pass.
         self.network_frame_barrier_armed = False
         # Set by :func:`_walk_to_trade_trigger`; same reporting contract.
         self.walk_settle_frames = None
+
+    async def _call(self, owner, name, arguments=None):
+        """Invoke one public tool on ``self.clients[owner]``.
+
+        The MCP SDK dispatches an unlisted ``tools/call`` and explicitly skips
+        its schema validation, so a driver that reached for a name its own
+        server never advertised would still look like it drove the public
+        surface.  Every driver call therefore goes through the per-owner
+        ``tools/list`` record captured by :meth:`assert_surface` and fails
+        loudly when the name is absent.
+        """
+        advertised = self._advertised[owner] if self._advertised else frozenset()
+        if name not in advertised:
+            raise AssertionError(
+                f"TCP driver called undiscovered tool {name!r} on owner {owner}; "
+                f"advertised={sorted(advertised)}"
+            )
+        return await self.clients[owner].tool(name, arguments)
 
     async def arm_network_frame_barrier(self):
         """Arm the documented network frame barrier on both owners.
@@ -643,8 +685,8 @@ class TcpPair:
         while no frame is in flight, and the ROM keeps ownership of every
         serial register and role change.
         """
-        for client in self.clients:
-            payload = await client.tool("link_frame_barrier", {"enabled": True})
+        for owner in range(self.owners):
+            payload = await self._call(owner, "link_frame_barrier", {"enabled": True})
             assert payload["enabled"] is True, payload
             assert payload["network_frame_barrier"] is True, payload
             assert payload["remote_mode"] == "connected", payload
@@ -666,6 +708,7 @@ class TcpPair:
             await client.initialize()
 
     async def assert_surface(self):
+        advertised = []
         for role, client in zip(("listener", "connector"), self.clients, strict=True):
             listed = await client.request("tools/list", {})
             tool_names = {row["name"] for row in listed["tools"]}
@@ -679,6 +722,15 @@ class TcpPair:
                 "link_status",
                 "link_disconnect",
             } <= tool_names, (role, tool_names)
+            # Discovery requirement: every tool this driver invokes (including
+            # the pacing control it arms) must be published by the very
+            # process it drives.  ``link_step`` is the in-process pair's
+            # two-session tool and is deliberately absent from a single-session
+            # process, so requiring it here would be a contradiction rather
+            # than a contract.
+            missing = _TCP_DRIVER_TOOL_NAMES - tool_names
+            assert not missing, (role, sorted(missing), tool_names)
+            assert "link_step" not in tool_names, (role, tool_names)
             # A single-session process must not advertise the in-process peer
             # tools: there is no second session for it to drive.
             assert "link_peer_press" not in tool_names, (role, tool_names)
@@ -695,10 +747,12 @@ class TcpPair:
             } <= uris, (role, uris)
             assert "pokered://peer-party-records" not in uris, (role, uris)
             assert "pokered://peer-events" not in uris, (role, uris)
+            advertised.append(frozenset(tool_names))
+        self._advertised = tuple(advertised)
 
     async def load_fixture(self, asset, *, owner):
-        loaded = await self.clients[owner].tool(
-            "load_state", {"data": base64.b64encode(asset["state"]).decode("ascii")}
+        loaded = await self._call(
+            owner, "load_state", {"data": base64.b64encode(asset["state"]).decode("ascii")}
         )
         assert loaded == {"ok": True}, loaded
 
@@ -712,8 +766,8 @@ class TcpPair:
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
-        listener, connector = self.clients
-        listening = await listener.tool(
+        listening = await self._call(
+            0,
             "link_listen",
             {
                 "host": "127.0.0.1",
@@ -724,7 +778,8 @@ class TcpPair:
             },
         )
         assert listening["remote_mode"] == "listening", listening
-        connected = await connector.tool(
+        connected = await self._call(
+            1,
             "link_connect",
             {
                 "host": "127.0.0.1",
@@ -743,7 +798,7 @@ class TcpPair:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + LINK_UP_STATUS_TIMEOUT
         while True:
-            statuses = [await client.tool("link_status") for client in self.clients]
+            statuses = [await self._call(owner, "link_status") for owner in range(self.owners)]
             modes = [status.get("remote_mode") or status.get("mode") for status in statuses]
             if all(mode == "connected" for mode in modes):
                 break
@@ -760,9 +815,7 @@ class TcpPair:
             await self.arm_network_frame_barrier()
 
     async def press(self, owner, button, *, duration=4):
-        await self.clients[owner].tool(
-            "press", {"button": button, "duration": duration}
-        )
+        await self._call(owner, "press", {"button": button, "duration": duration})
 
     async def step(self, frames):
         """Advance one frame on each owner per turn.
@@ -771,14 +824,12 @@ class TcpPair:
         frame per owner per turn.  Requests run concurrently: the remote
         transport paces turns between the listener and the connector, and a
         serial step on one side can require its peer to advance before either
-        call returns.
+        call returns.  Each owner is stepped through its own advertised
+        ``step`` tool: a single-session process publishes no ``link_step``.
         """
         for _ in range(frames):
             await asyncio.gather(
-                *(
-                    client.tool("link_step", {"count": 1})
-                    for client in self.clients
-                )
+                *(self._call(owner, "step", {"count": 1}) for owner in range(self.owners))
             )
 
     async def state(self, owner):
@@ -2012,15 +2063,27 @@ async def _tcp_pair_servers(tmp_path, primary_asset, peer_asset):
         original_failure = exc
         raise
     finally:
+        # Attempt every owned client's cleanup exactly once.  A cleanup failure
+        # must never leave a sibling process running: when the body already
+        # failed, that failure stays primary and each cleanup error is attached
+        # to it as a note; when the body succeeded, the cleanup errors are
+        # aggregated and raised only after every attempt has been made.
+        cleanup_errors = []
         for client in clients:
             try:
                 await client.cleanup()
-            except BaseException as cleanup_error:
-                if original_failure is None:
-                    raise
-                original_failure.add_note(
-                    f"MCP_TRADE_RECORDS_CLEANUP_ERROR {cleanup_error!r}"
-                )
+            # A cleanup attempt must also survive cancellation, so the blind
+            # catch is deliberate here.
+            except BaseException as cleanup_error:  # noqa: BLE001
+                cleanup_errors.append(cleanup_error)
+        if original_failure is not None:
+            for cleanup_error in cleanup_errors:
+                original_failure.add_note(f"MCP_TRADE_RECORDS_CLEANUP_ERROR {cleanup_error!r}")
+        elif cleanup_errors:
+            primary = cleanup_errors[0]
+            for extra in cleanup_errors[1:]:
+                primary.add_note(f"MCP_TRADE_RECORDS_CLEANUP_ERROR {extra!r}")
+            raise primary
 
 
 # The transfer contract's stable failure code, read from the client's own
@@ -2071,6 +2134,218 @@ def _base_row_payload(version, peer_version, primary_asset, peer_asset, primary_
         "fixture_sha1": _fixture_sha1(primary_asset),
         "peer_fixture_sha1": _fixture_sha1(peer_asset),
     }
+
+
+class _SyntheticTcpClient:
+    """Minimal single-session MCP surface for the TCP driver's own controls.
+
+    Answers ``tools/list``/``resources/list`` from an explicit surface, records
+    every ``tools/call`` it receives, and refuses a name that surface never
+    published -- the fail-closed behaviour an installed client relies on.  No
+    emulator, ROM, or child process is involved, so these controls cost nothing
+    and can probe failure paths the real rows cannot be made to hit.
+    """
+
+    _RESOURCE_URIS = (
+        "pokered://game-state",
+        "pokered://party-records",
+        "pokered://events",
+    )
+
+    def __init__(self, tools, *, cleanup_failure=None):
+        self.tools = frozenset(tools)
+        self.calls = []
+        self.cleanups = 0
+        self.cleanup_failure = cleanup_failure
+
+    async def request(self, method, params=None):
+        if method == "tools/list":
+            return {"tools": [{"name": name} for name in sorted(self.tools)]}
+        if method == "resources/list":
+            return {"resources": [{"uri": uri} for uri in self._RESOURCE_URIS]}
+        raise AssertionError(f"unexpected request {method!r}")
+
+    async def tool(self, name, arguments=None):
+        self.calls.append((name, dict(arguments or {})))
+        assert name in self.tools, f"undiscovered tool {name!r} in {sorted(self.tools)}"
+        return self._reply(name)
+
+    @staticmethod
+    def _reply(name):
+        if name == "load_state":
+            return {"ok": True}
+        if name == "link_listen":
+            return {"remote_mode": "listening"}
+        if name in {"link_connect", "link_status"}:
+            return {"remote_mode": "connected"}
+        if name == "link_frame_barrier":
+            return {
+                "enabled": True,
+                "network_frame_barrier": True,
+                "remote_mode": "connected",
+            }
+        return {"ok": True}
+
+    def called(self):
+        return {name for name, _ in self.calls}
+
+    async def cleanup(self):
+        self.cleanups += 1
+        if self.cleanup_failure is not None:
+            raise self.cleanup_failure
+
+
+def _patch_synthetic_tcp_launch(monkeypatch, clients):
+    """Replace the two real subprocess launches with synthetic clients."""
+    launches = list(clients)
+
+    monkeypatch.setitem(
+        globals(), "_stage_assets", lambda directory, primary, peer: (primary, peer)
+    )
+    monkeypatch.setitem(globals(), "_assert_invoking_runtime", lambda runtime_mode: None)
+
+    async def launch(env):
+        assert env, env
+        return launches.pop(0)
+
+    monkeypatch.setitem(globals(), "_launch_server", launch)
+
+
+def _synthetic_assets():
+    pins = {"expected_rom_sha1": "0" * 40, "expected_symbol_sha1": "1" * 40}
+    return [
+        {
+            "rom": Path("primary.gb"),
+            "sym": Path("primary.sym"),
+            "family": family,
+            "pins": dict(pins),
+            "state": b"\x00\x01",
+        }
+        for family in ("red", "blue")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tcp_driver_invokes_only_tools_its_own_server_advertises():
+    """Finding 1: every tool the TCP driver calls must be in that process's list.
+
+    ``_tool_specs(has_peer=False)`` is the surface a single-session installed
+    server publishes; it drops the in-process ``link_step`` because there is no
+    second session to drive, so the advertised equivalent is ``step``.  Reading
+    the production surface rather than restating it keeps the control honest if
+    the surface changes later.  The clients refuse any name they did not
+    publish, so a driver that reached for ``link_step`` -- as the reviewed head
+    did -- fails here instead of passing on permissive SDK dispatch.
+    """
+    from pokered_harness.mcp_server import _tool_specs
+
+    advertised = sorted(spec.name for spec in _tool_specs(has_peer=False))
+    assert "link_step" not in advertised, advertised
+    clients = [_SyntheticTcpClient(advertised) for _ in range(2)]
+    pair = TcpPair(clients, ("red", "blue"), "source")
+
+    await pair.assert_surface()
+    await pair.load_fixture({"state": b"\x00\x01"}, owner=0)
+    await pair.link_up()
+    await pair.arm_network_frame_barrier()
+    await pair.press(0, "a", duration=1)
+    await pair.step(2)
+
+    invoked = {name for client in clients for name in client.called()}
+    assert invoked == {
+        "load_state",
+        "step",
+        "press",
+        "link_listen",
+        "link_connect",
+        "link_status",
+        "link_frame_barrier",
+    }, sorted(invoked)
+    assert invoked <= set(advertised), sorted(invoked)
+    assert set(_TCP_DRIVER_TOOL_NAMES) == invoked, sorted(_TCP_DRIVER_TOOL_NAMES)
+    # Each owner was stepped twice, once per requested frame, through the
+    # advertised tool the pair actually selected.
+    assert [sum(1 for name, _ in client.calls if name == "step") for client in clients] == [2, 2]
+
+
+@pytest.mark.asyncio
+async def test_tcp_surface_requirement_rejects_a_process_missing_an_invoked_tool():
+    """Finding 1: the discovery requirement is load-bearing, not decorative.
+
+    The declared driver set is only a contract if a surface that omits one of
+    its names is rejected.  Here every published name but the pacing control is
+    advertised, so ``assert_surface`` must fail on the missing
+    ``link_frame_barrier`` rather than let a row arm a control its own process
+    never offered.
+    """
+    surface = sorted(
+        (set(_TCP_DRIVER_TOOL_NAMES) | {"release", "link_disconnect"}) - {"link_frame_barrier"}
+    )
+    clients = [_SyntheticTcpClient(surface) for _ in range(2)]
+    pair = TcpPair(clients, ("red", "blue"), "source")
+
+    with pytest.raises(AssertionError) as failure:
+        await pair.assert_surface()
+    assert "link_frame_barrier" in str(failure.value), failure.value
+
+
+@pytest.mark.asyncio
+async def test_tcp_pair_servers_attempt_every_cleanup_when_the_body_succeeds(monkeypatch, tmp_path):
+    """Finding 3: one failing cleanup must not strand the sibling server.
+
+    The unarmed-barrier control ends its expected-failure body without
+    ``pair.eof()`` and relies on this finalizer to terminate both live servers,
+    so every owned client has to be attempted even after an earlier attempt
+    raises.  Both synthetic cleanups raise here: both must still be attempted,
+    and the first failure must surface only after the loop, carrying the second
+    as a note.
+    """
+    clients = [
+        _SyntheticTcpClient(_TCP_DRIVER_TOOL_NAMES, cleanup_failure=TimeoutError("first")),
+        _SyntheticTcpClient(_TCP_DRIVER_TOOL_NAMES, cleanup_failure=TimeoutError("second")),
+    ]
+    primary, peer = _synthetic_assets()
+    _patch_synthetic_tcp_launch(monkeypatch, clients)
+
+    with pytest.raises(TimeoutError) as failure:
+        async with _tcp_pair_servers(tmp_path, primary, peer) as pair:
+            assert isinstance(pair, TcpPair), pair
+
+    assert [client.cleanups for client in clients] == [1, 1]
+    assert "first" in str(failure.value), failure.value
+    notes = getattr(failure.value, "__notes__", [])
+    assert any("MCP_TRADE_RECORDS_CLEANUP_ERROR" in note and "second" in note for note in notes), (
+        notes
+    )
+
+
+@pytest.mark.asyncio
+async def test_tcp_pair_servers_keep_the_body_failure_and_note_every_cleanup_failure(
+    monkeypatch, tmp_path
+):
+    """Finding 3: cleanup errors must not replace a failed body.
+
+    The body failure stays primary and both cleanup failures are attached to it,
+    so a row that already failed for its own reason still reports why the owned
+    processes could not be settled.  This pins the behaviour the aggregation
+    above must preserve (it already held before the correction).
+    """
+    clients = [
+        _SyntheticTcpClient(_TCP_DRIVER_TOOL_NAMES, cleanup_failure=TimeoutError("first")),
+        _SyntheticTcpClient(_TCP_DRIVER_TOOL_NAMES, cleanup_failure=TimeoutError("second")),
+    ]
+    primary, peer = _synthetic_assets()
+    _patch_synthetic_tcp_launch(monkeypatch, clients)
+    body_failure = RuntimeError("trade row failed")
+
+    with pytest.raises(RuntimeError) as failure:
+        async with _tcp_pair_servers(tmp_path, primary, peer):
+            raise body_failure
+
+    assert failure.value is body_failure, failure.value
+    assert [client.cleanups for client in clients] == [1, 1]
+    notes = getattr(failure.value, "__notes__", [])
+    assert sum(1 for note in notes if "MCP_TRADE_RECORDS_CLEANUP_ERROR" in note) == 2, notes
 
 
 @pytest.mark.asyncio
