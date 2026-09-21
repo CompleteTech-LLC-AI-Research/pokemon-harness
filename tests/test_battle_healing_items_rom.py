@@ -34,7 +34,10 @@ three pinned::
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
+import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,6 +81,40 @@ EVIDENCE_PATH = PROJECT_ROOT / "release-evidence" / "battle-healing-fixtures.jso
 PRODUCER_PATH = "scripts/produce_battle_healing_fixture.py"
 ROM_PIN_PATH = "rom/yellow/pokemon-yellow.gbc"
 SYM_PIN_PATH = "rom/yellow/pokemon-yellow.sym"
+
+# The dual-runtime registration bundle for this leaf's runtime half.  Nothing in
+# it is trusted: the function below re-derives every claim it makes from the
+# files themselves.  It is a committed record, so an overclaim or a leaked
+# machine path must fail here rather than be discovered at review time.
+QUALIFICATION_BUNDLE = (
+    PROJECT_ROOT / "release-evidence" / "feature-qualification" / "issue90-medicine-yellow-2d87676"
+)
+ACCEPTANCE_NODE_ID = (
+    "tests/test_battle_healing_items_rom.py"
+    "::test_potion_heals_the_active_mon_from_the_battle_item_menu"
+)
+BUNDLE_TIERS = ("source", "cython")
+
+# Absolute-path fragments that must never reach a committed record.  The same
+# tuple shape guards the build files in ``tests/test_runtime_packaging.py``.
+BUNDLE_FORBIDDEN_FRAGMENTS = (
+    "/mnt/",
+    "/home/",
+    "/Users/",
+    "C:\\Users\\",
+    "C:/Users/",
+    "/usr/",
+    "/tmp/",
+    "/var/",
+    "/root/",
+    "/etc/",
+)
+
+# The fragment list only names the prefixes this host is known to use; this
+# pattern is the general net.  It matches an absolute path introduced at a token
+# boundary, so a placeholder followed by a relative remainder (for example
+# ``[source-venv]/lib/python3.11/...``) is not a hit, and neither is a URL path.
+BUNDLE_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![\w\]\-.:/])/(?:[A-Za-z0-9_.\-]+/){2,}")
 
 # Potion (``0x14``) restores a fixed 20 HP; see ``_battle_item_evidence``.
 POTION = 0x14
@@ -646,6 +683,164 @@ def test_producer_refuses_existing_output_and_unpinned_assets(tmp_path: Path) ->
     with pytest.raises(producer.CaptureRefused, match="not pinned in VERSIONS.md"):
         producer.pinned(tmp_path / "pokemon-yellow.gbc", tmp_path / "pokemon-yellow.sym")
     assert not output.exists()
+
+
+def _bundle_junit(path: Path) -> dict:
+    """Read one tier's JUnit XML without trusting its name."""
+    root = ET.parse(path).getroot()
+    suite = root if root.tag == "testsuite" else root.find("testsuite")
+    assert suite is not None, f"{path} carries no testsuite element"
+    node_ids = [
+        f"{(case.get('classname') or '').replace('.', '/')}.py::{case.get('name')}"
+        for case in suite.iter("testcase")
+    ]
+    return {
+        "tests": int(suite.get("tests", 0)),
+        "failures": int(suite.get("failures", 0)),
+        "errors": int(suite.get("errors", 0)),
+        "skipped": int(suite.get("skipped", 0)),
+        "node_ids": node_ids,
+    }
+
+
+def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
+    """The committed dual-runtime record must be true, complete and clean.
+
+    ROM-free: it reads only committed files.  It fails closed when the bundle is
+    absent, disagrees with the harness pins, hides a missing tier, reports a
+    non-terminal row, drops the acceptance node id, or carries an absolute local
+    path.  A registration record that can drift from the run it describes is not
+    evidence, so the drift is made to fail here.
+    """
+    assert callable(globals()[ACCEPTANCE_NODE_ID.split("::")[1]]), (
+        "the registered acceptance node id does not name a function in this module"
+    )
+
+    for relative in (
+        "README.md",
+        "results.txt",
+        "runtime-identity.json",
+        "junit/source-focused.xml",
+        "junit/cython-focused.xml",
+        "logs/source-focused.log",
+        "logs/cython-focused.log",
+    ):
+        assert (QUALIFICATION_BUNDLE / relative).is_file(), (
+            f"the registration bundle is incomplete: {relative} is missing"
+        )
+
+    identity = json.loads(
+        (QUALIFICATION_BUNDLE / "runtime-identity.json").read_text(encoding="utf-8")
+    )
+    assert identity["issue"] == 90
+    assert identity["leaf"] == "90.3"
+    assert identity["acceptance_node_id"] == ACCEPTANCE_NODE_ID
+    assert identity["worktree_clean_at_run"] is True
+
+    # The record names exactly one tested state, and it names it in full.
+    for key in ("worktree_head", "worktree_tree"):
+        assert _is_lower_hex(identity[key], 40), f"{key} is not a lowercase hex object id"
+
+    pins = load_versions(PROJECT_ROOT / "VERSIONS.md")
+    declared_revision = identity["vendored_revision_marker"]
+    assert declared_revision == pins.pyboy_revision, (
+        "the bundle's vendored revision marker disagrees with VERSIONS.md"
+    )
+    assert set(identity["tiers"]) == set(BUNDLE_TIERS), "a declared runtime is missing"
+
+    for tier in BUNDLE_TIERS:
+        tier_identity = identity["tiers"][tier]
+        assert tier_identity["requested_tier"] == tier
+        assert (
+            tier_identity["python_version"] == identity["tiers"][BUNDLE_TIERS[0]]["python_version"]
+        ), "the two tiers did not run the same interpreter version"
+        assert tier_identity["pyboy_version"] == pins.pyboy_version
+        assert tier_identity["pyboy_revision"] == pins.pyboy_revision
+        assert tier_identity["revision_matches_vendored_pin"] is True
+        assert tier_identity["is_declared_runtime"] is True, (
+            f"the {tier} tier did not measure as its declared runtime"
+        )
+
+    # The dual-runtime claim rests on the imports each tier actually resolved:
+    # source must come from the vendored tree with no compiled extension, and
+    # cython must come from outside it with compiled extensions loaded.
+    source = identity["tiers"]["source"]
+    cython = identity["tiers"]["cython"]
+    assert source["pyboy_imported_from_vendored_tree"] is True
+    assert not source["imported_by_kind"].get(".so"), "the source tier loaded compiled extensions"
+    assert cython["pyboy_imported_from_vendored_tree"] is False, (
+        "the cython tier fell back to the vendored source tree"
+    )
+    assert cython["imported_by_kind"].get(".so"), "the cython tier loaded no compiled extensions"
+
+    results = identity["results_by_tier"]
+    assert set(results) == set(BUNDLE_TIERS)
+    for tier in BUNDLE_TIERS:
+        recorded = results[tier]
+        assert recorded["failures"] == 0 and recorded["errors"] == 0, (
+            f"the {tier} row is not terminal: {recorded}"
+        )
+        assert recorded["skipped"] == 0, f"the {tier} row skipped a required test"
+        assert recorded["tests"] > 0
+        assert ACCEPTANCE_NODE_ID in recorded["node_ids"], (
+            f"the {tier} row does not contain the acceptance node id"
+        )
+
+        junit = _bundle_junit(QUALIFICATION_BUNDLE / "junit" / f"{tier}-focused.xml")
+        assert junit["tests"] == recorded["tests"]
+        assert (junit["failures"], junit["errors"], junit["skipped"]) == (0, 0, 0)
+        assert junit["node_ids"] == recorded["node_ids"], (
+            f"the {tier} JUnit XML and the recorded node ids disagree"
+        )
+        assert ACCEPTANCE_NODE_ID in junit["node_ids"]
+
+        log = (QUALIFICATION_BUNDLE / "logs" / f"{tier}-focused.log").read_text(encoding="utf-8")
+        assert f"PASSED {ACCEPTANCE_NODE_ID}" in log, (
+            f"the {tier} log does not report the acceptance node id as passed"
+        )
+        assert f"{recorded['tests']} passed" in log, (
+            f"the {tier} log does not carry a terminal count agreement"
+        )
+
+        assert f"PASS  {tier}" in (QUALIFICATION_BUNDLE / "results.txt").read_text(encoding="utf-8")
+
+    # A record whose node ids no longer name live tests describes a tree that
+    # no longer exists, so it must stop being citable rather than linger.
+    for node_id in results[BUNDLE_TIERS[0]]["node_ids"]:
+        module_path, _, test_name = node_id.partition("::")
+        module = importlib.import_module(module_path[: -len(".py")].replace("/", "."))
+        assert callable(getattr(module, test_name, None)), (
+            f"{node_id} is registered in the bundle but does not exist in this tree"
+        )
+
+    # The record's inputs are the harness's own declared inputs, not merely
+    # strings that agree with each other.
+    assets = {entry["label"]: entry for entry in identity["assets"]}
+    fixture_label = f"tests/fixtures/link/{FIXTURE_VERSION}/{FIXTURE_NAME}"
+    assert set(assets) == {ROM_PIN_PATH, SYM_PIN_PATH, fixture_label}
+    assert assets[ROM_PIN_PATH]["sha1"] == pins.sha1_for_path(ROM_PIN_PATH)
+    assert assets[SYM_PIN_PATH]["sha1"] == pins.symbol_sha1_for_path(SYM_PIN_PATH)
+    fixture = _evidence_fixture()
+    assert assets[fixture_label]["sha1"] == fixture["sha1"]
+    assert assets[fixture_label]["sha256"] == fixture["sha256"]
+    assert assets[fixture_label]["size_bytes"] == fixture["size_bytes"]
+    for label, entry in assets.items():
+        assert _is_lower_hex(entry["sha1"], 40), f"{label} carries no lowercase SHA-1"
+        assert _is_lower_hex(entry["sha256"], 64), f"{label} carries no lowercase SHA-256"
+        assert entry["size_bytes"] > 0
+
+    for path in sorted(QUALIFICATION_BUNDLE.rglob("*")):
+        if not path.is_file():
+            continue
+        contents = path.read_text(encoding="utf-8", errors="replace")
+        leaked = [fragment for fragment in BUNDLE_FORBIDDEN_FRAGMENTS if fragment in contents]
+        assert not leaked, f"{path.relative_to(QUALIFICATION_BUNDLE)} leaks {leaked}"
+        absolute = sorted(
+            {match.group(0) for match in BUNDLE_ABSOLUTE_PATH_PATTERN.finditer(contents)}
+        )
+        assert not absolute, (
+            f"{path.relative_to(QUALIFICATION_BUNDLE)} carries absolute paths {absolute}"
+        )
 
 
 def test_potion_heals_the_active_mon_from_the_battle_item_menu() -> None:
