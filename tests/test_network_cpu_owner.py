@@ -9,6 +9,7 @@ observations happen on the thread that owns ``provider.step``.
 
 from __future__ import annotations
 
+import linecache
 import queue
 import socket
 import sys
@@ -23,6 +24,7 @@ from pokered_harness.link.network_backend import (
     _FRAME,
     _OP_EDGE_REQ_ID,
     _OP_EDGE_RESP,
+    _OP_EDGE_RESP_ID,
     NetworkBackend,
     _InboundEdge,
 )
@@ -41,6 +43,12 @@ _SERIAL_VECTOR = 0x0058
 _HALT_PC = 0x0167
 _HALT_MARKER = 0xFFAB
 _IRQ_MARKER = 0xFFAC
+
+# Generous, still-bounded ceiling for the coordination waits and joins these
+# regressions use.  It only elapses on failure; on the passing path every wait
+# is satisfied almost immediately, so a loaded host cannot turn a genuine
+# rejection into a spurious timeout-driven failure.
+_BOUNDED_WAIT = 30.0
 
 
 class _ObservedEdgeQueue(queue.Queue):
@@ -175,10 +183,43 @@ def _responses_written(backend: NetworkBackend) -> int:
     "not sent, closed" path, so this counter is evidence that an ``EDGE_RESP``
     reached the socket.  It is aggregate evidence and is never sufficient on
     its own: a replay, or a response belonging to a different admitted request,
-    grows it too.  :func:`_closed_transport_retirement_is_evidenced` pairs it
-    with the close snapshot before it can certify anything.
+    grows it too.  It is now used only for diagnostics and for an explicit
+    "bytes reached the peer" assertion; :func:`_closed_transport_retirement_is_evidenced`
+    decides on per-admission retirement records instead.
     """
     return int(backend._stats["edge_resp_sent"])
+
+
+def _inbound_retirement_ledger(
+    backend: NetworkBackend,
+) -> tuple[int, frozenset[int], frozenset[int]]:
+    """Read the backend's own per-admission retirement ledger.
+
+    ``network_backend`` keeps three connection-scoped, monotonically growing
+    facts about identified (``OP_EDGE_REQ_ID``) admissions: the highest id it
+    ever admitted, the ids it recorded a completed response for, and the ids it
+    claimed but has not answered.  A response is recorded inside the write guard
+    immediately before ``_send_frame`` runs, so an id in that set is a real
+    write path rather than an aggregate count:
+
+    * a duplicate replay of an already-retired id returns the recorded response
+      and records nothing new, so a replay cannot manufacture a retirement
+      record;
+    * a request the owner's closed branch discards is released through
+      ``_decrement_edge_pending`` without ever being recorded, so it stays
+      claimed and never appears in the recorded set.
+
+    ``_edge_id_lock`` is a leaf lock: nothing holds it while taking another
+    transport lock, so reading the ledger here (including while the caller holds
+    ``_edge_pending_condition``, as the retirement wait does) cannot invert the
+    close path's lock order.
+    """
+    with backend._edge_id_lock:
+        return (
+            int(backend._highest_inbound_edge_id),
+            frozenset(backend._inbound_edge_responses),
+            frozenset(backend._inbound_edge_ids_pending),
+        )
 
 
 def _pending_edge_requests_at_close(backend: NetworkBackend) -> object:
@@ -207,17 +248,24 @@ def _retirement_diagnostics(backend: NetworkBackend) -> dict[str, object]:
     reader_error = None
     if isinstance(pre_close, dict):
         reader_error = pre_close.get("reader_error")
+    highest_edge_id, retired_ids, unretired_ids = _inbound_retirement_ledger(backend)
     return {
         "pending_edge_requests": backend._edge_pending,
         "closed": backend._closed,
         "pending_at_close": _pending_edge_requests_at_close(backend),
         "reader_error": reader_error,
         "responses_written": _responses_written(backend),
+        "highest_inbound_edge_id": highest_edge_id,
+        "retired_inbound_edge_ids": sorted(retired_ids),
+        "unretired_inbound_edge_ids": sorted(unretired_ids),
     }
 
 
 def _closed_transport_retirement_is_evidenced(
-    backend: NetworkBackend, *, pending_at_close: object, responses_before: int
+    backend: NetworkBackend,
+    *,
+    pending_at_close: object,
+    ledger_at_entry: tuple[int, frozenset[int], frozenset[int]],
 ) -> bool:
     """Decide whether a closed transport really retired the admitted work.
 
@@ -225,19 +273,35 @@ def _closed_transport_retirement_is_evidenced(
     ``_edge_pending_condition`` while ``_closed`` was already published.
     ``_mark_closed_common`` publishes ``_closed`` before it samples its
     snapshot and zeroes the admitted-work count under that same condition, so
-    a terminal transport supplies a zero of its own: neither "pending zero" nor
-    "a response was written" separates retirement from closure alone.  Two
-    facts together do:
+    a terminal transport supplies a zero of its own.  Neither "pending zero"
+    nor an aggregate response count separates retirement from closure:
 
-    * ``pending_edge_requests`` in the close snapshot is zero, so the close
-      discarded nothing.  Every admitted request had already been released
-      while the transport was still open, and a close landing later cannot
-      un-establish that retirement.
-    * an ``EDGE_RESP`` reached the wire since this wait began.  A release that
-      ran the write path produced a completed response, rather than one of the
-      discard paths (``_publish_owner_response``, the closed branch of
-      ``_service_pending_edges_locked``, the reader's queue-full rollback) that
-      release admitted work without answering it.
+    * The close snapshot alone is not enough.  An owner that has already seen
+      the published ``_closed`` runs the real closed branch of
+      ``_service_pending_edges_locked``, which calls ``_decrement_edge_pending``
+      and drops the request unanswered.  That decrement lands before the close
+      samples its snapshot, so the snapshot can read zero with an admitted
+      request never answered.
+    * The aggregate ``edge_resp_sent`` growth alone is not enough either.  A
+      duplicate replay of an already-answered id writes ``EDGE_RESP`` and grows
+      that counter without answering anything new, so it can supply the growth
+      for a request the close discarded.
+
+    A per-admission answer is required instead.  The backend records a completed
+    response against the admitted request's own id, and a discard that wrote
+    nothing leaves that id still claimed with no record:
+
+    * ``pending_edge_requests`` in the close snapshot must be zero, so the close
+      itself discarded nothing; a release after terminal publication must not be
+      able to certify this wait.
+    * every id the reader had claimed but not answered when the wait began must
+      have a recorded response now, and the same holds for ids claimed while the
+      wait was outstanding.
+    * no id may still be claimed with no recorded response at decision time.
+    * at least one identified request must have been admitted.  An unidentified
+      ``OP_EDGE_REQ`` leaves no per-admission record at all, so a closed
+      transport that admitted only unidentified work is refused rather than
+      guessed at.
 
     Kept as its own function so a regression can install a predicate that never
     consents and show this acceptance path is load-bearing rather than
@@ -245,7 +309,15 @@ def _closed_transport_retirement_is_evidenced(
     """
     if pending_at_close != 0:
         return False
-    return _responses_written(backend) > responses_before
+    highest_at_entry, _retired_at_entry, unretired_at_entry = ledger_at_entry
+    highest_now, retired_now, unretired_now = _inbound_retirement_ledger(backend)
+    if unretired_now:
+        return False
+    if unretired_at_entry - retired_now:
+        return False
+    if any(edge_id not in retired_now for edge_id in range(highest_at_entry + 1, highest_now + 1)):
+        return False
+    return highest_now > 0
 
 
 def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float = 10.0) -> None:
@@ -273,22 +345,27 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
       notification, and a close arriving afterwards must not invalidate it.
     * The zero is observed with a published ``_closed`` and
       :func:`_closed_transport_retirement_is_evidenced` shows that the close
-      found nothing outstanding and that a response reached the wire.
+      found nothing outstanding and that the backend's per-admission ledger
+      records a completed response for every identified request it admitted,
+      including any it had already claimed when this wait began.
 
     Every other exit is reported as a closure with lock-free diagnostics, and a
     transport that is already closed when the wait begins is refused outright.
-    The response counter is sampled before that refusal so a write racing the
-    helper's entry still counts as growth.
+    The ledger is sampled before that refusal, so an admission already claimed
+    when this wait is entered is still part of the entry snapshot the
+    closed-transport decision compares against.
 
     Known limitation, unchanged from the original assertions: a release that
     runs one of the discard paths while the transport is still open is
-    indistinguishable from a completed response through this backend's
-    observable state, because those paths call ``_decrement_edge_pending``
-    without writing.  Closure is still rejected, and every admitted request
-    that has not produced a response keeps the count non-zero, so the leak this
-    wait was added to catch cannot hide behind a close.
+    indistinguishable from a completed response through the open-transport
+    observation itself, because those paths call ``_decrement_edge_pending``
+    without writing.  That is why the closed-transport branch may not lean on an
+    aggregate count and why an unidentified admission cannot be certified after
+    a close: closure is still rejected, and a request that has not produced a
+    response keeps its id claimed, so the leak this wait was added to catch
+    cannot hide behind a close.
     """
-    responses_before = _responses_written(backend)
+    ledger_at_entry = _inbound_retirement_ledger(backend)
     if backend._closed:
         raise AssertionError(
             "network backend was already closed before the admitted edge response "
@@ -306,7 +383,7 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
                     retired_while_open = _closed_transport_retirement_is_evidenced(
                         backend,
                         pending_at_close=_pending_edge_requests_at_close(backend),
-                        responses_before=responses_before,
+                        ledger_at_entry=ledger_at_entry,
                     )
                 break
             remaining = deadline - time.monotonic()
@@ -367,34 +444,65 @@ def _close_pair(peer: NetworkBackend, backend: NetworkBackend) -> None:
     assert peer.stop(timeout_s=2)
 
 
-def _admit_identified_edge_request(peer: NetworkBackend, backend: NetworkBackend) -> None:
+def _teardown_transport(
+    peer: NetworkBackend, backend: NetworkBackend, *threads: threading.Thread
+) -> None:
+    """Close a transport pair without waiting on a thread that may hold its locks.
+
+    A regressed helper can leave a participant owning the close lock, and both
+    ``_close_pair`` and ``stop()`` acquire it without a timeout.  When a
+    participant is still alive after a bounded join, the sockets are released
+    directly instead, so the runner reports the failed assertion rather than
+    hanging in cleanup.
+    """
+    for thread in threads:
+        thread.join(timeout=5.0)
+    if any(thread.is_alive() for thread in threads):
+        _abandon_test_transport(backend)
+        _abandon_test_transport(peer)
+        return
+    _close_pair(peer, backend)
+
+
+def _admit_identified_edge_request(
+    peer: NetworkBackend,
+    backend: NetworkBackend,
+    *,
+    edge_id: int = 1,
+    queued: int = 1,
+    expected_pending: int = 1,
+) -> None:
     """Send one identified ``EDGE_REQ`` through the real reader and wait for it.
 
     The reader increments the admitted-work count before it publishes the
     request on the owner queue and then notifies this condition, so observing a
-    non-empty queue under the condition observes genuine admission rather than
-    a value assigned by the test.
+    queue of ``queued`` published requests under the condition observes genuine
+    admission rather than a value assigned by the test.
     """
-    peer._sock.sendall(_EDGE_ID_FRAME.pack(_OP_EDGE_REQ_ID, 1, 1))
-    deadline = time.monotonic() + 5.0
+    peer._sock.sendall(_EDGE_ID_FRAME.pack(_OP_EDGE_REQ_ID, 1, edge_id))
+    deadline = time.monotonic() + _BOUNDED_WAIT
     with backend._edge_pending_condition:
-        while backend._edge_queue.qsize() < 1:
+        while backend._edge_queue.qsize() < queued:
             remaining = deadline - time.monotonic()
             assert remaining > 0, "the network reader never published an admitted EDGE_REQ"
             backend._edge_pending_condition.wait(timeout=remaining)
-        assert backend._edge_pending == 1, backend._edge_pending
+        assert backend._edge_pending == expected_pending, backend._edge_pending
 
 
-def _write_retire_and_close_holding_the_condition(backend: NetworkBackend) -> None:
+def _write_retire_and_close_holding_the_condition(
+    backend: NetworkBackend, *, edge_id: int | None = None
+) -> None:
     """Write the response, retire it, and complete the close as one hold.
 
     Holding the pending condition across the whole transition keeps the wait
     from observing the zero before the transport is already terminal, so the
     decision has to come from the closed-transport evidence instead of an
-    incidental open-transport return.
+    incidental open-transport return.  ``edge_id`` writes the identified
+    response for that admission, which is what the per-admission ledger records;
+    ``None`` keeps the historical two-byte response.
     """
     with backend._edge_pending_condition:
-        backend._send_edge_response(_InboundEdge(peer_bit=0, response_bit=1))
+        backend._send_edge_response(_InboundEdge(peer_bit=0, response_bit=1, edge_id=edge_id))
         backend._decrement_edge_pending()
         backend._mark_closed_uncoordinated()
 
@@ -404,27 +512,103 @@ def _record_closed_retirement_evidence(monkeypatch, decisions: list[tuple[bool, 
     module = sys.modules[_wait_for_edge_requests_retired.__module__]
     real_evidence = module._closed_transport_retirement_is_evidenced
 
-    def recording(backend: NetworkBackend, *, pending_at_close, responses_before):
+    def recording(backend: NetworkBackend, *, pending_at_close, ledger_at_entry):
         decisions.append((backend._closed, pending_at_close))
         return real_evidence(
-            backend, pending_at_close=pending_at_close, responses_before=responses_before
+            backend, pending_at_close=pending_at_close, ledger_at_entry=ledger_at_entry
         )
 
     monkeypatch.setattr(module, "_closed_transport_retirement_is_evidenced", recording)
 
 
+def _gated_closed_discard_transition(
+    backend: NetworkBackend, monkeypatch, threads: list[threading.Thread]
+) -> tuple[object, list[BaseException | None]]:
+    """Build a transition that discards the owner queue before a gated close snapshots.
+
+    ``_mark_closed_common`` publishes ``_closed`` before it wakes the reader and
+    before it records ``pending_edge_requests``.  The gate installed here holds
+    the closer inside that window, so the transition can run
+    ``service_pending_edges`` - which takes the real already-terminal discard
+    branch and answers nothing - before the close samples the snapshot the wait
+    will read.  The reader is deliberately left asleep until after the discard:
+    it takes the owner-dispatch lock before it waits for the close lock, so
+    letting it wake first would block the discard behind the close instead of
+    ordering the discard in front of the snapshot.
+    """
+    close_published = threading.Event()
+    release_close = threading.Event()
+    real_event_set = backend._closed_event.set
+    closer_outcomes: list[BaseException | None] = []
+
+    def gated_publish() -> None:
+        close_published.set()
+        assert release_close.wait(timeout=_BOUNDED_WAIT), "the gated close was never released"
+        real_event_set()
+
+    monkeypatch.setattr(backend._closed_event, "set", gated_publish)
+
+    def transition() -> None:
+        def close() -> None:
+            try:
+                backend._mark_closed_uncoordinated()
+            except BaseException as exc:  # noqa: BLE001 - reported to the caller
+                closer_outcomes.append(exc)
+            else:
+                closer_outcomes.append(None)
+
+        closer = threading.Thread(target=close, name="retirement-wait-closer", daemon=True)
+        threads.append(closer)
+        closer.start()
+        try:
+            assert close_published.wait(timeout=_BOUNDED_WAIT), (
+                "the close never published terminal state"
+            )
+            assert backend._closed and not backend._closed_event.is_set()
+            assert backend.service_pending_edges(max_edges=1) == 0
+            assert backend._edge_pending == 0
+        finally:
+            # Always release the gated closer, even when the discard ordering
+            # assertion fails, so a reported failure cannot hang teardown.
+            real_event_set()
+            release_close.set()
+        closer.join(timeout=_BOUNDED_WAIT)
+        assert not closer.is_alive(), "the gated close did not complete"
+
+    return transition, closer_outcomes
+
+
 def _run_transition_while_wait_is_outstanding(
-    backend: NetworkBackend, transition, *, wait_timeout: float = 5.0
+    backend: NetworkBackend,
+    transition,
+    *,
+    wait_timeout: float = 5.0,
+    resume_when: str | None = None,
+    threads: list[threading.Thread] | None = None,
 ) -> tuple[BaseException | None, float]:
-    """Run ``transition`` after the retirement wait is provably parked.
+    """Run ``transition`` after the retirement wait is provably inside its wait.
 
     Returns the waiter's outcome and how long it took after the transition
     started.  The transition is released only once the real condition-wait path
     reports that this waiter has parked, so the ordering never depends on a
     sleep and the waiter cannot mistake the transition for its entry check.
+
+    ``resume_when`` names a stripped source line inside
+    :func:`_wait_for_edge_requests_retired` that the waiter executes exactly
+    once, after it samples its entry ledger and after its already-closed check,
+    but before it acquires the pending condition.  When it is given, the waiter
+    is held there while the transition runs and is resumed once the transition
+    has completed.  Holding the waiter at that point decides the
+    close-versus-observation ordering deterministically while the waiter owns no
+    transport lock at all, which is what keeps a regression from depending on a
+    lock race.  Spawned threads are appended to ``threads`` so a caller can hand
+    them to :func:`_teardown_transport` even when an assertion aborts this
+    helper.
     """
     outcomes: list[BaseException | None] = []
     parked = threading.Event()
+    paused = threading.Event()
+    resume = threading.Event()
     waiter_holder: list[threading.Thread] = []
     condition = backend._edge_pending_condition
     original_wait = condition.wait
@@ -436,30 +620,68 @@ def _run_transition_while_wait_is_outstanding(
             parked.set()
         return original_wait(timeout)
 
+    def trace(frame, event, arg):
+        if event == "line" and frame.f_code is _wait_for_edge_requests_retired.__code__:
+            line = linecache.getline(frame.f_code.co_filename, frame.f_lineno).strip()
+            if line == resume_when:
+                paused.set()
+                assert resume.wait(timeout=_BOUNDED_WAIT), (
+                    "the paused retirement wait was never resumed"
+                )
+        return trace
+
+    actor_outcomes: list[BaseException] = []
+
+    def actor_run() -> None:
+        try:
+            transition()
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the caller
+            actor_outcomes.append(exc)
+
     def waiter() -> None:
+        sys.settrace(trace if resume_when is not None else None)
         try:
             _wait_for_edge_requests_retired(backend, timeout=wait_timeout)
         except BaseException as exc:  # noqa: BLE001 - returned for assertion
             outcomes.append(exc)
         else:
             outcomes.append(None)
+        finally:
+            sys.settrace(None)
 
     condition.wait = observed_wait  # type: ignore[method-assign]
     try:
         waiter_thread = threading.Thread(target=waiter, name="retirement-wait", daemon=True)
         waiter_holder.append(waiter_thread)
+        if threads is not None:
+            threads.append(waiter_thread)
         waiter_thread.start()
-        assert parked.wait(timeout=5.0), "retirement wait never parked on the condition"
-        actor = threading.Thread(target=transition, name="retirement-wait-actor", daemon=True)
+        if resume_when is None:
+            assert parked.wait(timeout=_BOUNDED_WAIT), (
+                "retirement wait never parked on the condition"
+            )
+        else:
+            assert paused.wait(timeout=_BOUNDED_WAIT), (
+                f"retirement wait never reached its pause line {resume_when!r}"
+            )
+        actor = threading.Thread(target=actor_run, name="retirement-wait-actor", daemon=True)
+        if threads is not None:
+            threads.append(actor)
         actor.start()
+        actor.join(timeout=_BOUNDED_WAIT)
+        assert not actor.is_alive(), "the transition did not finish"
         started = time.monotonic()
-        waiter_thread.join(timeout=10.0)
+        if resume_when is not None:
+            resume.set()
+        waiter_thread.join(timeout=_BOUNDED_WAIT)
         elapsed = time.monotonic() - started
-        actor.join(timeout=5.0)
     finally:
         condition.wait = original_wait
+        resume.set()
     assert not waiter_thread.is_alive(), "retirement wait did not observe the transition"
     assert not actor.is_alive(), "the transition did not complete"
+    if actor_outcomes:
+        raise actor_outcomes[0]
     assert len(outcomes) == 1, outcomes
     return outcomes[0], elapsed
 
@@ -497,61 +719,73 @@ def test_retirement_wait_rejects_close_that_abandons_admitted_work(clean_close: 
 def test_retirement_wait_accepts_a_close_after_a_completed_retirement(monkeypatch) -> None:
     """A close that lands after the response was written is still retirement.
 
-    The wait must not reject every close.  The transition holds the pending
-    condition across the write, the retirement notification, and the completed
-    close, so the zero cannot be observed before the transport is terminal, and
-    the recorded decision proves the closed-transport branch produced the
-    acceptance instead of an incidental open-transport return.
+    The wait must not reject every close.  A real peer request is admitted by
+    the real reader, so its id is claimed and the per-admission record can later
+    show it answered.  The transition holds the pending condition across the
+    identified write, the retirement notification, and the completed close, so
+    the zero cannot be observed before the transport is terminal, and the
+    recorded decision proves the closed-transport branch produced the acceptance
+    instead of an incidental open-transport return.
     """
     decisions: list[tuple[bool, object]] = []
     _record_closed_retirement_evidence(monkeypatch, decisions)
     peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
     try:
-        with backend._edge_pending_condition:
-            backend._edge_pending = 1
+        _admit_identified_edge_request(peer, backend)
         assert _responses_written(backend) == 0
         outcome, elapsed = _run_transition_while_wait_is_outstanding(
-            backend, lambda: _write_retire_and_close_holding_the_condition(backend)
+            backend,
+            lambda: _write_retire_and_close_holding_the_condition(backend, edge_id=1),
+            threads=threads,
         )
         assert outcome is None, outcome
         assert backend._closed
         assert decisions == [(True, 0)], decisions
         assert _responses_written(backend) == 1
         assert elapsed < 5.0, f"acceptance was not bounded ({elapsed:.3f}s)"
-        expected = _FRAME.pack(_OP_EDGE_RESP, 1)
+        expected = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 1, 1)
         peer._sock.settimeout(2.0)
         assert peer._sock.recv(len(expected)) == expected
         assert peer._sock.recv(1) == b"", "the closed transport did not reach the peer as EOF"
     finally:
-        _close_pair(peer, backend)
+        _teardown_transport(peer, backend, *threads)
 
 
 def test_retirement_wait_closed_acceptance_requires_wire_evidence(monkeypatch) -> None:
     """The closed-transport branch has to be load-bearing, not decorative.
 
-    Same write/retire/close ordering as the acceptance regression, with the
-    evidence predicate replaced by one that never consents.  If the acceptance
-    test still passed, it would be leaving through a different branch and would
-    not be a guard for accepting a completed close at all.
+    Same real-request write/retire/close ordering as the acceptance regression,
+    with the evidence predicate replaced by one that never consents.  If the
+    acceptance test still passed, it would be leaving through a different branch
+    and would not be a guard for accepting a completed close at all.
     """
     module = sys.modules[_wait_for_edge_requests_retired.__module__]
     monkeypatch.setattr(
         module,
         "_closed_transport_retirement_is_evidenced",
-        lambda backend, *, pending_at_close, responses_before: False,
+        lambda backend, *, pending_at_close, ledger_at_entry: False,
     )
     peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
     try:
-        with backend._edge_pending_condition:
-            backend._edge_pending = 1
+        _admit_identified_edge_request(peer, backend)
         outcome, _elapsed = _run_transition_while_wait_is_outstanding(
-            backend, lambda: _write_retire_and_close_holding_the_condition(backend)
+            backend,
+            lambda: _write_retire_and_close_holding_the_condition(backend, edge_id=1),
+            threads=threads,
         )
         assert isinstance(outcome, AssertionError), outcome
         assert "closure and not retirement" in str(outcome)
         assert _responses_written(backend) == 1
     finally:
-        _close_pair(peer, backend)
+        _teardown_transport(peer, backend, *threads)
 
 
 def test_retirement_wait_accepts_a_retirement_observed_on_an_open_transport() -> None:
@@ -618,53 +852,195 @@ def test_retirement_wait_rejects_a_close_that_abandons_work_behind_a_written_res
         _close_pair(peer, backend)
 
 
-def test_retirement_wait_rejects_a_close_that_finds_zero_after_an_unwritten_discard() -> None:
+def test_retirement_wait_rejects_a_close_that_finds_zero_after_an_unwritten_discard(
+    monkeypatch,
+) -> None:
     """A close whose snapshot reads zero is not retirement when nothing was written.
 
-    A real peer request is admitted by the real reader, then the owner's
-    fail-closed discard releases it without answering it, and only then does a
-    clean close publish ``_closed`` and sample its snapshot.  The close
-    therefore records ``pending_edge_requests`` zero with no reader error and
-    no response ever written, which is exactly the state a snapshot-only rule
-    accepts; the wait must still reject it, and the peer must observe EOF with
-    no response bytes.
+    A real peer request is admitted by the real reader and stays on the owner
+    queue, so its id is claimed with no recorded response.  A clean close
+    publishes ``_closed`` and then the owner's real closed branch releases that
+    request without answering it, so the close samples ``pending_edge_requests``
+    zero with no reader error and no response ever written.  That is exactly the
+    state a snapshot-only rule accepts; the wait must still reject it, and the
+    peer must observe EOF with no response bytes.
+
+    The discard runs from the transition thread rather than from inside a hold
+    on the pending condition, and the closer is gated after it publishes
+    ``_closed`` but before it wakes the reader or samples its snapshot.  The
+    ordering is therefore deterministic and no participant ever holds the
+    pending condition while it needs the owner-dispatch lock.
     """
     peer, backend = NetworkBackend.pair()
     from tests.test_network_owner_execution import _Core
 
+    threads: list[threading.Thread] = []
     backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
     try:
         _admit_identified_edge_request(peer, backend)
-
-        def discard_without_writing_and_close() -> None:
-            with backend._edge_pending_condition:
-                closer = threading.Thread(
-                    target=backend._mark_closed_uncoordinated,
-                    name="retirement-wait-closer",
-                    daemon=True,
-                )
-                closer.start()
-                assert backend._closed_event.wait(5.0), "the close never published terminal state"
-                # The owner discarding an already-terminal transport: the real
-                # release path that writes no response.
-                assert backend.service_pending_edges() == 0
-                backend._edge_pending_condition.notify_all()
-            closer.join(5.0)
-            assert not closer.is_alive(), "the close did not complete"
+        assert _inbound_retirement_ledger(backend) == (1, frozenset(), frozenset({1}))
+        discard_without_writing_and_close, closer_outcomes = _gated_closed_discard_transition(
+            backend, monkeypatch, threads
+        )
 
         outcome, elapsed = _run_transition_while_wait_is_outstanding(
-            backend, discard_without_writing_and_close
+            backend,
+            discard_without_writing_and_close,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
         )
         assert isinstance(outcome, AssertionError), outcome
         assert "closure and not retirement" in str(outcome)
+        assert closer_outcomes == [None], closer_outcomes
         assert _responses_written(backend) == 0
         assert backend._pre_close_snapshot["pending_edge_requests"] == 0
         assert backend._pre_close_snapshot.get("reader_error") is None
+        assert _inbound_retirement_ledger(backend) == (1, frozenset(), frozenset({1}))
         assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
         peer._sock.settimeout(2.0)
         assert peer._sock.recv(1) == b"", "the abandoned request was answered after all"
     finally:
-        _close_pair(peer, backend)
+        # Restore the real ``_closed_event.set`` before teardown; otherwise the
+        # gated publish still installed here would stall ``_close_pair`` when a
+        # failing assertion skipped the transition that releases the gate.
+        monkeypatch.undo()
+        _teardown_transport(peer, backend, *threads)
+
+
+def test_retirement_wait_rejects_a_replay_decoy_over_a_closed_discard(monkeypatch) -> None:
+    """A duplicate replay must not certify a different request the close dropped.
+
+    A first identified request is admitted, answered by the owner path, and its
+    response is read off the wire, so the backend's per-admission record shows
+    it completed.  A second identified request is then admitted and left on the
+    owner queue.  The wait enters and parks.  While it is parked the peer replays
+    the first request: the reader answers the duplicate from the bounded replay
+    window, which grows the aggregate response counter without answering
+    anything new.  The close then publishes terminal state and the owner's real
+    closed branch releases the second request without answering it, so the close
+    samples ``pending_edge_requests`` zero.
+
+    A rule that accepted "zero at close plus counter growth" certifies the
+    dropped second request on the strength of the first request's duplicate,
+    which is exactly the acceptance path this regression pins.
+    """
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        responded = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, 1)
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        _admit_identified_edge_request(peer, backend)
+        assert backend.service_pending_edges(max_edges=1) == 1
+        _wait_for_edge_requests_retired(backend, timeout=5.0)
+        assert _responses_written(backend) == 1
+        assert peer._sock.recv(len(responded)) == responded
+
+        _admit_identified_edge_request(peer, backend, edge_id=2)
+        assert _inbound_retirement_ledger(backend) == (2, frozenset({1}), frozenset({2}))
+        replay_close_and_discard, closer_outcomes = _gated_closed_discard_transition(
+            backend, monkeypatch, threads
+        )
+
+        def replay_then_discard() -> None:
+            peer._sock.sendall(_EDGE_ID_FRAME.pack(_OP_EDGE_REQ_ID, 1, 1))
+            assert peer._sock.recv(len(responded)) == responded, "the duplicate was not answered"
+            replay_close_and_discard()
+            # ``edge_resp_sent`` is incremented only after ``_send_frame`` returns,
+            # so it trails the bytes the peer just read; sample it once the closed
+            # transition has synchronized instead of racing the reader's increment.
+            assert _responses_written(backend) == 2, "the duplicate did not grow the shared counter"
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            replay_then_discard,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert isinstance(outcome, AssertionError), outcome
+        assert "closure and not retirement" in str(outcome)
+        assert closer_outcomes == [None], closer_outcomes
+        assert backend._pre_close_snapshot["pending_edge_requests"] == 0
+        # The duplicate grew the aggregate counter while the second request was
+        # never answered, so the per-admission record is the only fact that
+        # separates this closure from a completed retirement.
+        assert _responses_written(backend) == 2
+        assert _inbound_retirement_ledger(backend) == (2, frozenset({1}), frozenset({2}))
+        assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
+        assert peer._sock.recv(1) == b"", "the discarded request was answered after all"
+    finally:
+        # See the discard regression above: drop the gated ``set`` before any
+        # teardown close so a reported failure cannot hang in ``_close_pair``.
+        monkeypatch.undo()
+        _teardown_transport(peer, backend, *threads)
+
+
+@pytest.mark.parametrize(
+    "close_owns_the_condition",
+    [True, False],
+    ids=["close-holds-condition", "close-before-observation"],
+)
+def test_retirement_wait_accepts_a_close_that_beats_the_waiter_to_the_condition(
+    monkeypatch, close_owns_the_condition: bool
+) -> None:
+    """A genuine retirement observed only after the close must still be accepted.
+
+    The identified response is written before the wait begins, so nothing grows
+    the aggregate counter during the wait, and the worker's release arrives while
+    the transport is still open.  The close then completes before the waiter can
+    observe the zero: in one schedule the closer holds the pending condition
+    across the release and the close, so the notified waiter loses the
+    reacquisition; in the other the waiter is held before it acquires the
+    condition at all.  Either way the transport presents as closed with pending
+    zero and a counter that never moved during the wait, which a rule keyed on
+    counter growth rejects even though the admitted request really was answered.
+    """
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        responded = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 1, 1)
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        _admit_identified_edge_request(peer, backend)
+        backend._send_edge_response(_InboundEdge(peer_bit=0, response_bit=1, edge_id=1))
+        assert _responses_written(backend) == 1
+        assert peer._sock.recv(len(responded)) == responded
+        ledger_at_entry = _inbound_retirement_ledger(backend)
+        assert ledger_at_entry == (1, frozenset({1}), frozenset()), ledger_at_entry
+
+        def release_and_close() -> None:
+            if not close_owns_the_condition:
+                backend._decrement_edge_pending()
+                backend._mark_closed_uncoordinated()
+                return
+            with backend._edge_pending_condition:
+                backend._decrement_edge_pending()
+                backend._mark_closed_uncoordinated()
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            release_and_close,
+            resume_when=None
+            if close_owns_the_condition
+            else "deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert outcome is None, outcome
+        assert backend._closed
+        assert decisions == [(True, 0)], decisions
+        assert backend._pre_close_snapshot["pending_edge_requests"] == 0
+        assert _responses_written(backend) == 1, "no response was written during the wait"
+        assert _inbound_retirement_ledger(backend) == ledger_at_entry
+        assert elapsed < 5.0, f"acceptance was not bounded ({elapsed:.3f}s)"
+        assert peer._sock.recv(1) == b"", "the closed transport did not reach the peer as EOF"
+    finally:
+        _teardown_transport(peer, backend, *threads)
 
 
 def test_retirement_wait_failure_path_stays_bounded_while_close_lock_is_held() -> None:
