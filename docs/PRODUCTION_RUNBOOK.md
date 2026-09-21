@@ -290,27 +290,32 @@ tests/fixtures/link/
 ├── red/
 │   ├── cable_club.state
 │   ├── cable_club-battle.state
+│   ├── cable_club-slots.state
 │   ├── cable_club-vanilla.state
 │   └── cable_club-battle-vanilla.state
 ├── blue/
 │   ├── cable_club.state
 │   ├── cable_club-battle.state
+│   ├── cable_club-slots.state
 │   ├── cable_club-vanilla.state
 │   └── cable_club-battle-vanilla.state
 └── yellow/
     ├── cable_club.state
-    └── cable_club-battle.state
+    ├── cable_club-battle.state
+    └── cable_club-slots.state
 ```
 
 The default `cable_club.state` files support the ordinary Cable Club path; the
-`cable_club-battle.state` files are separate derived battle-start states. The
-two `*-vanilla.state` pairs are recorded in the manifest but remain partial
-because their ordinary source-state provenance is not established. The
-production gate preflight checks the three canonical ordinary files, strict
-acceptance tests require the three canonical battle files, and the manifest
-byte validator checks all ten listed entries. A missing required file or a
-manifest hash mismatch is a blocked/failed release result, never a passing
-skip.
+`cable_club-battle.state` files are separate derived battle-start states; the
+`cable_club-slots.state` files are separate derived states whose six-member
+party holds six pairwise-distinct 44-byte records for the sender/receiver slot
+rows. The two `*-vanilla.state` pairs are recorded in the manifest but remain
+partial because their ordinary source-state provenance is not established. The
+production gate preflight checks the three canonical ordinary files and the
+three six-member `slots` files, strict acceptance tests require the three
+canonical battle files, and the manifest byte validator checks all thirteen
+listed entries. A missing required file or a manifest hash mismatch is a
+blocked/failed release result, never a passing skip.
 
 The stock ROM/SYM pins and existing vanilla fixture bytes validate, but vanilla
 ordinary capture provenance cannot be established: replay against the retained
@@ -322,10 +327,10 @@ For the currently controlled stateful scope, the BYO asset set is:
 
 - five pinned ROMs: stock and color Red, stock and color Blue, and Yellow;
 - three matching symbol files: Red, Blue, and Yellow; and
-- six canonical color-Red, color-Blue, and Yellow ordinary/battle states.
+- nine canonical color-Red, color-Blue, and Yellow ordinary/battle/slots states.
 
-The ten-entry manifest therefore contains six canonical states and four
-vanilla-derived states. The canonical six have verified provenance; the four
+The thirteen-entry manifest therefore contains nine canonical states and four
+vanilla-derived states. The canonical nine have verified provenance; the four
 vanilla-derived entries remain `PARTIAL` because their ordinary source-state
 provenance is not established. Supply the two vanilla ordinary/battle pairs as
 well when validating the checked-in ten-entry manifest. They are not a
@@ -861,12 +866,18 @@ uses the pinned source PyBoy version and fork revision, and fails when either
 the wall-clock or movement budget is exhausted. It does not set or require
 `POKERED_SKIP_SHA1=1`.
 
-The tracked battle-fixture utility derives immutable battle-start states from
-ordinary fixtures. It copies the lead record into a legal multi-mon party,
-repairs zero-PP lead moves, validates the result, and closes the emulator
-before writing the output. Acceptance loads the resulting file and does not
-perform this preparation in emulator RAM. Prepare the canonical color rows in
-an external output root with:
+The tracked fixture utility derives immutable battle-start and six-member
+states from ordinary fixtures. It copies the lead record into a legal multi-mon
+party, repairs zero-PP lead moves, validates the result, and closes the emulator
+before writing the output. The `battle` rows keep the lead record in all six
+slots so battle tiers see a legal party, while the `slots` rows rewrite only the
+two-byte OT id (record offset 12) so the six records are pairwise distinct and
+the sender/receiver slot rows can tell an intended slot from any other. The
+utility saves, re-loads the persisted bytes, and fails closed unless the
+re-loaded party matches the required shape (including the pairwise-distinct
+requirement for the `slots` rows). Acceptance loads the resulting file and does
+not perform this preparation in emulator RAM. Prepare the canonical color rows
+in an external output root with:
 
 ```bash
 BATTLE_OUTPUT_ROOT="$(mktemp -d)"
@@ -880,7 +891,7 @@ python scripts/prepare_battle_cable_club_fixtures.py \
 
 The two vanilla battle rows may be generated with `red_gb` and `blue_gb`, but
 they remain `PARTIAL` until their ordinary source state is proven to match the
-vanilla ROM. The exact ten-entry hashes, source-state records, and status
+vanilla ROM. The exact thirteen-entry hashes, source-state records, and status
 values are in the fixture manifest. Validate them with:
 
 ```bash

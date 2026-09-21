@@ -1057,6 +1057,17 @@ class PyBoyLinkSession:
         with self._lifecycle_lock:
             self._network_frame_barrier = enabled
 
+    def network_frame_barrier(self) -> bool:
+        """Return this endpoint's current network frame-barrier flag.
+
+        Read-only companion to :meth:`set_network_frame_barrier` so a caller
+        can confirm the flag it just set on this endpoint without reaching
+        into private state.  The flag is session pacing metadata only: the ROM
+        still owns every serial register and hardware role change.
+        """
+        with self._lifecycle_lock:
+            return self._network_frame_barrier
+
     @_serialized_local_operation
     def detach(self, pyboy: _PyBoyLike) -> None:
         """Restore ``pyboy.mb.serial.backend`` and (if paired) tear

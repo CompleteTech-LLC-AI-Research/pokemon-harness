@@ -224,7 +224,7 @@ trade-tier supervisor started before PR #35 was published; its child runs
 loaded the then-current implementation, but it was not a clean post-merge
 all-tier sign-off.
 
-The six canonical fixture entries have verified provenance, while the four
+The nine canonical fixture entries have verified provenance, while the four
 vanilla-derived entries have not established vanilla ordinary capture
 provenance and remain `PARTIAL`. The stock ROM/SYM pins and existing fixture
 bytes validate against the manifest records, but vanilla ordinary capture
@@ -570,14 +570,18 @@ repository. Its current entries are:
 | `red/cable_club-vanilla.state` | `affd77c20bf4600b8057ea33683ed58a2ac86157` | `partial`, retained source is not proven vanilla-ROM captured |
 | `red/cable_club-battle.state` | `4343278b018187ed4bf7c4eda3b202097456f048` | `verified`, derived from canonical color-Red ordinary state |
 | `red/cable_club-battle-vanilla.state` | `63d00b469b07e3969bcd82be1047031265be0b3a` | `partial`, derived from partial vanilla ordinary provenance |
+| `red/cable_club-slots.state` | `b39afbcc8a05a59fb769a7993e7affb5dbf588b3` | `verified`, canonical color-Red ordinary state with six pairwise-distinct party records |
 | `blue/cable_club.state` | `0809d2f8e514c7fb714a73a7b13f120b26a40c38` | `verified`, canonical color-Blue ordinary reproduction |
 | `blue/cable_club-vanilla.state` | `cff5349b55f8fdf47a5af63d674977103aeb44d6` | `partial`, retained source is not proven vanilla-ROM captured |
 | `blue/cable_club-battle.state` | `6aac3aabe0f6ad662dec218682c2254b3954a10a` | `verified`, derived from canonical color-Blue ordinary state |
 | `blue/cable_club-battle-vanilla.state` | `442c1497c0398f7e54ceade9739ddd1b5b9456fc` | `partial`, derived from partial vanilla ordinary provenance |
+| `blue/cable_club-slots.state` | `eb1816e8c4ac777cc29662f9e09b398ed00abcdc` | `verified`, canonical color-Blue ordinary state with six pairwise-distinct party records |
 | `yellow/cable_club.state` | `37df4dbdb512cd3febdc2d536281683476291d3b` | `verified`, canonical Yellow ordinary reproduction |
 | `yellow/cable_club-battle.state` | `78c7d0b32006b11baa9ac9c71efc73b0a8d807b9` | `verified`, derived from canonical Yellow ordinary state |
+| `yellow/cable_club-slots.state` | `3a48c183628544bb2917e6dd7a336032bdad83fd` | `verified`, canonical Yellow ordinary state with six pairwise-distinct party records |
 
-The six canonical color Red, color Blue, and Yellow fixture entries have
+The nine canonical color Red, color Blue, and Yellow fixture entries (ordinary,
+battle, and pairwise-distinct six-member slot states) have
 verified provenance, while the four vanilla-derived entries have not
 established vanilla ordinary capture provenance and remain `PARTIAL`.
 The stock ROM/SYM pins and existing fixture bytes validate against the manifest

@@ -916,6 +916,54 @@ async def test_mcp_cached_status_tool_and_resource_return_while_owner_blocked(tm
         result(active)
 
 
+@pytest.mark.asyncio
+async def test_timed_discovery_omits_the_legacy_remote_frame_barrier(tmp_path):
+    """The timed owner publishes only the operations it can actually perform.
+
+    ``link_frame_barrier`` toggles the ROM-owned network frame barrier of a
+    non-timed remote link.  The timed transport replaces that pacing model with
+    its own policy and rejects the name unconditionally with
+    ``timed_unsupported_tool``, so advertising it in timed ``tools/list`` would
+    offer a client an operation this server can never perform.  This control
+    reads the server's actual list handler and then calls the same name through
+    the actual call handler, so re-advertising the legacy tool fails here
+    instead of in the field.
+    """
+    import mcp.types as mcp_types
+
+    from pokered_harness.mcp_server import build_server
+
+    with owned(tmp_path) as (owner, session, _):
+        server = build_server(session, timed_owner=owner, timed_policy=owner.policy)
+        listed = await server.request_handlers[mcp_types.ListToolsRequest](
+            mcp_types.ListToolsRequest()
+        )
+        names = {tool.name for tool in listed.root.tools}
+        assert "link_frame_barrier" not in names, sorted(names)
+        # The advertised timed surface still carries every operation the timed
+        # transport does implement, including its own ``link_step``.
+        assert {
+            "step",
+            "link_status",
+            "link_listen",
+            "link_connect",
+            "link_disconnect",
+            "link_step",
+        } <= names, sorted(names)
+
+        called = await server.request_handlers[mcp_types.CallToolRequest](
+            mcp_types.CallToolRequest(
+                params=mcp_types.CallToolRequestParams(
+                    name="link_frame_barrier", arguments={"enabled": True}
+                )
+            )
+        )
+        assert called.root.isError is True
+        payload = called.root.structuredContent
+        assert payload is not None, called
+        assert payload["error"]["code"] == "timed_unsupported_tool", payload
+
+
 @pytest.mark.parametrize("mismatch", ["session", "policy"])
 def test_server_rejects_supplied_owner_identity_or_policy_mismatch(tmp_path, mismatch):
     from pokered_harness.mcp_server import McpHarnessError, build_server

@@ -7,6 +7,7 @@ must remain safe when a request, worker, or asset fails.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 
@@ -18,6 +19,7 @@ from pokered_harness.mcp_server import (
     McpHarnessError,
     _error_code,
     _error_reply,
+    _peer_startup_state_from_env,
     dispatch_tool,
     main,
 )
@@ -258,6 +260,69 @@ def test_mcp_entrypoint_rejects_orphan_peer_symbol_pin(monkeypatch) -> None:
     monkeypatch.setenv("POKERED_PEER_SYM_SHA1", "0" * 40)
 
     with pytest.raises(SystemExit, match="POKERED_PEER_SYM_SHA1 requires"):
+        main()
+
+
+def _clear_peer_state_env(monkeypatch) -> None:
+    for name in (
+        "POKERED_PEER_STATE_PATH",
+        "POKERED_PEER_STATE_SHA1",
+        "POKERED_PEER_ROM_PATH",
+        "POKERED_PEER_SYM_PATH",
+        "POKERED_PEER_ROM_SHA1",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_peer_startup_state_reader_fails_closed(tmp_path, monkeypatch) -> None:
+    """The documented peer fixture contract never loads unpinned state."""
+    _clear_peer_state_env(monkeypatch)
+    assert _peer_startup_state_from_env() is None
+
+    fixture = tmp_path / "peer.state"
+    fixture.write_bytes(b"peer fixture bytes")
+    digest = hashlib.sha1(b"peer fixture bytes").hexdigest()
+
+    monkeypatch.setenv("POKERED_PEER_STATE_PATH", str(fixture))
+    with pytest.raises(SystemExit, match="must be set together"):
+        _peer_startup_state_from_env()
+
+    monkeypatch.setenv("POKERED_PEER_STATE_SHA1", digest)
+    assert _peer_startup_state_from_env() == b"peer fixture bytes"
+
+    monkeypatch.setenv("POKERED_PEER_STATE_SHA1", "0" * 40)
+    with pytest.raises(SystemExit, match="SHA-1 mismatch"):
+        _peer_startup_state_from_env()
+
+    monkeypatch.setenv("POKERED_PEER_STATE_SHA1", "not-a-digest")
+    with pytest.raises(SystemExit, match="40-character SHA-1"):
+        _peer_startup_state_from_env()
+
+    monkeypatch.setenv("POKERED_PEER_STATE_SHA1", digest)
+    monkeypatch.setenv("POKERED_PEER_STATE_PATH", str(tmp_path / "absent.state"))
+    with pytest.raises(SystemExit, match="unable to read"):
+        _peer_startup_state_from_env()
+
+    empty = tmp_path / "empty.state"
+    empty.write_bytes(b"")
+    monkeypatch.setenv("POKERED_PEER_STATE_PATH", str(empty))
+    with pytest.raises(SystemExit, match="between 1 and"):
+        _peer_startup_state_from_env()
+
+
+def test_mcp_entrypoint_rejects_peer_state_without_peer_session(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_peer_state_env(monkeypatch)
+    monkeypatch.delenv("POKERED_SKIP_SHA1", raising=False)
+    fixture = tmp_path / "peer.state"
+    fixture.write_bytes(b"peer fixture bytes")
+    monkeypatch.setenv("POKERED_ROM_PATH", str(tmp_path / "primary.gb"))
+    monkeypatch.setenv("POKERED_SYM_PATH", str(tmp_path / "primary.sym"))
+    monkeypatch.setenv("POKERED_PEER_STATE_PATH", str(fixture))
+    monkeypatch.setenv("POKERED_PEER_STATE_SHA1", "0" * 40)
+
+    with pytest.raises(SystemExit, match="requires a configured peer session"):
         main()
 
 
