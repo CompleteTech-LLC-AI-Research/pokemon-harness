@@ -15,13 +15,17 @@ import socket
 import sys
 import threading
 import time
+from typing import NamedTuple
 
 import pytest
 from pyboy.core.serial import CYCLES_PER_BYTE_DMG, Serial
 
 from pokered_harness.link.network_backend import (
     _EDGE_ID_FRAME,
+    _EDGE_RESPONSE_HISTORY_MAX,
     _FRAME,
+    _MAX_SERIAL_TRANSCRIPT_ENTRIES,
+    _OP_EDGE_REQ,
     _OP_EDGE_REQ_ID,
     _OP_EDGE_RESP,
     _OP_EDGE_RESP_ID,
@@ -49,6 +53,30 @@ _IRQ_MARKER = 0xFFAC
 # is satisfied almost immediately, so a loaded host cannot turn a genuine
 # rejection into a spurious timeout-driven failure.
 _BOUNDED_WAIT = 30.0
+
+# The closed-transport decision reads the backend's own opt-in serial
+# transcript, which is the only connection-scoped record that contains every
+# admission - including the legacy, id-less ``OP_EDGE_REQ`` format that leaves
+# no entry in the per-id ledger.  Capacity is the module ceiling so a
+# regression that admits many sequential requests cannot evict the evidence it
+# is judged on; ``_EDGE_RETIREMENT_WITNESS_EVICTING_ENTRIES`` is deliberately
+# small and is used only to show what the helper does when the evidence really
+# is missing.
+_EDGE_RETIREMENT_WITNESS_ENTRIES = _MAX_SERIAL_TRANSCRIPT_ENTRIES
+_EDGE_RETIREMENT_WITNESS_EVICTING_ENTRIES = 4
+
+# The reader records exactly one ``edge_req_received`` transcript event per
+# admission, at the single site that raises ``_edge_pending``.  A successful
+# socket write records ``edge_resp_send`` with ``outcome="success"``; the
+# closed, errored, and duplicate-replay paths are distinguished by that field.
+# ``_claim_inbound_edge_id`` is the only raiser of the backend's inbound
+# high-water mark, and each claim then records either ``edge_req_received``
+# (queued for the owner) or ``reciprocal_master_edge`` (answered on the reader
+# thread against this owner's master edge), so the witness ranges over both when
+# it cross-checks its transcript against that mark.
+_EDGE_ADMISSION_EVENT = "edge_req_received"
+_EDGE_WRITE_EVENT = "edge_resp_send"
+_EDGE_RECIPROCAL_EVENT = "reciprocal_master_edge"
 
 
 class _ObservedEdgeQueue(queue.Queue):
@@ -235,6 +263,130 @@ def _pending_edge_requests_at_close(backend: NetworkBackend) -> object:
     return None
 
 
+class _EdgeAdmissionWitness(NamedTuple):
+    """Connection-scoped admission/answer state read from the serial transcript.
+
+    ``admitted`` and ``answered`` hold identified (``OP_EDGE_REQ_ID``) request
+    ids: the ids the reader admitted, and the ids a successful ``EDGE_RESP``
+    write was recorded for.  ``unidentified_admissions`` counts admissions of
+    the historical id-less ``OP_EDGE_REQ`` format, which carry no id and so
+    cannot be matched to an individual write.  ``dropped`` is the number of
+    records the bounded ring evicted, ``witnessed_highest`` is the highest id
+    any admission or reciprocal record named, and ``complete`` records whether
+    this witness accounts for every admission the backend ever made.
+    """
+
+    enabled: bool
+    complete: bool
+    dropped: int
+    admitted: frozenset[int]
+    answered: frozenset[int]
+    unidentified_admissions: int
+    witnessed_highest: int
+
+    @property
+    def outstanding(self) -> frozenset[int]:
+        """Identified ids that were admitted with no recorded successful write."""
+        return self.admitted - self.answered
+
+
+def _edge_admission_witness(backend: NetworkBackend) -> _EdgeAdmissionWitness:
+    """Derive per-admission retirement state from the backend's own transcript.
+
+    The serial transcript is the only connection-scoped record that covers every
+    admission, including the id-less ``OP_EDGE_REQ`` format that leaves no entry
+    in the per-id ledger.  ``_record_serial_event`` appends under
+    ``_serial_transcript_lock``, which is a leaf lock: no caller holds it while
+    acquiring another transport lock, so reading here - including while the
+    caller holds ``_edge_pending_condition``, as the retirement wait does -
+    cannot invert the close path's lock order.  ``snapshot_stats`` copies the
+    ring, so the returned facts are a consistent point-in-time sample and the
+    live deque is never mutated by this read.
+
+    ``complete`` is the evidence-sufficiency check, not a guess:
+
+    * the ring must be enabled (a disabled transcript records nothing);
+    * ``dropped`` must be zero, so no record was evicted and a missing
+      admission cannot be read as one that never happened;
+    * the highest id this witness saw must match the backend's own
+      ``_highest_inbound_edge_id``, so a transcript enabled after this
+      connection already admitted identified work is refused rather than
+      silently under-reporting admissions.  ``_claim_inbound_edge_id`` is the
+      only raiser of that mark, and every claim then records either
+      ``edge_req_received`` (queued behind ``_edge_pending``) or
+      ``reciprocal_master_edge`` (answered on the reader thread against this
+      owner's master edge), so the cross-check ranges over both and does not
+      mistake a reciprocally answered request for a transcript that started
+      late.  A transcript that under-reports is refused here rather than read as
+      "nothing was admitted"; the narrower case of a claim that recorded nothing
+      at all is refused by the conservation clause below, because such a claim
+      keeps its id in the claimed-but-unanswered set;
+    * every id the backend still counts as claimed-and-unanswered must appear in
+      this witness's admitted set.  Both cross-checks read the per-id ledger
+      rather than the bounded replay window, because an id-less admission leaves
+      no per-id entry and a reciprocally answered one is retired by the reader
+      without ever reaching the owner, so only ``_highest_inbound_edge_id`` and
+      the claimed-id set are authoritative for what this connection still owes a
+      response.
+
+    A transcript write failure is recorded as ``outcome="error"`` and a
+    transport that closed before the write as ``outcome="not_sent_closed"``, so
+    neither is counted as a completed response.
+    """
+    info = backend.snapshot_stats()["serial_transcript"]
+    enabled = bool(info["enabled"])
+    dropped = int(info["dropped"])
+    records = info["records"] if enabled else []
+    admitted: set[int] = set()
+    answered: set[int] = set()
+    witnessed_highest = 0
+    unidentified = 0
+    for record in records:
+        event = record.get("event")
+        if event == _EDGE_ADMISSION_EVENT:
+            edge_id = record.get("edge_id")
+            if edge_id is None:
+                unidentified += 1
+            else:
+                admitted.add(int(edge_id))
+                witnessed_highest = max(witnessed_highest, int(edge_id))
+        elif event == _EDGE_RECIPROCAL_EVENT:
+            edge_id = record.get("edge_id")
+            if edge_id is not None:
+                witnessed_highest = max(witnessed_highest, int(edge_id))
+        elif event == _EDGE_WRITE_EVENT and record.get("outcome") == "success":
+            edge_id = record.get("edge_id")
+            if edge_id is not None:
+                answered.add(int(edge_id))
+    highest_edge_id, _retired, unretired = _inbound_retirement_ledger(backend)
+    complete = (
+        enabled and dropped == 0 and unretired <= admitted and witnessed_highest == highest_edge_id
+    )
+    return _EdgeAdmissionWitness(
+        enabled=enabled,
+        complete=complete,
+        dropped=dropped,
+        admitted=frozenset(admitted),
+        answered=frozenset(answered),
+        unidentified_admissions=unidentified,
+        witnessed_highest=witnessed_highest,
+    )
+
+
+def _witness_summary(witness: _EdgeAdmissionWitness) -> dict[str, object]:
+    """Compact, bounded description of one witness for failure diagnostics."""
+    return {
+        "enabled": witness.enabled,
+        "complete": witness.complete,
+        "dropped": witness.dropped,
+        "identified_admissions": len(witness.admitted),
+        "identified_answered": len(witness.answered),
+        "identified_outstanding": sorted(witness.outstanding),
+        "unidentified_admissions": witness.unidentified_admissions,
+        "witnessed_highest": witness.witnessed_highest,
+    }
+
+
 def _retirement_diagnostics(backend: NetworkBackend) -> dict[str, object]:
     """Collect failure diagnostics without acquiring any transport lock.
 
@@ -243,6 +395,8 @@ def _retirement_diagnostics(backend: NetworkBackend) -> dict[str, object]:
     order, so a failure path that already holds either lock can invert the order
     against a concurrent close.  These reads are plain attribute reads on
     counters that are only ever assigned, which is enough for a diagnostic.
+    The admission witness reads the transcript ring under its own leaf lock so a
+    rejection can name which piece of evidence was missing.
     """
     pre_close = backend._pre_close_snapshot
     reader_error = None
@@ -258,6 +412,7 @@ def _retirement_diagnostics(backend: NetworkBackend) -> dict[str, object]:
         "highest_inbound_edge_id": highest_edge_id,
         "retired_inbound_edge_ids": sorted(retired_ids),
         "unretired_inbound_edge_ids": sorted(unretired_ids),
+        "admission_witness": _witness_summary(_edge_admission_witness(backend)),
     }
 
 
@@ -265,7 +420,7 @@ def _closed_transport_retirement_is_evidenced(
     backend: NetworkBackend,
     *,
     pending_at_close: object,
-    ledger_at_entry: tuple[int, frozenset[int], frozenset[int]],
+    witness_at_entry: _EdgeAdmissionWitness,
 ) -> bool:
     """Decide whether a closed transport really retired the admitted work.
 
@@ -273,8 +428,8 @@ def _closed_transport_retirement_is_evidenced(
     ``_edge_pending_condition`` while ``_closed`` was already published.
     ``_mark_closed_common`` publishes ``_closed`` before it samples its
     snapshot and zeroes the admitted-work count under that same condition, so
-    a terminal transport supplies a zero of its own.  Neither "pending zero"
-    nor an aggregate response count separates retirement from closure:
+    a terminal transport supplies a zero of its own.  None of the facts a
+    closed transport makes cheap separates retirement from closure:
 
     * The close snapshot alone is not enough.  An owner that has already seen
       the published ``_closed`` runs the real closed branch of
@@ -286,22 +441,51 @@ def _closed_transport_retirement_is_evidenced(
       duplicate replay of an already-answered id writes ``EDGE_RESP`` and grows
       that counter without answering anything new, so it can supply the growth
       for a request the close discarded.
+    * The backend's per-id replay window is not a completion ledger either.
+      ``_inbound_edge_responses`` is a bounded duplicate-replay cache that
+      evicts its oldest entry once 256 responses are recorded
+      (``_EDGE_RESPONSE_HISTORY_MAX``), so an id missing from it is not
+      evidence that the request was never answered.  ``_highest_inbound_edge_id``
+      also accepts any id above the high-water mark without requiring
+      consecutive ids, so ranging over it invents admissions for ids the peer
+      never sent.
 
-    A per-admission answer is required instead.  The backend records a completed
-    response against the admitted request's own id, and a discard that wrote
-    nothing leaves that id still claimed with no record:
+    A per-admission record is required instead, and the only connection-scoped
+    record that covers every admission is the backend's own opt-in serial
+    transcript.  The reader appends exactly one ``edge_req_received`` record at
+    the single site that raises ``_edge_pending``, carrying that request's
+    ``edge_id`` - ``None`` for the historical id-less ``OP_EDGE_REQ`` - and a
+    response appends ``edge_resp_send`` with ``outcome="success"`` only after
+    ``_send_frame`` returned.  :func:`_edge_admission_witness` turns those into
+    the connection's admitted and answered id sets plus the count of unnamed
+    admissions.
+
+    The decision requires all of:
 
     * ``pending_edge_requests`` in the close snapshot must be zero, so the close
       itself discarded nothing; a release after terminal publication must not be
       able to certify this wait.
-    * every id the reader had claimed but not answered when the wait began must
-      have a recorded response now, and the same holds for ids claimed while the
-      wait was outstanding.
-    * no id may still be claimed with no recorded response at decision time.
-    * at least one identified request must have been admitted.  An unidentified
-      ``OP_EDGE_REQ`` leaves no per-admission record at all, so a closed
-      transport that admitted only unidentified work is refused rather than
-      guessed at.
+    * the witness must be complete: enabled, nothing evicted, and accounting for
+      every identified id the backend ever admitted.  This wait covers the
+      connection's own lifetime, so an unusable transcript is reported as
+      missing evidence and never read as an absence of admissions.  Long-lived
+      callers outside this file do not reach this branch, which is why the
+      completeness requirement is stated here rather than assumed.
+    * no unnamed admission may exist anywhere in the connection.  An id-less
+      ``OP_EDGE_REQ`` cannot be matched to a write, so a closed transport that
+      saw one is refused rather than guessed at; a historical identified answer
+      must not authenticate a later unanswered unnamed discard.
+    * every identified admission that was outstanding when the wait began must
+      have a recorded successful write now, which is this wait's own contract.
+    * every identified admission that became outstanding during the wait must
+      have one too, so a request admitted while the wait was parked cannot be
+      certified by the close that discarded it.  Together these two clauses say
+      that no identified admission is left unanswered, and each is isolated by
+      its own regression: an entry-scope request is dropped by the unwritten
+      discard, and a wait-scope request is dropped by the same schedule with its
+      admission moved after the entry sample.
+    * at least one identified request must have been admitted, so a zero that
+      never covered admitted work certifies nothing.
 
     Kept as its own function so a regression can install a predicate that never
     consents and show this acceptance path is load-bearing rather than
@@ -309,15 +493,16 @@ def _closed_transport_retirement_is_evidenced(
     """
     if pending_at_close != 0:
         return False
-    highest_at_entry, _retired_at_entry, unretired_at_entry = ledger_at_entry
-    highest_now, retired_now, unretired_now = _inbound_retirement_ledger(backend)
-    if unretired_now:
+    witness = _edge_admission_witness(backend)
+    if not witness.complete:
         return False
-    if unretired_at_entry - retired_now:
+    if witness.unidentified_admissions:
         return False
-    if any(edge_id not in retired_now for edge_id in range(highest_at_entry + 1, highest_now + 1)):
+    if witness_at_entry.outstanding - witness.answered:
         return False
-    return highest_now > 0
+    if witness.outstanding - witness_at_entry.outstanding:
+        return False
+    return bool(witness.admitted)
 
 
 def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float = 10.0) -> None:
@@ -345,15 +530,19 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
       notification, and a close arriving afterwards must not invalidate it.
     * The zero is observed with a published ``_closed`` and
       :func:`_closed_transport_retirement_is_evidenced` shows that the close
-      found nothing outstanding and that the backend's per-admission ledger
-      records a completed response for every identified request it admitted,
+      found nothing outstanding and that the backend's own serial transcript
+      records a completed write for every identified request it admitted,
       including any it had already claimed when this wait began.
 
     Every other exit is reported as a closure with lock-free diagnostics, and a
     transport that is already closed when the wait begins is refused outright.
-    The ledger is sampled before that refusal, so an admission already claimed
-    when this wait is entered is still part of the entry snapshot the
-    closed-transport decision compares against.
+    The admission witness is sampled before that refusal, so an admission
+    already claimed when this wait is entered is still part of the entry
+    snapshot the closed-transport decision compares against.  The transcript it
+    reads is opt-in and is enabled by the closed-transport regressions below
+    before ``start_receiver``; a caller that never reaches the closed branch
+    pays nothing for it, and a closed branch reached without one is refused as
+    missing evidence rather than guessed at.
 
     Known limitation, unchanged from the original assertions: a release that
     runs one of the discard paths while the transport is still open is
@@ -365,7 +554,7 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
     response keeps its id claimed, so the leak this wait was added to catch
     cannot hide behind a close.
     """
-    ledger_at_entry = _inbound_retirement_ledger(backend)
+    witness_at_entry = _edge_admission_witness(backend)
     if backend._closed:
         raise AssertionError(
             "network backend was already closed before the admitted edge response "
@@ -383,7 +572,7 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
                     retired_while_open = _closed_transport_retirement_is_evidenced(
                         backend,
                         pending_at_close=_pending_edge_requests_at_close(backend),
-                        ledger_at_entry=ledger_at_entry,
+                        witness_at_entry=witness_at_entry,
                     )
                 break
             remaining = deadline - time.monotonic()
@@ -480,6 +669,29 @@ def _admit_identified_edge_request(
     admission rather than a value assigned by the test.
     """
     peer._sock.sendall(_EDGE_ID_FRAME.pack(_OP_EDGE_REQ_ID, 1, edge_id))
+    _await_admitted_edge(backend, queued=queued, expected_pending=expected_pending)
+
+
+def _admit_legacy_edge_request(
+    peer: NetworkBackend,
+    backend: NetworkBackend,
+    *,
+    queued: int = 1,
+    expected_pending: int = 1,
+) -> None:
+    """Send one id-less ``OP_EDGE_REQ`` through the real reader and wait for it.
+
+    Same real admission path as :func:`_admit_identified_edge_request`, in the
+    historical two-byte format whose request carries no id.  The transport
+    still counts it as admitted work, so it must be part of the closed
+    transport's admission witness even though it has no per-id record.
+    """
+    peer._sock.sendall(_FRAME.pack(_OP_EDGE_REQ, 1))
+    _await_admitted_edge(backend, queued=queued, expected_pending=expected_pending)
+
+
+def _await_admitted_edge(backend: NetworkBackend, *, queued: int, expected_pending: int) -> None:
+    """Wait under the condition until the reader published ``queued`` requests."""
     deadline = time.monotonic() + _BOUNDED_WAIT
     with backend._edge_pending_condition:
         while backend._edge_queue.qsize() < queued:
@@ -487,6 +699,30 @@ def _admit_identified_edge_request(
             assert remaining > 0, "the network reader never published an admitted EDGE_REQ"
             backend._edge_pending_condition.wait(timeout=remaining)
         assert backend._edge_pending == expected_pending, backend._edge_pending
+
+
+def _wait_for_pending_zero(backend: NetworkBackend) -> None:
+    """Wait until every admitted request's response write retired."""
+    deadline = time.monotonic() + _BOUNDED_WAIT
+    with backend._edge_pending_condition:
+        while backend._edge_pending != 0:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"admitted work never retired ({backend._edge_pending})"
+            backend._edge_pending_condition.wait(timeout=remaining)
+
+
+def _enable_retirement_witness(
+    backend: NetworkBackend, *, max_entries: int = _EDGE_RETIREMENT_WITNESS_ENTRIES
+) -> None:
+    """Enable the serial transcript the closed-transport decision reads.
+
+    Must be called before ``start_receiver`` so the first admission is already
+    inside the ring.  The default capacity is the module ceiling, so a
+    regression that admits hundreds of sequential requests cannot evict the
+    evidence it is judged on.  ``enable_serial_transcript`` deliberately keeps
+    the produced facts local to this process and changes no serial scheduling.
+    """
+    backend.enable_serial_transcript(max_entries=max_entries)
 
 
 def _write_retire_and_close_holding_the_condition(
@@ -512,10 +748,10 @@ def _record_closed_retirement_evidence(monkeypatch, decisions: list[tuple[bool, 
     module = sys.modules[_wait_for_edge_requests_retired.__module__]
     real_evidence = module._closed_transport_retirement_is_evidenced
 
-    def recording(backend: NetworkBackend, *, pending_at_close, ledger_at_entry):
+    def recording(backend: NetworkBackend, *, pending_at_close, witness_at_entry):
         decisions.append((backend._closed, pending_at_close))
         return real_evidence(
-            backend, pending_at_close=pending_at_close, ledger_at_entry=ledger_at_entry
+            backend, pending_at_close=pending_at_close, witness_at_entry=witness_at_entry
         )
 
     monkeypatch.setattr(module, "_closed_transport_retirement_is_evidenced", recording)
@@ -696,6 +932,7 @@ def test_retirement_wait_rejects_close_that_abandons_admitted_work(clean_close: 
     zero and no reader error while no response ever reached the wire.
     """
     _peer, backend = NetworkBackend.pair()
+    _enable_retirement_witness(backend)
     try:
         with backend._edge_pending_condition:
             backend._edge_pending = 1
@@ -733,6 +970,7 @@ def test_retirement_wait_accepts_a_close_after_a_completed_retirement(monkeypatc
     from tests.test_network_owner_execution import _Core
 
     threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
     backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
     try:
         _admit_identified_edge_request(peer, backend)
@@ -767,12 +1005,13 @@ def test_retirement_wait_closed_acceptance_requires_wire_evidence(monkeypatch) -
     monkeypatch.setattr(
         module,
         "_closed_transport_retirement_is_evidenced",
-        lambda backend, *, pending_at_close, ledger_at_entry: False,
+        lambda backend, *, pending_at_close, witness_at_entry: False,
     )
     peer, backend = NetworkBackend.pair()
     from tests.test_network_owner_execution import _Core
 
     threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
     backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
     try:
         _admit_identified_edge_request(peer, backend)
@@ -828,6 +1067,7 @@ def test_retirement_wait_rejects_a_close_that_abandons_work_behind_a_written_res
     work outstanding, so counter growth is not retirement.
     """
     peer, backend = NetworkBackend.pair()
+    _enable_retirement_witness(backend)
     try:
         with backend._edge_pending_condition:
             backend._edge_pending = 1
@@ -875,6 +1115,7 @@ def test_retirement_wait_rejects_a_close_that_finds_zero_after_an_unwritten_disc
     from tests.test_network_owner_execution import _Core
 
     threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
     backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
     try:
         _admit_identified_edge_request(peer, backend)
@@ -907,6 +1148,54 @@ def test_retirement_wait_rejects_a_close_that_finds_zero_after_an_unwritten_disc
         _teardown_transport(peer, backend, *threads)
 
 
+def test_retirement_wait_rejects_a_close_that_discards_a_request_admitted_during_the_wait(
+    monkeypatch,
+) -> None:
+    """A request admitted while the wait is parked is not certified by the close.
+
+    Same real admission, real owner queue, and real closed discard as the
+    entry-scope regression above, except that the request is admitted after the
+    wait has already sampled its entry witness, so nothing about it can be
+    covered by that snapshot.  The close still publishes
+    ``pending_edge_requests`` zero with no reader error and no write, so the
+    wait-scope clause is what keeps this schedule a rejection.
+    """
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        discard_without_writing_and_close, closer_outcomes = _gated_closed_discard_transition(
+            backend, monkeypatch, threads
+        )
+
+        def admit_then_discard_and_close() -> None:
+            _admit_identified_edge_request(peer, backend)
+            discard_without_writing_and_close()
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            admit_then_discard_and_close,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert isinstance(outcome, AssertionError), outcome
+        assert "closure and not retirement" in str(outcome)
+        assert closer_outcomes == [None], closer_outcomes
+        assert backend._pre_close_snapshot["pending_edge_requests"] == 0
+        assert _inbound_retirement_ledger(backend) == (1, frozenset(), frozenset({1}))
+        assert _responses_written(backend) == 0
+        # The admission is visible to the witness and no write ever followed it.
+        assert _edge_admission_witness(backend).outstanding == frozenset({1})
+        assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
+        assert peer._sock.recv(1) == b"", "the abandoned request was answered after all"
+    finally:
+        monkeypatch.undo()
+        _teardown_transport(peer, backend, *threads)
+
+
 def test_retirement_wait_rejects_a_replay_decoy_over_a_closed_discard(monkeypatch) -> None:
     """A duplicate replay must not certify a different request the close dropped.
 
@@ -928,6 +1217,7 @@ def test_retirement_wait_rejects_a_replay_decoy_over_a_closed_discard(monkeypatc
     from tests.test_network_owner_execution import _Core
 
     threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
     backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
     try:
         responded = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, 1)
@@ -977,6 +1267,375 @@ def test_retirement_wait_rejects_a_replay_decoy_over_a_closed_discard(monkeypatc
         _teardown_transport(peer, backend, *threads)
 
 
+def test_retirement_witness_records_identified_and_unidentified_admissions() -> None:
+    """Pin the two transcript facts every closed-transport decision rests on.
+
+    The reader appends exactly one ``edge_req_received`` record at the single
+    site that raises ``_edge_pending``, carrying that request's ``edge_id`` and
+    ``None`` for the historical id-less ``OP_EDGE_REQ``; a response appends
+    ``edge_resp_send`` with ``outcome="success"`` only after ``_send_frame``
+    returned.  If either record ever changed shape, every decision below would
+    be reading a different fact than the one it documents, so the witness's own
+    inputs are asserted here against a real reader, a real owner dispatch, and
+    real bytes on a real socket pair.
+    """
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        empty = _edge_admission_witness(backend)
+        assert empty == _EdgeAdmissionWitness(
+            enabled=True,
+            complete=True,
+            dropped=0,
+            admitted=frozenset(),
+            answered=frozenset(),
+            unidentified_admissions=0,
+            witnessed_highest=0,
+        ), empty
+
+        _admit_legacy_edge_request(peer, backend)
+        legacy = _edge_admission_witness(backend)
+        assert legacy.complete
+        assert legacy.unidentified_admissions == 1
+        assert legacy.admitted == frozenset()
+        assert legacy.outstanding == frozenset()
+
+        # The legacy request is still on the owner queue, so this second
+        # admission is only observed once the queue holds both requests.
+        _admit_identified_edge_request(peer, backend, edge_id=7, queued=2, expected_pending=2)
+        identified = _edge_admission_witness(backend)
+        assert identified.complete
+        assert identified.admitted == frozenset({7})
+        assert identified.answered == frozenset()
+        assert identified.outstanding == frozenset({7})
+        assert identified.unidentified_admissions == 1
+
+        assert backend.service_pending_edges(max_edges=2) == 2
+        _wait_for_pending_zero(backend)
+        answered = _edge_admission_witness(backend)
+        assert answered.complete
+        assert answered.answered == frozenset({7})
+        assert answered.outstanding == frozenset()
+        # The id-less admission stays visible after it was answered: it still
+        # cannot be matched to that answer, which is why any unnamed admission
+        # refuses closed acceptance rather than being counted as retired.
+        assert answered.unidentified_admissions == 1
+    finally:
+        _close_pair(peer, backend)
+
+
+@pytest.mark.parametrize(
+    "legacy_before_entry",
+    [True, False],
+    ids=["legacy-before-entry", "legacy-during-the-wait"],
+)
+def test_retirement_wait_rejects_a_closed_legacy_discard_that_borrows_an_old_answer(
+    monkeypatch, legacy_before_entry: bool
+) -> None:
+    """An unnamed admission must not be certified by a historical answer.
+
+    A real identified request is admitted, answered by the owner path, and read
+    off the wire.  A second, id-less request is then admitted and left
+    unanswered, and the close's real closed branch discards it.  The close
+    records ``pending_edge_requests == 0``, the aggregate response count never
+    moves, and the per-id ledger shows nothing outstanding - the id-less request
+    never had an entry - so a rule keyed on "some identified id existed" accepts
+    a request that never received a response.
+
+    The witness refuses both orderings, because an admission with no id cannot
+    be matched to a write at all.  The second ordering admits the unnamed
+    request after the wait has already sampled its entry witness, so the refusal
+    cannot come from a stale entry snapshot.
+    """
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        responded = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, 1)
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        _admit_identified_edge_request(peer, backend)
+        assert backend.service_pending_edges(max_edges=1) == 1
+        _wait_for_pending_zero(backend)
+        assert peer._sock.recv(len(responded)) == responded
+        if legacy_before_entry:
+            _admit_legacy_edge_request(peer, backend)
+
+        discard_without_writing_and_close, closer_outcomes = _gated_closed_discard_transition(
+            backend, monkeypatch, threads
+        )
+
+        def discard_unnamed_request_and_close() -> None:
+            if not legacy_before_entry:
+                _admit_legacy_edge_request(peer, backend)
+            discard_without_writing_and_close()
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            discard_unnamed_request_and_close,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert isinstance(outcome, AssertionError), outcome
+        assert "closure and not retirement" in str(outcome)
+        assert closer_outcomes == [None], closer_outcomes
+        assert decisions == [(True, 0)], decisions
+        assert backend._pre_close_snapshot["pending_edge_requests"] == 0
+        # The identified request really was answered, so nothing in the per-id
+        # ledger is outstanding: only the admission witness can refuse this.
+        assert _inbound_retirement_ledger(backend) == (1, frozenset({1}), frozenset())
+        assert _responses_written(backend) == 1
+        assert "'unidentified_admissions': 1" in str(outcome), str(outcome)
+        assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
+        assert peer._sock.recv(1) == b"", "the unnamed request was answered after all"
+    finally:
+        # Restore the real ``_closed_event.set`` before teardown; see the
+        # unwritten-discard regression for why the gate must be dropped here.
+        monkeypatch.undo()
+        _teardown_transport(peer, backend, *threads)
+
+
+def test_retirement_wait_accepts_a_clean_close_after_the_replay_window_evicts_a_retired_id(
+    monkeypatch,
+) -> None:
+    """The bounded replay window is not a completion ledger.
+
+    ``_inbound_edge_responses`` keeps only the most recent 256 completed
+    responses, so the oldest retired id disappears from it while the connection
+    itself is entirely healthy.  Every one of these requests is admitted by the
+    real reader, dispatched to the real owner, written to the real socket, and
+    retired while the transport is still open, and the close then finds nothing
+    outstanding.  A rule that required a cached response for each id in its
+    entry ledger rejects this legitimate retirement; the admission witness
+    instead decides from per-admission records that outlive the replay window.
+    """
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    retired = _EDGE_RESPONSE_HISTORY_MAX + 1
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        _admit_identified_edge_request(peer, backend, edge_id=1)
+        received = bytearray()
+
+        def retire_every_request_and_close() -> None:
+            for edge_id in range(1, retired + 1):
+                if edge_id > 1:
+                    _admit_identified_edge_request(peer, backend, edge_id=edge_id)
+                assert backend.service_pending_edges(max_edges=1) == 1
+                _wait_for_pending_zero(backend)
+                frame = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, edge_id)
+                received.extend(peer._sock.recv(len(frame)))
+            backend._mark_closed_uncoordinated()
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            retire_every_request_and_close,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert outcome is None, outcome
+        assert backend._closed
+        assert decisions == [(True, 0)], decisions
+        assert elapsed < _BOUNDED_WAIT, f"acceptance was not bounded ({elapsed:.3f}s)"
+        expected = b"".join(
+            _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, edge_id) for edge_id in range(1, retired + 1)
+        )
+        assert bytes(received) == expected, "not every retired response reached the peer"
+        assert peer._sock.recv(1) == b"", "the closed transport did not reach the peer as EOF"
+        # The regression only means something if the replay window really
+        # evicted the oldest id, which is the fact the pre-round-6 rule keyed on.
+        _highest, replayed, unretired = _inbound_retirement_ledger(backend)
+        assert 1 not in replayed, "the bounded replay window did not evict the oldest id"
+        assert unretired == frozenset()
+        witness = _edge_admission_witness(backend)
+        assert witness.complete and not witness.unidentified_admissions, witness
+        assert witness.admitted == frozenset(range(1, retired + 1))
+        assert witness.answered == witness.admitted
+    finally:
+        _teardown_transport(peer, backend, *threads)
+
+
+def test_retirement_wait_accepts_a_clean_close_after_a_nonconsecutive_id_gap(
+    monkeypatch,
+) -> None:
+    """A high-water mark is not a contiguous range of admissions.
+
+    ``_claim_inbound_edge_id`` accepts any id above the high-water mark, so a
+    peer that abandons a request and recovers on the next id leaves a gap that
+    this connection never admitted.  Both requests here are admitted, answered
+    by the real owner, written to the peer, and retired, and the close finds
+    nothing outstanding.  A rule that ranged over the high-water mark invents an
+    admission for the missing id and rejects the retirement; the admission
+    witness only ever counts ids the reader really admitted.
+    """
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        _admit_identified_edge_request(peer, backend, edge_id=1)
+        received = bytearray()
+
+        def retire_one_three_and_close() -> None:
+            for edge_id in (1, 3):
+                if edge_id != 1:
+                    _admit_identified_edge_request(peer, backend, edge_id=edge_id)
+                assert backend.service_pending_edges(max_edges=1) == 1
+                _wait_for_pending_zero(backend)
+                frame = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, edge_id)
+                received.extend(peer._sock.recv(len(frame)))
+            backend._mark_closed_uncoordinated()
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            retire_one_three_and_close,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert outcome is None, outcome
+        assert backend._closed
+        assert decisions == [(True, 0)], decisions
+        assert elapsed < _BOUNDED_WAIT, f"acceptance was not bounded ({elapsed:.3f}s)"
+        assert bytes(received) == (
+            _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, 1)
+            + _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, 3)
+        ), "the nonconsecutive retirements did not reach the peer"
+        assert peer._sock.recv(1) == b"", "the closed transport did not reach the peer as EOF"
+        ledger = _inbound_retirement_ledger(backend)
+        assert ledger == (3, frozenset({1, 3}), frozenset()), ledger
+        witness = _edge_admission_witness(backend)
+        assert witness.complete and not witness.unidentified_admissions, witness
+        assert witness.admitted == frozenset({1, 3})
+        assert witness.answered == frozenset({1, 3})
+    finally:
+        _teardown_transport(peer, backend, *threads)
+
+
+def test_retirement_wait_reports_missing_witness_evidence_when_the_transcript_evicts(
+    monkeypatch,
+) -> None:
+    """An evicted transcript is missing evidence, not an empty one.
+
+    With a ring too small for the connection, the oldest admission record is
+    evicted, so the witness can no longer show that every admitted request was
+    answered.  The wait must refuse loudly and name the missing evidence, rather
+    than read the shortened transcript as "nothing was ever admitted".  The
+    recorded decision still comes from the closed-transport branch on a clean
+    close with zero outstanding work, so this is the same schedule as the
+    acceptance regressions apart from the ring capacity.
+    """
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend, max_entries=_EDGE_RETIREMENT_WITNESS_EVICTING_ENTRIES)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        for edge_id in range(1, 6):
+            _admit_identified_edge_request(peer, backend, edge_id=edge_id)
+            assert backend.service_pending_edges(max_edges=1) == 1
+            _wait_for_pending_zero(backend)
+            frame = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, edge_id)
+            assert peer._sock.recv(len(frame)) == frame
+        witness = _edge_admission_witness(backend)
+        assert witness.dropped > 0, "the bounded ring did not evict a record"
+        assert not witness.complete, witness
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            backend._mark_closed_uncoordinated,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert isinstance(outcome, AssertionError), outcome
+        assert "closure and not retirement" in str(outcome)
+        assert backend._pre_close_snapshot["pending_edge_requests"] == 0
+        assert "'complete': False" in str(outcome), str(outcome)
+        assert "'dropped': " in str(outcome), str(outcome)
+        assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
+    finally:
+        _teardown_transport(peer, backend, *threads)
+
+
+def test_retirement_wait_rejects_a_witness_enabled_after_the_admission(monkeypatch) -> None:
+    """A transcript that starts after the admission is refused, not trusted.
+
+    ``enable_serial_transcript`` starts an empty ring, so a caller that enables
+    it after this connection already admitted identified work would see no
+    admission for a request the backend really holds.  The schedule reaches the
+    decision with a close that found **no** outstanding work: the owner's real
+    closed branch discards the queued request before the close samples its
+    snapshot, so the recorded count is zero, exactly as in the acceptance
+    schedule.  That leaves the clauses that compare the transcript against the
+    backend's own ledger as the only ones able to refuse it, which is what this
+    regression is for.  A rule that trusts the transcript's visible ids accepts
+    this close; the witness instead reports the admitted id as missing evidence,
+    because it is still claimed-and-unanswered in ``_inbound_edge_ids_pending``
+    and ``_highest_inbound_edge_id`` names an id the transcript never saw.
+    """
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        _admit_identified_edge_request(peer, backend)
+        assert _inbound_retirement_ledger(backend) == (1, frozenset(), frozenset({1}))
+        _enable_retirement_witness(backend)
+        witness = _edge_admission_witness(backend)
+        assert witness.admitted == frozenset(), witness
+        assert not witness.complete, witness
+
+        discard_without_writing_and_close, closer_outcomes = _gated_closed_discard_transition(
+            backend, monkeypatch, threads
+        )
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            discard_without_writing_and_close,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert isinstance(outcome, AssertionError), outcome
+        assert "closure and not retirement" in str(outcome)
+        assert closer_outcomes == [None], closer_outcomes
+        # The predicate really was consulted on a zero of the close's own
+        # making, so the refusal below cannot come from the pre-close count.
+        assert decisions == [(True, 0)], decisions
+        assert backend._pre_close_snapshot["pending_edge_requests"] == 0
+        assert "'complete': False" in str(outcome), str(outcome)
+        assert "'highest_inbound_edge_id': 1" in str(outcome), str(outcome)
+        assert "'identified_admissions': 0" in str(outcome), str(outcome)
+        assert "'unretired_inbound_edge_ids': [1]" in str(outcome), str(outcome)
+        assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
+        assert peer._sock.recv(1) == b"", "the discarded request was answered after all"
+    finally:
+        # Restore the real ``_closed_event.set`` before teardown; see the
+        # unnamed-discard regression for why the gate must be dropped here.
+        monkeypatch.undo()
+        _teardown_transport(peer, backend, *threads)
+
+
 @pytest.mark.parametrize(
     "close_owns_the_condition",
     [True, False],
@@ -1003,6 +1662,7 @@ def test_retirement_wait_accepts_a_close_that_beats_the_waiter_to_the_condition(
     from tests.test_network_owner_execution import _Core
 
     threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
     backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
     try:
         responded = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 1, 1)
