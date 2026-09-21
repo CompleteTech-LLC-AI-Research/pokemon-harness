@@ -10,13 +10,14 @@ observations happen on the thread that owns ``provider.step``.
 from __future__ import annotations
 
 import queue
+import socket
 import threading
 import time
 
 import pytest
 from pyboy.core.serial import CYCLES_PER_BYTE_DMG, Serial
 
-from pokered_harness.link.network_backend import NetworkBackend
+from pokered_harness.link.network_backend import NetworkBackend, _InboundEdge
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 
 # Reuse the repository's original 32 KiB, asset-free PyBoy fixture.  The
@@ -157,6 +158,17 @@ def _wait_for_edge_request(
             raise AssertionError("network backend closed before EDGE_REQ")
 
 
+def _responses_written(backend: NetworkBackend) -> int:
+    """Count the ``EDGE_RESP`` frames this backend actually wrote to the wire.
+
+    ``edge_resp_sent`` is incremented only after ``_send_frame`` returns, and
+    ``_send_edge_response`` deliberately skips the increment on its
+    "not sent, closed" path, so a change in this counter is positive evidence
+    that an admitted edge request was answered rather than abandoned.
+    """
+    return int(backend._stats["edge_resp_sent"])
+
+
 def _retirement_diagnostics(backend: NetworkBackend) -> dict[str, object]:
     """Collect failure diagnostics without acquiring any transport lock.
 
@@ -177,6 +189,7 @@ def _retirement_diagnostics(backend: NetworkBackend) -> dict[str, object]:
         "closed": backend._closed,
         "pending_at_close": pending_at_close,
         "reader_error": reader_error,
+        "responses_written": _responses_written(backend),
     }
 
 
@@ -191,18 +204,25 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
     documented retirement, notified by ``_decrement_edge_pending``, and let the
     caller assert the invariant.
 
-    A terminal transport transition also drives the counter to zero while
-    abandoning admitted work (``_mark_closed_common``), so zero alone does not
-    prove a response reached the wire.  This wait therefore refuses to accept a
-    close as retirement: it rejects a transport that is already closed when the
-    wait begins, and one that closes while the wait is outstanding if the
-    terminal transition recorded unretired work or a reader failure.
+    Zero pending work is necessary but not sufficient.  A terminal transport
+    transition also drives the counter to zero while abandoning admitted work,
+    and ``_mark_closed_common`` publishes ``_closed`` before it samples the
+    counters it stores, so neither "pending zero" nor "no reader error" can
+    separate retirement from closure: a response worker that observes the close
+    skips ``_send_edge_response`` and still clears the accounting.  This wait
+    therefore requires positive wire evidence.  It accepts a zero counter only
+    on a still-open transport, where the retirement notification is the only
+    writer, or when a new ``EDGE_RESP`` really was written while the wait was
+    outstanding.  Every other exit is reported as a closure with lock-free
+    diagnostics, and a transport that is already closed when the wait begins is
+    refused outright.
     """
     if backend._closed:
         raise AssertionError(
             "network backend was already closed before the admitted edge response "
             f"wait began; diagnostics={_retirement_diagnostics(backend)}"
         )
+    responses_before = _responses_written(backend)
     deadline = time.monotonic() + timeout
     timed_out = False
     with backend._edge_pending_condition:
@@ -212,7 +232,7 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
                 timed_out = True
                 break
             backend._edge_pending_condition.wait(timeout=remaining)
-    # Both failure paths below run with no transport lock held and use only
+    # Every failure path below runs with no transport lock held and uses only
     # lock-free diagnostics, so a concurrent close can always finish and the
     # failure stays bounded instead of deadlocking on the inverted lock order.
     if timed_out:
@@ -220,14 +240,38 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
             "admitted edge response was not written within "
             f"{timeout:g}s; diagnostics={_retirement_diagnostics(backend)}"
         )
-    if backend._closed:
-        diagnostics = _retirement_diagnostics(backend)
-        if diagnostics["pending_at_close"] or diagnostics["reader_error"] is not None:
-            raise AssertionError(
-                "network backend closed while the admitted edge response was "
-                "outstanding, so zero pending work is closure and not retirement; "
-                f"diagnostics={diagnostics}"
-            )
+    if not backend._closed:
+        # On an open transport the retirement notification is the only writer
+        # that zeroes the admitted-work counter.
+        return
+    if _responses_written(backend) > responses_before:
+        # The admitted work did reach the wire before the transport closed.
+        return
+    raise AssertionError(
+        "network backend closed while the admitted edge response was outstanding, "
+        "so zero pending work is closure and not retirement; "
+        f"responses_written={_responses_written(backend)} "
+        f"(unchanged since the wait began at {responses_before}); "
+        f"diagnostics={_retirement_diagnostics(backend)}"
+    )
+
+
+def _abandon_test_transport(backend: NetworkBackend) -> None:
+    """Release a transport whose inspector can no longer be joined.
+
+    Only used by teardown when a regression is being demonstrated and the
+    pending condition is still owned by a thread that cannot finish; reaching
+    ``_mark_closed_uncoordinated`` would block on that condition, so the socket
+    is released directly and the runner stays bounded.
+    """
+    try:
+        backend._sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        backend._sock.close()
+    except OSError:
+        pass
 
 
 def test_retirement_wait_rejects_transport_closed_before_the_wait() -> None:
@@ -241,40 +285,109 @@ def test_retirement_wait_rejects_transport_closed_before_the_wait() -> None:
         backend._mark_closed_uncoordinated()
 
 
-def test_retirement_wait_rejects_close_that_abandons_admitted_work() -> None:
-    """A close during the wait drops admitted work; that is not retirement."""
+def _run_transition_while_wait_is_outstanding(
+    backend: NetworkBackend, transition, *, wait_timeout: float = 5.0
+) -> tuple[BaseException | None, float]:
+    """Run ``transition`` after the retirement wait is provably parked.
+
+    Returns the waiter's outcome and how long it took after the transition
+    started.  The transition is released only once the real condition-wait path
+    reports that this waiter has parked, so the ordering never depends on a
+    sleep and the waiter cannot mistake the transition for its entry check.
+    """
+    outcomes: list[BaseException | None] = []
+    parked = threading.Event()
+    waiter_holder: list[threading.Thread] = []
+    condition = backend._edge_pending_condition
+    original_wait = condition.wait
+
+    def observed_wait(timeout: float | None = None):
+        # Report only this waiter's own wait call; other transport waiters
+        # share the same condition and must not start the transition early.
+        if waiter_holder and threading.current_thread() is waiter_holder[0]:
+            parked.set()
+        return original_wait(timeout)
+
+    def waiter() -> None:
+        try:
+            _wait_for_edge_requests_retired(backend, timeout=wait_timeout)
+        except BaseException as exc:  # noqa: BLE001 - returned for assertion
+            outcomes.append(exc)
+        else:
+            outcomes.append(None)
+
+    condition.wait = observed_wait  # type: ignore[method-assign]
+    try:
+        waiter_thread = threading.Thread(target=waiter, name="retirement-wait", daemon=True)
+        waiter_holder.append(waiter_thread)
+        waiter_thread.start()
+        assert parked.wait(timeout=5.0), "retirement wait never parked on the condition"
+        actor = threading.Thread(target=transition, name="retirement-wait-actor", daemon=True)
+        actor.start()
+        started = time.monotonic()
+        waiter_thread.join(timeout=10.0)
+        elapsed = time.monotonic() - started
+        actor.join(timeout=5.0)
+    finally:
+        condition.wait = original_wait
+    assert not waiter_thread.is_alive(), "retirement wait did not observe the transition"
+    assert not actor.is_alive(), "the transition did not complete"
+    assert len(outcomes) == 1, outcomes
+    return outcomes[0], elapsed
+
+
+@pytest.mark.parametrize("clean_close", [True, False], ids=["clean-close", "error-close"])
+def test_retirement_wait_rejects_close_that_abandons_admitted_work(clean_close: bool) -> None:
+    """A close during the wait drops admitted work; that is not retirement.
+
+    Both closes are rejected. A clean close publishes ``_closed`` before it
+    samples the counters it records, and the response worker skips its write
+    once the transport is terminal, so a clean close can present with pending
+    zero and no reader error while no response ever reached the wire.
+    """
     _peer, backend = NetworkBackend.pair()
     try:
         with backend._edge_pending_condition:
             backend._edge_pending = 1
-        outcomes: list[BaseException | None] = []
-
-        def waiter() -> None:
-            try:
-                _wait_for_edge_requests_retired(backend, timeout=5.0)
-            except BaseException as exc:  # noqa: BLE001 - asserted below
-                outcomes.append(exc)
-            else:
-                outcomes.append(None)
-
-        waiter_thread = threading.Thread(target=waiter, name="retirement-wait", daemon=True)
-        waiter_thread.start()
-        # The wait releases the pending condition while it blocks, so a real
-        # terminal transition can complete inside the wait window.
-        time.sleep(0.05)
-        closer = threading.Thread(
-            target=backend._mark_closed_uncoordinated,
-            args=(RuntimeError("transport failed"),),
-            name="retirement-wait-error-close",
-            daemon=True,
+        assert _responses_written(backend) == 0
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            lambda: backend._mark_closed_uncoordinated(
+                None if clean_close else RuntimeError("transport failed")
+            ),
         )
-        closer.start()
-        waiter_thread.join(timeout=10.0)
-        closer.join(timeout=5.0)
-        assert not waiter_thread.is_alive()
-        assert not closer.is_alive()
-        assert len(outcomes) == 1 and isinstance(outcomes[0], AssertionError), outcomes
-        assert "closure and not retirement" in str(outcomes[0])
+        assert isinstance(outcome, AssertionError), outcome
+        assert "closure and not retirement" in str(outcome)
+        assert backend._closed
+        # No response was ever written, so zero pending work here is closure.
+        assert _responses_written(backend) == 0
+        assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
+    finally:
+        backend._mark_closed_uncoordinated()
+
+
+def test_retirement_wait_accepts_a_close_after_the_response_was_written() -> None:
+    """A close that lands after the response was written is still retirement.
+
+    The wait must not reject every close: the evidence it needs is the response
+    reaching the wire, not the transport staying open.
+    """
+    _peer, backend = NetworkBackend.pair()
+    try:
+        with backend._edge_pending_condition:
+            backend._edge_pending = 1
+
+        def write_retire_and_close() -> None:
+            backend._send_edge_response(_InboundEdge(peer_bit=0, response_bit=1))
+            backend._decrement_edge_pending()
+            backend._mark_closed_uncoordinated()
+
+        assert _responses_written(backend) == 0
+        outcome, _elapsed = _run_transition_while_wait_is_outstanding(
+            backend, write_retire_and_close
+        )
+        assert outcome is None, outcome
+        assert _responses_written(backend) == 1
         assert backend._closed
     finally:
         backend._mark_closed_uncoordinated()
@@ -283,36 +396,50 @@ def test_retirement_wait_rejects_close_that_abandons_admitted_work() -> None:
 def test_retirement_wait_failure_path_stays_bounded_while_close_lock_is_held() -> None:
     """Timeout diagnostics must not wait on the close lock."""
     _peer, backend = NetworkBackend.pair()
+    close_lock_held = False
+    waiter_thread: threading.Thread | None = None
     try:
         with backend._edge_pending_condition:
             backend._edge_pending = 1
         assert backend._close_lock.acquire(timeout=1.0)
-        try:
-            outcomes: list[BaseException | None] = []
+        close_lock_held = True
+        outcomes: list[BaseException | None] = []
 
-            def waiter() -> None:
-                try:
-                    _wait_for_edge_requests_retired(backend, timeout=0.2)
-                except BaseException as exc:  # noqa: BLE001 - asserted below
-                    outcomes.append(exc)
-                else:
-                    outcomes.append(None)
+        def waiter() -> None:
+            try:
+                _wait_for_edge_requests_retired(backend, timeout=0.2)
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                outcomes.append(exc)
+            else:
+                outcomes.append(None)
 
-            waiter_thread = threading.Thread(target=waiter, name="retirement-wait", daemon=True)
-            started = time.monotonic()
-            waiter_thread.start()
-            waiter_thread.join(timeout=5.0)
-            elapsed = time.monotonic() - started
-            assert not waiter_thread.is_alive(), (
-                "timeout diagnostics waited on the close lock a closer holds"
-            )
-            assert elapsed < 5.0, f"retirement wait was not bounded ({elapsed:.3f}s)"
-            assert len(outcomes) == 1 and isinstance(outcomes[0], AssertionError), outcomes
-            assert "was not written within" in str(outcomes[0])
-        finally:
-            backend._close_lock.release()
+        waiter_thread = threading.Thread(target=waiter, name="retirement-wait", daemon=True)
+        started = time.monotonic()
+        waiter_thread.start()
+        waiter_thread.join(timeout=5.0)
+        elapsed = time.monotonic() - started
+        assert not waiter_thread.is_alive(), (
+            "timeout diagnostics waited on the close lock a closer holds"
+        )
+        assert elapsed < 5.0, f"retirement wait was not bounded ({elapsed:.3f}s)"
+        assert len(outcomes) == 1 and isinstance(outcomes[0], AssertionError), outcomes
+        assert "was not written within" in str(outcomes[0])
     finally:
-        backend._mark_closed_uncoordinated()
+        if close_lock_held:
+            backend._close_lock.release()
+            close_lock_held = False
+        # Teardown must stay bounded even when the helper has regressed. A
+        # pre-fix helper is left holding the pending condition while it waits
+        # for the close lock, so releasing the lock first gives it the chance to
+        # finish; if it still cannot, the transport is released without taking
+        # the pending condition that thread owns, so the runner reports the
+        # failed assertion instead of hanging in cleanup.
+        if waiter_thread is not None:
+            waiter_thread.join(timeout=2.0)
+        if waiter_thread is None or not waiter_thread.is_alive():
+            backend._mark_closed_uncoordinated()
+        else:
+            _abandon_test_transport(backend)
 
 
 def test_byte_completed_at_frame_barrier_resumes_cpu_without_a_ninth_edge(
