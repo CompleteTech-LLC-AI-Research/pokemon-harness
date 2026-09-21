@@ -1204,12 +1204,19 @@ def test_producer_run_refuses_a_report_that_aliases_an_input(tmp_path: Path) -> 
 def test_producer_run_removes_its_fixture_when_the_report_cannot_be_written(
     tmp_path: Path,
 ) -> None:
+    """A prior report entry that cannot be secured refuses before anything is lost.
+
+    The report target is deliberately replaceable, but an existing entry must be
+    moved aside intact first; a directory (or any other entry whose contents this
+    call cannot read and therefore cannot preserve) is refused, and the refusal
+    still rolls the already-published fixture back.
+    """
     prepared = _prepared_run(tmp_path)
     output = tmp_path / "out.state"
     report_directory = tmp_path / "report-dir"
     report_directory.mkdir()
 
-    with pytest.raises(OSError):
+    with pytest.raises(producer.ScenarioRefusal, match="could not be read"):
         producer.run(
             scenario_id="red_color_ordinary",
             catalog=prepared["catalog"],
@@ -1225,6 +1232,37 @@ def test_producer_run_removes_its_fixture_when_the_report_cannot_be_written(
             ),
         )
 
+    assert not output.exists()
+    assert report_directory.is_dir()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_removes_its_fixture_when_the_report_path_is_unusable(
+    tmp_path: Path,
+) -> None:
+    """A report that genuinely cannot be written must not leave the fixture behind."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_bytes(b"a regular file cannot contain the report")
+
+    with pytest.raises(OSError):
+        producer.run(
+            scenario_id="red_color_ordinary",
+            catalog=prepared["catalog"],
+            rom=prepared["rom"],
+            sym=prepared["sym"],
+            input_fixture=prepared["input_fixture"],
+            output=output,
+            report=blocker / "report.json",
+            repo_root=tmp_path,
+            pins=prepared["pins"],
+            capture=lambda **kwargs: producer.capture_battle_scenario(
+                **kwargs, session_factory=lambda **_kwargs: _FakeSession()
+            ),
+        )
+
+    assert blocker.read_bytes() == b"a regular file cannot contain the report"
     assert not output.exists()
     assert _staged_files(tmp_path) == []
 
@@ -1348,13 +1386,89 @@ def test_producer_measure_runtime_identity_refuses_a_requested_mode_mismatch(
 
 
 def test_producer_measure_runtime_identity_refuses_a_foreign_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another environment's ``bin/python`` is refused even when it is our binary.
+
+    Two virtual environments routinely symlink the same real interpreter, so the
+    resolved binary cannot tell them apart -- but the environment it is recorded
+    under can, and recording a sibling environment's path as the interpreter this
+    process ran would be a measurement claim that was never observed.
+    """
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: False)
+    sibling_bin = tmp_path / "sibling-env" / "bin"
+    sibling_bin.mkdir(parents=True)
+    sibling_python = sibling_bin / "python"
+    sibling_python.symlink_to(sys.executable)
+    assert sibling_python.is_file()
+
+    with pytest.raises(producer.ScenarioRefusal, match="not the executing interpreter"):
+        producer.measure_runtime_identity(runtime="source", python=sibling_python, repo_root=ROOT)
+
+
+def test_producer_measure_runtime_identity_refuses_a_nonexistent_interpreter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A request that names nothing is refused before any environment reasoning."""
     monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: False)
-    with pytest.raises(producer.ScenarioRefusal, match="not the executing interpreter"):
-        producer.measure_runtime_identity(
-            runtime="source", python="/nonexistent/interpreter", repo_root=ROOT
+    inside_the_environment = Path(sys.executable).parent / "this-interpreter-does-not-exist"
+    assert not inside_the_environment.exists()
+    for missing in ("/nonexistent/interpreter", inside_the_environment):
+        with pytest.raises(producer.ScenarioRefusal, match="does not exist"):
+            producer.measure_runtime_identity(runtime="source", python=missing, repo_root=ROOT)
+
+
+def test_producer_measure_runtime_identity_refuses_a_foreign_executable_in_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sharing the environment's ``bin`` directory is not interpreter identity."""
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: False)
+    fake_prefix = tmp_path / "fakeenv"
+    fake_bin = fake_prefix / "bin"
+    fake_bin.mkdir(parents=True)
+    unrelated = fake_bin / "unrelated-launcher"
+    unrelated.symlink_to("/bin/sh")
+    monkeypatch.setattr(sys, "prefix", str(fake_prefix))
+
+    with pytest.raises(producer.ScenarioRefusal, match="resolves to"):
+        producer.measure_runtime_identity(runtime="source", python=unrelated, repo_root=ROOT)
+
+
+def test_producer_measure_runtime_identity_accepts_the_executing_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request for the real interpreter is recorded from the process itself."""
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: False)
+    identity = producer.measure_runtime_identity(
+        runtime="source", python=sys.executable, repo_root=ROOT
+    )
+    assert identity["measured"] is True
+    assert identity["mode"] == "source"
+    assert identity["executable"] == str(Path(sys.executable).resolve())
+    assert identity["environment"] == sys.prefix
+    assert identity["python_version"] == sys.version.split()[0]
+
+
+def test_producer_capture_refuses_a_foreign_executable_before_building_a_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The measured default path refuses an unrelated interpreter before PyBoy opens."""
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: False)
+    unrelated = Path(sys.executable).parent / "this-interpreter-does-not-exist"
+    assert not unrelated.exists()
+    sessions: list[int] = []
+
+    def factory(*_args: object, **_kwargs: object) -> object:
+        sessions.append(1)
+        return _FakeSession()
+
+    monkeypatch.setattr(producer, "_default_session_factory", factory)
+    with pytest.raises(producer.ScenarioRefusal, match="does not exist"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(tmp_path, _writable_scenario(), python=unrelated)
         )
+    assert sessions == []
+    assert not (tmp_path / "out.state").exists()
 
 
 def test_producer_measure_runtime_identity_records_measured_values(
@@ -2263,4 +2377,379 @@ def test_producer_capture_interruption_at_publish_leaves_no_partial_file(
         )
 
     assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+# --- round-3 review regressions (R3-01 to R3-06) ------------------------
+
+
+def _working_names(tmp_path: Path) -> list[str]:
+    """Every private staging or recovery name left behind under ``tmp_path``."""
+    return sorted(
+        path.name
+        for path in tmp_path.iterdir()
+        if ".partial-" in path.name or ".displaced-" in path.name
+    )
+
+
+def test_producer_capture_preserves_a_foreign_entry_installed_between_the_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A competitor that replaces the pathname between the two probes survives.
+
+    Ownership is probed and then re-probed at the point of removal precisely
+    because a pathname offers no compare-and-swap: the entry the first probe
+    observed is not necessarily the entry a removal would delete.
+    """
+    output = tmp_path / "out.state"
+    competitor = tmp_path / "competitor.state"
+    competitor.write_bytes(b"competitor bytes installed between the probes")
+    real_lstat = producer.os.lstat
+    real_link = producer.os.link
+    probes: list[int] = []
+
+    def link_then_interrupt(source: object, destination: object) -> None:
+        real_link(source, destination)
+        raise KeyboardInterrupt
+
+    def swap_between_probes(path: object, *args: object, **kwargs: object) -> object:
+        entry = real_lstat(path, *args, **kwargs)
+        if Path(path) == output:  # type: ignore[arg-type]
+            probes.append(1)
+            if len(probes) == 1:
+                # The first probe saw this capture's own entry; a competing
+                # writer installs its own before the re-probe can run.
+                os.replace(competitor, output)
+        return entry
+
+    monkeypatch.setattr(producer.os, "lstat", swap_between_probes)
+    monkeypatch.setattr(producer.os, "link", link_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _FakeSession()
+            )
+        )
+
+    assert len(probes) >= 2, "the entry must be re-probed before any removal"
+    assert output.read_bytes() == b"competitor bytes installed between the probes"
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_keeps_a_competitors_hard_link_to_the_staged_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``EEXIST`` proves this capture did not create the destination entry.
+
+    A competing writer can hard-link this capture's own staged inode into place,
+    so a matching inode is not ownership; the no-overwrite refusal must leave
+    that entry exactly where the competitor put it.
+    """
+    output = tmp_path / "out.state"
+    real_link = producer.os.link
+
+    def link_then_compete(source: object, destination: object) -> None:
+        real_link(source, destination)
+        # The competing writer links the same inode under the same name, then
+        # the destination exists: this capture's own publish fails with EEXIST.
+        real_link(source, destination)
+
+    monkeypatch.setattr(producer.os, "link", link_then_compete)
+
+    with pytest.raises(producer.ScenarioRefusal, match="overwrite"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _FakeSession()
+            )
+        )
+
+    assert output.read_bytes() == b"fake-bounded-capture-state"
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_restores_a_prior_report_when_the_publish_rename_never_happens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupt before the publish rename must not strand the prior report.
+
+    The earlier report is moved aside by one atomic rename before anything is
+    published over it, so a rollback landing before that publish still has to
+    put the earlier entry back instead of leaving it at its backup name.
+    """
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+    prior = b'{\n  "prior": true\n}\n'
+    report.write_bytes(prior)
+    real_replace = producer.os.replace
+    interrupted: list[int] = []
+
+    def interrupt_the_publish(source: object, destination: object) -> None:
+        if Path(destination) == report and ".partial-" in Path(source).name and not interrupted:
+            interrupted.append(1)
+            raise KeyboardInterrupt
+        real_replace(source, destination)
+
+    monkeypatch.setattr(producer.os, "replace", interrupt_the_publish)
+    prepared.update({"out": output, "report": report, "root": tmp_path})
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_with_fake_session(prepared)
+
+    assert interrupted, "the publish rename must have been refused before it happened"
+    assert report.read_bytes() == prior
+    assert not output.exists()
+    assert _working_names(tmp_path) == []
+
+
+@pytest.mark.parametrize("topology", ["regular", "symlink", "hardlink"])
+def test_producer_run_restores_a_prior_report_with_its_topology_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, topology: str
+) -> None:
+    """A displaced report is put back through one rename, keeping its topology."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+    prior = b'{\n  "prior": true\n}\n'
+    sibling = tmp_path / "prior-report.json"
+    if topology == "symlink":
+        sibling.write_bytes(prior)
+        report.symlink_to(sibling)
+    elif topology == "hardlink":
+        sibling.write_bytes(prior)
+        os.link(sibling, report)
+    else:
+        report.write_bytes(prior)
+    real_replace = producer.os.replace
+    fired: list[int] = []
+
+    def replace_then_interrupt(source: object, destination: object) -> None:
+        real_replace(source, destination)
+        if Path(destination) == report and ".partial-" in Path(source).name and not fired:
+            fired.append(1)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(producer.os, "replace", replace_then_interrupt)
+    prepared.update({"out": output, "report": report, "root": tmp_path})
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_with_fake_session(prepared)
+
+    assert fired, "the report rename must have completed before the interrupt"
+    assert not output.exists()
+    assert _working_names(tmp_path) == []
+    if topology == "symlink":
+        assert report.is_symlink(), "a displaced symlink must come back as a symlink"
+        assert report.resolve() == sibling.resolve()
+    elif topology == "hardlink":
+        assert os.path.samefile(sibling, report), "a displaced hard link must keep its inode"
+    assert report.read_bytes() == prior
+
+
+def test_producer_report_writer_refuses_an_unreadable_prior_report(tmp_path: Path) -> None:
+    """A prior report whose contents cannot be read is refused, not destroyed."""
+    report = tmp_path / "report.json"
+    report.mkdir()
+
+    with pytest.raises(producer.ScenarioRefusal, match="could not be read"):
+        producer.write_report(report, {"any": "payload"})
+
+    assert report.is_dir()
+    assert _working_names(tmp_path) == []
+
+
+def test_producer_run_reports_a_retained_backup_without_claiming_the_restore_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restore whose only failure is dropping the backup name must be described so."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+    prior = b'{\n  "prior": true\n}\n'
+    report.write_bytes(prior)
+    real_replace = producer.os.replace
+    real_remove = producer._remove_staged
+    fired: list[int] = []
+
+    def replace_then_interrupt(source: object, destination: object) -> None:
+        real_replace(source, destination)
+        if Path(destination) == report and ".partial-" in Path(source).name and not fired:
+            fired.append(1)
+            raise KeyboardInterrupt
+
+    def refuse_only_the_backup(path: str | Path) -> str | None:
+        if ".displaced-" in Path(path).name:
+            return f"staged file {path} could not be removed: simulated"
+        return real_remove(path)
+
+    monkeypatch.setattr(producer.os, "replace", replace_then_interrupt)
+    monkeypatch.setattr(producer, "_remove_staged", refuse_only_the_backup)
+    prepared.update({"out": output, "report": report, "root": tmp_path})
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        _run_with_fake_session(prepared)
+
+    notes = "\n".join(getattr(raised.value, "__notes__", []))
+    assert "the earlier entry is in place at" in notes
+    assert "could not be restored" not in notes
+    assert report.read_bytes() == prior
+    retained = [name for name in _working_names(tmp_path) if ".displaced-" in name]
+    assert len(retained) == 1, "the retained recovery copy must still be on disk"
+
+
+def test_producer_run_interrupt_at_the_final_report_sample_rolls_back_the_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final elapsed sample sits inside the rollback region for both entries."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+    real_write = producer.write_report
+    published: list[int] = []
+
+    def write_then_arm(path: str | Path, payload: object) -> object:
+        publication = real_write(path, payload)
+        published.append(1)
+        return publication
+
+    def clock() -> float:
+        if published:
+            raise KeyboardInterrupt
+        return 0.0
+
+    monkeypatch.setattr(producer, "write_report", write_then_arm)
+    prepared.update({"out": output, "report": report, "root": tmp_path})
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_with_fake_session(prepared, clock=clock)
+
+    assert published, "the report must have been published before the interrupt"
+    assert not report.exists()
+    assert not output.exists()
+    assert _working_names(tmp_path) == []
+
+
+def test_producer_run_admits_nothing_when_the_no_report_final_sample_expires(
+    tmp_path: Path,
+) -> None:
+    """The no-report path is held to the same absolute deadline as the capture."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    expired: list[int] = []
+
+    def capture_and_expire(**kwargs: object) -> dict:
+        record = producer.capture_battle_scenario(
+            **kwargs, session_factory=lambda **_kwargs: _FakeSession()
+        )
+        expired.append(1)
+        return record
+
+    def clock() -> float:
+        return 181.0 if expired else 0.0
+
+    prepared.update({"out": output, "report": None, "root": tmp_path})
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_wall_seconds"):
+        _run_with_fake_session(
+            prepared, capture=capture_and_expire, clock=clock, max_wall_seconds=180.0
+        )
+
+    assert expired, "the capture must have been admitted before the late sample"
+    assert not output.exists()
+    assert _working_names(tmp_path) == []
+
+
+def test_producer_run_records_elapsed_work_covering_the_report_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recorded duration covers the whole operation, not only the drive."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+    real_write = producer.write_report
+    phase = {"name": "start"}
+
+    def capture_and_advance(**kwargs: object) -> dict:
+        record = producer.capture_battle_scenario(
+            **kwargs, session_factory=lambda **_kwargs: _FakeSession()
+        )
+        phase["name"] = "after_capture"
+        return record
+
+    def write_and_advance(path: str | Path, payload: object) -> object:
+        publication = real_write(path, payload)
+        phase["name"] = "after_report"
+        return publication
+
+    def clock() -> float:
+        return {"start": 0.0, "after_capture": 30.0, "after_report": 60.0}[phase["name"]]
+
+    monkeypatch.setattr(producer, "write_report", write_and_advance)
+    prepared.update({"out": output, "report": report, "root": tmp_path})
+
+    plan = _run_with_fake_session(
+        prepared, capture=capture_and_advance, clock=clock, max_wall_seconds=180.0
+    )
+
+    assert plan["capture"]["wall_seconds"] == 60.0
+    persisted = json.loads(report.read_text(encoding="utf-8"))
+    assert persisted["capture"]["wall_seconds"] == 60.0
+    assert output.exists()
+
+
+def test_producer_capture_records_a_nonzero_under_budget_duration(tmp_path: Path) -> None:
+    """A mutable clock must show up in the record instead of a hard-coded zero."""
+    ticks = {"now": 0.0}
+
+    def clock() -> float:
+        ticks["now"] += 0.25
+        return ticks["now"]
+
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(
+            tmp_path,
+            _writable_scenario(),
+            session_factory=lambda **_kwargs: _FakeSession(),
+            clock=clock,
+        )
+    )
+
+    assert 0.0 < record["wall_seconds"] < 180.0
+    assert (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_reports_unresolved_ownership_instead_of_abandoning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unprobeable owned entry is reported, never silently left as not-ours."""
+    output = tmp_path / "out.state"
+    real_link = producer.os.link
+    real_lstat = producer.os.lstat
+
+    def link_then_interrupt(source: object, destination: object) -> None:
+        real_link(source, destination)
+        raise KeyboardInterrupt
+
+    def refuse_to_probe(path: object, *args: object, **kwargs: object) -> object:
+        try:
+            is_output = Path(path) == output  # type: ignore[arg-type]
+        except TypeError:
+            is_output = False
+        if is_output:
+            raise OSError("the entry could not be probed")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(producer.os, "link", link_then_interrupt)
+    monkeypatch.setattr(producer.os, "lstat", refuse_to_probe)
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _FakeSession()
+            )
+        )
+
+    notes = "\n".join(getattr(raised.value, "__notes__", []))
+    assert "could not be determined" in notes
+    assert output.exists(), "ownership that cannot be probed must not delete the entry"
     assert _staged_files(tmp_path) == []

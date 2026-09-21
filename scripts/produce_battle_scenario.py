@@ -63,7 +63,6 @@ hashes are what consumers pin.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import functools
 import hashlib
 import json
@@ -201,6 +200,7 @@ class _CaptureBudget:
         *,
         clock: Callable[[], float],
         deadline: float | None = None,
+        started: float | None = None,
     ) -> None:
         if not isinstance(bounds, dict):
             raise ScenarioRefusal("capture bounds must be a declared object")
@@ -216,7 +216,11 @@ class _CaptureBudget:
         self._max_inputs = self.bounds["max_inputs"]
         self._clock = clock
         if deadline is None:
-            self._deadline = clock() + self.bounds["max_wall_seconds"]
+            # Without a caller-supplied absolute deadline the bound is measured
+            # from the operation's own start, so the drive and the elapsed
+            # duration it records describe the same operation.
+            base = clock() if started is None else started
+            self._deadline = base + self.bounds["max_wall_seconds"]
         else:
             # A caller may carry one absolute deadline across the whole promised
             # operation; an unusable value is refused rather than accepted as an
@@ -227,6 +231,11 @@ class _CaptureBudget:
         self.frames = 0
         self.inputs = 0
         self.history: list[_InputStep] = []
+
+    @property
+    def deadline(self) -> float:
+        """The absolute wall-clock deadline this budget enforces."""
+        return self._deadline
 
     def check_wall(self, phase: str) -> None:
         """Refuse when the wall-clock deadline has already passed."""
@@ -309,16 +318,32 @@ def _deadline_guard(deadline: float, clock: Callable[[], float]) -> Callable[[st
     return functools.partial(_check_deadline, deadline, clock)
 
 
+def _cleanup(action: Callable[[], str | None]) -> str | None:
+    """Run one cleanup action in isolation, converting even an interrupt to a report.
+
+    Cleanup runs while a primary failure is already propagating.  A cleanup
+    failure -- including an interrupt handled under this cancellation contract --
+    must be reported as a note instead of replacing the error the caller has to
+    act on, and it must not prevent the remaining owned resources from being
+    considered.
+    """
+    try:
+        return action()
+    except BaseException as exc:  # noqa: BLE001 - cleanup isolation must not mask the primary failure
+        return f"cleanup was interrupted before it completed: {exc!r}"
+
+
 def _withdraw_all(exc: BaseException, *publications: _OwnedPublication | None) -> None:
     """Undo every owned publication, attaching cleanup failures to ``exc``.
 
     The primary error always stays primary: a cleanup that cannot complete is
-    reported as a note instead of replacing the failure a caller must act on.
+    reported as a note instead of replacing the failure a caller must act on,
+    and one interrupted withdrawal never stops the remaining ones.
     """
     for publication in publications:
         if publication is None:
             continue
-        error = publication.withdraw()
+        error = _cleanup(publication.withdraw)
         if error is not None:
             _note(exc, error)
 
@@ -838,24 +863,48 @@ def resolve_role(scenario: dict[str, Any], scenario_id: str, role: str | None) -
 
 @dataclass(frozen=True)
 class _OwnedPublication:
-    """A directory entry this capture published, identified by its inode.
+    """A directory entry this capture published.
 
-    The identity is retained from the *staging* entry immediately before the
-    publish, so it outlives the removal of that entry and is never re-derived
-    from a pathname a competing writer may have replaced in the meantime.
+    Ownership is established by the *publish operation itself*: an entry is this
+    capture's only when the operation that created it returned successfully.
+    Inode identity is retained as a second, independent check, because a
+    competing writer can install an entry that deliberately shares this capture's
+    inode (a hard link to the staging entry), so an inode match alone cannot
+    establish which writer created the directory entry.  A definite failure of
+    this capture's own publish -- ``EEXIST`` from ``os.link`` -- therefore never
+    enters the rollback set at all, even when the destination entry happens to
+    name the same inode.
 
-    ``displaced`` holds the bytes of an entry this publication deliberately
-    replaced, so a rollback can put the earlier state back rather than destroy
-    it.
+    ``displaced_backup`` names the earlier entry this publication moved aside
+    with one atomic rename, so a rollback can put that entry back with its
+    identity and topology intact -- and, when the restore itself fails, the
+    earlier bytes still exist on disk instead of surviving only in memory.
+
+    Concurrency contract, stated honestly: this capture publishes and withdraws
+    through pathnames, and POSIX pathnames provide no compare-and-swap, so no
+    sequence of probes can close the window between a probe and a mutation.  What
+    is guaranteed is narrower and checkable -- an entry that a probe *identifies
+    as foreign* is never removed, and an entry this capture's own successful
+    publish created is removed even when it is no longer reachable by name.
+    An entry a competing writer installs in that window and which happens to name
+    this capture's published inode is indistinguishable from this capture's own
+    and may be removed; callers needing mutual exclusion must provide it outside
+    this process, which is the namespace contract these artifacts are produced
+    under.
     """
 
     path: Path
     inode: int
     device: int
-    displaced: bytes | None = None
+    displaced_backup: Path | None = None
 
-    def is_owned(self) -> bool:
+    def is_owned(self) -> bool | None:
         """Whether ``path`` still names exactly the entry this capture published.
+
+        ``None`` means ownership could not be determined, which is deliberately
+        not the same answer as ``False``: a failed ``lstat`` is unresolved
+        cleanup that the caller must report, never a silent "somebody else's
+        entry" that abandons an owned artifact without a note.
 
         ``lstat`` is deliberate: a competing writer's symlink pointing at this
         capture's own inode is a *different* directory entry owned by that
@@ -863,32 +912,72 @@ class _OwnedPublication:
         """
         try:
             entry = os.lstat(self.path)
-        except OSError:
+        except FileNotFoundError:
             return False
+        except OSError:
+            return None
         return (entry.st_ino, entry.st_dev) == (self.inode, self.device)
 
     def withdraw(self) -> str | None:
         """Undo this publication; return a description of any cleanup failure.
 
-        A publication that is no longer ours is left exactly as it is, so a
-        competing writer's replacement always survives this capture's rollback.
+        A directory entry can only be removed through its pathname, so ownership
+        is probed and then *re-probed* at the point of removal: a competing
+        writer that replaced ``path`` after the first probe is observed by the
+        second and left exactly as it is.  A probe that cannot determine
+        ownership is reported as unresolved cleanup instead of being read as
+        "somebody else's entry".  When an earlier entry was moved aside,
+        that earlier entry is put back through a single atomic rename, which
+        preserves its inode and topology.
+
+        Putting the displaced entry back does not depend on this capture's own
+        publish having completed: an interrupt delivered *before* the publish
+        rename leaves the pathname free, so the earlier entry is restored
+        instead of being stranded at its backup name.  A pathname occupied by an
+        entry that is not this capture's own is never overwritten to do that,
+        and the retained backup is named in the returned report.
+
+        The re-probe narrows the check/mutation window; it cannot close it, as
+        the class contract above states.
         """
-        if not self.is_owned():
-            return None
-        if self.displaced is None:
+        seen = self.is_owned()
+        if seen is None:
+            seen = self.is_owned()
+            if seen is None:
+                return (
+                    f"ownership of {self.path} could not be determined, so the entry was left "
+                    f"in place rather than removed and the entry it displaced is retained at "
+                    f"{self.displaced_backup}"
+                )
+        # Re-probe immediately before the removal: whatever a competing writer
+        # installed since the first probe belongs to that writer, not to this
+        # capture, and must survive this rollback untouched.
+        if seen and self.is_owned() is True:
             try:
                 os.unlink(self.path)
+            except FileNotFoundError:
+                pass
             except OSError as exc:
                 return f"owned output {self.path} could not be removed: {exc!r}"
+        # ``path`` does not name this capture's entry now: either the publish
+        # never created it (an interrupt before the rename) or it has already
+        # been removed.  An entry this publication moved aside still has to go
+        # back, which the helper only does while the pathname is free.
+        return _restore_moved_aside(self.path, self.displaced_backup)
+
+    def commit(self) -> str | None:
+        """Drop the recovery backup once this publication has been admitted.
+
+        The backup exists so that a rollback can put the displaced entry back,
+        so it must outlive every check that can still roll this publication back
+        -- including the caller's final admission checks.  Once the operation has
+        committed there is nothing left to restore, and the backup name is
+        removed.  A backup that cannot be removed is reported instead of being
+        discarded silently, and the earlier entry is still on disk at that name.
+        """
+        if self.displaced_backup is None:
             return None
-        try:
-            _write_bytes_atomically(self.path, self.displaced)
-        except OSError as exc:
-            with contextlib.suppress(OSError):
-                if self.is_owned():
-                    os.unlink(self.path)
-            return f"replaced entry {self.path} could not be restored: {exc!r}"
-        return None
+        return _remove_staged(self.displaced_backup)
 
 
 def _entry_identity(path: Path) -> tuple[int, int]:
@@ -897,19 +986,20 @@ def _entry_identity(path: Path) -> tuple[int, int]:
     return entry.st_ino, entry.st_dev
 
 
-def _write_bytes_atomically(path: Path, payload: bytes) -> None:
-    """Replace ``path`` with ``payload`` through an fsynced private sibling."""
-    staged = path.with_name(f".{path.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
+def _entry_state(path: Path) -> tuple[int, int] | None:
+    """Return the ``(inode, device)`` of the entry at ``path``, or ``None`` when absent.
+
+    ``lstat`` is deliberate: a competing writer's symlink pointing at this
+    capture's own inode is a *different* directory entry owned by that writer, so
+    following the link would name somebody else's file.  A pathname that cannot
+    be probed at all raises ``OSError``: an unprobeable pathname is not the same
+    answer as an absent one, and only the caller may decide what to do with it.
+    """
     try:
-        descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(staged, path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(staged)
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return entry.st_ino, entry.st_dev
 
 
 def _remove_staged(path: Path) -> str | None:
@@ -923,46 +1013,193 @@ def _remove_staged(path: Path) -> str | None:
     return None
 
 
+def _private_staging(path: Path) -> Path:
+    """A private sibling name for one not-yet-final entry of this operation."""
+    return path.with_name(f".{path.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
+
+
+def _write_staged(path: Path, payload: bytes) -> None:
+    """Create ``path`` with ``payload``, mode 0600 and fsynced, never overwriting."""
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _encode_report(payload: Any) -> bytes:
+    """Serialize a report payload with this module's stable formatting."""
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _restore_displaced(target: Path, backup: Path) -> tuple[bool, str | None]:
+    """Put the entry this capture moved aside back at ``target``.
+
+    The entry is published through a private staging name and one atomic rename,
+    and that staging name is a hard link to the moved-aside entry, so a restored
+    symlink stays a symlink and a restored hard link keeps naming the same inode.
+    Because the staging name is a hard link rather than a copy, that rename leaves
+    no removable recovery copy of its own behind.
+
+    Returns ``(restored, error)``: whether the entry is in place again, and a
+    description of anything that went wrong.  The two are reported separately
+    because dropping the now-duplicate backup name is bookkeeping -- when that
+    step alone fails the entry *is* restored, and claiming otherwise would
+    misdescribe the artifact the next reader has to reconcile.
+    """
+    staged = _private_staging(target)
+    try:
+        os.link(backup, staged, follow_symlinks=False)
+    except OSError as exc:
+        return False, f"the earlier entry could not be staged for restoration ({exc!r})"
+    try:
+        os.replace(staged, target)
+    except OSError as exc:
+        staged_error = _cleanup(lambda: _remove_staged(staged))
+        message = f"the earlier entry could not be renamed back ({exc!r})"
+        return False, (message if staged_error is None else f"{message}; {staged_error}")
+    cleanup_error = _remove_staged(backup)
+    if cleanup_error is None:
+        return True, None
+    detail = (
+        f"{cleanup_error}; the earlier entry is in place at {target} and {backup} is a "
+        "second name for the same entry"
+    )
+    return True, detail
+
+
+def _restore_moved_aside(target: Path, backup: Path | None) -> str | None:
+    """Put a moved-aside entry back when nothing was published over it."""
+    if backup is None:
+        return None
+    try:
+        if _entry_state(backup) is None:
+            # The move-aside itself failed, so the earlier entry never left
+            # ``target`` and there is nothing to put back.
+            return None
+        if _entry_state(target) is not None:
+            return (
+                f"the entry this capture moved aside for {target} was not restored because "
+                f"another entry now occupies that pathname; it is retained at {backup}"
+            )
+    except OSError as exc:
+        return (
+            f"the entry moved aside for {target} could not be restored because a pathname "
+            f"could not be probed ({exc!r}); it is retained at {backup}"
+        )
+    restored, error = _restore_displaced(target, backup)
+    if error is None:
+        return None
+    if restored:
+        return f"the entry moved aside for {target} was restored, but {error}"
+    return (
+        f"replaced entry {target} could not be restored from {backup}: {error}; "
+        f"the earlier entry is retained at {backup}"
+    )
+
+
 def write_report(path: str | Path, payload: Any) -> _OwnedPublication:
     """Write a private capture/replay report atomically.
 
     The report is staged in a private sibling and moved into place, so a failed
-    or partial write never replaces an existing report and never leaves a
-    partial file behind.  The returned publication carries the inode this call
-    installed, so a caller can withdraw exactly its own report and never a
-    competing writer's replacement.
+    or partial write never replaces an existing report with something partial and
+    never leaves a partial file behind.
+
+    An entry this call replaces is moved aside by one atomic rename to a durable
+    private backup before anything is published over it, so its identity and
+    topology survive: a displaced symlink stays a symlink and a displaced hard
+    link keeps naming the same inode.  An existing report whose contents cannot
+    be read is refused before anything is moved, because displacing it would lose
+    a report this operation cannot account for.  The returned publication can put
+    the displaced entry back, and a restore that fails leaves that entry on disk
+    at its backup name instead of discarding the only recoverable copy.
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    staged = target.with_name(f".{target.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
-    displaced: bytes | None = None
+    staged = _private_staging(target)
+    backup: Path | None = None
     publication: _OwnedPublication | None = None
     try:
-        if target.exists():
-            # A report target is deliberately replaceable; remembering the entry
-            # it replaced lets a later rollback restore it instead of losing it.
-            with contextlib.suppress(OSError):
-                displaced = target.read_bytes()
-        encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
+        if _entry_state(target) is not None:
+            # A report target is deliberately replaceable, but the entry it
+            # replaces must be *secured* first.  An unreadable prior report is a
+            # refusal: displacing it would lose it outright if a later step
+            # failed, and there is no need to destroy it to make progress.
+            try:
+                target.read_bytes()
+            except OSError as exc:
+                raise ScenarioRefusal(
+                    f"refusing to replace the existing report {target}: its current contents "
+                    f"could not be read ({exc!r}) and so could not be preserved"
+                ) from exc
+            backup = target.with_name(
+                f".{target.name}.displaced-{os.getpid()}-{time.monotonic_ns()}"
+            )
+            # One atomic rename, not a byte copy: the displaced entry keeps its
+            # inode, its symlink target, and its hard-link relationships.
+            os.replace(target, backup)
+        _write_staged(staged, _encode_report(payload))
         # Retain the identity before the rename: an interrupt delivered inside
         # ``os.replace`` (after the entry exists, before it returns) must still
         # be recognisable as this capture's own publication.
-        publication = _OwnedPublication(target, *_entry_identity(staged), displaced)
+        publication = _OwnedPublication(target, *_entry_identity(staged), backup)
         os.replace(staged, target)
         return publication
     except BaseException as exc:
-        publication_error = publication.withdraw() if publication is not None else None
-        staging_error = _remove_staged(staged)
-        if publication_error is not None:
-            _note(exc, publication_error)
+        if publication is None:
+            # Nothing was published over the entry this call moved aside, so it
+            # is put back (a no-op when the move-aside itself never happened).
+            # A restore that cannot complete leaves it at the backup name.
+            restore_error = _cleanup(lambda: _restore_moved_aside(target, backup))
+            if restore_error is not None:
+                _note(exc, restore_error)
+        else:
+            publication_error = _cleanup(publication.withdraw)
+            if publication_error is not None:
+                _note(exc, publication_error)
+        staging_error = _cleanup(lambda: _remove_staged(staged))
         if staging_error is not None:
             _note(exc, staging_error)
         raise
+
+
+def republish_report(
+    target: str | Path, payload: Any, current: _OwnedPublication
+) -> _OwnedPublication:
+    """Atomically replace the report this capture just published.
+
+    Used for the final admission stamp: the value that has to be persisted is
+    only observable once the report is already in place.  The entry displaced
+    here is this capture's own report from a moment ago, so no recovery backup is
+    taken for it; the successor instead inherits ``current``'s displaced-entry
+    backup, so a rollback after this rename still puts the earlier report back.
+    Either publication may own ``target`` depending on where an interruption
+    lands, so a failure withdraws both: withdrawing the one that does not own
+    ``target`` is a harmless no-op.
+    """
+    path = Path(target)
+    staged = _private_staging(path)
+    _write_staged(staged, _encode_report(payload))
+    successor: _OwnedPublication | None = None
+    try:
+        successor = _OwnedPublication(path, *_entry_identity(staged), current.displaced_backup)
+        os.replace(staged, path)
+        return successor
+    except BaseException as exc:
+        _withdraw_all(exc, current, successor)
+        staging_error = _cleanup(lambda: _remove_staged(staged))
+        if staging_error is not None:
+            _note(exc, staging_error)
+        raise
+
+
+def _restamp_capture_wall_seconds(plan: dict[str, Any], elapsed: float) -> bool:
+    """Stamp the final elapsed seconds into ``plan``; report whether it changed."""
+    record = plan.get("capture")
+    if not isinstance(record, dict) or record.get("wall_seconds") == elapsed:
+        return False
+    record["wall_seconds"] = elapsed
+    return True
 
 
 def refuse_report_alias(report: str | Path, *protected: str | Path | None) -> None:
@@ -1241,13 +1478,42 @@ def measure_runtime_identity(
     executable = str(sys.executable)
     environment = str(sys.prefix)
     if python is not None:
-        requested_environment = _interpreter_environment(Path(python))
+        requested = Path(python)
+        # Existence is checked first: a path that cannot be resolved at all is
+        # refused before any environment comparison could accidentally accept it.
+        if not requested.is_file():
+            raise ScenarioRefusal(
+                f"requested interpreter {python} does not exist; refusing to record an "
+                "interpreter this process cannot resolve"
+            )
+        requested_environment = _interpreter_environment(requested)
         if requested_environment != environment:
             raise ScenarioRefusal(
                 f"requested interpreter {python} belongs to the environment "
                 f"{requested_environment!r}, which is not the executing interpreter "
                 f"environment {environment!r} ({executable}); refusing to record an interpreter "
                 "this process does not run in, even when both binaries resolve to the same file"
+            )
+        # The environment directory is not interpreter identity on its own: an
+        # unrelated executable that merely lives in the same ``bin`` directory
+        # would otherwise be recorded as the interpreter this capture ran, while
+        # the record's own executable fields name the real process.
+        executing = Path(sys.executable)
+        try:
+            requested_resolved = requested.resolve(strict=True)
+        except OSError as exc:
+            raise ScenarioRefusal(
+                f"requested interpreter {python} could not be resolved: {exc!r}"
+            ) from exc
+        try:
+            executing_resolved = executing.resolve(strict=True)
+        except OSError:  # pragma: no cover - the running interpreter always resolves
+            executing_resolved = executing
+        if requested_resolved != executing_resolved:
+            raise ScenarioRefusal(
+                f"requested interpreter {python} resolves to {requested_resolved}, which is not "
+                f"the executing interpreter {executable} ({executing_resolved}); refusing to "
+                "record an interpreter this process does not run"
             )
     from pokered_harness.config import load_versions
 
@@ -1296,27 +1562,26 @@ def _write_fixture_exclusive(
     The payload is staged in a private sibling and published with ``os.link``,
     which fails if the destination already exists.  Every step — including the
     removal of the staging entry that finalizes the operation — runs inside the
-    rollback-protected region, and the published inode identity is retained from
-    the staging entry *before* the link.  A failure after the directory entry
-    exists (an interrupt inside ``os.link``, or one delivered once the staging
-    entry has already gone) therefore still removes this capture's own
-    publication, while a pre-existing or competing writer's entry is never
-    touched: the check is ``lstat`` on the destination, so a competing symlink
-    pointing at this capture's inode is not mistaken for the publication itself.
+    rollback-protected region.
+
+    Ownership combines the publish outcome with inode identity.  The inode is
+    retained before the link, so a failure delivered once the link returned --
+    including one inside ``os.link`` itself -- still removes this capture's own
+    publication rather than abandoning it.  A ``FileExistsError`` is the one
+    definite proof that this capture did *not* create the destination entry: a
+    competing writer can hard-link the staging file itself, so a matching inode
+    must not be read as ownership, and the refusal leaves that entry untouched.
+    It is converted to an ordinary no-overwrite refusal.
 
     ``guard`` is called immediately before the link and again once the entry
     exists, so a caller's deadline is re-checked with the publication in place
     and a late expiry rolls it back instead of admitting it.
     """
     output.parent.mkdir(parents=True, exist_ok=True)
-    staged = output.with_name(f".{output.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
+    staged = _private_staging(output)
     publication: _OwnedPublication | None = None
     try:
-        descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+        _write_staged(staged, payload)
         if guard is not None:
             guard("fixture staging")
         # Retained before the link: once the entry exists the staging path may
@@ -1325,6 +1590,11 @@ def _write_fixture_exclusive(
         try:
             os.link(staged, output)
         except FileExistsError as exc:
+            # A definite ``EEXIST`` proves this capture did not create the
+            # destination entry, even when it names this capture's own staged
+            # inode: a competing writer can hard-link that inode itself.  The
+            # entry therefore never enters the rollback set.
+            publication = None
             raise ScenarioRefusal(f"refusing to overwrite existing output: {output}") from exc
         if guard is not None:
             guard("fixture publication")
@@ -1332,10 +1602,8 @@ def _write_fixture_exclusive(
         os.unlink(staged)
         return publication
     except BaseException as exc:
-        publication_error = publication.withdraw() if publication is not None else None
-        staging_error = _remove_staged(staged)
-        if publication_error is not None:
-            _note(exc, publication_error)
+        _withdraw_all(exc, publication)
+        staging_error = _cleanup(lambda: _remove_staged(staged))
         if staging_error is not None:
             _note(exc, staging_error)
         raise
@@ -1404,8 +1672,17 @@ def capture_battle_scenario(
             runtime=runtime, python=python, repo_root=repo_root
         )
     output_path = Path(output)
-    started = clock()
-    budget = _CaptureBudget(bounds, clock=clock, deadline=deadline)
+    # The operation starts before runtime measurement, so the recorded duration
+    # covers measurement as well as the drive it produces.  ``run`` supplies its
+    # own start so that one operation start governs both the elapsed duration and
+    # the absolute deadline; a direct caller starts its own operation here.
+    supplied_start = ownership.get("started") if ownership is not None else None
+    started = (
+        float(supplied_start)
+        if isinstance(supplied_start, (int, float)) and not isinstance(supplied_start, bool)
+        else clock()
+    )
+    budget = _CaptureBudget(bounds, clock=clock, deadline=deadline, started=started)
     session: Any | None = None
     failure: BaseException | None = None
     try:
@@ -1527,23 +1804,28 @@ def capture_battle_scenario(
     try:
         publication = _write_fixture_exclusive(output_path, payload, guard=budget.check_wall)
         budget.check_wall("fixture publication")
+        # The final admission sits inside the rollback region: interrupting this
+        # sample still withdraws the entry this capture published rather than
+        # abandoning it as an admitted fixture.
+        sampled = clock()
+        elapsed = round(sampled - started, 6)
+        if sampled >= budget.deadline:
+            raise CaptureBoundsExceeded(
+                "capture exceeded max_wall_seconds before admitting the fixture; "
+                "the declared bound may only be raised with a recorded justification"
+            )
+        if elapsed > effective_bounds["max_wall_seconds"]:
+            raise CaptureBoundsExceeded(
+                f"capture exceeded max_wall_seconds ({effective_bounds['max_wall_seconds']}) before "
+                f"admitting the fixture; observed {elapsed}s"
+            )
+        record["wall_seconds"] = elapsed
+        if ownership is not None:
+            ownership["publication"] = publication
+        return record
     except BaseException as exc:
         _withdraw_all(exc, publication)
         raise
-    # The recorded duration now covers the publication too, and an operation that
-    # crossed the declared bound regardless removes its own pair before refusing.
-    elapsed = round(clock() - started, 6)
-    if elapsed > effective_bounds["max_wall_seconds"]:
-        refusal = CaptureBoundsExceeded(
-            f"capture exceeded max_wall_seconds ({effective_bounds['max_wall_seconds']}) before "
-            f"admitting the fixture; observed {elapsed}s"
-        )
-        _withdraw_all(refusal, publication)
-        raise refusal
-    record["wall_seconds"] = elapsed
-    if ownership is not None:
-        ownership["publication"] = publication
-    return record
 
 
 def run(
@@ -1612,8 +1894,12 @@ def run(
         "capture_bounds": bounds,
         "output": str(output),
     }
-    deadline = clock() + bounds["max_wall_seconds"]
-    ownership: dict[str, Any] = {}
+    # One operation start and one absolute deadline govern every later admission
+    # path, and the capture is told about that start so the duration it records
+    # and the bound it is held to describe the same operation.
+    operation_start = clock()
+    deadline = operation_start + bounds["max_wall_seconds"]
+    ownership: dict[str, Any] = {"started": operation_start}
     capture_record = capture(
         scenario=scenario,
         rom=rom,
@@ -1641,6 +1927,24 @@ def run(
             guard("report preparation")
             report_publication = write_report(report, plan)
             guard("report finalization")
+            # The report's own publication is promised work.  Sample the final
+            # elapsed time once the entry is durable and stamp it into the
+            # returned record; the persisted copy is replaced only when that
+            # value differs from the one already written.
+            final_sample = clock()
+            if final_sample >= deadline:
+                raise CaptureBoundsExceeded(
+                    f"capture exceeded max_wall_seconds ({bounds['max_wall_seconds']}) while "
+                    "finalizing the requested report; refusing to admit the pair"
+                )
+            if _restamp_capture_wall_seconds(plan, round(final_sample - operation_start, 6)):
+                guard("report admission")
+                report_publication = republish_report(report, plan, report_publication)
+            # The report is now admitted, so the recovery backup of the entry it
+            # displaced has outlived every check that could roll it back.
+            uncommitted = report_publication.commit()
+            if uncommitted is not None:
+                plan["publication_cleanup"] = [uncommitted]
         except BaseException as exc:
             # A requested report that could not be written must not leave the
             # fixture behind as if the capture had been fully recorded, and a
@@ -1648,13 +1952,20 @@ def run(
             # fixture.  Only entries this capture owns are ever withdrawn.
             _withdraw_all(exc, report_publication, fixture_publication)
             raise
-        if clock() >= deadline:
-            refusal = CaptureBoundsExceeded(
-                f"capture exceeded max_wall_seconds ({bounds['max_wall_seconds']}) while "
-                "finalizing the requested report; refusing to admit the pair"
-            )
-            _withdraw_all(refusal, report_publication, fixture_publication)
-            raise refusal
+    else:
+        try:
+            # No report was requested, but the same absolute deadline still
+            # governs final admission of the fixture.
+            final_sample = clock()
+            if final_sample >= deadline:
+                raise CaptureBoundsExceeded(
+                    f"capture exceeded max_wall_seconds ({bounds['max_wall_seconds']}) before "
+                    "admitting the capture; refusing to admit the pair"
+                )
+            _restamp_capture_wall_seconds(plan, round(final_sample - operation_start, 6))
+        except BaseException as exc:
+            _withdraw_all(exc, fixture_publication)
+            raise
     return plan
 
 
