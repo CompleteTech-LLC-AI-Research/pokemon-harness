@@ -684,11 +684,29 @@ The single-session server exposes tools for:
 - stepping frames and pressing, holding, or releasing buttons;
 - saving and loading base64-encoded emulator state;
 - waiting for named hook events; and
-- reading parsed game state and the event log as resources.
+- reading parsed game state, the event log, and read-only per-slot 44-byte
+  party-record SHA-256 digests (`pokered://party-records`) as resources. The
+  digest resource is observational only and does not assert a completed trade.
 
 When a peer session is configured with `POKERED_PEER_*` variables, the
 link-related tools are also exposed. The peer is constructed at startup but
-is not paired automatically. Evidence from the pre-fix implementation/runtime snapshot
+is not paired automatically. The paired server additionally advertises
+`pokered://peer-party-records`, an owner-scoped, observational view of the
+peer's `wPartyMons` records. It reports only per-slot slot/digest/
+record_size/species/level plus the count and missing-symbol provenance, and
+it never exposes raw record or ROM bytes or absolute paths. Because the
+primary (`pokered://party-records`) and peer views are read under each
+owner's own lock, a public client can compare both owners' intended receiving
+slots and unrelated records without conflating owners. Timed remote mode has
+no local peer, so the peer resource is rejected there.
+
+The exact-exchange audit takes outgoing slot indexes. Gen I removes each
+selected record, compacts survivors in order, and appends the incoming record
+to the final occupied slot. The audit checks those receiving positions and
+all survivor bytes; an in-place replacement of a nonfinal slot is rejected.
+This is a record observation contract, not proof of animation or room return.
+
+Evidence from the pre-fix implementation/runtime snapshot
 includes six real MCP integration checks in 13.11 seconds with one SDL warning
 and 104 MCP dispatch tests. Ordinary MCP calls drove a real Red session from
 bedroom map 38 at `(3,7)` through the house exit, Pallet Town map 0 at `(5,5)`,
@@ -732,6 +750,21 @@ export POKERED_PEER_ROM_SHA1=cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1
 
 Then call `link_pair`, use `link_step`, and call `link_unpair` when finished.
 The exact fixture, runtime, and game-flow requirements are in the runbook.
+
+The public tool surface can load only the *primary* session's state, so a peer
+that must start from an admitted save-state fixture uses the entry point's
+documented launch contract instead of a private call:
+
+```bash
+export POKERED_PEER_STATE_PATH=tests/fixtures/link/blue/cable_club.state
+export POKERED_PEER_STATE_SHA1=<40-character SHA-1 of that fixture>
+```
+
+`POKERED_PEER_STATE_PATH` and `POKERED_PEER_STATE_SHA1` are required together
+and need a configured peer session (`POKERED_PEER_ROM_PATH` and
+`POKERED_PEER_SYM_PATH`). The digest and size are verified before the bytes
+reach the emulator, a mismatch fails closed at startup, and the pair is still
+linked explicitly with `link_pair`.
 
 ### Remote TCP pair
 

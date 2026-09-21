@@ -57,6 +57,9 @@ REQUIRED_FIXTURES: tuple[tuple[str, Path], ...] = (
     ("red cable-club", Path("red/cable_club.state")),
     ("blue cable-club", Path("blue/cable_club.state")),
     ("yellow cable-club", Path("yellow/cable_club.state")),
+    ("red cable-club slots", Path("red/cable_club-slots.state")),
+    ("blue cable-club slots", Path("blue/cable_club-slots.state")),
+    ("yellow cable-club slots", Path("yellow/cable_club-slots.state")),
 )
 
 REQUIRED_TIER_ASSETS = frozenset({"local", "remote", "trade", "battle", "smoke"})
@@ -157,10 +160,13 @@ CERTIFIED_FIXTURE_IDS = frozenset(
     {
         "red-color-ordinary",
         "red-color-battle",
+        "red-color-slots",
         "blue-color-ordinary",
         "blue-color-battle",
+        "blue-color-slots",
         "yellow-cgb-ordinary",
         "yellow-cgb-battle",
+        "yellow-cgb-slots",
     }
 )
 GATE_CONTROLLED_ENVIRONMENT = (

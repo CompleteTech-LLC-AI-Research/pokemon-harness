@@ -302,6 +302,93 @@
         "verification_method": "reproduced from the verified Yellow ordinary fixture with the tracked battle generator; output SHA-1 equals the external fixture",
         "evidence_note": "Battle acceptance loads this immutable state and performs no party mutation at runtime."
       }
+    },
+    {
+      "id": "red-color-slots",
+      "path": "red/cable_club-slots.state",
+      "version": "red",
+      "variant": "color",
+      "kind": "slots",
+      "size_bytes": 200548,
+      "sha1": "b39afbcc8a05a59fb769a7993e7affb5dbf588b3",
+      "sha256": "4af44ed63df79168e1e8d43157fb3ebf9d7fc85d5cc38e487a5d24f2ed9a2b00",
+      "expected_rom": {
+        "path": "rom/red/pokemon-red-color.gb",
+        "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "verified",
+        "producer": "scripts/prepare_battle_cable_club_fixtures.py",
+        "source_state": "external red/cable_club.state; SHA-1 546d7edaf7c3a987f86ae86a97066c7d619eefbb; SHA-256 ea0993b8652db11c85b24002170b93377b1a92b55c95f178f00a08a7c0e11719",
+        "capture_command_template": "python scripts/prepare_battle_cable_club_fixtures.py --repo-root <checkout> --rom-root <rom-root> --fixture-root <fixture-root> --output-root <output-root> --variants red_color_slots",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision ff47de93964a1f8a523b64eb052739b996ebda35",
+        "captured_at_utc": "2026-09-20T18:20:12Z",
+        "verification_method": "produced from the verified color-Red ordinary fixture with the tracked slots generator; the producer re-loads the persisted bytes and fails closed unless all six occupied 44-byte party records are pairwise distinct, and six distinct digests were observed",
+        "evidence_note": "The six occupied records differ only in the 2-byte original-trainer ID, so species, level, HP, moves, PP, EVs, DVs, stats, OT name, and nickname stay identical while a wrong-slot copy becomes detectable."
+      }
+    },
+    {
+      "id": "blue-color-slots",
+      "path": "blue/cable_club-slots.state",
+      "version": "blue",
+      "variant": "color",
+      "kind": "slots",
+      "size_bytes": 200548,
+      "sha1": "eb1816e8c4ac777cc29662f9e09b398ed00abcdc",
+      "sha256": "291b57343f9ee1dda6e7d4125af639ead0dd84643604a79c7953aade16fd5a16",
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "verified",
+        "producer": "scripts/prepare_battle_cable_club_fixtures.py",
+        "source_state": "external blue/cable_club.state; SHA-1 0809d2f8e514c7fb714a73a7b13f120b26a40c38; SHA-256 bc19c13a556f4fbabc6c08fd88e31e712ad7dcb9cf2213b15a6cd6cf3bddbba7",
+        "capture_command_template": "python scripts/prepare_battle_cable_club_fixtures.py --repo-root <checkout> --rom-root <rom-root> --fixture-root <fixture-root> --output-root <output-root> --variants blue_color_slots",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision ff47de93964a1f8a523b64eb052739b996ebda35",
+        "captured_at_utc": "2026-09-20T18:20:12Z",
+        "verification_method": "produced from the verified color-Blue ordinary fixture with the tracked slots generator; the producer re-loads the persisted bytes and fails closed unless all six occupied 44-byte party records are pairwise distinct, and six distinct digests were observed",
+        "evidence_note": "The six occupied records differ only in the 2-byte original-trainer ID, so species, level, HP, moves, PP, EVs, DVs, stats, OT name, and nickname stay identical while a wrong-slot copy becomes detectable."
+      }
+    },
+    {
+      "id": "yellow-cgb-slots",
+      "path": "yellow/cable_club-slots.state",
+      "version": "yellow",
+      "variant": "cgb",
+      "kind": "slots",
+      "size_bytes": 200548,
+      "sha1": "3a48c183628544bb2917e6dd7a336032bdad83fd",
+      "sha256": "a61eab73ab9baa8d263bee52a38f7cb9a0b79f38e3a8c52bafecc4f3aa0f6ebc",
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "verified",
+        "producer": "scripts/prepare_battle_cable_club_fixtures.py",
+        "source_state": "external yellow/cable_club.state; SHA-1 37df4dbdb512cd3febdc2d536281683476291d3b; SHA-256 73d1a134606d4646b0c0146c07369b6fe1da891a7d87bc893a550e623be04bea",
+        "capture_command_template": "python scripts/prepare_battle_cable_club_fixtures.py --repo-root <checkout> --rom-root <rom-root> --fixture-root <fixture-root> --output-root <output-root> --variants yellow_slots",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision ff47de93964a1f8a523b64eb052739b996ebda35",
+        "captured_at_utc": "2026-09-20T18:20:12Z",
+        "verification_method": "produced from the verified Yellow ordinary fixture with the tracked slots generator; the producer re-loads the persisted bytes and fails closed unless all six occupied 44-byte party records are pairwise distinct, and six distinct digests were observed",
+        "evidence_note": "The six occupied records differ only in the 2-byte original-trainer ID, so species, level, HP, moves, PP, EVs, DVs, stats, OT name, and nickname stay identical while a wrong-slot copy becomes detectable."
+      }
     }
   ]
 }

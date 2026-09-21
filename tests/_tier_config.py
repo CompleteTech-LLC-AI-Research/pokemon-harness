@@ -42,6 +42,7 @@ REAL_ROM_MODULES = frozenset(
         "test_link_symbols_real_roms.py",
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
+        "test_mcp_trade_records_rom.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
@@ -65,6 +66,7 @@ UNIT_MODULES = frozenset(
         "test_diagnostic_script_safety.py",
         "test_emulator_ownership.py",
         "test_pair_checkpoints.py",
+        "test_party_record_audit.py",
         "test_peer_frame_shutdown.py",
         "test_network_detach_references.py",
         "test_network_provider_locking.py",
@@ -205,6 +207,7 @@ ROM_FREE_TESTS = frozenset(
 LOCAL_LINK_MODULES = frozenset(
     {
         "test_link_integration.py",
+        "test_mcp_trade_records_rom.py",
         "test_pyboy_link_session_roms.py",
     }
 )
@@ -218,7 +221,13 @@ REMOTE_LINK_MODULES = frozenset(
     }
 )
 
-MCP_STDIO_MODULES = frozenset({"test_mcp_stdio_integration.py", "test_mcp_timed_rom.py"})
+MCP_STDIO_MODULES = frozenset(
+    {
+        "test_mcp_stdio_integration.py",
+        "test_mcp_timed_rom.py",
+        "test_mcp_trade_records_rom.py",
+    }
+)
 
 # The broad trade set keeps ROM milestones visible in diagnostics. The strict
 # acceptance set below is deliberately narrower and is what the production
@@ -253,6 +262,34 @@ TRADE_TESTS = frozenset(
         (
             "test_pyboy_link_session_subprocess.py",
             "test_subprocess_pair_completes_trade_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_multi_member_slot_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_cancel_before_commitment_keeps_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_setup_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly",
         ),
     }
 )
@@ -289,6 +326,34 @@ TRADE_ACCEPTANCE_TESTS = frozenset(
         (
             "test_pyboy_link_session_subprocess.py",
             "test_subprocess_pair_completes_trade_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_multi_member_slot_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_cancel_before_commitment_keeps_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_setup_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly",
         ),
     }
 )

@@ -342,7 +342,7 @@ def test_fixture_manifest_schema_validation_uses_selected_interpreter(tmp_path):
 
     assert result["status"] == "PASS"
     assert result["mode"] == "schema"
-    assert result["entries"] == 10
+    assert result["entries"] == 13
 
 
 def test_fixture_manifest_provenance_requires_certified_entries(tmp_path):
@@ -497,7 +497,11 @@ def test_required_matrix_manifest_covers_ordered_versions_and_variants():
     assert len(REMOTE_VERSION_PAIR_NODEIDS) == 9
     assert len(REMOTE_REVERSED_ROLE_NODEIDS) == 6
     assert len(LOCAL_VARIANT_NODEIDS) == 9
-    assert len(TIER_REQUIRED_NODEIDS["trade"]) == 19
+    # 19 pre-existing strict trade rows plus the 24 real-ROM MCP stdio rows
+    # declared by tests/test_mcp_trade_records_rom.py (nine local orientations,
+    # nine TCP orientations, two multi-member slot rows, the cancel row, and
+    # the three EOF/disconnect rows).
+    assert len(TIER_REQUIRED_NODEIDS["trade"]) == 43
     assert len(TIER_REQUIRED_NODEIDS["battle"]) == 19
     assert any("[red-blue]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
     assert any("[blue-red]" in nodeid for nodeid in TIER_REQUIRED_NODEIDS["remote"])
@@ -523,6 +527,32 @@ def test_required_matrix_manifest_covers_ordered_versions_and_variants():
             for listener in ("red_color", "blue_color", "yellow")
             for connector in ("red_color", "blue_color", "yellow")
         }
+
+
+@pytest.mark.parametrize(
+    ("operation", "marker"),
+    (("trade", "trade_acceptance"), ("battle", "battle_acceptance")),
+)
+def test_strict_matrix_rows_are_selected_by_their_tier_expression(operation, marker):
+    """Every declared strict row must survive the tier marker expression.
+
+    ``run_matrix_tier`` runs each required node ID as an explicit selector
+    *together with* the tier marker expression, so a declared row whose base
+    test is missing from the acceptance marker set is deselected and the row
+    fails closed.  Classify every declared node ID's original test name here so
+    a dropped ``TRADE_ACCEPTANCE_TESTS``/``BATTLE_ACCEPTANCE_TESTS`` entry
+    cannot hide behind the aggregate node-ID manifest.
+    """
+
+    assert gate.TIER_EXPRESSIONS[operation] == f"real_rom and {marker}"
+    declared = sorted(TIER_REQUIRED_NODEIDS[operation])
+    assert declared, operation
+    for nodeid in declared:
+        path, separator, test_name = nodeid.partition("::")
+        assert separator, nodeid
+        marks = classify_test(path, test_name.split("[", 1)[0])
+        assert "real_rom" in marks, (nodeid, marks)
+        assert marker in marks, (nodeid, marks)
 
 
 def test_matrix_audit_fails_closed_on_missing_cases_and_reports_unrun_runtime():
