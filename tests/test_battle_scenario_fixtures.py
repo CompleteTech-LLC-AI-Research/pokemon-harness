@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import math
+import types
 from pathlib import Path
 
 import pytest
@@ -310,6 +311,364 @@ def test_producer_capture_stub_refuses_without_writing(tmp_path: Path) -> None:
         )
     assert not output.exists()
     assert not report.exists()
+
+
+# --- bounded capture path (ROM-free, injected session) ------------------
+
+
+class _FakeSymbols:
+    """Symbol table stand-in exposing only the verified ``wLinkState`` byte."""
+
+    def __init__(self, *, link_state: int, present: bool) -> None:
+        self._present = present
+        self._values = {"wLinkState": link_state}
+
+    def __contains__(self, name: object) -> bool:
+        return self._present and isinstance(name, str) and name in self._values
+
+    def addr_of(self, name: str) -> int:
+        if name not in self._values:
+            raise KeyError(f"unknown symbol: {name!r}")
+        return self._values[name]
+
+    def read_u8(self, memory: dict[int, int], name: str) -> int:
+        return memory[self.addr_of(name)] & 0xFF
+
+
+class _FakeSession:
+    """Scripted stand-in for a bounded capture session: no ROM, no PyBoy."""
+
+    def __init__(
+        self,
+        *,
+        link_state: int = 0,
+        map_id: int = 64,
+        start_x: int = 9,
+        start_y: int = 4,
+        party_count: int = 0,
+        active_slot: int | None = None,
+        payload: bytes = b"fake-bounded-capture-state",
+        symbols_present: bool = True,
+    ) -> None:
+        self.symbols = _FakeSymbols(link_state=link_state, present=symbols_present)
+        self._pyboy = types.SimpleNamespace(memory={link_state: link_state})
+        self.map_id = map_id
+        self.x = start_x
+        self.y = start_y
+        self.party = types.SimpleNamespace(count=party_count, active_slot=active_slot)
+        self.payload = payload
+        self.ticks = 0
+        self.presses: list[tuple[str, int]] = []
+        self.loaded: list[bytes] = []
+        self.closed = False
+
+    def load_state(self, data: bytes) -> None:
+        self.loaded.append(bytes(data))
+
+    def step(self, count: int = 1, **_kwargs: object) -> None:
+        self.ticks += count
+
+    def press(self, button: str, *, duration: int = 1) -> None:
+        self.presses.append((button, duration))
+        if button == "right":
+            self.x += 1
+
+    def read_game_state(self) -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            overworld=types.SimpleNamespace(map_id=self.map_id, x=self.x, y=self.y),
+            party=self.party,
+        )
+
+    def save_state(self) -> bytes:
+        return self.payload
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _writable_scenario(scenario_id: str = "red_color_ordinary") -> dict:
+    """A declared scenario with its pinned fixture hashes cleared for new bytes."""
+    scenario = copy.deepcopy(_scenario(_load_catalog(), scenario_id))
+    scenario["fixture"].update({"sha1": None, "sha256": None, "size_bytes": None})
+    return scenario
+
+
+def _capture_kwargs(tmp_path: Path, scenario: dict, **overrides: object) -> dict:
+    input_fixture = tmp_path / "source.state"
+    input_fixture.write_bytes(b"source-state-bytes")
+    kwargs: dict = {
+        "scenario": scenario,
+        "rom": tmp_path / "pokemon-red-color.gb",
+        "sym": tmp_path / "pokemon-red.sym",
+        "input_fixture": input_fixture,
+        "output": tmp_path / "out.state",
+        "role": "listen",
+        "bounds": {"max_frames": 100000, "max_wall_seconds": 180.0, "max_inputs": 64},
+        "report": None,
+        "repo_root": tmp_path,
+        "runtime": "source",
+        "python": None,
+        "plan": {"rom_sha1": "a" * 40, "sym_sha1": "b" * 40, "input_fixture_sha1": None},
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _staged_files(tmp_path: Path) -> list[Path]:
+    return [path for path in tmp_path.iterdir() if ".partial-" in path.name]
+
+
+def test_producer_capture_drives_link_reception_and_records_provenance(tmp_path: Path) -> None:
+    session = _FakeSession()
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: session)
+    )
+
+    assert (tmp_path / "out.state").read_bytes() == session.payload
+    assert session.loaded == [b"source-state-bytes"]
+    assert session.closed is True
+    assert record["producer"] == "scripts/produce_battle_scenario.py"
+    assert record["role"] == "listen"
+    assert record["inputs_used"] == 10
+    assert record["frames_used"] == 220
+    assert record["input_sequence"][0] == "step:10"
+    assert record["input_sequence"][-1] == "press:up:8:30"
+    assert record["observed_boundary"] == {
+        "map_id": 64,
+        "x": 11,
+        "y": 4,
+        "link_state_raw": 0,
+        "party_count": 0,
+        "active_slot": None,
+    }
+    assert record["output"]["size_bytes"] == len(session.payload)
+    assert record["output"]["sha1"] == hashlib.sha1(session.payload).hexdigest()
+    assert record["output"]["sha256"] == hashlib.sha256(session.payload).hexdigest()
+    assert record["reproduction"]["matches"] is False
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_records_a_matching_reproduction(tmp_path: Path) -> None:
+    payload = b"declared-fixture-bytes"
+    scenario = _writable_scenario()
+    scenario["fixture"].update(
+        {
+            "sha1": hashlib.sha1(payload).hexdigest(),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+        }
+    )
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(
+            tmp_path,
+            scenario,
+            session_factory=lambda **_kwargs: _FakeSession(payload=payload),
+        )
+    )
+
+    assert record["reproduction"]["matches"] is True
+    assert (tmp_path / "out.state").read_bytes() == payload
+
+
+def test_producer_capture_aborts_when_the_input_budget_is_exhausted(tmp_path: Path) -> None:
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_inputs"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                bounds={"max_frames": 100000, "max_wall_seconds": 180.0, "max_inputs": 5},
+                session_factory=lambda **_kwargs: _FakeSession(),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_aborts_before_exceeding_the_frame_budget(tmp_path: Path) -> None:
+    session = _FakeSession()
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_frames"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                bounds={"max_frames": 25, "max_wall_seconds": 180.0, "max_inputs": 64},
+                session_factory=lambda **_kwargs: session,
+            )
+        )
+
+    # The settle step was charged; the next advance was refused before ticking.
+    assert session.ticks == 10
+    assert not (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_aborts_on_the_wall_clock_bound(tmp_path: Path) -> None:
+    ticks = {"now": 0.0}
+
+    def clock() -> float:
+        ticks["now"] += 1000.0
+        return ticks["now"]
+
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_wall_seconds"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: _FakeSession(),
+                clock=clock,
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_rejects_a_map_precondition_mismatch(tmp_path: Path) -> None:
+    with pytest.raises(producer.CapturePreconditionFailed, match="map_id"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: _FakeSession(map_id=12),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_rejects_a_link_state_precondition_mismatch(tmp_path: Path) -> None:
+    with pytest.raises(producer.CapturePreconditionFailed, match="link_state"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: _FakeSession(link_state=1),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_asserts_a_declared_party_shape(tmp_path: Path) -> None:
+    scenario = _writable_scenario()
+    scenario["party"]["count"] = 6
+    scenario["party"]["active_slot"] = 0
+    with pytest.raises(producer.CapturePreconditionFailed, match="party.count"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(tmp_path, scenario, session_factory=lambda **_kwargs: _FakeSession())
+        )
+
+    scenario["party"]["count"] = 0
+    scenario["party"]["active_slot"] = None
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(tmp_path, scenario, session_factory=lambda **_kwargs: _FakeSession())
+    )
+    assert record["observed_boundary"]["party_count"] == 0
+
+
+def test_producer_capture_refuses_when_the_link_symbol_is_absent(tmp_path: Path) -> None:
+    with pytest.raises(producer.CapturePreconditionFailed, match="absent from the loaded"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: _FakeSession(symbols_present=False),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_refuses_a_boundary_the_bounded_drive_cannot_reach(
+    tmp_path: Path,
+) -> None:
+    scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_battle"))
+    with pytest.raises(producer.CaptureNotAvailable, match="capture requires a controlled ROM run"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(tmp_path, scenario, session_factory=lambda **_kwargs: _FakeSession())
+        )
+
+    assert not (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_requires_a_source_state(tmp_path: Path) -> None:
+    with pytest.raises(producer.ScenarioRefusal, match="requires a source state"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                input_fixture=None,
+                session_factory=lambda **_kwargs: _FakeSession(),
+            )
+        )
+
+
+def test_producer_capture_refuses_a_verified_fixture_hash_mismatch(tmp_path: Path) -> None:
+    with pytest.raises(producer.ScenarioRefusal, match="did not reproduce"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                # red_color_ordinary is verified with pinned fixture hashes.
+                copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary")),
+                session_factory=lambda **_kwargs: _FakeSession(),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_never_overwrites_an_existing_output(tmp_path: Path) -> None:
+    output = tmp_path / "out.state"
+    output.write_bytes(b"existing-bytes")
+
+    with pytest.raises(producer.ScenarioRefusal, match="refusing to overwrite"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _FakeSession()
+            )
+        )
+
+    assert output.read_bytes() == b"existing-bytes"
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_merges_the_capture_record_into_the_report(tmp_path: Path) -> None:
+    catalog = copy.deepcopy(_load_catalog())
+    scenario = _scenario(catalog, "red_color_ordinary")
+    scenario["fixture"].update({"sha1": None, "sha256": None, "size_bytes": None})
+    rom = tmp_path / "pokemon-red-color.gb"
+    sym = tmp_path / "pokemon-red.sym"
+    source = tmp_path / "source.state"
+    rom.write_bytes(b"temporary rom bytes")
+    sym.write_bytes(b"temporary sym bytes")
+    source.write_bytes(b"source-state-bytes")
+    scenario["game"]["rom_sha1"] = hashlib.sha1(rom.read_bytes()).hexdigest()
+    scenario["game"]["sym_sha1"] = hashlib.sha1(sym.read_bytes()).hexdigest()
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+    session = _FakeSession()
+
+    plan = producer.run(
+        scenario_id="red_color_ordinary",
+        catalog=catalog,
+        rom=rom,
+        sym=sym,
+        input_fixture=source,
+        output=output,
+        report=report,
+        repo_root=tmp_path,
+        pins=_FakePins(scenario["game"]["rom_sha1"], scenario["game"]["sym_sha1"]),
+        capture=lambda **kwargs: producer.capture_battle_scenario(
+            **kwargs, session_factory=lambda **_kwargs: session
+        ),
+    )
+
+    assert plan["capture"]["inputs_used"] == 10
+    assert output.read_bytes() == session.payload
+    written = json.loads(report.read_text(encoding="utf-8"))
+    assert written["capture"]["output"]["sha1"] == hashlib.sha1(session.payload).hexdigest()
+    assert written["capture"]["producer"] == "scripts/produce_battle_scenario.py"
 
 
 def test_producer_requires_declared_input_fixture(tmp_path: Path) -> None:

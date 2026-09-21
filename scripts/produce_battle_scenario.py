@@ -12,20 +12,38 @@ inconsistent requests *before* touching the emulator:
 * an existing ``--output`` is never overwritten;
 * non-finite or non-positive bounds are refused.
 
-The actual capture path is deliberately not implemented here: a real capture
-requires a controlled ROM run with legal assets.  It exits non-zero with a clear
-message and never writes a fixture, fabricates bytes, or disables hash
-verification.  Callers capture externally and pin the resulting hashes.
+The capture path itself is bounded and fail-closed:
+
+* it drives the pinned ROM with an explicit, replayable input sequence and no
+  runtime RAM, party, PP, RNG, or serial mutation;
+* it enforces the declared ``max_frames``, ``max_wall_seconds``, and
+  ``max_inputs`` bounds and aborts as soon as any of them would be exceeded;
+* it asserts the declared ``capture_boundary`` (map, link state, and any declared
+  party shape) *before* anything is written;
+* it writes the state file with ``O_EXCL`` so an existing fixture can never be
+  overwritten, and it leaves no partial file behind when capture fails;
+* it records a private report with the replayable input history, the producer and
+  runtime identities, the asset/output hashes, and the reproduction comparison
+  against the pinned fixture hashes.
+
+Callers still capture real fixtures from legal ROM/SYM inputs; the recorded
+hashes are what consumers pin.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
+import os
+import subprocess
 import sys
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +54,23 @@ _CAPTURE_MESSAGE = (
     "Run the documented external capture procedure with legal ROM/SYM inputs, "
     "record the resulting hashes, and pin them in the scenario catalog."
 )
+_DEFAULT_STEP_FRAMES = 20
+_DEFAULT_PRESS_DURATION = 8
+# The single-console bounded drive can only reproduce boundaries it reaches
+# with legal inputs from a supplied source state.  A linked boundary needs a
+# controlled two-console run and is refused (never guessed).
+_SUPPORTED_BOUNDARY = ("link_reception", "pre_command")
+_CAPTURE_PRODUCER = "scripts/produce_battle_scenario.py"
+# The Cable Club link receptionist tile (11, 3) in the Cerulean Pokecenter
+# interior (map 0x40, shared by R/B/Y) — the only tile whose A press fires
+# ``CableClubNPC``.
+_LINK_RECEPTION_TILE = (11, 3)
+# ``wLinkState`` values the producer is willing to assert, taken from the
+# pinned pret sources (``LINK_STATE_NONE EQU $00 ; not using link``).  Only
+# states with a verified meaning are listed; an unlisted label is refused
+# rather than skipped.
+_LINK_STATE_CODES = {"disconnected": 0}
+_BUTTON_NAMES = frozenset({"a", "b", "start", "select", "up", "down", "left", "right"})
 
 
 class ScenarioRefusal(ValueError):
@@ -47,7 +82,104 @@ class ScenarioBlocked(ScenarioRefusal):
 
 
 class CaptureNotAvailable(RuntimeError):
-    """Raised by the bounded capture stub because no controlled ROM run is active."""
+    """Raised when no controlled ROM run can be established for a capture."""
+
+
+class CaptureBoundsExceeded(ScenarioRefusal):
+    """Raised when a declared capture bound would be exceeded."""
+
+
+class CapturePreconditionFailed(ScenarioRefusal):
+    """Raised when the declared capture boundary is not observed before saving."""
+
+
+@dataclass(frozen=True)
+class _InputStep:
+    """One replayable capture input: a button press, or an idle frame run."""
+
+    button: str | None
+    duration: int
+    frames: int
+
+    @property
+    def emulated_frames(self) -> int:
+        """Frames this step advances the emulator.
+
+        ``PyBoy.button`` only schedules a release; the emulator advances when
+        the session ticks, so a press advances exactly ``frames`` frames and
+        ``duration`` merely bounds the hold inside them.
+        """
+        return self.frames
+
+    def render(self) -> str:
+        if self.button is None:
+            return f"step:{self.frames}"
+        return f"press:{self.button}:{self.duration}:{self.frames}"
+
+
+class _CaptureBudget:
+    """Fail-closed frame, input, and wall-clock budget for one bounded drive.
+
+    Every emulator advance is charged against the declared bounds *before* it
+    happens, so a drive can never overshoot ``max_frames`` or ``max_inputs``,
+    and the wall-clock deadline is re-checked around every advance.
+    """
+
+    def __init__(self, bounds: dict[str, Any], *, clock: Callable[[], float]) -> None:
+        self._max_frames = bounds["max_frames"]
+        self._max_inputs = bounds["max_inputs"]
+        self._clock = clock
+        self._deadline = clock() + float(bounds["max_wall_seconds"])
+        self.frames = 0
+        self.inputs = 0
+        self.history: list[_InputStep] = []
+
+    def _check_wall(self, phase: str) -> None:
+        if self._clock() >= self._deadline:
+            raise CaptureBoundsExceeded(
+                f"capture exceeded max_wall_seconds during {phase}; "
+                "the declared bound may only be raised with a recorded justification"
+            )
+
+    def _reserve_frames(self, frames: int) -> None:
+        if self.frames + frames > self._max_frames:
+            raise CaptureBoundsExceeded(
+                f"capture would exceed max_frames ({self._max_frames}); "
+                "aborted before advancing the emulator"
+            )
+        self.frames += frames
+
+    def step(self, session: Any, frames: int) -> None:
+        """Advance ``frames`` idle frames, charged against the bounds."""
+        _positive_int(frames, "step frames")
+        self._check_wall("idle step")
+        step = _InputStep(None, 0, frames)
+        self._reserve_frames(step.emulated_frames)
+        session.step(frames)
+        self.history.append(step)
+        self._check_wall("idle step")
+
+    def press(self, session: Any, button: str, *, duration: int, frames: int) -> None:
+        """Press ``button`` and advance ``frames``, charged against the bounds."""
+        if button not in _BUTTON_NAMES:
+            raise ScenarioRefusal(f"unknown capture button {button!r}")
+        _positive_int(duration, "press duration")
+        _positive_int(frames, "press frames")
+        if duration > frames:
+            raise ScenarioRefusal(f"press duration {duration} exceeds the ticked frames {frames}")
+        if self.inputs + 1 > self._max_inputs:
+            raise CaptureBoundsExceeded(
+                f"capture would exceed max_inputs ({self._max_inputs}); "
+                "aborted before sending another input"
+            )
+        self._check_wall("input")
+        step = _InputStep(button, duration, frames)
+        self._reserve_frames(step.emulated_frames)
+        session.press(button, duration=duration)
+        session.step(frames)
+        self.inputs += 1
+        self.history.append(step)
+        self._check_wall("input")
 
 
 def _require(condition: bool, message: str) -> None:
@@ -188,9 +320,7 @@ def verify_pinned_assets(
             raise ScenarioRefusal(f"{label} not found: {target}")
         actual = sha1_file(target)
         if actual != expected:
-            raise ScenarioRefusal(
-                f"{label} SHA-1 mismatch: expected {expected}, got {actual}"
-            )
+            raise ScenarioRefusal(f"{label} SHA-1 mismatch: expected {expected}, got {actual}")
 
 
 def sha1_file(path: str | Path) -> str:
@@ -245,9 +375,298 @@ def write_report(path: str | Path, payload: Any) -> None:
     target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def capture_battle_scenario(**_kwargs: Any) -> None:
-    """Bounded capture stub: refuse until a controlled ROM run is available."""
-    raise CaptureNotAvailable(_CAPTURE_MESSAGE)
+def _symbol_byte(session: Any, name: str) -> int:
+    """Read one symbol-backed byte through the session's symbol table.
+
+    ``Session`` exposes ``symbols`` publicly but keeps the emulator memory
+    private; this reads the same ``symbols``/``memory`` pair the harness's own
+    observers use.  An absent symbol is a refusal, never a guessed zero.
+    """
+    symbols = getattr(session, "symbols", None)
+    memory = getattr(getattr(session, "_pyboy", None), "memory", None)
+    if symbols is None or memory is None:
+        raise CapturePreconditionFailed(
+            f"cannot read {name}: the capture session exposes no symbol table/memory"
+        )
+    if name not in symbols:
+        raise CapturePreconditionFailed(
+            f"cannot assert the declared boundary: {name} is absent from the loaded .sym table"
+        )
+    return symbols.read_u8(memory, name)
+
+
+def _observe_boundary(session: Any) -> dict[str, Any]:
+    """Return the observed pre-write boundary used for the precondition check."""
+    state = session.read_game_state()
+    return {
+        "map_id": state.overworld.map_id,
+        "x": state.overworld.x,
+        "y": state.overworld.y,
+        "link_state_raw": _symbol_byte(session, "wLinkState"),
+        "party_count": state.party.count,
+        "active_slot": state.party.active_slot,
+    }
+
+
+def _assert_boundary(scenario: dict[str, Any], observed: dict[str, Any], scenario_id: str) -> None:
+    """Refuse unless the observed state matches the declared capture boundary."""
+    boundary = scenario["capture_boundary"]
+    if observed["map_id"] != boundary["map_id"]:
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares map_id {boundary['map_id']}, "
+            f"observed {observed['map_id']}"
+        )
+    label = boundary["link_state"]
+    if label not in _LINK_STATE_CODES:
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} declares link_state {label!r}, which has no "
+            "verified wLinkState encoding; refusing to assert an unverified value"
+        )
+    expected_link = _LINK_STATE_CODES[label]
+    if observed["link_state_raw"] != expected_link:
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares link_state {label!r} "
+            f"(wLinkState={expected_link}), observed wLinkState="
+            f"{observed['link_state_raw']}"
+        )
+    party = scenario.get("party") or {}
+    if party.get("count") is not None and observed["party_count"] != party["count"]:
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares party.count {party['count']}, "
+            f"observed {observed['party_count']}"
+        )
+    if party.get("active_slot") is not None and observed["active_slot"] != party["active_slot"]:
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares party.active_slot {party['active_slot']}, "
+            f"observed {observed['active_slot']}"
+        )
+    if party.get("mons"):
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares per-mon party contents, which this "
+            "bounded drive does not assert; refusing to record an unchecked capture"
+        )
+
+
+def _drive_to_link_reception(session: Any, budget: _CaptureBudget) -> None:
+    """Drive the supplied source state to the Cable Club link receptionist.
+
+    The input sequence is the documented, replayable route from a Cerulean
+    Pokecenter source state: settle, walk up to the counter row, sidestep the
+    nurse, cross to the receptionist's adjacent tile, and face it.  No runtime
+    RAM, party, PP, RNG, or serial state is mutated.
+    """
+    budget.step(session, 10)  # let the overworld settle after loading
+    for _ in range(4):
+        budget.press(session, "up", duration=_DEFAULT_PRESS_DURATION, frames=_DEFAULT_STEP_FRAMES)
+    for _ in range(2):
+        budget.press(session, "left", duration=_DEFAULT_PRESS_DURATION, frames=_DEFAULT_STEP_FRAMES)
+    budget.press(session, "down", duration=_DEFAULT_PRESS_DURATION, frames=_DEFAULT_STEP_FRAMES)
+    while session.read_game_state().overworld.x < _LINK_RECEPTION_TILE[0]:
+        budget.press(
+            session, "right", duration=_DEFAULT_PRESS_DURATION, frames=_DEFAULT_STEP_FRAMES
+        )
+    budget.press(session, "up", duration=_DEFAULT_PRESS_DURATION, frames=30)
+    if session.read_game_state().overworld.x != _LINK_RECEPTION_TILE[0]:
+        raise CapturePreconditionFailed(
+            "the bounded drive did not reach the link receptionist column"
+        )
+
+
+def _default_session_factory(
+    *,
+    rom: str | Path,
+    sym: str | Path,
+    repo_root: str | Path,
+    runtime: str,
+    python: str | Path | None,
+    plan: dict[str, Any],
+) -> Any:
+    """Open the pinned PyBoy session, or refuse when none can be established."""
+    del runtime, python, plan
+    try:
+        from pokered_harness.config import load_versions
+        from pokered_harness.session import Session
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        raise CaptureNotAvailable(
+            f"{_CAPTURE_MESSAGE} The pinned PyBoy runtime is not importable: {exc}"
+        ) from exc
+    pins = load_versions(Path(repo_root) / "VERSIONS.md")
+    return Session.from_files(
+        rom,
+        sym,
+        expected_rom_sha1=pins.sha1_for_path(rom),
+        expected_symbol_sha1=pins.symbol_sha1_for_path(sym),
+        expected_pyboy_version=pins.pyboy_version,
+        expected_pyboy_revision=pins.pyboy_revision,
+    )
+
+
+def _producer_revision(repo_root: str | Path) -> str | None:
+    """Best-effort enclosing commit for the produced provenance record."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    revision = result.stdout.strip()
+    return revision or None
+
+
+def _write_fixture_exclusive(output: Path, payload: bytes) -> None:
+    """Publish fixture bytes without ever overwriting, or leaving a partial file.
+
+    The payload is staged in a private sibling and published with ``os.link``,
+    which fails if the destination already exists.  The staged file is removed
+    on every exit path, so a failed capture leaves nothing behind.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staged = output.with_name(f".{output.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
+    try:
+        descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(staged, output)
+        except FileExistsError as exc:
+            raise ScenarioRefusal(f"refusing to overwrite existing output: {output}") from exc
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(staged)
+
+
+def capture_battle_scenario(
+    *,
+    scenario: dict[str, Any],
+    rom: str | Path,
+    sym: str | Path,
+    input_fixture: str | Path | None,
+    output: str | Path,
+    role: str,
+    bounds: dict[str, Any],
+    report: str | Path | None,
+    repo_root: str | Path,
+    runtime: str,
+    python: str | Path | None,
+    plan: dict[str, Any],
+    session_factory: Callable[..., Any] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """Drive a pinned ROM to the declared boundary and publish the fixture.
+
+    Returns the private provenance record for the capture.  ``run`` merges it
+    into the report it writes, so a caller never has to re-derive the input
+    history, the runtime identity, or the output hashes.
+    """
+    del report
+    boundary = scenario["capture_boundary"]
+    scenario_id = scenario["scenario_id"]
+    if (boundary["stage"], boundary["when"]) not in (_SUPPORTED_BOUNDARY,):
+        producer = scenario.get("provenance", {}).get("producer", "the documented producer")
+        raise CaptureNotAvailable(
+            f"{_CAPTURE_MESSAGE} The {boundary['stage']!r}/{boundary['when']!r} boundary "
+            f"requires the controlled linked run produced by {producer}; a single-console "
+            "bounded drive cannot establish it."
+        )
+    if input_fixture is None:
+        raise ScenarioRefusal(
+            "capture requires a source state; pass --input-fixture (the documented "
+            "producer takes --source) so the drive starts from a known position"
+        )
+
+    factory = session_factory or _default_session_factory
+    output_path = Path(output)
+    started = clock()
+    budget = _CaptureBudget(bounds, clock=clock)
+    session: Any | None = None
+    try:
+        try:
+            session = factory(
+                rom=rom,
+                sym=sym,
+                repo_root=repo_root,
+                runtime=runtime,
+                python=python,
+                plan=plan,
+            )
+        except CaptureNotAvailable:
+            raise
+        except (ImportError, RuntimeError, OSError) as exc:
+            raise CaptureNotAvailable(
+                f"{_CAPTURE_MESSAGE} The pinned runtime could not be opened: {exc}"
+            ) from exc
+        session.load_state(Path(input_fixture).read_bytes())
+        _drive_to_link_reception(session, budget)
+        observed = _observe_boundary(session)
+        _assert_boundary(scenario, observed, scenario_id)
+        payload = session.save_state()
+    except (CaptureNotAvailable, ScenarioRefusal):
+        raise
+    except Exception as exc:  # fail closed: never publish bytes on an error
+        raise ScenarioRefusal(
+            f"bounded capture aborted before writing ({type(exc).__name__}): {exc}"
+        ) from exc
+    finally:
+        if session is not None:
+            with contextlib.suppress(Exception):
+                session.close()
+
+    declared = scenario.get("fixture") or {}
+    digest_sha1 = hashlib.sha1(payload).hexdigest()
+    digest_sha256 = hashlib.sha256(payload).hexdigest()
+    matches = (
+        declared.get("sha1") == digest_sha1
+        and declared.get("sha256") == digest_sha256
+        and declared.get("size_bytes") == len(payload)
+    )
+    verified = scenario.get("provenance", {}).get("status") == "verified"
+    if verified and declared.get("sha1") and not matches:
+        raise ScenarioRefusal(
+            f"bounded capture did not reproduce the declared fixture for {scenario_id!r}: "
+            f"declared sha1 {declared['sha1']} ({declared.get('size_bytes')} bytes), "
+            f"produced sha1 {digest_sha1} ({len(payload)} bytes); no bytes were written"
+        )
+    _write_fixture_exclusive(output_path, payload)
+
+    return {
+        "producer": _CAPTURE_PRODUCER,
+        "producer_sha1": sha1_file(Path(__file__)),
+        "producer_revision": _producer_revision(repo_root),
+        "runtime": runtime,
+        "python": str(python) if python is not None else None,
+        "role": role,
+        "captured_at_utc": datetime.now(UTC).isoformat(),
+        "wall_seconds": round(clock() - started, 6),
+        "declared_bounds": bounds,
+        "inputs_used": budget.inputs,
+        "frames_used": budget.frames,
+        "input_sequence": [step.render() for step in budget.history],
+        "observed_boundary": observed,
+        "rom_sha1": plan.get("rom_sha1"),
+        "sym_sha1": plan.get("sym_sha1"),
+        "input_fixture_sha1": plan.get("input_fixture_sha1"),
+        "output": {
+            "path": str(output_path),
+            "size_bytes": len(payload),
+            "sha1": digest_sha1,
+            "sha256": digest_sha256,
+        },
+        "reproduction": {
+            "declared_fixture_sha1": declared.get("sha1"),
+            "declared_fixture_sha256": declared.get("sha256"),
+            "declared_size_bytes": declared.get("size_bytes"),
+            "matches": matches,
+        },
+    }
 
 
 def run(
@@ -291,9 +710,7 @@ def run(
     provenance = scenario["provenance"]
     declared_input_sha1 = provenance.get("input_fixture_sha1")
     if provenance.get("source_fixture_id") is not None and input_fixture is None:
-        raise ScenarioRefusal(
-            "scenario declares a source fixture; an input fixture is required"
-        )
+        raise ScenarioRefusal("scenario declares a source fixture; an input fixture is required")
     input_sha1: str | None = None
     if input_fixture is not None:
         input_sha1 = verify_input_fixture(input_fixture, declared_input_sha1)
@@ -308,7 +725,7 @@ def run(
         "capture_bounds": bounds,
         "output": str(output),
     }
-    capture(
+    capture_record = capture(
         scenario=scenario,
         rom=rom,
         sym=sym,
@@ -322,6 +739,8 @@ def run(
         python=python,
         plan=plan,
     )
+    if isinstance(capture_record, dict):
+        plan = {**plan, "capture": capture_record}
     if report is not None:
         write_report(report, plan)
     return plan
