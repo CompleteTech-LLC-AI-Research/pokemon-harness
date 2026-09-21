@@ -43,6 +43,7 @@ REAL_ROM_MODULES = frozenset(
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
         "test_mcp_trade_records_rom.py",
+        "test_battle_healing_items_rom.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",

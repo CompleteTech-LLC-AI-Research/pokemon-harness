@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "manifest_id": "pokered-harness.battle-healing-fixtures",
+  "manifest_version": 1,
+  "generated_on": "2026-09-21",
+  "fixture_root": "tests/fixtures/link",
+  "asset_policy": {
+    "repository_distributed": false,
+    "repository_tracking": "untracked; *.state is ignored",
+    "observed_location": "operator-managed external fixture root using the fixture_root layout",
+    "validation_command": "PYTHONPATH=vendor/pyboy-src:src:. POKERED_ROM_ROOT=<rom root> POKERED_FIXTURE_ROOT=<fixture root> pytest tests/test_battle_healing_items_rom.py",
+    "validation_policy": "fail closed on missing, size, SHA-1, or SHA-256 mismatch",
+    "provenance_policy": "an entry pins the exact bytes of a driven capture together with the milestone and ROM inputs and the observed signals that produced it; it never claims the external-link manifest's Cable Club acceptance role",
+    "scope": "ROM-half evidence for the ordinary battle medicine workstream (#90.3). These are ordinary single-player battle states, not link fixtures, and they are not part of the Cable Club trade/battle acceptance matrix."
+  },
+  "fixtures": [
+    {
+      "id": "yellow-ordinary-battle-healing",
+      "path": "yellow/battle_healing.state",
+      "version": "yellow",
+      "variant": "cgb",
+      "kind": "battle_healing",
+      "size_bytes": 200548,
+      "sha1": "348ba9aec5a8f4f72c59efc547a09a5c2ff84ef4",
+      "sha256": "17605698782dfd8c19c8fcbab8a2292af052eb67623d80c99fea5efb923ad911",
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "repository_distributed": false,
+      "producer": "scripts/produce_battle_healing_fixture.py",
+      "asserted_by": "tests/test_battle_healing_items_rom.py",
+      "provenance": {
+        "status": "verified",
+        "kind": "driven-capture",
+        "source_state": "external walkthrough_yellow/milestones/brock_badge.state; SHA-1 beaa784f0c68f0bae56d1d5f3ff7f31ee97ff062",
+        "input_sequence": "leave Pewter Gym; buy a POTION at the Pewter Mart counter via BUY/POTION/quantity (settle signal: money 4643 -> 4343 and a new 0x14 stack, never an A-press count); walk to Pewter's south edge; take the south warp to Route 2 north; step into grass until the ROM's own encounter check fires (wTileMap[9][9] == wGrassTile); save at the first wild-battle command-menu boundary",
+        "capture_command_template": "PYTHONPATH=vendor/pyboy-src:src:. POKERED_ROM_ROOT=<rom root> POKERED_PRET_ROOT=<pret/pokeyellow checkout> python -u scripts/produce_battle_healing_fixture.py --source <matching-brock_badge.state> --source-sha1 beaa784f0c68f0bae56d1d5f3ff7f31ee97ff062 --rom rom/yellow/pokemon-yellow.gbc --sym rom/yellow/pokemon-yellow.sym --out tests/fixtures/link/yellow/battle_healing.state",
+        "captured_at_utc": "2026-09-21T16:18:27Z (first capture; 2026-09-21T16:30:44Z reproduction)",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0; fork c565df66c3731fad2856169a90f6bbec99925915",
+        "verification_method": "the producer was run twice from the same pinned milestone and the two outputs are byte-for-byte identical (SHA-1 348ba9aec5a8f4f72c59efc547a09a5c2ff84ef4), so the encounter is determined by the pinned inputs and the recorded input sequence rather than by host timing",
+        "observed_signals": {
+          "purchase": {
+            "money_before": 4643,
+            "money_after": 4343,
+            "bag_before": ["0xea x1"],
+            "bag_after": ["0xea x1", "0x14 x1"]
+          },
+          "route2_entry": {"map_id": "0x0d", "x": 9, "y": 0, "grass_tile": "0x52", "grass_rate": 25},
+          "encounter": {"kind": "WILD", "walk_steps": 29, "steps_on_grass": 24},
+          "capture_boundary": {
+            "stage": "wild_battle_command_menu",
+            "in_battle": "wIsInBattle=1",
+            "menu": "wMaxMenuItem=1, wMenuWatchedKeys=0x11",
+            "money": 4343,
+            "bag": ["0xea x1", "0x14 x1"],
+            "active_hp": "6/102"
+          }
+        },
+        "evidence_note": "The fixture bytes remain operator-managed and outside the repository. The test re-derives every asserted value from the live emulator: it plays ITEM -> POTION -> target with real button input and checks the inventory, HP, and turn accounting against tests/_battle_item_evidence.py."
+      }
+    }
+  ]
+}
