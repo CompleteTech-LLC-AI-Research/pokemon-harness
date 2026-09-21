@@ -10,8 +10,10 @@ from the pinned ``brock_badge`` milestone with real button input:
    the bag already holds Brock's TM and a truthiness check would pass without a
    purchase);
 3. walk to Route 2 north and step into grass until the ROM's own encounter check
-   fires (``engine/battle/wild_encounters.asm`` compares ``wTileMap[9][9]`` --
-   ``hlcoord 9, 9`` -- against ``wGrassTile``);
+   fires.  Yellow's ``engine/battle/wild_encounters.asm`` reads the player's
+   *bottom-left* half-block tile, ``hlcoord 8, 9`` -- ``wTileMap[9][8]`` -- and
+   compares it with ``wGrassTile``; Red/Blue read the bottom-right tile
+   ``hlcoord 9, 9`` instead, so the two games sample different cells;
 4. save the state at the first command-menu boundary of that wild battle.
 
 The contract is bounded and fail-closed, in the style of
@@ -23,13 +25,16 @@ hash in ``release-evidence/battle-healing-fixtures.json`` and verified by the
 test; this script is a capture tool, not a claim of acceptance.
 
 Usage:
-    PYTHONPATH=src POKERED_ROM_ROOT=<rom root> \\
-    POKERED_PRET_ROOT=<pret/pokeyellow checkout> \\
+    PYTHONPATH=src POKERED_PRET_ROOT=<pret/pokeyellow checkout> \\
     python -u scripts/produce_battle_healing_fixture.py \\
         --source <milestone.state> --source-sha1 <sha1> \\
         --rom <rom root>/yellow/pokemon-yellow.gbc \\
         --sym <rom root>/yellow/pokemon-yellow.sym \\
         --out <fixture root>/yellow/battle_healing.state
+
+``--rom``/``--sym`` take real paths to the assets pinned in ``VERSIONS.md``;
+``POKERED_PRET_ROOT`` is inherited by the ``scripts/path_from_tiles.py``
+subprocess the driver shells out to for navigation.
 """
 
 from __future__ import annotations
@@ -45,8 +50,8 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 
-from pokered_harness.config import load_versions  # noqa: E402
-from pokered_harness.session import Session  # noqa: E402
+from pokered_harness.config import load_versions
+from pokered_harness.session import Session
 
 # Map ids are shared across Gen 1 (Kanto maps keep their ids).
 PEWTER_CITY = 0x02
@@ -56,6 +61,14 @@ ROUTE_2 = 0x0D
 
 POTION = 0x14
 POTION_PRICE = 300
+
+# Yellow's encounter check reads the player's own tile, which is fixed in the
+# 20x18 ``wTileMap`` view: ``hlcoord 8, 9`` is the *bottom-left* tile of the
+# player's half-block, i.e. row 9, column 8.  This is a per-game constant --
+# Red/Blue's ``hlcoord 9, 9`` is the bottom-right tile -- so sampling column 9
+# here would test an adjacent tile and misreport the ROM's own predicate.
+ENCOUNTER_CHECK_ROW = 9
+ENCOUNTER_CHECK_COLUMN = 8
 
 # The counter clerk occupies (1,5); the walkable tile the player stands on to
 # face them is (2,5).  ``scripts/path_from_tiles.py`` force-marks the goal cell
@@ -166,8 +179,9 @@ class Driver:
         base = self.symbols.get("wTileMap").addr
         out = []
         for row in range(TILEMAP_HEIGHT):
-            tiles = [int(self.memory[base + row * TILEMAP_WIDTH + col])
-                     for col in range(TILEMAP_WIDTH)]
+            tiles = [
+                int(self.memory[base + row * TILEMAP_WIDTH + col]) for col in range(TILEMAP_WIDTH)
+            ]
             out.append("".join(_glyph(t) for t in tiles))
         return out
 
@@ -190,10 +204,9 @@ class Driver:
         """The ROM's own command-menu fingerprint, not a stale cursor byte."""
         if not self.in_battle():
             return False
-        return (
-            self.menu()[1] == BATTLE_MENU_MAX_ITEM
-            and self.byte("wMenuWatchedKeys")
-            in (BATTLE_MENU_LEFT_COLUMN, BATTLE_MENU_RIGHT_COLUMN)
+        return self.menu()[1] == BATTLE_MENU_MAX_ITEM and self.byte("wMenuWatchedKeys") in (
+            BATTLE_MENU_LEFT_COLUMN,
+            BATTLE_MENU_RIGHT_COLUMN,
         )
 
     # -- actions -------------------------------------------------------
@@ -234,10 +247,23 @@ class Driver:
         if self.rom_sha1:
             env["POKERED_ROM_SHA1"] = self.rom_sha1
         result = subprocess.run(
-            [sys.executable, "-u", str(_REPO / "scripts" / "path_from_tiles.py"),
-             "--state", str(state_path), "--goal-xy", goal,
-             "--save-path-to", str(out_path)],
-            capture_output=True, text=True, timeout=600, check=False, cwd=_REPO, env=env,
+            [
+                sys.executable,
+                "-u",
+                str(_REPO / "scripts" / "path_from_tiles.py"),
+                "--state",
+                str(state_path),
+                "--goal-xy",
+                goal,
+                "--save-path-to",
+                str(out_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+            cwd=_REPO,
+            env=env,
         )
         if result.returncode != 0 or not out_path.exists():
             return None
@@ -253,8 +279,10 @@ class Driver:
             self.step_dir(direction)
             if index % 10 == 9 or index == len(path) - 1:
                 map_id, x, y = self.where()
-                print(f"    [{label}] {index + 1}/{len(path)} -> map=0x{map_id:02x} ({x},{y})",
-                      flush=True)
+                print(
+                    f"    [{label}] {index + 1}/{len(path)} -> map=0x{map_id:02x} ({x},{y})",
+                    flush=True,
+                )
 
     def goto(self, goal: str, label: str, tries: int = 4) -> bool:
         """Arrive at ``goal`` or refuse: every attempt is verified."""
@@ -271,8 +299,10 @@ class Driver:
                 print(f"    [{label}] reached {goal} on attempt {attempt + 1}", flush=True)
                 return True
             map_id, x, y = self.where()
-            print(f"    [{label}] drift: wanted {goal}, at ({x},{y}) on map 0x{map_id:02x}",
-                  flush=True)
+            print(
+                f"    [{label}] drift: wanted {goal}, at ({x},{y}) on map 0x{map_id:02x}",
+                flush=True,
+            )
         return False
 
     def step_until_map(self, direction: str, wanted: int, budget: int = 14) -> bool:
@@ -377,16 +407,18 @@ def leave_mart(driver: Driver) -> None:
 def walk_into_grass(driver: Driver, battle_budget: int = 160) -> dict:
     """Step into grass until the ROM's encounter check fires.
 
-    Movement alternates toward the nearest grass tile and is verified with the
-    ROM's own predicate: the bottom-right tile of the player's half-block
-    (``hlcoord 9, 9``) equals ``wGrassTile``.
+    Movement alternates toward the nearest grass tile and every step is recorded
+    with the ROM's own predicate: the bottom-left tile of the player's half-block
+    (``hlcoord 8, 9``) equals ``wGrassTile``.  The same cell is used as the
+    movement aim point, so the walked path is the one the recorded predicate
+    describes.
     """
     steps_on_grass = 0
     total = 0
     for _ in range(battle_budget):
         driver.dismiss()
         tile, cells = driver.grass_tiles()
-        on_grass = (9, 9) in cells
+        on_grass = (ENCOUNTER_CHECK_ROW, ENCOUNTER_CHECK_COLUMN) in cells
         steps_on_grass += int(on_grass)
         total += 1
         if driver.in_battle():
@@ -407,13 +439,24 @@ def walk_into_grass(driver: Driver, battle_budget: int = 160) -> dict:
 
         def key(cell: tuple[int, int]) -> tuple[int, int]:
             row, col = cell
-            aligned = 0 if (row - 9) % 2 == 0 and (col - 9) % 2 == 0 else 1
-            return (aligned, abs(row - 9) + abs(col - 9))
+            aligned = (
+                0
+                if (row - ENCOUNTER_CHECK_ROW) % 2 == 0 and (col - ENCOUNTER_CHECK_COLUMN) % 2 == 0
+                else 1
+            )
+            return (
+                aligned,
+                abs(row - ENCOUNTER_CHECK_ROW) + abs(col - ENCOUNTER_CHECK_COLUMN),
+            )
 
         row, col = min(cells, key=key)
-        vertical = ["d" if row > 9 else "u"]
-        horizontal = ["r" if col > 9 else "l"]
-        order = (vertical + horizontal) if abs(row - 9) >= abs(col - 9) else (horizontal + vertical)
+        vertical = ["d" if row > ENCOUNTER_CHECK_ROW else "u"]
+        horizontal = ["r" if col > ENCOUNTER_CHECK_COLUMN else "l"]
+        order = (
+            (vertical + horizontal)
+            if abs(row - ENCOUNTER_CHECK_ROW) >= abs(col - ENCOUNTER_CHECK_COLUMN)
+            else (horizontal + vertical)
+        )
         before = driver.where()
         for direction in order + ["l", "r", "u", "d"]:
             driver.step_dir(direction)
@@ -439,8 +482,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sym", required=True)
     parser.add_argument("--out", required=True, help="fixture path; must not exist")
     parser.add_argument("--provenance-out", default=None)
-    parser.add_argument("--version", default="yellow", choices=["yellow"],
-                        help="only Yellow is driven by this producer")
+    parser.add_argument(
+        "--version",
+        default="yellow",
+        choices=["yellow"],
+        help="only Yellow is driven by this producer",
+    )
     return parser.parse_args(argv)
 
 
@@ -450,8 +497,8 @@ def main(argv: list[str] | None = None) -> int:
     rom = Path(args.rom)
     sym = Path(args.sym)
     out = Path(args.out)
-    provenance_out = Path(args.provenance_out) if args.provenance_out else out.with_suffix(
-        ".provenance.json"
+    provenance_out = (
+        Path(args.provenance_out) if args.provenance_out else out.with_suffix(".provenance.json")
     )
 
     if out.exists():
@@ -460,9 +507,7 @@ def main(argv: list[str] | None = None) -> int:
         raise CaptureRefused(f"source milestone is missing: {source}")
     observed_source_sha1 = sha1_of(source)
     if observed_source_sha1.lower() != args.source_sha1.lower():
-        raise CaptureRefused(
-            f"source SHA-1 mismatch: {observed_source_sha1} != {args.source_sha1}"
-        )
+        raise CaptureRefused(f"source SHA-1 mismatch: {observed_source_sha1} != {args.source_sha1}")
     rom_sha1, sym_sha1 = pinned(rom, sym)
 
     session = Session.from_files(
@@ -476,9 +521,12 @@ def main(argv: list[str] | None = None) -> int:
         session.load_state(source.read_bytes())
         session.step(60, render=True)
         driver = Driver(session, rom=rom, sym=sym, rom_sha1=rom_sha1)
-        print(f"  source {source.name} sha1={observed_source_sha1} "
-              f"map=0x{driver.where()[0]:02x} {driver.where()[1:]} money={driver.money()} "
-              f"bag={driver.bag_stacks()} hp={driver.hp()}", flush=True)
+        print(
+            f"  source {source.name} sha1={observed_source_sha1} "
+            f"map=0x{driver.where()[0]:02x} {driver.where()[1:]} money={driver.money()} "
+            f"bag={driver.bag_stacks()} hp={driver.hp()}",
+            flush=True,
+        )
 
         leave_gym_and_reach_mart(driver)
         signals["purchase"] = buy_potion(driver)
@@ -489,8 +537,11 @@ def main(argv: list[str] | None = None) -> int:
             raise CaptureRefused("could not reach Pewter's south edge")
         if not driver.step_until_map("d", ROUTE_2):
             raise CaptureRefused("the south warp did not reach Route 2")
-        signals["route2_entry"] = {"map_id": driver.where()[0], "x": driver.where()[1],
-                                   "y": driver.where()[2]}
+        signals["route2_entry"] = {
+            "map_id": driver.where()[0],
+            "x": driver.where()[1],
+            "y": driver.where()[2],
+        }
         print(f"  route 2 at {driver.where()} bag={driver.bag_stacks()}", flush=True)
 
         signals["encounter"] = walk_into_grass(driver)
@@ -520,8 +571,12 @@ def main(argv: list[str] | None = None) -> int:
 
     provenance = {
         "$schema": "pokered-harness.battle-healing-fixture-provenance",
-        "fixture": {"path": out.name, "size_bytes": out.stat().st_size,
-                    "sha1": sha1_of(out), "sha256": sha256_of(out)},
+        "fixture": {
+            "path": out.name,
+            "size_bytes": out.stat().st_size,
+            "sha1": sha1_of(out),
+            "sha256": sha256_of(out),
+        },
         "source": {"path": f"external {source.name}", "sha1": observed_source_sha1},
         "expected_rom": {"path": str(rom), "sha1": rom_sha1},
         "expected_symbols": {"path": str(sym), "sha1": sym_sha1},
