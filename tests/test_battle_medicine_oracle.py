@@ -9,16 +9,16 @@ item-evidence contract.
 
 Every assertion here is pure arithmetic and text: no emulator, ROM, symbol
 file, save state or runtime fixture is touched, so the module belongs to the
-ROM-free unit tier.  ``test_committed_excerpt_matches_the_configured_pret_checkout``
-additionally re-derives the excerpts from local pinned checkouts when
-``POKERED_PRET_ROOT`` / ``POKEYELLOW_PRET_ROOT`` are set.
+always-selected ROM-free unit tier and must never skip.  The audit that
+re-derives the excerpts from a local pinned checkout needs
+``POKERED_PRET_ROOT`` / ``POKEYELLOW_PRET_ROOT`` and therefore lives in the
+separate opt-in module ``tests/test_battle_medicine_source_conformance.py``,
+which no tier marker expression selects.
 """
 
 from __future__ import annotations
 
-import hashlib
-import os
-import subprocess
+import ast
 from pathlib import Path
 
 import pytest
@@ -48,8 +48,6 @@ from tests._battle_medicine_oracle import (
     ITEM_ID_EXCERPTS,
     LADDER_CONDITIONS,
     OP_BRANCH,
-    RED_BLUE,
-    YELLOW,
     LadderOp,
     add_heal_amount,
     clamps_to_max_hp,
@@ -68,13 +66,9 @@ from tests._battle_medicine_oracle import (
     run_heal_ladder,
     yellow_heal_ladder_ops,
 )
+from tests._tier_config import KNOWN_TEST_MODULES, classify_test
 
 EXCERPT_IDS = [record.label.replace(" ", "-") for record in ALL_EXCERPTS]
-
-CONFORMANCE_VARIABLES = {
-    RED_BLUE: "POKERED_PRET_ROOT",
-    YELLOW: "POKEYELLOW_PRET_ROOT",
-}
 
 # Fixed amounts the pinned ladder must load into ``b``.
 PINNED_FIXED_AMOUNTS = {
@@ -428,7 +422,29 @@ def test_moving_full_restore_above_hyper_potion_removes_the_clamp() -> None:
     moved = {**ids, "FULL_RESTORE": 0x20}
     assert clamps_to_max_hp(0x20, moved) is False
     outcome = heal_application(0x20, 10, 999, 0x08, item_ids=moved)
-    assert (outcome.hp, outcome.status, outcome.branch) == (30, 0, BRANCH_FIXED_HEAL)
+    # Neither clamp is taken, so the routine jumps from the ladder straight to
+    # ``.updateInBattleData`` and never reaches ``.doneHealingPartyHP``: the
+    # party status byte survives even though the ID is Full Restore.
+    assert (outcome.hp, outcome.status, outcome.branch) == (30, 0x08, BRANCH_FIXED_HEAL)
+
+
+def test_remapped_full_restore_clears_status_when_the_heal_is_clamped() -> None:
+    ids = pinned_item_ids()
+    moved = {**ids, "FULL_RESTORE": 0x20}
+    # 10 + 20 exceeds the 20 max HP, so the oversized-heal clamp carries the
+    # routine into ``.doneHealingPartyHP``, where Full Restore clears status.
+    outcome = heal_application(0x20, 10, 20, 0x08, item_ids=moved)
+    assert (outcome.hp, outcome.status, outcome.branch) == (20, 0x00, BRANCH_CLAMPED_TO_MAX)
+
+
+def test_remapped_full_restore_below_hyper_potion_clears_status_by_item_id() -> None:
+    ids = pinned_item_ids()
+    moved = {**ids, "FULL_RESTORE": 0x0B}
+    assert clamps_to_max_hp(0x0B, moved) is True
+    # ``cp HYPER_POTION`` / ``jr c`` routes this ID through the same clamp and
+    # the same status write, this time without exceeding max HP.
+    outcome = heal_application(0x0B, 10, 999, 0x08, item_ids=moved)
+    assert (outcome.hp, outcome.status, outcome.branch) == (999, 0x00, BRANCH_CLAMPED_TO_MAX)
 
 
 def test_full_restore_and_max_potion_clamp_by_id_not_by_loaded_amount() -> None:
@@ -561,34 +577,30 @@ def test_oracle_agrees_with_the_merged_item_evidence_contract() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Source conformance against local pinned checkouts (opt-in)
+# The opt-in source audit must stay outside the required unit tier
 # ---------------------------------------------------------------------------
 
-
-def _git_head(root: Path) -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return completed.stdout.strip()
+SOURCE_AUDIT_MODULE = "test_battle_medicine_source_conformance.py"
 
 
-def _slice_lines(path: Path, first: int, last: int) -> str:
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    return "".join(lines[first - 1 : last])
+def test_source_audit_stays_out_of_the_required_unit_tier() -> None:
+    """The opt-in checkout audit must never be selectable by a tier marker.
 
+    It skips whenever a pinned upstream checkout is absent, and the required
+    unit tier fails closed on any skip, so registering it as ``unit`` would
+    fail the asset-free unit gate.  This pins the split that keeps the audit
+    runnable while leaving the always-selected suite skip-free.
+    """
 
-@pytest.mark.parametrize("record", ALL_EXCERPTS, ids=EXCERPT_IDS)
-def test_committed_excerpt_matches_the_configured_pret_checkout(record) -> None:
-    variable = CONFORMANCE_VARIABLES[record.source]
-    configured = os.environ.get(variable)
-    if not configured:
-        pytest.skip(f"{variable} is not set; source conformance needs a pinned checkout")
-    root = Path(configured).expanduser()
-    path = root / record.path
-    assert path.is_file(), f"{path} is missing"
-    assert _git_head(root) == record.revision, f"{variable} is not at the pinned revision"
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == record.file_sha256
-    assert _slice_lines(path, record.first_line, record.last_line) == excerpt_text(record)
+    assert SOURCE_AUDIT_MODULE in KNOWN_TEST_MODULES
+    source = Path(__file__).resolve().parent / SOURCE_AUDIT_MODULE
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    names = [
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    ]
+    assert names, "the audit module declares no tests"
+    for name in names:
+        assert classify_test(SOURCE_AUDIT_MODULE, name) == frozenset(), name

@@ -163,7 +163,19 @@ UNIT_MODULES = frozenset(
     }
 )
 
-KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES
+# Reviewed opt-in modules.  These tests need assets the gate environment does
+# not provision - a local pinned upstream checkout, for example - and skip when
+# it is absent.  A required tier fails closed on any skip, so these modules
+# carry no tier marker and are never selected by a tier marker expression; run
+# them explicitly by path, as their module docstrings document.  The manifest
+# entry is still required: an unlisted module keeps failing collection.
+OPT_IN_MODULES = frozenset(
+    {
+        "test_battle_medicine_source_conformance.py",
+    }
+)
+
+KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES | OPT_IN_MODULES
 
 # Reviewed ROM-free exceptions in mixed modules. Only actual test functions
 # belong here; unlisted future functions retain the module's real-ROM tier.
@@ -731,6 +743,10 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     test_key = (filename, test_name)
     if test_key in ROM_FREE_TESTS:
         return frozenset({"unit"})
+    if filename in OPT_IN_MODULES:
+        # Opt-in audit: no tier marker, so no tier expression can select a
+        # skip that only a fully provisioned checkout could satisfy.
+        return frozenset()
 
     marks: set[str] = set()
 
@@ -781,6 +797,7 @@ __all__ = [
     "LOCAL_VERSION_PAIR_NODEIDS",
     "MARKERS",
     "MCP_STDIO_MODULES",
+    "OPT_IN_MODULES",
     "REAL_ROM_MODULES",
     "REMOTE_LINK_MODULES",
     "REMOTE_VERSION_PAIR_NODEIDS",

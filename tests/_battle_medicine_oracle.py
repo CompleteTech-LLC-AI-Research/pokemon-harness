@@ -595,14 +595,32 @@ def heal_application(
     amount = run_heal_ladder(item_id, ops=ladder, item_ids=table)
     new_hp = add_heal_amount(hp, amount)
     if revive:
-        return HealOutcome(True, revive_half_max_hp(max_hp), status, BRANCH_REVIVE_HALF_MAX)
+        # ``jr .doneHealingPartyHP`` from the half-max path still flows into the
+        # party-status write, so an ID that is both a revive and Full Restore
+        # would clear the status byte here.
+        return HealOutcome(
+            True,
+            revive_half_max_hp(max_hp),
+            0 if full_restore else status,
+            BRANCH_REVIVE_HALF_MAX,
+        )
     if to_max or new_hp >= max_hp or clamps_to_max_hp(item_id, table):
         resolved, branch = max_hp, BRANCH_CLAMPED_TO_MAX
         if to_max:
             branch = BRANCH_REVIVE_TO_MAX
+        # Every clamp path (.setCurrentHPToMaxHp and the revive half-max path)
+        # falls through .doneHealingPartyHP, which is where the status write
+        # lives.
+        clears_status = full_restore
     else:
         resolved, branch = new_hp, BRANCH_FIXED_HEAL
-    return HealOutcome(True, resolved, 0 if full_restore else status, branch)
+        # A fixed-amount heal jumps straight from the ladder to
+        # ``.updateInBattleData``, skipping ``.doneHealingPartyHP`` entirely, so
+        # it never writes the party status byte - even for a Full Restore ID
+        # whose clamp was not taken (for example once the ID is remapped above
+        # Hyper Potion).
+        clears_status = False
+    return HealOutcome(True, resolved, 0 if clears_status else status, branch)
 
 
 def raw_loaded_amount(
