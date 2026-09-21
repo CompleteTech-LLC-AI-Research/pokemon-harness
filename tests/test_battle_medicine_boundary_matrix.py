@@ -35,8 +35,9 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 import pytest
 
@@ -216,8 +217,10 @@ def domain_problems(case: dict[str, Any]) -> list[str]:
 
     if case["item"] not in ADMITTED_ITEMS:
         return [
-            f"item {case['item']!r} is outside the admitted HP-medicine domain "
-            f"{sorted(ADMITTED_ITEMS)}"
+            (
+                f"item {case['item']!r} is outside the admitted HP-medicine domain "
+                f"{sorted(ADMITTED_ITEMS)}"
+            )
         ]
     if case["item"] not in pinned_item_ids():
         return [f"item {case['item']!r} is not in the pinned item table"]
