@@ -158,9 +158,18 @@ distributed. The repository's own entry point is the tracked test module, so wit
 roots exported any single declared row runs directly from a clean checkout at the reviewed head:
 
 ```sh
-# ROMs: POKERED_ROM_ROOT/<family>/{pokemon-red.gb,pokemon-blue.gb,pokemon-yellow.gbc} + .sym
-# link fixtures: POKERED_FIXTURE_ROOT/<family>/cable_club.state
-# both default to <worktree>/rom and <worktree>/tests/fixtures/link when unset
+# ROMs (POKERED_ROM_ROOT), named exactly as tests/_rom_assets.py resolves them:
+#   red/pokemon-red.gb  red/pokemon-red-color.gb  red/pokemon-red.sym
+#   blue/pokemon-blue.gb  blue/pokemon-blue-color.gb  blue/pokemon-blue.sym
+#   yellow/pokemon-yellow.gbc  yellow/pokemon-yellow.sym
+# link fixtures (POKERED_FIXTURE_ROOT): <family>/cable_club.state and
+#   <family>/cable_club-slots.state
+# when these are unset the helpers walk up from the worktree looking for rom/ and
+# tests/fixtures/link/, falling back to <worktree>/rom and <worktree>/tests/fixtures/link
+# The row below is that version pair 'red_color-blue_color', so it needs the two colour
+# ROMs above; with only the stock red/blue ROMs present it reports skipped, not passed.
+# A single row is minutes of emulator work, not seconds: this node id is recorded at
+# 1527s in pr105-report.json's rows[] beside its committed JUnit and log.
 export POKERED_ROM_ROOT=/path/to/rom
 export POKERED_FIXTURE_ROOT=/path/to/link-fixtures
 
