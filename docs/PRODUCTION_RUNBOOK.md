@@ -709,6 +709,25 @@ owned process group is terminated without discarding the original failure; the
 `POKERED_QUALIFICATION_RUN_TIMEOUT_SECONDS` or `--run-timeout` (default
 `86400`).
 
+Admission is re-measured under the held lease, immediately before `--run` is
+launched: the prerequisite probes can run for minutes and can spawn work that
+competes for the same host, so the effective CPUs, competing affinity, and
+admission inputs are re-collected rather than reused from before the lease was
+acquired. An unreadable cgroup CPU quota, including an unreadable ancestor
+controller, is reported as `unsupported` instead of being treated as unlimited
+capacity, matching the cgroup memory bound.
+
+`--reserve` writes an owner-only `job-launch-intent.json` beside
+`allocation.json` before the command is spawned, and records the launched
+command's pid, start time, process group, and session as soon as it starts. A
+write failure is terminal: the command is torn down and the lease is kept,
+because capacity that cannot be attributed to a recorded job must never be
+reported as free. A launch intent without an ownership record, an incomplete
+record, or a record whose pid was reused by an unrelated process all keep the
+state and report blocked. `--release` and `--recover` signal a recorded process
+group only after proving every live member of it can belong to the recorded
+job.
+
 The runner installs itself as a child subreaper (`PR_SET_CHILD_SUBREAPER`) and
 contains descendants on every command exit path, not only on timeout. Two
 sweeps run after the parent exits: the command's whole process group, and the

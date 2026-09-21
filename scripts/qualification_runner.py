@@ -699,6 +699,66 @@ def _cgroup_memory_limit(paths: list[Path], filename: str) -> tuple[int | None, 
     return (min(limits) if limits else None), observable
 
 
+def _cgroup_cpu_quota_v2(paths: list[Path]) -> tuple[float | None, bool]:
+    """Return the tightest cgroup-v2 CPU quota for *paths* and its observability.
+
+    The second element is ``False`` when a ``cpu.max`` exists but could not be
+    read or parsed.  An unreadable controller is an *unknown* bound, not an
+    absent one: a leaf that looks like four cores while an unreadable ancestor
+    throttles it to half a core would otherwise be admitted with no headroom.
+    """
+
+    quotas: list[float] = []
+    observable = True
+    for path in paths:
+        candidate = path / "cpu.max"
+        if not candidate.exists():
+            continue
+        raw = _read_text(candidate)
+        if raw is None:
+            observable = False
+            continue
+        try:
+            quota = _parse_cpu_max(raw)
+        except ValueError:
+            observable = False
+            continue
+        if quota is not None:
+            quotas.append(quota)
+    return (min(quotas) if quotas else None), observable
+
+
+def _cgroup_cpu_quota_v1(paths: list[Path]) -> tuple[float | None, bool]:
+    """Return the tightest cgroup-v1 CPU quota for *paths* and its observability.
+
+    A quota or period file that is present but unreadable makes the effective
+    quota unknown, so admission fails closed instead of reading ``-1``-like
+    silence as "unlimited".
+    """
+
+    quotas: list[float] = []
+    observable = True
+    for path in paths:
+        quota_file = path / "cpu.cfs_quota_us"
+        period_file = path / "cpu.cfs_period_us"
+        if not quota_file.exists() and not period_file.exists():
+            continue
+        quota_raw = _read_text(quota_file)
+        period_raw = _read_text(period_file)
+        if not quota_raw or not period_raw:
+            observable = False
+            continue
+        try:
+            quota_us = int(quota_raw)
+            period_us = int(period_raw)
+        except ValueError:
+            observable = False
+            continue
+        if quota_us >= 0 and period_us > 0:
+            quotas.append(quota_us / period_us)
+    return (min(quotas) if quotas else None), observable
+
+
 def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None) -> dict[str, Any]:
     """Read the cgroup facts for this process.
 
@@ -710,6 +770,7 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
     base = Path("/sys/fs/cgroup") if root is None else Path(root)
     version = "unavailable"
     quota_cores: float | None = None
+    quota_observable = True
     weight: int | None = None
     throttled: dict[str, int] | None = None
     relative: str | None = None
@@ -727,12 +788,7 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
         version = "v2"
         relative = v2_relative
         primary = v2_paths[0]
-        quotas = [
-            quota
-            for quota in (_parse_cpu_max(_read_text(path / "cpu.max") or "") for path in v2_paths)
-            if quota is not None
-        ]
-        quota_cores = min(quotas) if quotas else None
+        quota_cores, quota_observable = _cgroup_cpu_quota_v2(v2_paths)
         for path in v2_paths:
             raw_weight = _read_text(path / "cpu.weight")
             if raw_weight is not None and raw_weight.isdigit():
@@ -743,17 +799,7 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
         version = "v1"
         relative = v1_relative
         primary = v1_paths[0]
-        quotas = []
-        for path in v1_paths:
-            quota_raw = _read_text(path / "cpu.cfs_quota_us")
-            period_raw = _read_text(path / "cpu.cfs_period_us")
-            if not quota_raw or not period_raw:
-                continue
-            quota_us = int(quota_raw)
-            period_us = int(period_raw)
-            if quota_us >= 0 and period_us > 0:
-                quotas.append(quota_us / period_us)
-        quota_cores = min(quotas) if quotas else None
+        quota_cores, quota_observable = _cgroup_cpu_quota_v1(v1_paths)
         for path in v1_paths:
             shares_raw = _read_text(path / "cpu.shares")
             if shares_raw and shares_raw.isdigit():
@@ -804,6 +850,7 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
     return {
         "cgroup_version": version,
         "cpu_quota_cores": quota_cores,
+        "cpu_quota_observable": quota_observable,
         "cpu_weight": weight,
         "cpu_throttled": throttled,
         "cgroup_relative_path": relative,
@@ -1012,6 +1059,7 @@ class RunnerFacts:
     cgroup_descendants: dict[str, int] | None = None
     cgroup_sibling_competitors: list[str] | None = None
     cpu_quota_cores: float | None = None
+    cpu_quota_observable: bool = True
     cpu_weight: int | None = None
     cpu_throttled: dict[str, int] | None = None
     memory_total_bytes: int | None = None
@@ -1132,6 +1180,7 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
     facts.cgroup_descendants = _cgroup_descendant_counts(cgroup["cgroup_dir"])
     facts.cgroup_sibling_competitors = _cgroup_sibling_competitors(cgroup["cgroup_dir"])
     facts.cpu_quota_cores = cgroup["cpu_quota_cores"]
+    facts.cpu_quota_observable = cgroup["cpu_quota_observable"]
     facts.cpu_weight = cgroup["cpu_weight"]
     facts.cpu_throttled = cgroup["cpu_throttled"]
     facts.memory_limit_bytes = cgroup["memory_limit_bytes"]
@@ -2181,7 +2230,21 @@ def evaluate_resources(
 
     declared_quota = declaration.get("cpu_quota_cores")
     quota_below_requirement = declared_quota is not None and declared_quota < declared_cpus
-    if mechanism == "cgroup-quota":
+    if not facts.cpu_quota_observable:
+        # An unreadable ancestor controller is unknown capacity, not unlimited
+        # capacity: a leaf that reports four cores under a half-core ancestor
+        # that cannot be read must never be admitted as four usable cores.
+        results.append(
+            _result(
+                "cpu-quota",
+                "unsupported",
+                declared_quota,
+                facts.cpu_quota_cores,
+                "the effective cgroup CPU quota could not be observed; "
+                "refusing to treat an unknown bound as unlimited",
+            )
+        )
+    elif mechanism == "cgroup-quota":
         if declared_quota is None:
             results.append(
                 _result(
@@ -2459,6 +2522,19 @@ _LEFTOVER_OWNED_PIDS: set[int] = set()
 # job directory so a later ``--recover``/``--release`` process can identify the
 # job's own process group and session even after its holder died.
 _JOB_RUN_RECORD_NAME = "job-run.json"
+# The launch intent is written before the command is spawned, so a lease whose
+# ownership record never landed is still distinguishable from one that never
+# launched anything.  Without it a swallowed record write would read as "no job
+# ran" and a later recovery would delete the lease while the job still ran.
+_JOB_LAUNCH_INTENT_NAME = "job-launch-intent.json"
+
+
+class JobOwnershipError(RuntimeError):
+    """A lease could not durably record the job it launched.
+
+    The command is torn down and the lease is kept: capacity that cannot be
+    attributed to a recorded job must never be reported as free.
+    """
 
 
 @dataclass(frozen=True)
@@ -2970,7 +3046,10 @@ def run_command(
 
     *on_start*, when given, is called with the live ``Popen`` immediately after
     the command has started, so a lease can persist durable job ownership
-    before the command outlives its holder.
+    before the command outlives its holder.  If it raises, the command and its
+    descendants are torn down and the exception is re-raised only once
+    containment has run, so a lease can never keep running work it cannot
+    attribute.
 
     The sweeps run on the cancellation path too.  The installed signal handlers
     raise ``SystemExit`` from inside ``communicate``, so containment is not left
@@ -3011,10 +3090,14 @@ def run_command(
             return subprocess.CompletedProcess(command, 127, "", f"{type(exc).__name__}: {exc}")
         preexisting.discard(process.pid)
         _register_owned(process)
-        if on_start is not None:
-            on_start(process)
         try:
             try:
+                # ``on_start`` runs inside the containment window: if a lease
+                # cannot durably attribute the command it just spawned, the
+                # command is torn down here instead of being left running with
+                # no record that would let a later recovery find it.
+                if on_start is not None:
+                    on_start(process)
                 stdout, stderr = process.communicate(timeout=timeout)
             except subprocess.TimeoutExpired as exc:
                 # ``communicate`` waits for EOF as well as for the command to
@@ -4359,6 +4442,11 @@ def _write_job_run_record(
     the launched job's own pid/start time and its process group/session, and
     ``containment_confirmed`` is set only after the runner proved every
     descendant was gone.
+
+    The record is the *only* thing that can attribute a surviving descendant to
+    this lease, so a write that fails is a terminal failure rather than a
+    silently unobservable detail: the caller tears the command down while it is
+    still inside a proved-containment window, and the lease stays held.
     """
 
     try:
@@ -4382,10 +4470,96 @@ def _write_job_run_record(
     try:
         path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.chmod(path, 0o600)
+    except OSError as exc:
+        raise JobOwnershipError(
+            f"the launched job's durable ownership record could not be written ({exc}); "
+            "the command is being torn down because its descendants cannot be attributed"
+        ) from exc
+
+
+def _write_job_launch_intent(job_dir: Path, command: list[str]) -> None:
+    """Record the intent to launch *command* before the command is spawned.
+
+    Recovery must never delete a lease whose launched job cannot be identified.
+    Writing this marker first makes the two states distinguishable: a lease with
+    an intent but no ownership record is *unknown* work and stays blocked, while
+    a lease with neither never launched anything and is safe to remove.
+    """
+
+    digest = hashlib.sha256("\x00".join(command).encode("utf-8", "surrogateescape")).hexdigest()
+    intent = {
+        "intent_version": 1,
+        "command_sha256": digest,
+        "recorded_at": _iso_now(),
+    }
+    path = job_dir / _JOB_LAUNCH_INTENT_NAME
+    try:
+        path.write_text(json.dumps(intent, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        raise JobOwnershipError(
+            f"the job's launch intent could not be persisted ({exc}); refusing to spawn a "
+            "command whose ownership could not be recorded"
+        ) from exc
+
+
+def _remove_launch_intent(job_dir: Path) -> None:
+    """Best-effort removal of a launch intent that never produced a command.
+
+    Only the caller that knows nothing was spawned may call this, because the
+    intent is what keeps recovery from treating unidentifiable work as an idle
+    lease.  A partially written or chmod-failed intent must not outlive the
+    failure it recorded.
+    """
+
+    try:
+        (job_dir / _JOB_LAUNCH_INTENT_NAME).unlink()
     except OSError:
-        # The lease is still valid; the run path reports the missing record as
-        # unobservable ownership rather than silently claiming containment.
-        pass
+        return
+
+
+def _recorded_start_time_at_or_after(observed: str | None, recorded: Any) -> bool:
+    """Return ``True`` when *observed* cannot predate the recorded start time.
+
+    Start times are the ``starttime`` field of ``/proc/<pid>/stat`` in clock
+    ticks since boot, so a process that started *before* the recorded job can
+    never be one of its descendants.  Anything that cannot be compared is
+    treated as unprovable rather than as ownership.
+    """
+
+    if observed is None or not isinstance(recorded, str) or not recorded.strip():
+        return False
+    try:
+        return int(observed) >= int(recorded)
+    except ValueError:
+        return False
+
+
+def _recorded_job_group_ownership(pgid: int, job_start_time: Any) -> tuple[bool, str]:
+    """Prove that every live member of *pgid* can belong to the recorded job.
+
+    A process-group id is reusable once its members exit, so recovering a stale
+    lease must never signal a group merely because the id appears in the record.
+    Each live member must be observable and must have started no earlier than
+    the recorded job; otherwise the group is unproven and must be left alone.
+    """
+
+    members = [pid for pid in _process_group_members(pgid) if pid != os.getpid()]
+    if not members:
+        return True, ""
+    for pid in members:
+        observed = _process_start_time(pid)
+        if observed is None:
+            return False, (
+                f"the start time of process {pid} in the recorded job's group is not "
+                "observable; refusing to signal a group whose ownership cannot be proven"
+            )
+        if not _recorded_start_time_at_or_after(observed, job_start_time):
+            return False, (
+                f"process {pid} in the recorded job's group started before the recorded job; "
+                "refusing to signal a group whose ownership cannot be proven"
+            )
+    return True, ""
 
 
 def _update_job_run_record(job_dir: Path, *, containment_confirmed: bool) -> None:
@@ -4421,23 +4595,39 @@ def _confirm_recorded_job_containment(
     record, error = _read_job_run_record(job_dir)
     if error:
         return False, error
+    if record is None and (job_dir / _JOB_LAUNCH_INTENT_NAME).exists():
+        return False, (
+            "this lease recorded a launch intent but no job ownership record exists; "
+            "refusing to signal or release an allocation whose ownership cannot be proven"
+        )
     if record is not None:
         job_pid = record.get("job_pid")
         start_time = record.get("job_start_time")
-        if (
-            isinstance(job_pid, int)
-            and not isinstance(job_pid, bool)
-            and job_pid > 0
-            and _pid_alive(job_pid)
-            and _process_start_time(job_pid) == start_time
-        ):
-            return False, f"the recorded qualification job (pid {job_pid}) is still running"
+        owned_pid = isinstance(job_pid, int) and not isinstance(job_pid, bool) and job_pid > 0
+        if not owned_pid or not isinstance(start_time, str) or not start_time.strip():
+            return False, (
+                "the recorded job's ownership (pid and start time) is incomplete; refusing to "
+                "signal or release an allocation whose ownership cannot be proven"
+            )
+        if _pid_alive(job_pid):
+            if _process_start_time(job_pid) == start_time:
+                return False, f"the recorded qualification job (pid {job_pid}) is still running"
+            # The pid now belongs to someone else.  Signalling the recorded
+            # group here is exactly how recovery killed unrelated work, so the
+            # record is treated as unproven ownership instead of as a target.
+            return False, (
+                f"pid {job_pid} belongs to an unrelated process that reused the recorded "
+                "job's pid; refusing to signal a group whose ownership cannot be proven"
+            )
         groups = {
             value
             for value in (record.get("job_process_group"), record.get("job_session"))
             if isinstance(value, int) and not isinstance(value, bool) and value > 0
         }
         for pgid in sorted(groups):
+            group_owned, ownership_detail = _recorded_job_group_ownership(pgid, start_time)
+            if not group_owned:
+                return False, ownership_detail
             confirmed, survivors = _terminate_process_group(pgid)
             if not confirmed:
                 return (
@@ -4777,7 +4967,13 @@ def _do_reserve(
             extra,
         )
 
-    resources = evaluate_resources(declaration, facts, repo_root)
+    # The prerequisite probes above can run for minutes and can spawn work that
+    # competes for this host, so observations taken before the lease was held
+    # are stale by admission time.  Recollect them *while holding the lease*
+    # and admit against what is true now, not against what was true earlier.
+    admitted_facts = collect_facts(repo_root)
+    _populate_job_filesystem_facts(admitted_facts, job_dir)
+    resources = evaluate_resources(declaration, admitted_facts, repo_root)
     if overall_status(resources) != "ok":
         _release_allocation(declaration, repo_root)
         return (
@@ -4798,16 +4994,35 @@ def _do_reserve(
 
     # Durable job ownership is written before the command runs, so a holder that
     # dies mid-run still leaves a verifiable record of what it launched.
+    try:
+        _write_job_launch_intent(job_dir, command)
+    except JobOwnershipError as exc:
+        # Nothing was spawned, so the intent, if a partial write landed, does
+        # not describe anything running and must not block the clean release.
+        _remove_launch_intent(job_dir)
+        _release_allocation(declaration, repo_root)
+        return (
+            "fail",
+            f"the qualification command was not launched: {exc}",
+            extra,
+        )
+
     def _record_start(process: subprocess.Popen[str]) -> None:
         _write_job_run_record(job_dir, process, containment_confirmed=False)
 
-    process = run_command(
-        command,
-        repo_root,
-        timeout=_qualification_timeout(getattr(args, "run_timeout", None)),
-        env=child_env,
-        on_start=_record_start,
-    )
+    try:
+        process = run_command(
+            command,
+            repo_root,
+            timeout=_qualification_timeout(getattr(args, "run_timeout", None)),
+            env=child_env,
+            on_start=_record_start,
+        )
+    except JobOwnershipError as exc:
+        # The command was spawned but could not be attributed to this lease, so
+        # ``run_command`` already tore it down.  The lease is kept because the
+        # launch intent remains and no containment proof exists for it.
+        return "blocked", f"the launched command could not be recorded: {exc}", extra
     containment = last_command_containment()
     containment_proven = containment is not None and containment.proven
     _update_job_run_record(job_dir, containment_confirmed=containment_proven)

@@ -1827,10 +1827,16 @@ def test_release_contains_holder_descendants(tmp_path: Path, monkeypatch):
     detached_pid: int | None = None
     try:
         deadline = time.monotonic() + 10
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert ready.exists(), "the holder did not start its detached descendant"
-        detached_pid = json.loads(ready.read_text())["detached"]
+        while time.monotonic() < deadline:
+            # ``write_text`` creates the file before it has written the payload,
+            # so a loaded host can briefly expose an empty handshake file.
+            try:
+                detached_pid = json.loads(ready.read_text(encoding="utf-8"))["detached"]
+            except (OSError, ValueError):
+                time.sleep(0.02)
+                continue
+            break
+        assert detached_pid is not None, "the holder did not start its detached descendant"
         rewrite_descriptor(
             declaration,
             {
@@ -2658,6 +2664,13 @@ def test_reserve_run_configures_private_paths_and_timeout(monkeypatch, tmp_path:
         captured["timeout"] = timeout
         captured["env"] = env
         captured["on_start"] = on_start
+        # ``run_command`` records durable ownership of the live command before
+        # it can outlive the holder, so the stub does the same against a real
+        # short-lived child: the record must carry an observable start time,
+        # exactly as a production run's does.
+        child = subprocess.Popen([sys.executable, "-c", "pass"], **runner._process_group_options())
+        on_start(child)
+        child.wait()
         # ``_do_reserve`` only releases the lease on a *proven* containment
         # outcome, so the stub publishes one exactly as ``run_command`` does.
         runner._LAST_COMMAND_CONTAINMENT = runner.CommandContainment(
@@ -2749,3 +2762,274 @@ def test_redact_payload_scrubs_unregistered_build_paths():
     rendered = json.dumps(runner._redact_payload(payload, {}))
     assert "/var/private" not in rendered
     assert "<redacted-path>" in rendered
+
+
+def test_recover_does_not_signal_a_group_whose_pid_was_reused(tmp_path: Path):
+    """A reused pid must not authorize signalling the recorded process group.
+
+    The record is the only ownership evidence recovery has.  When the recorded
+    pid now belongs to an unrelated process, the recorded group id may belong to
+    that process, so recovery must block instead of terminating it.
+    """
+
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert runner._process_start_time(sleeper.pid) != "0"
+        declaration, descriptor_path, _job_dir = _stale_job_dir(
+            tmp_path,
+            _job_record(
+                job_pid=sleeper.pid,
+                job_process_group=sleeper.pid,
+                job_session=sleeper.pid,
+            ),
+        )
+        status, message = runner._recover_allocation(declaration, tmp_path)
+        assert status == "blocked", message
+        assert "ownership cannot be proven" in message
+        assert sleeper.poll() is None, (
+            f"recovery killed an unrelated process that reused the recorded pid "
+            f"(rc={sleeper.returncode}, message={message!r})"
+        )
+        assert descriptor_path.exists(), "the unproven lease state was removed"
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+        sleeper.wait(timeout=5)
+
+
+def test_recover_refuses_an_incomplete_ownership_record(tmp_path: Path):
+    """A record without a usable pid/start time cannot authorize a group sweep."""
+
+    declaration, descriptor_path, _job_dir = _stale_job_dir(
+        tmp_path, _job_record(job_pid=None, job_start_time=None)
+    )
+    status, message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "blocked", message
+    assert "ownership" in message
+    assert descriptor_path.exists()
+
+
+def test_launch_intent_without_an_ownership_record_blocks_containment(tmp_path: Path):
+    """A recorded launch whose ownership record is missing is unproven work."""
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    runner._write_job_launch_intent(job_dir, [sys.executable, "-c", "pass"])
+    for contain_adopted in (False, True):
+        confirmed, detail = runner._confirm_recorded_job_containment(
+            job_dir, contain_adopted=contain_adopted
+        )
+        assert not confirmed, (contain_adopted, detail)
+        assert "launch intent" in detail
+
+
+def test_recover_refuses_a_launch_intent_without_an_ownership_record(tmp_path: Path):
+    """Recovery must not delete a lease whose launched job cannot be identified."""
+
+    declaration, descriptor_path, job_dir = _stale_job_dir(tmp_path, None)
+    runner._write_job_launch_intent(job_dir, [sys.executable, "-c", "pass"])
+    status, message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "blocked", message
+    assert "launch intent" in message
+    assert descriptor_path.exists(), "lease state was removed with no ownership evidence"
+
+
+def test_write_job_run_record_is_terminal_when_the_record_cannot_be_written(tmp_path: Path):
+    """A swallowed write failure would leave running work that reads as no job."""
+
+    if os.geteuid() == 0:
+        pytest.skip("permission failures cannot be provoked as root")
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        **runner._process_group_options(),
+    )
+    try:
+        os.chmod(job_dir, 0o500)
+        with pytest.raises(runner.JobOwnershipError) as excinfo:
+            runner._write_job_run_record(job_dir, child, containment_confirmed=False)
+        assert "could not be written" in str(excinfo.value)
+        assert not (job_dir / runner._JOB_RUN_RECORD_NAME).exists()
+    finally:
+        os.chmod(job_dir, 0o700)
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+
+
+def test_do_reserve_contains_the_command_when_the_record_cannot_be_written(
+    tmp_path: Path, monkeypatch
+):
+    """An unattributable command is torn down and its lease kept, not left running."""
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration = make_declaration()
+    declaration["reservation"]["host_lock_path"] = str(tmp_path / "host.lock")
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    job_dir = tmp_path / "job"
+    pidfile = tmp_path / "command.pid"
+    code = (
+        "import os, time; from pathlib import Path; "
+        f"Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    )
+
+    def reject(*_args, **_kwargs):
+        raise runner.JobOwnershipError("simulated unwritable ownership record")
+
+    monkeypatch.setattr(runner, "_write_job_run_record", reject)
+    monkeypatch.setattr(
+        runner,
+        "prerequisite_checks",
+        lambda decl, root: [runner.CheckResult("stub", "ok", 1, 1, "")],
+    )
+    monkeypatch.setattr(
+        runner,
+        "evaluate_resources",
+        lambda decl, facts, root: [runner.CheckResult("stub", "ok", 1, 1, "")],
+    )
+    args = argparse.Namespace(job_dir=job_dir, run=[sys.executable, "-c", code], run_timeout=30.0)
+    status, message, _extra = runner._do_reserve(
+        args, declaration, declaration_path, tmp_path, make_facts()
+    )
+    assert status == "blocked", message
+    assert "could not be recorded" in message
+    assert (job_dir / "allocation.json").exists(), "the unattributed lease was released"
+    assert (job_dir / runner._JOB_LAUNCH_INTENT_NAME).exists()
+    deadline = time.monotonic() + 5
+    while not pidfile.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if pidfile.exists():
+        launched = int(pidfile.read_text(encoding="utf-8"))
+        while time.monotonic() < deadline and runner._pid_alive(launched):
+            time.sleep(0.05)
+        assert not runner._pid_alive(launched), "the unattributed command was left running"
+
+
+def test_admission_recollects_capacity_after_the_prerequisite_probes(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Resources are re-measured under the held lease, not reused from before."""
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    phase = {"probed": False, "samples": 0}
+    declaration = make_declaration(
+        reservation_mechanism="cpuset-affinity",
+        affinity_cpus=[0, 1, 2, 3],
+        cpu_quota_cores=None,
+    )
+    declaration["reservation"]["host_lock_path"] = str(tmp_path / "host.lock")
+    declaration["reservation"]["job_dir"] = str(tmp_path / "job")
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    sentinel = tmp_path / "launched"
+
+    def sample(_root):
+        phase["samples"] += 1
+        return make_facts(
+            affinity_cpus=[0, 1, 2, 3],
+            affinity_count=4,
+            cpu_quota_cores=None,
+            foreign_process_affinity={999999: [0, 1]} if phase["probed"] else {},
+        )
+
+    def probes(_declaration, _root):
+        phase["probed"] = True
+        return [runner.CheckResult("diagnostic-prerequisites", "ok", None, None, "stub")]
+
+    monkeypatch.setattr(runner, "collect_facts", sample)
+    monkeypatch.setattr(runner, "prerequisite_checks", probes)
+    exit_code = runner.main(
+        [
+            "--reserve",
+            "--json",
+            "--declaration",
+            str(declaration_path),
+            "--run",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(sentinel)!r}).touch()",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code != 0, payload
+    assert phase["samples"] > 1, "capacity was never re-collected after the probes"
+    assert not sentinel.exists(), (
+        f"admitted a changed allocation: exit={exit_code}, samples={phase['samples']}"
+    )
+
+
+def test_unreadable_ancestor_cpu_quota_is_not_treated_as_unlimited(tmp_path: Path, monkeypatch):
+    """An unreadable controller is unknown capacity, not absent capacity."""
+
+    root = tmp_path / "cgroup"
+    allocation = root / "allocation"
+    allocation.mkdir(parents=True)
+    (root / "cpu.max").write_text("50000 100000\n", encoding="utf-8")
+    (allocation / "cpu.max").write_text("400000 100000\n", encoding="utf-8")
+    real_read_text = runner._read_text
+
+    def hide_ancestor_quota(path):
+        return None if path == root / "cpu.max" else real_read_text(path)
+
+    monkeypatch.setattr(runner, "_read_text", hide_ancestor_quota)
+    observed = runner._read_cgroup_facts(root, "0::/allocation")
+    assert observed["cpu_quota_observable"] is False
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    for key, value in observed.items():
+        setattr(facts, key, value)
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["cpu-quota"] == "unsupported"
+    assert runner.overall_status(results) != "ok", (
+        "an unobservable half-core ancestor was admitted as four usable cores: "
+        + repr(statuses(results))
+    )
+
+
+def test_cgroup_cpu_quota_reports_an_unreadable_level(tmp_path: Path, monkeypatch):
+    """The v2 controller walk must publish observability, not just the quota."""
+
+    root = tmp_path / "cgroup"
+    leaf = root / "user.slice" / "session.scope"
+    leaf.mkdir(parents=True)
+    (leaf / "cpu.max").write_text("400000 100000\n", encoding="utf-8")
+    paths = runner._iter_cgroup_paths(root, "/user.slice/session.scope")
+    real_read_text = runner._read_text
+
+    def unreadable(path: Path) -> str | None:
+        if path.name == "cpu.max" and path.parent == leaf:
+            return None
+        return real_read_text(path)
+
+    monkeypatch.setattr(runner, "_read_text", unreadable)
+    quota, observable = runner._cgroup_cpu_quota_v2(paths)
+    assert observable is False
+    assert quota is None
+
+
+def test_cgroup_v1_cpu_quota_reports_an_unreadable_period(tmp_path: Path, monkeypatch):
+    """A v1 period that cannot be read makes the effective quota unknown."""
+
+    path = tmp_path / "cpu" / "user.slice"
+    path.mkdir(parents=True)
+    (path / "cpu.cfs_quota_us").write_text("50000\n", encoding="utf-8")
+    (path / "cpu.cfs_period_us").write_text("100000\n", encoding="utf-8")
+    real_read_text = runner._read_text
+
+    def unreadable(candidate: Path) -> str | None:
+        if candidate.name == "cpu.cfs_period_us":
+            return None
+        return real_read_text(candidate)
+
+    monkeypatch.setattr(runner, "_read_text", unreadable)
+    quota, observable = runner._cgroup_cpu_quota_v1([path])
+    assert observable is False
+    assert quota is None
