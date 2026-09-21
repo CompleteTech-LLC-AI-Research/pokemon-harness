@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import sys
 import types
 import typing
@@ -434,6 +435,30 @@ def _staged_files(tmp_path: Path) -> list[Path]:
     return [path for path in tmp_path.iterdir() if ".partial-" in path.name]
 
 
+def _measured_record() -> dict:
+    """A capture record satisfying the measured-runtime contract exactly."""
+    return {
+        "producer": "scripts/produce_battle_scenario.py",
+        "producer_sha1": "a" * 40,
+        "runtime": "source",
+        "runtime_measurement": "measured",
+        "runtime_identity": {"mode": "source", "measured": True, "executable": "/usr/bin/python3"},
+        "python": None,
+        "role": "listen",
+        "captured_at_utc": "2026-09-21T00:00:00+00:00",
+        "wall_seconds": 0.5,
+        "declared_bounds": {"max_frames": 1, "max_wall_seconds": 1.0, "max_inputs": 1},
+        "inputs_used": 1,
+        "frames_used": 1,
+        "input_sequence": ["step:1"],
+        "observed_boundary": {"map_id": 64, "link_state_raw": 0},
+        "rom_sha1": "b" * 40,
+        "sym_sha1": "c" * 40,
+        "output": {"path": "out.state", "size_bytes": 12, "sha1": "d" * 40, "sha256": "e" * 64},
+        "reproduction": {"matches": False},
+    }
+
+
 def test_producer_capture_drives_link_reception_and_records_provenance(tmp_path: Path) -> None:
     session = _FakeSession()
     record = producer.capture_battle_scenario(
@@ -499,6 +524,542 @@ def test_producer_capture_aborts_when_the_input_budget_is_exhausted(tmp_path: Pa
 
     assert not (tmp_path / "out.state").exists()
     assert _staged_files(tmp_path) == []
+
+
+# --- round-2 closure: owned publications, one deadline, measured identity ------
+
+
+def _run_with_fake_session(prepared: dict, **overrides: object) -> dict:
+    """Invoke ``run`` with the real capture path and an injected fake session."""
+    kwargs: dict = {
+        "scenario_id": "red_color_ordinary",
+        "catalog": prepared["catalog"],
+        "rom": prepared["rom"],
+        "sym": prepared["sym"],
+        "input_fixture": prepared["input_fixture"],
+        "output": prepared["out"],
+        "report": prepared.get("report"),
+        "repo_root": prepared["root"],
+        "pins": prepared["pins"],
+        "capture": lambda **capture_kwargs: producer.capture_battle_scenario(
+            **capture_kwargs, session_factory=lambda **_kwargs: _FakeSession()
+        ),
+    }
+    kwargs.update(overrides)
+    return producer.run(**kwargs)
+
+
+def test_producer_capture_interruption_after_the_stage_is_removed_still_withdraws(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the staging entry is gone, only retained inode identity finds the output."""
+    real_unlink = producer.os.unlink
+
+    def unlink_then_interrupt(path: object, *args: object, **kwargs: object) -> None:
+        real_unlink(path, *args, **kwargs)
+        if ".partial-" in Path(path).name:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(producer.os, "unlink", unlink_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _FakeSession()
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_finalization_failure_removes_the_owned_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed staging removal is inside the rollback region, not beside it."""
+    real_unlink = producer.os.unlink
+    failures: list[str] = []
+
+    def fail_stage_removal_once(path: object, *args: object, **kwargs: object) -> None:
+        name = Path(path).name
+        if ".partial-" in name and not failures:
+            failures.append(name)
+            raise PermissionError(f"staging entry {name} is not removable")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(producer.os, "unlink", fail_stage_removal_once)
+    with pytest.raises(PermissionError, match="is not removable"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _FakeSession()
+            )
+        )
+
+    assert failures, "the staging removal must have been attempted"
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_keeps_the_primary_error_when_stage_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cleanup that cannot complete is reported, never substituted for the failure."""
+    real_link = producer.os.link
+    real_unlink = producer.os.unlink
+
+    def link_then_interrupt(source: object, destination: object) -> None:
+        real_link(source, destination)
+        raise KeyboardInterrupt
+
+    def refuse_to_remove_stage(path: object, *args: object, **kwargs: object) -> None:
+        if ".partial-" in Path(path).name:
+            raise PermissionError("staging entry is not removable")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(producer.os, "link", link_then_interrupt)
+    monkeypatch.setattr(producer.os, "unlink", refuse_to_remove_stage)
+
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _FakeSession()
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert any("could not be removed" in note for note in notes), notes
+
+
+def test_producer_capture_preserves_a_competing_symlink_at_the_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A competitor's symlink aimed at our staged bytes is not our publication."""
+    real_symlink = producer.os.symlink
+
+    def competing_symlink(source: object, destination: object) -> None:
+        # Emulate the race: a competing writer installs a destination symlink
+        # pointing at this capture's staged file, then an interrupt arrives.
+        real_symlink(source, destination)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(producer.os, "link", competing_symlink)
+    with pytest.raises(KeyboardInterrupt):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _FakeSession()
+            )
+        )
+
+    competitor = tmp_path / "out.state"
+    assert competitor.is_symlink(), "the competing writer's entry must survive the rollback"
+    assert ".partial-" in Path(os.readlink(competitor)).name
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_preserves_a_competing_fixture_when_the_report_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report rollback must not delete an entry a competing writer replaced."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    replacement = tmp_path / "competitor.state"
+    replacement.write_bytes(b"competitor must survive")
+
+    def replace_output_then_fail(*_args: object, **_kwargs: object) -> None:
+        os.replace(replacement, output)
+        raise OSError("report could not be finalized")
+
+    monkeypatch.setattr(producer, "write_report", replace_output_then_fail)
+    prepared.update({"out": output, "report": tmp_path / "report.json", "root": tmp_path})
+    with pytest.raises(OSError, match="could not be finalized"):
+        _run_with_fake_session(prepared)
+
+    assert output.read_bytes() == b"competitor must survive"
+    assert not (tmp_path / "report.json").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_withdraws_its_report_when_finalization_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A report published for a rolled-back fixture must not survive as a success."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+    real_replace = producer.os.replace
+    fired: list[int] = []
+
+    def replace_then_interrupt(source: object, destination: object) -> None:
+        real_replace(source, destination)
+        if Path(destination) == report and not fired:
+            fired.append(1)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(producer.os, "replace", replace_then_interrupt)
+    prepared.update({"out": output, "report": report, "root": tmp_path})
+    with pytest.raises(KeyboardInterrupt):
+        _run_with_fake_session(prepared)
+
+    assert fired, "the report rename must have completed before the interrupt"
+    assert not report.exists()
+    assert not output.exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_restores_a_replaced_report_when_finalization_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prior report is put back rather than destroyed by this capture's rollback."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+    prior = b'{\n  "prior": true\n}\n'
+    report.write_bytes(prior)
+    real_replace = producer.os.replace
+    fired: list[int] = []
+
+    def replace_then_interrupt(source: object, destination: object) -> None:
+        real_replace(source, destination)
+        if Path(destination) == report and not fired:
+            fired.append(1)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(producer.os, "replace", replace_then_interrupt)
+    prepared.update({"out": output, "report": report, "root": tmp_path})
+    with pytest.raises(KeyboardInterrupt):
+        _run_with_fake_session(prepared)
+
+    assert report.read_bytes() == prior
+    assert not output.exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_refuses_a_report_that_aliases_the_catalog(tmp_path: Path) -> None:
+    """The catalog is a protected input: a report over it would erase the contract."""
+    prepared = _prepared_run(tmp_path)
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(json.dumps(prepared["catalog"]), encoding="utf-8")
+    before = catalog_path.read_bytes()
+    hard_link = tmp_path / "catalog-hardlink.json"
+    os.link(catalog_path, hard_link)
+
+    for report in (catalog_path, tmp_path / "." / "catalog.json", hard_link):
+        with pytest.raises(producer.ScenarioRefusal, match="same file as"):
+            producer.run(
+                scenario_id="red_color_ordinary",
+                catalog=prepared["catalog"],
+                rom=prepared["rom"],
+                sym=prepared["sym"],
+                input_fixture=prepared["input_fixture"],
+                output=tmp_path / "out.state",
+                report=report,
+                repo_root=tmp_path,
+                pins=prepared["pins"],
+                catalog_path=catalog_path,
+                capture=lambda **_kwargs: pytest.fail("capture must not run"),
+            )
+
+    assert catalog_path.read_bytes() == before
+    assert hard_link.read_bytes() == before
+    assert json.loads(catalog_path.read_text(encoding="utf-8"))["scenarios"]
+    assert not (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_refuses_expiry_during_the_producer_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deadline that expires while looking up the revision must publish nothing."""
+    now = {"seconds": 0.0}
+    real_revision = producer._producer_revision
+
+    def slow_revision(repo_root: object) -> str | None:
+        now["seconds"] = 181.0
+        return real_revision(repo_root)
+
+    monkeypatch.setattr(producer, "_producer_revision", slow_revision)
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_wall_seconds"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: _FakeSession(),
+                clock=lambda: now["seconds"],
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_refuses_expiry_during_the_fixture_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deadline that expires inside ``os.link`` withdraws the published entry."""
+    now = {"seconds": 0.0}
+    real_link = producer.os.link
+
+    def link_then_expire(source: object, destination: object) -> None:
+        real_link(source, destination)
+        now["seconds"] = 181.0
+
+    monkeypatch.setattr(producer.os, "link", link_then_expire)
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_wall_seconds"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: _FakeSession(),
+                clock=lambda: now["seconds"],
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_refuses_expiry_during_the_fixture_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deadline that expires while staging the bytes must publish nothing."""
+    now = {"seconds": 0.0}
+    real_fsync = producer.os.fsync
+
+    def fsync_then_expire(descriptor: int) -> None:
+        real_fsync(descriptor)
+        now["seconds"] = 181.0
+
+    monkeypatch.setattr(producer.os, "fsync", fsync_then_expire)
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_wall_seconds"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: _FakeSession(),
+                clock=lambda: now["seconds"],
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_refuses_expiry_during_report_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deadline that expires at report finalization withdraws the whole pair."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+    now = {"seconds": 0.0}
+    real_write_report = producer.write_report
+
+    def write_then_expire(path: object, payload: object) -> object:
+        publication = real_write_report(path, payload)
+        now["seconds"] = 181.0
+        return publication
+
+    monkeypatch.setattr(producer, "write_report", write_then_expire)
+    prepared.update({"out": output, "report": report, "root": tmp_path})
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_wall_seconds"):
+        _run_with_fake_session(prepared, clock=lambda: now["seconds"])
+
+    assert not report.exists()
+    assert not output.exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_report_writer_never_leaves_a_partial_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed report rename leaves the prior report byte-identical, with no stage."""
+    report = tmp_path / "report.json"
+    prior = b'{\n  "prior": true\n}\n'
+    report.write_bytes(prior)
+    real_replace = producer.os.replace
+
+    def refuse_replace(_source: object, _destination: object) -> None:
+        raise OSError("rename refused")
+
+    monkeypatch.setattr(producer.os, "replace", refuse_replace)
+    with pytest.raises(OSError, match="rename refused"):
+        producer.write_report(report, {"scenario_id": "red_color_battle"})
+
+    assert report.read_bytes() == prior
+    assert _staged_files(tmp_path) == []
+
+    monkeypatch.setattr(producer.os, "replace", real_replace)
+    publication = producer.write_report(report, {"scenario_id": "red_color_battle"})
+    assert json.loads(report.read_text(encoding="utf-8")) == {"scenario_id": "red_color_battle"}
+    assert publication.is_owned() is True
+    assert publication.withdraw() is None
+    assert report.read_bytes() == prior
+
+
+def test_producer_measure_runtime_identity_refuses_a_foreign_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two venvs whose ``bin/python`` resolve to one binary are still two environments."""
+    source_environment = tmp_path / "source-venv"
+    native_environment = tmp_path / "native-venv"
+    for environment in (source_environment, native_environment):
+        (environment / "bin").mkdir(parents=True)
+        (environment / "bin" / "python").symlink_to(sys.executable)
+
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: False)
+    monkeypatch.setattr(producer.sys, "executable", str(source_environment / "bin" / "python"))
+    monkeypatch.setattr(producer.sys, "prefix", str(source_environment))
+    monkeypatch.setattr(producer.sys, "base_prefix", "/usr")
+
+    identity = producer.measure_runtime_identity(
+        runtime="source", python=source_environment / "bin" / "python", repo_root=ROOT
+    )
+    assert identity["environment"] == str(source_environment)
+    assert identity["executable_path"] == str(source_environment / "bin" / "python")
+    assert identity["isolated_environment"] is True
+
+    # Both requests name the very same resolved binary ...
+    assert (
+        Path(source_environment / "bin" / "python").resolve()
+        == Path(native_environment / "bin" / "python").resolve()
+    )
+    # ... and the sibling environment is still refused.
+    with pytest.raises(producer.ScenarioRefusal, match="not the executing interpreter"):
+        producer.measure_runtime_identity(
+            runtime="source", python=native_environment / "bin" / "python", repo_root=ROOT
+        )
+
+
+@pytest.mark.parametrize(("compiled", "expected"), [(False, "source"), (True, "cython")])
+def test_producer_capture_records_only_the_measured_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compiled: bool, expected: str
+) -> None:
+    """The recorded mode and versions are the measured build, never the pins or a request."""
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: compiled)
+    monkeypatch.setattr(producer, "_pyboy_module_version", lambda: "9.9.9-observed")
+    monkeypatch.setattr(producer, "_pyboy_module_revision", lambda: "f" * 40)
+    monkeypatch.setattr(producer, "_default_session_factory", lambda **_kwargs: _FakeSession())
+
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(tmp_path, _writable_scenario(), runtime=expected, repo_root=ROOT)
+    )
+
+    assert record["runtime"] == expected
+    assert record["runtime_measurement"] == "measured"
+    assert record["runtime_identity"]["mode"] == expected
+    assert record["runtime_identity"]["measured"] is True
+    assert record["runtime_identity"]["pyboy_version_observed"] == "9.9.9-observed"
+    assert record["runtime_identity"]["pyboy_revision_observed"] == "f" * 40
+    assert record["runtime_identity"]["python_version"] == sys.version.split()[0]
+    assert record["runtime_identity"]["environment"] == sys.prefix
+    assert record["python"] is None
+    assert (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_marks_an_injected_session_as_unmeasured(tmp_path: Path) -> None:
+    """An injected session may not record the caller's request as capture identity."""
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(
+            tmp_path,
+            _writable_scenario(),
+            runtime="cython",
+            session_factory=lambda **_kwargs: _FakeSession(),
+        )
+    )
+
+    assert record["runtime_measurement"] == "not_measured"
+    assert record["runtime"] == "unmeasured"
+    assert record["runtime_identity"] is None
+    assert record["python"] is None
+    assert record["runtime_request"] == {"runtime": "cython", "python": None}
+    assert (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_refuses_a_nonexistent_interpreter_for_an_injected_session(
+    tmp_path: Path,
+) -> None:
+    """An unresolvable interpreter request is refused however the session is built."""
+    with pytest.raises(producer.ScenarioRefusal, match="does not exist"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                runtime="cython",
+                python="/does/not/exist/python",
+                session_factory=lambda **_kwargs: _FakeSession(),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_never_records_a_cython_claim_for_a_wrapped_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wrapper around the production factory cannot mint a measured-mode claim."""
+    monkeypatch.setattr(producer, "_default_session_factory", lambda **_kwargs: _FakeSession())
+    wrapped = producer._default_session_factory
+
+    def wrapper(**kwargs: object) -> object:
+        return wrapped(**kwargs)
+
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(tmp_path, _writable_scenario(), runtime="cython", session_factory=wrapper)
+    )
+
+    assert record["runtime"] == "unmeasured"
+    assert record["runtime_measurement"] == "not_measured"
+    assert record["runtime_identity"] is None
+
+
+def test_producer_refuses_a_capture_record_with_an_unqualified_runtime_claim() -> None:
+    """A record may not present an unmeasured runtime as an observed one."""
+    record = _measured_record()
+    producer.validate_capture_record(record, "red_color_ordinary")
+
+    cases = [
+        ({**record, "runtime_measurement": None}, "missing runtime_measurement"),
+        ({**record, "runtime_measurement": "sometimes"}, "does not record whether"),
+        ({**record, "runtime_identity": None}, "unmeasurable runtime identity"),
+        ({**record, "runtime_identity": None, "runtime_measurement": "measured"}, "unmeasurable"),
+        ({**record, "runtime": "cython"}, "unmeasurable runtime identity"),
+        (
+            {**record, "runtime_identity": {**record["runtime_identity"], "measured": False}},
+            "unmeasurable runtime identity",
+        ),
+        ({**record, "runtime": "unmeasured", "runtime_identity": None}, "outside"),
+        ({**record, "runtime_measurement": "not_measured"}, "without measuring it"),
+        (
+            {**record, "runtime_measurement": "not_measured", "runtime_identity": None},
+            "without measuring it",
+        ),
+        (
+            {
+                **record,
+                "runtime": "unmeasured",
+                "runtime_measurement": "not_measured",
+                "runtime_identity": None,
+                "python": "/x/python",
+            },
+            "interpreter it did not run",
+        ),
+    ]
+    for broken, message in cases:
+        with pytest.raises(producer.ScenarioRefusal, match=message):
+            producer.validate_capture_record(broken, "red_color_ordinary")
+
+
+def test_producer_refuses_a_declared_inventory_or_opponent_even_when_empty() -> None:
+    """An empty declaration is still a precondition this drive cannot observe."""
+    for field, value in (("inventory", []), ("inventory", {}), ("opponent", {})):
+        scenario = _writable_scenario()
+        scenario[field] = value
+        with pytest.raises(producer.CaptureNotAvailable, match="does not observe"):
+            producer._assert_supported_conditions(scenario, "red_color_ordinary")
+
+    accepted = _writable_scenario()
+    accepted["party"] = {"count": None, "active_slot": None, "mons": []}
+    producer._assert_supported_conditions(accepted, "red_color_ordinary")
 
 
 # --- #87.6 round 2: publication, bounds, identity, and condition safety ------
@@ -818,7 +1379,7 @@ def test_producer_capture_measures_identity_before_opening_the_session(
     assert not (tmp_path / "out.state").exists()
 
 
-@pytest.mark.parametrize("value", [True, "1", 0, -5, math.inf, -math.inf, math.nan])
+@pytest.mark.parametrize("value", [True, "1", 0, -5, math.inf, -math.inf, math.nan, 24.0])
 def test_producer_refuses_a_malformed_verified_fixture_size(tmp_path: Path, value: object) -> None:
     scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary"))
     scenario["fixture"]["size_bytes"] = value
@@ -1610,23 +2171,7 @@ def test_producer_run_screens_metadata_before_the_assets(tmp_path: Path) -> None
 
 
 def test_producer_refuses_a_capture_record_missing_its_identity() -> None:
-    record = {
-        "producer": "scripts/produce_battle_scenario.py",
-        "producer_sha1": "a" * 40,
-        "runtime": "source",
-        "role": "listen",
-        "captured_at_utc": "2026-09-21T00:00:00+00:00",
-        "wall_seconds": 0.5,
-        "declared_bounds": {"max_frames": 1, "max_wall_seconds": 1.0, "max_inputs": 1},
-        "inputs_used": 1,
-        "frames_used": 1,
-        "input_sequence": ["step:1"],
-        "observed_boundary": {"map_id": 64, "link_state_raw": 0},
-        "rom_sha1": "b" * 40,
-        "sym_sha1": "c" * 40,
-        "output": {"path": "out.state", "size_bytes": 12, "sha1": "d" * 40, "sha256": "e" * 64},
-        "reproduction": {"matches": False},
-    }
+    record = _measured_record()
     producer.validate_capture_record(record, "red_color_ordinary")
 
     for field in ("producer_sha1", "input_sequence", "observed_boundary", "output"):
