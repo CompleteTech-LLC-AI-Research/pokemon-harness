@@ -73,7 +73,10 @@ _EDGE_RETIREMENT_WITNESS_EVICTING_ENTRIES = 4
 # high-water mark, and each claim then records either ``edge_req_received``
 # (queued for the owner) or ``reciprocal_master_edge`` (answered on the reader
 # thread against this owner's master edge), so the witness ranges over both when
-# it cross-checks its transcript against that mark.
+# it cross-checks its transcript against that mark.  A reciprocal record is an
+# admission with its own write obligation, not merely a high-water datum, so the
+# witness counts an identified reciprocal id as admitted and an id-less one as
+# unnamed; only that shape makes a failed reciprocal write detectable.
 _EDGE_ADMISSION_EVENT = "edge_req_received"
 _EDGE_WRITE_EVENT = "edge_resp_send"
 _EDGE_RECIPROCAL_EVENT = "reciprocal_master_edge"
@@ -266,14 +269,16 @@ def _pending_edge_requests_at_close(backend: NetworkBackend) -> object:
 class _EdgeAdmissionWitness(NamedTuple):
     """Connection-scoped admission/answer state read from the serial transcript.
 
-    ``admitted`` and ``answered`` hold identified (``OP_EDGE_REQ_ID``) request
-    ids: the ids the reader admitted, and the ids a successful ``EDGE_RESP``
-    write was recorded for.  ``unidentified_admissions`` counts admissions of
-    the historical id-less ``OP_EDGE_REQ`` format, which carry no id and so
-    cannot be matched to an individual write.  ``dropped`` is the number of
-    records the bounded ring evicted, ``witnessed_highest`` is the highest id
-    any admission or reciprocal record named, and ``complete`` records whether
-    this witness accounts for every admission the backend ever made.
+    ``admitted`` and ``answered`` hold identified request ids: the ids the
+    reader admitted - including a request it answered reciprocally on its own
+    thread - and the ids a successful ``EDGE_RESP`` write was recorded for.
+    ``unidentified_admissions`` counts admissions that carry no id, which is
+    both the historical id-less ``OP_EDGE_REQ`` format and the id-less
+    reciprocal request, because neither can be matched to an individual write.
+    ``dropped`` is the number of records the bounded ring evicted,
+    ``witnessed_highest`` is the highest id any admission or reciprocal record
+    named, and ``complete`` records whether this witness accounts for every
+    admission the backend ever made.
     """
 
     enabled: bool
@@ -321,6 +326,18 @@ def _edge_admission_witness(backend: NetworkBackend) -> _EdgeAdmissionWitness:
       "nothing was admitted"; the narrower case of a claim that recorded nothing
       at all is refused by the conservation clause below, because such a claim
       keeps its id in the claimed-but-unanswered set;
+    * a reciprocal record is an admission in its own right, not only a
+      high-water datum.  The reader answers that request on its own thread,
+      records ``reciprocal_master_edge`` before it attempts the write, and never
+      raises ``_edge_pending``, so the write is invisible to the pending
+      counter, to the close snapshot, and to the per-id ledger - which
+      publishes the response before ``_send_frame`` and so counts a failed send
+      as retired.  Only that request's own ``edge_resp_send`` record with
+      ``outcome="success"`` shows its response reached the wire, so an
+      identified reciprocal request joins ``admitted`` and an id-less one joins
+      the unnamed count.  Ranging over the record for completeness while
+      declining it an obligation is what let a failed reciprocal write be
+      certified as retired;
     * every id the backend still counts as claimed-and-unanswered must appear in
       this witness's admitted set.  Both cross-checks read the per-id ledger
       rather than the bounded replay window, because an id-less admission leaves
@@ -343,16 +360,17 @@ def _edge_admission_witness(backend: NetworkBackend) -> _EdgeAdmissionWitness:
     unidentified = 0
     for record in records:
         event = record.get("event")
-        if event == _EDGE_ADMISSION_EVENT:
+        # Both transcript admission sites are accounted identically on purpose.
+        # A request queued behind ``_edge_pending`` (``edge_req_received``) and a
+        # request the reader answers itself on its own thread
+        # (``reciprocal_master_edge``) each owe a successful write, and each
+        # carries ``edge_id=None`` when the peer used the id-less format.
+        if event in (_EDGE_ADMISSION_EVENT, _EDGE_RECIPROCAL_EVENT):
             edge_id = record.get("edge_id")
             if edge_id is None:
                 unidentified += 1
             else:
                 admitted.add(int(edge_id))
-                witnessed_highest = max(witnessed_highest, int(edge_id))
-        elif event == _EDGE_RECIPROCAL_EVENT:
-            edge_id = record.get("edge_id")
-            if edge_id is not None:
                 witnessed_highest = max(witnessed_highest, int(edge_id))
         elif event == _EDGE_WRITE_EVENT and record.get("outcome") == "success":
             edge_id = record.get("edge_id")
@@ -458,7 +476,11 @@ def _closed_transport_retirement_is_evidenced(
     response appends ``edge_resp_send`` with ``outcome="success"`` only after
     ``_send_frame`` returned.  :func:`_edge_admission_witness` turns those into
     the connection's admitted and answered id sets plus the count of unnamed
-    admissions.
+    admissions.  A request the reader answers reciprocally on its own thread is
+    an admission too: that path records ``reciprocal_master_edge`` before it
+    tries the write and never raises ``_edge_pending``, so its own
+    ``edge_resp_send`` record is the only evidence that the response reached the
+    wire, and the witness registers it as an admission for exactly that reason.
 
     The decision requires all of:
 
@@ -472,9 +494,11 @@ def _closed_transport_retirement_is_evidenced(
       callers outside this file do not reach this branch, which is why the
       completeness requirement is stated here rather than assumed.
     * no unnamed admission may exist anywhere in the connection.  An id-less
-      ``OP_EDGE_REQ`` cannot be matched to a write, so a closed transport that
-      saw one is refused rather than guessed at; a historical identified answer
-      must not authenticate a later unanswered unnamed discard.
+      request - the historical ``OP_EDGE_REQ`` or the id-less reciprocal request
+      the reader answers itself - cannot be matched to a write, so a closed
+      transport that saw one is refused rather than guessed at; a historical
+      identified answer must not authenticate a later unanswered unnamed
+      discard.
     * every identified admission that was outstanding when the wait began must
       have a recorded successful write now, which is this wait's own contract.
     * every identified admission that became outstanding during the wait must
@@ -920,6 +944,57 @@ def _run_transition_while_wait_is_outstanding(
         raise actor_outcomes[0]
     assert len(outcomes) == 1, outcomes
     return outcomes[0], elapsed
+
+
+def _start_master_edge(
+    backend: NetworkBackend, threads: list[threading.Thread]
+) -> list[BaseException | None]:
+    """Run the real master exchange of ``on_edge`` on its own thread.
+
+    ``on_edge`` sends this endpoint's own ``EDGE_REQ`` and then blocks for its
+    ``EDGE_RESP``, so the reciprocal branch the reader takes for an incoming
+    request needs a caller that is genuinely in flight.  The returned list
+    receives the outcome, which lets a regression assert that a sabotaged write
+    surfaced as an error instead of being swallowed on a detached thread.
+    """
+    outcomes: list[BaseException | None] = []
+
+    def run() -> None:
+        try:
+            backend.on_edge(1, 1)
+        except BaseException as exc:  # noqa: BLE001 - returned for assertion
+            outcomes.append(exc)
+        else:
+            outcomes.append(None)
+
+    thread = threading.Thread(target=run, name="reciprocal-master-edge", daemon=True)
+    threads.append(thread)
+    thread.start()
+    return outcomes
+
+
+def _read_master_edge_request(peer: NetworkBackend) -> bytes:
+    """Consume the master's own outbound ``EDGE_REQ`` from the peer's socket.
+
+    Edge ids are unnegotiated in these regressions (no ``HELLO`` exchange), so
+    ``on_edge`` sends the historical two-byte request and the peer answers it
+    with the two-byte response.  Reading it here is what puts the reader's
+    reciprocal branch next in the peer's own byte order.  The consumed frame is
+    returned so a caller can account for every byte the peer really saw.
+    """
+    frame = _FRAME.pack(_OP_EDGE_REQ, 1)
+    received = b""
+    while len(received) < len(frame):
+        part = peer._sock.recv(len(frame) - len(received))
+        assert part, (received.hex(), "the master never sent its outbound edge request")
+        received += part
+    assert received == frame, received
+    return received
+
+
+def _transcript_records(backend: NetworkBackend) -> list[dict[str, object]]:
+    """Copy the serial transcript's records for shape assertions."""
+    return list(backend.snapshot_stats()["serial_transcript"]["records"])
 
 
 @pytest.mark.parametrize("clean_close", [True, False], ids=["clean-close", "error-close"])
@@ -1632,6 +1707,213 @@ def test_retirement_wait_rejects_a_witness_enabled_after_the_admission(monkeypat
     finally:
         # Restore the real ``_closed_event.set`` before teardown; see the
         # unnamed-discard regression for why the gate must be dropped here.
+        monkeypatch.undo()
+        _teardown_transport(peer, backend, *threads)
+
+
+def test_retirement_witness_counts_a_reciprocal_admission_and_its_write(monkeypatch) -> None:
+    """A reciprocal request is an admission with its own write obligation.
+
+    When this endpoint's master edge is in flight, the reader answers an
+    incoming peer request reciprocally on its own thread.  That path records
+    ``reciprocal_master_edge`` before it attempts the write and never raises
+    ``_edge_pending``, so the request appears in no pending count, in no close
+    snapshot, and in no per-id ledger entry that a failed send would leave
+    unretired - ``_send_edge_response`` publishes the response and drops the id
+    before ``_send_frame``.  Only the reciprocal request's own
+    ``edge_resp_send`` record with ``outcome="success"`` shows the response
+    reached the wire, so the witness carries it as an admission and the close
+    can decide from it.  This pins both real record shapes, the accounting a
+    completed reciprocal edge produces, and the acceptance that must survive.
+    """
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        completed = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, 1)
+        _admit_identified_edge_request(peer, backend)
+        assert backend.service_pending_edges(max_edges=1) == 1
+        _wait_for_pending_zero(backend)
+        assert peer._sock.recv(len(completed)) == completed
+
+        master = _start_master_edge(backend, threads)
+        _read_master_edge_request(peer)
+        # The reciprocal response carries this endpoint's own master bit, which
+        # is the ``our_bit`` the in-flight ``on_edge`` published.
+        reciprocal = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 1, 3)
+        peer._sock.sendall(_EDGE_ID_FRAME.pack(_OP_EDGE_REQ_ID, 1, 3))
+        assert peer._sock.recv(len(reciprocal)) == reciprocal, (
+            "the reciprocal request was not answered on the wire"
+        )
+        peer._sock.sendall(_FRAME.pack(_OP_EDGE_RESP, 0))
+        master_thread = threads[-1]
+        master_thread.join(timeout=_BOUNDED_WAIT)
+        assert not master_thread.is_alive(), "the master exchange never finished"
+        assert master == [None], master
+
+        records = _transcript_records(backend)
+        assert any(
+            record.get("event") == _EDGE_RECIPROCAL_EVENT and record.get("edge_id") == 3
+            for record in records
+        ), "the reader did not record the reciprocal admission with its id"
+        assert any(
+            record.get("event") == _EDGE_WRITE_EVENT
+            and record.get("edge_id") == 3
+            and record.get("outcome") == "success"
+            for record in records
+        ), "the reciprocal response did not record a successful write"
+        witness = _edge_admission_witness(backend)
+        assert witness.complete, witness
+        assert witness.admitted == frozenset({1, 3})
+        assert witness.answered == frozenset({1, 3})
+        assert witness.outstanding == frozenset()
+        assert witness.unidentified_admissions == 0
+        assert witness.witnessed_highest == 3
+        assert _responses_written(backend) == 2, "the reciprocal response was not counted"
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            backend._mark_closed_uncoordinated,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert outcome is None, outcome
+        assert backend._closed
+        assert decisions == [(True, 0)], decisions
+        assert elapsed < _BOUNDED_WAIT, f"acceptance was not bounded ({elapsed:.3f}s)"
+        assert peer._sock.recv(1) == b"", "the closed transport did not reach the peer as EOF"
+    finally:
+        monkeypatch.undo()
+        _teardown_transport(peer, backend, *threads)
+
+
+@pytest.mark.parametrize(
+    "edge_id",
+    [3, None],
+    ids=["identified-reciprocal", "unnamed-reciprocal"],
+)
+@pytest.mark.parametrize(
+    "transport_end",
+    ["write-half-shutdown", "clean-close"],
+    ids=["failed-send", "close-cancelled"],
+)
+def test_retirement_wait_rejects_a_reciprocal_response_that_never_reached_the_wire(
+    monkeypatch, edge_id: int | None, transport_end: str
+) -> None:
+    """An unanswered reciprocal request must not be certified as retired.
+
+    A first identified request completes through the real owner path and its
+    response is read off the wire, so an unrelated admission is already
+    answered.  The real master exchange is then started, and the peer sends a
+    further request that the reader answers reciprocally.  That response is
+    gated immediately before the socket write and the write is then really
+    prevented - either by shutting down this endpoint's write half or by
+    completing a clean close while it is gated.  ``_send_edge_response`` has
+    already published the response and dropped the id from the pending ledger
+    by then, and the reciprocal path never raised ``_edge_pending``, so the
+    close records zero outstanding work and every aggregate fact looks healthy.
+    The transcript is the only place the failure is visible, which is why an
+    identified reciprocal id must join ``admitted`` and an id-less one must
+    join the unnamed count instead of only advancing the high-water mark.
+    """
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        completed = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, 1)
+        _admit_identified_edge_request(peer, backend)
+        assert backend.service_pending_edges(max_edges=1) == 1
+        _wait_for_pending_zero(backend)
+        assert peer._sock.recv(len(completed)) == completed
+        wire: list[bytes] = []
+
+        def fail_the_reciprocal_write_and_close() -> None:
+            at_send = threading.Event()
+            release_send = threading.Event()
+            real_send = backend._send_frame
+
+            def gated_send(frame: bytes, **kwargs) -> None:
+                if kwargs.get("operation") == "EDGE_RESP":
+                    at_send.set()
+                    assert release_send.wait(timeout=_BOUNDED_WAIT), (
+                        "the gated reciprocal write was never released"
+                    )
+                real_send(frame, **kwargs)
+
+            monkeypatch.setattr(backend, "_send_frame", gated_send)
+            master = _start_master_edge(backend, threads)
+            wire.append(_read_master_edge_request(peer))
+            if edge_id is None:
+                request = _FRAME.pack(_OP_EDGE_REQ, 1)
+            else:
+                request = _EDGE_ID_FRAME.pack(_OP_EDGE_REQ_ID, 1, edge_id)
+            peer._sock.sendall(request)
+            assert at_send.wait(timeout=_BOUNDED_WAIT), (
+                "the reader never attempted the reciprocal response"
+            )
+            if transport_end == "write-half-shutdown":
+                backend._sock.shutdown(socket.SHUT_WR)
+            else:
+                backend._mark_closed_uncoordinated()
+            release_send.set()
+            master_thread = threads[-1]
+            master_thread.join(timeout=_BOUNDED_WAIT)
+            assert not master_thread.is_alive(), "the master exchange never failed out"
+            assert isinstance(master[0], BaseException), master
+            backend._reader.join(timeout=_BOUNDED_WAIT)
+            assert not backend._reader.is_alive(), (
+                "the failed reciprocal write did not end the reader"
+            )
+            assert backend._closed, "the failed reciprocal write did not close the transport"
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            fail_the_reciprocal_write_and_close,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert isinstance(outcome, AssertionError), outcome
+        assert "closure and not retirement" in str(outcome)
+        assert decisions == [(True, 0)], decisions
+        assert backend._pre_close_snapshot["pending_edge_requests"] == 0
+        assert _responses_written(backend) == 1, "the failed write grew the success counter"
+        records = _transcript_records(backend)
+        assert any(
+            record.get("event") == _EDGE_RECIPROCAL_EVENT and record.get("edge_id") == edge_id
+            for record in records
+        ), "the reader did not record the reciprocal admission with its id"
+        assert any(
+            record.get("event") == _EDGE_WRITE_EVENT
+            and record.get("edge_id") == edge_id
+            and record.get("outcome") != "success"
+            for record in records
+        ), "the unanswerable reciprocal write was recorded as a success"
+        witness = _edge_admission_witness(backend)
+        assert witness.answered == frozenset({1}), witness
+        if edge_id is None:
+            assert witness.admitted == frozenset({1}), witness
+            assert witness.unidentified_admissions == 1, witness
+        else:
+            assert witness.admitted == frozenset({1, 3}), witness
+            assert witness.outstanding == frozenset({3}), witness
+        assert b"".join(wire) == _FRAME.pack(_OP_EDGE_REQ, 1), (
+            "the peer saw bytes other than the master's own outbound request"
+        )
+        assert peer._sock.recv(1) == b"", "the unanswerable reciprocal response reached the peer"
+        assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
+    finally:
         monkeypatch.undo()
         _teardown_transport(peer, backend, *threads)
 
