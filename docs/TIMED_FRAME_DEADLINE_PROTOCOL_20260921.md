@@ -13,6 +13,21 @@ assertion is relaxed, and the cause of the observed failures remains
 unresolved. Parent acceptance for #84 (nine ordinary orientations in both
 runtimes, then the fresh #72 gate) stays open until the runs below exist.
 
+**Revision 2 (2026-09-21).** Independent round-1 review of revision 1
+(`1ff3713`) returned CHANGES_REQUESTED with five findings; this revision
+corrects all five, anchored to source artifacts rather than to prose:
+
+| Finding | Correction in this revision |
+|---|---|
+| F1 (P1) causal rule promoted two passes to a conclusion | §7 pre-registers an explicit inconclusive outcome and lists the prerequisites for causal attribution; §5/§5.1 supply the during-row capacity control it depends on. |
+| F2 mandated cadence contradicts the frozen watcher | §5 states the frozen watcher's real cadence, defines the permitted observation gaps, and keeps the historical samples labelled with the cadence they actually have; §2.6 is relabelled accordingly. |
+| F3 admission is not executable as frozen | §5.1 is a capacity/admission state table with one defined outcome per state, and carries #85's allocation requirement forward as a named prerequisite. |
+| F4 terminal outputs omit mandatory fields on the success path | §6.1 freezes a field-to-output mapping for both outcomes and labels every value captured, derived, or prerequisite-bound. |
+| F5 the runner configuration is not bound to the candidate | §9.2 requires a candidate-bound launch plan, an import-origin check, and the recorded effective configuration; re-aiming the asserted SHA alone is declared insufficient. |
+
+Revision 2 records no execution and no acceptance result. Every identity in §2 is
+unchanged and was re-verified statically, without an emulator.
+
 ## 1. Frozen decisions
 
 1. The six failed orientations, both failed single-case Red/Red reproductions,
@@ -25,8 +40,9 @@ runtimes, then the fresh #72 gate) stays open until the runs below exist.
    with a new candidate's results (§4).
 4. Capacity is judged by the **pre-existing read-only control definition**
    (CPU-pressure `some` avg10 and avg60 below 10%, one-minute load below the
-   allowed CPU count, held continuously for 60 s) before a comparison row is
-   admitted (§5).
+   allowed CPU count, held continuously for 60 s) **at the frozen watcher's own
+   sampling cadence**, before a comparison row is admitted, and with the
+   admission, control-loss and sample-gap outcomes of §5.1 (§5).
 5. Each row must produce the **terminal artifacts in §6**; a missing or
    non-terminal artifact is not a result.
 6. The 84.3 outcome is selected by the **pre-registered rules in §7**, not by
@@ -175,6 +191,11 @@ with `NO_QUIET_CONTROL_WINDOW`. That is an observation result, not a test
 failure, and these thresholds select a conservative comparison condition rather
 than a measured universal product performance floor.
 
+These 359 samples were taken at the frozen watcher's **five-second** cadence
+(§5), not at one second: consecutive gaps run from `5.000317 s` to `5.256798 s`,
+median `5.002217 s`. The retained description here and the cadence rule in §5
+must agree; the samples are never re-described as a one-second series.
+
 ## 3. Conditions that must not change
 
 These are the exact values in the code at the frozen candidate. A comparison
@@ -232,19 +253,109 @@ bytes remain private and are never committed or published.
 ## 5. Capacity measurement
 
 Capacity is measured by the read-only control already used for this issue, with
-its definition unchanged:
+its qualification thresholds unchanged. Two things are now stated explicitly
+because revision 1 left them ambiguous: the **cadence the frozen watcher
+actually uses**, and the **allocation** the control is supposed to describe.
 
-- sample `/proc/loadavg` and the `some` line of `/proc/pressure/cpu` once per
-  second;
+**Cadence (F2).** The frozen watcher is `watch_cpu_capacity_84.py`, pinned in §2
+at 3419 bytes / SHA-256
+`24d719bb4d1d0fad8b8cfcf79f14fc59fdb37e7a78cc7bfd31401acf3caa15bf`. It samples
+`/proc/loadavg` and the `some` line of `/proc/pressure/cpu` and then sleeps
+**five** seconds (`time.sleep(5)`, line 85), so the pre-admission observer takes
+a sample every ~5 s. Revision 1's "once per second" described the separate
+in-test observer loop, not this watcher; the two are not interchangeable. The
+359 retained samples of §2.6 have gaps of `5.000317 s`–`5.256798 s`, median
+`5.002217 s` — the frozen watcher's own cadence.
+
 - the window qualifies when `avg10 < 10%` **and** `avg60 < 10%` **and**
   one-minute load `< allowed CPU count`, all held continuously for 60 s;
 - the observation is bounded at 1800 s and takes no emulator slot;
-- a qualifying window is required **before** a comparison row is admitted, and
-  capacity is sampled **during** the row as well.
+- **permitted sample gaps.** A continuity run stays valid only while every
+  consecutive sample gap is at most `6.0 s` — the largest gap actually observed
+  (`5.256798 s`) plus slack for a single scheduling delay. A longer gap breaks
+  continuity: the 60 s interval restarts from the next sample, and the gap is
+  recorded in the window record. An unrecorded or unbounded gap is not a
+  qualifying window;
+- a qualifying window is required **before** each comparison row is admitted,
+  and capacity is sampled **during** the row as well (§5.1).
+
+A one-second watcher may be used **only** as an explicitly declared
+substitution: named, pinned by source and SHA-256 in the §2 table, and recorded
+as a rerun prerequisite of §9 before it observes anything. A faster cadence
+must never be reported as if it were the frozen observer's own.
+
+**Allocation (F3).** Leaf 84.2 requires the comparison to run under #85's
+verified allocation. #85 distinguishes an actual operator-controlled
+reservation from CPU affinity or a cgroup quota, and requires the allocation
+facts to be retained. Aggregate `/proc` averages and a granted emulator slot do
+**not** identify an allocation and do not by themselves demonstrate that
+capacity was available to the peers:
+
+- the rerun records which allocation was held, its extent, its span, and the
+  fact that it is a reservation rather than affinity or a quota;
+- the allocation identity is retained with the row record (§6, item 6);
+- when no allocation is held the row is not admitted, whatever `/proc` shows
+  (§5.1, states `S0`/`S5`).
 
 Host load alone never establishes the cause. A row that fails outside a
 qualifying window is not evidence of a product defect, and a row that passes
 outside one is not evidence that capacity explains anything.
+
+### 5.1 Capacity/admission state table (F3)
+
+One row has exactly one state, decided from that row's own pre-admission
+window, its during-row samples, and its allocation record — never from the
+overall host history.
+
+| State | Evidence | Row outcome | Remaining rows |
+|---|---|---|---|
+| `S0` not admitted | no qualifying window, or no allocation held, before the row | the row is **not dispatched**; nothing is recorded as a pass or a failure | wait for a fresh window under §9.1 |
+| `S1` admitted, control held | qualifying window before the row, allocation recorded, every during-row sample inside the qualifying bounds with gaps within the permitted maximum | a **valid controlled observation**: a pass or a failure is read by §7 | the next row re-enters at `S0`; admission is never inherited |
+| `S2` admitted, pressure rose but stayed valid | as `S1`, except during-row samples exceeded the qualifying bounds while gaps stayed within the permitted maximum | retained, flagged `during_row_pressure`; a **failure here is still a failure**, and a pass here is not evidence that capacity explains anything | the next row re-enters at `S0` |
+| `S3` control lost | admitted, then a during-row sample violated the qualifying bounds | retained and marked **`inadmissible`**: it counts as **neither pass nor failure** for §7 and must not be reported as a product failure | stop dispatching; remaining rows wait for a fresh window under §9.1 |
+| `S4` sample gap | as `S1`/`S2`, but a during-row gap exceeded the permitted maximum | as `S3` (`inadmissible`), with the gap recorded | as `S3` |
+| `S5` admission unavailable | no fresh qualifying window (or no allocation) when the next row is due | no further row is dispatched; remaining rows are reported **`not run — blocked on the capacity prerequisite`** | the run stops; the matrix does not report success |
+| `S6` failed inside a valid window | the row failed in state `S1`/`S2` | §7's failure arm applies: bounded diagnostic, then a failing regression at the frozen candidate | that row is **never** re-run for admission reasons |
+
+Three rules make the table unambiguous:
+
+1. **Re-running an `inadmissible` row is not "retrying until green."** `S3`/`S4`
+   discard the *observation*, because the control was invalid; the replacement
+   observation is judged on its own merits. A row that *failed* in `S1` or `S2`
+   is never re-run to obtain a different result, and no `S3`/`S4` row may be
+   silently counted as either outcome.
+2. **Capacity loss is not a product defect**, and a failure outside a valid
+   window is not evidence of one.
+3. **Admission is per row.** The nine orientations are nine rows; each
+   re-enters at `S0` and requires its own fresh window. A first row's window
+   never admits the second.
+
+**Worked timeline (authored illustration, not a run).** A row is admitted in
+`S1` from a fresh window; 40 s in, a sample shows avg10 `18%`. The row is now
+`S2`: retained and flagged; if it fails, that failure is still a failure, and
+if it passes, the pass explains nothing. The next row re-enters at `S0`. If
+instead a during-row sample violates the qualifying bounds, the row is `S3`
+(`inadmissible`): it counts as neither outcome and dispatch stops. If the
+observer then finds no fresh window, the remaining rows are `S5` — reported
+`not run — blocked on the capacity prerequisite` — and the matrix does not
+report success. A `7.4 s` gap in one row's samples makes that row `S4`
+(`inadmissible`), with the gap recorded. No sequence of these states turns an
+`S3`/`S4` row into a pass or a failure, and no `S3`/`S4` row is re-run to obtain
+a different result (§7).
+
+**Runner prerequisite.** Per-row admission is not implementable with the frozen
+matrix runner as it stands. `run_timed_mcp_84_matrix.py` (pinned in §2 at 6293
+bytes / SHA-256
+`fa064cbe5600f6e562265cb1bc5f1454ac4d69f97a1f0a73c2a16643281fa6cd`) launches
+**one** pytest selection containing all nine orientations (`:35-40`) and then
+samples the host globally while it runs (`:86-90`); it has no inter-row
+admission check and no admission pause, so a successful first row can be
+followed automatically by an inadmissible second row. The nine-orientation
+expansion therefore requires a declared, hashed admission wrapper that waits
+for a fresh qualifying window before each of the nine rows, samples during each
+row, classifies each row by this table, and stops dispatching in `S5`. Until
+that wrapper is named and pinned, the nine-orientation expansion does not start.
+The frozen runner's own `1800 s` value remains only the supervisor bound of §3.
 
 ## 6. Required terminal artifacts
 
@@ -260,14 +371,17 @@ not a terminal result:
    `errors`, `skipped`, `xfailed`, `xpassed`, `total`) and per-node outcomes;
    JUnit XML where the run collects it.
 4. **Per-row observations** — CPU execution and wall time for the MCP
-   processes, runnable-queue delay where the scheduler observer is active,
-   owner progress (public tick, half-cycles, raw CPU clock, active episode,
-   pending delivery/permit, debt), frame accounting (frame index, phase, role),
-   and structured step results.
+   processes, runnable-queue delay **from the scheduler observer of §2.5** (it
+   is required for the controlled rows, not optional — see §6.1), owner progress
+   (public tick, half-cycles, raw CPU clock, active episode, pending
+   delivery/permit, debt), frame accounting (frame index, phase, role), and
+   structured step results.
 5. **Teardown** — per peer: return code, `forced`, `group_alive`, EOF/disconnect
    classification, and the phase in which cleanup ran.
-6. **Capacity context** — the qualifying window record and the during-row
-   samples.
+6. **Capacity context** — the qualifying window record, the during-row samples,
+   and the allocation record (which allocation was held, its extent, its span,
+   and the fact that it is a reservation rather than affinity or a cgroup quota,
+   §5).
 7. **Digests** — SHA-256 of each retained output, so the record is
    self-checking.
 
@@ -277,27 +391,145 @@ runner that stops at the first failure. The matrix runner additionally asserts
 9/9 non-skipped passes before it can report success, and asserts the final
 commit equals the starting commit with a clean tracked status.
 
+### 6.1 Field-to-output mapping (F4)
+
+Fields 1–3 and 6–7 of §6 come from the runner and the pytest process without any
+observation change. Field 4's frame accounting and step results, and field 5's
+EOF/disconnect classification and cleanup phase, are **not** serialized on the
+success path: the successful ordinary row prints a single `TIMED_ROM_SMOKE`
+report (`tests/test_mcp_timed_rom.py:419-443` — `profile`, `policy`, `listener`,
+`connector`, `completed_frames`, `prelink_press_release_restored`,
+`prelink_input_drain_frames`, `baseline_statuses`, `final_statuses`, and one
+`processes[]` entry per peer with `pid`, `returncode`, `forced`, `group_alive`).
+That report carries **no** per-step results and no `phase` or `eof` field; the
+richer `structured_step_result`/`phase`/`eof` records exist only on the
+paired-step exception (failure) path, and neither the external observers nor the
+`_gate_report` plugin fills the missing success fields. Revision 1 therefore
+required artifacts the success path does not emit, so each value below is now
+labelled by how it is actually obtained:
+
+- **captured** — emitted by the run itself;
+- **derived** — not serialized by the run, but unambiguously reconstructible
+  from the terminal pytest result plus the fixed source assertions at the pinned
+  candidate; a reconstruction, never presented as a raw capture;
+- **prerequisite-bound** — obtainable only while the named declared prerequisite
+  is present; without it the record is not terminal.
+
+| §6 field | Success outcome | Failure outcome | Label |
+|---|---|---|---|
+| identity (candidate/runtime/interpreter/native/ROM pins) | runner identity record | runner identity record | captured |
+| command and bounds | exact invocation + §3 bounds | same | captured |
+| terminal pytest result | exit status, counts, JUnit XML | exit status, counts, JUnit XML | captured |
+| owner progress, frame accounting, step results | reconstructed from the terminal pytest result (the row asserts its expected tick sequence and a clean `eof()`) | captured from the exception-path records | derived (success) / captured (failure) |
+| teardown: return code, `forced`, `group_alive` | each `processes[]` entry | captured | captured |
+| teardown: EOF/disconnect classification, cleanup phase | reconstructed from the passing assertions that each `link_disconnect` returned `mode: idle`/`transport: timed` and that `client.eof()` completed | captured from the exception path | derived (success) / captured (failure) |
+| CPU execution and wall time | each `processes[]` entry plus the runner's timing | captured | captured |
+| runnable-queue delay | captured only while the §2.5 scheduler observer runs the row | same | prerequisite-bound (scheduler observer) |
+| capacity window + during-row samples | captured only while the §5 watcher admission holds | same | prerequisite-bound (capacity watcher) |
+| allocation identity (§5, §6 item 6) | recorded only while #85's verified allocation is held | same | prerequisite-bound (#85 allocation) |
+| output digests | SHA-256 of each retained output | SHA-256 of each retained output | derived |
+
+Two consequences are mandatory:
+
+- **The scheduler observer is selected, not optional.** Leaf 84.2 requires the
+  runnable-delay record, so every controlled row runs under the scheduler
+  observer of §2.5; a row that omits it is missing a field-4 artifact and is not
+  terminal. Field 4's earlier "where the scheduler observer is active" no longer
+  leaves that requirement optional.
+- **A derived value is never described as captured.** A record that reconstructs
+  frame, step, or teardown detail from the terminal result and the fixed source
+  assertions must label that detail `derived`, and must not be read as if the run
+  had serialized it.
+
+**Authored record sketch (schema illustration only, not a real-ROM result).** A
+success row's retained record carries the identity/interpreter/ROM pins
+(`captured`), the exact invocation (`captured`), the pytest counts plus JUnit
+XML (`captured`), `TIMED_ROM_SMOKE`'s `baseline_statuses`/`final_statuses`/
+`processes[]` (`captured`), the frame/step and teardown detail labelled
+`derived` together with the assertion each was reconstructed from, the
+scheduler observer's runnable-delay sample (`captured`, prerequisite-bound), the
+window and during-row samples (`captured`, prerequisite-bound), the #85
+allocation record (`prerequisite-bound`), and the output digests (`derived`). A
+failure row substitutes the exception-path
+`structured_step_result`/`phase`/`eof` records, labelled `captured`. This sketch
+is schema only and must not be presented as real-ROM acceptance.
+
 ## 7. Pre-registered decision rules (leaf 84.3)
 
 Run one unchanged ordinary Red/Red case in each runtime inside a qualifying
-window. Then:
+window. Observations, invalid controls, and causal conclusions are three
+separate categories and stay separate below:
 
-- **Both rows pass in a qualifying window** → the observed failures are
-  capacity-attributed. Record the measured prerequisite, the qualifying window,
-  and its limits explicitly; this is a resource prerequisite, not a product
-  defect claim, and it does not erase the retained failures. Proceed to the
-  nine orientations per runtime under the same admission rule.
-- **A row fails in a qualifying window** → the cause is not capacity alone.
-  Isolate owner, transport, and runtime overhead with a bounded diagnostic and
-  land a failing regression that reproduces at the frozen candidate before any
-  correction is attempted. Do not increase a deadline to make the row pass.
+- an **observation** is a pass or a failure read in a valid controlled state
+  (`S1`/`S2`/`S6`, §5.1);
+- an **invalid control** (`S0`/`S3`/`S4`/`S5`, §5.1) is neither a pass nor a
+  failure and supports no conclusion;
+- a **causal conclusion** requires the attribution prerequisites below and is
+  never read off the pass/fail outcome alone.
+
+Then:
+
+- **Both rows pass in a qualifying window** → pre-registered outcome
+  **"controlled rows passed; cause not established."** Record the measured
+  prerequisite, the qualifying window, and its limits explicitly, and record
+  that **no cause is attributed**. Two non-reproductions do not by themselves
+  establish that the retained failures were caused by capacity: the frozen
+  candidate need not be the historical revision the failures were observed on
+  (§4), and two non-reproductions on any one revision do not exclude an
+  intermittent implementation problem. Proceed to the nine orientations per
+  runtime under the same admission rule. This outcome is a resource
+  prerequisite, not a product defect claim, and it does not erase the retained
+  failures.
+- **Causal attribution, when required, has its own prerequisites.** The
+  "cause not established" outcome is upgraded to a capacity attribution only
+  when **all** of the following hold and each is recorded:
+  1. **Comparable identity** — the code, build, and pinned inputs of the passing
+     rows and of the failing observations are the same, or their differences are
+     enumerated (§4), so like states are compared;
+  2. **Verified allocation** — the rows ran under #85's verified operator
+     reservation (§5), not affinity or a cgroup quota;
+  3. **During-request scheduler evidence** — the §2.5 observer recorded
+     runnable-queue delay *during the failed request itself*, not only a host
+     average taken before or between rows; and
+  4. **The extra discriminator** — the retained scheduler diagnostic (§2.5) and
+     the during-row control evidence together tell capacity starvation apart
+     from owner, transport, or native-execution overhead.
+  A **newly selected candidate's pass is never treated as explaining an older
+  candidate's failure**: when the passing rows and the failures are not the same
+  state under prerequisite 1, the outcome is "cause not established" by
+  construction.
+- **A row fails in a qualifying window** → the cause is not capacity alone. A
+  qualifying pre-admission window does **not** by itself rule capacity out for
+  the failed request, because it records nothing about scheduling capacity
+  throughout that request: the row is read as `S6` only when its during-row
+  samples also stayed valid (`S1`/`S2`, §5.1). Isolate owner, transport, and
+  runtime overhead with a bounded diagnostic and land a failing regression that
+  reproduces at the frozen candidate before any correction is attempted. Do not
+  increase a deadline to make the row pass.
 - **No qualifying window is obtainable** → report the comparison as blocked on
-  the capacity prerequisite with the observer's terminal result. Do not run the
-  comparison and do not infer a cause; a saturated host is not a result.
+  the capacity prerequisite with the observer's terminal result (`S5`, §5.1).
+  Do not run the comparison and do not infer a cause; a saturated host is not a
+  result.
 
 In every branch the six original failures, both Red/Red reproductions, the
 scheduler diagnostic, and the capacity window remain retained and keep their
 recorded scopes.
+
+**Worked examples (authored, not execution).**
+
+- *Changed candidate, both rows green.* The frozen candidate is a later revision
+  than `7516f16` and its source diff is nonempty (§4). Both ordinary rows pass in
+  a valid window (`S1`). Prerequisite 1 is **not** met — the passing state is not
+  the failing state — so the outcome is **"controlled rows passed; cause not
+  established."** The rules neither say nor imply that the older failures were
+  caused by capacity.
+- *Same revision, intermittent.* Two rows pass on one revision, but a later run
+  of the same unchanged row fails intermittently. Passes do not exclude an
+  intermittent implementation problem, so no attribution follows either.
+- *Failure inside a valid window.* A row fails while its during-row samples stay
+  valid (`S6`). The pre-admission window alone does not rule capacity out, so a
+  bounded diagnostic and a regression that reproduces at the frozen candidate
+  come before any correction — never a raised deadline.
 
 ## 8. Prohibited actions
 
@@ -317,21 +549,65 @@ recorded scopes.
 
 ## 9. Prerequisites before the first rerun
 
-1. **Capacity.** A qualifying window must be observed (§5). The 2026-09-13
-   attempt produced none, and the same observation and reported result are
-   required again.
-2. **Runner candidate pin.** The three observers currently assert the
-   historical `7516f16` as `HEAD` and refuse to run otherwise. The pin must be
-   re-aimed at the frozen candidate, and the re-aimed runner's own SHA-256
-   recorded with the run, before any comparison executes. This is a declared
-   prerequisite of the rerun, not a change to §3.
-3. **Emulator admission.** The orchestrator owns the global CPU/emulator-pair
-   budget; a comparison row runs only after it is granted a slot. The nine-row
-   matrix runs with one worker, because each row is an emulator pair.
-4. **Assets and runtimes.** Pinned ROM/symbol/fixture inputs via the documented
-   external roots, separate bootstrapped source and native interpreters, and a
-   native build whose installed-extension identity is proven rather than
-   assumed.
+### 9.1 Capacity
+
+A qualifying window must be observed (§5) before each row, and re-observed
+whenever admission is lost (§5.1). The 2026-09-13 attempt produced none, and the
+same observation and reported result are required again. A lost, expired, or
+inherited window is not carried forward: each row waits for a fresh window under
+this section before it is dispatched.
+
+### 9.2 Runner candidate pin (F5)
+
+The three observers derive `ROOT` from their own physical location, load an
+undeclared sibling donor record (`{source,native}-trade-79-after1-start.json`),
+and take their first eight command arguments and their environment from it. That
+donor record pins absolute `PYTHONPATH` and interpreter paths that target a
+**different checkout**, and it is absent from §2's retained-tool table. Re-aiming
+the hard-coded `HEAD` assertion (currently the historical `7516f16`) therefore
+does **not** bind a row to the candidate it records: the runner can assert one
+checkout's commit while the server imports another checkout's `pokered_harness`.
+An import-origin check performed at the proposed new checkout confirms this —
+with the inherited donor `PYTHONPATH`, both modes resolve `pokered_harness`
+outside the reviewed tree, and the donor checkout's own head is not the reviewed
+SHA. Re-aiming the asserted SHA alone is **not** sufficient preparation.
+
+Before any comparison executes, all of the following must be met and recorded.
+This is a declared prerequisite of the rerun, not a change to §3.
+
+1. **Candidate-bound launch plan.** Document the observers' CLI and their
+   physical layout, and record the exact invocation and environment actually
+   used for each runtime (source and native) in the run record.
+2. **Import-origin check.** Using a path-lookup check that requires no emulator,
+   prove independently of the runner's own assertions that the harness and the
+   test module resolve inside the selected candidate — not inside a stale donor
+   checkout — for both runtimes, and that the PyBoy runtime matches the declared
+   mode: the vendored source package for the source runtime, the declared
+   installed compiled extension for the native runtime. The check must fail when
+   a donor path is still in effect.
+3. **Replace or explicitly reconstruct the donor configuration.** Either replace
+   the donor record with one written for the selected candidate, or pin it by
+   content and reconstruct it explicitly. An undeclared, stale sibling file is
+   not acceptable, and a second engineer must be able to reconstruct it from the
+   protocol alone.
+4. **Record the effective configuration.** Retain the effective launch plan, the
+   digests of the runner, donor record, and interpreter actually used, and the
+   resulting CLI/physical layout with the row record.
+
+External configuration keeps real host paths; the tracked protocol states the
+shape and the identities, never absolute local paths.
+
+### 9.3 Emulator admission
+
+The orchestrator owns the global CPU/emulator-pair budget; a comparison row runs
+only after it is granted a slot. The nine-row matrix runs with one worker,
+because each row is an emulator pair, and each row requires its own §9.1 window.
+
+### 9.4 Assets and runtimes
+
+Pinned ROM/symbol/fixture inputs via the documented external roots, separate
+bootstrapped source and native interpreters, and a native build whose
+installed-extension identity is proven rather than assumed.
 
 ## 10. Re-verifying this document
 
