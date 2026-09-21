@@ -152,6 +152,15 @@ def _validate_party(party: Any, field: str) -> None:
     mons = party.get("mons")
     _require(isinstance(mons, list), f"{field}.mons must be a list")
     _require(all(isinstance(mon, dict) for mon in mons), f"{field}.mons entries must be objects")
+    for index, mon in enumerate(mons):
+        for key in ("slot", "species", "level"):
+            _require(
+                _is_int(mon.get(key)),
+                f"{field}.mons[{index}].{key} must be an integer",
+            )
+        digest = mon.get("digest")
+        if digest is not None:
+            _validate_sha256(digest, f"{field}.mons[{index}].digest")
 
 
 def _validate_inventory(inventory: Any, field: str) -> None:
@@ -164,6 +173,12 @@ def _validate_inventory(inventory: Any, field: str) -> None:
             all(isinstance(item, dict) for item in inventory),
             f"{field} entries must be objects",
         )
+        for index, item in enumerate(inventory):
+            for key in ("item_id", "quantity"):
+                _require(
+                    _is_int(item.get(key)),
+                    f"{field}[{index}].{key} must be an integer",
+                )
 
 
 def _validate_opponent(opponent: Any, field: str) -> None:

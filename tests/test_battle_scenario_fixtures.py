@@ -346,6 +346,33 @@ class _FakeSymbols:
         return memory[self.addr_of(name)] & 0xFF
 
 
+def _fake_record_digest(slot: int, species: int, level: int) -> str:
+    """The deterministic per-slot digest the fake party records publish."""
+    return hashlib.sha256(f"record:{slot}:{species}:{level}".encode()).hexdigest()
+
+
+class _FakePartyRecord:
+    """Stand-in exposing only the sanitized projection the producer reads.
+
+    It deliberately carries no raw record bytes, mirroring
+    ``PartyRecord.to_resource_dict()``: a producer that reached for ``raw``
+    would fail against this stand-in rather than silently recording ROM-derived
+    party bytes.
+    """
+
+    def __init__(self, *, slot: int, species: int, level: int) -> None:
+        self._projection = {
+            "slot": slot,
+            "digest": _fake_record_digest(slot, species, level),
+            "record_size": 44,
+            "species": species,
+            "level": level,
+        }
+
+    def to_resource_dict(self) -> dict[str, object]:
+        return dict(self._projection)
+
+
 class _FakeSession:
     """Scripted stand-in for a bounded capture session: no ROM, no PyBoy."""
 
@@ -365,6 +392,10 @@ class _FakeSession:
         start_y: int = 7,
         party_count: int = 0,
         active_slot: int | None = None,
+        bag_stacks: tuple[tuple[int, int], ...] = (),
+        bag_unknown: bool = False,
+        party_records: tuple[tuple[int, int], ...] = (),
+        party_records_unknown: bool = False,
         payload: bytes = b"fake-bounded-capture-state",
         symbols_present: bool = True,
     ) -> None:
@@ -374,6 +405,10 @@ class _FakeSession:
         self.x = start_x
         self.y = start_y
         self.party = types.SimpleNamespace(count=party_count, active_slot=active_slot)
+        self.bag_stacks = bag_stacks
+        self.bag_unknown = bag_unknown
+        self.party_records = party_records
+        self.party_records_unknown = party_records_unknown
         self.payload = payload
         self.ticks = 0
         self.presses: list[tuple[str, int]] = []
@@ -393,10 +428,30 @@ class _FakeSession:
         self.y += dy
 
     def read_game_state(self) -> types.SimpleNamespace:
+        bag = None
+        if not self.bag_unknown:
+            bag = types.SimpleNamespace(
+                count=len(self.bag_stacks),
+                stacks=tuple(
+                    types.SimpleNamespace(item_id=item_id, quantity=quantity)
+                    for item_id, quantity in self.bag_stacks
+                ),
+                valid=True,
+            )
         return types.SimpleNamespace(
             overworld=types.SimpleNamespace(map_id=self.map_id, x=self.x, y=self.y),
             party=self.party,
+            bag=bag,
         )
+
+    def read_party_records(self) -> types.SimpleNamespace:
+        if self.party_records_unknown:
+            return types.SimpleNamespace(records=(), count=None, valid=None)
+        records = tuple(
+            _FakePartyRecord(slot=slot, species=species, level=level)
+            for slot, (species, level) in enumerate(self.party_records)
+        )
+        return types.SimpleNamespace(records=records, count=len(records), valid=True)
 
     def save_state(self) -> bytes:
         return self.payload
@@ -459,7 +514,18 @@ def _measured_record() -> dict:
         "inputs_used": 1,
         "frames_used": 1,
         "input_sequence": ["step:1"],
-        "observed_boundary": {"map_id": 64, "link_state_raw": 0},
+        "observed_boundary": {
+            "map_id": 64,
+            "link_state_raw": 0,
+            "bag": {
+                "observed": True,
+                "valid": True,
+                "count": 0,
+                "stacks": [],
+                "digest": "f" * 64,
+            },
+            "party_records": {"observed": True, "valid": True, "count": 0, "slots": []},
+        },
         "rom_sha1": "b" * 40,
         "sym_sha1": "c" * 40,
         "output": {"path": "out.state", "size_bytes": 12, "sha1": "d" * 40, "sha256": "e" * 64},
@@ -489,6 +555,14 @@ def test_producer_capture_drives_link_reception_and_records_provenance(tmp_path:
         "link_state_raw": 0,
         "party_count": 0,
         "active_slot": None,
+        "bag": {
+            "observed": True,
+            "valid": True,
+            "count": 0,
+            "stacks": [],
+            "digest": hashlib.sha256(b"[]").hexdigest(),
+        },
+        "party_records": {"observed": True, "valid": True, "count": 0, "slots": []},
     }
     assert record["output"]["size_bytes"] == len(session.payload)
     assert record["output"]["sha1"] == hashlib.sha1(session.payload).hexdigest()
@@ -1020,6 +1094,28 @@ def test_producer_capture_never_records_a_cython_claim_for_a_wrapped_factory(
     assert record["runtime_identity"] is None
 
 
+def test_producer_refuses_a_capture_record_without_the_asserted_measurements() -> None:
+    """A record may not omit the measurement behind an asserted precondition."""
+    record = _measured_record()
+    producer.validate_capture_record(record, "red_color_ordinary")
+
+    observed = record["observed_boundary"]
+    cases = [
+        ({**observed, "bag": None}, "does not record the observed bag"),
+        ({**observed, "party_records": None}, "does not record the observed party_records"),
+        ({**observed, "bag": {"observed": True}}, "does not record the bag validity"),
+        (
+            {**observed, "party_records": {"observed": "yes", "valid": True}},
+            "does not record the observed party_records",
+        ),
+    ]
+    for boundary, message in cases:
+        with pytest.raises(producer.ScenarioRefusal, match=message):
+            producer.validate_capture_record(
+                {**record, "observed_boundary": boundary}, "red_color_ordinary"
+            )
+
+
 def test_producer_refuses_a_capture_record_with_an_unqualified_runtime_claim() -> None:
     """A record may not present an unmeasured runtime as an observed one."""
     record = _measured_record()
@@ -1057,17 +1153,65 @@ def test_producer_refuses_a_capture_record_with_an_unqualified_runtime_claim() -
             producer.validate_capture_record(broken, "red_color_ordinary")
 
 
-def test_producer_refuses_a_declared_inventory_or_opponent_even_when_empty() -> None:
-    """An empty declaration is still a precondition this drive cannot observe."""
-    for field, value in (("inventory", []), ("inventory", {}), ("opponent", {})):
+def test_producer_still_refuses_an_opponent_or_prior_action_it_cannot_observe() -> None:
+    """The two genuinely unobservable preconditions stay refused, empty or not."""
+    for value in ({}, [], {"species": 1}):
         scenario = _writable_scenario()
-        scenario[field] = value
+        scenario["opponent"] = value
         with pytest.raises(producer.CaptureNotAvailable, match="does not observe"):
             producer._assert_supported_conditions(scenario, "red_color_ordinary")
 
-    accepted = _writable_scenario()
-    accepted["party"] = {"count": None, "active_slot": None, "mons": []}
-    producer._assert_supported_conditions(accepted, "red_color_ordinary")
+    scenario = _writable_scenario()
+    scenario["required_prior_actions"] = ["walk_to_reception"]
+    with pytest.raises(producer.CaptureNotAvailable, match="does not replay"):
+        producer._assert_supported_conditions(scenario, "red_color_ordinary")
+
+
+def test_producer_accepts_the_observable_declarations_it_now_asserts() -> None:
+    """A shaped bag and per-mon declaration pass the pre-emulator screen."""
+    scenario = _writable_scenario()
+    scenario["inventory"] = [{"item_id": 0x14, "quantity": 2}]
+    scenario["party"] = {
+        "count": 1,
+        "active_slot": 0,
+        "mons": [{"slot": 0, "species": 0xB0, "level": 12}],
+    }
+    producer._assert_supported_conditions(scenario, "red_color_ordinary")
+
+    empty = _writable_scenario()
+    empty["party"] = {"count": None, "active_slot": None, "mons": []}
+    producer._assert_supported_conditions(empty, "red_color_ordinary")
+
+
+def test_producer_refuses_a_malformed_inventory_declaration() -> None:
+    """A declaration the boundary comparison cannot read is refused pre-emulator."""
+    cases = (
+        ({"inventory": {}}, "inventory as a list of objects"),
+        ({"inventory": [{}]}, r"inventory\[0\]\.item_id"),
+        ({"inventory": [{"item_id": 1}]}, r"inventory\[0\]\.quantity"),
+        ({"inventory": [{"item_id": "1", "quantity": 1}]}, r"inventory\[0\]\.item_id"),
+        ({"inventory": [{"item_id": True, "quantity": 1}]}, r"inventory\[0\]\.item_id"),
+    )
+    for override, message in cases:
+        scenario = _writable_scenario()
+        scenario.update(override)
+        with pytest.raises(producer.ScenarioRefusal, match=message):
+            producer._assert_supported_conditions(scenario, "red_color_ordinary")
+
+
+def test_producer_refuses_a_malformed_party_mons_declaration() -> None:
+    """Per-mon entries must carry exactly the fields the comparison reads."""
+    cases = (
+        ({"slot": 0, "species": 1, "level": 5}, "party.mons as a list of objects"),
+        ([{"slot": 0, "species": 1}], r"party\.mons\[0\]\.level"),
+        ([{"slot": 0, "species": 1, "level": "5"}], r"party\.mons\[0\]\.level"),
+        ([{"slot": 0, "species": 1, "level": 5, "digest": "abc"}], r"party\.mons\[0\]\.digest"),
+    )
+    for mons, message in cases:
+        scenario = _writable_scenario()
+        scenario["party"] = {"count": None, "active_slot": None, "mons": mons}
+        with pytest.raises(producer.ScenarioRefusal, match=message):
+            producer._assert_supported_conditions(scenario, "red_color_ordinary")
 
 
 # --- #87.6 round 2: publication, bounds, identity, and condition safety ------
@@ -1107,6 +1251,267 @@ def test_all_shipped_scenarios_pass_the_new_screening() -> None:
         scenario_id = scenario["scenario_id"]
         producer.validate_scenario_metadata(scenario, scenario_id)
         producer._assert_supported_conditions(scenario, scenario_id)
+
+
+# --- #87 precondition observability: the bag and per-mon party are asserted --
+
+
+def test_producer_capture_asserts_a_matching_declared_inventory(tmp_path: Path) -> None:
+    """A declared bag that matches the measurement is captured, not refused."""
+    scenario = _writable_scenario()
+    scenario["inventory"] = [{"item_id": 0x14, "quantity": 2}, {"item_id": 0x01, "quantity": 1}]
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(
+            tmp_path,
+            scenario,
+            session_factory=lambda **_kwargs: _FakeSession(bag_stacks=((0x14, 2), (0x01, 1))),
+        )
+    )
+
+    observed = record["observed_boundary"]["bag"]
+    assert observed["valid"] is True
+    assert observed["count"] == 2
+    assert observed["stacks"] == [
+        {"item_id": 0x14, "quantity": 2},
+        {"item_id": 0x01, "quantity": 1},
+    ]
+    # The published digest is the canonical stack digest, pinned here so a
+    # change to the projection cannot silently change the recorded identity.
+    assert observed["digest"] == hashlib.sha256(b"[[20,2],[1,1]]").hexdigest()
+    assert (tmp_path / "out.state").read_bytes() == b"fake-bounded-capture-state"
+
+
+def test_producer_capture_compares_a_declared_inventory_as_a_multiset(tmp_path: Path) -> None:
+    """Storage order is the game's; the assertion is over the declared stacks."""
+    scenario = _writable_scenario()
+    scenario["inventory"] = [{"item_id": 0x01, "quantity": 1}, {"item_id": 0x14, "quantity": 2}]
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(
+            tmp_path,
+            scenario,
+            session_factory=lambda **_kwargs: _FakeSession(bag_stacks=((0x14, 2), (0x01, 1))),
+        )
+    )
+
+    assert record["observed_boundary"]["bag"]["count"] == 2
+    assert (tmp_path / "out.state").exists()
+
+
+@pytest.mark.parametrize(
+    ("declared", "bag_stacks", "message"),
+    [
+        ([{"item_id": 0x14, "quantity": 3}], ((0x14, 2),), "declares inventory item 14 x3"),
+        (
+            [{"item_id": 0x14, "quantity": 2}],
+            ((0x14, 2), (0x01, 1)),
+            "declares inventory item 14 x2, observed item 01 x1, item 14 x2",
+        ),
+        ([], ((0x14, 2),), "declares inventory an empty bag, observed item 14 x2"),
+    ],
+)
+def test_producer_capture_refuses_a_mismatched_declared_inventory(
+    tmp_path: Path, declared: list, bag_stacks: tuple, message: str
+) -> None:
+    """A declaration that does not match the measurement publishes nothing."""
+    scenario = _writable_scenario()
+    scenario["inventory"] = declared
+    with pytest.raises(producer.CapturePreconditionFailed, match=message):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                scenario,
+                session_factory=lambda **_kwargs: _FakeSession(bag_stacks=bag_stacks),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_refuses_a_declared_inventory_when_the_bag_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    """An unobservable bag must refuse, never be assumed to match."""
+    scenario = _writable_scenario()
+    scenario["inventory"] = []
+    with pytest.raises(producer.CapturePreconditionFailed, match="was not observed as valid"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                scenario,
+                session_factory=lambda **_kwargs: _FakeSession(bag_unknown=True),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_asserts_a_mismatching_context_is_recorded_when_undeclared(
+    tmp_path: Path,
+) -> None:
+    """An undeclared bag is recorded as measured evidence, not asserted."""
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(
+            tmp_path,
+            _writable_scenario(),
+            session_factory=lambda **_kwargs: _FakeSession(bag_stacks=((0x14, 2),)),
+        )
+    )
+
+    observed = record["observed_boundary"]["bag"]
+    assert observed["valid"] is True
+    assert observed["stacks"] == [{"item_id": 0x14, "quantity": 2}]
+    assert (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_asserts_declared_party_mons_per_slot(tmp_path: Path) -> None:
+    """Species, level and the optional record digest are asserted per slot."""
+    scenario = _writable_scenario()
+    scenario["party"] = {
+        "count": 2,
+        "active_slot": 0,
+        "mons": [
+            {"slot": 0, "species": 0xB0, "level": 12, "digest": _fake_record_digest(0, 0xB0, 12)},
+            {"slot": 1, "species": 0x99, "level": 5},
+        ],
+    }
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(
+            tmp_path,
+            scenario,
+            session_factory=lambda **_kwargs: _FakeSession(
+                party_count=2,
+                active_slot=0,
+                party_records=((0xB0, 12), (0x99, 5)),
+            ),
+        )
+    )
+
+    slots = record["observed_boundary"]["party_records"]["slots"]
+    assert [(slot["slot"], slot["species"], slot["level"]) for slot in slots] == [
+        (0, 0xB0, 12),
+        (1, 0x99, 5),
+    ]
+    assert slots[0]["digest"] == _fake_record_digest(0, 0xB0, 12)
+    assert slots[0]["record_size"] == 44
+    assert "raw" not in slots[0]
+    assert (tmp_path / "out.state").exists()
+
+
+@pytest.mark.parametrize(
+    ("mons", "party_records", "message"),
+    [
+        (
+            [{"slot": 0, "species": 0xB0, "level": 13}],
+            ((0xB0, 12),),
+            "declares party slot 0 as species 176 level 13, observed species 176 level 12",
+        ),
+        (
+            [{"slot": 0, "species": 0x99, "level": 12}],
+            ((0xB0, 12),),
+            "declares party slot 0 as species 153 level 12, observed species 176 level 12",
+        ),
+        (
+            [{"slot": 0, "species": 0xB0, "level": 12, "digest": "a" * 64}],
+            ((0xB0, 12),),
+            "declares party slot 0 record digest",
+        ),
+        (
+            [{"slot": 0, "species": 0xB0, "level": 12}],
+            ((0xB0, 12), (0x99, 5)),
+            r"declares party slots \[0\], but the observed party occupies \[0, 1\]",
+        ),
+        (
+            [
+                {"slot": 0, "species": 0xB0, "level": 12},
+                {"slot": 0, "species": 0xB0, "level": 12},
+            ],
+            ((0xB0, 12), (0x99, 5)),
+            r"declares party slots \[0, 0\]",
+        ),
+    ],
+)
+def test_producer_capture_refuses_a_mismatched_declared_party(
+    tmp_path: Path, mons: list, party_records: tuple, message: str
+) -> None:
+    """A misdeclared member, a partial list and a duplicated slot all refuse."""
+    scenario = _writable_scenario()
+    scenario["party"] = {"count": None, "active_slot": None, "mons": mons}
+    with pytest.raises(producer.CapturePreconditionFailed, match=message):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                scenario,
+                session_factory=lambda **_kwargs: _FakeSession(
+                    party_count=len(party_records),
+                    party_records=party_records,
+                ),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_refuses_declared_party_mons_when_records_are_unavailable(
+    tmp_path: Path,
+) -> None:
+    """An unreadable party must refuse rather than publish an unchecked party."""
+    scenario = _writable_scenario()
+    scenario["party"] = {
+        "count": 1,
+        "active_slot": 0,
+        "mons": [{"slot": 0, "species": 0xB0, "level": 12}],
+    }
+    with pytest.raises(producer.CapturePreconditionFailed, match="were not observed as valid"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                scenario,
+                session_factory=lambda **_kwargs: _FakeSession(
+                    party_count=1,
+                    active_slot=0,
+                    party_records_unknown=True,
+                ),
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_catalog_validator_requires_assertable_inventory_and_party_entries() -> None:
+    """The catalog schema rejects declarations the boundary cannot compare."""
+    with pytest.raises(ValueError, match=r"inventory\[0\]\.quantity must be an integer"):
+        validator._validate_inventory([{"item_id": 1}], "scenario.inventory")
+    with pytest.raises(ValueError, match=r"inventory\[0\]\.item_id must be an integer"):
+        validator._validate_inventory([{"item_id": "1", "quantity": 1}], "scenario.inventory")
+    with pytest.raises(ValueError, match=r"mons\[0\]\.level must be an integer"):
+        validator._validate_party(
+            {"count": None, "active_slot": None, "mons": [{"slot": 0, "species": 1}]},
+            "scenario.party",
+        )
+    with pytest.raises(ValueError, match=r"mons\[0\]\.digest"):
+        validator._validate_party(
+            {
+                "count": None,
+                "active_slot": None,
+                "mons": [{"slot": 0, "species": 1, "level": 5, "digest": "abc"}],
+            },
+            "scenario.party",
+        )
+
+    validator._validate_inventory([{"item_id": 1, "quantity": 1}], "scenario.inventory")
+    validator._validate_party(
+        {
+            "count": 1,
+            "active_slot": 0,
+            "mons": [{"slot": 0, "species": 1, "level": 5, "digest": "a" * 64}],
+        },
+        "scenario.party",
+    )
+    validator._validate_inventory(None, "scenario.inventory")
 
 
 @pytest.mark.parametrize("row", [4, 99])
@@ -1527,17 +1932,39 @@ def test_producer_accepts_a_correct_integer_verified_fixture_size() -> None:
     producer.validate_scenario_metadata(scenario, "red_color_ordinary")
 
 
-@pytest.mark.parametrize("mutation", ["inventory", "opponent", "prior_actions", "mons"])
+@pytest.mark.parametrize("mutation", ["opponent", "prior_actions"])
 def test_producer_refuses_conditions_the_bounded_drive_cannot_observe(
     tmp_path: Path, mutation: str
 ) -> None:
     scenario = _writable_scenario()
+    if mutation == "opponent":
+        scenario["opponent"] = {"name": "rival"}
+    else:
+        scenario["required_prior_actions"] = ["defeat_rival"]
+    opened: list[dict] = []
+
+    def factory(**kwargs: object) -> _FakeSession:
+        opened.append(dict(kwargs))
+        return _FakeSession()
+
+    with pytest.raises(producer.CaptureNotAvailable, match="controlled ROM run"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(tmp_path, scenario, session_factory=factory)
+        )
+
+    assert opened == []
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+@pytest.mark.parametrize("mutation", ["inventory", "mons"])
+def test_producer_refuses_malformed_condition_declarations_before_the_emulator(
+    tmp_path: Path, mutation: str
+) -> None:
+    """A declaration whose shape cannot be asserted is refused pre-emulator."""
+    scenario = _writable_scenario()
     if mutation == "inventory":
         scenario["inventory"] = [{"item": "POTION", "count": 1}]
-    elif mutation == "opponent":
-        scenario["opponent"] = {"name": "rival"}
-    elif mutation == "prior_actions":
-        scenario["required_prior_actions"] = ["defeat_rival"]
     else:
         scenario["party"]["mons"] = [{"species": "PIKACHU"}]
     opened: list[dict] = []
@@ -1546,7 +1973,7 @@ def test_producer_refuses_conditions_the_bounded_drive_cannot_observe(
         opened.append(dict(kwargs))
         return _FakeSession()
 
-    with pytest.raises(producer.CaptureNotAvailable, match="controlled ROM run"):
+    with pytest.raises(producer.ScenarioRefusal, match="which is not an integer"):
         producer.capture_battle_scenario(
             **_capture_kwargs(tmp_path, scenario, session_factory=factory)
         )

@@ -46,9 +46,10 @@ The capture path itself is bounded and fail-closed:
   encoding, a non-positive or non-integer verified fixture size, a verified entry
   whose producer is absent or whose declared producer digest disagrees, or a
   verified entry with no pinned fixture hashes — before the emulator is opened;
-* it refuses a declared inventory, opponent, prior-action, or per-mon party
-  precondition this bounded drive cannot observe, instead of recording an
-  unchecked capture;
+* it refuses a declared opponent or prior-action precondition this bounded
+  drive cannot observe, instead of recording an unchecked capture, while the
+  two preconditions it *can* observe — the bag and the per-slot party records —
+  are asserted against the measured boundary rather than refused;
 * it validates the capture record it is about to return and admits only records
   that carry the producer, asset, boundary, and output identities within the
   effective bounds;
@@ -735,6 +736,22 @@ def validate_capture_record(record: Any, scenario_id: str) -> None:
         raise ScenarioRefusal(
             f"capture record for {scenario_id!r} does not record the observed boundary"
         )
+    # The bag and per-slot party records are asserted preconditions, so a record
+    # that omits the measurement behind that assertion cannot be admitted as
+    # validated metadata.  ``valid`` stays tri-state: an unavailable or
+    # contradictory observation is recorded, never silently defaulted.
+    for field in ("bag", "party_records"):
+        projection = observed.get(field)
+        if not isinstance(projection, dict) or not isinstance(projection.get("observed"), bool):
+            raise ScenarioRefusal(
+                f"capture record for {scenario_id!r} does not record the observed {field}"
+            )
+        if "valid" not in projection or not (
+            projection["valid"] is None or isinstance(projection["valid"], bool)
+        ):
+            raise ScenarioRefusal(
+                f"capture record for {scenario_id!r} does not record the {field} validity"
+            )
     reproduction = record.get("reproduction")
     if not isinstance(reproduction, dict) or not isinstance(reproduction.get("matches"), bool):
         raise ScenarioRefusal(
@@ -1243,6 +1260,77 @@ def _symbol_byte(session: Any, name: str) -> int:
     return symbols.read_u8(memory, name)
 
 
+def _bag_digest(stacks: list[dict[str, int]]) -> str:
+    """Digest the observed stack list, never the raw save-state bytes."""
+    canonical = json.dumps(
+        [[stack["item_id"], stack["quantity"]] for stack in stacks],
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _observe_bag(bag: Any) -> dict[str, Any]:
+    """Sanitized projection of the parsed bag at the declared boundary.
+
+    ``valid`` keeps the parser's tri-state: ``None`` means the observation was
+    unavailable and must not be read as an observed bag, and a ``False`` bag is
+    contradictory RAM.  Only item ids and quantities are projected; no raw
+    save-state bytes are recorded.  The digest is published only for a bag that
+    was actually observed as valid.
+    """
+    if bag is None:
+        return {
+            "observed": False,
+            "valid": None,
+            "count": None,
+            "stacks": [],
+            "digest": None,
+        }
+    stacks = [
+        {"item_id": int(stack.item_id), "quantity": int(stack.quantity)} for stack in bag.stacks
+    ]
+    valid = None if bag.valid is None else bool(bag.valid)
+    return {
+        "observed": True,
+        "valid": valid,
+        "count": int(bag.count),
+        "stacks": stacks,
+        "digest": _bag_digest(stacks) if valid is True else None,
+    }
+
+
+def _observe_party_records(records: Any) -> dict[str, Any]:
+    """Sanitized per-slot party records at the declared boundary.
+
+    Each slot is projected through ``PartyRecord.to_resource_dict()``, which
+    deliberately omits the raw 44-byte record, so a published capture record
+    can never carry ROM-derived party bytes.  Slots are projected only when the
+    read actually produced a valid party.
+    """
+    if records is None:
+        return {"observed": False, "valid": None, "count": None, "slots": []}
+    valid = None if records.valid is None else bool(records.valid)
+    slots: list[dict[str, Any]] = []
+    if valid is True:
+        for record in records.records:
+            projection = record.to_resource_dict()
+            slots.append(
+                {
+                    "slot": int(projection["slot"]),
+                    "species": int(projection["species"]),
+                    "level": int(projection["level"]),
+                    "record_size": int(projection["record_size"]),
+                    "digest": str(projection["digest"]),
+                }
+            )
+    return {
+        "observed": True,
+        "valid": valid,
+        "count": None if records.count is None else int(records.count),
+        "slots": slots,
+    }
+
+
 def _observe_boundary(session: Any) -> dict[str, Any]:
     """Return the observed pre-write boundary used for the precondition check."""
     state = session.read_game_state()
@@ -1253,6 +1341,8 @@ def _observe_boundary(session: Any) -> dict[str, Any]:
         "link_state_raw": _symbol_byte(session, "wLinkState"),
         "party_count": state.party.count,
         "active_slot": state.party.active_slot,
+        "bag": _observe_bag(state.bag),
+        "party_records": _observe_party_records(session.read_party_records()),
     }
 
 
@@ -1297,26 +1387,120 @@ def _assert_boundary(scenario: dict[str, Any], observed: dict[str, Any], scenari
             f"scenario {scenario_id!r} declares party.active_slot {party['active_slot']}, "
             f"observed {observed['active_slot']}"
         )
+    _assert_declared_inventory(scenario.get("inventory"), observed["bag"], scenario_id)
+    _assert_declared_party_mons(party.get("mons"), observed["party_records"], scenario_id)
+
+
+def _render_stacks(stacks: list[tuple[int, int]]) -> str:
+    """Render observed/declared stacks compactly for a refusal message."""
+    if not stacks:
+        return "an empty bag"
+    return ", ".join(f"item {item_id:02x} x{quantity}" for item_id, quantity in stacks)
+
+
+def _assert_declared_inventory(declared: Any, observed: dict[str, Any], scenario_id: str) -> None:
+    """Assert a declared bag against the stacks measured at the boundary.
+
+    A declared inventory is a complete assertion: the declared and observed
+    ``(item, quantity)`` multisets must agree exactly, so a declaration that
+    names only part of the observed bag is refused rather than read as an
+    unchecked remainder.  ``inventory: null`` asserts nothing, and
+    ``inventory: []`` asserts that the bag is empty.
+
+    This is the failure mode the previous refusal existed to prevent: a
+    declaration that could not be checked must still never publish.  It is
+    checked here instead, because the bag *is* observable at this boundary
+    (``read_game_state().bag``), and an unobservable bag is refused rather than
+    assumed.
+    """
+    if declared is None:
+        return
+    if observed.get("valid") is not True:
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares an inventory precondition, but the bag at the "
+            "declared boundary was not observed as valid; refusing to publish an unchecked capture"
+        )
+    declared_stacks = sorted((int(item["item_id"]), int(item["quantity"])) for item in declared)
+    observed_stacks = sorted(
+        (int(stack["item_id"]), int(stack["quantity"])) for stack in observed["stacks"]
+    )
+    if declared_stacks != observed_stacks:
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares inventory {_render_stacks(declared_stacks)}, "
+            f"observed {_render_stacks(observed_stacks)} "
+            f"(digest {observed['digest']})"
+        )
+
+
+def _assert_declared_party_mons(declared: Any, observed: dict[str, Any], scenario_id: str) -> None:
+    """Assert declared per-slot party contents against the measured records.
+
+    A declared member list is a complete assertion of the occupied party: it
+    must name exactly the occupied slots once each, so a partial or duplicated
+    declaration cannot leave a member unasserted.  Species and level are always
+    compared; the record digest is compared when it is declared, which is what
+    makes two same-species members distinguishable without publishing the raw
+    44-byte records.
+    """
+    if not declared:
+        return
+    if observed.get("valid") is not True:
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares per-mon party contents, but the party records at "
+            "the declared boundary were not observed as valid; refusing to publish an unchecked "
+            "capture"
+        )
+    slots = observed["slots"]
+    occupied = list(range(len(slots)))
+    declared_slots = sorted(int(mon["slot"]) for mon in declared)
+    if declared_slots != occupied:
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares party slots {declared_slots}, but the observed "
+            f"party occupies {occupied}"
+        )
+    for mon in declared:
+        slot = int(mon["slot"])
+        measured = slots[slot]
+        if int(mon["species"]) != measured["species"] or int(mon["level"]) != measured["level"]:
+            raise CapturePreconditionFailed(
+                f"scenario {scenario_id!r} declares party slot {slot} as species "
+                f"{mon['species']} level {mon['level']}, observed species {measured['species']} "
+                f"level {measured['level']}"
+            )
+        declared_digest = mon.get("digest")
+        if declared_digest is not None and str(declared_digest) != measured["digest"]:
+            raise CapturePreconditionFailed(
+                f"scenario {scenario_id!r} declares party slot {slot} record digest "
+                f"{declared_digest}, observed {measured['digest']}"
+            )
 
 
 def _assert_supported_conditions(scenario: dict[str, Any], scenario_id: str) -> None:
     """Refuse declared preconditions this bounded drive cannot observe.
 
-    Silently driving past a declared inventory, opponent, prior action, or
-    per-mon party condition would publish a fixture whose declared
-    preconditions were never checked.  Only declarations that assert nothing are
-    accepted: an *absent* field (or an explicit ``null``) for the inventory and
-    opponent, an empty ``required_prior_actions`` list, and an empty per-mon
-    ``party.mons`` list.  A declared inventory or opponent is refused even when
+    Silently driving past a declared opponent or prior action would publish a
+    fixture whose declared preconditions were never checked, so for those two
+    fields only declarations that assert nothing are accepted: an *absent*
+    field (or an explicit ``null``) for the opponent, and an empty
+    ``required_prior_actions`` list.  A declared opponent is refused even when
     it is empty, because the field's presence is itself the assertion that this
     drive cannot check.
+
+    A declared ``inventory`` and a declared ``party.mons`` list are *asserted*,
+    not refused: both are read from the loaded state at the declared boundary
+    and compared before anything is published (see
+    ``_assert_declared_inventory`` and ``_assert_declared_party_mons``).  This
+    screen therefore only requires that a declaration is shaped so it *can* be
+    asserted — a list of objects carrying the integer fields the comparison
+    reads — so that a malformed declaration is refused before the emulator is
+    opened rather than surfacing as an opaque ``KeyError`` at the boundary.
     """
-    if scenario.get("inventory") is not None:
-        raise CaptureNotAvailable(
-            f"{_CAPTURE_MESSAGE} Scenario {scenario_id!r} declares an inventory precondition "
-            "that this bounded drive does not observe; capture it with a producer that asserts "
-            "the declared bag, or declare the inventory as null."
-        )
+    inventory = scenario.get("inventory")
+    if inventory is not None:
+        _require_declared_list(inventory, "inventory", scenario_id)
+        for index, item in enumerate(inventory):
+            for field in ("item_id", "quantity"):
+                _require_declared_int(item.get(field), f"inventory[{index}].{field}", scenario_id)
     if scenario.get("opponent") is not None:
         raise CaptureNotAvailable(
             f"{_CAPTURE_MESSAGE} Scenario {scenario_id!r} declares an opponent precondition "
@@ -1335,10 +1519,31 @@ def _assert_supported_conditions(scenario: dict[str, Any], scenario_id: str) -> 
             "records them, or declare an empty list."
         )
     party = scenario.get("party") or {}
-    if party.get("mons"):
-        raise CaptureNotAvailable(
-            f"{_CAPTURE_MESSAGE} Scenario {scenario_id!r} declares per-mon party contents, "
-            "which this bounded drive does not assert; refusing to record an unchecked capture."
+    mons = party.get("mons")
+    if mons:
+        _require_declared_list(mons, "party.mons", scenario_id)
+        for index, mon in enumerate(mons):
+            for field in ("slot", "species", "level"):
+                _require_declared_int(mon.get(field), f"party.mons[{index}].{field}", scenario_id)
+            digest = mon.get("digest")
+            if digest is not None and not _is_digest(digest, 64):
+                raise ScenarioRefusal(
+                    f"scenario {scenario_id!r} declares party.mons[{index}].digest as a value "
+                    "that is not a SHA-256 digest"
+                )
+
+
+def _require_declared_list(value: Any, field: str, scenario_id: str) -> None:
+    """Require a declared precondition list to be assertable objects."""
+    if not isinstance(value, list) or any(not isinstance(entry, dict) for entry in value):
+        raise ScenarioRefusal(f"scenario {scenario_id!r} must declare {field} as a list of objects")
+
+
+def _require_declared_int(value: Any, field: str, scenario_id: str) -> None:
+    """Require a declared precondition field to be a real integer."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} declares {field} as {value!r}, which is not an integer"
         )
 
 
