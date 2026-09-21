@@ -162,8 +162,12 @@ roots exported any single declared row runs directly from a clean checkout at th
 #   red/pokemon-red.gb  red/pokemon-red-color.gb  red/pokemon-red.sym
 #   blue/pokemon-blue.gb  blue/pokemon-blue-color.gb  blue/pokemon-blue.sym
 #   yellow/pokemon-yellow.gbc  yellow/pokemon-yellow.sym
-# link fixtures (POKERED_FIXTURE_ROOT): <family>/cable_club.state and
-#   <family>/cable_club-slots.state
+# link fixtures (POKERED_FIXTURE_ROOT): the declared rows resolve exactly six files -
+#   red/cable_club.state, red/cable_club-slots.state, blue/cable_club.state,
+#   blue/cable_club-battle.state, blue/cable_club-slots.state, yellow/cable_club.state.
+#   Blue's battle fixture is loaded because the blue_color-blue_color local and TCP rows
+#   pair Blue's battle party against Blue's ordinary party; the two red/blue multi-member
+#   rows are the only readers of cable_club-slots.state
 # when these are unset the helpers walk up from the worktree looking for rom/ and
 # tests/fixtures/link/, falling back to <worktree>/rom and <worktree>/tests/fixtures/link
 # The row below is that version pair 'red_color-blue_color', so it needs the two colour
