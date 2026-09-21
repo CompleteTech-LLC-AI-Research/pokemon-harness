@@ -266,6 +266,41 @@ def _pending_edge_requests_at_close(backend: NetworkBackend) -> object:
     return None
 
 
+def _await_wire_record_publication(
+    backend: NetworkBackend, *, timeout: float = _BOUNDED_WAIT
+) -> bool:
+    """Bound the producers that can still publish a transcript record.
+
+    ``_mark_closed_common`` publishes ``_closed`` without joining the reader or
+    the response workers, and ``_send_reciprocal_master_response`` answers an
+    incoming request on the reader thread without ever touching
+    ``_edge_pending``, so observing zero admitted work under
+    ``_edge_pending_condition`` does not exclude that producer.  Reading the
+    serial transcript while it was still in flight certified an unnamed
+    reciprocal request whose response never reached the wire: the copy the
+    decision was taken from simply did not contain the admission yet.
+
+    Both the reader and both response workers hold
+    ``_edge_wire_completion_lock`` across their transcript publication and the
+    write it reports, so a bounded join of the reader followed by a bounded
+    acquire of that lock - taken by the caller with no transport lock held - is
+    a completion boundary for those records.  The join also closes the window
+    before the lock is taken, where the reader has already deserialised a frame
+    but has not yet entered its guarded section.  A timeout is reported as
+    missing evidence and is never read as a settled transcript.
+    """
+    reader = backend._reader
+    if reader is not None:
+        reader.join(timeout=timeout)
+        if reader.is_alive():
+            return False
+    completion_lock = backend._edge_wire_completion_lock
+    if not completion_lock.acquire(timeout=timeout):
+        return False
+    completion_lock.release()
+    return True
+
+
 class _EdgeAdmissionWitness(NamedTuple):
     """Connection-scoped admission/answer state read from the serial transcript.
 
@@ -511,6 +546,11 @@ def _closed_transport_retirement_is_evidenced(
     * at least one identified request must have been admitted, so a zero that
       never covered admitted work certifies nothing.
 
+    The caller is responsible for reading this predicate only after
+    :func:`_await_wire_record_publication` has bounded the reader and the
+    response workers: the witness is a snapshot, so a producer that is still
+    mid-publication would be invisible to every clause here.
+
     Kept as its own function so a regression can install a predicate that never
     consents and show this acceptance path is load-bearing rather than
     incidental.
@@ -556,10 +596,18 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
       :func:`_closed_transport_retirement_is_evidenced` shows that the close
       found nothing outstanding and that the backend's own serial transcript
       records a completed write for every identified request it admitted,
-      including any it had already claimed when this wait began.
+      including any it had already claimed when this wait began.  A published
+      close does not join the reader or the response workers, so the witness is
+      read only after :func:`_await_wire_record_publication` bounds those
+      producers outside this condition; a transcript copy taken while a
+      reciprocal admission was still in flight certified a request whose
+      response never reached the wire.
 
     Every other exit is reported as a closure with lock-free diagnostics, and a
     transport that is already closed when the wait begins is refused outright.
+    When the publication boundary expires, the refusal says so - the transcript
+    could not be settled, which is missing evidence rather than a demonstration
+    that the response was never written.
     The admission witness is sampled before that refusal, so an admission
     already claimed when this wait is entered is still part of the entry
     snapshot the closed-transport decision compares against.  The transcript it
@@ -587,17 +635,14 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
     deadline = time.monotonic() + timeout
     timed_out = False
     retired_while_open = False
+    closed_at_zero = False
     with backend._edge_pending_condition:
         while True:
             if backend._edge_pending == 0:
                 if not backend._closed:
                     retired_while_open = True
                 else:
-                    retired_while_open = _closed_transport_retirement_is_evidenced(
-                        backend,
-                        pending_at_close=_pending_edge_requests_at_close(backend),
-                        witness_at_entry=witness_at_entry,
-                    )
+                    closed_at_zero = True
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -614,9 +659,37 @@ def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float =
         )
     if retired_while_open:
         return
+    # A zero seen with a published close is the close's own zero, not yet a
+    # settled transcript.  The reciprocal handler answers on the reader thread
+    # and never touches ``_edge_pending``, so this condition could not exclude
+    # it: taking the witness straight from the loop certified an unnamed
+    # reciprocal admission whose record was still in flight.  Wait - outside
+    # the condition, because the producers themselves need it - for the reader
+    # and the response workers to finish publishing, and only then read the
+    # evidence.
+    publication_settled = closed_at_zero and _await_wire_record_publication(
+        backend, timeout=_BOUNDED_WAIT
+    )
+    if publication_settled and _closed_transport_retirement_is_evidenced(
+        backend,
+        pending_at_close=_pending_edge_requests_at_close(backend),
+        witness_at_entry=witness_at_entry,
+    ):
+        return
+    if not closed_at_zero:
+        publication = "not evaluated: the wait did not observe a zero with a close"
+    elif publication_settled:
+        publication = "settled"
+    else:
+        publication = (
+            "unsettled: a transcript producer was still publishing when the "
+            f"{_BOUNDED_WAIT:g}s publication boundary expired, so this refusal is missing "
+            "evidence - it does not show the response was never written"
+        )
     raise AssertionError(
         "network backend closed while the admitted edge response was outstanding, "
         "so zero pending work is closure and not retirement; "
+        f"transcript_publication={publication}; "
         f"diagnostics={_retirement_diagnostics(backend)}"
     )
 
@@ -1098,6 +1171,70 @@ def test_retirement_wait_closed_acceptance_requires_wire_evidence(monkeypatch) -
         assert isinstance(outcome, AssertionError), outcome
         assert "closure and not retirement" in str(outcome)
         assert _responses_written(backend) == 1
+    finally:
+        _teardown_transport(peer, backend, *threads)
+
+
+def test_retirement_wait_reports_missing_evidence_when_the_publication_boundary_expires(
+    monkeypatch,
+) -> None:
+    """An expired publication boundary is missing evidence, not proof of a leak.
+
+    The transcript here really does hold this admission and its completed write:
+    the response reached the peer and the backend retired the id.  Only the
+    boundary that settles those producers is made to expire, which is the shape
+    a caller sees when a producer is held past ``_BOUNDED_WAIT``.  The wait must
+    still refuse - it may not certify retirement it could not observe settling -
+    but it has to say which of the two it is, and it must not consult the
+    evidence predicate at all, because the transcript it would read is exactly
+    the copy that is not yet known to be complete.
+    """
+    module = sys.modules[_wait_for_edge_requests_retired.__module__]
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    boundary_entered = threading.Event()
+
+    def expired_boundary(backend: NetworkBackend, *, timeout: float) -> bool:
+        del backend, timeout
+        boundary_entered.set()
+        return False
+
+    monkeypatch.setattr(module, "_await_wire_record_publication", expired_boundary)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        _admit_identified_edge_request(peer, backend)
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            lambda: _write_retire_and_close_holding_the_condition(backend, edge_id=1),
+            threads=threads,
+        )
+        assert boundary_entered.is_set(), "the wait never entered its publication boundary"
+        assert isinstance(outcome, AssertionError), outcome
+        assert "closure and not retirement" in str(outcome)
+        assert "transcript_publication=unsettled" in str(outcome), str(outcome)
+        assert "missing evidence" in str(outcome), str(outcome)
+        assert decisions == [], (
+            "the evidence predicate was consulted while the transcript was still "
+            f"unsettled: {decisions}"
+        )
+        records = _transcript_records(backend)
+        assert any(
+            record.get("event") == _EDGE_ADMISSION_EVENT and record.get("edge_id") == 1
+            for record in records
+        ), "the admitted request was not on the transcript"
+        assert any(
+            record.get("event") == _EDGE_WRITE_EVENT
+            and record.get("edge_id") == 1
+            and record.get("outcome") == "success"
+            for record in records
+        ), "the completed write was not on the transcript"
+        assert _responses_written(backend) == 1
+        assert elapsed < 5.0, f"the refusal was not bounded ({elapsed:.3f}s)"
     finally:
         _teardown_transport(peer, backend, *threads)
 
@@ -1913,6 +2050,256 @@ def test_retirement_wait_rejects_a_reciprocal_response_that_never_reached_the_wi
         )
         assert peer._sock.recv(1) == b"", "the unanswerable reciprocal response reached the peer"
         assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
+    finally:
+        monkeypatch.undo()
+        _teardown_transport(peer, backend, *threads)
+
+
+@pytest.mark.parametrize(
+    "edge_id",
+    [3, None],
+    ids=["identified-reciprocal", "unnamed-reciprocal"],
+)
+def test_retirement_wait_rejects_a_reciprocal_admission_published_after_the_close(
+    monkeypatch, edge_id: int | None
+) -> None:
+    """A transcript copy taken before the reader published is not evidence.
+
+    The reader answers an incoming request reciprocally on its own thread and
+    appends ``reciprocal_master_edge`` inside its wire-completion section, but
+    it never touches ``_edge_pending``, so the pending condition this wait sits
+    on cannot exclude it and a real clean close can publish while that record is
+    still in flight.  This test holds the reader immediately before its
+    admission record, completes the close, and asserts that the wait does not
+    decide from the copy it could have taken then: it has to stay inside its
+    publication boundary until the admission and the real failed send are on the
+    transcript, and then refuse.  Deciding from the stale copy certified an
+    unnamed reciprocal request whose response never reached the wire, which is
+    exactly what the reader is gated on here.
+    """
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        completed = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, 1)
+        _admit_identified_edge_request(peer, backend)
+        assert backend.service_pending_edges(max_edges=1) == 1
+        _wait_for_pending_zero(backend)
+        assert peer._sock.recv(len(completed)) == completed
+
+        record_started = threading.Event()
+        release_record = threading.Event()
+        real_record = backend._record_serial_event
+
+        def gated_record(event: str, **fields: object) -> None:
+            if event == _EDGE_RECIPROCAL_EVENT:
+                record_started.set()
+                assert release_record.wait(timeout=_BOUNDED_WAIT), (
+                    "the gated reciprocal admission record was never released"
+                )
+            real_record(event, **fields)
+
+        monkeypatch.setattr(backend, "_record_serial_event", gated_record)
+
+        module = sys.modules[_wait_for_edge_requests_retired.__module__]
+        real_boundary = module._await_wire_record_publication
+        boundary_entered = threading.Event()
+
+        def signalling_boundary(transport: NetworkBackend, *, timeout: float) -> bool:
+            boundary_entered.set()
+            return real_boundary(transport, timeout=timeout)
+
+        monkeypatch.setattr(module, "_await_wire_record_publication", signalling_boundary)
+
+        def release_once_the_waiter_is_parked_on_the_record() -> None:
+            if boundary_entered.wait(timeout=_BOUNDED_WAIT):
+                release_record.set()
+
+        watcher = threading.Thread(
+            target=release_once_the_waiter_is_parked_on_the_record,
+            name="reciprocal-record-releaser",
+            daemon=True,
+        )
+        threads.append(watcher)
+        watcher.start()
+
+        wire: list[bytes] = []
+        master_holder: list[list[BaseException | None]] = []
+
+        def close_while_the_record_is_gated() -> None:
+            master_holder.append(_start_master_edge(backend, threads))
+            wire.append(_read_master_edge_request(peer))
+            if edge_id is None:
+                request = _FRAME.pack(_OP_EDGE_REQ, 1)
+            else:
+                request = _EDGE_ID_FRAME.pack(_OP_EDGE_REQ_ID, 1, edge_id)
+            peer._sock.sendall(request)
+            assert record_started.wait(timeout=_BOUNDED_WAIT), (
+                "the reader never attempted the reciprocal admission record"
+            )
+            # The reader has consumed the request and holds its wire-completion
+            # section, but the admission record is not on the transcript yet, so
+            # the close finds no admitted work and cannot see the request.
+            backend._mark_closed_uncoordinated()
+            assert backend._closed
+            assert backend._pre_close_snapshot["pending_edge_requests"] == 0
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            close_while_the_record_is_gated,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert isinstance(outcome, AssertionError), outcome
+        assert "closure and not retirement" in str(outcome)
+        assert decisions == [(True, 0)], decisions
+        records = _transcript_records(backend)
+        assert any(
+            record.get("event") == _EDGE_RECIPROCAL_EVENT and record.get("edge_id") == edge_id
+            for record in records
+        ), "the admitted reciprocal request never reached the transcript"
+        witness = _edge_admission_witness(backend)
+        assert witness.answered == frozenset({1}), witness
+        if edge_id is None:
+            assert witness.admitted == frozenset({1}), witness
+            assert witness.unidentified_admissions == 1, witness
+        else:
+            assert witness.admitted == frozenset({1, 3}), witness
+            assert witness.outstanding == frozenset({3}), witness
+        assert _responses_written(backend) == 1, "the failed reciprocal write reached the wire"
+        assert b"".join(wire) == _FRAME.pack(_OP_EDGE_REQ, 1), (
+            "the peer saw bytes other than the master's own outbound request"
+        )
+        assert peer._sock.recv(1) == b"", "an unanswered reciprocal response reached the peer"
+        assert elapsed < 5.0, f"rejection was not bounded ({elapsed:.3f}s)"
+        master_thread = next(
+            thread for thread in threads if thread.name == "reciprocal-master-edge"
+        )
+        master_thread.join(timeout=_BOUNDED_WAIT)
+        assert not master_thread.is_alive(), "the master exchange never failed out"
+        master_outcomes = master_holder[0]
+        assert master_outcomes and isinstance(master_outcomes[0], BaseException), master_outcomes
+    finally:
+        monkeypatch.undo()
+        _teardown_transport(peer, backend, *threads)
+
+
+def test_retirement_wait_accepts_a_reciprocal_response_whose_success_record_publishes_after_the_close(
+    monkeypatch,
+) -> None:
+    """A real reciprocal write is retirement even when its record lags the close.
+
+    The reciprocal response for id 3 really reaches the peer, so the write is
+    complete and the success counter has already grown.  Only the transcript
+    record that reports it is held back, and the clean close lands in that
+    window with zero admitted work.  A witness read then sees an admission with
+    no answer and refuses a request that was really written, so the publication
+    boundary has to settle that record before the decision is taken.  The wire
+    is asserted byte for byte, and the successful completion this test accepts
+    is the same exchange the round-6 repair's failure regressions tear down.
+    """
+    decisions: list[tuple[bool, object]] = []
+    _record_closed_retirement_evidence(monkeypatch, decisions)
+    peer, backend = NetworkBackend.pair()
+    from tests.test_network_owner_execution import _Core
+
+    threads: list[threading.Thread] = []
+    _enable_retirement_witness(backend)
+    backend.start_receiver(_Core(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
+    try:
+        peer._sock.settimeout(_BOUNDED_WAIT)
+        completed = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 0, 1)
+        _admit_identified_edge_request(peer, backend)
+        assert backend.service_pending_edges(max_edges=1) == 1
+        _wait_for_pending_zero(backend)
+        assert peer._sock.recv(len(completed)) == completed
+
+        success_recorded = threading.Event()
+        release_record = threading.Event()
+        real_record = backend._record_serial_event
+
+        def gated_record(event: str, **fields: object) -> None:
+            if (
+                event == _EDGE_WRITE_EVENT
+                and fields.get("edge_id") == 3
+                and fields.get("outcome") == "success"
+            ):
+                success_recorded.set()
+                assert release_record.wait(timeout=_BOUNDED_WAIT), (
+                    "the gated successful write record was never released"
+                )
+            real_record(event, **fields)
+
+        monkeypatch.setattr(backend, "_record_serial_event", gated_record)
+
+        module = sys.modules[_wait_for_edge_requests_retired.__module__]
+        real_boundary = module._await_wire_record_publication
+        boundary_entered = threading.Event()
+
+        def signalling_boundary(transport: NetworkBackend, *, timeout: float) -> bool:
+            boundary_entered.set()
+            return real_boundary(transport, timeout=timeout)
+
+        monkeypatch.setattr(module, "_await_wire_record_publication", signalling_boundary)
+
+        def release_once_the_waiter_is_parked_on_the_record() -> None:
+            if boundary_entered.wait(timeout=_BOUNDED_WAIT):
+                release_record.set()
+
+        watcher = threading.Thread(
+            target=release_once_the_waiter_is_parked_on_the_record,
+            name="reciprocal-success-releaser",
+            daemon=True,
+        )
+        threads.append(watcher)
+        watcher.start()
+
+        wire: list[bytes] = []
+        reciprocal = _EDGE_ID_FRAME.pack(_OP_EDGE_RESP_ID, 1, 3)
+
+        def close_after_the_response_reached_the_wire() -> None:
+            _start_master_edge(backend, threads)
+            wire.append(_read_master_edge_request(peer))
+            peer._sock.sendall(_EDGE_ID_FRAME.pack(_OP_EDGE_REQ_ID, 1, 3))
+            received = b""
+            while len(received) < len(reciprocal):
+                part = peer._sock.recv(len(reciprocal) - len(received))
+                assert part, (received.hex(), "the reciprocal response never reached the peer")
+                received += part
+            assert received == reciprocal, received
+            wire.append(received)
+            assert success_recorded.wait(timeout=_BOUNDED_WAIT), (
+                "the reader never recorded the reciprocal write"
+            )
+            assert _responses_written(backend) == 2, "the reciprocal response was not written"
+            backend._mark_closed_uncoordinated()
+            assert backend._closed
+            assert backend._pre_close_snapshot["pending_edge_requests"] == 0
+
+        outcome, elapsed = _run_transition_while_wait_is_outstanding(
+            backend,
+            close_after_the_response_reached_the_wire,
+            resume_when="deadline = time.monotonic() + timeout",
+            threads=threads,
+        )
+        assert outcome is None, outcome
+        assert backend._closed
+        assert decisions == [(True, 0)], decisions
+        witness = _edge_admission_witness(backend)
+        assert witness.admitted == frozenset({1, 3}), witness
+        assert witness.answered == frozenset({1, 3}), witness
+        assert witness.outstanding == frozenset(), witness
+        assert b"".join(wire) == _FRAME.pack(_OP_EDGE_REQ, 1) + reciprocal, (
+            "the peer saw bytes other than the master request and the reciprocal response"
+        )
+        assert peer._sock.recv(1) == b"", "the closed transport did not reach the peer as EOF"
+        assert elapsed < 5.0, f"acceptance was not bounded ({elapsed:.3f}s)"
     finally:
         monkeypatch.undo()
         _teardown_transport(peer, backend, *threads)
