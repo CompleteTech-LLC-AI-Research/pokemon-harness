@@ -28,6 +28,16 @@
     "fainted",
     "same_species_distinct"
   ],
+  "admitted_items": [
+    "POTION",
+    "SUPER_POTION",
+    "HYPER_POTION",
+    "MAX_POTION",
+    "FULL_RESTORE",
+    "REVIVE",
+    "MAX_REVIVE"
+  ],
+  "active_slot_rule": "Party index 0 is the fixture's battle-active slot and must be a non-fainted member; a benched target is any other party slot.",
   "execution_requirements": {
     "games": ["red", "blue", "yellow"],
     "runtimes": ["source", "native"],
@@ -206,37 +216,37 @@
     },
     {
       "id": "potion-on-fainted-target-is-refused",
-      "categories": ["fainted", "target_active"],
+      "categories": ["fainted", "target_benched"],
       "item": "POTION",
-      "target_index": 0,
+      "target_index": 1,
       "party": [
-        {"species": "PIDGEY", "level": 5, "hp": 0, "max_hp": 30, "status": 8},
-        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0}
+        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 0, "max_hp": 30, "status": 8}
       ],
       "expected": {
         "applied": false,
         "branch": "refused_fainted",
         "members": [
-          {"hp": 0, "status": 8},
-          {"hp": 9, "status": 0}
+          {"hp": 9, "status": 0},
+          {"hp": 0, "status": 8}
         ]
       }
     },
     {
       "id": "full-restore-on-fainted-target-is-refused",
-      "categories": ["fainted", "target_active"],
+      "categories": ["fainted", "target_benched"],
       "item": "FULL_RESTORE",
-      "target_index": 0,
+      "target_index": 1,
       "party": [
-        {"species": "PIDGEY", "level": 5, "hp": 0, "max_hp": 75, "status": 4},
-        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0}
+        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 0, "max_hp": 75, "status": 4}
       ],
       "expected": {
         "applied": false,
         "branch": "refused_fainted",
         "members": [
-          {"hp": 0, "status": 4},
-          {"hp": 9, "status": 0}
+          {"hp": 9, "status": 0},
+          {"hp": 0, "status": 4}
         ]
       }
     },
@@ -374,7 +384,7 @@
       "party": [
         {"species": "CHARMANDER", "level": 12, "hp": 33, "max_hp": 40, "status": 0},
         {"species": "PIDGEY", "level": 5, "hp": 19, "max_hp": 21, "status": 0},
-        {"species": "SNORLAX", "level": 40, "hp": 300, "max_hp": 999, "status": 0}
+        {"species": "SNORLAX", "level": 40, "hp": 320, "max_hp": 999, "status": 0}
       ],
       "expected": {
         "applied": true,
@@ -382,7 +392,7 @@
         "members": [
           {"hp": 33, "status": 0},
           {"hp": 19, "status": 0},
-          {"hp": 500, "status": 0}
+          {"hp": 520, "status": 0}
         ]
       }
     }
