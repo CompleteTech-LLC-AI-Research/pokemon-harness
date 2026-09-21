@@ -11,7 +11,9 @@ import copy
 import hashlib
 import json
 import math
+import sys
 import types
+import typing
 from pathlib import Path
 
 import pytest
@@ -338,13 +340,20 @@ class _FakeSymbols:
 class _FakeSession:
     """Scripted stand-in for a bounded capture session: no ROM, no PyBoy."""
 
+    _DELTAS: typing.ClassVar[dict[str, tuple[int, int]]] = {
+        "up": (0, -1),
+        "down": (0, 1),
+        "left": (-1, 0),
+        "right": (1, 0),
+    }
+
     def __init__(
         self,
         *,
         link_state: int = 0,
         map_id: int = 64,
-        start_x: int = 9,
-        start_y: int = 4,
+        start_x: int = 8,
+        start_y: int = 7,
         party_count: int = 0,
         active_slot: int | None = None,
         payload: bytes = b"fake-bounded-capture-state",
@@ -370,8 +379,9 @@ class _FakeSession:
 
     def press(self, button: str, *, duration: int = 1) -> None:
         self.presses.append((button, duration))
-        if button == "right":
-            self.x += 1
+        dx, dy = self._DELTAS[button]
+        self.x += dx
+        self.y += dy
 
     def read_game_state(self) -> types.SimpleNamespace:
         return types.SimpleNamespace(
@@ -435,14 +445,14 @@ def test_producer_capture_drives_link_reception_and_records_provenance(tmp_path:
     assert session.closed is True
     assert record["producer"] == "scripts/produce_battle_scenario.py"
     assert record["role"] == "listen"
-    assert record["inputs_used"] == 10
-    assert record["frames_used"] == 220
+    assert record["inputs_used"] == 13
+    assert record["frames_used"] == 280
     assert record["input_sequence"][0] == "step:10"
     assert record["input_sequence"][-1] == "press:up:8:30"
     assert record["observed_boundary"] == {
         "map_id": 64,
         "x": 11,
-        "y": 4,
+        "y": 3,
         "link_state_raw": 0,
         "party_count": 0,
         "active_slot": None,
@@ -489,6 +499,587 @@ def test_producer_capture_aborts_when_the_input_budget_is_exhausted(tmp_path: Pa
 
     assert not (tmp_path / "out.state").exists()
     assert _staged_files(tmp_path) == []
+
+
+# --- #87.6 round 2: publication, bounds, identity, and condition safety ------
+
+
+def _prepared_run(tmp_path: Path) -> dict:
+    """Prepare a runnable partial scenario with stand-in assets under ``tmp_path``."""
+    catalog = copy.deepcopy(_load_catalog())
+    scenario = _scenario(catalog, "red_color_ordinary")
+    scenario["fixture"].update({"sha1": None, "sha256": None, "size_bytes": None})
+    scenario["provenance"]["status"] = "partial"
+    declared_producer = tmp_path / "scripts" / "produce_cable_club_fixture.py"
+    declared_producer.parent.mkdir(parents=True, exist_ok=True)
+    declared_producer.write_text("# declared producer stand-in\n", encoding="utf-8")
+    rom = tmp_path / "pokemon-red-color.gb"
+    sym = tmp_path / "pokemon-red.sym"
+    source = tmp_path / "source.state"
+    rom.write_bytes(b"temporary rom bytes")
+    sym.write_bytes(b"temporary sym bytes")
+    source.write_bytes(b"source-state-bytes")
+    scenario["game"]["rom_sha1"] = hashlib.sha1(rom.read_bytes()).hexdigest()
+    scenario["game"]["sym_sha1"] = hashlib.sha1(sym.read_bytes()).hexdigest()
+    return {
+        "catalog": catalog,
+        "scenario": scenario,
+        "rom": rom,
+        "sym": sym,
+        "input_fixture": source,
+        "pins": _FakePins(scenario["game"]["rom_sha1"], scenario["game"]["sym_sha1"]),
+    }
+
+
+def test_all_shipped_scenarios_pass_the_new_screening() -> None:
+    """The stricter screening must not narrow the ten declared scenarios."""
+    catalog = _load_catalog()
+    for scenario in catalog["scenarios"]:
+        scenario_id = scenario["scenario_id"]
+        producer.validate_scenario_metadata(scenario, scenario_id)
+        producer._assert_supported_conditions(scenario, scenario_id)
+
+
+@pytest.mark.parametrize("row", [4, 99])
+def test_producer_capture_refuses_a_wrong_receptionist_row(tmp_path: Path, row: int) -> None:
+    """Column 11 on the wrong row is not the declared link-receptionist tile."""
+
+    class _WrongRow(_FakeSession):
+        def press(self, button: str, *, duration: int = 1) -> None:
+            super().press(button, duration=duration)
+            self.y = row  # never reaches the receptionist row (11, 3)
+
+    sessions: list[_WrongRow] = []
+
+    def factory(**_kwargs: object) -> _WrongRow:
+        session = _WrongRow()
+        sessions.append(session)
+        return session
+
+    with pytest.raises(producer.CapturePreconditionFailed, match="link receptionist tile"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(tmp_path, _writable_scenario(), session_factory=factory)
+        )
+
+    assert sessions and sessions[0].closed is True
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_interruption_after_the_link_removes_its_own_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupt delivered right after ``os.link`` must not leave the fixture."""
+    real_link = producer.os.link
+
+    def link_then_interrupt(source: object, destination: object) -> None:
+        real_link(source, destination)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(producer.os, "link", link_then_interrupt)
+    keeper = tmp_path / "keep.state"
+    keeper.write_bytes(b"unrelated bytes")
+
+    with pytest.raises(KeyboardInterrupt):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _FakeSession()
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert keeper.read_bytes() == b"unrelated bytes"
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_refuses_a_report_that_aliases_the_output(tmp_path: Path) -> None:
+    catalog = copy.deepcopy(_load_catalog())
+    scenario = _scenario(catalog, "red_color_ordinary")
+    output = tmp_path / "out.state"
+    pins = _FakePins(scenario["game"]["rom_sha1"], scenario["game"]["sym_sha1"])
+    for report in (output, tmp_path / "." / "out.state"):
+        with pytest.raises(producer.ScenarioRefusal, match="same file as"):
+            producer.run(
+                scenario_id="red_color_ordinary",
+                catalog=catalog,
+                rom=tmp_path / "absent.gb",
+                sym=tmp_path / "absent.sym",
+                output=output,
+                report=report,
+                repo_root=tmp_path,
+                pins=pins,
+            )
+    assert not output.exists()
+
+
+def test_producer_run_refuses_a_report_that_aliases_an_input(tmp_path: Path) -> None:
+    catalog = copy.deepcopy(_load_catalog())
+    scenario = _scenario(catalog, "red_color_ordinary")
+    rom = tmp_path / "rom.gb"
+    rom.write_bytes(b"rom bytes")
+    with pytest.raises(producer.ScenarioRefusal, match="same file as"):
+        producer.run(
+            scenario_id="red_color_ordinary",
+            catalog=catalog,
+            rom=rom,
+            sym=tmp_path / "absent.sym",
+            input_fixture=tmp_path / "absent.state",
+            output=tmp_path / "out.state",
+            report=rom,
+            repo_root=tmp_path,
+            pins=_FakePins(scenario["game"]["rom_sha1"], scenario["game"]["sym_sha1"]),
+        )
+    assert rom.read_bytes() == b"rom bytes"
+
+
+def test_producer_run_removes_its_fixture_when_the_report_cannot_be_written(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report_directory = tmp_path / "report-dir"
+    report_directory.mkdir()
+
+    with pytest.raises(OSError):
+        producer.run(
+            scenario_id="red_color_ordinary",
+            catalog=prepared["catalog"],
+            rom=prepared["rom"],
+            sym=prepared["sym"],
+            input_fixture=prepared["input_fixture"],
+            output=output,
+            report=report_directory,
+            repo_root=tmp_path,
+            pins=prepared["pins"],
+            capture=lambda **kwargs: producer.capture_battle_scenario(
+                **kwargs, session_factory=lambda **_kwargs: _FakeSession()
+            ),
+        )
+
+    assert not output.exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_run_interruption_at_finalization_removes_the_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupt after publication but before the report must roll the fixture back."""
+    prepared = _prepared_run(tmp_path)
+    output = tmp_path / "out.state"
+    report = tmp_path / "report.json"
+
+    def interrupt(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(producer, "write_report", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        producer.run(
+            scenario_id="red_color_ordinary",
+            catalog=prepared["catalog"],
+            rom=prepared["rom"],
+            sym=prepared["sym"],
+            input_fixture=prepared["input_fixture"],
+            output=output,
+            report=report,
+            repo_root=tmp_path,
+            pins=prepared["pins"],
+            capture=lambda **kwargs: producer.capture_battle_scenario(
+                **kwargs, session_factory=lambda **_kwargs: _FakeSession()
+            ),
+        )
+
+    assert not output.exists()
+    assert not report.exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_rechecks_the_deadline_between_press_and_advance(
+    tmp_path: Path,
+) -> None:
+    now = {"seconds": 0.0}
+
+    class _ExpiringPress(_FakeSession):
+        def press(self, button: str, *, duration: int = 1) -> None:
+            super().press(button, duration=duration)
+            now["seconds"] = 1000.0
+
+    session = _ExpiringPress()
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_wall_seconds"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: session,
+                clock=lambda: now["seconds"],
+            )
+        )
+
+    # Only the initial settle step advanced; the expired press was never ticked.
+    assert session.ticks == 10
+    assert not (tmp_path / "out.state").exists()
+
+
+def test_producer_capture_refuses_a_save_that_crosses_the_deadline(tmp_path: Path) -> None:
+    now = {"seconds": 0.0}
+    session = _FakeSession()
+    real_save = session.save_state
+
+    def slow_save() -> bytes:
+        now["seconds"] = 500.0
+        return real_save()
+
+    session.save_state = slow_save  # type: ignore[method-assign]
+    with pytest.raises(producer.CaptureBoundsExceeded, match="max_wall_seconds"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: session,
+                clock=lambda: now["seconds"],
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        {"max_frames": 100000, "max_wall_seconds": math.nan, "max_inputs": 64},
+        {"max_frames": 100000, "max_wall_seconds": math.inf, "max_inputs": 64},
+        {"max_frames": 100000, "max_inputs": 64},
+    ],
+)
+def test_producer_capture_refuses_invalid_effective_bounds(tmp_path: Path, bounds: dict) -> None:
+    opened: list[dict] = []
+
+    def factory(**kwargs: object) -> _FakeSession:
+        opened.append(dict(kwargs))
+        return _FakeSession()
+
+    with pytest.raises(producer.ScenarioRefusal):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), bounds=bounds, session_factory=factory
+            )
+        )
+
+    assert opened == []
+    assert not (tmp_path / "out.state").exists()
+
+
+def test_producer_measure_runtime_identity_refuses_a_requested_mode_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: False)
+    with pytest.raises(producer.ScenarioRefusal, match="executing PyBoy reports 'source'"):
+        producer.measure_runtime_identity(runtime="cython", python=None, repo_root=ROOT)
+
+
+def test_producer_measure_runtime_identity_refuses_a_foreign_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: False)
+    with pytest.raises(producer.ScenarioRefusal, match="not the executing interpreter"):
+        producer.measure_runtime_identity(
+            runtime="source", python="/nonexistent/interpreter", repo_root=ROOT
+        )
+
+
+def test_producer_measure_runtime_identity_records_measured_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: True)
+    identity = producer.measure_runtime_identity(
+        runtime="cython", python=sys.executable, repo_root=ROOT
+    )
+    assert identity["mode"] == "cython"
+    assert identity["measured"] is True
+    assert identity["executable"] == str(Path(sys.executable).resolve())
+    assert identity["python_version"]
+
+
+def test_producer_capture_measures_identity_before_opening_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+
+    def measure(**kwargs: object) -> dict:
+        calls.append(dict(kwargs))
+        raise producer.ScenarioRefusal("runtime identity could not be established")
+
+    monkeypatch.setattr(producer, "measure_runtime_identity", measure)
+    with pytest.raises(producer.ScenarioRefusal, match="identity could not be established"):
+        producer.capture_battle_scenario(**_capture_kwargs(tmp_path, _writable_scenario()))
+
+    assert calls and calls[0]["runtime"] == "source"
+    assert not (tmp_path / "out.state").exists()
+
+
+@pytest.mark.parametrize("value", [True, "1", 0, -5, math.inf, -math.inf, math.nan])
+def test_producer_refuses_a_malformed_verified_fixture_size(tmp_path: Path, value: object) -> None:
+    scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary"))
+    scenario["fixture"]["size_bytes"] = value
+    with pytest.raises(producer.ScenarioRefusal, match="size_bytes"):
+        producer.validate_scenario_metadata(scenario, "red_color_ordinary")
+
+    opened: list[dict] = []
+
+    def factory(**kwargs: object) -> _FakeSession:
+        opened.append(dict(kwargs))
+        return _FakeSession()
+
+    with pytest.raises(producer.ScenarioRefusal, match="size_bytes"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(tmp_path, scenario, session_factory=factory)
+        )
+    assert opened == []
+
+
+def test_producer_accepts_a_correct_integer_verified_fixture_size() -> None:
+    scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary"))
+    scenario["fixture"]["size_bytes"] = 200546
+    producer.validate_scenario_metadata(scenario, "red_color_ordinary")
+
+
+@pytest.mark.parametrize("mutation", ["inventory", "opponent", "prior_actions", "mons"])
+def test_producer_refuses_conditions_the_bounded_drive_cannot_observe(
+    tmp_path: Path, mutation: str
+) -> None:
+    scenario = _writable_scenario()
+    if mutation == "inventory":
+        scenario["inventory"] = [{"item": "POTION", "count": 1}]
+    elif mutation == "opponent":
+        scenario["opponent"] = {"name": "rival"}
+    elif mutation == "prior_actions":
+        scenario["required_prior_actions"] = ["defeat_rival"]
+    else:
+        scenario["party"]["mons"] = [{"species": "PIKACHU"}]
+    opened: list[dict] = []
+
+    def factory(**kwargs: object) -> _FakeSession:
+        opened.append(dict(kwargs))
+        return _FakeSession()
+
+    with pytest.raises(producer.CaptureNotAvailable, match="controlled ROM run"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(tmp_path, scenario, session_factory=factory)
+        )
+
+    assert opened == []
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_accepts_unspecified_conditions_and_empty_prior_actions(tmp_path: Path) -> None:
+    scenario = _writable_scenario()
+    assert scenario["inventory"] is None
+    assert scenario["opponent"] is None
+    assert scenario["required_prior_actions"] == []
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(tmp_path, scenario, session_factory=lambda **_kwargs: _FakeSession())
+    )
+    assert record["observed_boundary"]["map_id"] == 64
+
+
+def test_producer_capture_fails_when_teardown_fails(tmp_path: Path) -> None:
+    class _BadClose(_FakeSession):
+        def close(self) -> None:
+            raise RuntimeError("close exploded")
+
+    with pytest.raises(producer.ScenarioRefusal, match="teardown failed"):
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: _BadClose()
+            )
+        )
+
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_capture_keeps_the_primary_error_when_teardown_also_fails(
+    tmp_path: Path,
+) -> None:
+    class _InterruptedBadClose(_InterruptingSession):
+        def close(self) -> None:
+            raise RuntimeError("close exploded")
+
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                session_factory=lambda **_kwargs: _InterruptedBadClose(interrupt_after=10),
+            )
+        )
+
+    notes = getattr(excinfo.value, "__notes__", ())
+    assert any("close() also failed" in note for note in notes)
+    assert not (tmp_path / "out.state").exists()
+    assert _staged_files(tmp_path) == []
+
+
+def test_producer_accepts_an_unchanged_pinned_producer(tmp_path: Path) -> None:
+    scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary"))
+    target = tmp_path / scenario["provenance"]["producer"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"producer bytes")
+    scenario["provenance"]["producer_sha1"] = hashlib.sha1(b"producer bytes").hexdigest()
+
+    identity = producer.verify_declared_producer(scenario, "red_color_ordinary", tmp_path)
+
+    assert identity["kind"] == "repository"
+    assert identity["identity_verified"] is True
+    assert identity["observed_sha1"] == identity["declared_sha1"]
+
+
+def test_producer_refuses_a_changed_producer_that_breaks_its_pin(tmp_path: Path) -> None:
+    scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary"))
+    target = tmp_path / scenario["provenance"]["producer"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"original producer bytes")
+    scenario["provenance"]["producer_sha1"] = hashlib.sha1(b"original producer bytes").hexdigest()
+    target.write_bytes(b"changed producer bytes")
+
+    with pytest.raises(producer.ScenarioRefusal, match="changed producer"):
+        producer.verify_declared_producer(scenario, "red_color_ordinary", tmp_path)
+
+
+def test_producer_supports_an_external_verified_producer_pinned_by_digest(tmp_path: Path) -> None:
+    scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary"))
+    scenario["provenance"].update(
+        {
+            "producer": "Operator capture rig (out of tree)",
+            "producer_kind": "external",
+            "producer_sha1": "a" * 40,
+        }
+    )
+    identity = producer.verify_declared_producer(scenario, "red_color_ordinary", tmp_path)
+    assert identity["kind"] == "external"
+    assert identity["declared_sha1"] == "a" * 40
+    # An out-of-tree producer's bytes cannot be read here, so its identity stays
+    # pinned-but-unobserved rather than claimed as verified.
+    assert identity["identity_verified"] is False
+
+
+def test_producer_refuses_an_external_verified_producer_without_a_digest(tmp_path: Path) -> None:
+    scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary"))
+    scenario["provenance"].update(
+        {"producer": "Operator capture rig (out of tree)", "producer_kind": "external"}
+    )
+    with pytest.raises(producer.ScenarioRefusal, match="without pinning producer_sha1"):
+        producer.verify_declared_producer(scenario, "red_color_ordinary", tmp_path)
+
+
+def test_producer_refuses_a_derived_producer_claiming_verified_provenance(
+    tmp_path: Path,
+) -> None:
+    scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary"))
+    scenario["provenance"].update(
+        {"producer": "derive: transform an existing state", "producer_kind": "derived"}
+    )
+    with pytest.raises(producer.ScenarioRefusal, match="derived bytes must be declared as derived"):
+        producer.verify_declared_producer(scenario, "red_color_ordinary", tmp_path)
+
+
+def _verified_run_inputs(tmp_path: Path, *, payload: bytes = b"fake-bounded-capture-state") -> dict:
+    """Prepare a verified scenario whose pins match a ``_FakeSession`` payload."""
+    catalog = copy.deepcopy(_load_catalog())
+    scenario = _scenario(catalog, "red_color_ordinary")
+    scenario["fixture"].update(
+        {
+            "sha1": hashlib.sha1(payload).hexdigest(),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+        }
+    )
+    producer_file = tmp_path / scenario["provenance"]["producer"]
+    producer_file.parent.mkdir(parents=True, exist_ok=True)
+    producer_file.write_bytes(b"original producer bytes")
+    scenario["provenance"]["producer_sha1"] = hashlib.sha1(b"original producer bytes").hexdigest()
+    rom = tmp_path / "pokemon-red-color.gb"
+    sym = tmp_path / "pokemon-red.sym"
+    source = tmp_path / "source.state"
+    rom.write_bytes(b"temporary rom bytes")
+    sym.write_bytes(b"temporary sym bytes")
+    source.write_bytes(b"source-state-bytes")
+    scenario["game"]["rom_sha1"] = hashlib.sha1(rom.read_bytes()).hexdigest()
+    scenario["game"]["sym_sha1"] = hashlib.sha1(sym.read_bytes()).hexdigest()
+    return {
+        "catalog": catalog,
+        "scenario": scenario,
+        "producer_file": producer_file,
+        "rom": rom,
+        "sym": sym,
+        "input_fixture": source,
+        "pins": _FakePins(scenario["game"]["rom_sha1"], scenario["game"]["sym_sha1"]),
+    }
+
+
+def test_producer_run_accepts_a_verified_capture_with_a_pinned_producer(tmp_path: Path) -> None:
+    prepared = _verified_run_inputs(tmp_path)
+    output = tmp_path / "out.state"
+
+    plan = producer.run(
+        scenario_id="red_color_ordinary",
+        catalog=prepared["catalog"],
+        rom=prepared["rom"],
+        sym=prepared["sym"],
+        input_fixture=prepared["input_fixture"],
+        output=output,
+        repo_root=tmp_path,
+        pins=prepared["pins"],
+        capture=lambda **kwargs: producer.capture_battle_scenario(
+            **kwargs, session_factory=lambda **_kwargs: _FakeSession()
+        ),
+    )
+
+    assert plan["producer_identity"]["identity_verified"] is True
+    assert plan["capture"]["reproduction"]["matches"] is True
+    assert output.read_bytes() == b"fake-bounded-capture-state"
+
+
+def test_producer_run_refuses_a_changed_producer_for_a_verified_entry(tmp_path: Path) -> None:
+    prepared = _verified_run_inputs(tmp_path)
+    prepared["producer_file"].write_bytes(b"changed producer bytes")
+
+    with pytest.raises(producer.ScenarioRefusal, match="changed producer"):
+        producer.run(
+            scenario_id="red_color_ordinary",
+            catalog=prepared["catalog"],
+            rom=prepared["rom"],
+            sym=prepared["sym"],
+            input_fixture=prepared["input_fixture"],
+            output=tmp_path / "out.state",
+            repo_root=tmp_path,
+            pins=prepared["pins"],
+            capture=lambda **_kwargs: pytest.fail("capture must not run"),
+        )
+
+    assert not (tmp_path / "out.state").exists()
+
+
+def test_producer_run_refuses_a_verified_producer_absent_from_the_tree(tmp_path: Path) -> None:
+    prepared = _verified_run_inputs(tmp_path)
+    prepared["producer_file"].unlink()
+
+    with pytest.raises(producer.ScenarioRefusal, match="cannot be reproduced from this tree"):
+        producer.run(
+            scenario_id="red_color_ordinary",
+            catalog=prepared["catalog"],
+            rom=prepared["rom"],
+            sym=prepared["sym"],
+            input_fixture=prepared["input_fixture"],
+            output=tmp_path / "out.state",
+            repo_root=tmp_path,
+            pins=prepared["pins"],
+            capture=lambda **_kwargs: pytest.fail("capture must not run"),
+        )
+
+    assert not (tmp_path / "out.state").exists()
 
 
 def test_producer_capture_aborts_before_exceeding_the_frame_budget(tmp_path: Path) -> None:
@@ -674,12 +1265,14 @@ def test_producer_run_merges_the_capture_record_into_the_report(tmp_path: Path) 
         ),
     )
 
-    assert plan["capture"]["inputs_used"] == 10
+    assert plan["capture"]["inputs_used"] == 13
     assert output.read_bytes() == session.payload
     assert plan["declared_producer"] == "scripts/produce_cable_club_fixture.py"
     assert (
-        plan["declared_producer_sha1"] == hashlib.sha1(declared_producer.read_bytes()).hexdigest()
+        plan["producer_identity"]["observed_sha1"]
+        == hashlib.sha1(declared_producer.read_bytes()).hexdigest()
     )
+    assert plan["producer_identity"]["identity_verified"] is False
     written = json.loads(report.read_text(encoding="utf-8"))
     assert written["capture"]["output"]["sha1"] == hashlib.sha1(session.payload).hexdigest()
     assert written["capture"]["producer"] == "scripts/produce_battle_scenario.py"
@@ -957,18 +1550,24 @@ def test_producer_refuses_verified_provenance_without_pinned_fixture_bytes(
         scenario["fixture"][field] = None
         with pytest.raises(producer.ScenarioRefusal, match=f"does not declare {field}"):
             producer.validate_scenario_metadata(scenario, "red_color_ordinary")
+
+        opened: list[dict] = []
+
+        def factory(_opened: list = opened, **kwargs: object) -> _FakeSession:
+            _opened.append(dict(kwargs))
+            return _FakeSession()
+
         with pytest.raises(producer.ScenarioRefusal, match=f"does not declare {field}"):
             producer.capture_battle_scenario(
-                **_capture_kwargs(
-                    tmp_path, scenario, session_factory=lambda **_kwargs: _FakeSession()
-                )
+                **_capture_kwargs(tmp_path, scenario, session_factory=factory)
             )
+        assert opened == []
     assert not (tmp_path / "out.state").exists()
     assert _staged_files(tmp_path) == []
 
 
 def test_producer_refuses_a_named_producer_absent_from_the_tree(tmp_path: Path) -> None:
-    """A changed or removed producer leaves a verified lineage that cannot be replayed."""
+    """A removed producer leaves a verified lineage that cannot be replayed."""
     scenario = copy.deepcopy(_scenario(_load_catalog(), "red_color_ordinary"))
     with pytest.raises(producer.ScenarioRefusal, match="cannot be reproduced from this tree"):
         producer.verify_declared_producer(scenario, "red_color_ordinary", tmp_path)
@@ -976,8 +1575,12 @@ def test_producer_refuses_a_named_producer_absent_from_the_tree(tmp_path: Path) 
     target = tmp_path / scenario["provenance"]["producer"]
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"changed producer bytes")
-    digest = producer.verify_declared_producer(scenario, "red_color_ordinary", tmp_path)
-    assert digest == hashlib.sha1(b"changed producer bytes").hexdigest()
+    identity = producer.verify_declared_producer(scenario, "red_color_ordinary", tmp_path)
+    # An unpinned producer is fingerprinted, but its identity stays unqualified:
+    # the digest is recorded as observed, never as a verified historical pin.
+    assert identity["observed_sha1"] == hashlib.sha1(b"changed producer bytes").hexdigest()
+    assert identity["declared_sha1"] is None
+    assert identity["identity_verified"] is False
 
 
 def test_producer_refuses_verified_provenance_without_a_named_producer(tmp_path: Path) -> None:
@@ -1013,7 +1616,7 @@ def test_producer_refuses_a_capture_record_missing_its_identity() -> None:
         "runtime": "source",
         "role": "listen",
         "captured_at_utc": "2026-09-21T00:00:00+00:00",
-        "wall_seconds": 1.5,
+        "wall_seconds": 0.5,
         "declared_bounds": {"max_frames": 1, "max_wall_seconds": 1.0, "max_inputs": 1},
         "inputs_used": 1,
         "frames_used": 1,

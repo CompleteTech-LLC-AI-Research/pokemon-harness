@@ -9,29 +9,42 @@ inconsistent requests *before* touching the emulator:
   reported as ``BLOCKED``, never as a passing skip);
 * a ROM or symbol file that is not pinned in ``VERSIONS.md`` is refused;
 * an ``--input-fixture`` whose SHA-1 disagrees with the declared input is refused;
-* an existing ``--output`` is never overwritten;
-* non-finite or non-positive bounds are refused.
+* an existing ``--output`` is never overwritten, and ``--report`` may not alias
+  the output or any input file;
+* non-finite or non-positive bounds are refused, including the effective bounds
+  a caller supplies directly instead of taking the declared ones.
 
 The capture path itself is bounded and fail-closed:
 
 * it drives the pinned ROM with an explicit, replayable input sequence and no
   runtime RAM, party, PP, RNG, or serial mutation;
 * it enforces the declared ``max_frames``, ``max_wall_seconds``, and
-  ``max_inputs`` bounds and aborts as soon as any of them would be exceeded;
-* it asserts the declared ``capture_boundary`` (map, link state, and any declared
-  party shape) *before* anything is written;
+  ``max_inputs`` bounds and aborts as soon as any of them would be exceeded,
+  including when a slow step crosses the wall-clock deadline before publication;
+* it asserts the declared ``capture_boundary`` (map, the link-receptionist tile,
+  link state, and any declared party shape) *before* anything is written;
+* it measures the executing runtime and refuses a requested runtime or named
+  interpreter the process does not actually provide;
 * it writes the state file with ``O_EXCL`` so an existing fixture can never be
-  overwritten, and it leaves no partial file behind when capture fails;
- * it records a private report with the replayable input history, the producer and
-   runtime identities, the asset/output hashes, and the reproduction comparison
-   against the pinned fixture hashes;
+  overwritten, removes its own publication if a later step fails, and leaves no
+  partial file behind when capture fails;
+* it records a private report with the replayable input history, the measured
+  runtime identity, the producer and declared-producer identities, the
+  asset/output hashes, and the reproduction comparison against the pinned fixture
+  hashes;
 * it refuses incomplete or unverifiable declared metadata — a missing capture
   boundary or bounds block, a non-integer map, a link-state label with no verified
-  encoding, a producer-named verified entry whose producer no longer exists, or a
+  encoding, a non-positive or non-integer verified fixture size, a verified entry
+  whose producer is absent or whose declared producer digest disagrees, or a
   verified entry with no pinned fixture hashes — before the emulator is opened;
-* it validates the capture record it is about to record and admits only records
-  that carry the producer, asset, boundary, and output identities;
-* an interruption publishes nothing, leaves no staged file, and still closes the
+* it refuses a declared inventory, opponent, prior-action, or per-mon party
+  precondition this bounded drive cannot observe, instead of recording an
+  unchecked capture;
+* it validates the capture record it is about to return and admits only records
+  that carry the producer, asset, boundary, and output identities within the
+  effective bounds;
+* a cleanup failure fails the capture and prevents publication, and an
+  interruption publishes nothing, leaves no staged file, and still closes the
   emulator session.
 
 Callers still capture real fixtures from legal ROM/SYM inputs; the recorded
@@ -81,6 +94,13 @@ _LINK_STATE_CODES = {"disconnected": 0}
 # Provenance statuses the catalog may declare.  Anything else is refused rather
 # than copied into a record a consumer might read as an admission.
 _PROVENANCE_STATUSES = ("verified", "partial", "derived", "unknown")
+# How a declared fixture producer is located.  ``repository`` names a tracked
+# script whose bytes can be re-read here; ``external`` names an operator- or
+# out-of-tree producer whose identity can only be pinned by digest; ``derived``
+# names a transformation whose identity is not a single readable file.
+_PRODUCER_KINDS = ("repository", "external", "derived")
+# The runtime modes the harness builds and can therefore claim to have measured.
+_RUNTIME_MODES = ("source", "cython")
 # Fixture fields a "verified" entry must pin before its bytes may be compared.
 _PINNED_FIXTURE_FIELDS = ("sha1", "sha256", "size_bytes")
 # Fields every admitted capture record must carry; a record missing one of them
@@ -158,13 +178,27 @@ class _CaptureBudget:
     """
 
     def __init__(self, bounds: dict[str, Any], *, clock: Callable[[], float]) -> None:
-        self._max_frames = bounds["max_frames"]
-        self._max_inputs = bounds["max_inputs"]
+        if not isinstance(bounds, dict):
+            raise ScenarioRefusal("capture bounds must be a declared object")
+        # The effective bounds are validated here, not merely the scenario's:
+        # a caller that overrides the declared bounds must not be able to disable
+        # the deadline with a non-finite value.
+        self.bounds = validate_bounds(
+            max_frames=bounds.get("max_frames"),
+            max_wall_seconds=bounds.get("max_wall_seconds"),
+            max_inputs=bounds.get("max_inputs"),
+        )
+        self._max_frames = self.bounds["max_frames"]
+        self._max_inputs = self.bounds["max_inputs"]
         self._clock = clock
-        self._deadline = clock() + float(bounds["max_wall_seconds"])
+        self._deadline = clock() + self.bounds["max_wall_seconds"]
         self.frames = 0
         self.inputs = 0
         self.history: list[_InputStep] = []
+
+    def check_wall(self, phase: str) -> None:
+        """Refuse when the wall-clock deadline has already passed."""
+        self._check_wall(phase)
 
     def _check_wall(self, phase: str) -> None:
         if self._clock() >= self._deadline:
@@ -208,6 +242,9 @@ class _CaptureBudget:
         step = _InputStep(button, duration, frames)
         self._reserve_frames(step.emulated_frames)
         session.press(button, duration=duration)
+        # A press schedules the release; the advance is what must remain inside
+        # the deadline, so re-check after a potentially slow ``press`` call.
+        self._check_wall("input advance")
         session.step(frames)
         self.inputs += 1
         self.history.append(step)
@@ -217,6 +254,13 @@ class _CaptureBudget:
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ScenarioRefusal(message)
+
+
+def _note(exception: BaseException, message: str) -> None:
+    """Attach supplementary evidence to an exception when the runtime supports it."""
+    add_note = getattr(exception, "add_note", None)
+    if add_note is not None:
+        add_note(message)
 
 
 def load_catalog(path: str | Path) -> dict[str, Any]:
@@ -363,6 +407,10 @@ def validate_scenario_metadata(scenario: dict[str, Any], scenario_id: str) -> No
             raise ScenarioRefusal(
                 f"scenario {scenario_id!r} declares malformed fixture sha1/sha256 digests"
             )
+        # ``size_bytes`` is compared against the produced length, so a boolean or
+        # numeric-string value (``True == 1``) could admit a one-byte file as a
+        # verified reproduction.  Require a real positive integer.
+        _positive_int(fixture.get("size_bytes"), f"scenario {scenario_id!r} fixture.size_bytes")
 
     boundary = scenario.get("capture_boundary")
     if not isinstance(boundary, dict):
@@ -444,42 +492,98 @@ def sha1_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _repository_producer_locator(label: str) -> bool:
+    """Return whether a producer locator names a readable in-tree script path."""
+    if " " in label or not label.endswith(".py"):
+        return False
+    path = Path(label)
+    return not path.is_absolute() and ".." not in path.parts
+
+
 def verify_declared_producer(
     scenario: dict[str, Any],
     scenario_id: str,
     repo_root: str | Path,
-) -> str | None:
-    """Identify the producer named by the declared provenance, or refuse.
+) -> dict[str, Any]:
+    """Resolve the declared producer identity, refusing what cannot be verified.
 
-    A verified entry must name the producer that generated its pinned bytes, and
-    that producer must still be readable in the tree.  A changed, removed, or
-    unspecified producer would leave a "verified" fixture whose lineage can no
-    longer be reproduced, so it is refused instead of being recorded as if the
-    lineage were intact.  Non-path prose (used by derived transformations) is
-    recorded as-is with no digest.
+    A fixture's identity has three parts: the declared locator, its kind, and
+    the digest actually observed here.  A declaration that pins an expected
+    ``producer_sha1`` is compared against the observed bytes, so a changed or
+    substituted producer is refused instead of being fingerprinted and accepted.
+    A verified entry with no pinned digest is recorded with its identity
+    explicitly unqualified rather than described as verified lineage, and its
+    repository producer must still be readable so the capture can be replayed.
+    ``partial``/``derived``/``unknown`` entries may name an external or operator
+    producer that need not exist in this tree.
     """
     provenance = scenario["provenance"]
+    status = provenance.get("status")
     named = provenance.get("producer")
+    declared_sha1 = provenance.get("producer_sha1")
+    if declared_sha1 is not None and not _is_digest(declared_sha1, 40):
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} declares a malformed producer_sha1 "
+            f"{declared_sha1!r}; expected a 40-character lowercase hex digest"
+        )
+    identity: dict[str, Any] = {
+        "locator": None,
+        "kind": None,
+        "declared_sha1": declared_sha1,
+        "observed_sha1": None,
+        "identity_verified": False,
+    }
     if named is None:
-        if provenance.get("status") == "verified":
+        if status == "verified":
             raise ScenarioRefusal(
                 f"scenario {scenario_id!r} claims verified provenance but names no producer"
             )
-        return None
+        return identity
     if not isinstance(named, str) or not named.strip():
         raise ScenarioRefusal(
             f"scenario {scenario_id!r} declares a non-textual provenance producer: {named!r}"
         )
     label = named.strip()
-    if not label.endswith(".py") or " " in label:
-        return None
-    target = Path(repo_root) / label
-    if not target.is_file():
+    declared_kind = provenance.get("producer_kind")
+    if declared_kind is None:
+        declared_kind = "repository" if _repository_producer_locator(label) else "derived"
+    if declared_kind not in _PRODUCER_KINDS:
         raise ScenarioRefusal(
-            f"scenario {scenario_id!r} names producer {label!r}, which is not present at "
-            f"{target}; the declared lineage cannot be reproduced from this tree"
+            f"scenario {scenario_id!r} declares producer_kind {declared_kind!r}, which is not "
+            f"one of {list(_PRODUCER_KINDS)}"
         )
-    return sha1_file(target)
+    identity["locator"] = label
+    identity["kind"] = declared_kind
+    if declared_kind == "repository":
+        target = Path(repo_root) / label
+        if target.is_file():
+            identity["observed_sha1"] = sha1_file(target)
+        elif status == "verified":
+            raise ScenarioRefusal(
+                f"scenario {scenario_id!r} names producer {label!r}, which is not present at "
+                f"{target}; the declared lineage cannot be reproduced from this tree"
+            )
+    if status == "verified":
+        if declared_kind == "derived":
+            raise ScenarioRefusal(
+                f"scenario {scenario_id!r} claims verified provenance from a derived "
+                f"transformation {label!r}; derived bytes must be declared as derived provenance"
+            )
+        if declared_kind == "external" and declared_sha1 is None:
+            raise ScenarioRefusal(
+                f"scenario {scenario_id!r} claims verified provenance from an external producer "
+                f"{label!r} without pinning producer_sha1; the identity cannot be verified here"
+            )
+    observed = identity["observed_sha1"]
+    if declared_sha1 is not None and observed is not None and observed != declared_sha1:
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} declares producer_sha1 {declared_sha1} but {label!r} "
+            f"hashes to {observed}; a changed producer cannot back a verified fixture"
+        )
+    identity["identity_verified"] = (
+        status == "verified" and declared_sha1 is not None and observed == declared_sha1
+    )
+    return identity
 
 
 def validate_capture_record(record: Any, scenario_id: str) -> None:
@@ -554,6 +658,42 @@ def validate_capture_record(record: Any, scenario_id: str) -> None:
         or float(wall_seconds) < 0
     ):
         raise ScenarioRefusal(f"capture record for {scenario_id!r} does not record wall_seconds")
+    declared_bounds = record.get("declared_bounds")
+    if not isinstance(declared_bounds, dict):
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} does not record the effective bounds"
+        )
+    try:
+        effective = validate_bounds(
+            max_frames=declared_bounds.get("max_frames"),
+            max_wall_seconds=declared_bounds.get("max_wall_seconds"),
+            max_inputs=declared_bounds.get("max_inputs"),
+        )
+    except ScenarioRefusal as exc:
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} records invalid effective bounds: {exc}"
+        ) from exc
+    for field, limit in (("frames_used", "max_frames"), ("inputs_used", "max_inputs")):
+        if record[field] > effective[limit]:
+            raise ScenarioRefusal(
+                f"capture record for {scenario_id!r} records {field}={record[field]}, which "
+                f"exceeds the effective {limit}={effective[limit]}"
+            )
+    if float(wall_seconds) > effective["max_wall_seconds"]:
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} records wall_seconds={wall_seconds}, which "
+            f"exceeds the effective max_wall_seconds={effective['max_wall_seconds']}"
+        )
+    runtime_identity = record.get("runtime_identity")
+    if runtime_identity is not None and (
+        not isinstance(runtime_identity, dict)
+        or runtime_identity.get("mode") not in _RUNTIME_MODES
+        or not isinstance(runtime_identity.get("executable"), str)
+        or not runtime_identity["executable"].strip()
+    ):
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} records an unmeasurable runtime identity"
+        )
 
 
 def verify_input_fixture(path: str | Path, expected_sha1: str | None) -> str:
@@ -593,10 +733,46 @@ def resolve_role(scenario: dict[str, Any], scenario_id: str, role: str | None) -
 
 
 def write_report(path: str | Path, payload: Any) -> None:
-    """Write a private capture/replay report; never called for the stub path."""
+    """Write a private capture/replay report atomically.
+
+    The report is staged in a private sibling and moved into place, so a failed
+    or partial write never replaces an existing report and never leaves a
+    partial file behind.
+    """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    staged = target.with_name(f".{target.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
+    try:
+        descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staged, target)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(staged)
+
+
+def refuse_report_alias(report: str | Path, *protected: str | Path | None) -> None:
+    """Refuse a report path that resolves to an input or to the output fixture."""
+    report_path = Path(report)
+    report_resolved = report_path.resolve(strict=False)
+    for other in protected:
+        if other is None:
+            continue
+        other_path = Path(other)
+        alias = report_resolved == other_path.resolve(strict=False)
+        if not alias and report_path.exists() and other_path.exists():
+            try:
+                alias = os.path.samefile(report_path, other_path)
+            except OSError:  # pragma: no cover - a racing removal is not an alias
+                alias = False
+        if alias:
+            raise ScenarioRefusal(
+                f"refusing to write the report to {report_path}, which is the same file as "
+                f"{other_path}; the report must not overwrite an input or the output fixture"
+            )
 
 
 def _symbol_byte(session: Any, name: str) -> int:
@@ -640,6 +816,15 @@ def _assert_boundary(scenario: dict[str, Any], observed: dict[str, Any], scenari
             f"scenario {scenario_id!r} declares map_id {boundary['map_id']}, "
             f"observed {observed['map_id']}"
         )
+    if (boundary["stage"], boundary["when"]) == _SUPPORTED_BOUNDARY and (
+        observed["x"],
+        observed["y"],
+    ) != _LINK_RECEPTION_TILE:
+        raise CapturePreconditionFailed(
+            f"scenario {scenario_id!r} declares the link-reception pre-command boundary, but the "
+            f"observed position ({observed['x']}, {observed['y']}) is not the link receptionist "
+            f"tile {_LINK_RECEPTION_TILE}"
+        )
     label = boundary["link_state"]
     if label not in _LINK_STATE_CODES:
         raise ScenarioRefusal(
@@ -664,10 +849,45 @@ def _assert_boundary(scenario: dict[str, Any], observed: dict[str, Any], scenari
             f"scenario {scenario_id!r} declares party.active_slot {party['active_slot']}, "
             f"observed {observed['active_slot']}"
         )
+
+
+def _assert_supported_conditions(scenario: dict[str, Any], scenario_id: str) -> None:
+    """Refuse declared preconditions this bounded drive cannot observe.
+
+    Silently driving past a declared inventory, opponent, prior action, or
+    per-mon party condition would publish a fixture whose declared
+    preconditions were never checked.  ``null``/``[]`` declarations assert
+    nothing here and are accepted; anything else is refused before the session
+    is opened.
+    """
+    if scenario.get("inventory") is not None:
+        raise CaptureNotAvailable(
+            f"{_CAPTURE_MESSAGE} Scenario {scenario_id!r} declares an inventory precondition "
+            "that this bounded drive does not observe; capture it with a producer that asserts "
+            "the declared bag, or declare the inventory as null."
+        )
+    if scenario.get("opponent") is not None:
+        raise CaptureNotAvailable(
+            f"{_CAPTURE_MESSAGE} Scenario {scenario_id!r} declares an opponent precondition "
+            "that this bounded drive does not observe; capture it with a producer that asserts "
+            "the declared opponent, or declare the opponent as null."
+        )
+    prior_actions = scenario.get("required_prior_actions")
+    if not isinstance(prior_actions, list):
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} must declare required_prior_actions as a list"
+        )
+    if prior_actions:
+        raise CaptureNotAvailable(
+            f"{_CAPTURE_MESSAGE} Scenario {scenario_id!r} declares required prior actions that "
+            "this bounded drive does not replay; capture it with a producer that performs and "
+            "records them, or declare an empty list."
+        )
+    party = scenario.get("party") or {}
     if party.get("mons"):
-        raise CapturePreconditionFailed(
-            f"scenario {scenario_id!r} declares per-mon party contents, which this "
-            "bounded drive does not assert; refusing to record an unchecked capture"
+        raise CaptureNotAvailable(
+            f"{_CAPTURE_MESSAGE} Scenario {scenario_id!r} declares per-mon party contents, "
+            "which this bounded drive does not assert; refusing to record an unchecked capture."
         )
 
 
@@ -690,9 +910,11 @@ def _drive_to_link_reception(session: Any, budget: _CaptureBudget) -> None:
             session, "right", duration=_DEFAULT_PRESS_DURATION, frames=_DEFAULT_STEP_FRAMES
         )
     budget.press(session, "up", duration=_DEFAULT_PRESS_DURATION, frames=30)
-    if session.read_game_state().overworld.x != _LINK_RECEPTION_TILE[0]:
+    position = session.read_game_state().overworld
+    if (position.x, position.y) != _LINK_RECEPTION_TILE:
         raise CapturePreconditionFailed(
-            "the bounded drive did not reach the link receptionist column"
+            f"the bounded drive ended at ({position.x}, {position.y}), not the link "
+            f"receptionist tile {_LINK_RECEPTION_TILE}"
         )
 
 
@@ -705,7 +927,12 @@ def _default_session_factory(
     python: str | Path | None,
     plan: dict[str, Any],
 ) -> Any:
-    """Open the pinned PyBoy session, or refuse when none can be established."""
+    """Open the pinned PyBoy session, or refuse when none can be established.
+
+    ``runtime`` and ``python`` are not consumed here: the caller measures the
+    executing runtime and refuses a mismatch before this factory runs, so the
+    requested labels can never be recorded as if they had been observed.
+    """
     del runtime, python, plan
     try:
         from pokered_harness.config import load_versions
@@ -723,6 +950,61 @@ def _default_session_factory(
         expected_pyboy_version=pins.pyboy_version,
         expected_pyboy_revision=pins.pyboy_revision,
     )
+
+
+def _pyboy_cython_flag() -> bool:
+    """Return the executing PyBoy's compiled-extension flag."""
+    import pyboy.utils
+
+    return bool(getattr(pyboy.utils, "cython_compiled", False))
+
+
+def measure_runtime_identity(
+    *,
+    runtime: str,
+    python: str | Path | None,
+    repo_root: str | Path,
+) -> dict[str, Any]:
+    """Measure the executing runtime and enforce the requested labels.
+
+    A caller's ``runtime``/``python`` arguments are requests, not evidence.  The
+    mode is read from the imported PyBoy build and the interpreter from the
+    running process, and a request that disagrees is refused instead of being
+    copied into a record as if it had been observed.
+    """
+    if runtime not in _RUNTIME_MODES:
+        raise ScenarioRefusal(f"runtime must be one of {list(_RUNTIME_MODES)}, got {runtime!r}")
+    try:
+        compiled = _pyboy_cython_flag()
+    except ImportError as exc:
+        raise CaptureNotAvailable(
+            f"{_CAPTURE_MESSAGE} The pinned PyBoy runtime is not importable: {exc}"
+        ) from exc
+    mode = "cython" if compiled else "source"
+    if runtime != mode:
+        raise ScenarioRefusal(
+            f"requested runtime {runtime!r} but the executing PyBoy reports {mode!r}; refusing "
+            "to record a runtime this process does not provide"
+        )
+    executable = str(Path(sys.executable).resolve())
+    if python is not None:
+        requested = str(Path(python).resolve(strict=False))
+        if requested != executable:
+            raise ScenarioRefusal(
+                f"requested interpreter {python} is not the executing interpreter {executable}; "
+                "refusing to record an interpreter this process does not run"
+            )
+    from pokered_harness.config import load_versions
+
+    pins = load_versions(Path(repo_root) / "VERSIONS.md")
+    return {
+        "mode": mode,
+        "executable": executable,
+        "python_version": sys.version.split()[0],
+        "pyboy_version": pins.pyboy_version,
+        "pyboy_revision": pins.pyboy_revision,
+        "measured": True,
+    }
 
 
 def _producer_revision(repo_root: str | Path) -> str | None:
@@ -749,7 +1031,12 @@ def _write_fixture_exclusive(output: Path, payload: bytes) -> None:
 
     The payload is staged in a private sibling and published with ``os.link``,
     which fails if the destination already exists.  The staged file is removed
-    on every exit path, so a failed capture leaves nothing behind.
+    on every exit path.  If the destination is now the very same file this
+    capture just staged, it is removed as well — including when the interrupt
+    arrives *inside* ``os.link`` after the directory entry already exists.  The
+    test is inode identity rather than a success flag, so a failed capture
+    leaves nothing behind while a pre-existing or competing writer's file is
+    never deleted.
     """
     output.parent.mkdir(parents=True, exist_ok=True)
     staged = output.with_name(f".{output.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
@@ -763,6 +1050,11 @@ def _write_fixture_exclusive(output: Path, payload: bytes) -> None:
             os.link(staged, output)
         except FileExistsError as exc:
             raise ScenarioRefusal(f"refusing to overwrite existing output: {output}") from exc
+    except BaseException:
+        with contextlib.suppress(OSError):
+            if os.path.samestat(os.stat(staged), os.stat(output)):
+                os.unlink(output)
+        raise
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(staged)
@@ -802,6 +1094,7 @@ def capture_battle_scenario(
             f"requires the controlled linked run produced by {producer}; a single-console "
             "bounded drive cannot establish it."
         )
+    _assert_supported_conditions(scenario, scenario_id)
     if input_fixture is None:
         raise ScenarioRefusal(
             "capture requires a source state; pass --input-fixture (the documented "
@@ -809,10 +1102,17 @@ def capture_battle_scenario(
         )
 
     factory = session_factory or _default_session_factory
+    if session_factory is None and isinstance(plan, dict):
+        # Measure and enforce the executing identity *before* the emulator opens,
+        # so a requested runtime or interpreter is never recorded as observed.
+        plan["runtime_identity"] = measure_runtime_identity(
+            runtime=runtime, python=python, repo_root=repo_root
+        )
     output_path = Path(output)
     started = clock()
     budget = _CaptureBudget(bounds, clock=clock)
     session: Any | None = None
+    failure: BaseException | None = None
     try:
         try:
             session = factory(
@@ -832,19 +1132,45 @@ def capture_battle_scenario(
         session.load_state(Path(input_fixture).read_bytes())
         _drive_to_link_reception(session, budget)
         observed = _observe_boundary(session)
+        budget.check_wall("boundary observation")
         _assert_boundary(scenario, observed, scenario_id)
+        budget.check_wall("state save")
         payload = session.save_state()
-    except (CaptureNotAvailable, ScenarioRefusal):
+        budget.check_wall("state save")
+    except (CaptureNotAvailable, ScenarioRefusal) as exc:
+        failure = exc
         raise
     except Exception as exc:  # fail closed: never publish bytes on an error
-        raise ScenarioRefusal(
+        refusal = ScenarioRefusal(
             f"bounded capture aborted before writing ({type(exc).__name__}): {exc}"
-        ) from exc
+        )
+        failure = refusal
+        raise refusal from exc
+    except BaseException as exc:  # an interrupt still owns a session to close
+        failure = exc
+        raise
     finally:
         if session is not None:
-            with contextlib.suppress(Exception):
+            try:
                 session.close()
+            except Exception as close_exc:
+                if failure is None:
+                    # An otherwise successful capture whose teardown failed has
+                    # not established bounded cleanup, so it must not publish.
+                    raise ScenarioRefusal(
+                        f"capture teardown failed for {scenario_id!r} and the owned session was "
+                        f"not closed; no bytes were written: {close_exc}"
+                    ) from close_exc
+                _note(failure, f"session.close() also failed: {close_exc!r}")
 
+    wall_seconds = round(clock() - started, 6)
+    effective_bounds = budget.bounds
+    if wall_seconds > effective_bounds["max_wall_seconds"]:
+        raise CaptureBoundsExceeded(
+            f"capture exceeded max_wall_seconds ({effective_bounds['max_wall_seconds']}) before "
+            f"publishing; observed {wall_seconds}s"
+        )
+    runtime_identity = plan.get("runtime_identity") if isinstance(plan, dict) else None
     declared = scenario.get("fixture") or {}
     digest_sha1 = hashlib.sha1(payload).hexdigest()
     digest_sha256 = hashlib.sha256(payload).hexdigest()
@@ -865,12 +1191,14 @@ def capture_battle_scenario(
         "producer": _CAPTURE_PRODUCER,
         "producer_sha1": sha1_file(Path(__file__)),
         "producer_revision": _producer_revision(repo_root),
-        "runtime": runtime,
+        "runtime": runtime_identity["mode"] if runtime_identity else runtime,
+        "runtime_identity": runtime_identity,
         "python": str(python) if python is not None else None,
         "role": role,
         "captured_at_utc": datetime.now(UTC).isoformat(),
-        "wall_seconds": round(clock() - started, 6),
-        "declared_bounds": bounds,
+        "wall_seconds": wall_seconds,
+        "declared_bounds": effective_bounds,
+        "declared_producer": plan.get("producer_identity") if isinstance(plan, dict) else None,
         "inputs_used": budget.inputs,
         "frames_used": budget.frames,
         "input_sequence": [step.render() for step in budget.history],
@@ -927,6 +1255,8 @@ def run(
         ),
         max_inputs=declared["max_inputs"] if max_inputs is None else max_inputs,
     )
+    if report is not None:
+        refuse_report_alias(report, output, rom, sym, input_fixture)
     ensure_output_available(output)
     if pins is None:
         from pokered_harness.config import load_versions
@@ -939,7 +1269,7 @@ def run(
     declared_input_sha1 = provenance.get("input_fixture_sha1")
     if provenance.get("source_fixture_id") is not None and input_fixture is None:
         raise ScenarioRefusal("scenario declares a source fixture; an input fixture is required")
-    declared_producer_sha1 = verify_declared_producer(scenario, scenario_id, repo_root)
+    producer_identity = verify_declared_producer(scenario, scenario_id, repo_root)
     input_sha1: str | None = None
     if input_fixture is not None:
         input_sha1 = verify_input_fixture(input_fixture, declared_input_sha1)
@@ -952,7 +1282,7 @@ def run(
         "sym_sha1": sym_pin,
         "input_fixture_sha1": input_sha1,
         "declared_producer": provenance.get("producer"),
-        "declared_producer_sha1": declared_producer_sha1,
+        "producer_identity": producer_identity,
         "capture_bounds": bounds,
         "output": str(output),
     }
@@ -973,7 +1303,14 @@ def run(
     if isinstance(capture_record, dict):
         plan = {**plan, "capture": capture_record}
     if report is not None:
-        write_report(report, plan)
+        try:
+            write_report(report, plan)
+        except BaseException:
+            # A requested report that could not be written must not leave the
+            # fixture behind as if the capture had been fully recorded.
+            with contextlib.suppress(OSError):
+                Path(output).unlink()
+            raise
     return plan
 
 
