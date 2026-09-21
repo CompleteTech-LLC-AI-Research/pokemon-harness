@@ -153,16 +153,35 @@ digest list is in `trade-evidence.json` under `assets[]`, each entry carrying `k
 
 ## Reproducing
 
-These runs require operator-supplied ROMs and fixtures that cannot be distributed. With those
-roots in place the matrix is driven by, from a clean checkout at the reviewed head:
+These runs require operator-supplied ROMs, symbol tables and link fixtures that cannot be
+distributed. The repository's own entry point is the tracked test module, so with the operator
+roots exported any single declared row runs directly from a clean checkout at the reviewed head:
 
 ```sh
-# worktree path and branch were declared before creation, per repo workspace policy
-bash run_pr118_realrom.sh source cython     # PR118_PARALLEL=<n>
-python3 summarize_matrix.py                 # rewrites matrix-summary.json
-python3 build_evidence.py <outdir>          # regenerates this bundle
-python3 verify_evidence_bundle.py <outdir>  # independent re-derivation
+# ROMs: POKERED_ROM_ROOT/<family>/{pokemon-red.gb,pokemon-blue.gb,pokemon-yellow.gbc} + .sym
+# link fixtures: POKERED_FIXTURE_ROOT/<family>/cable_club.state
+# both default to <worktree>/rom and <worktree>/tests/fixtures/link when unset
+export POKERED_ROM_ROOT=/path/to/rom
+export POKERED_FIXTURE_ROOT=/path/to/link-fixtures
+
+# source runtime, one row (the gate's source switch is PYBOY_NO_CYTHON=1):
+PYBOY_NO_CYTHON=1 python -m pytest -q \
+  'tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-blue_color]'
+
+# cython/native runtime, the same row (leave PYBOY_NO_CYTHON unset):
+python -m pytest -q \
+  'tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-blue_color]'
 ```
+
+The 48-row matrix is those node ids across both runtimes, driven in parallel with a low-load
+serial re-run for rows that lose the host-contention race. That driver, the summary script, the
+bundle builder (`build_evidence.py`), the report generator (`make_pr105_report.py`) and the
+verifier (`verify_evidence_bundle.py`) were operator-side orchestration helpers: they are not
+part of this repository and are not distributed with it. This bundle is their output, and it is
+complete enough to audit from the bundle alone - the per-row JUnit XML and captured logs are
+committed here, `pr105-report.json`/`.md` carry the per-row digests and attempt binding, and
+`trade-evidence.json` carries the asset digests, the decision provenance and the merged-commit
+transfer.
 
 Guardrails honoured by this lane: `POKERED_SKIP_SHA1` was never set, and no bound, tolerance,
 skip or xfail was changed to obtain a green row.

@@ -1,14 +1,17 @@
 {
   "tool": "make_pr105_report.py",
-  "generated": "2026-09-21T12:09:00+00:00",
+  "generated": "2026-09-21T13:48:35+00:00",
   "rootdir": "<matrix-root>",
   "evidence_dir": "<evidence-root>",
+  "identity_note": "junit_sha256/junit_bytes and log_sha256/log_bytes are the sha256 and size of the committed files in this bundle (the sanitized copies). raw_log_sha256/raw_log_bytes are the pre-sanitization runner log, whose bytes differ wherever an absolute root was replaced by a bracket placeholder. JUnit XML carries no absolute root, so its raw and committed bytes are identical.",
+  "attempt_binding_note": "started/ended/secs belong to the single attempt that decides each row (the last END record). A row whose deciding END carries the serial discriminator's marker is bound to the serial attempt's own START/END; attempts_recorded counts every END record for the label in rows.log.",
   "verdict": "PASS",
   "rows_expected": 48,
   "rows_pass": 48,
   "rows_non_pass": 0,
   "rows_in_flight": 0,
   "rows_never_started": 0,
+  "serial_decided_count": 10,
   "pass_by_runtime": {
     "cython": {
       "expected": 24,
@@ -51,434 +54,626 @@
     {
       "label": "source_test_real_rom_mcp_trade_eof_during_setup_exits_cleanly_red_color-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T04:54:16+00:00",
       "secs": 31,
       "ended": "2026-09-21T04:54:47+00:00",
       "junit_tests": 1,
       "junit_sha256": "55afbb8725f9efb40cc843ab3c6da682770db590920f3da5e897eb4d7df311e5",
-      "log_sha256": "615694e025f992b94a986e419bbfe70b58b3c1f923372ea97f1ec81f8fc9fef2"
+      "log_sha256": "e46855af03502437fed76dc1152168587dcc10a713a82a4e07e6ef493b4db3f7",
+      "raw_log_sha256": "615694e025f992b94a986e419bbfe70b58b3c1f923372ea97f1ec81f8fc9fef2",
+      "raw_log_bytes": 1673
     },
     {
       "label": "source_test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly_red_color-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T05:08:59+00:00",
       "secs": 629,
       "ended": "2026-09-21T05:19:28+00:00",
       "junit_tests": 1,
       "junit_sha256": "376776fbe5c83d85cb8afa914e9f7850c94f0343a84be7540108d1e5047821e2",
-      "log_sha256": "44df8dfc16b08b08f207bb4a14be799629e7210d52f70a8d09a771c82df1c7f6"
+      "log_sha256": "79fce3aa26fad3642a153f948f4f73ffd89fd60799283019f13c0755927a0d6d",
+      "raw_log_sha256": "44df8dfc16b08b08f207bb4a14be799629e7210d52f70a8d09a771c82df1c7f6",
+      "raw_log_bytes": 2202
     },
     {
       "label": "source_test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly_red_color-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T05:08:59+00:00",
       "secs": 717,
       "ended": "2026-09-21T05:20:56+00:00",
       "junit_tests": 1,
       "junit_sha256": "2734979742f7b11ce92857422c8d5b06db36f7fd38ece9c8c0e2edbb31328fa4",
-      "log_sha256": "8856d414288eecc6a0d11063c0d1c5d2e8b879f89518da915e3d63c2dfb7b316"
+      "log_sha256": "6bb08f2c398cf245ea625d435f3a4b87f269c10fca68dc99fe8825a2d094e1ab",
+      "raw_log_sha256": "8856d414288eecc6a0d11063c0d1c5d2e8b879f89518da915e3d63c2dfb7b316",
+      "raw_log_bytes": 2363
     },
     {
       "label": "source_test_real_rom_mcp_trade_cancel_before_commitment_keeps_records_red_color-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T06:30:34+00:00",
       "secs": 1680,
       "ended": "2026-09-21T06:58:34+00:00",
       "junit_tests": 1,
       "junit_sha256": "38b70b821679f1a3988b632f217417e6935068ea7469da5d8309af3b67ed4807",
-      "log_sha256": "3b08f44cfdb1aff6bd124f8fd877cbc6b4830212fa1c129d941eb52d784563fc"
+      "log_sha256": "28cc1c926ef4737dc8e2ef91d34f1e72edf55dc535cdcd602d3025c2409dd42e",
+      "raw_log_sha256": "3b08f44cfdb1aff6bd124f8fd877cbc6b4830212fa1c129d941eb52d784563fc",
+      "raw_log_bytes": 3145
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_red_color-blue_color-out2-peerout0_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T06:30:34+00:00",
       "secs": 1657,
       "ended": "2026-09-21T06:58:11+00:00",
       "junit_tests": 1,
       "junit_sha256": "49e0257e8a0529658bb65ad794832574577346839f39778f0287bbe85d5983b2",
-      "log_sha256": "599c058471c5a7943a515fe3a3f45366e693ea8dbf9c92cbcb5476b306fdf570"
+      "log_sha256": "12670b609b8b056b94cfe2b2c3c7d462b6583bb6a437e749722bc93d74d3418f",
+      "raw_log_sha256": "599c058471c5a7943a515fe3a3f45366e693ea8dbf9c92cbcb5476b306fdf570",
+      "raw_log_bytes": 4606
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_blue_color-red_color-out0-peerout3_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T06:58:11+00:00",
       "secs": 1500,
       "ended": "2026-09-21T07:23:11+00:00",
       "junit_tests": 1,
       "junit_sha256": "2e66af6af850e6d5745d6baeecc9e6cd90d896f356a37ed262dbfdc7c0f2bb98",
-      "log_sha256": "5ef99b6f383ff3901c85116cb6dd6b8778f55165acaf5e85cca2f4741eeffb4a"
+      "log_sha256": "73ae1de318911cd2e9230d7469d7f9016c424e91d1bcbb0739e6f8f129ebdbe2",
+      "raw_log_sha256": "5ef99b6f383ff3901c85116cb6dd6b8778f55165acaf5e85cca2f4741eeffb4a",
+      "raw_log_bytes": 4547
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_red_color-red_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T06:58:34+00:00",
       "secs": 1508,
       "ended": "2026-09-21T07:23:42+00:00",
       "junit_tests": 1,
       "junit_sha256": "ab083289844c6881956350173a50d51390b57f5f4302eaf4621317d41b4028c6",
-      "log_sha256": "a0eff72d7b3cb461e966bfc56912240af1ff189d4400b945828c12cfbd1dd2f8"
+      "log_sha256": "2fb9c5609f2a1ccca1afd6ae617f5c87cd6893576b746b53168856fc07a07768",
+      "raw_log_sha256": "a0eff72d7b3cb461e966bfc56912240af1ff189d4400b945828c12cfbd1dd2f8",
+      "raw_log_bytes": 3035
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_red_color-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T07:23:11+00:00",
       "secs": 1527,
       "ended": "2026-09-21T07:48:38+00:00",
       "junit_tests": 1,
       "junit_sha256": "2689a4203c2ea9d578c262467edabd0e87919f9c7f4fb877afa817b3e195296d",
-      "log_sha256": "72fa6d95071524a32e2672b46cc20d1734a0fd18cb01f6980d5ff431f15d68d0"
+      "log_sha256": "c7b2688df790ce0d33bc3ffeadaf486ccd753ece24b130d463acfbeed38e6c08",
+      "raw_log_sha256": "72fa6d95071524a32e2672b46cc20d1734a0fd18cb01f6980d5ff431f15d68d0",
+      "raw_log_bytes": 3066
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_red_color-yellow_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T07:23:42+00:00",
       "secs": 1146,
       "ended": "2026-09-21T07:42:48+00:00",
       "junit_tests": 1,
       "junit_sha256": "58f8d3910997f785d6f72c28685911fb7ac6edfc6acb3adf681b644becc2a377",
-      "log_sha256": "da9f59352f7814d76417b6c1e27677fa570498c6745123eb8c9200c5355f2282"
+      "log_sha256": "7638127f74cbf1637dd75bded410f8572f88d7a53ca8c7834f7fcdb6762421ff",
+      "raw_log_sha256": "da9f59352f7814d76417b6c1e27677fa570498c6745123eb8c9200c5355f2282",
+      "raw_log_bytes": 3025
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-red_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T07:42:48+00:00",
       "secs": 1556,
       "ended": "2026-09-21T08:08:44+00:00",
       "junit_tests": 1,
       "junit_sha256": "f410e07c94782290ba732af4b3c8f076996a9a5fffb25e0240a60683d54cb384",
-      "log_sha256": "17daea12eb44e4551af1dbbd2cf5616ee14e4e1949630ede4971e944fccfd248"
+      "log_sha256": "f9a410664f0081d40ded7922b4262adba910dcd87e36ad50f841f270a94cc671",
+      "raw_log_sha256": "17daea12eb44e4551af1dbbd2cf5616ee14e4e1949630ede4971e944fccfd248",
+      "raw_log_bytes": 3067
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T07:48:38+00:00",
       "secs": 1539,
       "ended": "2026-09-21T08:14:17+00:00",
       "junit_tests": 1,
       "junit_sha256": "a325c5788b8c4963167ecfa14f31aa3da2d3cd86b1e9e8a7415d687f1b17d2aa",
-      "log_sha256": "859afd73dca486eab481c8caf89f5485692dd2aca8d8817b6a1b4e0240a4cc57"
+      "log_sha256": "2dfa5f1203ed1ee12f5283f84ae74b6a399429d1f3c252750874322db2eec14b",
+      "raw_log_sha256": "859afd73dca486eab481c8caf89f5485692dd2aca8d8817b6a1b4e0240a4cc57",
+      "raw_log_bytes": 3757
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-yellow_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T08:08:44+00:00",
       "secs": 1619,
       "ended": "2026-09-21T08:35:43+00:00",
       "junit_tests": 1,
       "junit_sha256": "a7b3c4424a66438b574e79cdeba94c79db58b783aa8207a3da53ef23e08ef775",
-      "log_sha256": "5a63f7842d2daf72e4db6aeba3c6ef10b46447874bdba59fb342e0f1393b3264"
+      "log_sha256": "ba5ad233ee3204e60ac6445497cd1af24a9bf3679d4efc96c9d5ea2b522a4f9b",
+      "raw_log_sha256": "5a63f7842d2daf72e4db6aeba3c6ef10b46447874bdba59fb342e0f1393b3264",
+      "raw_log_bytes": 3028
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_yellow-red_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T08:14:17+00:00",
       "secs": 1701,
       "ended": "2026-09-21T08:42:38+00:00",
       "junit_tests": 1,
       "junit_sha256": "f896ba1e48041608c80db12770202f785db9963ca63f3d5945895469a298fa47",
-      "log_sha256": "842c673a959a49bcbe0cb2571bc24a60681bef4d7bfbf57d21b1b1fe2b46a371"
+      "log_sha256": "3d4e5428dcdbce95feabee96355e9511e34c889bbf2f7de55f55a88228785da0",
+      "raw_log_sha256": "842c673a959a49bcbe0cb2571bc24a60681bef4d7bfbf57d21b1b1fe2b46a371",
+      "raw_log_bytes": 3054
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_yellow-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T08:35:43+00:00",
       "secs": 1309,
       "ended": "2026-09-21T08:57:32+00:00",
       "junit_tests": 1,
       "junit_sha256": "608beb24432b1b43296c4b4212413eda2c6b14bcf15a1da105acc5aaadd58b93",
-      "log_sha256": "5922dc72e89fd8f03c7bf55880e69b5973681ffdc8060f603e024eaa069dd056"
+      "log_sha256": "b393249b901b120430fe4fecf27000f4371fe202b934b8e9fdcd8dbd21188773",
+      "raw_log_sha256": "5922dc72e89fd8f03c7bf55880e69b5973681ffdc8060f603e024eaa069dd056",
+      "raw_log_bytes": 3057
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_yellow-yellow_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T08:42:38+00:00",
       "secs": 826,
       "ended": "2026-09-21T08:56:24+00:00",
       "junit_tests": 1,
       "junit_sha256": "f02bc32ba9159abb714c35af3279c8a92b23ae496e08ea514717d92da9804edc",
-      "log_sha256": "8a3ed068da2e35ec0162f07422387caea60d47b3d51c4c22f01f748721d5e6ec"
+      "log_sha256": "8186589d4e7876b51073656ab2b0f0994430e460e551fc2c0cfc8030c4d9512e",
+      "raw_log_sha256": "8a3ed068da2e35ec0162f07422387caea60d47b3d51c4c22f01f748721d5e6ec",
+      "raw_log_bytes": 2929
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-red_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T08:56:24+00:00",
       "secs": 283,
       "ended": "2026-09-21T09:01:07+00:00",
       "junit_tests": 1,
       "junit_sha256": "0294a70d7790891380ef101497fe79ba1924e3865e8e4723191d4543b1890715",
-      "log_sha256": "c9a42150525c894c437b1bfee3b550165cba55381cdd409a7a1185413d2b9117"
+      "log_sha256": "228a5df54f9cdfe6eaa95002384b1423ceaa3ac40b29f3b27d25686a11c03bda",
+      "raw_log_sha256": "c9a42150525c894c437b1bfee3b550165cba55381cdd409a7a1185413d2b9117",
+      "raw_log_bytes": 3112
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T08:57:32+00:00",
       "secs": 288,
       "ended": "2026-09-21T09:02:20+00:00",
       "junit_tests": 1,
       "junit_sha256": "a934fab68b2f168607768198c100cdf16a40260f6d2f785af3a320e0605ec9af",
-      "log_sha256": "cf4ba3264ff8e15e873331cb24fd90c8a8cf645be162c997e835e026eea7df3e"
+      "log_sha256": "1b0ffb894eee925c4d6faf29b1cc2e8394d59d77b758d6cd6d377692bafebc07",
+      "raw_log_sha256": "cf4ba3264ff8e15e873331cb24fd90c8a8cf645be162c997e835e026eea7df3e",
+      "raw_log_bytes": 3115
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-yellow_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:01:07+00:00",
       "secs": 296,
       "ended": "2026-09-21T09:06:03+00:00",
       "junit_tests": 1,
       "junit_sha256": "08f64d1de7ac0a513679db902ee7452e6722f1be74671c7e273d264cad6a0aed",
-      "log_sha256": "2d930942abbbd1991fffdb5e293cf03ae877d3a60e38974927e22f6dd2a97375"
+      "log_sha256": "6ec1d35d19f116b32b905f9339a0da1be70653d6a8733e7294cfb0d56b97a527",
+      "raw_log_sha256": "2d930942abbbd1991fffdb5e293cf03ae877d3a60e38974927e22f6dd2a97375",
+      "raw_log_bytes": 3044
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-red_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:02:20+00:00",
       "secs": 226,
       "ended": "2026-09-21T09:06:06+00:00",
       "junit_tests": 1,
       "junit_sha256": "f6a525b5b078131d0fe16c4ec0e577513428fa9453a0c266a946f231cbbdbaab",
-      "log_sha256": "4139ddfb5150e8d070a628e98f643052586ddcc38048d21f97ec2367dc84aab9"
+      "log_sha256": "348ae128d3acc669c483b5fb9552cacef221231ea895c497faa87e830c24c09f",
+      "raw_log_sha256": "4139ddfb5150e8d070a628e98f643052586ddcc38048d21f97ec2367dc84aab9",
+      "raw_log_bytes": 3115
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:06:03+00:00",
       "secs": 335,
       "ended": "2026-09-21T09:11:38+00:00",
       "junit_tests": 1,
       "junit_sha256": "5b4900ef57b8e29d394759b3c18144a35a53c6eb5fe99952bb7785ed6c56b84c",
-      "log_sha256": "f0c1b92969416d1ec1f11995d4f7106c14528d29008393ab34358db345b74fc3"
+      "log_sha256": "10f35d4635f7c9762175e50edfc939c2717433b97cb6968d511827dfe255483b",
+      "raw_log_sha256": "f0c1b92969416d1ec1f11995d4f7106c14528d29008393ab34358db345b74fc3",
+      "raw_log_bytes": 3862
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-yellow_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:06:06+00:00",
       "secs": 307,
       "ended": "2026-09-21T09:11:13+00:00",
       "junit_tests": 1,
       "junit_sha256": "1894b23e0da832793b579d2c46782f8c0e7ccf7b4e0e04722359d6113d630368",
-      "log_sha256": "404d66a8055c4c9d893e028544c9e9a9844c3f46b361cf7843d27dac53a8f0f5"
+      "log_sha256": "d7abf75805426155e6994d4ab8e67c39b57e0b69ab246bd52ade6a018a212ab1",
+      "raw_log_sha256": "404d66a8055c4c9d893e028544c9e9a9844c3f46b361cf7843d27dac53a8f0f5",
+      "raw_log_bytes": 3047
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-red_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:14:22+00:00",
       "secs": 206,
       "ended": "2026-09-21T09:17:48+00:00",
       "junit_tests": 1,
       "junit_sha256": "2905119c26d06af3ad89a78dbfdecbc54ca00715c903c4fd885d0003b9d9de4b",
-      "log_sha256": "a15a70b3ecb330eb79f349f834f4aafc124884b3fdecdde878fe47fee267d3e6"
+      "log_sha256": "7bed631b6d250dcd49a3611415f0be1b73bf88f94770847d02ceacb14ab87a2f",
+      "raw_log_sha256": "a15a70b3ecb330eb79f349f834f4aafc124884b3fdecdde878fe47fee267d3e6",
+      "raw_log_bytes": 3100
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-blue_color_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:14:22+00:00",
       "secs": 206,
       "ended": "2026-09-21T09:17:48+00:00",
       "junit_tests": 1,
       "junit_sha256": "3b9c05abe5955ed81cc73befb5758a05e0571e3d19b39360bdebb6e793aa2abb",
-      "log_sha256": "5a496162fae508ec0b72910d355f3546b0ec630b66373981d8969a2fd1568ce9"
+      "log_sha256": "246b64a8da1e681117805455e89b724ce9ff1ff7c6ffa1cc2d1a81aa72a88f9e",
+      "raw_log_sha256": "5a496162fae508ec0b72910d355f3546b0ec630b66373981d8969a2fd1568ce9",
+      "raw_log_bytes": 3103
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-yellow_",
       "runtime": "source",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:17:48+00:00",
       "secs": 259,
       "ended": "2026-09-21T09:22:07+00:00",
       "junit_tests": 1,
       "junit_sha256": "45cb4f673bf195164381ef1afaf15266cf5a960598a56328b401fa0867a06cf3",
-      "log_sha256": "a5d810fce2ce6a2f7ca7af2c5869383eb5416f369a646250039d700ea794e752"
+      "log_sha256": "d4038a110bc439858955952c0cddf322c85ae6439b7b3e3c4f370bba6030f2a4",
+      "raw_log_sha256": "a5d810fce2ce6a2f7ca7af2c5869383eb5416f369a646250039d700ea794e752",
+      "raw_log_bytes": 3005
     },
     {
       "label": "cython_test_real_rom_mcp_trade_eof_during_setup_exits_cleanly_red_color-blue_color_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:17:48+00:00",
       "secs": 2,
       "ended": "2026-09-21T09:17:50+00:00",
       "junit_tests": 1,
       "junit_sha256": "91e5801ddeef234c363c509141618204eea045f1e089b4baffcba087b18a95b6",
-      "log_sha256": "68bb12d0c980d22a01eed0008dbcd7144b63b4c09fa9d192d48e56bb93aed446"
+      "log_sha256": "b303018b2de66e549d584103b5025afb13372487b4ef5f9f8145d89497ed5643",
+      "raw_log_sha256": "68bb12d0c980d22a01eed0008dbcd7144b63b4c09fa9d192d48e56bb93aed446",
+      "raw_log_bytes": 1827
     },
     {
       "label": "cython_test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly_red_color-blue_color_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:17:50+00:00",
       "secs": 86,
       "ended": "2026-09-21T09:19:16+00:00",
       "junit_tests": 1,
       "junit_sha256": "0d7cc267968aec3ec1aa7e19a7195fcaae8b6a8debae6ac6394d15cc69b62baf",
-      "log_sha256": "5a6c4b38a95765900dbad60d55b2f4fc1a12e11cc601dfdadd665f5293b9cd8a"
+      "log_sha256": "d395a5cfd771f76427598e275b2cca742c05275f6827638d8077c91b97190318",
+      "raw_log_sha256": "5a6c4b38a95765900dbad60d55b2f4fc1a12e11cc601dfdadd665f5293b9cd8a",
+      "raw_log_bytes": 2356
     },
     {
       "label": "cython_test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly_red_color-blue_color_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:19:16+00:00",
       "secs": 108,
       "ended": "2026-09-21T09:21:04+00:00",
       "junit_tests": 1,
       "junit_sha256": "e85c7f61c7420aeb750e78123262cae87222746041534e17dfb2d38ed81ae2b3",
-      "log_sha256": "83595e68d2c02158030c2d93178a37461dcc6d81c88c937bd054a49188bf3369"
+      "log_sha256": "d0326f7d01f70d1260f48264b75de2d3c6e8d40d0ff4f6a73904a10acc41ebf4",
+      "raw_log_sha256": "83595e68d2c02158030c2d93178a37461dcc6d81c88c937bd054a49188bf3369",
+      "raw_log_bytes": 2518
     },
     {
       "label": "cython_test_real_rom_mcp_trade_cancel_before_commitment_keeps_records_red_color-blue_color_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:21:04+00:00",
       "secs": 434,
       "ended": "2026-09-21T09:28:18+00:00",
       "junit_tests": 1,
       "junit_sha256": "f522c2506bd2b7eba1791d10f6ae4fdff70f4e6b9359e4dbbb5b65943689e32e",
-      "log_sha256": "3a47bae615d3e1eec13018cd2e4d8b56327ad1afe6fd75ca08ae10e31bea623a"
+      "log_sha256": "af9836bf7df5a48d83dbbbacca25b30fd0a7f93073752d503a57bd6f73412c5b",
+      "raw_log_sha256": "3a47bae615d3e1eec13018cd2e4d8b56327ad1afe6fd75ca08ae10e31bea623a",
+      "raw_log_bytes": 3299
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_red_color-blue_color-out2-peerout0_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T10:46:56+00:00",
       "secs": 328,
       "ended": "2026-09-21T10:52:24+00:00",
       "junit_tests": 1,
       "junit_sha256": "1537bb1c5b12bc0b24fafbc3d12d19e6796faf1bc8b4effd9d759e68ef5dcb4d",
-      "log_sha256": "161bd0ddb9010a4a4ec8b640cc965873fd8862d84c1f4e17b0a2db205b2a35fe"
+      "log_sha256": "97d59d156c6e703cd1415df5f21c5728d3594182beafd315050e9081e1149785",
+      "raw_log_sha256": "161bd0ddb9010a4a4ec8b640cc965873fd8862d84c1f4e17b0a2db205b2a35fe",
+      "raw_log_bytes": 4760
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_blue_color-red_color-out0-peerout3_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T10:52:24+00:00",
       "secs": 353,
       "ended": "2026-09-21T10:58:17+00:00",
       "junit_tests": 1,
       "junit_sha256": "94d18d2872c3b34e19b0f55b6b5cc52aa896de919a67fee5c8565c7ac7d6dfd0",
-      "log_sha256": "32e0f64c176f0bc683c28c4caacc2ec87164f6791908373f217536c698018d7c"
+      "log_sha256": "2a6e6ae721570b980da1888500881322c0d9c4c92973abdd94f1f575f4561f1f",
+      "raw_log_sha256": "32e0f64c176f0bc683c28c4caacc2ec87164f6791908373f217536c698018d7c",
+      "raw_log_bytes": 4701
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-red_color_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T10:58:17+00:00",
       "secs": 328,
       "ended": "2026-09-21T11:03:45+00:00",
       "junit_tests": 1,
       "junit_sha256": "c1ad47ab711a87d6c41bd37ba50d0293228c0b2e33ed355d117ae9119f3a0f7f",
-      "log_sha256": "99f60d52374b5f4f164638753783f07e87d2e3dca7f7196a59d64247cdaf23b8"
+      "log_sha256": "153a725bbb00dc5d33bd027964f642de464a6f23634843c491fecd695af623ed",
+      "raw_log_sha256": "99f60d52374b5f4f164638753783f07e87d2e3dca7f7196a59d64247cdaf23b8",
+      "raw_log_bytes": 3189
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-blue_color_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T11:03:45+00:00",
       "secs": 320,
       "ended": "2026-09-21T11:09:05+00:00",
       "junit_tests": 1,
       "junit_sha256": "c0cdfd54ba11c459917ff379bda943c98886fc6ba9fd5e1431225797beaaae1d",
-      "log_sha256": "8d17711b29d021bde9c6eca2285ffc496d407efb879dba65bb942264adae0d0d"
+      "log_sha256": "d4d3f6fe29ffd5934f1b482fbdfa19df12c45efb60a1bef9b2cff6c892a29b85",
+      "raw_log_sha256": "8d17711b29d021bde9c6eca2285ffc496d407efb879dba65bb942264adae0d0d",
+      "raw_log_bytes": 3220
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-yellow_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T11:09:05+00:00",
       "secs": 395,
       "ended": "2026-09-21T11:15:40+00:00",
       "junit_tests": 1,
       "junit_sha256": "90b9b57dbac933e931e71878faee388cd108c84d6a10f05c8426bf31f0b053b4",
-      "log_sha256": "a7aa3214042298fde309e75ed83367c5aeaf34d2d0c1a0ab754f8ceea601c159"
+      "log_sha256": "7151ca82c26e83b30a80e0fb6fb3fc5b0e6ab635d7a17b7979835a1e3dd5c47e",
+      "raw_log_sha256": "a7aa3214042298fde309e75ed83367c5aeaf34d2d0c1a0ab754f8ceea601c159",
+      "raw_log_bytes": 3179
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-red_color_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T11:15:41+00:00",
       "secs": 396,
       "ended": "2026-09-21T11:22:17+00:00",
       "junit_tests": 1,
       "junit_sha256": "151088986a5135e2943a2952e94a215dba1e72ae2fc0004d00a49f91ad3daf1b",
-      "log_sha256": "45e98a0ad5ddda926d2b74e8fca36697267a01dcc57e0f789e42db55ca8e532c"
+      "log_sha256": "93e9f9a781fdd1d0756be3b081937ebc2051195719bc3526c9256866701bce43",
+      "raw_log_sha256": "45e98a0ad5ddda926d2b74e8fca36697267a01dcc57e0f789e42db55ca8e532c",
+      "raw_log_bytes": 3221
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-blue_color_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T11:22:17+00:00",
       "secs": 269,
       "ended": "2026-09-21T11:26:46+00:00",
       "junit_tests": 1,
       "junit_sha256": "b7f2e04aa60f52e814617cce1ae10870c87b8490fbb1e564d168d818eecbee6c",
-      "log_sha256": "62b7c2db804a579ce0e12ed24b1ffb5866c8d9251f036203242ff8f9261b0994"
+      "log_sha256": "71c9ce7006dacbeea71e492dd9217d0cd32dd0763f50b159fb766b6167adf7d3",
+      "raw_log_sha256": "62b7c2db804a579ce0e12ed24b1ffb5866c8d9251f036203242ff8f9261b0994",
+      "raw_log_bytes": 3911
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-yellow_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:43:53+00:00",
       "secs": 1498,
       "ended": "2026-09-21T10:08:51+00:00",
       "junit_tests": 1,
       "junit_sha256": "03b7df8c34c74ee7829b4b3e0e8f4b683ebe5cde14ec42dc22d18d7729f5f477",
-      "log_sha256": "fade22a26348687badc46339a8579d864e8d471d83fa9f2f3845a7d3a9b12483"
+      "log_sha256": "58c39849caf72df369b0618d6941cd55c965505fb0b6b2eaeefc862801746897",
+      "raw_log_sha256": "fade22a26348687badc46339a8579d864e8d471d83fa9f2f3845a7d3a9b12483",
+      "raw_log_bytes": 3183
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-red_color_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T11:26:46+00:00",
       "secs": 200,
       "ended": "2026-09-21T11:30:06+00:00",
       "junit_tests": 1,
       "junit_sha256": "736336f4984fa020bff7e53202c38e4a5e3ce5c8144c160443d2e46de2762f97",
-      "log_sha256": "ba2c909ae8640aa0f098cd50a67f4e00d4ca829a86f90f235c83c14f28b0c7f3"
+      "log_sha256": "c3e88bc3263ee4850e9c2cfbf26a750a926f88391f1a1dd84a5a9280147deaa9",
+      "raw_log_sha256": "ba2c909ae8640aa0f098cd50a67f4e00d4ca829a86f90f235c83c14f28b0c7f3",
+      "raw_log_bytes": 3208
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-blue_color_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T09:49:07+00:00",
       "secs": 1228,
       "ended": "2026-09-21T10:09:35+00:00",
       "junit_tests": 1,
       "junit_sha256": "da094cca69f550d9722c97caca076b44fa14c3f1fe05519e419ab103980780b9",
-      "log_sha256": "01f50e7dfeed8c7694ce2c772a2eb654ddda11529c665938e89ded8dd27c56e5"
+      "log_sha256": "d6aeda3a1d654a91f481f3d47ad09e3c7a3bb4a7e57f72eb55c5701b9c32574e",
+      "raw_log_sha256": "01f50e7dfeed8c7694ce2c772a2eb654ddda11529c665938e89ded8dd27c56e5",
+      "raw_log_bytes": 3212
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-yellow_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T10:08:51+00:00",
       "secs": 1330,
       "ended": "2026-09-21T10:31:01+00:00",
       "junit_tests": 1,
       "junit_sha256": "5334e13e623a120c0a4fccd2686add23cc8f9192459f0dd52e0cf2a78129aadf",
-      "log_sha256": "0b827cf3414192e20c4b15c8ea234c8c5a389b89722dcfed1a0799b7507ea60d"
+      "log_sha256": "2a0b65a2714aa1597b6f0017e5febd0a90f351c23dfa77a08a2ae57d425f0426",
+      "raw_log_sha256": "0b827cf3414192e20c4b15c8ea234c8c5a389b89722dcfed1a0799b7507ea60d",
+      "raw_log_bytes": 3085
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-red_color_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T11:30:06+00:00",
       "secs": 206,
       "ended": "2026-09-21T11:33:32+00:00",
       "junit_tests": 1,
       "junit_sha256": "64a4465db11fccd8d1ddfad514d5f92994a13f4171ce0b43821443fb41344d21",
-      "log_sha256": "399e6c7c4ecd7a8218700d6b62c519272fb63e7659029049b2139d0ac7f7ceca"
+      "log_sha256": "910921ae43068fedde07bbe824879fdb4c25baeae7e93702640df64bde22c476",
+      "raw_log_sha256": "399e6c7c4ecd7a8218700d6b62c519272fb63e7659029049b2139d0ac7f7ceca",
+      "raw_log_bytes": 3267
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-blue_color_",
       "runtime": "cython",
+      "decided_by": "serial-rerun",
+      "started": "2026-09-21T11:33:32+00:00",
       "secs": 207,
       "ended": "2026-09-21T11:36:59+00:00",
       "junit_tests": 1,
       "junit_sha256": "684efc94b27cb938748574e2ff96556276761b05a17f29072966999a623131fa",
-      "log_sha256": "878559e772f6ce3020ac1e84282a426c91403baa72e8733cf6097056329a4b7f"
+      "log_sha256": "34ca4069de771a424f84e5ffae15f93b56346c06ab25de1c8a22220300ec0b5e",
+      "raw_log_sha256": "878559e772f6ce3020ac1e84282a426c91403baa72e8733cf6097056329a4b7f",
+      "raw_log_bytes": 3270
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-yellow_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T10:31:01+00:00",
       "secs": 485,
       "ended": "2026-09-21T10:39:06+00:00",
       "junit_tests": 1,
       "junit_sha256": "12ecfd3b5546e08d01c35de6ce70c3a5ab38f99720982cb6fb90ff13516aa6fc",
-      "log_sha256": "7a1b1c8c9cf0f6485dfb3e4298d90a8a731e6f4be5165eeefaf6246aeb96efdb"
+      "log_sha256": "9427fc0cd7b378db8700793c80d9b8b6e701cd868ffaee9ffef6869be47f3d34",
+      "raw_log_sha256": "7a1b1c8c9cf0f6485dfb3e4298d90a8a731e6f4be5165eeefaf6246aeb96efdb",
+      "raw_log_bytes": 3199
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-red_color_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T10:32:47+00:00",
       "secs": 171,
       "ended": "2026-09-21T10:35:38+00:00",
       "junit_tests": 1,
       "junit_sha256": "f907c856f7ee5019b5bbc7a352e8581bb4db55318d7058d09bc99c76715efd78",
-      "log_sha256": "619f24ab2ceea967f0fa162683be5300c0b25b989c17be2f1995cf195b736e3c"
+      "log_sha256": "6509b83a28364c92cb340a172b73983daf4e66ebf3cdd5cd3ddbe7caa0a21397",
+      "raw_log_sha256": "619f24ab2ceea967f0fa162683be5300c0b25b989c17be2f1995cf195b736e3c",
+      "raw_log_bytes": 3270
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-blue_color_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T10:35:38+00:00",
       "secs": 267,
       "ended": "2026-09-21T10:40:05+00:00",
       "junit_tests": 1,
       "junit_sha256": "0d1fd412407f8fca04123dd8992d47b203cfa3ccbc7af4091793389cdd6a4d29",
-      "log_sha256": "b889afc1c8b1d0fcdad6628ab947e6fadc5f9a8d91d50ab3fc91da781076a9e8"
+      "log_sha256": "2d8c38445bc75659342ae7ad7687eff1bf8e92aed504fd6c0575dfc4c5a27fe9",
+      "raw_log_sha256": "b889afc1c8b1d0fcdad6628ab947e6fadc5f9a8d91d50ab3fc91da781076a9e8",
+      "raw_log_bytes": 4017
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-yellow_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T10:39:06+00:00",
       "secs": 251,
       "ended": "2026-09-21T10:43:17+00:00",
       "junit_tests": 1,
       "junit_sha256": "e9d5779ac1773dc02310703e7e535a542e3c26ce9762f62511958d7df4dc4fab",
-      "log_sha256": "2d5a73c2bf558c8b16284651da2b01d5aba1be6b2b7a08471639163ea8ad1747"
+      "log_sha256": "34ff23aa71648de49caacb5571fd1012134780a244ae53aeac7a91be7c4a3836",
+      "raw_log_sha256": "2d5a73c2bf558c8b16284651da2b01d5aba1be6b2b7a08471639163ea8ad1747",
+      "raw_log_bytes": 3202
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-red_color_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T10:40:05+00:00",
       "secs": 44,
       "ended": "2026-09-21T10:40:49+00:00",
       "junit_tests": 1,
       "junit_sha256": "4eecbb4f56b305c02a2f815712cbf294d02e1294631024856dc2424ca0111b33",
-      "log_sha256": "b11d1c7314b882ff0be340cfd5a719d9634595240c1e0c6c7145ed6bc6b266f6"
+      "log_sha256": "da52dc4124589c0b18adb7d0d2ebc057951dfbd27ad940785470d10fbff48e42",
+      "raw_log_sha256": "b11d1c7314b882ff0be340cfd5a719d9634595240c1e0c6c7145ed6bc6b266f6",
+      "raw_log_bytes": 3244
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-blue_color_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T10:40:49+00:00",
       "secs": 44,
       "ended": "2026-09-21T10:41:33+00:00",
       "junit_tests": 1,
       "junit_sha256": "d8ec153035414a67149c1dde609b1408764250b14dfd054e5a7549bc4907bbd3",
-      "log_sha256": "a782f07b8d120525570f28d0c12ac2ddbda1d59b5ac375942add234558744bda"
+      "log_sha256": "b78e55c3b7a4c2549bcf97bc1af7885c86c3afca6a86621e15645e761cdcc34a",
+      "raw_log_sha256": "a782f07b8d120525570f28d0c12ac2ddbda1d59b5ac375942add234558744bda",
+      "raw_log_bytes": 3247
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-yellow_",
       "runtime": "cython",
+      "decided_by": "parallel-run",
+      "started": "2026-09-21T10:41:33+00:00",
       "secs": 241,
       "ended": "2026-09-21T10:45:34+00:00",
       "junit_tests": 1,
       "junit_sha256": "57b31d3620e47cb7978a274ea924d538a39feb9eceff2582ae1bebb827736144",
-      "log_sha256": "26e1ad8c375f31574ad93bbb5bde529481498c90d374169b500a514f8fc6ccd1"
+      "log_sha256": "5adafa3de91cdce083064c0c260488ffbd7f68b6605f873a39b161f1a21efc72",
+      "raw_log_sha256": "26e1ad8c375f31574ad93bbb5bde529481498c90d374169b500a514f8fc6ccd1",
+      "raw_log_bytes": 3160
     }
   ],
   "non_pass": [],
@@ -490,6 +685,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_eof_during_setup_exits_cleanly[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 31,
       "ended": "2026-09-21T04:54:47+00:00",
@@ -504,8 +701,11 @@
       },
       "junit_sha256": "55afbb8725f9efb40cc843ab3c6da682770db590920f3da5e897eb4d7df311e5",
       "junit_bytes": 404,
-      "log_sha256": "615694e025f992b94a986e419bbfe70b58b3c1f923372ea97f1ec81f8fc9fef2",
-      "log_bytes": 1673
+      "log_sha256": "e46855af03502437fed76dc1152168587dcc10a713a82a4e07e6ef493b4db3f7",
+      "log_bytes": 1563,
+      "raw_junit_sha256": "55afbb8725f9efb40cc843ab3c6da682770db590920f3da5e897eb4d7df311e5",
+      "raw_log_sha256": "615694e025f992b94a986e419bbfe70b58b3c1f923372ea97f1ec81f8fc9fef2",
+      "raw_log_bytes": 1673
     },
     {
       "label": "source_test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly_red_color-blue_color_",
@@ -513,6 +713,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 629,
       "ended": "2026-09-21T05:19:28+00:00",
@@ -527,8 +729,11 @@
       },
       "junit_sha256": "376776fbe5c83d85cb8afa914e9f7850c94f0343a84be7540108d1e5047821e2",
       "junit_bytes": 413,
-      "log_sha256": "44df8dfc16b08b08f207bb4a14be799629e7210d52f70a8d09a771c82df1c7f6",
-      "log_bytes": 2202
+      "log_sha256": "79fce3aa26fad3642a153f948f4f73ffd89fd60799283019f13c0755927a0d6d",
+      "log_bytes": 2092,
+      "raw_junit_sha256": "376776fbe5c83d85cb8afa914e9f7850c94f0343a84be7540108d1e5047821e2",
+      "raw_log_sha256": "44df8dfc16b08b08f207bb4a14be799629e7210d52f70a8d09a771c82df1c7f6",
+      "raw_log_bytes": 2202
     },
     {
       "label": "source_test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly_red_color-blue_color_",
@@ -536,6 +741,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 717,
       "ended": "2026-09-21T05:20:56+00:00",
@@ -550,8 +757,11 @@
       },
       "junit_sha256": "2734979742f7b11ce92857422c8d5b06db36f7fd38ece9c8c0e2edbb31328fa4",
       "junit_bytes": 410,
-      "log_sha256": "8856d414288eecc6a0d11063c0d1c5d2e8b879f89518da915e3d63c2dfb7b316",
-      "log_bytes": 2363
+      "log_sha256": "6bb08f2c398cf245ea625d435f3a4b87f269c10fca68dc99fe8825a2d094e1ab",
+      "log_bytes": 2253,
+      "raw_junit_sha256": "2734979742f7b11ce92857422c8d5b06db36f7fd38ece9c8c0e2edbb31328fa4",
+      "raw_log_sha256": "8856d414288eecc6a0d11063c0d1c5d2e8b879f89518da915e3d63c2dfb7b316",
+      "raw_log_bytes": 2363
     },
     {
       "label": "source_test_real_rom_mcp_trade_cancel_before_commitment_keeps_records_red_color-blue_color_",
@@ -559,6 +769,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_cancel_before_commitment_keeps_records[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 4,
       "rc": 0,
       "secs": 1680,
       "ended": "2026-09-21T06:58:34+00:00",
@@ -573,8 +785,11 @@
       },
       "junit_sha256": "38b70b821679f1a3988b632f217417e6935068ea7469da5d8309af3b67ed4807",
       "junit_bytes": 416,
-      "log_sha256": "3b08f44cfdb1aff6bd124f8fd877cbc6b4830212fa1c129d941eb52d784563fc",
-      "log_bytes": 3145
+      "log_sha256": "28cc1c926ef4737dc8e2ef91d34f1e72edf55dc535cdcd602d3025c2409dd42e",
+      "log_bytes": 3035,
+      "raw_junit_sha256": "38b70b821679f1a3988b632f217417e6935068ea7469da5d8309af3b67ed4807",
+      "raw_log_sha256": "3b08f44cfdb1aff6bd124f8fd877cbc6b4830212fa1c129d941eb52d784563fc",
+      "raw_log_bytes": 3145
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_red_color-blue_color-out2-peerout0_",
@@ -582,6 +797,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_multi_member_slot_records[red_color-blue_color-out2-peerout0]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 4,
       "rc": 0,
       "secs": 1657,
       "ended": "2026-09-21T06:58:11+00:00",
@@ -596,8 +813,11 @@
       },
       "junit_sha256": "49e0257e8a0529658bb65ad794832574577346839f39778f0287bbe85d5983b2",
       "junit_bytes": 427,
-      "log_sha256": "599c058471c5a7943a515fe3a3f45366e693ea8dbf9c92cbcb5476b306fdf570",
-      "log_bytes": 4606
+      "log_sha256": "12670b609b8b056b94cfe2b2c3c7d462b6583bb6a437e749722bc93d74d3418f",
+      "log_bytes": 4496,
+      "raw_junit_sha256": "49e0257e8a0529658bb65ad794832574577346839f39778f0287bbe85d5983b2",
+      "raw_log_sha256": "599c058471c5a7943a515fe3a3f45366e693ea8dbf9c92cbcb5476b306fdf570",
+      "raw_log_bytes": 4606
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_blue_color-red_color-out0-peerout3_",
@@ -605,6 +825,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_multi_member_slot_records[blue_color-red_color-out0-peerout3]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 4,
       "rc": 0,
       "secs": 1500,
       "ended": "2026-09-21T07:23:11+00:00",
@@ -619,8 +841,11 @@
       },
       "junit_sha256": "2e66af6af850e6d5745d6baeecc9e6cd90d896f356a37ed262dbfdc7c0f2bb98",
       "junit_bytes": 427,
-      "log_sha256": "5ef99b6f383ff3901c85116cb6dd6b8778f55165acaf5e85cca2f4741eeffb4a",
-      "log_bytes": 4547
+      "log_sha256": "73ae1de318911cd2e9230d7469d7f9016c424e91d1bcbb0739e6f8f129ebdbe2",
+      "log_bytes": 4437,
+      "raw_junit_sha256": "2e66af6af850e6d5745d6baeecc9e6cd90d896f356a37ed262dbfdc7c0f2bb98",
+      "raw_log_sha256": "5ef99b6f383ff3901c85116cb6dd6b8778f55165acaf5e85cca2f4741eeffb4a",
+      "raw_log_bytes": 4547
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_red_color-red_color_",
@@ -628,6 +853,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 3,
       "rc": 0,
       "secs": 1508,
       "ended": "2026-09-21T07:23:42+00:00",
@@ -642,8 +869,11 @@
       },
       "junit_sha256": "ab083289844c6881956350173a50d51390b57f5f4302eaf4621317d41b4028c6",
       "junit_bytes": 400,
-      "log_sha256": "a0eff72d7b3cb461e966bfc56912240af1ff189d4400b945828c12cfbd1dd2f8",
-      "log_bytes": 3035
+      "log_sha256": "2fb9c5609f2a1ccca1afd6ae617f5c87cd6893576b746b53168856fc07a07768",
+      "log_bytes": 2925,
+      "raw_junit_sha256": "ab083289844c6881956350173a50d51390b57f5f4302eaf4621317d41b4028c6",
+      "raw_log_sha256": "a0eff72d7b3cb461e966bfc56912240af1ff189d4400b945828c12cfbd1dd2f8",
+      "raw_log_bytes": 3035
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_red_color-blue_color_",
@@ -651,6 +881,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 3,
       "rc": 0,
       "secs": 1527,
       "ended": "2026-09-21T07:48:38+00:00",
@@ -665,8 +897,11 @@
       },
       "junit_sha256": "2689a4203c2ea9d578c262467edabd0e87919f9c7f4fb877afa817b3e195296d",
       "junit_bytes": 401,
-      "log_sha256": "72fa6d95071524a32e2672b46cc20d1734a0fd18cb01f6980d5ff431f15d68d0",
-      "log_bytes": 3066
+      "log_sha256": "c7b2688df790ce0d33bc3ffeadaf486ccd753ece24b130d463acfbeed38e6c08",
+      "log_bytes": 2956,
+      "raw_junit_sha256": "2689a4203c2ea9d578c262467edabd0e87919f9c7f4fb877afa817b3e195296d",
+      "raw_log_sha256": "72fa6d95071524a32e2672b46cc20d1734a0fd18cb01f6980d5ff431f15d68d0",
+      "raw_log_bytes": 3066
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_red_color-yellow_",
@@ -674,6 +909,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 1146,
       "ended": "2026-09-21T07:42:48+00:00",
@@ -688,8 +925,11 @@
       },
       "junit_sha256": "58f8d3910997f785d6f72c28685911fb7ac6edfc6acb3adf681b644becc2a377",
       "junit_bytes": 397,
-      "log_sha256": "da9f59352f7814d76417b6c1e27677fa570498c6745123eb8c9200c5355f2282",
-      "log_bytes": 3025
+      "log_sha256": "7638127f74cbf1637dd75bded410f8572f88d7a53ca8c7834f7fcdb6762421ff",
+      "log_bytes": 2915,
+      "raw_junit_sha256": "58f8d3910997f785d6f72c28685911fb7ac6edfc6acb3adf681b644becc2a377",
+      "raw_log_sha256": "da9f59352f7814d76417b6c1e27677fa570498c6745123eb8c9200c5355f2282",
+      "raw_log_bytes": 3025
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-red_color_",
@@ -697,6 +937,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[blue_color-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 1556,
       "ended": "2026-09-21T08:08:44+00:00",
@@ -711,8 +953,11 @@
       },
       "junit_sha256": "f410e07c94782290ba732af4b3c8f076996a9a5fffb25e0240a60683d54cb384",
       "junit_bytes": 401,
-      "log_sha256": "17daea12eb44e4551af1dbbd2cf5616ee14e4e1949630ede4971e944fccfd248",
-      "log_bytes": 3067
+      "log_sha256": "f9a410664f0081d40ded7922b4262adba910dcd87e36ad50f841f270a94cc671",
+      "log_bytes": 2957,
+      "raw_junit_sha256": "f410e07c94782290ba732af4b3c8f076996a9a5fffb25e0240a60683d54cb384",
+      "raw_log_sha256": "17daea12eb44e4551af1dbbd2cf5616ee14e4e1949630ede4971e944fccfd248",
+      "raw_log_bytes": 3067
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-blue_color_",
@@ -720,6 +965,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[blue_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 1539,
       "ended": "2026-09-21T08:14:17+00:00",
@@ -734,8 +981,11 @@
       },
       "junit_sha256": "a325c5788b8c4963167ecfa14f31aa3da2d3cd86b1e9e8a7415d687f1b17d2aa",
       "junit_bytes": 402,
-      "log_sha256": "859afd73dca486eab481c8caf89f5485692dd2aca8d8817b6a1b4e0240a4cc57",
-      "log_bytes": 3757
+      "log_sha256": "2dfa5f1203ed1ee12f5283f84ae74b6a399429d1f3c252750874322db2eec14b",
+      "log_bytes": 3647,
+      "raw_junit_sha256": "a325c5788b8c4963167ecfa14f31aa3da2d3cd86b1e9e8a7415d687f1b17d2aa",
+      "raw_log_sha256": "859afd73dca486eab481c8caf89f5485692dd2aca8d8817b6a1b4e0240a4cc57",
+      "raw_log_bytes": 3757
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-yellow_",
@@ -743,6 +993,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[blue_color-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 1619,
       "ended": "2026-09-21T08:35:43+00:00",
@@ -757,8 +1009,11 @@
       },
       "junit_sha256": "a7b3c4424a66438b574e79cdeba94c79db58b783aa8207a3da53ef23e08ef775",
       "junit_bytes": 398,
-      "log_sha256": "5a63f7842d2daf72e4db6aeba3c6ef10b46447874bdba59fb342e0f1393b3264",
-      "log_bytes": 3028
+      "log_sha256": "ba5ad233ee3204e60ac6445497cd1af24a9bf3679d4efc96c9d5ea2b522a4f9b",
+      "log_bytes": 2918,
+      "raw_junit_sha256": "a7b3c4424a66438b574e79cdeba94c79db58b783aa8207a3da53ef23e08ef775",
+      "raw_log_sha256": "5a63f7842d2daf72e4db6aeba3c6ef10b46447874bdba59fb342e0f1393b3264",
+      "raw_log_bytes": 3028
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_yellow-red_color_",
@@ -766,6 +1021,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[yellow-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 1701,
       "ended": "2026-09-21T08:42:38+00:00",
@@ -780,8 +1037,11 @@
       },
       "junit_sha256": "f896ba1e48041608c80db12770202f785db9963ca63f3d5945895469a298fa47",
       "junit_bytes": 397,
-      "log_sha256": "842c673a959a49bcbe0cb2571bc24a60681bef4d7bfbf57d21b1b1fe2b46a371",
-      "log_bytes": 3054
+      "log_sha256": "3d4e5428dcdbce95feabee96355e9511e34c889bbf2f7de55f55a88228785da0",
+      "log_bytes": 2944,
+      "raw_junit_sha256": "f896ba1e48041608c80db12770202f785db9963ca63f3d5945895469a298fa47",
+      "raw_log_sha256": "842c673a959a49bcbe0cb2571bc24a60681bef4d7bfbf57d21b1b1fe2b46a371",
+      "raw_log_bytes": 3054
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_yellow-blue_color_",
@@ -789,6 +1049,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[yellow-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 1309,
       "ended": "2026-09-21T08:57:32+00:00",
@@ -803,8 +1065,11 @@
       },
       "junit_sha256": "608beb24432b1b43296c4b4212413eda2c6b14bcf15a1da105acc5aaadd58b93",
       "junit_bytes": 398,
-      "log_sha256": "5922dc72e89fd8f03c7bf55880e69b5973681ffdc8060f603e024eaa069dd056",
-      "log_bytes": 3057
+      "log_sha256": "b393249b901b120430fe4fecf27000f4371fe202b934b8e9fdcd8dbd21188773",
+      "log_bytes": 2947,
+      "raw_junit_sha256": "608beb24432b1b43296c4b4212413eda2c6b14bcf15a1da105acc5aaadd58b93",
+      "raw_log_sha256": "5922dc72e89fd8f03c7bf55880e69b5973681ffdc8060f603e024eaa069dd056",
+      "raw_log_bytes": 3057
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_yellow-yellow_",
@@ -812,6 +1077,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[yellow-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 826,
       "ended": "2026-09-21T08:56:24+00:00",
@@ -826,8 +1093,11 @@
       },
       "junit_sha256": "f02bc32ba9159abb714c35af3279c8a92b23ae496e08ea514717d92da9804edc",
       "junit_bytes": 392,
-      "log_sha256": "8a3ed068da2e35ec0162f07422387caea60d47b3d51c4c22f01f748721d5e6ec",
-      "log_bytes": 2929
+      "log_sha256": "8186589d4e7876b51073656ab2b0f0994430e460e551fc2c0cfc8030c4d9512e",
+      "log_bytes": 2819,
+      "raw_junit_sha256": "f02bc32ba9159abb714c35af3279c8a92b23ae496e08ea514717d92da9804edc",
+      "raw_log_sha256": "8a3ed068da2e35ec0162f07422387caea60d47b3d51c4c22f01f748721d5e6ec",
+      "raw_log_bytes": 2929
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-red_color_",
@@ -835,6 +1105,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[red_color-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 283,
       "ended": "2026-09-21T09:01:07+00:00",
@@ -849,8 +1121,11 @@
       },
       "junit_sha256": "0294a70d7790891380ef101497fe79ba1924e3865e8e4723191d4543b1890715",
       "junit_bytes": 407,
-      "log_sha256": "c9a42150525c894c437b1bfee3b550165cba55381cdd409a7a1185413d2b9117",
-      "log_bytes": 3112
+      "log_sha256": "228a5df54f9cdfe6eaa95002384b1423ceaa3ac40b29f3b27d25686a11c03bda",
+      "log_bytes": 3002,
+      "raw_junit_sha256": "0294a70d7790891380ef101497fe79ba1924e3865e8e4723191d4543b1890715",
+      "raw_log_sha256": "c9a42150525c894c437b1bfee3b550165cba55381cdd409a7a1185413d2b9117",
+      "raw_log_bytes": 3112
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-blue_color_",
@@ -858,6 +1133,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 288,
       "ended": "2026-09-21T09:02:20+00:00",
@@ -872,8 +1149,11 @@
       },
       "junit_sha256": "a934fab68b2f168607768198c100cdf16a40260f6d2f785af3a320e0605ec9af",
       "junit_bytes": 408,
-      "log_sha256": "cf4ba3264ff8e15e873331cb24fd90c8a8cf645be162c997e835e026eea7df3e",
-      "log_bytes": 3115
+      "log_sha256": "1b0ffb894eee925c4d6faf29b1cc2e8394d59d77b758d6cd6d377692bafebc07",
+      "log_bytes": 3005,
+      "raw_junit_sha256": "a934fab68b2f168607768198c100cdf16a40260f6d2f785af3a320e0605ec9af",
+      "raw_log_sha256": "cf4ba3264ff8e15e873331cb24fd90c8a8cf645be162c997e835e026eea7df3e",
+      "raw_log_bytes": 3115
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-yellow_",
@@ -881,6 +1161,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[red_color-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 296,
       "ended": "2026-09-21T09:06:03+00:00",
@@ -895,8 +1177,11 @@
       },
       "junit_sha256": "08f64d1de7ac0a513679db902ee7452e6722f1be74671c7e273d264cad6a0aed",
       "junit_bytes": 404,
-      "log_sha256": "2d930942abbbd1991fffdb5e293cf03ae877d3a60e38974927e22f6dd2a97375",
-      "log_bytes": 3044
+      "log_sha256": "6ec1d35d19f116b32b905f9339a0da1be70653d6a8733e7294cfb0d56b97a527",
+      "log_bytes": 2934,
+      "raw_junit_sha256": "08f64d1de7ac0a513679db902ee7452e6722f1be74671c7e273d264cad6a0aed",
+      "raw_log_sha256": "2d930942abbbd1991fffdb5e293cf03ae877d3a60e38974927e22f6dd2a97375",
+      "raw_log_bytes": 3044
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-red_color_",
@@ -904,6 +1189,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[blue_color-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 226,
       "ended": "2026-09-21T09:06:06+00:00",
@@ -918,8 +1205,11 @@
       },
       "junit_sha256": "f6a525b5b078131d0fe16c4ec0e577513428fa9453a0c266a946f231cbbdbaab",
       "junit_bytes": 408,
-      "log_sha256": "4139ddfb5150e8d070a628e98f643052586ddcc38048d21f97ec2367dc84aab9",
-      "log_bytes": 3115
+      "log_sha256": "348ae128d3acc669c483b5fb9552cacef221231ea895c497faa87e830c24c09f",
+      "log_bytes": 3005,
+      "raw_junit_sha256": "f6a525b5b078131d0fe16c4ec0e577513428fa9453a0c266a946f231cbbdbaab",
+      "raw_log_sha256": "4139ddfb5150e8d070a628e98f643052586ddcc38048d21f97ec2367dc84aab9",
+      "raw_log_bytes": 3115
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-blue_color_",
@@ -927,6 +1217,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[blue_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 335,
       "ended": "2026-09-21T09:11:38+00:00",
@@ -941,8 +1233,11 @@
       },
       "junit_sha256": "5b4900ef57b8e29d394759b3c18144a35a53c6eb5fe99952bb7785ed6c56b84c",
       "junit_bytes": 409,
-      "log_sha256": "f0c1b92969416d1ec1f11995d4f7106c14528d29008393ab34358db345b74fc3",
-      "log_bytes": 3862
+      "log_sha256": "10f35d4635f7c9762175e50edfc939c2717433b97cb6968d511827dfe255483b",
+      "log_bytes": 3752,
+      "raw_junit_sha256": "5b4900ef57b8e29d394759b3c18144a35a53c6eb5fe99952bb7785ed6c56b84c",
+      "raw_log_sha256": "f0c1b92969416d1ec1f11995d4f7106c14528d29008393ab34358db345b74fc3",
+      "raw_log_bytes": 3862
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-yellow_",
@@ -950,6 +1245,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[blue_color-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 307,
       "ended": "2026-09-21T09:11:13+00:00",
@@ -964,8 +1261,11 @@
       },
       "junit_sha256": "1894b23e0da832793b579d2c46782f8c0e7ccf7b4e0e04722359d6113d630368",
       "junit_bytes": 405,
-      "log_sha256": "404d66a8055c4c9d893e028544c9e9a9844c3f46b361cf7843d27dac53a8f0f5",
-      "log_bytes": 3047
+      "log_sha256": "d7abf75805426155e6994d4ab8e67c39b57e0b69ab246bd52ade6a018a212ab1",
+      "log_bytes": 2937,
+      "raw_junit_sha256": "1894b23e0da832793b579d2c46782f8c0e7ccf7b4e0e04722359d6113d630368",
+      "raw_log_sha256": "404d66a8055c4c9d893e028544c9e9a9844c3f46b361cf7843d27dac53a8f0f5",
+      "raw_log_bytes": 3047
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-red_color_",
@@ -973,6 +1273,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[yellow-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 206,
       "ended": "2026-09-21T09:17:48+00:00",
@@ -987,8 +1289,11 @@
       },
       "junit_sha256": "2905119c26d06af3ad89a78dbfdecbc54ca00715c903c4fd885d0003b9d9de4b",
       "junit_bytes": 404,
-      "log_sha256": "a15a70b3ecb330eb79f349f834f4aafc124884b3fdecdde878fe47fee267d3e6",
-      "log_bytes": 3100
+      "log_sha256": "7bed631b6d250dcd49a3611415f0be1b73bf88f94770847d02ceacb14ab87a2f",
+      "log_bytes": 2990,
+      "raw_junit_sha256": "2905119c26d06af3ad89a78dbfdecbc54ca00715c903c4fd885d0003b9d9de4b",
+      "raw_log_sha256": "a15a70b3ecb330eb79f349f834f4aafc124884b3fdecdde878fe47fee267d3e6",
+      "raw_log_bytes": 3100
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-blue_color_",
@@ -996,6 +1301,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[yellow-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 206,
       "ended": "2026-09-21T09:17:48+00:00",
@@ -1010,8 +1317,11 @@
       },
       "junit_sha256": "3b9c05abe5955ed81cc73befb5758a05e0571e3d19b39360bdebb6e793aa2abb",
       "junit_bytes": 405,
-      "log_sha256": "5a496162fae508ec0b72910d355f3546b0ec630b66373981d8969a2fd1568ce9",
-      "log_bytes": 3103
+      "log_sha256": "246b64a8da1e681117805455e89b724ce9ff1ff7c6ffa1cc2d1a81aa72a88f9e",
+      "log_bytes": 2993,
+      "raw_junit_sha256": "3b9c05abe5955ed81cc73befb5758a05e0571e3d19b39360bdebb6e793aa2abb",
+      "raw_log_sha256": "5a496162fae508ec0b72910d355f3546b0ec630b66373981d8969a2fd1568ce9",
+      "raw_log_bytes": 3103
     },
     {
       "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-yellow_",
@@ -1019,6 +1329,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[yellow-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 259,
       "ended": "2026-09-21T09:22:07+00:00",
@@ -1033,8 +1345,11 @@
       },
       "junit_sha256": "45cb4f673bf195164381ef1afaf15266cf5a960598a56328b401fa0867a06cf3",
       "junit_bytes": 401,
-      "log_sha256": "a5d810fce2ce6a2f7ca7af2c5869383eb5416f369a646250039d700ea794e752",
-      "log_bytes": 3005
+      "log_sha256": "d4038a110bc439858955952c0cddf322c85ae6439b7b3e3c4f370bba6030f2a4",
+      "log_bytes": 2895,
+      "raw_junit_sha256": "45cb4f673bf195164381ef1afaf15266cf5a960598a56328b401fa0867a06cf3",
+      "raw_log_sha256": "a5d810fce2ce6a2f7ca7af2c5869383eb5416f369a646250039d700ea794e752",
+      "raw_log_bytes": 3005
     },
     {
       "label": "cython_test_real_rom_mcp_trade_eof_during_setup_exits_cleanly_red_color-blue_color_",
@@ -1042,6 +1357,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_eof_during_setup_exits_cleanly[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 2,
       "ended": "2026-09-21T09:17:50+00:00",
@@ -1056,8 +1373,11 @@
       },
       "junit_sha256": "91e5801ddeef234c363c509141618204eea045f1e089b4baffcba087b18a95b6",
       "junit_bytes": 402,
-      "log_sha256": "68bb12d0c980d22a01eed0008dbcd7144b63b4c09fa9d192d48e56bb93aed446",
-      "log_bytes": 1827
+      "log_sha256": "b303018b2de66e549d584103b5025afb13372487b4ef5f9f8145d89497ed5643",
+      "log_bytes": 1713,
+      "raw_junit_sha256": "91e5801ddeef234c363c509141618204eea045f1e089b4baffcba087b18a95b6",
+      "raw_log_sha256": "68bb12d0c980d22a01eed0008dbcd7144b63b4c09fa9d192d48e56bb93aed446",
+      "raw_log_bytes": 1827
     },
     {
       "label": "cython_test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly_red_color-blue_color_",
@@ -1065,6 +1385,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 86,
       "ended": "2026-09-21T09:19:16+00:00",
@@ -1079,8 +1401,11 @@
       },
       "junit_sha256": "0d7cc267968aec3ec1aa7e19a7195fcaae8b6a8debae6ac6394d15cc69b62baf",
       "junit_bytes": 411,
-      "log_sha256": "5a6c4b38a95765900dbad60d55b2f4fc1a12e11cc601dfdadd665f5293b9cd8a",
-      "log_bytes": 2356
+      "log_sha256": "d395a5cfd771f76427598e275b2cca742c05275f6827638d8077c91b97190318",
+      "log_bytes": 2242,
+      "raw_junit_sha256": "0d7cc267968aec3ec1aa7e19a7195fcaae8b6a8debae6ac6394d15cc69b62baf",
+      "raw_log_sha256": "5a6c4b38a95765900dbad60d55b2f4fc1a12e11cc601dfdadd665f5293b9cd8a",
+      "raw_log_bytes": 2356
     },
     {
       "label": "cython_test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly_red_color-blue_color_",
@@ -1088,6 +1413,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 108,
       "ended": "2026-09-21T09:21:04+00:00",
@@ -1102,8 +1429,11 @@
       },
       "junit_sha256": "e85c7f61c7420aeb750e78123262cae87222746041534e17dfb2d38ed81ae2b3",
       "junit_bytes": 410,
-      "log_sha256": "83595e68d2c02158030c2d93178a37461dcc6d81c88c937bd054a49188bf3369",
-      "log_bytes": 2518
+      "log_sha256": "d0326f7d01f70d1260f48264b75de2d3c6e8d40d0ff4f6a73904a10acc41ebf4",
+      "log_bytes": 2404,
+      "raw_junit_sha256": "e85c7f61c7420aeb750e78123262cae87222746041534e17dfb2d38ed81ae2b3",
+      "raw_log_sha256": "83595e68d2c02158030c2d93178a37461dcc6d81c88c937bd054a49188bf3369",
+      "raw_log_bytes": 2518
     },
     {
       "label": "cython_test_real_rom_mcp_trade_cancel_before_commitment_keeps_records_red_color-blue_color_",
@@ -1111,6 +1441,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_cancel_before_commitment_keeps_records[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 434,
       "ended": "2026-09-21T09:28:18+00:00",
@@ -1125,8 +1457,11 @@
       },
       "junit_sha256": "f522c2506bd2b7eba1791d10f6ae4fdff70f4e6b9359e4dbbb5b65943689e32e",
       "junit_bytes": 414,
-      "log_sha256": "3a47bae615d3e1eec13018cd2e4d8b56327ad1afe6fd75ca08ae10e31bea623a",
-      "log_bytes": 3299
+      "log_sha256": "af9836bf7df5a48d83dbbbacca25b30fd0a7f93073752d503a57bd6f73412c5b",
+      "log_bytes": 3185,
+      "raw_junit_sha256": "f522c2506bd2b7eba1791d10f6ae4fdff70f4e6b9359e4dbbb5b65943689e32e",
+      "raw_log_sha256": "3a47bae615d3e1eec13018cd2e4d8b56327ad1afe6fd75ca08ae10e31bea623a",
+      "raw_log_bytes": 3299
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_red_color-blue_color-out2-peerout0_",
@@ -1134,11 +1469,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_multi_member_slot_records[red_color-blue_color-out2-peerout0]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 328,
       "ended": "2026-09-21T10:52:24+00:00",
-      "started": "2026-09-21T09:22:07+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 328.00s (0:05:28)",
+      "started": "2026-09-21T10:46:56+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 328.00s (0:05:28)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1148,8 +1485,11 @@
       },
       "junit_sha256": "1537bb1c5b12bc0b24fafbc3d12d19e6796faf1bc8b4effd9d759e68ef5dcb4d",
       "junit_bytes": 425,
-      "log_sha256": "161bd0ddb9010a4a4ec8b640cc965873fd8862d84c1f4e17b0a2db205b2a35fe",
-      "log_bytes": 4760
+      "log_sha256": "97d59d156c6e703cd1415df5f21c5728d3594182beafd315050e9081e1149785",
+      "log_bytes": 4646,
+      "raw_junit_sha256": "1537bb1c5b12bc0b24fafbc3d12d19e6796faf1bc8b4effd9d759e68ef5dcb4d",
+      "raw_log_sha256": "161bd0ddb9010a4a4ec8b640cc965873fd8862d84c1f4e17b0a2db205b2a35fe",
+      "raw_log_bytes": 4760
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_blue_color-red_color-out0-peerout3_",
@@ -1157,11 +1497,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_multi_member_slot_records[blue_color-red_color-out0-peerout3]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 353,
       "ended": "2026-09-21T10:58:17+00:00",
-      "started": "2026-09-21T09:28:18+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 352.79s (0:05:52)",
+      "started": "2026-09-21T10:52:24+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 352.79s (0:05:52)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1171,8 +1513,11 @@
       },
       "junit_sha256": "94d18d2872c3b34e19b0f55b6b5cc52aa896de919a67fee5c8565c7ac7d6dfd0",
       "junit_bytes": 425,
-      "log_sha256": "32e0f64c176f0bc683c28c4caacc2ec87164f6791908373f217536c698018d7c",
-      "log_bytes": 4701
+      "log_sha256": "2a6e6ae721570b980da1888500881322c0d9c4c92973abdd94f1f575f4561f1f",
+      "log_bytes": 4587,
+      "raw_junit_sha256": "94d18d2872c3b34e19b0f55b6b5cc52aa896de919a67fee5c8565c7ac7d6dfd0",
+      "raw_log_sha256": "32e0f64c176f0bc683c28c4caacc2ec87164f6791908373f217536c698018d7c",
+      "raw_log_bytes": 4701
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-red_color_",
@@ -1180,11 +1525,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 328,
       "ended": "2026-09-21T11:03:45+00:00",
-      "started": "2026-09-21T09:30:29+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 327.17s (0:05:27)",
+      "started": "2026-09-21T10:58:17+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 327.17s (0:05:27)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1194,8 +1541,11 @@
       },
       "junit_sha256": "c1ad47ab711a87d6c41bd37ba50d0293228c0b2e33ed355d117ae9119f3a0f7f",
       "junit_bytes": 398,
-      "log_sha256": "99f60d52374b5f4f164638753783f07e87d2e3dca7f7196a59d64247cdaf23b8",
-      "log_bytes": 3189
+      "log_sha256": "153a725bbb00dc5d33bd027964f642de464a6f23634843c491fecd695af623ed",
+      "log_bytes": 3075,
+      "raw_junit_sha256": "c1ad47ab711a87d6c41bd37ba50d0293228c0b2e33ed355d117ae9119f3a0f7f",
+      "raw_log_sha256": "99f60d52374b5f4f164638753783f07e87d2e3dca7f7196a59d64247cdaf23b8",
+      "raw_log_bytes": 3189
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-blue_color_",
@@ -1203,11 +1553,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 320,
       "ended": "2026-09-21T11:09:05+00:00",
-      "started": "2026-09-21T09:31:09+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 319.62s (0:05:19)",
+      "started": "2026-09-21T11:03:45+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 319.62s (0:05:19)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1217,8 +1569,11 @@
       },
       "junit_sha256": "c0cdfd54ba11c459917ff379bda943c98886fc6ba9fd5e1431225797beaaae1d",
       "junit_bytes": 399,
-      "log_sha256": "8d17711b29d021bde9c6eca2285ffc496d407efb879dba65bb942264adae0d0d",
-      "log_bytes": 3220
+      "log_sha256": "d4d3f6fe29ffd5934f1b482fbdfa19df12c45efb60a1bef9b2cff6c892a29b85",
+      "log_bytes": 3106,
+      "raw_junit_sha256": "c0cdfd54ba11c459917ff379bda943c98886fc6ba9fd5e1431225797beaaae1d",
+      "raw_log_sha256": "8d17711b29d021bde9c6eca2285ffc496d407efb879dba65bb942264adae0d0d",
+      "raw_log_bytes": 3220
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-yellow_",
@@ -1226,11 +1581,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 395,
       "ended": "2026-09-21T11:15:40+00:00",
-      "started": "2026-09-21T09:34:25+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 394.30s (0:06:34)",
+      "started": "2026-09-21T11:09:05+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 394.30s (0:06:34)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1240,8 +1597,11 @@
       },
       "junit_sha256": "90b9b57dbac933e931e71878faee388cd108c84d6a10f05c8426bf31f0b053b4",
       "junit_bytes": 395,
-      "log_sha256": "a7aa3214042298fde309e75ed83367c5aeaf34d2d0c1a0ab754f8ceea601c159",
-      "log_bytes": 3179
+      "log_sha256": "7151ca82c26e83b30a80e0fb6fb3fc5b0e6ab635d7a17b7979835a1e3dd5c47e",
+      "log_bytes": 3065,
+      "raw_junit_sha256": "90b9b57dbac933e931e71878faee388cd108c84d6a10f05c8426bf31f0b053b4",
+      "raw_log_sha256": "a7aa3214042298fde309e75ed83367c5aeaf34d2d0c1a0ab754f8ceea601c159",
+      "raw_log_bytes": 3179
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-red_color_",
@@ -1249,11 +1609,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[blue_color-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 396,
       "ended": "2026-09-21T11:22:17+00:00",
-      "started": "2026-09-21T09:35:09+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 395.14s (0:06:35)",
+      "started": "2026-09-21T11:15:41+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 395.14s (0:06:35)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1263,8 +1625,11 @@
       },
       "junit_sha256": "151088986a5135e2943a2952e94a215dba1e72ae2fc0004d00a49f91ad3daf1b",
       "junit_bytes": 399,
-      "log_sha256": "45e98a0ad5ddda926d2b74e8fca36697267a01dcc57e0f789e42db55ca8e532c",
-      "log_bytes": 3221
+      "log_sha256": "93e9f9a781fdd1d0756be3b081937ebc2051195719bc3526c9256866701bce43",
+      "log_bytes": 3107,
+      "raw_junit_sha256": "151088986a5135e2943a2952e94a215dba1e72ae2fc0004d00a49f91ad3daf1b",
+      "raw_log_sha256": "45e98a0ad5ddda926d2b74e8fca36697267a01dcc57e0f789e42db55ca8e532c",
+      "raw_log_bytes": 3221
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-blue_color_",
@@ -1272,11 +1637,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[blue_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 269,
       "ended": "2026-09-21T11:26:46+00:00",
-      "started": "2026-09-21T09:43:19+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 269.10s (0:04:29)",
+      "started": "2026-09-21T11:22:17+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 269.10s (0:04:29)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1286,8 +1653,11 @@
       },
       "junit_sha256": "b7f2e04aa60f52e814617cce1ae10870c87b8490fbb1e564d168d818eecbee6c",
       "junit_bytes": 400,
-      "log_sha256": "62b7c2db804a579ce0e12ed24b1ffb5866c8d9251f036203242ff8f9261b0994",
-      "log_bytes": 3911
+      "log_sha256": "71c9ce7006dacbeea71e492dd9217d0cd32dd0763f50b159fb766b6167adf7d3",
+      "log_bytes": 3797,
+      "raw_junit_sha256": "b7f2e04aa60f52e814617cce1ae10870c87b8490fbb1e564d168d818eecbee6c",
+      "raw_log_sha256": "62b7c2db804a579ce0e12ed24b1ffb5866c8d9251f036203242ff8f9261b0994",
+      "raw_log_bytes": 3911
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-yellow_",
@@ -1295,6 +1665,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[blue_color-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 1498,
       "ended": "2026-09-21T10:08:51+00:00",
@@ -1309,8 +1681,11 @@
       },
       "junit_sha256": "03b7df8c34c74ee7829b4b3e0e8f4b683ebe5cde14ec42dc22d18d7729f5f477",
       "junit_bytes": 398,
-      "log_sha256": "fade22a26348687badc46339a8579d864e8d471d83fa9f2f3845a7d3a9b12483",
-      "log_bytes": 3183
+      "log_sha256": "58c39849caf72df369b0618d6941cd55c965505fb0b6b2eaeefc862801746897",
+      "log_bytes": 3069,
+      "raw_junit_sha256": "03b7df8c34c74ee7829b4b3e0e8f4b683ebe5cde14ec42dc22d18d7729f5f477",
+      "raw_log_sha256": "fade22a26348687badc46339a8579d864e8d471d83fa9f2f3845a7d3a9b12483",
+      "raw_log_bytes": 3183
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-red_color_",
@@ -1318,11 +1693,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[yellow-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 200,
       "ended": "2026-09-21T11:30:06+00:00",
-      "started": "2026-09-21T09:48:26+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 198.98s (0:03:18)",
+      "started": "2026-09-21T11:26:46+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 198.98s (0:03:18)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1332,8 +1709,11 @@
       },
       "junit_sha256": "736336f4984fa020bff7e53202c38e4a5e3ce5c8144c160443d2e46de2762f97",
       "junit_bytes": 395,
-      "log_sha256": "ba2c909ae8640aa0f098cd50a67f4e00d4ca829a86f90f235c83c14f28b0c7f3",
-      "log_bytes": 3208
+      "log_sha256": "c3e88bc3263ee4850e9c2cfbf26a750a926f88391f1a1dd84a5a9280147deaa9",
+      "log_bytes": 3094,
+      "raw_junit_sha256": "736336f4984fa020bff7e53202c38e4a5e3ce5c8144c160443d2e46de2762f97",
+      "raw_log_sha256": "ba2c909ae8640aa0f098cd50a67f4e00d4ca829a86f90f235c83c14f28b0c7f3",
+      "raw_log_bytes": 3208
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-blue_color_",
@@ -1341,6 +1721,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[yellow-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 1228,
       "ended": "2026-09-21T10:09:35+00:00",
@@ -1355,8 +1737,11 @@
       },
       "junit_sha256": "da094cca69f550d9722c97caca076b44fa14c3f1fe05519e419ab103980780b9",
       "junit_bytes": 398,
-      "log_sha256": "01f50e7dfeed8c7694ce2c772a2eb654ddda11529c665938e89ded8dd27c56e5",
-      "log_bytes": 3212
+      "log_sha256": "d6aeda3a1d654a91f481f3d47ad09e3c7a3bb4a7e57f72eb55c5701b9c32574e",
+      "log_bytes": 3098,
+      "raw_junit_sha256": "da094cca69f550d9722c97caca076b44fa14c3f1fe05519e419ab103980780b9",
+      "raw_log_sha256": "01f50e7dfeed8c7694ce2c772a2eb654ddda11529c665938e89ded8dd27c56e5",
+      "raw_log_bytes": 3212
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-yellow_",
@@ -1364,6 +1749,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[yellow-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 1330,
       "ended": "2026-09-21T10:31:01+00:00",
@@ -1378,8 +1765,11 @@
       },
       "junit_sha256": "5334e13e623a120c0a4fccd2686add23cc8f9192459f0dd52e0cf2a78129aadf",
       "junit_bytes": 394,
-      "log_sha256": "0b827cf3414192e20c4b15c8ea234c8c5a389b89722dcfed1a0799b7507ea60d",
-      "log_bytes": 3085
+      "log_sha256": "2a0b65a2714aa1597b6f0017e5febd0a90f351c23dfa77a08a2ae57d425f0426",
+      "log_bytes": 2971,
+      "raw_junit_sha256": "5334e13e623a120c0a4fccd2686add23cc8f9192459f0dd52e0cf2a78129aadf",
+      "raw_log_sha256": "0b827cf3414192e20c4b15c8ea234c8c5a389b89722dcfed1a0799b7507ea60d",
+      "raw_log_bytes": 3085
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-red_color_",
@@ -1387,11 +1777,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[red_color-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 206,
       "ended": "2026-09-21T11:33:32+00:00",
-      "started": "2026-09-21T10:09:35+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 206.17s (0:03:26)",
+      "started": "2026-09-21T11:30:06+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 206.17s (0:03:26)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1401,8 +1793,11 @@
       },
       "junit_sha256": "64a4465db11fccd8d1ddfad514d5f92994a13f4171ce0b43821443fb41344d21",
       "junit_bytes": 407,
-      "log_sha256": "399e6c7c4ecd7a8218700d6b62c519272fb63e7659029049b2139d0ac7f7ceca",
-      "log_bytes": 3267
+      "log_sha256": "910921ae43068fedde07bbe824879fdb4c25baeae7e93702640df64bde22c476",
+      "log_bytes": 3153,
+      "raw_junit_sha256": "64a4465db11fccd8d1ddfad514d5f92994a13f4171ce0b43821443fb41344d21",
+      "raw_log_sha256": "399e6c7c4ecd7a8218700d6b62c519272fb63e7659029049b2139d0ac7f7ceca",
+      "raw_log_bytes": 3267
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-blue_color_",
@@ -1410,11 +1805,13 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[red_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "serial-rerun",
+      "attempts_recorded": 2,
       "rc": 0,
       "secs": 207,
       "ended": "2026-09-21T11:36:59+00:00",
-      "started": "2026-09-21T10:19:20+00:00",
-      "tail": "SERIAL-DISCRIMINATOR: 1 passed, 1 warning in 206.81s (0:03:26)",
+      "started": "2026-09-21T11:33:32+00:00",
+      "tail": "SERIAL: 1 passed, 1 warning in 206.81s (0:03:26)",
       "junit": {
         "tests": 1,
         "failures": 0,
@@ -1424,8 +1821,11 @@
       },
       "junit_sha256": "684efc94b27cb938748574e2ff96556276761b05a17f29072966999a623131fa",
       "junit_bytes": 408,
-      "log_sha256": "878559e772f6ce3020ac1e84282a426c91403baa72e8733cf6097056329a4b7f",
-      "log_bytes": 3270
+      "log_sha256": "34ca4069de771a424f84e5ffae15f93b56346c06ab25de1c8a22220300ec0b5e",
+      "log_bytes": 3156,
+      "raw_junit_sha256": "684efc94b27cb938748574e2ff96556276761b05a17f29072966999a623131fa",
+      "raw_log_sha256": "878559e772f6ce3020ac1e84282a426c91403baa72e8733cf6097056329a4b7f",
+      "raw_log_bytes": 3270
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-yellow_",
@@ -1433,6 +1833,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[red_color-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 485,
       "ended": "2026-09-21T10:39:06+00:00",
@@ -1447,8 +1849,11 @@
       },
       "junit_sha256": "12ecfd3b5546e08d01c35de6ce70c3a5ab38f99720982cb6fb90ff13516aa6fc",
       "junit_bytes": 404,
-      "log_sha256": "7a1b1c8c9cf0f6485dfb3e4298d90a8a731e6f4be5165eeefaf6246aeb96efdb",
-      "log_bytes": 3199
+      "log_sha256": "9427fc0cd7b378db8700793c80d9b8b6e701cd868ffaee9ffef6869be47f3d34",
+      "log_bytes": 3085,
+      "raw_junit_sha256": "12ecfd3b5546e08d01c35de6ce70c3a5ab38f99720982cb6fb90ff13516aa6fc",
+      "raw_log_sha256": "7a1b1c8c9cf0f6485dfb3e4298d90a8a731e6f4be5165eeefaf6246aeb96efdb",
+      "raw_log_bytes": 3199
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-red_color_",
@@ -1456,6 +1861,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[blue_color-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 171,
       "ended": "2026-09-21T10:35:38+00:00",
@@ -1470,8 +1877,11 @@
       },
       "junit_sha256": "f907c856f7ee5019b5bbc7a352e8581bb4db55318d7058d09bc99c76715efd78",
       "junit_bytes": 408,
-      "log_sha256": "619f24ab2ceea967f0fa162683be5300c0b25b989c17be2f1995cf195b736e3c",
-      "log_bytes": 3270
+      "log_sha256": "6509b83a28364c92cb340a172b73983daf4e66ebf3cdd5cd3ddbe7caa0a21397",
+      "log_bytes": 3156,
+      "raw_junit_sha256": "f907c856f7ee5019b5bbc7a352e8581bb4db55318d7058d09bc99c76715efd78",
+      "raw_log_sha256": "619f24ab2ceea967f0fa162683be5300c0b25b989c17be2f1995cf195b736e3c",
+      "raw_log_bytes": 3270
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-blue_color_",
@@ -1479,6 +1889,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[blue_color-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 267,
       "ended": "2026-09-21T10:40:05+00:00",
@@ -1493,8 +1905,11 @@
       },
       "junit_sha256": "0d1fd412407f8fca04123dd8992d47b203cfa3ccbc7af4091793389cdd6a4d29",
       "junit_bytes": 409,
-      "log_sha256": "b889afc1c8b1d0fcdad6628ab947e6fadc5f9a8d91d50ab3fc91da781076a9e8",
-      "log_bytes": 4017
+      "log_sha256": "2d8c38445bc75659342ae7ad7687eff1bf8e92aed504fd6c0575dfc4c5a27fe9",
+      "log_bytes": 3903,
+      "raw_junit_sha256": "0d1fd412407f8fca04123dd8992d47b203cfa3ccbc7af4091793389cdd6a4d29",
+      "raw_log_sha256": "b889afc1c8b1d0fcdad6628ab947e6fadc5f9a8d91d50ab3fc91da781076a9e8",
+      "raw_log_bytes": 4017
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-yellow_",
@@ -1502,6 +1917,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[blue_color-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 251,
       "ended": "2026-09-21T10:43:17+00:00",
@@ -1516,8 +1933,11 @@
       },
       "junit_sha256": "e9d5779ac1773dc02310703e7e535a542e3c26ce9762f62511958d7df4dc4fab",
       "junit_bytes": 405,
-      "log_sha256": "2d5a73c2bf558c8b16284651da2b01d5aba1be6b2b7a08471639163ea8ad1747",
-      "log_bytes": 3202
+      "log_sha256": "34ff23aa71648de49caacb5571fd1012134780a244ae53aeac7a91be7c4a3836",
+      "log_bytes": 3088,
+      "raw_junit_sha256": "e9d5779ac1773dc02310703e7e535a542e3c26ce9762f62511958d7df4dc4fab",
+      "raw_log_sha256": "2d5a73c2bf558c8b16284651da2b01d5aba1be6b2b7a08471639163ea8ad1747",
+      "raw_log_bytes": 3202
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-red_color_",
@@ -1525,6 +1945,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[yellow-red_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 44,
       "ended": "2026-09-21T10:40:49+00:00",
@@ -1539,8 +1961,11 @@
       },
       "junit_sha256": "4eecbb4f56b305c02a2f815712cbf294d02e1294631024856dc2424ca0111b33",
       "junit_bytes": 402,
-      "log_sha256": "b11d1c7314b882ff0be340cfd5a719d9634595240c1e0c6c7145ed6bc6b266f6",
-      "log_bytes": 3244
+      "log_sha256": "da52dc4124589c0b18adb7d0d2ebc057951dfbd27ad940785470d10fbff48e42",
+      "log_bytes": 3130,
+      "raw_junit_sha256": "4eecbb4f56b305c02a2f815712cbf294d02e1294631024856dc2424ca0111b33",
+      "raw_log_sha256": "b11d1c7314b882ff0be340cfd5a719d9634595240c1e0c6c7145ed6bc6b266f6",
+      "raw_log_bytes": 3244
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-blue_color_",
@@ -1548,6 +1973,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[yellow-blue_color]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 44,
       "ended": "2026-09-21T10:41:33+00:00",
@@ -1562,8 +1989,11 @@
       },
       "junit_sha256": "d8ec153035414a67149c1dde609b1408764250b14dfd054e5a7549bc4907bbd3",
       "junit_bytes": 403,
-      "log_sha256": "a782f07b8d120525570f28d0c12ac2ddbda1d59b5ac375942add234558744bda",
-      "log_bytes": 3247
+      "log_sha256": "b78e55c3b7a4c2549bcf97bc1af7885c86c3afca6a86621e15645e761cdcc34a",
+      "log_bytes": 3133,
+      "raw_junit_sha256": "d8ec153035414a67149c1dde609b1408764250b14dfd054e5a7549bc4907bbd3",
+      "raw_log_sha256": "a782f07b8d120525570f28d0c12ac2ddbda1d59b5ac375942add234558744bda",
+      "raw_log_bytes": 3247
     },
     {
       "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-yellow_",
@@ -1571,6 +2001,8 @@
       "nodeid": "tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records_over_tcp[yellow-yellow]",
       "status": "PASS",
       "in_flight": false,
+      "decided_by": "parallel-run",
+      "attempts_recorded": 1,
       "rc": 0,
       "secs": 241,
       "ended": "2026-09-21T10:45:34+00:00",
@@ -1585,8 +2017,11 @@
       },
       "junit_sha256": "57b31d3620e47cb7978a274ea924d538a39feb9eceff2582ae1bebb827736144",
       "junit_bytes": 401,
-      "log_sha256": "26e1ad8c375f31574ad93bbb5bde529481498c90d374169b500a514f8fc6ccd1",
-      "log_bytes": 3160
+      "log_sha256": "5adafa3de91cdce083064c0c260488ffbd7f68b6605f873a39b161f1a21efc72",
+      "log_bytes": 3046,
+      "raw_junit_sha256": "57b31d3620e47cb7978a274ea924d538a39feb9eceff2582ae1bebb827736144",
+      "raw_log_sha256": "26e1ad8c375f31574ad93bbb5bde529481498c90d374169b500a514f8fc6ccd1",
+      "raw_log_bytes": 3160
     }
   ]
 }
