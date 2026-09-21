@@ -20,6 +20,7 @@ from pokered_harness.link.network_backend import (
 )
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_coordinator import SerialOperationGate
+from tests.test_network_cpu_owner import _wait_for_edge_requests_retired
 
 pytestmark = [pytest.mark.unit, pytest.mark.timing_sensitive]
 
@@ -297,6 +298,9 @@ def test_frame_owner_wakes_for_published_edge_without_polling(monkeypatch, leade
         assert owner_result == [None]
         assert core.calls == 1
         assert core.call_threads == [finisher.ident, finisher.ident]
+        # The owner applied the edge; the response worker writes it. Retire the
+        # admitted request before sampling the counter that reports the write.
+        _wait_for_edge_requests_retired(owner)
         assert owner.debug_snapshot()["pending_edge_requests"] == 0
     finally:
         cleanup.set()

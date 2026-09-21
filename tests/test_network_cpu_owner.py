@@ -157,6 +157,29 @@ def _wait_for_edge_request(
             raise AssertionError("network backend closed before EDGE_REQ")
 
 
+def _wait_for_edge_requests_retired(backend: NetworkBackend, *, timeout: float = 10.0) -> None:
+    """Wait until every admitted edge response has reached the wire.
+
+    ``pending_edge_requests`` counts an ``EDGE_REQ`` "from enqueue until their
+    response has been written", and in owner-dispatch mode that write happens
+    on the response worker, not on the owner thread.  The counter is therefore
+    not zero the instant an owner frame returns, so sampling it immediately
+    measures thread scheduling rather than backend state.  Wait for the
+    documented retirement, notified by ``_decrement_edge_pending``, and let the
+    caller assert the invariant.
+    """
+    deadline = time.monotonic() + timeout
+    with backend._edge_pending_condition:
+        while backend._edge_pending != 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(
+                    "admitted edge response was not written within "
+                    f"{timeout:g}s; snapshot={backend.debug_snapshot()}"
+                )
+            backend._edge_pending_condition.wait(timeout=remaining)
+
+
 def test_byte_completed_at_frame_barrier_resumes_cpu_without_a_ninth_edge(
     _emulator_fixture,  # noqa: F811 - shared authored-ROM fixture
     monkeypatch,
