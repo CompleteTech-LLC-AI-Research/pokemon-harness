@@ -22,9 +22,17 @@ The capture path itself is bounded and fail-closed:
   party shape) *before* anything is written;
 * it writes the state file with ``O_EXCL`` so an existing fixture can never be
   overwritten, and it leaves no partial file behind when capture fails;
-* it records a private report with the replayable input history, the producer and
-  runtime identities, the asset/output hashes, and the reproduction comparison
-  against the pinned fixture hashes.
+ * it records a private report with the replayable input history, the producer and
+   runtime identities, the asset/output hashes, and the reproduction comparison
+   against the pinned fixture hashes;
+* it refuses incomplete or unverifiable declared metadata — a missing capture
+  boundary or bounds block, a non-integer map, a link-state label with no verified
+  encoding, a producer-named verified entry whose producer no longer exists, or a
+  verified entry with no pinned fixture hashes — before the emulator is opened;
+* it validates the capture record it is about to record and admits only records
+  that carry the producer, asset, boundary, and output identities;
+* an interruption publishes nothing, leaves no staged file, and still closes the
+  emulator session.
 
 Callers still capture real fixtures from legal ROM/SYM inputs; the recorded
 hashes are what consumers pin.
@@ -70,6 +78,30 @@ _LINK_RECEPTION_TILE = (11, 3)
 # states with a verified meaning are listed; an unlisted label is refused
 # rather than skipped.
 _LINK_STATE_CODES = {"disconnected": 0}
+# Provenance statuses the catalog may declare.  Anything else is refused rather
+# than copied into a record a consumer might read as an admission.
+_PROVENANCE_STATUSES = ("verified", "partial", "derived", "unknown")
+# Fixture fields a "verified" entry must pin before its bytes may be compared.
+_PINNED_FIXTURE_FIELDS = ("sha1", "sha256", "size_bytes")
+# Fields every admitted capture record must carry; a record missing one of them
+# cannot be admitted as validated metadata.
+_CAPTURE_RECORD_FIELDS = (
+    "producer",
+    "producer_sha1",
+    "runtime",
+    "role",
+    "captured_at_utc",
+    "wall_seconds",
+    "declared_bounds",
+    "inputs_used",
+    "frames_used",
+    "input_sequence",
+    "observed_boundary",
+    "rom_sha1",
+    "sym_sha1",
+    "output",
+    "reproduction",
+)
 _BUTTON_NAMES = frozenset({"a", "b", "start", "select", "up", "down", "left", "right"})
 
 
@@ -252,6 +284,15 @@ def _positive_int(value: Any, name: str) -> int:
     return int(value)
 
 
+def _is_digest(value: Any, length: int) -> bool:
+    """Return whether ``value`` is a lowercase hex digest of ``length`` characters."""
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def validate_bounds(
     *,
     max_frames: Any,
@@ -273,6 +314,77 @@ def validate_bounds(
         "max_wall_seconds": float(max_wall_seconds),
         "max_inputs": inputs,
     }
+
+
+def validate_scenario_metadata(scenario: dict[str, Any], scenario_id: str) -> None:
+    """Refuse incomplete or unverifiable declared metadata before any emulator work.
+
+    A capture is only as trustworthy as the metadata it asserts and records, so
+    every field the capture later reads is screened here.  Reading these fields
+    with ``[]`` deep inside the drive would surface a missing key as an opaque
+    ``KeyError``, and reading them with ``.get`` would silently accept a
+    ``None`` boundary as an unasserted precondition.
+    """
+    if not isinstance(scenario, dict):
+        raise ScenarioRefusal(f"scenario {scenario_id!r} is not a declared object")
+    game = scenario.get("game")
+    if not isinstance(game, dict) or not _is_digest(game.get("rom_sha1"), 40):
+        raise ScenarioRefusal(f"scenario {scenario_id!r} must declare a pinned ROM SHA-1")
+    if not _is_digest(game.get("sym_sha1"), 40):
+        raise ScenarioRefusal(f"scenario {scenario_id!r} must declare a pinned symbol SHA-1")
+
+    bounds = scenario.get("capture_bounds")
+    if not isinstance(bounds, dict):
+        raise ScenarioRefusal(f"scenario {scenario_id!r} must declare capture_bounds")
+    validate_bounds(
+        max_frames=bounds.get("max_frames"),
+        max_wall_seconds=bounds.get("max_wall_seconds"),
+        max_inputs=bounds.get("max_inputs"),
+    )
+
+    provenance = scenario.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("status") not in _PROVENANCE_STATUSES:
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} must declare a provenance status in "
+            f"{list(_PROVENANCE_STATUSES)}"
+        )
+    fixture = scenario.get("fixture")
+    if not isinstance(fixture, dict):
+        raise ScenarioRefusal(f"scenario {scenario_id!r} must declare its fixture block")
+    if provenance["status"] == "verified":
+        absent = [field for field in _PINNED_FIXTURE_FIELDS if not fixture.get(field)]
+        if absent:
+            raise ScenarioRefusal(
+                f"scenario {scenario_id!r} claims verified provenance but does not declare "
+                f"{', '.join(absent)}; an unverified byte comparison must not be admitted "
+                "as verified provenance"
+            )
+        if not _is_digest(fixture.get("sha1"), 40) or not _is_digest(fixture.get("sha256"), 64):
+            raise ScenarioRefusal(
+                f"scenario {scenario_id!r} declares malformed fixture sha1/sha256 digests"
+            )
+
+    boundary = scenario.get("capture_boundary")
+    if not isinstance(boundary, dict):
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} must declare capture_boundary; a capture cannot "
+            "assert an undeclared boundary"
+        )
+    for field in ("stage", "when"):
+        declared = boundary.get(field)
+        if not isinstance(declared, str) or not declared.strip():
+            raise ScenarioRefusal(f"scenario {scenario_id!r} must declare capture_boundary.{field}")
+    map_id = boundary.get("map_id")
+    if isinstance(map_id, bool) or not isinstance(map_id, int) or map_id < 0:
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} must declare a non-negative integer capture_boundary.map_id"
+        )
+    label = boundary.get("link_state")
+    if not isinstance(label, str) or label not in _LINK_STATE_CODES:
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} declares link_state {label!r}, which has no "
+            "verified wLinkState encoding; refusing to assert an unverified value"
+        )
 
 
 def resolve_pins(pins: Any, rom: str | Path, sym: str | Path) -> tuple[str, str]:
@@ -330,6 +442,118 @@ def sha1_file(path: str | Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def verify_declared_producer(
+    scenario: dict[str, Any],
+    scenario_id: str,
+    repo_root: str | Path,
+) -> str | None:
+    """Identify the producer named by the declared provenance, or refuse.
+
+    A verified entry must name the producer that generated its pinned bytes, and
+    that producer must still be readable in the tree.  A changed, removed, or
+    unspecified producer would leave a "verified" fixture whose lineage can no
+    longer be reproduced, so it is refused instead of being recorded as if the
+    lineage were intact.  Non-path prose (used by derived transformations) is
+    recorded as-is with no digest.
+    """
+    provenance = scenario["provenance"]
+    named = provenance.get("producer")
+    if named is None:
+        if provenance.get("status") == "verified":
+            raise ScenarioRefusal(
+                f"scenario {scenario_id!r} claims verified provenance but names no producer"
+            )
+        return None
+    if not isinstance(named, str) or not named.strip():
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} declares a non-textual provenance producer: {named!r}"
+        )
+    label = named.strip()
+    if not label.endswith(".py") or " " in label:
+        return None
+    target = Path(repo_root) / label
+    if not target.is_file():
+        raise ScenarioRefusal(
+            f"scenario {scenario_id!r} names producer {label!r}, which is not present at "
+            f"{target}; the declared lineage cannot be reproduced from this tree"
+        )
+    return sha1_file(target)
+
+
+def validate_capture_record(record: Any, scenario_id: str) -> None:
+    """Refuse a capture record that cannot be admitted as validated metadata.
+
+    The record is the only machine-readable evidence a consumer receives, so a
+    record that omits the producer, asset, boundary, or output identity is
+    refused *before* the produced bytes are published: a fixture whose metadata
+    cannot be admitted must not exist on disk as if it had been admitted.
+    """
+    if not isinstance(record, dict):
+        raise ScenarioRefusal(f"capture record for {scenario_id!r} is not an object")
+    absent = [field for field in _CAPTURE_RECORD_FIELDS if record.get(field) is None]
+    if absent:
+        raise ScenarioRefusal(f"capture record for {scenario_id!r} is missing {', '.join(absent)}")
+    producer = record.get("producer")
+    if not isinstance(producer, str) or not producer.strip():
+        raise ScenarioRefusal(f"capture record for {scenario_id!r} does not name its producer")
+    if not _is_digest(record.get("producer_sha1"), 40):
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} does not record a producer digest"
+        )
+    for field, label in (("rom_sha1", "ROM"), ("sym_sha1", "symbol")):
+        if not _is_digest(record.get(field), 40):
+            raise ScenarioRefusal(
+                f"capture record for {scenario_id!r} does not record the pinned {label} digest"
+            )
+
+    output = record.get("output")
+    if not isinstance(output, dict):
+        raise ScenarioRefusal(f"capture record for {scenario_id!r} has no output block")
+    if not isinstance(output.get("path"), str) or not output["path"].strip():
+        raise ScenarioRefusal(f"capture record for {scenario_id!r} does not record the output path")
+    size = output.get("size_bytes")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} does not record a positive output size"
+        )
+    if not _is_digest(output.get("sha1"), 40) or not _is_digest(output.get("sha256"), 64):
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} does not record output sha1/sha256 digests"
+        )
+
+    sequence = record.get("input_sequence")
+    if not isinstance(sequence, list) or any(not isinstance(step, str) for step in sequence):
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} does not record a replayable input history"
+        )
+    observed = record.get("observed_boundary")
+    if (
+        not isinstance(observed, dict)
+        or not isinstance(observed.get("map_id"), int)
+        or not isinstance(observed.get("link_state_raw"), int)
+    ):
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} does not record the observed boundary"
+        )
+    reproduction = record.get("reproduction")
+    if not isinstance(reproduction, dict) or not isinstance(reproduction.get("matches"), bool):
+        raise ScenarioRefusal(
+            f"capture record for {scenario_id!r} does not record the reproduction comparison"
+        )
+    for field in ("inputs_used", "frames_used"):
+        value = record.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ScenarioRefusal(f"capture record for {scenario_id!r} does not record {field}")
+    wall_seconds = record.get("wall_seconds")
+    if (
+        isinstance(wall_seconds, bool)
+        or not isinstance(wall_seconds, (int, float))
+        or not math.isfinite(float(wall_seconds))
+        or float(wall_seconds) < 0
+    ):
+        raise ScenarioRefusal(f"capture record for {scenario_id!r} does not record wall_seconds")
 
 
 def verify_input_fixture(path: str | Path, expected_sha1: str | None) -> str:
@@ -568,8 +792,9 @@ def capture_battle_scenario(
     history, the runtime identity, or the output hashes.
     """
     del report
-    boundary = scenario["capture_boundary"]
     scenario_id = scenario["scenario_id"]
+    validate_scenario_metadata(scenario, scenario_id)
+    boundary = scenario["capture_boundary"]
     if (boundary["stage"], boundary["when"]) not in (_SUPPORTED_BOUNDARY,):
         producer = scenario.get("provenance", {}).get("producer", "the documented producer")
         raise CaptureNotAvailable(
@@ -629,15 +854,14 @@ def capture_battle_scenario(
         and declared.get("size_bytes") == len(payload)
     )
     verified = scenario.get("provenance", {}).get("status") == "verified"
-    if verified and declared.get("sha1") and not matches:
+    if verified and not matches:
         raise ScenarioRefusal(
             f"bounded capture did not reproduce the declared fixture for {scenario_id!r}: "
             f"declared sha1 {declared['sha1']} ({declared.get('size_bytes')} bytes), "
             f"produced sha1 {digest_sha1} ({len(payload)} bytes); no bytes were written"
         )
-    _write_fixture_exclusive(output_path, payload)
 
-    return {
+    record = {
         "producer": _CAPTURE_PRODUCER,
         "producer_sha1": sha1_file(Path(__file__)),
         "producer_revision": _producer_revision(repo_root),
@@ -667,6 +891,9 @@ def capture_battle_scenario(
             "matches": matches,
         },
     }
+    validate_capture_record(record, scenario_id)
+    _write_fixture_exclusive(output_path, payload)
+    return record
 
 
 def run(
@@ -690,6 +917,7 @@ def run(
 ) -> dict[str, Any]:
     """Validate a scenario request, then invoke the bounded capture path."""
     scenario = find_scenario(catalog, scenario_id)
+    validate_scenario_metadata(scenario, scenario_id)
     resolved_role = resolve_role(scenario, scenario_id, role)
     declared = scenario["capture_bounds"]
     bounds = validate_bounds(
@@ -711,6 +939,7 @@ def run(
     declared_input_sha1 = provenance.get("input_fixture_sha1")
     if provenance.get("source_fixture_id") is not None and input_fixture is None:
         raise ScenarioRefusal("scenario declares a source fixture; an input fixture is required")
+    declared_producer_sha1 = verify_declared_producer(scenario, scenario_id, repo_root)
     input_sha1: str | None = None
     if input_fixture is not None:
         input_sha1 = verify_input_fixture(input_fixture, declared_input_sha1)
@@ -722,6 +951,8 @@ def run(
         "rom_sha1": rom_pin,
         "sym_sha1": sym_pin,
         "input_fixture_sha1": input_sha1,
+        "declared_producer": provenance.get("producer"),
+        "declared_producer_sha1": declared_producer_sha1,
         "capture_bounds": bounds,
         "output": str(output),
     }
