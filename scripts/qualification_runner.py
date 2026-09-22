@@ -4186,8 +4186,18 @@ def _asset_tree_immutability_problem(root: Path) -> str | None:
         )
     if os.access(root, os.W_OK):
         return "the asset root is writable by this job; mount it read-only"
+
+    def raise_walk_error(error: OSError) -> None:
+        # ``os.walk`` swallows listing errors by default, so an unlistable
+        # directory would silently vanish from the scan.  A searchable but
+        # unlistable directory (mode 0111) can still hand a writer a protected
+        # file, so an unobservable tree must fail closed rather than pass.
+        raise error
+
     try:
-        for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        for directory, dirnames, filenames in os.walk(
+            root, followlinks=False, onerror=raise_walk_error
+        ):
             base = Path(directory)
             for name in dirnames + filenames:
                 entry = base / name
@@ -5110,9 +5120,6 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
         )
         if not recorded_ok:
             return "blocked", recorded_detail
-        _close_held_lease_descriptors(descriptor.get("lock_identity"))
-        if lock_path is not None and _lock_owned_by_this_process(lock_path):
-            return "blocked", "this process still holds the allocation lock after releasing it"
     else:
         if _pid_alive(holder) or holder in lock_holders:
             terminated, detail = _release_confirm_holder_tree(holder)
@@ -5163,6 +5170,15 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
             f"({len(token_survivors)} pid(s)); the lease is kept because the "
             "allocation is still in use: " + ", ".join(str(pid) for pid in token_survivors[:16])
         )
+    if holder == os.getpid():
+        # Relinquish the lock only after every containment check has passed.  A
+        # blocked release must keep effective exclusion: closing the descriptors
+        # earlier would let a competing reservation acquire the lock while owned
+        # work was still alive, even though the release reported it was keeping
+        # the lease.
+        _close_held_lease_descriptors(descriptor.get("lock_identity"))
+        if lock_path is not None and _lock_owned_by_this_process(lock_path):
+            return "blocked", "this process still holds the allocation lock after releasing it"
     _remove_allocation_state(descriptor_path)
     return "ok", "the owned lease was relinquished and the private job state removed"
 

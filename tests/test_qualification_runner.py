@@ -1660,6 +1660,56 @@ def test_release_blocks_on_launch_intent_without_ownership_record(tmp_path: Path
     assert descriptor_path.exists(), "release removed state whose ownership was unproven"
 
 
+def test_blocked_release_keeps_the_lease_lock_held(tmp_path: Path):
+    """A blocked release must not relinquish the kernel lease lock.
+
+    The round-14 finding: the holder closed its lease descriptors before the
+    token-survivor check, so a ``blocked`` release still freed the lock and a
+    competing reservation could acquire it while a descendant was alive.
+    """
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    job_dir = Path(declaration["reservation"]["job_dir"])
+    lock_path = Path(declaration["reservation"]["host_lock_path"])
+    token = "round-14-live-descendant"
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        env={**os.environ, runner._JOB_OWNERSHIP_TOKEN_ENV: token},
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        (job_dir / runner._JOB_RUN_RECORD_NAME).write_text(
+            json.dumps(_job_record(containment_confirmed=True, job_token=token)),
+            encoding="utf-8",
+        )
+        status, message = runner._release_allocation(declaration, tmp_path)
+        assert status == "blocked", message
+        assert sleeper.poll() is None
+        competitor = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR); "
+                + "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+                str(lock_path),
+            ],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        assert competitor.returncode != 0, (
+            "release reported blocked but another process acquired the lease lock"
+        )
+    finally:
+        sleeper.kill()
+        sleeper.wait(timeout=5)
+        runner._close_held_lease_descriptors(runner._lock_identity(lock_path))
+
+
 def rewrite_descriptor(declaration: dict, changes: dict) -> None:
     path = Path(declaration["reservation"]["descriptor_path"])
     os.chmod(path, 0o600)
@@ -2460,6 +2510,31 @@ def test_immutable_asset_check_rejects_a_symlinked_directory(tmp_path: Path):
     finally:
         target.chmod(0o755)
         rom_root.chmod(0o755)
+
+
+def test_immutable_asset_check_rejects_an_unlistable_directory(tmp_path: Path):
+    """A searchable but unlistable directory must not hide a writable input.
+
+    The round-14 finding: ``os.walk`` swallows ``scandir`` errors by default, so
+    a mode-0111 directory under a mode-0555 root vanished from the scan while a
+    mode-0644 pinned file inside it stayed writable.
+    """
+
+    root = tmp_path / "assets"
+    directory = root / "red"
+    directory.mkdir(parents=True)
+    asset = directory / "pokemon-red.gb"
+    asset.write_bytes(b"synthetic reviewer control, not a ROM")
+    asset.chmod(0o644)
+    directory.chmod(0o111)
+    root.chmod(0o555)
+    try:
+        problem = runner._asset_tree_immutability_problem(root)
+        assert problem is not None, "an unobservable asset tree was admitted"
+        assert "could not be inspected" in problem
+    finally:
+        root.chmod(0o755)
+        directory.chmod(0o755)
 
 
 def test_required_asset_rejects_a_symlinked_directory_component(tmp_path: Path):
