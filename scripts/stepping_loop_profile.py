@@ -558,34 +558,37 @@ def main(argv: list[str] | None = None) -> int:
     if args.profile_mix is not None and args.profile_mix not in MIXES_BY_NAME:
         raise SystemExit(f"unknown --profile-mix: {args.profile_mix}")
 
+    results: dict[str, dict[str, dict[str, object]]] = {}
+    # Every refusal path reports the same bounded outcome: a ``REFUSED`` line on
+    # stderr, exit code 2, and no report or JSON payload.  A measurement whose
+    # counts disagree with the declared mix, or that escapes the authored loop,
+    # is the reason this probe exists, so it must not surface as a traceback.
     try:
         runtime = require_compiled_runtime()
+        for name in mix_names:
+            results[name] = measure_mix(
+                MIXES_BY_NAME[name], args.cycles, args.repeats, tuple(path_names)
+            )
+        payload: dict[str, object] = {
+            "subject": "#109 instruction-stepping loop profile",
+            "label": args.label,
+            "cycles_requested": args.cycles,
+            "repeats": args.repeats,
+            "runtime": runtime,
+            "host_load_1min": os.getloadavg()[0],
+            "cpu_count": os.cpu_count(),
+            "mixes": {mix.name: mix.as_dict() for mix in MIXES},
+            "paths": [name for name, _ in PATHS],
+            "results": results,
+            "ratios": compute_ratios(results),
+        }
+        if args.profile_mix:
+            payload["production_loop_profile"] = profile_production_loop(
+                MIXES_BY_NAME[args.profile_mix], args.cycles, args.profile_top
+            )
     except ProfileRefused as refusal:
         print(f"REFUSED: {refusal}", file=sys.stderr)
         return 2
-
-    results: dict[str, dict[str, dict[str, object]]] = {}
-    for name in mix_names:
-        results[name] = measure_mix(
-            MIXES_BY_NAME[name], args.cycles, args.repeats, tuple(path_names)
-        )
-    payload: dict[str, object] = {
-        "subject": "#109 instruction-stepping loop profile",
-        "label": args.label,
-        "cycles_requested": args.cycles,
-        "repeats": args.repeats,
-        "runtime": runtime,
-        "host_load_1min": os.getloadavg()[0],
-        "cpu_count": os.cpu_count(),
-        "mixes": {mix.name: mix.as_dict() for mix in MIXES},
-        "paths": [name for name, _ in PATHS],
-        "results": results,
-        "ratios": compute_ratios(results),
-    }
-    if args.profile_mix:
-        payload["production_loop_profile"] = profile_production_loop(
-            MIXES_BY_NAME[args.profile_mix], args.cycles, args.profile_top
-        )
 
     print(format_report(payload))
     if args.json is not None:

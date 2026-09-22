@@ -248,6 +248,34 @@ def test_run_sample_rejects_an_unknown_path_without_a_runtime(tmp_path):
         profile.run_sample(mix, cartridge, "nope", 1024)
 
 
+def test_measurement_refusal_is_a_clean_bounded_exit(tmp_path, capsys, monkeypatch):
+    """A disagreement found *while measuring* must not surface as a traceback.
+
+    The runtime gate is not the only refusal path: an oracle mismatch or a loop
+    escape is raised from inside the measurement, and those are the refusals
+    that actually guard the numbers.  They must share the gate's exit contract.
+    """
+
+    def _refuse(*_args, **_kwargs):
+        raise profile.ProfileRefused(
+            "production_chunk_loop advanced 200200 cycles for 30030 instructions; "
+            "the declared reg-only mix predicts 220220"
+        )
+
+    monkeypatch.setattr(profile, "require_compiled_runtime", lambda: {"ok": True})
+    monkeypatch.setattr(profile, "measure_mix", _refuse)
+    destination = tmp_path / "refused.json"
+    code = profile.main(["--cycles", "1000", "--repeats", "1", "--json", str(destination)])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert captured.err.startswith("REFUSED: ")
+    assert "declared reg-only mix predicts" in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+    assert not destination.exists()
+
+
 def test_summarize_reports_count_determinism_and_rejects_drift():
     mix = profile.MIXES_BY_NAME["reg-only"]
     retired = mix.loop_instructions * 10
