@@ -102,7 +102,10 @@ def _validate_schema(document: dict[str, Any]) -> list[dict[str, Any]]:
         _require(relative_path not in seen_paths, f"duplicate fixture path: {relative_path}")
         seen_paths.add(relative_path)
 
-        _require(fixture.get("kind") in {"ordinary", "battle"}, f"{prefix}.kind is invalid")
+        _require(
+            fixture.get("kind") in {"ordinary", "battle", "slots"},
+            f"{prefix}.kind is invalid",
+        )
         _validate_text(fixture.get("version"), f"{prefix}.version")
         _validate_text(fixture.get("variant"), f"{prefix}.variant")
         size = fixture.get("size_bytes")

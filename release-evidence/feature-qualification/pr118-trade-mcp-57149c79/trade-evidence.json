@@ -1,0 +1,3957 @@
+{
+  "assets": [
+    {
+      "kind": "rom",
+      "label": "blue/pokemon-blue-color.gb",
+      "path": "<rom-root>/blue/pokemon-blue-color.gb",
+      "sha1": "5f4b05725a860e04077045462176d3e2771c5022",
+      "size": 1048576
+    },
+    {
+      "kind": "rom",
+      "label": "blue/pokemon-blue.gb",
+      "path": "<rom-root>/blue/pokemon-blue.gb",
+      "sha1": "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2",
+      "size": 1048576
+    },
+    {
+      "kind": "rom",
+      "label": "red/pokemon-red-color.gb",
+      "path": "<rom-root>/red/pokemon-red-color.gb",
+      "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+      "size": 1048576
+    },
+    {
+      "kind": "rom",
+      "label": "red/pokemon-red.gb",
+      "path": "<rom-root>/red/pokemon-red.gb",
+      "sha1": "ea9bcae617fdf159b045185467ae58b2e4a48b9a",
+      "size": 1048576
+    },
+    {
+      "kind": "rom",
+      "label": "yellow/pokemon-yellow.gbc",
+      "path": "<rom-root>/yellow/pokemon-yellow.gbc",
+      "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+      "size": 1048576
+    },
+    {
+      "kind": "symbol",
+      "label": "blue/pokemon-blue.sym",
+      "path": "<rom-root>/blue/pokemon-blue.sym",
+      "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6",
+      "size": 708615
+    },
+    {
+      "kind": "symbol",
+      "label": "red/pokemon-red.sym",
+      "path": "<rom-root>/red/pokemon-red.sym",
+      "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118",
+      "size": 708615
+    },
+    {
+      "kind": "symbol",
+      "label": "yellow/pokemon-yellow.sym",
+      "path": "<rom-root>/yellow/pokemon-yellow.sym",
+      "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa",
+      "size": 842120
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-battle-faint-peer.state",
+      "path": "<fixture-root>/blue/cable_club-battle-faint-peer.state",
+      "sha1": "cbfdd7238f1e9c5bf1e4b500e5a11d698a854b8c",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-battle-faint.state",
+      "path": "<fixture-root>/blue/cable_club-battle-faint.state",
+      "sha1": "8d06732843bf070eafcd37531ab6c6e827aedf71",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-battle-vanilla.state",
+      "path": "<fixture-root>/blue/cable_club-battle-vanilla.state",
+      "sha1": "442c1497c0398f7e54ceade9739ddd1b5b9456fc",
+      "size": 192217
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-battle.state",
+      "path": "<fixture-root>/blue/cable_club-battle.state",
+      "sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+      "size": 200546
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-pre-terminal-peer.state",
+      "path": "<fixture-root>/blue/cable_club-pre-terminal-peer.state",
+      "sha1": "ed9c680cff2af1e64c66a78132685411d2497a38",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-pre-terminal.state",
+      "path": "<fixture-root>/blue/cable_club-pre-terminal.state",
+      "sha1": "01ca20eabaa33e0e6cfcd87136432db9b84911f2",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-slots.state",
+      "path": "<fixture-root>/blue/cable_club-slots.state",
+      "sha1": "eb1816e8c4ac777cc29662f9e09b398ed00abcdc",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-terminal-peer.state",
+      "path": "<fixture-root>/blue/cable_club-terminal-peer.state",
+      "sha1": "d2c6d3a6fe75e80b295949f3c66c3db27479c94e",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-terminal.state",
+      "path": "<fixture-root>/blue/cable_club-terminal.state",
+      "sha1": "4cbc31c960742c362d75ee016a52273889b734b7",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club-vanilla.state",
+      "path": "<fixture-root>/blue/cable_club-vanilla.state",
+      "sha1": "cff5349b55f8fdf47a5af63d674977103aeb44d6",
+      "size": 192217
+    },
+    {
+      "kind": "fixture",
+      "label": "blue/cable_club.state",
+      "path": "<fixture-root>/blue/cable_club.state",
+      "sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+      "size": 200546
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-battle-faint-peer.state",
+      "path": "<fixture-root>/red/cable_club-battle-faint-peer.state",
+      "sha1": "2f261e0ff4accf1bf795e52063c283641e4d1381",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-battle-faint.state",
+      "path": "<fixture-root>/red/cable_club-battle-faint.state",
+      "sha1": "3e669f36fa63b398b0d0c551ec637599a4fca5b0",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-battle-vanilla.state",
+      "path": "<fixture-root>/red/cable_club-battle-vanilla.state",
+      "sha1": "63d00b469b07e3969bcd82be1047031265be0b3a",
+      "size": 192217
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-battle.state",
+      "path": "<fixture-root>/red/cable_club-battle.state",
+      "sha1": "4343278b018187ed4bf7c4eda3b202097456f048",
+      "size": 200546
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-pre-terminal-peer.state",
+      "path": "<fixture-root>/red/cable_club-pre-terminal-peer.state",
+      "sha1": "2528e133a8bae489afba30e19fd1fcefa562bba8",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-pre-terminal.state",
+      "path": "<fixture-root>/red/cable_club-pre-terminal.state",
+      "sha1": "b6a5d674def9b567a19ff3488b5abdb4de87c29a",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-slots.state",
+      "path": "<fixture-root>/red/cable_club-slots.state",
+      "sha1": "b39afbcc8a05a59fb769a7993e7affb5dbf588b3",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-terminal-peer.state",
+      "path": "<fixture-root>/red/cable_club-terminal-peer.state",
+      "sha1": "741a8e2e7bf94ca252506e2b839095cb23507425",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-terminal.state",
+      "path": "<fixture-root>/red/cable_club-terminal.state",
+      "sha1": "e263470468fd12b83f7d6fa7d8fe5ece4ece440f",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club-vanilla.state",
+      "path": "<fixture-root>/red/cable_club-vanilla.state",
+      "sha1": "affd77c20bf4600b8057ea33683ed58a2ac86157",
+      "size": 192217
+    },
+    {
+      "kind": "fixture",
+      "label": "red/cable_club.state",
+      "path": "<fixture-root>/red/cable_club.state",
+      "sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+      "size": 200546
+    },
+    {
+      "kind": "fixture",
+      "label": "yellow/cable_club-battle-faint-peer.state",
+      "path": "<fixture-root>/yellow/cable_club-battle-faint-peer.state",
+      "sha1": "1274cd78b8a0cb307c4848e37040cc84e808e4a7",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "yellow/cable_club-battle-faint.state",
+      "path": "<fixture-root>/yellow/cable_club-battle-faint.state",
+      "sha1": "e28a61e83da08fc8d4617a516534019135d8e7aa",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "yellow/cable_club-battle.state",
+      "path": "<fixture-root>/yellow/cable_club-battle.state",
+      "sha1": "78c7d0b32006b11baa9ac9c71efc73b0a8d807b9",
+      "size": 200546
+    },
+    {
+      "kind": "fixture",
+      "label": "yellow/cable_club-pre-terminal-peer.state",
+      "path": "<fixture-root>/yellow/cable_club-pre-terminal-peer.state",
+      "sha1": "e4cb97370e616358b78943e879ac24ac87304604",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "yellow/cable_club-pre-terminal.state",
+      "path": "<fixture-root>/yellow/cable_club-pre-terminal.state",
+      "sha1": "798d79c8b6e6fba2c807ae77c45ca85a33ec9cbe",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "yellow/cable_club-slots.state",
+      "path": "<fixture-root>/yellow/cable_club-slots.state",
+      "sha1": "3a48c183628544bb2917e6dd7a336032bdad83fd",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "yellow/cable_club-terminal-peer.state",
+      "path": "<fixture-root>/yellow/cable_club-terminal-peer.state",
+      "sha1": "5e2ac879818071e36121b2b18d2312597ffd7b2d",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "yellow/cable_club-terminal.state",
+      "path": "<fixture-root>/yellow/cable_club-terminal.state",
+      "sha1": "a4dfb7afb6684a2a6c95894bbcaca173cca595cd",
+      "size": 200548
+    },
+    {
+      "kind": "fixture",
+      "label": "yellow/cable_club.state",
+      "path": "<fixture-root>/yellow/cable_club.state",
+      "sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+      "size": 200546
+    }
+  ],
+  "pass_by_runtime": {
+    "cython": 24,
+    "source": 24
+  },
+  "re_run_provenance": {
+    "deciding_record": "the last END record for the label in rows.log",
+    "note": "A row counted as a pass may have failed an earlier attempt. Where the deciding record carries the serial discriminator's marker, the row was re-run on the same commit, node id and interpreter inside a measured low-load window after the parallel attempt lost the host-contention race. No bound, timeout, tolerance, skip or xfail differs between the two attempts; only the ambient load does, and the load actually observed is recorded in serial_rounds.",
+    "parallel_decided_count": 38,
+    "prior_not_pass_attempts_total": 26,
+    "serial_decided_count": 10,
+    "serial_decided_rows": [
+      "cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_red_color-blue_color-out2-peerout0_",
+      "cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_blue_color-red_color-out0-peerout3_",
+      "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-red_color_",
+      "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-blue_color_",
+      "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-yellow_",
+      "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-red_color_",
+      "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-blue_color_",
+      "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-red_color_",
+      "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-red_color_",
+      "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-blue_color_"
+    ],
+    "serial_rounds": [
+      {
+        "load1_after": 8.72,
+        "load1_before": 10.32,
+        "load_max_for_window": 24.0,
+        "round": 1,
+        "rows": 10
+      }
+    ]
+  },
+  "reviewed_head": "57149c79931dde507515f3ae2d639806953e17ea",
+  "row_artifacts": {
+    "junit_dir": "junit/",
+    "junit_included": 48,
+    "logs_dir": "logs/",
+    "logs_included": 48,
+    "pass_rows_missing_artifact": [],
+    "pass_rows_missing_rom_record": [],
+    "pass_rows_with_rom_record": 48,
+    "sanitization": {
+      "applies_to": [
+        "junit/*.xml",
+        "logs/*.log"
+      ],
+      "method": "longest-prefix substitution of absolute roots to placeholders",
+      "placeholders": [
+        "[bin]",
+        "[boot]",
+        "[dev]",
+        "[etc]",
+        "[home]",
+        "[lib64]",
+        "[lib]",
+        "[matrix-root]",
+        "[media]",
+        "[mnt]",
+        "[native-venv]",
+        "[nix]",
+        "[operator-root]",
+        "[opt]",
+        "[proc]",
+        "[root]",
+        "[run]",
+        "[sbin]",
+        "[shm]",
+        "[snap]",
+        "[source-venv]",
+        "[srv]",
+        "[sys]",
+        "[tmp]",
+        "[usr]",
+        "[var]",
+        "[workspace]",
+        "[worktree]",
+        "[worktree]/target/venv-native",
+        "[worktree]/target/venv-native-head",
+        "[worktree]/vendor/pyboy-src"
+      ],
+      "round_trip_verified": true,
+      "scan": "every emitted file is re-scanned for absolute-path substrings and the build fails if any survive",
+      "substitution_count": 32
+    }
+  },
+  "rows_expected": 48,
+  "rows_in_flight": 0,
+  "rows_not_pass": 0,
+  "rows_not_pass_detail": [],
+  "rows_outstanding": 0,
+  "rows_outstanding_detail": [],
+  "rows_pass": 48,
+  "rows_pass_detail": [
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T04:54:47+00:00",
+      "junit_sha1": "19ab1ce5ad05f899ceb3d96e0e2bc1381b489e46",
+      "label": "source_test_real_rom_mcp_trade_eof_during_setup_exits_cleanly_red_color-blue_color_",
+      "log_bytes": 1563,
+      "log_sha1": "88f3b7b5613b606ed778e48ef59fe93f4c739529",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "cleanup": "stdin_eof_bounded_exit_0_no_live_group",
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "paired": true,
+        "party_count": 1,
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_version": "blue_color",
+        "primary_fixture": "cable_club.state",
+        "runtime_mode": "source",
+        "scenario": "eof_during_setup",
+        "transport": "local_pair",
+        "version": "red_color"
+      },
+      "secs": 31,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T05:19:28+00:00",
+      "junit_sha1": "1894822950bef58760578d89fb8cf197caa9debb",
+      "label": "source_test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly_red_color-blue_color_",
+      "log_bytes": 2092,
+      "log_sha1": "dd0d1277192841e66b54af60e946a2cea59407b1",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "cleanup": "stdin_eof_bounded_exit_0_no_live_group",
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "interrupted_copy_events": 0,
+        "interrupted_peer": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "interrupted_primary": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "menu_frames": 270,
+        "party_count": 1,
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_version": "blue_color",
+        "primary_fixture": "cable_club.state",
+        "runtime_mode": "source",
+        "scenario": "eof_before_commitment",
+        "submenu_frames": 10,
+        "transport": "local_pair",
+        "version": "red_color"
+      },
+      "secs": 629,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS party_menu frames=270 submenu_back_outs=0",
+        "MCP_TRADE_RECORDS submenu frames=10",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T05:20:56+00:00",
+      "junit_sha1": "1d8b219112114db67fe7098211b1c29451bf470c",
+      "label": "source_test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly_red_color-blue_color_",
+      "log_bytes": 2253,
+      "log_sha1": "044d8cd72f89b6ef7f71affd35b5c3489116603b",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "cleanup": "stdin_eof_bounded_exit_0_no_live_group",
+        "commitment_frames": 620,
+        "committed_peer": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "committed_peer_map": 239,
+        "committed_primary": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "committed_primary_map": 239,
+        "committed_trade_received": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "outstanding_after_commitment": [
+          "trade_animation",
+          "evolution_check",
+          "save_party_and_dex",
+          "room_return"
+        ],
+        "party_count": 1,
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_version": "blue_color",
+        "primary_fixture": "cable_club.state",
+        "rollback_claimed": false,
+        "runtime_mode": "source",
+        "scenario": "eof_after_commitment",
+        "transport": "local_pair",
+        "version": "red_color"
+      },
+      "secs": 717,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=620 trade_received=[1, 1] interrupted_at_commitment",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 4,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T06:58:34+00:00",
+      "junit_sha1": "a1f0fdbcdbc0caf951d8c7732860ab19bb9e176a",
+      "label": "source_test_real_rom_mcp_trade_cancel_before_commitment_keeps_records_red_color-blue_color_",
+      "log_bytes": 3035,
+      "log_sha1": "7f9035dca35525d71f2cb839c183167944769b45",
+      "prior_not_pass_attempts": 3,
+      "rom_record": {
+        "back_frames": 10,
+        "cancelled_copy_events": 0,
+        "cancelled_peer": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "cancelled_primary": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "menu_frames": 270,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "runtime_mode": "source",
+        "scenario": "cancel_before_commitment",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "submenu_frames": 10,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color"
+      },
+      "secs": 1680,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS party_menu frames=270 submenu_back_outs=0",
+        "MCP_TRADE_RECORDS submenu frames=10",
+        "MCP_TRADE_RECORDS trade_copy frames=340 trade_received=[1, 1] milestones=[['239:145:0/1', '239:145:0/1'], ['239:19:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 4,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T06:58:11+00:00",
+      "junit_sha1": "567a2419aad8fdfdc84aaeabfb7083f6f99ec0bb",
+      "label": "source_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_red_color-blue_color-out2-peerout0_",
+      "log_bytes": 4496,
+      "log_sha1": "51caafcdb3f8f7157da8a42974559420f4a00f36",
+      "prior_not_pass_attempts": 3,
+      "rom_record": {
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "distinct_slot_digests": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "b39afbcc8a05a59fb769a7993e7affb5dbf588b3",
+        "in_place_model_differs": true,
+        "offered_slots": {
+          "0": 2,
+          "1": 0
+        },
+        "outgoing_slot": 2,
+        "party_count": 6,
+        "peer_after": [
+          "dc09078325a6c179d06450dbc02a4cecd7bd9467b4c1b00ab83702daca88e390",
+          "612bd58ac2b9622a1c9486a1867ef61be6dab74400c42f1c331061798af1c360",
+          "3140370202c6d63553843d03b4737476c6be51ccb1e7c25781de89045f209128",
+          "03d5edaed27d2b7305eea46992ea5287cf7062c69e1de0a5f31d4da852091411",
+          "aef0fd23ab614912f25c476098c7b7385b7d450f12e712a4cde67ff8d5b4497e",
+          "1ef6c8f00d78642dd29081b072cbb3065f5947ef70cff18d7040289f31138aba"
+        ],
+        "peer_before": [
+          "d6470ab722e321a6efb6d0db732288ec46a1a24cb245096d5c1572ea7c0ae8fc",
+          "dc09078325a6c179d06450dbc02a4cecd7bd9467b4c1b00ab83702daca88e390",
+          "612bd58ac2b9622a1c9486a1867ef61be6dab74400c42f1c331061798af1c360",
+          "3140370202c6d63553843d03b4737476c6be51ccb1e7c25781de89045f209128",
+          "03d5edaed27d2b7305eea46992ea5287cf7062c69e1de0a5f31d4da852091411",
+          "aef0fd23ab614912f25c476098c7b7385b7d450f12e712a4cde67ff8d5b4497e"
+        ],
+        "peer_fixture": "cable_club-slots.state",
+        "peer_fixture_sha1": "eb1816e8c4ac777cc29662f9e09b398ed00abcdc",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 6,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "e97e154b1e1081a5aa9c1c82acfee897e17564986d6d9f69b7c55760d3860027",
+          "269c72d401032df466b5f11ecb52c65943406246e13e4e6578b5f286c42f4d44",
+          "dbcfa6d76953f0e98f8edc45657f457dc4bc6af69fb996d2fa76ee956cfe3432",
+          "99b2eb9350f6faaf099aa169d1b78ee8c897b3f86bde5b84e73e17b6c76e5bce",
+          "cef3765d30b047d5c4201cbb5d43492cf03f164f1560216c331d533f15f91229",
+          "d6470ab722e321a6efb6d0db732288ec46a1a24cb245096d5c1572ea7c0ae8fc"
+        ],
+        "primary_before": [
+          "e97e154b1e1081a5aa9c1c82acfee897e17564986d6d9f69b7c55760d3860027",
+          "269c72d401032df466b5f11ecb52c65943406246e13e4e6578b5f286c42f4d44",
+          "1ef6c8f00d78642dd29081b072cbb3065f5947ef70cff18d7040289f31138aba",
+          "dbcfa6d76953f0e98f8edc45657f457dc4bc6af69fb996d2fa76ee956cfe3432",
+          "99b2eb9350f6faaf099aa169d1b78ee8c897b3f86bde5b84e73e17b6c76e5bce",
+          "cef3765d30b047d5c4201cbb5d43492cf03f164f1560216c331d533f15f91229"
+        ],
+        "primary_fixture": "cable_club-slots.state",
+        "primary_map": 239,
+        "receiving_slot": 5,
+        "runtime_mode": "source",
+        "scenario": "multi_member_slots",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color",
+        "wrong_slot_control_rejected": true
+      },
+      "secs": 1657,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=650 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:145:0/6'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:145:0/6', '239:35:0/0'], ['239:145:1/6', '239:35:0/0'], ['239:145:2/6', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:2/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=2 peer=0 observed={1: 0, 0: 2} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 4,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T07:23:11+00:00",
+      "junit_sha1": "e96ba21bf5d169b22bf0f28d99554e96d67b011b",
+      "label": "source_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_blue_color-red_color-out0-peerout3_",
+      "log_bytes": 4437,
+      "log_sha1": "92f55ae791420817a6815a8401e1c7f3415ed372",
+      "prior_not_pass_attempts": 3,
+      "rom_record": {
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "distinct_slot_digests": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "eb1816e8c4ac777cc29662f9e09b398ed00abcdc",
+        "in_place_model_differs": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 3
+        },
+        "outgoing_slot": 0,
+        "party_count": 6,
+        "peer_after": [
+          "e97e154b1e1081a5aa9c1c82acfee897e17564986d6d9f69b7c55760d3860027",
+          "269c72d401032df466b5f11ecb52c65943406246e13e4e6578b5f286c42f4d44",
+          "1ef6c8f00d78642dd29081b072cbb3065f5947ef70cff18d7040289f31138aba",
+          "99b2eb9350f6faaf099aa169d1b78ee8c897b3f86bde5b84e73e17b6c76e5bce",
+          "cef3765d30b047d5c4201cbb5d43492cf03f164f1560216c331d533f15f91229",
+          "d6470ab722e321a6efb6d0db732288ec46a1a24cb245096d5c1572ea7c0ae8fc"
+        ],
+        "peer_before": [
+          "e97e154b1e1081a5aa9c1c82acfee897e17564986d6d9f69b7c55760d3860027",
+          "269c72d401032df466b5f11ecb52c65943406246e13e4e6578b5f286c42f4d44",
+          "1ef6c8f00d78642dd29081b072cbb3065f5947ef70cff18d7040289f31138aba",
+          "dbcfa6d76953f0e98f8edc45657f457dc4bc6af69fb996d2fa76ee956cfe3432",
+          "99b2eb9350f6faaf099aa169d1b78ee8c897b3f86bde5b84e73e17b6c76e5bce",
+          "cef3765d30b047d5c4201cbb5d43492cf03f164f1560216c331d533f15f91229"
+        ],
+        "peer_fixture": "cable_club-slots.state",
+        "peer_fixture_sha1": "b39afbcc8a05a59fb769a7993e7affb5dbf588b3",
+        "peer_map": 239,
+        "peer_outgoing_slot": 3,
+        "peer_party_count": 6,
+        "peer_version": "red_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "dc09078325a6c179d06450dbc02a4cecd7bd9467b4c1b00ab83702daca88e390",
+          "612bd58ac2b9622a1c9486a1867ef61be6dab74400c42f1c331061798af1c360",
+          "3140370202c6d63553843d03b4737476c6be51ccb1e7c25781de89045f209128",
+          "03d5edaed27d2b7305eea46992ea5287cf7062c69e1de0a5f31d4da852091411",
+          "aef0fd23ab614912f25c476098c7b7385b7d450f12e712a4cde67ff8d5b4497e",
+          "dbcfa6d76953f0e98f8edc45657f457dc4bc6af69fb996d2fa76ee956cfe3432"
+        ],
+        "primary_before": [
+          "d6470ab722e321a6efb6d0db732288ec46a1a24cb245096d5c1572ea7c0ae8fc",
+          "dc09078325a6c179d06450dbc02a4cecd7bd9467b4c1b00ab83702daca88e390",
+          "612bd58ac2b9622a1c9486a1867ef61be6dab74400c42f1c331061798af1c360",
+          "3140370202c6d63553843d03b4737476c6be51ccb1e7c25781de89045f209128",
+          "03d5edaed27d2b7305eea46992ea5287cf7062c69e1de0a5f31d4da852091411",
+          "aef0fd23ab614912f25c476098c7b7385b7d450f12e712a4cde67ff8d5b4497e"
+        ],
+        "primary_fixture": "cable_club-slots.state",
+        "primary_map": 239,
+        "receiving_slot": 5,
+        "runtime_mode": "source",
+        "scenario": "multi_member_slots",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "blue_color",
+        "wrong_slot_control_rejected": true
+      },
+      "secs": 1500,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/6'], ['239:3:0/2', '239:145:1/6'], ['239:145:0/6', '239:145:2/6'], ['239:19:0/0', '239:145:3/6'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:3/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=3 observed={0: 0, 1: 3} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 3,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T07:23:42+00:00",
+      "junit_sha1": "32849283f5fac8972ebb216b61777c310a0f40ae",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_red_color-red_color_",
+      "log_bytes": 2925,
+      "log_sha1": "c7c560629e35054c0d60ea0c581da695e083efbe",
+      "prior_not_pass_attempts": 2,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": false,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 1508,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=620 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 3,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T07:48:38+00:00",
+      "junit_sha1": "8b8f769304c5ede842cf10d916ef1fae12c6e8f7",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_red_color-blue_color_",
+      "log_bytes": 2956,
+      "log_sha1": "24deea4a19e753261a34bdb5bee84aba58d9285f",
+      "prior_not_pass_attempts": 2,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color",
+        "walk_settle_frames": 90
+      },
+      "secs": 1527,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=620 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T07:42:48+00:00",
+      "junit_sha1": "9df6e3e7c6b9195886c2ea44eaa45ec2445ae0e6",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_red_color-yellow_",
+      "log_bytes": 2915,
+      "log_sha1": "dd4de1cbecc1941e36fbf8841e5d1c4c6d6435ce",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2990,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color",
+        "walk_settle_frames": 90
+      },
+      "secs": 1146,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=660 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/3'], ['239:145:0/1', '239:3:0/3'], ['239:19:0/0', '239:3:0/3'], ['239:35:0/0', '239:145:0/1'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2990 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T08:08:44+00:00",
+      "junit_sha1": "a0b42c0c4918b5e8c8393d0e5c2185c15978160e",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-red_color_",
+      "log_bytes": 2957,
+      "log_sha1": "8e8951fea0fe043b4e5f1f3de3e8bf36c29c1dc6",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 1556,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T08:14:17+00:00",
+      "junit_sha1": "d64f85733534124b87ebc1224ee40946e32f14b7",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-blue_color_",
+      "log_bytes": 3647,
+      "log_sha1": "17c12b6b162726e801ff4b1531e998be6200200b",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd"
+        ],
+        "peer_fixture": "cable_club-battle.state",
+        "peer_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 6,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 90
+      },
+      "secs": 1539,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:145:0/6'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T08:35:43+00:00",
+      "junit_sha1": "0b8d0989b881c2ee759d13b61a39d138d4bcf8d7",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-yellow_",
+      "log_bytes": 2918,
+      "log_sha1": "7b781b259b885f3fdc91dc43548e299a186d26da",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2990,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 1619,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=660 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/3'], ['239:145:0/1', '239:3:0/3'], ['239:19:0/0', '239:3:0/3'], ['239:35:0/0', '239:145:0/1'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2990 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T08:42:38+00:00",
+      "junit_sha1": "50f5046b4da92c8a8e317fd25ab4ebf71aed3125",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_yellow-red_color_",
+      "log_bytes": 2944,
+      "log_sha1": "0451bdea8ded1d015f1584e1e97d07b7784d9fca",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2980,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 1701,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/2'], ['239:3:0/3', '239:145:0/1'], ['239:3:0/3', '239:19:0/0'], ['239:3:0/3', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2980 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T08:57:32+00:00",
+      "junit_sha1": "38e0c5011954c7504ef73e24f3ccd6fd3b24368e",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_yellow-blue_color_",
+      "log_bytes": 2947,
+      "log_sha1": "09f84c531de896067ad11a81ca5faca0cff614bf",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2980,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 1309,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/2'], ['239:3:0/3', '239:145:0/1'], ['239:3:0/3', '239:19:0/0'], ['239:3:0/3', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2980 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T08:56:24+00:00",
+      "junit_sha1": "3591727d0cd77f916b1d1281e0bcb93d3fbe0315",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_yellow-yellow_",
+      "log_bytes": 2819,
+      "log_sha1": "fa77dc30c65538b42347439b0c7266b67b9acbc7",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": false,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2990,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 826,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/3'], ['239:145:0/1', '239:145:0/1'], ['239:19:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2990 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:01:07+00:00",
+      "junit_sha1": "67b76efd8921995de7cc389280cbdd029f276d94",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-red_color_",
+      "log_bytes": 3002,
+      "log_sha1": "4d24196509c4b0341e68ef22baf6a83a3f0a2dbf",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": false,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "network_frame_barrier": false,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2850,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "red_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 283,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=630",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=110",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2850 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:02:20+00:00",
+      "junit_sha1": "7779024fe73743fc9cfbba19dc0dca98ffc7e58b",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-blue_color_",
+      "log_bytes": 3005,
+      "log_sha1": "2d27b14d7de70ef6e188b75b50b6abe1dcb2340e",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "network_frame_barrier": false,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2850,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "red_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 288,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=630",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=110",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2850 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:06:03+00:00",
+      "junit_sha1": "5031f49b668253f57d6ae966d34e41cef4edbba1",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-yellow_",
+      "log_bytes": 2934,
+      "log_sha1": "64e86456b906d5c3f0a0cddd2321c9eaa881569b",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2900,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "red_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 296,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/3'], ['239:145:0/1', '239:3:0/3'], ['239:19:0/0', '239:145:0/1'], ['239:35:0/0', '239:145:0/1'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2900 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:06:06+00:00",
+      "junit_sha1": "a31aa14ecc6f195f8d298fb3a5b5530379059c01",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-red_color_",
+      "log_bytes": 3005,
+      "log_sha1": "a283520a7145838d38ac117c4738593186aafdeb",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "network_frame_barrier": false,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2850,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 226,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=630",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2850 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:11:38+00:00",
+      "junit_sha1": "45ff94e21f41377c97a0ca8888f5c4c3e0051f63",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-blue_color_",
+      "log_bytes": 3752,
+      "log_sha1": "a3c1c1d355dc7ad9f3aa5c4e503dcaab90f5e6b2",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "network_frame_barrier": false,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd"
+        ],
+        "peer_fixture": "cable_club-battle.state",
+        "peer_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 6,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2850,
+        "primary_after": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 335,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=630",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '0:3:0/2'], ['239:3:0/2', '239:145:0/6'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2850 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:11:13+00:00",
+      "junit_sha1": "8950366db404b37dca27d265ab0d65db0d54d9c3",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-yellow_",
+      "log_bytes": 2937,
+      "log_sha1": "0b40188eee017264fad9b7cada6f8ac33e29aca8",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2900,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 307,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/3'], ['239:145:0/1', '239:3:0/3'], ['239:19:0/0', '239:145:0/1'], ['239:35:0/0', '239:145:0/1'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2900 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:17:48+00:00",
+      "junit_sha1": "2c98b8cbe4b43401b282410126771d142366a852",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-red_color_",
+      "log_bytes": 2990,
+      "log_sha1": "0887bd5cfe99433ac103c7f928280c48f66be9f0",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2980,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 206,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=150",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/2'], ['239:3:0/3', '239:145:0/1'], ['239:3:0/3', '239:19:0/0'], ['239:3:0/3', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2980 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:17:48+00:00",
+      "junit_sha1": "1fd6052b5a903f0ea180ca512c56fa0680d24cda",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-blue_color_",
+      "log_bytes": 2993,
+      "log_sha1": "06eaad07cf74acf802460131e256e6da5fa0ef7d",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2980,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 206,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=150",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/2'], ['239:3:0/3', '239:145:0/1'], ['239:3:0/3', '239:19:0/0'], ['239:3:0/3', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2980 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:22:07+00:00",
+      "junit_sha1": "1bab5cbc7a28ab131fc83b2fb072ee7e6059af26",
+      "label": "source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-yellow_",
+      "log_bytes": 2895,
+      "log_sha1": "cdccdbebf2618426380e53df9795fce4d0bda46c",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": false,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2960,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "source",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 259,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/3'], ['239:145:0/1', '239:145:0/1'], ['239:19:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2960 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:17:50+00:00",
+      "junit_sha1": "9a4d88e086cad868154a704245fa2237e3f642f4",
+      "label": "cython_test_real_rom_mcp_trade_eof_during_setup_exits_cleanly_red_color-blue_color_",
+      "log_bytes": 1713,
+      "log_sha1": "9b8c4195226e2a6d4a679738abf5237b270c0181",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "cleanup": "stdin_eof_bounded_exit_0_no_live_group",
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "paired": true,
+        "party_count": 1,
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_version": "blue_color",
+        "primary_fixture": "cable_club.state",
+        "runtime_mode": "cython",
+        "scenario": "eof_during_setup",
+        "transport": "local_pair",
+        "version": "red_color"
+      },
+      "secs": 2,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:19:16+00:00",
+      "junit_sha1": "d05a1476db12722c3d46af99306804e721062502",
+      "label": "cython_test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly_red_color-blue_color_",
+      "log_bytes": 2242,
+      "log_sha1": "d7d0fa2c1cb6447620e94a087c24ad46dc27368e",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "cleanup": "stdin_eof_bounded_exit_0_no_live_group",
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "interrupted_copy_events": 0,
+        "interrupted_peer": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "interrupted_primary": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "menu_frames": 270,
+        "party_count": 1,
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_version": "blue_color",
+        "primary_fixture": "cable_club.state",
+        "runtime_mode": "cython",
+        "scenario": "eof_before_commitment",
+        "submenu_frames": 10,
+        "transport": "local_pair",
+        "version": "red_color"
+      },
+      "secs": 86,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS party_menu frames=270 submenu_back_outs=0",
+        "MCP_TRADE_RECORDS submenu frames=10",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:21:04+00:00",
+      "junit_sha1": "ec8ee4647d5fcf92c92e9a89c48d32f1e4a1ebed",
+      "label": "cython_test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly_red_color-blue_color_",
+      "log_bytes": 2404,
+      "log_sha1": "e95a65db88d342b265ff9b42956fc2731e9a5196",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "cleanup": "stdin_eof_bounded_exit_0_no_live_group",
+        "commitment_frames": 620,
+        "committed_peer": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "committed_peer_map": 239,
+        "committed_primary": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "committed_primary_map": 239,
+        "committed_trade_received": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "outstanding_after_commitment": [
+          "trade_animation",
+          "evolution_check",
+          "save_party_and_dex",
+          "room_return"
+        ],
+        "party_count": 1,
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_version": "blue_color",
+        "primary_fixture": "cable_club.state",
+        "rollback_claimed": false,
+        "runtime_mode": "cython",
+        "scenario": "eof_after_commitment",
+        "transport": "local_pair",
+        "version": "red_color"
+      },
+      "secs": 108,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=620 trade_received=[1, 1] interrupted_at_commitment",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T09:28:18+00:00",
+      "junit_sha1": "11fc9ee3711c43dcce0a70454cb06268a0c78fe5",
+      "label": "cython_test_real_rom_mcp_trade_cancel_before_commitment_keeps_records_red_color-blue_color_",
+      "log_bytes": 3185,
+      "log_sha1": "bfe3c03da9419857c80c606120105b74db3d90a5",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "back_frames": 10,
+        "cancelled_copy_events": 0,
+        "cancelled_peer": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "cancelled_primary": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "menu_frames": 270,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "runtime_mode": "cython",
+        "scenario": "cancel_before_commitment",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "submenu_frames": 10,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color"
+      },
+      "secs": 434,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS party_menu frames=270 submenu_back_outs=0",
+        "MCP_TRADE_RECORDS submenu frames=10",
+        "MCP_TRADE_RECORDS trade_copy frames=340 trade_received=[1, 1] milestones=[['239:145:0/1', '239:145:0/1'], ['239:19:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:52:24+00:00",
+      "junit_sha1": "66c3da96d7b542f17ecb3bf9ed4497aaf9c790eb",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_red_color-blue_color-out2-peerout0_",
+      "log_bytes": 4646,
+      "log_sha1": "dabd8f1853a070fdf127833ffd4b1fc7b33fe4e5",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "distinct_slot_digests": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "b39afbcc8a05a59fb769a7993e7affb5dbf588b3",
+        "in_place_model_differs": true,
+        "offered_slots": {
+          "0": 2,
+          "1": 0
+        },
+        "outgoing_slot": 2,
+        "party_count": 6,
+        "peer_after": [
+          "dc09078325a6c179d06450dbc02a4cecd7bd9467b4c1b00ab83702daca88e390",
+          "612bd58ac2b9622a1c9486a1867ef61be6dab74400c42f1c331061798af1c360",
+          "3140370202c6d63553843d03b4737476c6be51ccb1e7c25781de89045f209128",
+          "03d5edaed27d2b7305eea46992ea5287cf7062c69e1de0a5f31d4da852091411",
+          "aef0fd23ab614912f25c476098c7b7385b7d450f12e712a4cde67ff8d5b4497e",
+          "1ef6c8f00d78642dd29081b072cbb3065f5947ef70cff18d7040289f31138aba"
+        ],
+        "peer_before": [
+          "d6470ab722e321a6efb6d0db732288ec46a1a24cb245096d5c1572ea7c0ae8fc",
+          "dc09078325a6c179d06450dbc02a4cecd7bd9467b4c1b00ab83702daca88e390",
+          "612bd58ac2b9622a1c9486a1867ef61be6dab74400c42f1c331061798af1c360",
+          "3140370202c6d63553843d03b4737476c6be51ccb1e7c25781de89045f209128",
+          "03d5edaed27d2b7305eea46992ea5287cf7062c69e1de0a5f31d4da852091411",
+          "aef0fd23ab614912f25c476098c7b7385b7d450f12e712a4cde67ff8d5b4497e"
+        ],
+        "peer_fixture": "cable_club-slots.state",
+        "peer_fixture_sha1": "eb1816e8c4ac777cc29662f9e09b398ed00abcdc",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 6,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "e97e154b1e1081a5aa9c1c82acfee897e17564986d6d9f69b7c55760d3860027",
+          "269c72d401032df466b5f11ecb52c65943406246e13e4e6578b5f286c42f4d44",
+          "dbcfa6d76953f0e98f8edc45657f457dc4bc6af69fb996d2fa76ee956cfe3432",
+          "99b2eb9350f6faaf099aa169d1b78ee8c897b3f86bde5b84e73e17b6c76e5bce",
+          "cef3765d30b047d5c4201cbb5d43492cf03f164f1560216c331d533f15f91229",
+          "d6470ab722e321a6efb6d0db732288ec46a1a24cb245096d5c1572ea7c0ae8fc"
+        ],
+        "primary_before": [
+          "e97e154b1e1081a5aa9c1c82acfee897e17564986d6d9f69b7c55760d3860027",
+          "269c72d401032df466b5f11ecb52c65943406246e13e4e6578b5f286c42f4d44",
+          "1ef6c8f00d78642dd29081b072cbb3065f5947ef70cff18d7040289f31138aba",
+          "dbcfa6d76953f0e98f8edc45657f457dc4bc6af69fb996d2fa76ee956cfe3432",
+          "99b2eb9350f6faaf099aa169d1b78ee8c897b3f86bde5b84e73e17b6c76e5bce",
+          "cef3765d30b047d5c4201cbb5d43492cf03f164f1560216c331d533f15f91229"
+        ],
+        "primary_fixture": "cable_club-slots.state",
+        "primary_map": 239,
+        "receiving_slot": 5,
+        "runtime_mode": "cython",
+        "scenario": "multi_member_slots",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color",
+        "wrong_slot_control_rejected": true
+      },
+      "secs": 328,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=650 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:145:0/6'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:145:0/6', '239:35:0/0'], ['239:145:1/6', '239:35:0/0'], ['239:145:2/6', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:2/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=2 peer=0 observed={1: 0, 0: 2} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:58:17+00:00",
+      "junit_sha1": "1cef093b3b1960d4e2dbcf41598b4f91157808be",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_blue_color-red_color-out0-peerout3_",
+      "log_bytes": 4587,
+      "log_sha1": "5c4e0acf14c89a6cde7ce27b2f0c3bde28e2b59f",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "distinct_slot_digests": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "eb1816e8c4ac777cc29662f9e09b398ed00abcdc",
+        "in_place_model_differs": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 3
+        },
+        "outgoing_slot": 0,
+        "party_count": 6,
+        "peer_after": [
+          "e97e154b1e1081a5aa9c1c82acfee897e17564986d6d9f69b7c55760d3860027",
+          "269c72d401032df466b5f11ecb52c65943406246e13e4e6578b5f286c42f4d44",
+          "1ef6c8f00d78642dd29081b072cbb3065f5947ef70cff18d7040289f31138aba",
+          "99b2eb9350f6faaf099aa169d1b78ee8c897b3f86bde5b84e73e17b6c76e5bce",
+          "cef3765d30b047d5c4201cbb5d43492cf03f164f1560216c331d533f15f91229",
+          "d6470ab722e321a6efb6d0db732288ec46a1a24cb245096d5c1572ea7c0ae8fc"
+        ],
+        "peer_before": [
+          "e97e154b1e1081a5aa9c1c82acfee897e17564986d6d9f69b7c55760d3860027",
+          "269c72d401032df466b5f11ecb52c65943406246e13e4e6578b5f286c42f4d44",
+          "1ef6c8f00d78642dd29081b072cbb3065f5947ef70cff18d7040289f31138aba",
+          "dbcfa6d76953f0e98f8edc45657f457dc4bc6af69fb996d2fa76ee956cfe3432",
+          "99b2eb9350f6faaf099aa169d1b78ee8c897b3f86bde5b84e73e17b6c76e5bce",
+          "cef3765d30b047d5c4201cbb5d43492cf03f164f1560216c331d533f15f91229"
+        ],
+        "peer_fixture": "cable_club-slots.state",
+        "peer_fixture_sha1": "b39afbcc8a05a59fb769a7993e7affb5dbf588b3",
+        "peer_map": 239,
+        "peer_outgoing_slot": 3,
+        "peer_party_count": 6,
+        "peer_version": "red_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "dc09078325a6c179d06450dbc02a4cecd7bd9467b4c1b00ab83702daca88e390",
+          "612bd58ac2b9622a1c9486a1867ef61be6dab74400c42f1c331061798af1c360",
+          "3140370202c6d63553843d03b4737476c6be51ccb1e7c25781de89045f209128",
+          "03d5edaed27d2b7305eea46992ea5287cf7062c69e1de0a5f31d4da852091411",
+          "aef0fd23ab614912f25c476098c7b7385b7d450f12e712a4cde67ff8d5b4497e",
+          "dbcfa6d76953f0e98f8edc45657f457dc4bc6af69fb996d2fa76ee956cfe3432"
+        ],
+        "primary_before": [
+          "d6470ab722e321a6efb6d0db732288ec46a1a24cb245096d5c1572ea7c0ae8fc",
+          "dc09078325a6c179d06450dbc02a4cecd7bd9467b4c1b00ab83702daca88e390",
+          "612bd58ac2b9622a1c9486a1867ef61be6dab74400c42f1c331061798af1c360",
+          "3140370202c6d63553843d03b4737476c6be51ccb1e7c25781de89045f209128",
+          "03d5edaed27d2b7305eea46992ea5287cf7062c69e1de0a5f31d4da852091411",
+          "aef0fd23ab614912f25c476098c7b7385b7d450f12e712a4cde67ff8d5b4497e"
+        ],
+        "primary_fixture": "cable_club-slots.state",
+        "primary_map": 239,
+        "receiving_slot": 5,
+        "runtime_mode": "cython",
+        "scenario": "multi_member_slots",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "blue_color",
+        "wrong_slot_control_rejected": true
+      },
+      "secs": 353,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/6'], ['239:3:0/2', '239:145:1/6'], ['239:145:0/6', '239:145:2/6'], ['239:19:0/0', '239:145:3/6'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:3/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=3 observed={0: 0, 1: 3} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T11:03:45+00:00",
+      "junit_sha1": "d1ac48140a904f24fe7d56f8499e3d6ee89237d1",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-red_color_",
+      "log_bytes": 3075,
+      "log_sha1": "67df45e0b131c34056b9a27ee9eff4b0fbf68aa6",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": false,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 328,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=620 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T11:09:05+00:00",
+      "junit_sha1": "c03f657f7920184208aa527bd549afd452f4d5c7",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-blue_color_",
+      "log_bytes": 3106,
+      "log_sha1": "81f484e97a733c953d5ae78a00f995937bb03937",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color",
+        "walk_settle_frames": 90
+      },
+      "secs": 320,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=620 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T11:15:40+00:00",
+      "junit_sha1": "60705c0afff5e1a918224a5c28cccfce2ef6bbc3",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-yellow_",
+      "log_bytes": 3065,
+      "log_sha1": "675fdc92bfd056cc1646a782bc2cf3ab1885af05",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2990,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "red_color",
+        "walk_settle_frames": 90
+      },
+      "secs": 395,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=660 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/3'], ['239:145:0/1', '239:3:0/3'], ['239:19:0/0', '239:3:0/3'], ['239:35:0/0', '239:145:0/1'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2990 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T11:22:17+00:00",
+      "junit_sha1": "fa29e7fffdcaee2c2f023ffb80362706388cad67",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-red_color_",
+      "log_bytes": 3107,
+      "log_sha1": "753cd03b53297c5319c5d372c610aef2e41bb2ab",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 396,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T11:26:46+00:00",
+      "junit_sha1": "ce21656c2c3e1244e66171db7623f04a4d87cca9",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-blue_color_",
+      "log_bytes": 3797,
+      "log_sha1": "3106bab7bf14bbe12f0da63e1aeb69949c465fbf",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd"
+        ],
+        "peer_fixture": "cable_club-battle.state",
+        "peer_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 6,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2880,
+        "primary_after": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 90
+      },
+      "secs": 269,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:145:0/6'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2880 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:08:51+00:00",
+      "junit_sha1": "fd740c5d9b7ffa70b1348ad1bee08e1745aeaabf",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-yellow_",
+      "log_bytes": 3069,
+      "log_sha1": "0a9c0dd27908164f2ac1fa08df34b80d97f149a1",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2990,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 1498,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=660 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/3'], ['239:145:0/1', '239:3:0/3'], ['239:19:0/0', '239:3:0/3'], ['239:35:0/0', '239:145:0/1'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2990 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T11:30:06+00:00",
+      "junit_sha1": "49640bac68316267ea1c25c97bc94e8af293b99b",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-red_color_",
+      "log_bytes": 3094,
+      "log_sha1": "783f8861e5e96a0180ff2cc74fd2013f949b073a",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2980,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 200,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/2'], ['239:3:0/3', '239:145:0/1'], ['239:3:0/3', '239:19:0/0'], ['239:3:0/3', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2980 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:09:35+00:00",
+      "junit_sha1": "b44eda2e65d948f4a0c94db46c746f03184a8719",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-blue_color_",
+      "log_bytes": 3098,
+      "log_sha1": "8c0dbc665133385a9535b66f8ef9fbb4accd7bfd",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2980,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 1228,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/2'], ['239:3:0/3', '239:145:0/1'], ['239:3:0/3', '239:19:0/0'], ['239:3:0/3', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2980 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:31:01+00:00",
+      "junit_sha1": "fa0074b71ff7ab54d4961e3bef9b4be242f76b4a",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-yellow_",
+      "log_bytes": 2971,
+      "log_sha1": "8f4a255793452c86cc83bc001474e356574d845d",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": false,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2990,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "local_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 1330,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/3'], ['239:145:0/1', '239:145:0/1'], ['239:19:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2990 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T11:33:32+00:00",
+      "junit_sha1": "0ce69d2ff8a227735625df94ee57c20bf30d99e0",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-red_color_",
+      "log_bytes": 3153,
+      "log_sha1": "fe7dcc2291580f06ba6476cd103f72eb1a2564c7",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": false,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "network_frame_barrier": false,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2850,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "red_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 206,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=630",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=110",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2850 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 2,
+      "decided_by": "serial-discriminator",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T11:36:59+00:00",
+      "junit_sha1": "74497c8bc7740fd6750577796a9998d86c30faba",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-blue_color_",
+      "log_bytes": 3156,
+      "log_sha1": "215b17533cb5b1500a4193280900b9cd919806a6",
+      "prior_not_pass_attempts": 1,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "network_frame_barrier": false,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2850,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "red_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 207,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=630",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=110",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2850 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:39:06+00:00",
+      "junit_sha1": "445ab972f24ea1ee323f5d59eb246b4c9c572194",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-yellow_",
+      "log_bytes": 3085,
+      "log_sha1": "006b2eb33cf44ced9dc6b24b71da62bc76ff8731",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2900,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "red_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 485,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/3'], ['239:145:0/1', '239:3:0/3'], ['239:19:0/0', '239:145:0/1'], ['239:35:0/0', '239:145:0/1'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2900 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:35:38+00:00",
+      "junit_sha1": "a610244235b7bc6b1d82d665b5b28a1cbb39e5e8",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-red_color_",
+      "log_bytes": 3156,
+      "log_sha1": "facce9eb1f43a304a511c2eb9e6bec87562d0f24",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "network_frame_barrier": false,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2850,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 171,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=630",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:145:0/1'], ['239:3:0/2', '239:19:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2850 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:40:05+00:00",
+      "junit_sha1": "7b85d3a61ed76abb9748423e4aaaff551692446f",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-blue_color_",
+      "log_bytes": 3903,
+      "log_sha1": "5e6f9a8067a3251d3678a8f7fa2ff1342f7b0aa9",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "network_frame_barrier": false,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd",
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd"
+        ],
+        "peer_fixture": "cable_club-battle.state",
+        "peer_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 6,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2850,
+        "primary_after": [
+          "27d4b20751d2d852837c83c7c5950ea8abad9a043dad307c56249ca4dcda4bbd"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 1,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 267,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=630",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/2'], ['239:3:0/2', '0:3:0/2'], ['239:3:0/2', '239:145:0/6'], ['239:3:0/2', '239:19:0/0'], ['239:3:0/2', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2850 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=1 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:43:17+00:00",
+      "junit_sha1": "33873d4e408c448165846a5046493b9e8c3754f1",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-yellow_",
+      "log_bytes": 3088,
+      "log_sha1": "443b2af9602491e4c7627bed7f56bec2baa53571",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2900,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "blue_color",
+        "walk_settle_frames": 50
+      },
+      "secs": 251,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=630 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/3'], ['239:145:0/1', '239:3:0/3'], ['239:19:0/0', '239:145:0/1'], ['239:35:0/0', '239:145:0/1'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2900 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:40:49+00:00",
+      "junit_sha1": "81c7835161ad9b6af17bb176758e62173650f9f5",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-red_color_",
+      "log_bytes": 3130,
+      "log_sha1": "740b96abb0af296256f490ba5ba0c1ab32ce0d2c",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "red_color",
+        "post_trade_frames": 2980,
+        "primary_after": [
+          "f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 44,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=150",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/2'], ['239:3:0/3', '239:145:0/1'], ['239:3:0/3', '239:19:0/0'], ['239:3:0/3', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2980 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:41:33+00:00",
+      "junit_sha1": "766ed01e9df91a9f02d211ed6ee8a156387320bc",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-blue_color_",
+      "log_bytes": 3133,
+      "log_sha1": "2028a7ac560480a1b10ac80922c29823eab46bf5",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": true,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "blue_color",
+        "post_trade_frames": 2980,
+        "primary_after": [
+          "b23fd6f97c8ad67b5fa7c05002a32ace9e681cf610bb1aefe0a279dcf5b856c0"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 44,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=150",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/2'], ['239:3:0/3', '239:145:0/1'], ['239:3:0/3', '239:19:0/0'], ['239:3:0/3', '239:35:0/0'], ['239:145:0/1', '239:35:0/0'], ['239:19:0/0', '239:35:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2980 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={1: 0, 0: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    },
+    {
+      "attempts_recorded": 1,
+      "decided_by": "parallel-run",
+      "deciding_rc": 0,
+      "ended": "2026-09-21T10:45:34+00:00",
+      "junit_sha1": "aa42805c391669b478eb192d7e959abc703a3d0c",
+      "label": "cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-yellow_",
+      "log_bytes": 3046,
+      "log_sha1": "6650cf011a5f3d9f683afb88bb0f2d059effef00",
+      "prior_not_pass_attempts": 0,
+      "rom_record": {
+        "completion_menu_keys": [
+          145,
+          145
+        ],
+        "copy_milestone_observed": true,
+        "copy_peer_map": 239,
+        "copy_primary_map": 239,
+        "distinct_records": false,
+        "evolution_events": [
+          1,
+          1
+        ],
+        "fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "network_frame_barrier": true,
+        "offered_slots": {
+          "0": 0,
+          "1": 0
+        },
+        "outgoing_slot": 0,
+        "party_count": 1,
+        "peer_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "peer_fixture": "cable_club.state",
+        "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+        "peer_map": 239,
+        "peer_outgoing_slot": 0,
+        "peer_party_count": 1,
+        "peer_version": "yellow",
+        "post_trade_frames": 2960,
+        "primary_after": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_before": [
+          "390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"
+        ],
+        "primary_fixture": "cable_club.state",
+        "primary_map": 239,
+        "receiving_slot": 0,
+        "runtime_mode": "cython",
+        "scenario": "ordered_orientation",
+        "step_chunk": 10,
+        "submenu_back_outs": 0,
+        "trade_received": [
+          1,
+          1
+        ],
+        "transport": "tcp_pair",
+        "version": "yellow",
+        "walk_settle_frames": 50
+      },
+      "secs": 241,
+      "trade_lines": [
+        "MCP_TRADE_RECORDS link_menu frames=640",
+        "MCP_TRADE_RECORDS trade_center cursor=0 warp=120",
+        "MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=50",
+        "MCP_TRADE_RECORDS trade_copy frames=680 trade_received=[1, 1] milestones=[['239:3:0/3', '239:3:0/3'], ['239:145:0/1', '239:145:0/1'], ['239:19:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:35:0/0', '239:3:0/1'], ['239:3:0/1', '239:3:0/1']]",
+        "MCP_TRADE_RECORDS trade_completion frames=2960 evolution=[1, 1]",
+        "MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]",
+        "MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+      ]
+    }
+  ],
+  "runtime_provenance": {
+    "both_tiers_are_their_declared_runtime": true,
+    "both_tiers_share_the_pinned_revision": true,
+    "tiers": {
+      "cython": {
+        "available": true,
+        "compiled_extensions": 58,
+        "compiled_runtime": true,
+        "fork_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "mode_matches_claim": true,
+        "pyboy_suffix": ".so",
+        "pyboy_version": "2.7.0",
+        "python": "3.11.2",
+        "revision_matches_vendored_marker": true,
+        "serial_suffix": ".so"
+      },
+      "source": {
+        "available": true,
+        "compiled_extensions": 0,
+        "compiled_runtime": false,
+        "fork_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "mode_matches_claim": true,
+        "pyboy_suffix": ".py",
+        "pyboy_version": "2.7.0",
+        "python": "3.11.2",
+        "revision_matches_vendored_marker": true,
+        "serial_suffix": ".py"
+      }
+    },
+    "vendored_revision_marker": "c565df66c3731fad2856169a90f6bbec99925915"
+  },
+  "schema": "pokered-harness/real-rom-trade-evidence/1",
+  "status": "TERMINAL",
+  "suite": "tests/test_mcp_trade_records_rom.py",
+  "transfer_to_merged_master": {
+    "available": true,
+    "diff_empty": false,
+    "differing_files": [
+      {
+        "ast_identical": true,
+        "ast_sha256_master": "6f77ab157f7232c2f5761145077dd27406e5bb692828727841737d7706e49a0a",
+        "ast_sha256_reviewed": "6f77ab157f7232c2f5761145077dd27406e5bb692828727841737d7706e49a0a",
+        "bytes_master": 14201,
+        "bytes_reviewed": 14253,
+        "imported_by_tested_modules": false,
+        "path": "scripts/produce_battle_scenario.py",
+        "sha256_master": "0cd5b2270e8f6a7c5eddf22e9a5bafd38b8fe99641ffb1c5d80540d879bea1d7",
+        "sha256_reviewed": "db4b3b86061ef647b31d002f8e8ccf3931f91b253ccecda512472de3d98addc0"
+      }
+    ],
+    "merged_master": "80f2313c2f12dcffaef150dcd69ef2831b07bafd",
+    "reviewed_head": "57149c79931dde507515f3ae2d639806953e17ea",
+    "rows_unaffected": true,
+    "tested_modules": [
+      "tests/test_mcp_trade_records_rom.py",
+      "tests/_tcp_trade_peer.py"
+    ]
+  },
+  "worktree_head": "57149c79931dde507515f3ae2d639806953e17ea",
+  "worktree_tree": "72c99491d9a36db3eac277c55381d7712412970b"
+}

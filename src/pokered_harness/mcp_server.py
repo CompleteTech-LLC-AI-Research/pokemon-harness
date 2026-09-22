@@ -9,7 +9,8 @@ session, which is where lifecycle, version enforcement, and hooks live.
 When a peer :class:`Session` is configured (via ``POKERED_PEER_*`` env
 vars), the server also exposes link-cable tools (``link_pair``,
 ``link_step``, ``link_peer_press``, ...) and peer resources
-(``pokered://peer-game-state``, ``pokered://link-transport``). The peer
+(``pokered://peer-game-state``, ``pokered://peer-party-records``,
+``pokered://link-transport``). The peer
 Session is constructed at startup but not *paired* — callers must invoke
 ``link_pair`` explicitly.
 """
@@ -20,6 +21,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -29,6 +31,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import mcp.types as mcp_types
@@ -151,6 +154,14 @@ _LOCAL_LINK_TOOL_NAMES = frozenset(
         "link_peer_release",
     }
 )
+# Tools that are advertised on a ROM-owned remote link but that the timed owner
+# cannot perform.  ``link_frame_barrier`` toggles the connected network
+# session's ROM-owned pacing control; the timed owner replaces that pacing model
+# with its own policy and rejects the name unconditionally
+# (``timed_unsupported_tool``), so timed ``tools/list`` must not offer it.  This
+# is a mode boundary, not a permission: the legacy tool stays advertised and
+# dispatched for every non-timed remote link.
+_TIMED_UNSUPPORTED_TOOL_NAMES = frozenset({"link_frame_barrier"})
 
 # Default hooks registered at session start. Keep this list short — each
 # entry is a semantic event downstream agents are expected to react to.
@@ -167,6 +178,13 @@ DEFAULT_HOOKS: tuple[tuple[str, str], ...] = (
     ("YesNoChoice", "yes_no_prompt"),
     ("TryEvolvingMon", "evolution_check"),
     ("SetLastBlackoutMap", "blackout"),
+    # ``_AddEnemyMonToPlayerParty`` is the routine the Trade Center runs when it
+    # appends the peer's received 44-byte record to the player's own party
+    # (engine/link/cable_club.asm via the party compaction path).  It is the
+    # ROM-owned marker that a trade actually copied a record: it never runs for
+    # a party that merely sat in the trade menus, so an acceptance row can
+    # reject a skipped copy even when both offered records hold identical bytes.
+    ("_AddEnemyMonToPlayerParty", "trade_received"),
 )
 
 
@@ -176,6 +194,9 @@ _URI_EVENT_LOG = "pokered://events"
 _URI_PEER_GAME_STATE = "pokered://peer-game-state"
 _URI_LINK_TRANSPORT = "pokered://link-transport"
 _URI_LINK_STATUS = "pokered://link-status"
+_URI_PARTY_RECORDS = "pokered://party-records"
+_URI_PEER_PARTY_RECORDS = "pokered://peer-party-records"
+_URI_PEER_EVENTS = "pokered://peer-events"
 
 
 # -- server state container --------------------------------------------------
@@ -453,6 +474,19 @@ def _tool_specs(*, has_peer: bool = False) -> list[mcp_types.Tool]:
                     "render": {"type": "boolean", "default": False},
                 },
                 "required": ["count"],
+            },
+        ),
+        mcp_types.Tool(
+            name="link_frame_barrier",
+            description=(
+                "Enable or disable the network frame barrier on a connected "
+                "remote link. Both endpoints must call this at the same "
+                "ROM-owned boundary; the ROM still owns all serial registers."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"enabled": {"type": "boolean"}},
+                "required": ["enabled"],
             },
         ),
         mcp_types.Tool(
@@ -1298,6 +1332,30 @@ def _dispatch_link_tool(
         peer = _require_peer(link)
         peer.release(arguments["button"])
         return {"ok": True}
+
+    if name == "link_frame_barrier":
+        enabled = arguments.get("enabled")
+        if type(enabled) is not bool:
+            raise McpHarnessError(
+                "invalid_argument", "enabled must be a boolean"
+            )
+        _refresh_remote_state(link, session)
+        with link.state():
+            network_session = link.network_session
+            remote_mode = link.remote_mode
+        if network_session is None or remote_mode != "connected":
+            raise McpHarnessError(
+                "not_connected",
+                "link_frame_barrier requires a connected remote link",
+            )
+        with session.locked(timeout_s=_DEFAULT_CLEANUP_TIMEOUT_S):
+            network_session.set_network_frame_barrier(enabled)
+            applied = network_session.network_frame_barrier()
+        return {
+            "enabled": enabled,
+            "network_frame_barrier": applied,
+            "remote_mode": remote_mode,
+        }
 
     if name == "link_status":
         # Surface listener-thread failures lazily on status checks so
@@ -2851,7 +2909,12 @@ def read_resource(
             raise McpHarnessError(
                 "invalid_timed_configuration", "timed owner belongs to another session"
             )
-        if uri in {_URI_PEER_GAME_STATE, _URI_LINK_TRANSPORT}:
+        if uri in {
+            _URI_PEER_GAME_STATE,
+            _URI_PEER_PARTY_RECORDS,
+            _URI_PEER_EVENTS,
+            _URI_LINK_TRANSPORT,
+        }:
             raise McpHarnessError(
                 "timed_unsupported_resource", "timed remote transport has no local peer"
             )
@@ -2860,9 +2923,34 @@ def read_resource(
         return timed_owner.submit(lambda owned: read_resource(owned, uri, link)).result()
     if uri == _URI_GAME_STATE:
         return json.dumps(to_jsonable(session.read_game_state()))
+    if uri == _URI_PARTY_RECORDS:
+        # Bounded, read-only projection: per-slot record SHA-256 digests plus
+        # the sanitized species/level needed to interpret them.  Raw record
+        # bytes and absolute paths are deliberately never serialized.
+        return json.dumps(session.read_party_records().to_resource_payload())
+    if uri == _URI_PEER_PARTY_RECORDS:
+        # Owner-scoped peer observation: read the peer Session's own party
+        # records under that owner's lock. Like peer-game-state, this is
+        # strictly observational and never advances or repairs either owner.
+        if link is None or link.peer_session is None:
+            raise McpHarnessError("peer_not_configured", "peer session not configured")
+        with link.state():
+            peer = link.peer_session
+        return json.dumps(
+            peer.read_party_records().to_resource_payload(source="peer-party-records")
+        )
     if uri == _URI_EVENT_LOG:
         events: list[GameEvent] = session.event_snapshot()
         return json.dumps([to_jsonable(e) for e in events])
+    if uri == _URI_PEER_EVENTS:
+        # Owner-scoped peer observation, mirroring ``peer-game-state`` and
+        # ``peer-party-records``: read the peer Session's own latched event log
+        # under that owner's lock. Observational only; no raw bytes, no paths.
+        if link is None or link.peer_session is None:
+            raise McpHarnessError("peer_not_configured", "peer session not configured")
+        with link.state():
+            peer = link.peer_session
+        return json.dumps([to_jsonable(e) for e in peer.event_snapshot()])
     if uri == _URI_PEER_GAME_STATE:
         if link is None or link.peer_session is None:
             raise McpHarnessError("peer_not_configured", "peer session not configured")
@@ -2913,6 +3001,16 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
             ),
             mimeType="application/json",
         ),
+        mcp_types.Resource(
+            uri=_URI_PARTY_RECORDS,  # type: ignore[arg-type]
+            name="Party Records",
+            description=(
+                "Read-only per-slot SHA-256 digests of the raw 44-byte "
+                "party_struct records, plus sanitized species/level fields "
+                "for interpretation. Observational only; no raw bytes."
+            ),
+            mimeType="application/json",
+        ),
     ]
     if has_peer:
         specs.append(
@@ -2920,6 +3018,32 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
                 uri=_URI_PEER_GAME_STATE,  # type: ignore[arg-type]
                 name="Peer Game State",
                 description="Parsed game state of the peer session (JSON).",
+                mimeType="application/json",
+            )
+        )
+        specs.append(
+            mcp_types.Resource(
+                uri=_URI_PEER_PARTY_RECORDS,  # type: ignore[arg-type]
+                name="Peer Party Records",
+                description=(
+                    "Read-only per-slot SHA-256 digests of the peer session's "
+                    "raw 44-byte party_struct records, plus sanitized "
+                    "species/level fields for interpretation. Observational "
+                    "only; no raw bytes."
+                ),
+                mimeType="application/json",
+            )
+        )
+        specs.append(
+            mcp_types.Resource(
+                uri=_URI_PEER_EVENTS,  # type: ignore[arg-type]
+                name="Peer Event Log",
+                description=(
+                    "Read-only latched execution-hook event log of the peer "
+                    "session (JSON). The peer's own ROM-owned milestone "
+                    "observations, mirroring pokered://events for the primary. "
+                    "Observational only; no raw bytes."
+                ),
                 mimeType="application/json",
             )
         )
@@ -3308,7 +3432,8 @@ def build_server(
             specs = [
                 spec
                 for spec in _tool_specs(has_peer=True)
-                if spec.name not in _LOCAL_LINK_TOOL_NAMES or spec.name == "link_step"
+                if spec.name not in _TIMED_UNSUPPORTED_TOOL_NAMES
+                and (spec.name == "link_step" or spec.name not in _LOCAL_LINK_TOOL_NAMES)
             ]
             for spec in specs:
                 if spec.name in {"link_listen", "link_connect"}:
@@ -3377,7 +3502,12 @@ def build_server(
             try:
                 if resource_uri == _URI_LINK_STATUS:
                     return json.dumps(_timed_status(timed_owner))
-                if resource_uri in {_URI_PEER_GAME_STATE, _URI_LINK_TRANSPORT}:
+                if resource_uri in {
+                    _URI_PEER_GAME_STATE,
+                    _URI_PEER_PARTY_RECORDS,
+                    _URI_PEER_EVENTS,
+                    _URI_LINK_TRANSPORT,
+                }:
                     raise McpHarnessError(
                         "timed_unsupported_resource", "timed remote transport has no local peer"
                     )
@@ -3538,6 +3668,58 @@ async def serve_stdio(
                 raise McpHarnessError("server_cleanup_failed", details)
 
 
+_PEER_STATE_SHA1_ENV = "POKERED_PEER_STATE_SHA1"
+_PEER_STATE_PATH_ENV = "POKERED_PEER_STATE_PATH"
+
+
+def _peer_startup_state_from_env() -> bytes | None:
+    """Read the documented peer-fixture launch contract.
+
+    The public tool surface can only ``load_state`` the primary session, so a
+    second session's starting fixture has no supported tool call.  The
+    production entry point therefore publishes an explicit launch contract:
+    ``POKERED_PEER_STATE_PATH`` names the immutable peer fixture and
+    ``POKERED_PEER_STATE_SHA1`` pins its bytes.  Both are required together and
+    the pin is verified before the bytes reach the emulator, so a caller cannot
+    silently start the peer from unpinned or substituted state.  A checkout
+    that does not need a peer fixture leaves both unset.
+    """
+    raw_path = os.environ.get(_PEER_STATE_PATH_ENV)
+    raw_sha1 = os.environ.get(_PEER_STATE_SHA1_ENV)
+    path = raw_path.strip() if raw_path is not None else ""
+    sha1 = raw_sha1.strip() if raw_sha1 is not None else ""
+    if not path and not sha1:
+        return None
+    if not path or not sha1:
+        raise SystemExit(
+            f"{_PEER_STATE_PATH_ENV} and {_PEER_STATE_SHA1_ENV} must be set "
+            "together; a peer fixture is never loaded without its pin"
+        )
+    expected = sha1.lower()
+    if len(expected) != 40 or any(char not in "0123456789abcdef" for char in expected):
+        raise SystemExit(
+            f"{_PEER_STATE_SHA1_ENV} must be a 40-character SHA-1 hex digest"
+        )
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        raise SystemExit(
+            f"unable to read {_PEER_STATE_PATH_ENV}: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not data or len(data) > _MAX_STATE_BYTES:
+        raise SystemExit(
+            f"{_PEER_STATE_PATH_ENV} must hold between 1 and {_MAX_STATE_BYTES} "
+            f"bytes; observed {len(data)}"
+        )
+    observed = hashlib.sha1(data).hexdigest()
+    if observed != expected:
+        raise SystemExit(
+            f"{_PEER_STATE_PATH_ENV} SHA-1 mismatch: expected {expected}, "
+            f"observed {observed}"
+        )
+    return data
+
+
 def main() -> None:
     """CLI entry point: ``python -m pokered_harness.mcp_server``.
 
@@ -3563,6 +3745,13 @@ def main() -> None:
       ``POKERED_PEER_ROM_SHA1`` — when set, a peer Session is constructed
       at startup and the link-cable tools become usable. The pair is NOT
       auto-paired — invoke ``link_pair`` explicitly.
+    * ``POKERED_PEER_STATE_PATH`` / ``POKERED_PEER_STATE_SHA1`` — the
+      documented public peer-fixture launch contract. When both are set, this
+      entry point verifies the pinned peer save state and loads it before
+      serving, so a caller never constructs a Session or calls a private
+      ``Session.load_state`` to reproduce the peer's starting board. Both
+      variables are required together, the digest is verified before the bytes
+      reach the emulator, and the pair must still be linked explicitly.
     * ``POKERED_LINK_TRANSPORT=timed`` — explicitly select timed remote
       transport. Every ``POKERED_TIMED_<FIELD>`` listed by
       :func:`load_timed_policy_from_env` is required; no timing policy is
@@ -3602,6 +3791,16 @@ def main() -> None:
     primary_rom, primary_sym = primary_env.resolved_paths()
     assert primary_rom is not None and primary_sym is not None
     peer_rom, peer_sym = peer_env.resolved_paths()
+    peer_state_configured = any(
+        (os.environ.get(name) or "").strip()
+        for name in (_PEER_STATE_PATH_ENV, _PEER_STATE_SHA1_ENV)
+    )
+    if peer_state_configured and (peer_rom is None or peer_sym is None):
+        raise SystemExit(
+            f"{_PEER_STATE_PATH_ENV} requires a configured peer session; set "
+            "POKERED_PEER_ROM_PATH and POKERED_PEER_SYM_PATH"
+        )
+    peer_state = _peer_startup_state_from_env()
     if timed_policy is not None and peer_rom is not None:
         raise SystemExit(
             "timed MCP transport requires a single local session; unset POKERED_PEER_*"
@@ -3758,6 +3957,11 @@ def main() -> None:
                     expected_pyboy_revision=expected_pyboy_revision,
                 )
                 register_default_hooks(peer_session)
+                if peer_state is not None:
+                    # The pin was verified before the emulator existed; the
+                    # load itself is the same public state entry the primary
+                    # session uses through the ``load_state`` tool.
+                    peer_session.load_state(peer_state)
 
         timed_options: dict[str, Any] = {}
         if timed_policy is not None:

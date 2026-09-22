@@ -1393,17 +1393,19 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
 # The in-process LinkPair avoids both failure modes because both
 # Sessions are stepped by a single lockstep driver with zero timing
 # variance — and test_link_integration.test_link_trade_roundtrip
-# proves end-to-end trade UI reachability in that mode. The remote
-# TCP case would require either:
-#   (a) a shared "tick broker" between the two processes that aligns
-#       frame advancement (converges the remote model to LinkPair), or
-#   (b) agent-layer protocol: each side signals "I'm at frame N" to
-#       its peer and both wait until matching before issuing the next
-#       button press. That's T7 deployment-time work, not test
-#       infrastructure.
+# proves end-to-end trade UI reachability in that mode.
 #
-# Trade completion and battle completion therefore remain "proven
-# in-process, partially proven remote (first post-menu exchange)".
+# The *uncoordinated* raw daemon drivers in this file are what stay
+# limited: they step at their own pace and cannot align frame
+# advancement, so they still deadlock or desync as described above.
+# Option (a) — a shared tick broker — is now realized by the public
+# MCP stdio path in tests/test_mcp_trade_records_rom.py, where the
+# acceptance client drives ``link_step`` on two independent server
+# processes in lockstep and completes the full paired record swap; the
+# ``..._over_tcp`` rows do it with the two servers joined by the public
+# ``link_listen``/``link_connect`` pair, so a two-process trade is no
+# longer "first post-menu exchange" only. Trade completion over two
+# autonomous, unsynchronized processes would still need option (b).
 
 
 # --- T7+: AgentSync-coordinated trade setup -----------------------------

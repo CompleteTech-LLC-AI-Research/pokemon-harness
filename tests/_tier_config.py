@@ -42,6 +42,8 @@ REAL_ROM_MODULES = frozenset(
         "test_link_symbols_real_roms.py",
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
+        "test_mcp_trade_records_rom.py",
+        "test_battle_healing_items_rom.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
@@ -55,6 +57,10 @@ REAL_ROM_MODULES = frozenset(
 UNIT_MODULES = frozenset(
     {
         "test_agent_sync.py",
+        "test_battle_coverage.py",
+        "test_battle_item_evidence.py",
+        "test_battle_medicine_oracle.py",
+        "test_battle_scenario_fixtures.py",
         "test_battle_turn_evidence.py",
         "test_config.py",
         "test_coordinator_detach_callback.py",
@@ -62,6 +68,7 @@ UNIT_MODULES = frozenset(
         "test_diagnostic_script_safety.py",
         "test_emulator_ownership.py",
         "test_pair_checkpoints.py",
+        "test_party_record_audit.py",
         "test_peer_frame_shutdown.py",
         "test_network_detach_references.py",
         "test_network_provider_locking.py",
@@ -158,7 +165,19 @@ UNIT_MODULES = frozenset(
     }
 )
 
-KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES
+# Reviewed opt-in modules.  These tests need assets the gate environment does
+# not provision - a local pinned upstream checkout, for example - and skip when
+# it is absent.  A required tier fails closed on any skip, so these modules
+# carry no tier marker and are never selected by a tier marker expression; run
+# them explicitly by path, as their module docstrings document.  The manifest
+# entry is still required: an unlisted module keeps failing collection.
+OPT_IN_MODULES = frozenset(
+    {
+        "test_battle_medicine_source_conformance.py",
+    }
+)
+
+KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES | OPT_IN_MODULES
 
 # Reviewed ROM-free exceptions in mixed modules. Only actual test functions
 # belong here; unlisted future functions retain the module's real-ROM tier.
@@ -198,11 +217,33 @@ ROM_FREE_TESTS = frozenset(
             "test_rom_client_load_state_timeout_redacts_data",
         ),
     }
+    | {
+        # This module drives a real ROM for its capture assertions, but its
+        # manifest cross-check, its producer guards, and its turn-timeline
+        # negative control touch no asset and have no skip path, so they belong
+        # in the always-selected unit tier rather than being masked by the
+        # module's `real_rom` classification.  The two asset-consuming tests stay
+        # in `real_rom`: they skip when the operator fixture or the BYO ROM/SYM
+        # is absent, and the unit tier fails closed on any skip.
+        (
+            "test_battle_healing_items_rom.py",
+            "test_release_evidence_names_the_pinned_assets_and_producer",
+        ),
+        (
+            "test_battle_healing_items_rom.py",
+            "test_producer_refuses_existing_output_and_unpinned_assets",
+        ),
+        (
+            "test_battle_healing_items_rom.py",
+            "test_turn_evidence_is_required_rather_than_supplied",
+        ),
+    }
 )
 
 LOCAL_LINK_MODULES = frozenset(
     {
         "test_link_integration.py",
+        "test_mcp_trade_records_rom.py",
         "test_pyboy_link_session_roms.py",
     }
 )
@@ -216,7 +257,13 @@ REMOTE_LINK_MODULES = frozenset(
     }
 )
 
-MCP_STDIO_MODULES = frozenset({"test_mcp_stdio_integration.py", "test_mcp_timed_rom.py"})
+MCP_STDIO_MODULES = frozenset(
+    {
+        "test_mcp_stdio_integration.py",
+        "test_mcp_timed_rom.py",
+        "test_mcp_trade_records_rom.py",
+    }
+)
 
 # The broad trade set keeps ROM milestones visible in diagnostics. The strict
 # acceptance set below is deliberately narrower and is what the production
@@ -251,6 +298,34 @@ TRADE_TESTS = frozenset(
         (
             "test_pyboy_link_session_subprocess.py",
             "test_subprocess_pair_completes_trade_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_multi_member_slot_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_cancel_before_commitment_keeps_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_setup_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly",
         ),
     }
 )
@@ -287,6 +362,34 @@ TRADE_ACCEPTANCE_TESTS = frozenset(
         (
             "test_pyboy_link_session_subprocess.py",
             "test_subprocess_pair_completes_trade_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_party_records_over_tcp",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_exchanges_multi_member_slot_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_cancel_before_commitment_keeps_records",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_setup_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly",
+        ),
+        (
+            "test_mcp_trade_records_rom.py",
+            "test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly",
         ),
     }
 )
@@ -663,6 +766,10 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     test_key = (filename, test_name)
     if test_key in ROM_FREE_TESTS:
         return frozenset({"unit"})
+    if filename in OPT_IN_MODULES:
+        # Opt-in audit: no tier marker, so no tier expression can select a
+        # skip that only a fully provisioned checkout could satisfy.
+        return frozenset()
 
     marks: set[str] = set()
 
@@ -713,6 +820,7 @@ __all__ = [
     "LOCAL_VERSION_PAIR_NODEIDS",
     "MARKERS",
     "MCP_STDIO_MODULES",
+    "OPT_IN_MODULES",
     "REAL_ROM_MODULES",
     "REMOTE_LINK_MODULES",
     "REMOTE_VERSION_PAIR_NODEIDS",

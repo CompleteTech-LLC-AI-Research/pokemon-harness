@@ -29,7 +29,7 @@ from pokered_harness.ownership import (
     owner_group,
 )
 from pokered_harness.pyboy_protocol import PyBoyLike
-from pokered_harness.state import GameState, parse_game_state
+from pokered_harness.state import GameState, PartyRecords, parse_game_state, parse_party_records
 from pokered_harness.symbols.loader import SymbolTable, load_sym_file
 
 
@@ -1184,6 +1184,18 @@ class Session:
         with self._emulator_access():
             self._ensure_open()
             return parse_game_state(self._pyboy.memory, self._symbols)
+
+    def read_party_records(self) -> PartyRecords:
+        """Read-only per-slot raw party-record digests under the owner lock.
+
+        This mirrors :meth:`read_game_state`: it takes the same emulator owner
+        scope and never ticks, writes RAM, touches serial state, or calls a
+        gameplay driver.
+        """
+        self._ensure_open()
+        with self._emulator_access():
+            self._ensure_open()
+            return parse_party_records(self._pyboy.memory, self._symbols)
 
     def event_snapshot(self) -> list[GameEvent]:
         """Return a consistent copy of the current event log."""
