@@ -42,6 +42,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import signal
 import stat
@@ -699,6 +700,43 @@ def _cgroup_memory_limit(paths: list[Path], filename: str) -> tuple[int | None, 
     return (min(limits) if limits else None), observable
 
 
+def _cgroup_memory_headroom(
+    paths: list[Path], limit_filename: str, usage_filename: str
+) -> tuple[int | None, bool]:
+    """Return the tightest remaining memory under any finite cgroup limit.
+
+    A finite limit overstates what this job can use when an ancestor is already
+    consuming most of it: the headroom is ``limit - usage`` at each level that
+    imposes a finite limit, and the tightest such remainder is the real bound.
+    The second element is ``False`` when a finite limit or its usage could not
+    be read, so admission fails closed instead of assuming the limit is free.
+    """
+
+    headroom: int | None = None
+    observable = True
+    for path in paths:
+        limit_file = path / limit_filename
+        if not limit_file.exists():
+            continue
+        raw_limit = _read_text(limit_file)
+        if raw_limit is None:
+            observable = False
+            continue
+        value = raw_limit.strip()
+        if not value or value == "max" or not value.isdigit():
+            continue
+        number = int(value)
+        if number >= 1 << 60:
+            continue
+        raw_usage = _read_text(path / usage_filename)
+        if raw_usage is None or not raw_usage.strip().isdigit():
+            observable = False
+            continue
+        remaining = number - int(raw_usage.strip())
+        headroom = remaining if headroom is None else min(headroom, remaining)
+    return headroom, observable
+
+
 def _cgroup_cpu_quota_v2(paths: list[Path]) -> tuple[float | None, bool]:
     """Return the tightest cgroup-v2 CPU quota for *paths* and its observability.
 
@@ -819,11 +857,16 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
             base / "memory", _cgroup_relative_path("memory", cgroup_text)
         )
         memory_filename = "memory.limit_in_bytes"
+        memory_usage_filename = "memory.usage_in_bytes"
     else:
         memory_paths = v2_paths
         memory_filename = "memory.max"
+        memory_usage_filename = "memory.current"
     memory_limit_bytes, memory_limit_observable = _cgroup_memory_limit(
         memory_paths, memory_filename
+    )
+    memory_headroom_bytes, memory_headroom_observable = _cgroup_memory_headroom(
+        memory_paths, memory_filename, memory_usage_filename
     )
 
     for path in stat_paths:
@@ -858,6 +901,8 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
         "cgroup_member_pids": member_pids,
         "memory_limit_bytes": memory_limit_bytes,
         "memory_limit_observable": memory_limit_observable,
+        "memory_headroom_bytes": memory_headroom_bytes,
+        "memory_headroom_observable": memory_headroom_observable,
     }
 
 
@@ -1066,6 +1111,8 @@ class RunnerFacts:
     memory_available_bytes: int | None = None
     memory_limit_bytes: int | None = None
     memory_limit_observable: bool = True
+    memory_headroom_bytes: int | None = None
+    memory_headroom_observable: bool = True
     load_average: list[float] | None = None
     psi_cpu_some_avg300: float | None = None
     repo_disk_free_bytes: int | None = None
@@ -1076,6 +1123,7 @@ class RunnerFacts:
     job_evidence_disk_free_bytes: int | None = None
     shm_path: str = "/dev/shm"
     shm_size_bytes: int | None = None
+    shm_available_bytes: int | None = None
     shm_writable: bool = False
     process_pid: int = 0
     process_ancestor_pids: list[int] = field(default_factory=list)
@@ -1159,6 +1207,9 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
         try:
             stats = os.statvfs(shm)
             facts.shm_size_bytes = stats.f_bsize * stats.f_blocks
+            # f_bavail is what an unprivileged writer can actually allocate; the
+            # total size (f_blocks) can be almost entirely reserved elsewhere.
+            facts.shm_available_bytes = stats.f_bsize * stats.f_bavail
             writable, marker = _probe_shm(shm)
             facts.shm_writable = writable
             if marker is not None:
@@ -1185,6 +1236,8 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
     facts.cpu_throttled = cgroup["cpu_throttled"]
     facts.memory_limit_bytes = cgroup["memory_limit_bytes"]
     facts.memory_limit_observable = cgroup["memory_limit_observable"]
+    facts.memory_headroom_bytes = cgroup["memory_headroom_bytes"]
+    facts.memory_headroom_observable = cgroup["memory_headroom_observable"]
     facts.psi_cpu_some_avg300 = _read_psi_cpu()
     return facts
 
@@ -1572,6 +1625,36 @@ def _load_allocation_descriptor(path: Path) -> tuple[dict[str, Any] | None, str]
     if not isinstance(document, dict):
         return None, "the allocation descriptor must be a JSON object"
     return document, ""
+
+
+def _pinned_descriptor_binding_error(
+    declaration: dict[str, Any], descriptor_path: Path
+) -> str | None:
+    """Return why *descriptor_path* does not belong to *declaration*, or ``None``.
+
+    A saved declaration names exactly one lease.  If that lease was released and
+    a later lease reused the same descriptor path, the declaration's pinned
+    digest no longer matches the bytes on disk.  Acting on the new bytes would
+    signal or remove state this declaration never authorized, so the binding is
+    re-checked by digest before any release or recovery touches the lease.
+    """
+
+    reservation = declaration.get("reservation")
+    reservation = reservation if isinstance(reservation, dict) else {}
+    pinned = reservation.get("descriptor_sha256")
+    if not _is_sha256(pinned):
+        return "the declaration does not pin the allocation descriptor by SHA-256"
+    try:
+        actual = _sha256_of_file(descriptor_path)
+    except OSError as exc:
+        return f"the pinned allocation descriptor could not be read ({exc})"
+    if actual != str(pinned).strip().lower():
+        return (
+            "the pinned allocation descriptor digest no longer matches this declaration; "
+            "the descriptor belongs to a different lease, so no state may be signalled "
+            "or removed"
+        )
+    return None
 
 
 def _descriptor_lease_status(
@@ -2165,8 +2248,15 @@ def _usable_memory_bytes(facts: RunnerFacts) -> tuple[int | None, str]:
         "host-available": facts.memory_available_bytes,
     }
     if facts.memory_limit_bytes is not None:
-        bounds["cgroup-limit"] = facts.memory_limit_bytes
-        detail = "usable memory bytes (the lowest of host-total, host-available, cgroup-limit)"
+        # A finite limit is only headroom the job can use if the cgroup is not
+        # already near it.  Admit against limit-minus-current-usage, not the
+        # bare limit, or a nearly-full ancestor is admitted as if it were empty.
+        if not facts.memory_headroom_observable:
+            return None, "the allocation's cgroup memory usage could not be read"
+        if facts.memory_headroom_bytes is None:
+            return None, "the allocation's cgroup memory headroom is not observable"
+        bounds["cgroup-headroom"] = max(facts.memory_headroom_bytes, 0)
+        detail = "usable memory bytes (the lowest of host-total, host-available, cgroup-headroom)"
     else:
         detail = (
             "usable memory bytes (the lowest of host-total, host-available; "
@@ -2440,14 +2530,22 @@ def evaluate_resources(
             )
         )
     else:
+        # ``shm_size_bytes`` is the filesystem's total size, which can be
+        # almost entirely reserved; admission must use the space actually
+        # available to an unprivileged writer.
+        observed_shm = facts.shm_available_bytes
         status = (
             "unsupported"
-            if facts.shm_size_bytes is None
-            else ("ok" if facts.shm_size_bytes >= declared_shm else "fail")
+            if observed_shm is None
+            else ("ok" if observed_shm >= declared_shm else "fail")
         )
         results.append(
             _result(
-                "shm", status, declared_shm, facts.shm_size_bytes, "writable shared memory bytes"
+                "shm",
+                status,
+                declared_shm,
+                observed_shm,
+                "available writable shared memory bytes",
             )
         )
 
@@ -2527,6 +2625,13 @@ _JOB_RUN_RECORD_NAME = "job-run.json"
 # launched anything.  Without it a swallowed record write would read as "no job
 # ran" and a later recovery would delete the lease while the job still ran.
 _JOB_LAUNCH_INTENT_NAME = "job-launch-intent.json"
+# A random per-launch token injected into the job's environment and recorded
+# with its ownership.  A live process that carries the token in
+# ``/proc/<pid>/environ`` was demonstrably started by this exact job; a process
+# that merely reused a pid or a process-group id does not.  Recovery requires
+# the token before it will signal anything, so reused identifiers can never
+# turn into an unrelated process being killed.
+_JOB_OWNERSHIP_TOKEN_ENV = "POKERED_QUALIFICATION_JOB_TOKEN"
 
 
 class JobOwnershipError(RuntimeError):
@@ -2606,6 +2711,12 @@ def _drain_after_termination(
 
 
 _SIGNAL_HANDLERS_INSTALLED = False
+# True while owned-process cleanup is running.  A SIGINT/SIGTERM received then
+# is deferred (recorded in _DEFERRED_SIGNAL) instead of being raised into the
+# sweep, so the bounded containment work always completes before the process
+# exits with the signal status.
+_CLEANUP_ACTIVE = False
+_DEFERRED_SIGNAL: int | None = None
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 
@@ -3002,6 +3113,29 @@ def _terminate_owned_processes(*_args: object) -> None:
     _OWNED_PROCESSES.clear()
 
 
+def _begin_cleanup() -> None:
+    """Mark that owned-process cleanup is running.
+
+    A cancel request that arrives here must not be delivered as a Python
+    exception, because doing so would abort the very sweep that contains the
+    allocation's descendants.  The signal is recorded instead and re-raised
+    once cleanup finishes.
+    """
+
+    global _CLEANUP_ACTIVE
+    _CLEANUP_ACTIVE = True
+
+
+def _end_cleanup() -> int | None:
+    """Stop deferring cancellation and return any deferred signal number."""
+
+    global _CLEANUP_ACTIVE, _DEFERRED_SIGNAL
+    _CLEANUP_ACTIVE = False
+    signum = _DEFERRED_SIGNAL
+    _DEFERRED_SIGNAL = None
+    return signum
+
+
 def _install_signal_handlers() -> None:
     global _SIGNAL_HANDLERS_INSTALLED
     if _SIGNAL_HANDLERS_INSTALLED or os.name == "nt":
@@ -3009,6 +3143,13 @@ def _install_signal_handlers() -> None:
     _SIGNAL_HANDLERS_INSTALLED = True
 
     def _handler(signum: int, _frame: object) -> None:
+        global _DEFERRED_SIGNAL
+        if _CLEANUP_ACTIVE:
+            # Cleanup is mid-flight; recording the signal keeps the bounded
+            # descendant sweep from being interrupted, which would otherwise
+            # exit with the signal's status while an owned process stayed live.
+            _DEFERRED_SIGNAL = signum
+            return
         _terminate_owned_processes()
         raise SystemExit(128 + signum)
 
@@ -3068,6 +3209,7 @@ def run_command(
     group_leftovers: list[int] = []
     detached_leftovers: list[int] = []
     pending_error: BaseException | None = None
+    deferred_signum: int | None = None
     with _adopted_descendants() as adoption:
         adoption_active = adoption.active
         preexisting = set(_direct_child_pids(os.getpid()))
@@ -3100,6 +3242,7 @@ def run_command(
                     on_start(process)
                 stdout, stderr = process.communicate(timeout=timeout)
             except subprocess.TimeoutExpired as exc:
+                _begin_cleanup()
                 # ``communicate`` waits for EOF as well as for the command to
                 # exit.  A descendant that inherited the output pipe keeps it
                 # open after the command itself finished, so this timeout is not
@@ -3114,6 +3257,7 @@ def run_command(
                     output_stream_held = True
                 stdout, stderr = _drain_after_termination(process, (stdout, stderr))
             except (KeyboardInterrupt, SystemExit) as exc:
+                _begin_cleanup()
                 # A signal that interrupts the wait must not skip containment:
                 # collect the command's output opportunistically, tear the
                 # command down, and remember the exception to re-raise once the
@@ -3124,6 +3268,7 @@ def run_command(
                 with contextlib.suppress(KeyboardInterrupt, SystemExit):
                     stdout, stderr = _drain_after_termination(process)
             except BaseException as exc:  # noqa: BLE001 - containment must run first
+                _begin_cleanup()
                 # A decoding failure (``UnicodeDecodeError``) or any other
                 # error raised while reading the child's streams must not skip
                 # containment.  The command may still have detached
@@ -3138,17 +3283,23 @@ def run_command(
                     stdout, stderr = _drain_after_termination(process)
         finally:
             _unregister_owned(process)
+            # Cleanup of the just-terminated command is about to start; defer
+            # any cancel request that would otherwise interrupt it.
+            _begin_cleanup()
 
         # Containment runs on every path, including the cancellation path, so a
         # signal cannot leave an owned descendant holding the allocation.
-        group_confirmed, group_leftovers = _terminate_process_group(process.pid)
-        detached_confirmed, detached_leftovers = _contain_adopted_descendants(preexisting)
-        if not adoption_active:
-            notes.append(
-                "the runner could not become a child subreaper, so descendants that "
-                "detached into a new session could not be observed or contained; "
-                "this run's containment is unproven"
-            )
+        try:
+            group_confirmed, group_leftovers = _terminate_process_group(process.pid)
+            detached_confirmed, detached_leftovers = _contain_adopted_descendants(preexisting)
+            if not adoption_active:
+                notes.append(
+                    "the runner could not become a child subreaper, so descendants that "
+                    "detached into a new session could not be observed or contained; "
+                    "this run's containment is unproven"
+                )
+        finally:
+            deferred_signum = _end_cleanup()
 
     leftovers = sorted(set(group_leftovers) | set(detached_leftovers))
     if not group_confirmed or not detached_confirmed:
@@ -3182,6 +3333,10 @@ def run_command(
         # The signal or interrupt still terminates the run, but only after the
         # descendant sweeps above have run; a survivor keeps the lease.
         raise pending_error
+    if deferred_signum is not None:
+        # A cancel request arrived while containment was running; it is honored
+        # only now that the bounded cleanup has finished.
+        raise SystemExit(128 + deferred_signum)
     if timed_out:
         notes.insert(
             0,
@@ -4432,7 +4587,11 @@ def _read_job_run_record(job_dir: Path) -> tuple[dict[str, Any] | None, str]:
 
 
 def _write_job_run_record(
-    job_dir: Path, process: subprocess.Popen[str], *, containment_confirmed: bool
+    job_dir: Path,
+    process: subprocess.Popen[str],
+    *,
+    containment_confirmed: bool,
+    job_token: str | None = None,
 ) -> None:
     """Persist verifiable ownership of the job running under a lease.
 
@@ -4463,6 +4622,7 @@ def _write_job_run_record(
         "job_start_time": _process_start_time(process.pid),
         "job_process_group": process_group,
         "job_session": session,
+        "job_token": job_token,
         "containment_confirmed": containment_confirmed,
         "recorded_at": _iso_now(),
     }
@@ -4535,19 +4695,65 @@ def _recorded_start_time_at_or_after(observed: str | None, recorded: Any) -> boo
         return False
 
 
-def _recorded_job_group_ownership(pgid: int, job_start_time: Any) -> tuple[bool, str]:
+def _process_environ(pid: int) -> dict[str, str] | None:
+    """Return *pid*'s environment, or ``None`` when it cannot be observed.
+
+    ``/proc/<pid>/environ`` is the initial environment a process was started
+    with; children inherit it.  It is therefore durable evidence of which
+    launch a process belongs to, unlike a reusable pid or process-group id.
+    """
+
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    environ: dict[str, str] = {}
+    for entry in raw.split(b"\0"):
+        if not entry:
+            continue
+        name, sep, value = entry.partition(b"=")
+        if not sep:
+            continue
+        environ[name.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return environ or None
+
+
+def _recorded_job_group_ownership(
+    pgid: int, job_start_time: Any, job_token: Any
+) -> tuple[bool, str]:
     """Prove that every live member of *pgid* can belong to the recorded job.
 
     A process-group id is reusable once its members exit, so recovering a stale
     lease must never signal a group merely because the id appears in the record.
-    Each live member must be observable and must have started no earlier than
-    the recorded job; otherwise the group is unproven and must be left alone.
+    A start time cannot prove ownership either: an unrelated process that joined
+    a reused group id starts *after* the recorded job.  Each live member must
+    instead carry the launch's own ownership token in its environment, and be
+    observable; otherwise the group is unproven and must be left alone.
     """
 
     members = [pid for pid in _process_group_members(pgid) if pid != os.getpid()]
     if not members:
         return True, ""
+    if not isinstance(job_token, str) or not job_token.strip():
+        return False, (
+            "the recorded job has no durable ownership token; refusing to signal a group "
+            "whose ownership cannot be proven"
+        )
     for pid in members:
+        environ = _process_environ(pid)
+        if environ is None:
+            return False, (
+                f"the environment of process {pid} in the recorded job's group is not "
+                "observable; refusing to signal a group whose ownership cannot be proven"
+            )
+        if environ.get(_JOB_OWNERSHIP_TOKEN_ENV) != job_token:
+            return False, (
+                f"process {pid} in the recorded job's group does not carry the recorded "
+                "job's ownership token; refusing to signal a group whose ownership cannot "
+                "be proven"
+            )
         observed = _process_start_time(pid)
         if observed is None:
             return False, (
@@ -4625,7 +4831,9 @@ def _confirm_recorded_job_containment(
             if isinstance(value, int) and not isinstance(value, bool) and value > 0
         }
         for pgid in sorted(groups):
-            group_owned, ownership_detail = _recorded_job_group_ownership(pgid, start_time)
+            group_owned, ownership_detail = _recorded_job_group_ownership(
+                pgid, start_time, record.get("job_token")
+            )
             if not group_owned:
                 return False, ownership_detail
             confirmed, survivors = _terminate_process_group(pgid)
@@ -4748,6 +4956,9 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
     descriptor_path = _allocation_descriptor_path(declaration, repo_root)
     if descriptor_path is None or not descriptor_path.is_file():
         return "blocked", "no pinned allocation descriptor to release"
+    binding_error = _pinned_descriptor_binding_error(declaration, descriptor_path)
+    if binding_error is not None:
+        return "blocked", binding_error
     descriptor, error = _load_allocation_descriptor(descriptor_path)
     if descriptor is None:
         return "fail", error
@@ -4818,6 +5029,9 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
     descriptor_path = _allocation_descriptor_path(declaration, repo_root)
     if descriptor_path is None or not descriptor_path.is_file():
         return "ok", "no allocation descriptor to recover"
+    binding_error = _pinned_descriptor_binding_error(declaration, descriptor_path)
+    if binding_error is not None:
+        return "blocked", binding_error
     # A recovery removes the lease state, so it must first prove no owned work
     # survived a cancelled command: a rejected signal path can leave a detached
     # descendant that would otherwise keep consuming the allocation after the
@@ -4983,6 +5197,10 @@ def _do_reserve(
         )
 
     command = list(args.run)
+    # The per-launch token is durable ownership evidence: only this job and its
+    # descendants can carry it, so a later recovery can tell them apart from an
+    # unrelated process that happens to reuse the recorded pid or group id.
+    job_token = secrets.token_hex(16)
     child_env = dict(os.environ)
     for name, child in (
         ("TMPDIR", job_dir / "tmp"),
@@ -4991,6 +5209,7 @@ def _do_reserve(
     ):
         child.mkdir(parents=True, exist_ok=True)
         child_env[name] = str(child)
+    child_env[_JOB_OWNERSHIP_TOKEN_ENV] = job_token
 
     # Durable job ownership is written before the command runs, so a holder that
     # dies mid-run still leaves a verifiable record of what it launched.
@@ -5008,7 +5227,7 @@ def _do_reserve(
         )
 
     def _record_start(process: subprocess.Popen[str]) -> None:
-        _write_job_run_record(job_dir, process, containment_confirmed=False)
+        _write_job_run_record(job_dir, process, containment_confirmed=False, job_token=job_token)
 
     try:
         process = run_command(

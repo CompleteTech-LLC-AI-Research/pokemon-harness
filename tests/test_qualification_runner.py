@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -46,6 +47,7 @@ def make_facts(**overrides):
         temp_disk_free_bytes=10**12,
         shm_path="/dev/shm",
         shm_size_bytes=10**9,
+        shm_available_bytes=10**9,
         shm_writable=True,
         process_pid=os.getpid(),
         process_ancestor_pids=[],
@@ -582,11 +584,42 @@ def test_evaluate_resources_memory_respects_the_allocation_cgroup_limit(tmp_path
     facts.memory_total_bytes = 64 * 1024**3
     facts.memory_available_bytes = 32 * 1024**3
     facts.memory_limit_bytes = 2 * 1024**3
+    facts.memory_headroom_bytes = 2 * 1024**3
     results = runner.evaluate_resources(declaration, facts, tmp_path)
     memory = next(item for item in results if item.name == "memory")
     assert memory.status == "fail"
     assert memory.observed == 2 * 1024**3
-    assert "cgroup-limit" in memory.detail
+    assert "cgroup-headroom" in memory.detail
+
+
+def test_evaluate_resources_memory_respects_cgroup_headroom(tmp_path: Path):
+    """A nearly-full ancestor must not be admitted as if it were empty."""
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    facts.memory_total_bytes = 64 * 1024**3
+    facts.memory_available_bytes = 32 * 1024**3
+    # The ancestor's limit is generous but its existing usage leaves only a
+    # quarter of a GiB for this job; the declared requirement is far larger.
+    facts.memory_limit_bytes = 8 * 1024**3
+    facts.memory_headroom_bytes = 256 * 1024**2
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    memory = next(item for item in results if item.name == "memory")
+    assert memory.status == "fail"
+    assert memory.observed == 256 * 1024**2
+    assert "cgroup-headroom" in memory.detail
+
+
+def test_evaluate_resources_memory_fails_closed_on_unreadable_headroom(tmp_path: Path):
+    """A finite limit with unreadable usage is unknown headroom, not free memory."""
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota")
+    facts.memory_total_bytes = 64 * 1024**3
+    facts.memory_available_bytes = 32 * 1024**3
+    facts.memory_limit_bytes = 2 * 1024**3
+    facts.memory_headroom_observable = False
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    memory = next(item for item in results if item.name == "memory")
+    assert memory.status == "unsupported"
 
 
 def test_evaluate_resources_memory_fails_closed_on_unreadable_limit(tmp_path: Path):
@@ -676,6 +709,28 @@ def test_evaluate_resources_fails_when_shared_memory_is_not_writable(tmp_path: P
     facts.shm_writable = False
     results = runner.evaluate_resources(declaration, facts, tmp_path)
     assert statuses(results)["shm"] == "fail"
+
+
+def test_evaluate_resources_shm_uses_available_space_not_total(tmp_path: Path):
+    """A shared-memory mount with little free space must fail admission."""
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota", shm_bytes_min=8 * 1024**2)
+    # The filesystem is large in total, but almost all of it is reserved, so an
+    # unprivileged writer cannot satisfy the declared minimum.
+    facts.shm_size_bytes = 64 * 1024**2
+    facts.shm_available_bytes = 4 * 1024
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    shm = next(item for item in results if item.name == "shm")
+    assert shm.status == "fail"
+    assert shm.observed == 4 * 1024
+    assert "available" in shm.detail
+
+
+def test_evaluate_resources_shm_unsupported_when_availability_is_unobservable(tmp_path: Path):
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota", shm_bytes_min=8 * 1024**2)
+    facts.shm_available_bytes = None
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["shm"] == "unsupported"
 
 
 def test_evaluate_resources_marks_affinity_unsupported(tmp_path: Path):
@@ -1327,12 +1382,42 @@ def test_recover_removes_stale_allocation(tmp_path: Path):
             "allocation_id": "test-runner",
             "job_dir": str(job_dir),
             "descriptor_path": str(descriptor_path),
-            "descriptor_sha256": "a" * 64,
+            "descriptor_sha256": runner._sha256_of_file(descriptor_path),
         }
     )
     status, _message = runner._recover_allocation(declaration, tmp_path)
     assert status == "ok"
     assert not descriptor_path.exists()
+
+
+def test_recover_refuses_a_descriptor_rewritten_by_another_lease(tmp_path: Path):
+    """A saved declaration must not act on a later lease's descriptor bytes."""
+
+    declaration, descriptor_path, _job_dir = _stale_job_dir(tmp_path, None)
+    replacement = {
+        "descriptor_version": runner._DESCRIPTOR_VERSION,
+        "holder_pid": os.getpid(),
+        "holder_start_time": runner._process_start_time(os.getpid()),
+    }
+    descriptor_path.write_text(json.dumps(replacement), encoding="utf-8")
+    status, message = runner._recover_allocation(declaration, tmp_path)
+    assert status == "blocked", message
+    assert "digest" in message
+    assert descriptor_path.exists(), "the replacement lease's descriptor was removed"
+
+
+def test_release_refuses_a_descriptor_rewritten_by_another_lease(tmp_path: Path):
+    """A stale declaration must not signal or remove a replacement lease."""
+
+    declaration, descriptor_path, _job_dir = _stale_job_dir(tmp_path, None)
+    descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+    descriptor["holder_pid"] = os.getpid()
+    descriptor["holder_start_time"] = runner._process_start_time(os.getpid())
+    descriptor_path.write_text(json.dumps(descriptor), encoding="utf-8")
+    status, message = runner._release_allocation(declaration, tmp_path)
+    assert status == "blocked", message
+    assert "digest" in message
+    assert descriptor_path.exists()
 
 
 def test_recover_keeps_active_lease(tmp_path: Path):
@@ -1377,7 +1462,7 @@ def _stale_job_dir(tmp_path: Path, record: dict | None) -> tuple[dict, Path, Pat
             "allocation_id": "test-runner",
             "job_dir": str(job_dir),
             "descriptor_path": str(descriptor_path),
-            "descriptor_sha256": "a" * 64,
+            "descriptor_sha256": runner._sha256_of_file(descriptor_path),
         }
     )
     return declaration, descriptor_path, job_dir
@@ -1677,6 +1762,37 @@ def test_run_command_timeout_contains_detached_grandchild(tmp_path: Path):
     assert pidfile.exists()
     detached = int(pidfile.read_text(encoding="utf-8"))
     assert _wait_for_dead(detached)
+
+
+def test_run_command_defers_cancellation_until_containment_finishes(tmp_path: Path, monkeypatch):
+    """A cancel that lands mid-sweep must not abort the descendant sweep.
+
+    The round-11 finding: the SIGTERM handler raised ``SystemExit`` from inside
+    ``_contain_adopted_descendants``, so the process exited 143 with a detached
+    descendant still alive.  The handler must record the signal and let the
+    bounded cleanup finish before the status is delivered.
+    """
+
+    runner._install_signal_handlers()
+    pidfile = tmp_path / "detached.pid"
+    command = _write_detached_grandchild_command(tmp_path, 0, pidfile, parent_sleeps=True)
+    real = runner._contain_adopted_descendants
+    state = {"fired": False}
+
+    def fire(exclude=None, **kwargs):
+        if not state["fired"]:
+            state["fired"] = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real(exclude, **kwargs)
+
+    monkeypatch.setattr(runner, "_contain_adopted_descendants", fire)
+    with pytest.raises(SystemExit) as excinfo:
+        runner.run_command(command, tmp_path, timeout=0.75)
+    assert excinfo.value.code == 128 + signal.SIGTERM
+    assert state["fired"]
+    assert pidfile.exists()
+    detached = int(pidfile.read_text(encoding="utf-8"))
+    assert _wait_for_dead(detached), "the deferred cancel interrupted containment"
 
 
 def test_run_command_retains_output_when_a_descendant_holds_the_stream(tmp_path: Path):
@@ -2800,6 +2916,88 @@ def test_recover_does_not_signal_a_group_whose_pid_was_reused(tmp_path: Path):
         if sleeper.poll() is None:
             sleeper.kill()
         sleeper.wait(timeout=5)
+
+
+def test_recorded_group_ownership_requires_the_job_token(tmp_path: Path):
+    """A member is owned only when it carries the launch's environment token."""
+
+    token = "0123456789abcdef" * 2
+    untokened = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        env={**os.environ, "UNRELATED": "1"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    tokened = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        env={**os.environ, runner._JOB_OWNERSHIP_TOKEN_ENV: token},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        unowned, detail = runner._recorded_job_group_ownership(
+            untokened.pid, runner._process_start_time(untokened.pid), token
+        )
+        assert not unowned
+        assert "ownership token" in detail
+        owned, owned_detail = runner._recorded_job_group_ownership(
+            tokened.pid, runner._process_start_time(tokened.pid), token
+        )
+        assert owned, owned_detail
+        # A start time alone never authorizes the group.
+        missing, missing_detail = runner._recorded_job_group_ownership(
+            tokened.pid, runner._process_start_time(tokened.pid), None
+        )
+        assert not missing
+        assert "ownership token" in missing_detail
+    finally:
+        for process in (untokened, tokened):
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+
+
+def test_recover_does_not_signal_a_group_without_the_ownership_token(tmp_path: Path):
+    """A newer start time is not ownership: a reused group needs the token."""
+
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        env={**os.environ, "UNRELATED": "1"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    dead = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        dead_start = runner._process_start_time(dead.pid)
+        dead.wait(timeout=5)
+        declaration, descriptor_path, _job_dir = _stale_job_dir(
+            tmp_path,
+            _job_record(
+                job_pid=dead.pid,
+                job_start_time=dead_start,
+                job_process_group=sleeper.pid,
+                job_session=sleeper.pid,
+                job_token="f" * 32,
+            ),
+        )
+        status, message = runner._recover_allocation(declaration, tmp_path)
+        assert status == "blocked", message
+        assert "ownership token" in message
+        assert sleeper.poll() is None, "recovery killed a group it did not own"
+        assert descriptor_path.exists(), "the unproven lease state was removed"
+    finally:
+        for process in (sleeper, dead):
+            if process.poll() is None:
+                process.kill()
+            with contextlib.suppress(OSError):
+                process.wait(timeout=5)
 
 
 def test_recover_refuses_an_incomplete_ownership_record(tmp_path: Path):
