@@ -40,6 +40,7 @@ TRUE_CYCLES = {
 }
 DECLARED_PATHS = (
     "production_chunk_loop",
+    "optimized_chunk_loop",
     "minimal_singlestep_loop",
     "compiled_frame_loop",
     "compiled_batched_loop",
@@ -288,10 +289,19 @@ def test_summarize_reports_count_determinism_and_rejects_drift():
     summary = profile.summarize(mix, "minimal_singlestep_loop", stable)
     assert summary["samples"] == 3
     assert summary["seconds_median"] == pytest.approx(0.51)
+    assert summary["seconds_min"] == pytest.approx(0.50)
+    assert summary["seconds_max"] == pytest.approx(0.52)
     assert summary["cycles"] == cycles
     assert summary["retired_instructions"] == retired
     assert summary["cycles_per_instruction"] == pytest.approx(cycles / retired)
     assert summary["python_calls_per_instruction"] == pytest.approx(1.0)
+    # The best-of-repeat rate is the load-robust estimate and must be the
+    # fastest sample, never the median.
+    assert summary["best_retired_instructions_per_second"] == pytest.approx(retired / 0.50)
+    assert (
+        summary["best_retired_instructions_per_second"] > summary["retired_instructions_per_second"]
+    )
+    assert summary["best_emulated_cycles_per_second"] == pytest.approx(cycles / 0.50)
     assert summary["deterministic_counts_agree"] is True
 
     drifted = stable + [_sample("minimal_singlestep_loop", 0.4, cycles + 4, retired, retired)]
@@ -306,14 +316,17 @@ def test_ratios_are_relative_to_the_production_path():
         "reg-only": {
             "production_chunk_loop": {
                 "retired_instructions_per_second": 500_000.0,
+                "best_retired_instructions_per_second": 625_000.0,
                 "python_calls_per_instruction": 0.025,
             },
             "minimal_singlestep_loop": {
                 "retired_instructions_per_second": 1_000_000.0,
+                "best_retired_instructions_per_second": 1_250_000.0,
                 "python_calls_per_instruction": 1.0,
             },
             "compiled_frame_loop": {
                 "retired_instructions_per_second": 5_000_000.0,
+                "best_retired_instructions_per_second": 6_250_000.0,
                 "python_calls_per_instruction": 0.0001,
             },
         }
@@ -322,9 +335,34 @@ def test_ratios_are_relative_to_the_production_path():
 
     assert ratios["reg-only"]["production_to_minimal_singlestep_loop"] == pytest.approx(0.5)
     assert ratios["reg-only"]["production_to_compiled_frame_loop"] == pytest.approx(0.1)
+    assert ratios["reg-only"]["production_best_to_minimal_singlestep_loop_best"] == pytest.approx(
+        0.5
+    )
+    assert ratios["reg-only"]["production_best_to_compiled_frame_loop_best"] == pytest.approx(0.1)
     assert ratios["reg-only"]["python_calls_per_instruction_median_over_paths"] == pytest.approx(
         0.0001
     )
+
+
+def test_measure_mix_interleaves_paths_across_repeats(monkeypatch):
+    """Sequential scheduling let host drift land on one path; interleaving fixes it."""
+
+    order: list[str] = []
+    paths = tuple(name for name, _ in profile.PATHS)
+
+    def _fake(mix, cartridge, path, cycles_target):
+        order.append(path)
+        return _sample(path, 0.1, 1000, 100, 10)
+
+    monkeypatch.setattr(profile, "run_sample", _fake)
+    profile.measure_mix(profile.MIXES_BY_NAME["reg-only"], 1000, 3, paths)
+
+    assert order == [
+        *paths,
+        *reversed(paths),
+        *paths,
+    ]
+    assert len(set(order)) == len(paths)
 
 
 def test_format_report_states_identity_paths_and_ratios():
@@ -476,6 +514,28 @@ def probe_native_repeated_counts_are_identical():
             assert summary["seconds_median"] > 0
 
 
+def probe_native_optimized_path_is_semantically_identical():
+    """The optimized model must reproduce the shipped path exactly.
+
+    Its rate is only meaningful if the emulated work is unchanged, so this probe
+    compares the two paths on freshly opened games at several budgets and across
+    a frame boundary: identical cycle counts, retired instructions, and end PC.
+    """
+
+    targets = (CHUNK_CYCLES, 1_000, 4_096, SHORT_CYCLES, SHORT_CYCLES + 251)
+    for mix in profile.MIXES:
+        with TemporaryDirectory(prefix="stepping-profile-probe-") as directory:
+            cartridge = profile.author_cartridge(Path(directory))
+            for target in targets:
+                production = profile.run_sample(mix, cartridge, "production_chunk_loop", target)
+                optimized = profile.run_sample(mix, cartridge, "optimized_chunk_loop", target)
+                assert production.cycles == optimized.cycles, (mix.name, target)
+                assert production.retired == optimized.retired, (mix.name, target)
+                assert production.end_pc == optimized.end_pc, (mix.name, target)
+                assert production.python_calls == optimized.python_calls, (mix.name, target)
+                assert optimized.cycles == mix.expected_cycles(optimized.retired)
+
+
 def _run_native_probe():
     cases = (
         ("declared mixes match the oracle", probe_native_declared_mixes_match_the_oracle),
@@ -485,6 +545,10 @@ def _run_native_probe():
             probe_native_single_step_chunk_is_budget_bounded_across_a_frame,
         ),
         ("repeated counts are identical", probe_native_repeated_counts_are_identical),
+        (
+            "optimized model is semantically identical",
+            probe_native_optimized_path_is_semantically_identical,
+        ),
     )
     for label, probe in cases:
         probe()

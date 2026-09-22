@@ -280,6 +280,71 @@ def production_chunk_loop(game, cycles_target: int) -> int:
     return calls
 
 
+def _optimized_step_chunk(p: object, cycle_budget: int, *, stop_on_frame: bool = True) -> bool:
+    """Model of ``_step_single_step_chunk`` with its Python overhead removed.
+
+    This is a *probe-local model*, never a shipped change.  The transformation
+    over the shipped method is pure redundancy removal: the same object graph,
+    the same call order, the same breakpoint and frame-done handling, and the
+    same cycle-budget break, but attribute lookups that cannot change within one
+    instruction step are hoisted to the top of the call.  Nothing about the
+    emulated work changes, so the retired-instruction and cycle counts must stay
+    exactly equal to the shipped path; ``tests/test_stepping_loop_profile.py``
+    asserts that parity directly.
+
+    Treat the resulting rate as an *upper bound* on what a pure-Python edit to
+    the shipped function could recover: a real change must keep working for
+    callers whose ``mb``/``lcd``/``cpu`` are lightweight test doubles that rely
+    on the shipped ``getattr(..., None)`` defaults.
+    """
+
+    mb = p.mb
+    cpu = getattr(mb, "cpu", None)
+    lcd = getattr(mb, "lcd", None)
+    tick = mb.tick
+    start_cycles = getattr(cpu, "cycles", None)
+    fallback_ticks = max(1, cycle_budget // 7)
+    max_ticks = min(
+        max(fallback_ticks, cycle_budget * 4),
+        PyBoyLinkSession._MAX_SINGLE_STEP_TICKS,
+    )
+    ticks = 0
+    while ticks < max_ticks:
+        done = getattr(lcd, "frame_done", False)
+        if stop_on_frame and done:
+            return True
+        if not stop_on_frame and done:
+            lcd.frame_done = False
+        mb.breakpoint_singlestep = 1
+        if tick():
+            mb.breakpoint_reinject()
+            bp = mb.breakpoint_reached()
+            if bp != (-1, -1, -1):
+                bank, addr, _ = bp
+                mb.breakpoint_remove(bank, addr)
+                mb.breakpoint_singlestep_latch = 0
+                p._handle_hooks()
+        ticks += 1
+        if start_cycles is not None:
+            if cpu.cycles - start_cycles >= cycle_budget:
+                break
+        elif ticks >= fallback_ticks:
+            break
+    return bool(getattr(lcd, "frame_done", False))
+
+
+def optimized_chunk_loop(game, cycles_target: int) -> int:
+    """The production chunk loop, driven by the probe-local optimized chunk step."""
+
+    chunk = PyBoyLinkSession._REAL_SCHEDULER_CHUNK_CYCLES
+    start = game.mb.cpu.cycles
+    calls = 0
+    while game.mb.cpu.cycles - start < cycles_target:
+        _optimized_step_chunk(game, chunk, stop_on_frame=False)
+        calls += 1
+    return calls
+
+
 def minimal_singlestep_loop(game, cycles_target: int) -> int:
     """One instruction per iteration with nothing but the stepping in the loop."""
 
@@ -326,6 +391,7 @@ def compiled_batched_loop(game, cycles_target: int) -> int:
 
 PATHS: tuple[tuple[str, Callable[[object, int], int]], ...] = (
     ("production_chunk_loop", production_chunk_loop),
+    ("optimized_chunk_loop", optimized_chunk_loop),
     ("minimal_singlestep_loop", minimal_singlestep_loop),
     ("compiled_frame_loop", compiled_frame_loop),
     ("compiled_batched_loop", compiled_batched_loop),
@@ -394,6 +460,7 @@ def run_sample(mix: Mix, cartridge: Path, path: str, cycles_target: int) -> Samp
 
 def summarize(mix: Mix, path: str, samples: list[Sample]) -> dict[str, object]:
     seconds = statistics.median(sample.seconds for sample in samples)
+    best_seconds = min(sample.seconds for sample in samples)
     cycles = samples[0].cycles
     retired = samples[0].retired
     calls = samples[0].python_calls
@@ -401,7 +468,7 @@ def summarize(mix: Mix, path: str, samples: list[Sample]) -> dict[str, object]:
         "path": path,
         "samples": len(samples),
         "seconds_median": seconds,
-        "seconds_min": min(sample.seconds for sample in samples),
+        "seconds_min": best_seconds,
         "seconds_max": max(sample.seconds for sample in samples),
         "cycles": cycles,
         "retired_instructions": retired,
@@ -410,6 +477,8 @@ def summarize(mix: Mix, path: str, samples: list[Sample]) -> dict[str, object]:
         "python_calls_per_instruction": calls / retired,
         "emulated_cycles_per_second": cycles / seconds,
         "retired_instructions_per_second": retired / seconds,
+        "best_emulated_cycles_per_second": cycles / best_seconds,
+        "best_retired_instructions_per_second": retired / best_seconds,
         "deterministic_counts_agree": len({(s.cycles, s.retired, s.python_calls) for s in samples})
         == 1,
     }
@@ -421,11 +490,28 @@ def measure_mix(
     repeats: int,
     paths: tuple[str, ...],
 ) -> dict[str, dict[str, object]]:
+    """Time every declared path on an interleaved schedule.
+
+    Paths are sampled round-robin inside each repeat (and in reverse order on
+    alternate repeats) rather than one path after another.  The host is shared
+    and its load moves during a run, so a sequential schedule lets drift land on
+    whichever path happens to be measured last - in an earlier version of this
+    probe a loaded interval made the bare hand-rolled loop look *slower* than the
+    production loop, which is arithmetically impossible.  Interleaving spreads
+    drift across the paths, and the per-path minimum is reported alongside the
+    median as the load-robust estimate.
+    """
+
     results: dict[str, dict[str, object]] = {}
     with TemporaryDirectory() as directory:
         cartridge = author_cartridge(Path(directory))
+        collected: dict[str, list[Sample]] = {path: [] for path in paths}
+        for repeat in range(repeats):
+            order = paths if repeat % 2 == 0 else tuple(reversed(paths))
+            for path in order:
+                collected[path].append(run_sample(mix, cartridge, path, cycles_target))
         for path in paths:
-            samples = [run_sample(mix, cartridge, path, cycles_target) for _ in range(repeats)]
+            samples = collected[path]
             results[path] = summarize(mix, path, samples)
     return results
 
@@ -472,11 +558,15 @@ def compute_ratios(results: dict[str, dict[str, dict[str, object]]]) -> dict[str
     ratios: dict[str, object] = {}
     for mix_name, paths in results.items():
         production = paths["production_chunk_loop"]["retired_instructions_per_second"]
+        production_best = paths["production_chunk_loop"]["best_retired_instructions_per_second"]
         entry: dict[str, float] = {}
         for path, summary in paths.items():
             if path == "production_chunk_loop":
                 continue
             entry[f"production_to_{path}"] = production / summary["retired_instructions_per_second"]
+            entry[f"production_best_to_{path}_best"] = (
+                production_best / summary["best_retired_instructions_per_second"]
+            )
         smallest = min(paths[name]["python_calls_per_instruction"] for name in paths)
         entry["python_calls_per_instruction_median_over_paths"] = float(smallest)
         ratios[mix_name] = entry
@@ -501,19 +591,22 @@ def format_report(payload: dict[str, object]) -> str:
             f"  oracle: {mix.loop_instructions} instructions / {mix.loop_cycles} cycles per loop"
         )
         lines.append(
-            f"  {'path':26s} {'med s':>8s} {'cycles/s':>12s} {'instr/s':>11s} "
-            f"{'py calls/instr':>15s} {'stable':>7s}"
+            f"  {'path':26s} {'med s':>8s} {'best s':>8s} {'med instr/s':>11s} "
+            f"{'best instr/s':>12s} {'py calls/instr':>15s} {'stable':>7s}"
         )
         for path, summary in paths.items():
             lines.append(
                 f"  {path:26s} {summary['seconds_median']:8.3f} "
-                f"{summary['emulated_cycles_per_second']:12.0f} "
+                f"{summary['seconds_min']:8.3f} "
                 f"{summary['retired_instructions_per_second']:11.0f} "
+                f"{summary['best_retired_instructions_per_second']:12.0f} "
                 f"{summary['python_calls_per_instruction']:15.5f} "
                 f"{summary['deterministic_counts_agree']!s:>7s}"
             )
     lines.append("")
-    lines.append("ratios (production loop seconds per unit work / other path):")
+    lines.append("ratios: median-based, then best-of-repeat-based (load-robust). Both are")
+    lines.append("seconds-per-unit-work of the production loop divided by the other path, so")
+    lines.append("a value below 1.0 means the production loop is slower.")
     for mix_name, entry in payload["ratios"].items():
         for key, value in entry.items():
             lines.append(f"  [{mix_name}] {key} = {value:.3f}")
