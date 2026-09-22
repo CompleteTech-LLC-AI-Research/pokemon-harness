@@ -57,7 +57,11 @@ REAL_ROM_MODULES = frozenset(
 UNIT_MODULES = frozenset(
     {
         "test_agent_sync.py",
-        "test_battle_coverage.py",
+        "test_battle_coverage_accounting.py",
+        "test_battle_coverage_catalog.py",
+        "test_battle_coverage_gate_assets.py",
+        "test_battle_coverage_identity.py",
+        "test_battle_coverage_mechanics.py",
         "test_battle_item_evidence.py",
         "test_battle_medicine_oracle.py",
         "test_battle_scenario_fixtures.py",
