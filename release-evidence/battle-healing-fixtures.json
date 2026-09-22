@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "manifest_id": "pokered-harness.battle-healing-fixtures",
   "manifest_version": 1,
-  "generated_on": "2026-09-21",
+  "generated_on": "2026-09-22",
   "fixture_root": "tests/fixtures/link",
   "asset_policy": {
     "repository_distributed": false,
@@ -62,6 +62,69 @@
           }
         },
         "evidence_note": "The fixture bytes remain operator-managed and outside the repository. The test re-derives every asserted value from the live emulator: it plays ITEM -> POTION -> target with real button input and checks the inventory, HP, and turn accounting against tests/_battle_item_evidence.py."
+      }
+    },
+    {
+      "id": "blue-color-ordinary-battle-healing",
+      "path": "blue/battle_healing.state",
+      "version": "blue",
+      "variant": "color",
+      "kind": "battle_healing",
+      "size_bytes": 200548,
+      "sha1": "4a2903e043cda7a179f92f78751f41577279a679",
+      "sha256": "5376806933cfc710bc1aa468a69d873c0b64d1591a5f9019085b5afc280231a7",
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "repository_distributed": false,
+      "producer": "scripts/produce_battle_healing_fixture.py",
+      "asserted_by": "tests/test_battle_healing_items_rom.py",
+      "provenance": {
+        "status": "capture-only",
+        "kind": "driven-capture",
+        "source_state": "external walkthrough_blue/milestones/after_brock.state; SHA-1 63287049a18105ae16433914cc3b3c136fe25db2",
+        "input_sequence": "leave Pewter Gym; buy a POTION at the Pewter Mart counter via BUY/POTION/quantity (settle signal: money 4696 -> 4396 and a new 0x14 stack, never an A-press count); walk to Pewter's south edge; take the south warp to Route 2 north; step into grass until the ROM's own encounter check fires on Red/Blue's bottom-right half-block tile, wTileMap[9][9] == wGrassTile; in that first (throwaway) encounter, burn one turn with the non-damaging move at FIGHT index 1 so the wild mon damages the full-HP active mon, then leave through RUN (verified against wIsInBattle); step into grass again and save at the first command-menu boundary of the fresh second encounter, which is the state whose bytes are pinned",
+        "capture_command_template": "PYTHONPATH=vendor/pyboy-src:src:. POKERED_PRET_ROOT=<pret/pokeyellow checkout> python -u scripts/produce_battle_healing_fixture.py --game blue --source <matching-after_brock.state> --source-sha1 63287049a18105ae16433914cc3b3c136fe25db2 --rom <rom root>/blue/pokemon-blue-color.gb --sym <rom root>/blue/pokemon-blue.sym --burn-move 1 --out <fixture root>/blue/battle_healing.state",
+        "captured_at_utc": "2026-09-22T07:00Z (the same input sequence to a scratch path produced byte-identical output at 2026-09-22T06:47Z)",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0",
+        "verification_method": "two runs of the same producer from the same pinned milestone produced byte-identical output (SHA-1 4a2903e043cda7a179f92f78751f41577279a679), so the Route 2 encounter is determined by the pinned inputs and the recorded input sequence rather than by host timing; the captured bytes were then driven to completion by the merged acceptance driver tests/test_battle_healing_items_rom.py::_play_potion_turn with no arguments and no overrides, which played ITEM -> POTION -> target and reported hp 150 -> 152 on a 152 max (the heal is clamped, so the observed delta is 2, not the item's full 20), turn_consumed=True, an announced opponent move, and an unchanged money total",
+        "observed_signals": {
+          "purchase": {
+            "money_before": 4696,
+            "money_after": 4396,
+            "price": 300,
+            "bag_before": ["0x0b x1", "0xea x1"],
+            "bag_after": ["0x0b x1", "0xea x1", "0x14 x1"]
+          },
+          "route2_entry": {"map_id": "0x0d", "x": 9, "y": 0, "grass_tile": "0x52", "grass_rate": 25},
+          "encounter_cell": "wTileMap[9][9] (Red/Blue read the bottom-right half-block tile; Yellow reads [9][8])",
+          "throwaway_battle": {
+            "walk_steps": 33,
+            "steps_on_grass": 28,
+            "hp_before_burn": "152/152",
+            "hp_after_burn": "150/152",
+            "burn_move_index": 1,
+            "left_through": "RUN, verified against wIsInBattle"
+          },
+          "capture_boundary": {
+            "stage": "wild_battle_command_menu",
+            "in_battle": "wIsInBattle=1",
+            "wild": true,
+            "menu": "wMaxMenuItem=1, wMenuWatchedKeys=0x11",
+            "money": 4396,
+            "bag": ["0x0b x1", "0xea x1", "0x14 x1"],
+            "active_hp": "150/152",
+            "walk_steps": 6,
+            "steps_on_grass": 5,
+            "wEnemySelectedMove": 0
+          }
+        },
+        "evidence_note": "Capture-only: this entry pins the bytes of a driven capture and the observed signals that produced it. It is not an acceptance claim - the Red/Blue assertion half of #90.3 is deliberately deferred until the Yellow runtime half (PR #170) resolves, so this check has not been exercised by a committed RB test. The merged helper tests/test_battle_healing_items_rom.py::_evidence_fixture() selects fixtures[0]; this entry is appended so that index still resolves to the Yellow fixture, and the eventual RB half must select by id rather than by position. Red-color is NOT captured: the retained Pewter Red milestone (artifacts/vanilla-brock-red-direct-20260504/after_brock.state) is a single full-HP mon whose only two moves are damaging, so it cannot be damaged without risking a knockout of the Route 2 wild mon, and the one damaged Red milestone (walkthrough_red/milestones/cerulean_pc.state, 148/154) is in Cerulean and needs an entry route this producer does not have."
       }
     }
   ]

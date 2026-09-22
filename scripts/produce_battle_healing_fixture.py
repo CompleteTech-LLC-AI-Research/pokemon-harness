@@ -3,9 +3,10 @@
 The #90 medicine workstream needs an *ordinary battle* whose bag already holds a
 medicine item, and no retained milestone provides one (no Yellow milestone is
 in a battle at all, and none holds a Potion).  This producer drives one for real
-from the pinned ``brock_badge`` milestone with real button input:
+from a pinned milestone with real button input:
 
-1. leave Pewter Gym and walk to Pewter Mart;
+1. reach Pewter Mart -- Yellow/Blue start inside Pewter Gym and leave it first,
+   Red's milestone starts in Pewter City and enters the mart directly;
 2. buy a POTION at the counter (the settle signal is the money delta, because
    the bag already holds Brock's TM and a truthiness check would pass without a
    purchase);
@@ -15,6 +16,11 @@ from the pinned ``brock_badge`` milestone with real button input:
    compares it with ``wGrassTile``; Red/Blue read the bottom-right tile
    ``hlcoord 9, 9`` instead, so the two games sample different cells;
 4. save the state at the first command-menu boundary of that wild battle.
+
+The retained Red and Blue ``after_brock`` milestones are at full HP, unlike
+Yellow's damaged ``brock_badge``, so those captures pass ``--burn-move`` to burn
+a turn with a non-damaging move and let the wild mon damage the active mon
+before the save; Yellow needs no burn because it is already damaged.
 
 The contract is bounded and fail-closed, in the style of
 ``scripts/produce_battle_scenario.py``: the ROM and symbol files must be pinned
@@ -27,6 +33,7 @@ test; this script is a capture tool, not a claim of acceptance.
 Usage:
     PYTHONPATH=src POKERED_PRET_ROOT=<pret/pokeyellow checkout> \\
     python -u scripts/produce_battle_healing_fixture.py \\
+        --game yellow \\
         --source <milestone.state> --source-sha1 <sha1> \\
         --rom <rom root>/yellow/pokemon-yellow.gbc \\
         --sym <rom root>/yellow/pokemon-yellow.sym \\
@@ -46,6 +53,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -62,13 +70,32 @@ ROUTE_2 = 0x0D
 POTION = 0x14
 POTION_PRICE = 300
 
-# Yellow's encounter check reads the player's own tile, which is fixed in the
-# 20x18 ``wTileMap`` view: ``hlcoord 8, 9`` is the *bottom-left* tile of the
-# player's half-block, i.e. row 9, column 8.  This is a per-game constant --
-# Red/Blue's ``hlcoord 9, 9`` is the bottom-right tile -- so sampling column 9
-# here would test an adjacent tile and misreport the ROM's own predicate.
-ENCOUNTER_CHECK_ROW = 9
-ENCOUNTER_CHECK_COLUMN = 8
+# The encounter check reads the player's own half-block of the 20x18
+# ``wTileMap`` view.  Yellow's ``engine/battle/wild_encounters.asm`` reads the
+# *bottom-left* tile ``hlcoord 8, 9`` (row 9, column 8); Red/Blue read the
+# *bottom-right* tile ``hlcoord 9, 9`` (row 9, column 9).  Sampling the wrong
+# cell tests an adjacent tile and misreports the ROM's own predicate, so the
+# cell is a per-game parameter of :data:`GAMES` rather than one constant.
+
+
+class GameSpec(NamedTuple):
+    """Per-game parameters the driver must not get from the Yellow default."""
+
+    #: ``wTileMap`` row/column the game's own wild-encounter predicate reads.
+    encounter_row: int
+    encounter_col: int
+    #: Where the pinned milestone starts: ``"gym"`` inside Pewter Gym (the
+    #: producer leaves the gym first), ``"city"`` already in Pewter City.
+    entry: str
+
+
+GAMES: dict[str, GameSpec] = {
+    # ``hlcoord 8, 9`` -> the bottom-left tile of the player's half-block.
+    "yellow": GameSpec(encounter_row=9, encounter_col=8, entry="gym"),
+    # ``hlcoord 9, 9`` -> the bottom-right tile; see #90.3 scoping notes.
+    "blue": GameSpec(encounter_row=9, encounter_col=9, entry="gym"),
+    "red": GameSpec(encounter_row=9, encounter_col=9, entry="city"),
+}
 
 # The counter clerk occupies (1,5); the walkable tile the player stands on to
 # face them is (2,5).  ``scripts/path_from_tiles.py`` force-marks the goal cell
@@ -136,6 +163,7 @@ class Driver:
         rom: Path | None = None,
         sym: Path | None = None,
         rom_sha1: str | None = None,
+        game: GameSpec | None = None,
     ) -> None:
         self.session = session
         self.memory = session._pyboy.memory
@@ -145,6 +173,9 @@ class Driver:
         self.rom = rom
         self.sym = sym
         self.rom_sha1 = rom_sha1
+        self.game = game or GAMES["yellow"]
+        self.encounter_row = self.game.encounter_row
+        self.encounter_col = self.game.encounter_col
 
     # -- observations --------------------------------------------------
     def state(self):
@@ -335,6 +366,17 @@ def leave_gym_and_reach_mart(driver: Driver) -> None:
         raise CaptureRefused("could not reach the Pewter Gym exit")
     if not driver.step_until_map("d", PEWTER_CITY):
         raise CaptureRefused("leaving the gym did not return to Pewter City")
+    reach_mart_from_city(driver)
+
+
+def reach_mart_from_city(driver: Driver) -> None:
+    """Walk to the Pewter Mart door from anywhere in Pewter City and warp in.
+
+    Yellow's ``brock_badge`` and Blue's ``after_brock`` milestones start inside
+    Pewter Gym, so they reach the mart through :func:`leave_gym_and_reach_mart`.
+    Red's ``after_brock`` milestone starts in Pewter City itself, so it enters
+    the mart directly and must not be driven at the gym-door waypoint.
+    """
     if not driver.goto("23,19", "mart-door"):
         raise CaptureRefused("could not reach the Pewter Mart door")
     for _ in range(4):
@@ -408,17 +450,19 @@ def walk_into_grass(driver: Driver, battle_budget: int = 160) -> dict:
     """Step into grass until the ROM's encounter check fires.
 
     Movement alternates toward the nearest grass tile and every step is recorded
-    with the ROM's own predicate: the bottom-left tile of the player's half-block
-    (``hlcoord 8, 9``) equals ``wGrassTile``.  The same cell is used as the
-    movement aim point, so the walked path is the one the recorded predicate
-    describes.
+    with the ROM's own predicate: the game's own half-block tile (Yellow reads
+    ``hlcoord 8, 9``, Red/Blue read ``hlcoord 9, 9``) equals ``wGrassTile``.
+    The same cell is used as the movement aim point, so the walked path is the
+    one the recorded predicate describes.
     """
+    check_row = driver.encounter_row
+    check_col = driver.encounter_col
     steps_on_grass = 0
     total = 0
     for _ in range(battle_budget):
         driver.dismiss()
         tile, cells = driver.grass_tiles()
-        on_grass = (ENCOUNTER_CHECK_ROW, ENCOUNTER_CHECK_COLUMN) in cells
+        on_grass = (check_row, check_col) in cells
         steps_on_grass += int(on_grass)
         total += 1
         if driver.in_battle():
@@ -428,6 +472,7 @@ def walk_into_grass(driver: Driver, battle_budget: int = 160) -> dict:
                 "grass_tile": tile,
                 "grass_rate": driver.byte("wGrassRate"),
                 "map_id": driver.where()[0],
+                "encounter_cell": [check_row, check_col],
             }
         if not cells:
             before = driver.where()
@@ -439,22 +484,15 @@ def walk_into_grass(driver: Driver, battle_budget: int = 160) -> dict:
 
         def key(cell: tuple[int, int]) -> tuple[int, int]:
             row, col = cell
-            aligned = (
-                0
-                if (row - ENCOUNTER_CHECK_ROW) % 2 == 0 and (col - ENCOUNTER_CHECK_COLUMN) % 2 == 0
-                else 1
-            )
-            return (
-                aligned,
-                abs(row - ENCOUNTER_CHECK_ROW) + abs(col - ENCOUNTER_CHECK_COLUMN),
-            )
+            aligned = 0 if (row - check_row) % 2 == 0 and (col - check_col) % 2 == 0 else 1
+            return (aligned, abs(row - check_row) + abs(col - check_col))
 
         row, col = min(cells, key=key)
-        vertical = ["d" if row > ENCOUNTER_CHECK_ROW else "u"]
-        horizontal = ["r" if col > ENCOUNTER_CHECK_COLUMN else "l"]
+        vertical = ["d" if row > check_row else "u"]
+        horizontal = ["r" if col > check_col else "l"]
         order = (
             (vertical + horizontal)
-            if abs(row - ENCOUNTER_CHECK_ROW) >= abs(col - ENCOUNTER_CHECK_COLUMN)
+            if abs(row - check_row) >= abs(col - check_col)
             else (horizontal + vertical)
         )
         before = driver.where()
@@ -474,6 +512,64 @@ def wait_for_command_menu(driver: Driver, budget: int = 14) -> bool:
     return False
 
 
+def fight_move(driver: Driver, index: int) -> None:
+    """With the command menu open on FIGHT, execute the move at ``index``."""
+    driver.press("a", step=48)  # open the FIGHT move list (cursor starts at 0)
+    for _ in range(index):
+        driver.press("down", step=30)
+    driver.press("a", step=60)  # execute the chosen move
+
+
+def burn_turns_until_damaged(driver: Driver, *, burn_move: int, budget: int = 6) -> dict:
+    """Take damage from the current wild battle, and report how.
+
+    Yellow's ``brock_badge`` milestone is already damaged, so the caller does not
+    reach here for it.  The retained Red and Blue ``after_brock`` milestones are
+    at full HP, so a battle captured at the first command menu would leave a
+    Potion with nothing to heal.  Each burn executes ``burn_move`` - which the
+    caller picks to be non-damaging, so the wild mon survives long enough to take
+    its own turn - and then waits for the command menu to return and reads the
+    ROM's reported HP.  The turn is only accepted once the ROM itself shows a
+    lower HP.  This battle is *throwaway*: the caller leaves it and re-encounters
+    so the saved fixture is a fresh battle whose opponent has not yet chosen a
+    move, which is what the acceptance driver's ordering observation requires.
+    """
+    active = driver.state().party.active_mon
+    if active is None:
+        raise CaptureRefused("the active mon is unavailable")
+    if active.hp < active.max_hp:
+        return {"burns": 0, "hp": [active.hp, active.max_hp], "already_damaged": True}
+    for burn in range(1, budget + 1):
+        fight_move(driver, burn_move)
+        if not wait_for_command_menu(driver):
+            raise CaptureRefused("the wild battle ended before the active mon was damaged")
+        mon = driver.state().party.active_mon
+        if mon is not None and mon.hp < mon.max_hp:
+            return {"burns": burn, "hp": [mon.hp, mon.max_hp], "already_damaged": False}
+    raise CaptureRefused("the active mon was never damaged by the wild battle")
+
+
+def flee_battle(driver: Driver, budget: int = 8) -> None:
+    """Leave the current wild battle through RUN, verified against ``wIsInBattle``.
+
+    The command menu is a 2x2 template (FIGHT/ITEM above POKéMON/RUN), so RUN is
+    reached with RIGHT then DOWN.  The driver is far above the Route 2 wild
+    levels, so the escape is deterministic; every step is still observed rather
+    than assumed.
+    """
+    for _ in range(budget):
+        if not driver.in_battle():
+            return
+        driver.press("right", step=30)
+        driver.press("down", step=30)
+        driver.press("a", step=60)
+        for _ in range(6):
+            if not driver.in_battle():
+                return
+            driver.press("a", step=45)
+    raise CaptureRefused("the wild battle could not be left through RUN")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--source", required=True, help="pinned milestone state to drive")
@@ -483,10 +579,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out", required=True, help="fixture path; must not exist")
     parser.add_argument("--provenance-out", default=None)
     parser.add_argument(
-        "--version",
+        "--game",
         default="yellow",
-        choices=["yellow"],
-        help="only Yellow is driven by this producer",
+        choices=sorted(GAMES),
+        help="which game's encounter cell and entry route to drive (default yellow)",
+    )
+    parser.add_argument(
+        "--burn-move",
+        type=int,
+        default=None,
+        help=(
+            "zero-based FIGHT move index used to burn a turn so the wild mon can "
+            "damage a full-HP active mon before the capture; omit to require the "
+            "milestone to already be damaged"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -509,6 +615,7 @@ def main(argv: list[str] | None = None) -> int:
     if observed_source_sha1.lower() != args.source_sha1.lower():
         raise CaptureRefused(f"source SHA-1 mismatch: {observed_source_sha1} != {args.source_sha1}")
     rom_sha1, sym_sha1 = pinned(rom, sym)
+    game = GAMES[args.game]
 
     session = Session.from_files(
         rom,
@@ -520,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         session.load_state(source.read_bytes())
         session.step(60, render=True)
-        driver = Driver(session, rom=rom, sym=sym, rom_sha1=rom_sha1)
+        driver = Driver(session, rom=rom, sym=sym, rom_sha1=rom_sha1, game=game)
         print(
             f"  source {source.name} sha1={observed_source_sha1} "
             f"map=0x{driver.where()[0]:02x} {driver.where()[1:]} money={driver.money()} "
@@ -528,7 +635,10 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
-        leave_gym_and_reach_mart(driver)
+        if game.entry == "gym":
+            leave_gym_and_reach_mart(driver)
+        else:
+            reach_mart_from_city(driver)
         signals["purchase"] = buy_potion(driver)
         leave_mart(driver)
         print(f"  purchased: {signals['purchase']}", flush=True)
@@ -544,25 +654,56 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(f"  route 2 at {driver.where()} bag={driver.bag_stacks()}", flush=True)
 
-        signals["encounter"] = walk_into_grass(driver)
-        print(f"  encounter: {signals['encounter']}", flush=True)
-        if not wait_for_command_menu(driver):
-            raise CaptureRefused("the battle command menu never appeared")
-        battle = driver.state().battle
-        signals["battle"] = {
-            "kind": getattr(battle.kind, "name", None),
-            "raw_is_in_battle": battle.raw_is_in_battle,
-            "max_item": driver.menu()[1],
-            "watched_keys": driver.byte("wMenuWatchedKeys"),
-            "hp": driver.hp(),
-            "bag": driver.bag_stacks(),
-            "money": driver.money(),
-        }
-        print(f"  battle: {signals['battle']}", flush=True)
-        if not battle.is_wild_battle:
-            raise CaptureRefused("the captured battle is not an ordinary wild battle")
-        if not any(i == POTION for i, _ in driver.bag_stacks()):
-            raise CaptureRefused("the captured battle has no POTION in the bag")
+        def capture_battle() -> tuple[dict, dict]:
+            encounter = walk_into_grass(driver)
+            print(f"  encounter: {encounter}", flush=True)
+            if not wait_for_command_menu(driver):
+                raise CaptureRefused("the battle command menu never appeared")
+            battle = driver.state().battle
+            observed = {
+                "kind": getattr(battle.kind, "name", None),
+                "raw_is_in_battle": battle.raw_is_in_battle,
+                "max_item": driver.menu()[1],
+                "watched_keys": driver.byte("wMenuWatchedKeys"),
+                "hp": driver.hp(),
+                "bag": driver.bag_stacks(),
+                "money": driver.money(),
+            }
+            print(f"  battle: {observed}", flush=True)
+            if not battle.is_wild_battle:
+                raise CaptureRefused("the captured battle is not an ordinary wild battle")
+            if not any(i == POTION for i, _ in driver.bag_stacks()):
+                raise CaptureRefused("the captured battle has no POTION in the bag")
+            return encounter, observed
+
+        first_encounter, first_battle = capture_battle()
+
+        active = driver.state().party.active_mon
+        if active is not None and active.hp < active.max_hp:
+            signals["encounter"], signals["battle"] = first_encounter, first_battle
+            signals["damage"] = {
+                "burns": 0,
+                "hp": [active.hp, active.max_hp],
+                "already_damaged": True,
+            }
+        else:
+            if args.burn_move is None:
+                raise CaptureRefused("the milestone is at full HP and no --burn-move was given")
+            signals["damage"] = burn_turns_until_damaged(driver, burn_move=args.burn_move)
+            print(f"  damage: {signals['damage']}", flush=True)
+            signals["throwaway_battle"] = {"encounter": first_encounter, "battle": first_battle}
+            flee_battle(driver)
+            print("  left the throwaway battle; re-encountering on the grass", flush=True)
+            signals["encounter"], signals["battle"] = capture_battle()
+        print(f"  damage: {signals['damage']}", flush=True)
+
+        selected = driver.byte("wEnemySelectedMove")
+        signals["enemy_selected_move"] = selected
+        if selected != 0:
+            raise CaptureRefused(
+                "the saved battle already has the opponent's move queued: "
+                f"wEnemySelectedMove={selected}"
+            )
 
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(session.save_state())
@@ -571,6 +712,7 @@ def main(argv: list[str] | None = None) -> int:
 
     provenance = {
         "$schema": "pokered-harness.battle-healing-fixture-provenance",
+        "game": args.game,
         "fixture": {
             "path": out.name,
             "size_bytes": out.stat().st_size,
