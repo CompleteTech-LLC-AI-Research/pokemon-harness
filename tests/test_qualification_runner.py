@@ -711,6 +711,32 @@ def test_evaluate_resources_fails_when_shared_memory_is_not_writable(tmp_path: P
     assert statuses(results)["shm"] == "fail"
 
 
+def test_evaluate_resources_fails_on_read_only_shm_with_zero_minimum(tmp_path: Path):
+    """A zero minimum must not opt out of the shared-memory writability check.
+
+    The round-13 finding: ``shm_bytes_min=0`` made the admission ``skipped``, so
+    a read-only shared-memory mount still admitted the job.  Availability and
+    writability are host facts the contract requires independently of the size
+    minimum.
+    """
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota", shm_bytes_min=0)
+    facts.shm_writable = False
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["shm"] == "fail"
+
+
+def test_evaluate_resources_admits_writable_shm_with_zero_minimum(tmp_path: Path):
+    """A writable shared-memory mount is admitted when no size minimum is set."""
+
+    declaration, facts = held_reservation(tmp_path, "cgroup-quota", shm_bytes_min=0)
+    facts.shm_writable = True
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    shm = next(item for item in results if item.name == "shm")
+    assert shm.status == "ok"
+    assert "no size minimum" in shm.detail
+
+
 def test_evaluate_resources_shm_uses_available_space_not_total(tmp_path: Path):
     """A shared-memory mount with little free space must fail admission."""
 
@@ -1608,6 +1634,30 @@ def test_release_blocks_when_a_token_owned_descendant_survives(tmp_path: Path):
         if sleeper.poll() is None:
             sleeper.kill()
             sleeper.wait(timeout=5)
+
+
+def test_release_blocks_on_launch_intent_without_ownership_record(tmp_path: Path, monkeypatch):
+    """An external releaser must not free a lease whose launched work is unidentified.
+
+    The round-13 finding: a launch intent written before the spawn survived a
+    holder that died before its ownership record was written.  The external
+    ``--release`` read "no record" as "no job", deleted the descriptor, and left
+    a detached descendant alive.  Missing ownership evidence must block.
+    """
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    job_dir = Path(declaration["reservation"]["job_dir"])
+    rewrite_descriptor(declaration, {"holder_pid": 2**31 - 1, "holder_start_time": "0"})
+    monkeypatch.setattr(runner, "_holder_is_owned", lambda holder, start: True)
+    runner._write_job_launch_intent(job_dir, [sys.executable, "-c", "pass"])
+    assert not (job_dir / runner._JOB_RUN_RECORD_NAME).exists()
+    status, message = runner._release_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert "launch intent" in message
+    assert descriptor_path.exists(), "release removed state whose ownership was unproven"
 
 
 def rewrite_descriptor(declaration: dict, changes: dict) -> None:

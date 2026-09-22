@@ -2499,11 +2499,11 @@ def evaluate_resources(
         results.append(_result(name, status, declared_disk, observed, detail))
 
     declared_shm = int(declaration.get("shm_bytes_min") or 0)
-    if declared_shm <= 0:
-        results.append(
-            _result("shm", "skipped", declared_shm, facts.shm_size_bytes, "no minimum declared")
-        )
-    elif "shm-missing" in facts.unsupported:
+    # Availability and writability are checked independently of the size
+    # minimum.  A declaration that requires no minimum still needs a writable
+    # shared-memory namespace to run the qualification job, so a zero minimum
+    # must not be able to opt out of the host-fact check.
+    if "shm-missing" in facts.unsupported:
         results.append(
             _result(
                 "shm",
@@ -2527,6 +2527,16 @@ def evaluate_resources(
         results.append(
             _result(
                 "shm", "fail", declared_shm, facts.shm_size_bytes, "shared memory is not writable"
+            )
+        )
+    elif declared_shm <= 0:
+        results.append(
+            _result(
+                "shm",
+                "ok",
+                declared_shm,
+                facts.shm_size_bytes,
+                "shared memory is available and writable; no size minimum declared",
             )
         )
     else:
@@ -5123,18 +5133,17 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
         # This process is not the holder's ancestor, so setting its own
         # subreaper flag cannot adopt the holder's children and it cannot even
         # observe a descendant the holder detaches during teardown.  Only a job
-        # record that already proved containment can stand in for that proof;
-        # otherwise the state is kept rather than reported free.
-        record, record_error = _read_job_run_record(descriptor_path.parent)
-        if record_error:
-            return "blocked", record_error
-        if record is not None and not record.get("containment_confirmed"):
-            return "blocked", (
-                "the recorded qualification job never confirmed descendant containment "
-                "and this process is not its ancestor, so it cannot adopt or observe "
-                "descendants the job detached during teardown; refusing to call the "
-                "allocation free"
-            )
+        # record that already proved containment can stand in for that proof: a
+        # launch intent with no ownership record is unidentified work, and a
+        # record that never confirmed containment may still own a detached
+        # descendant.  Both keep the state rather than report the allocation
+        # free.  ``contain_adopted`` stays false because adoption cannot reach a
+        # sibling's children.
+        confirmed, detail = _confirm_recorded_job_containment(
+            descriptor_path.parent, contain_adopted=False
+        )
+        if not confirmed:
+            return "blocked", detail
     live_leftovers = _sweep_leftover_owned_processes()
     if live_leftovers:
         return "blocked", (
