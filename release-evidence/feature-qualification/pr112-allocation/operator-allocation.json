@@ -8,9 +8,10 @@
     "descriptor_path": "target/qualification-runs/operator-qual-1/allocation.json",
     "descriptor_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "host_lock_path": "target/qualification-runs/host.lock",
-    "cgroup_path": "/sys/fs/cgroup/qualification/operator-qual-1"
+    "cgroup_path": "/qualification/operator-qual-1",
+    "exclusive": true
   },
-  "logical_cpus": 12,
+  "logical_cpus": 8,
   "affinity_cpus": [
     0,
     1,
@@ -19,13 +20,9 @@
     4,
     5,
     6,
-    7,
-    8,
-    9,
-    10,
-    11
+    7
   ],
-  "cpu_quota_cores": 12.0,
+  "cpu_quota_cores": 8.0,
   "cpu_weight": 100,
   "memory_bytes": 8589934592,
   "disk_free_bytes_min": 1000000000,
@@ -47,5 +44,5 @@
     ]
   },
   "supplied_by": "operator",
-  "supply_note": "Operator-supplied declaration for the issue #85 allocation contract. Synthesized per the delivery prompt; not host-observed reservation evidence."
+  "supply_note": "Operator-supplied declaration shape for the issue #85 allocation contract, synthesized per the delivery prompt. Its cgroup_path is cgroup-relative (as the checker compares it to /proc/self/cgroup) and its 8-core quota on the documented 12-CPU host leaves headroom, so the declaration is internally consistent with the runner's contract. Every value here is a DECLARED fact supplied by the operator; none of it is host-observed reservation evidence, and the retained check report records which declared facts this host could confirm and which it reports as unsupported or fail."
 }

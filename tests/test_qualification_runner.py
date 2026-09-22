@@ -929,7 +929,7 @@ def test_prerequisite_checks_use_injected_runner(tmp_path: Path, monkeypatch):
     with_native_evidence(declaration, tmp_path)
     monkeypatch.setattr(runner, "_required_asset_entries", lambda decl, root: requirements)
     monkeypatch.setattr(runner, "_native_source_digest", lambda root: "b" * 64)
-    monkeypatch.setattr(runner, "_asset_tree_writable", lambda root: False)
+    monkeypatch.setattr(runner, "_asset_tree_immutability_problem", lambda root: None)
     probe_payload = _probe_payload(NATIVE_FINGERPRINT)
     fake_runner, calls = _prerequisite_runner(probe_payload)
     results = runner.prerequisite_checks(declaration, tmp_path, runner=fake_runner)
@@ -1548,6 +1548,66 @@ def test_release_refuses_when_the_job_record_never_confirmed_containment(tmp_pat
     assert status == "blocked"
     assert "never confirmed descendant containment" in message
     assert Path(declaration["reservation"]["descriptor_path"]).exists()
+
+
+def test_release_refuses_unconfirmed_containment_for_an_external_holder(
+    tmp_path: Path, monkeypatch
+):
+    """A releaser outside the holder's ancestry cannot adopt its orphans.
+
+    The round-12 finding: an external ``--release`` snapshotted the holder's
+    tree, killed it, and returned ``ok`` even though the holder's SIGTERM
+    handler could fork a detached descendant after the snapshot.  Setting the
+    releaser's subreaper flag does not adopt a sibling's children, so a record
+    that never proved containment must keep the lease blocked.
+    """
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    job_dir = Path(declaration["reservation"]["job_dir"])
+    # A holder that is not this process and never recorded containment proof.
+    rewrite_descriptor(declaration, {"holder_pid": 2**31 - 1, "holder_start_time": "0"})
+    monkeypatch.setattr(runner, "_holder_is_owned", lambda holder, start: True)
+    (job_dir / runner._JOB_RUN_RECORD_NAME).write_text(
+        json.dumps(_job_record(containment_confirmed=False)), encoding="utf-8"
+    )
+    status, message = runner._release_allocation(declaration, tmp_path)
+    assert status == "blocked"
+    assert "never confirmed descendant containment" in message
+    assert descriptor_path.exists(), "release removed state it could not prove was free"
+
+
+def test_release_blocks_when_a_token_owned_descendant_survives(tmp_path: Path):
+    """The launch's inherited token reveals a descendant the sweep cannot see."""
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration, _facts = held_reservation(tmp_path, "cgroup-quota")
+    descriptor_path = Path(declaration["reservation"]["descriptor_path"])
+    job_dir = Path(declaration["reservation"]["job_dir"])
+    token = "c0ffee" * 5 + "abcd"
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        start_new_session=True,
+        env={**os.environ, runner._JOB_OWNERSHIP_TOKEN_ENV: token},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        (job_dir / runner._JOB_RUN_RECORD_NAME).write_text(
+            json.dumps(_job_record(containment_confirmed=True, job_token=token)),
+            encoding="utf-8",
+        )
+        status, message = runner._release_allocation(declaration, tmp_path)
+        assert status == "blocked", message
+        assert str(sleeper.pid) in message
+        assert descriptor_path.exists(), "release removed state while owned work ran"
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+            sleeper.wait(timeout=5)
 
 
 def rewrite_descriptor(declaration: dict, changes: dict) -> None:
@@ -2318,6 +2378,62 @@ def test_immutable_asset_check_rejects_writable_nested_directory(tmp_path: Path)
         # Restore writability so pytest can remove the temporary tree.
         nested.chmod(0o755)
         rom_root.chmod(0o755)
+
+
+def test_immutable_asset_check_rejects_a_symlinked_directory(tmp_path: Path):
+    """A linked read-only directory can hide a writable leaf from ``rglob``.
+
+    The round-12 finding: a mode-0555 asset root containing a symlink to a
+    mode-0555 directory passed the scan while a mode-0644 ROM inside the target
+    stayed writable, because ``Path.rglob`` does not descend into a linked
+    directory.  Reject the link instead of trusting the tree.
+    """
+
+    target = tmp_path / "real-assets"
+    target.mkdir()
+    rom = target / "pokemon-red.gb"
+    rom.write_bytes(b"dummy")
+    rom.chmod(0o644)
+    rom_root = tmp_path / "rom"
+    rom_root.mkdir()
+    (rom_root / "red").symlink_to(target)
+    for path in (target, rom_root):
+        path.chmod(0o555)
+    declaration = make_declaration(
+        assets={"rom_root": str(rom_root), "fixture_root": str(tmp_path / "fixtures")}
+    )
+    try:
+        results = runner._immutable_asset_checks(declaration, tmp_path)
+        assert statuses(results)["assets-immutable-rom_root"] == "fail"
+        detail = next(item.detail for item in results if item.name == "assets-immutable-rom_root")
+        assert "symbolic link" in detail
+    finally:
+        target.chmod(0o755)
+        rom_root.chmod(0o755)
+
+
+def test_required_asset_rejects_a_symlinked_directory_component(tmp_path: Path):
+    """A read-only leaf reached through a linked parent is refused."""
+
+    target = tmp_path / "real"
+    target.mkdir()
+    payload = b"rom-bytes"
+    (target / "pokemon-red.gb").write_bytes(payload)
+    rom_root = tmp_path / "rom"
+    rom_root.mkdir()
+    (rom_root / "linked").symlink_to(target)
+    requirement = runner._AssetRequirement(
+        key="linked/pokemon-red.gb",
+        root="rom_root",
+        sha1=hashlib.sha1(payload).hexdigest(),
+    )
+    result = runner._verify_required_asset(
+        "assets-required-rom_root-0", requirement, rom_root, rom_root / requirement.key
+    )
+    assert result.status == "fail"
+    assert "symbolic link" in result.detail
+    assert runner._symlinked_path_component(rom_root, "linked/pokemon-red.gb") == "linked"
+    assert runner._symlinked_path_component(rom_root, "plain.gb") is None
 
 
 def test_observed_task_affinities_unions_every_thread(tmp_path: Path, monkeypatch):

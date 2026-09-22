@@ -3007,6 +3007,60 @@ def _sweep_leftover_owned_processes() -> list[int]:
     return still_alive
 
 
+def _token_owned_live_pids(job_token: Any) -> list[int]:
+    """Return live pids, other than this one, carrying *job_token* in their environment.
+
+    A launch's ownership token is inherited by every descendant it forks or
+    execs, so it is the one piece of evidence that survives both pid and
+    process-group reuse.  It is also the only way a releaser that is not the
+    holder's ancestor or subreaper can observe a descendant the holder detached
+    during its own teardown.
+    """
+
+    if not isinstance(job_token, str) or not job_token.strip():
+        return []
+    if os.name == "nt":
+        return []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    found: list[int] = []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == os.getpid():
+            continue
+        if not _pid_alive(pid) or _pid_is_zombie(pid):
+            continue
+        environ = _process_environ(pid)
+        if environ is None:
+            continue
+        if environ.get(_JOB_OWNERSHIP_TOKEN_ENV) == job_token:
+            found.append(pid)
+    return sorted(found)
+
+
+def _await_no_token_owned_survivors(job_token: Any, *, settle_seconds: float = 1.0) -> list[int]:
+    """Return token-carrying descendants still alive after a bounded settle.
+
+    A teardown handler can fork a detached descendant moments after the
+    holder's tree was snapshotted.  The owned-process sweep cannot see that
+    process (it is not our child), but it inherits the ownership token, so the
+    scan is repeated across a short window before the caller may remove state.
+    """
+
+    if not isinstance(job_token, str) or not job_token.strip():
+        return []
+    deadline = time.monotonic() + max(0.0, settle_seconds)
+    while True:
+        survivors = _token_owned_live_pids(job_token)
+        if survivors or time.monotonic() >= deadline:
+            return survivors
+        time.sleep(0.05)
+
+
 def _contain_adopted_descendants(
     exclude: set[int] | None = None,
     *,
@@ -3468,10 +3522,38 @@ def _required_asset_entries(
     return requirements
 
 
+def _symlinked_path_component(root: Path, relative: str) -> str | None:
+    """Return a relative component of *root*/*relative* that is a symlink, or ``None``.
+
+    A required input is only trustworthy if every step of its path inside the
+    asset root is a real directory entry.  Checking just the final component
+    would accept a read-only leaf reached through a linked parent, because the
+    leaf itself is not a link.
+    """
+
+    current = root
+    parts: list[str] = []
+    for part in Path(relative).parts:
+        current = current / part
+        parts.append(part)
+        if current.is_symlink():
+            return "/".join(parts)
+    return None
+
+
 def _verify_required_asset(
-    name: str, requirement: _AssetRequirement, resolved: Path
+    name: str, requirement: _AssetRequirement, root: Path, resolved: Path
 ) -> CheckResult:
     relative = requirement.key
+    linked = _symlinked_path_component(root, relative)
+    if linked is not None:
+        return _result(
+            name,
+            "fail",
+            "required file",
+            linked,
+            "required input is reached through a symbolic link; refusing a linked input",
+        )
     if resolved.is_symlink() or not resolved.is_file():
         return _result(name, "fail", "required file", relative, "required input is missing")
     try:
@@ -3653,7 +3735,9 @@ def validate_asset_inputs(declaration: dict[str, Any], repo_root: Path) -> list[
         root_path = rom_root_path if requirement.root == "rom_root" else fixture_root_path
         if root_path is None:
             continue
-        results.append(_verify_required_asset(name, requirement, root_path / requirement.key))
+        results.append(
+            _verify_required_asset(name, requirement, root_path, root_path / requirement.key)
+        )
     return results
 
 
@@ -4073,20 +4157,44 @@ def _native_build_fingerprint(identity: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _asset_tree_writable(root: Path) -> bool:
+def _asset_tree_immutability_problem(root: Path) -> str | None:
+    """Return why *root* is not a provably immutable asset tree, else ``None``.
+
+    A read-only directory containing a writable subdirectory is not immutable:
+    the owner can delete or replace a protected file through that parent, so
+    directories are inspected as well as files.  Symbolic links are refused
+    rather than followed: ``Path.rglob`` does not descend into a linked
+    directory, so a link can hide a writable file from the scan while the linked
+    path still resolves for a reader.  Every entry is walked without following
+    links, and an unreadable tree fails closed.
+    """
+
+    if root.is_symlink():
+        return (
+            "the asset root is a symbolic link; a linked tree cannot be shown to be "
+            "read-only, so it is refused"
+        )
     if os.access(root, os.W_OK):
-        return True
+        return "the asset root is writable by this job; mount it read-only"
     try:
-        for entry in root.rglob("*"):
-            # A read-only directory containing a writable subdirectory is not
-            # immutable: the owner can delete or replace a protected file via
-            # that parent.  Check directories as well as files so a writable
-            # nested directory fails the admission instead of passing.
-            if os.access(entry, os.W_OK):
-                return True
-    except OSError:
-        return True
-    return False
+        for directory, dirnames, filenames in os.walk(root, followlinks=False):
+            base = Path(directory)
+            for name in dirnames + filenames:
+                entry = base / name
+                if entry.is_symlink():
+                    return (
+                        f"the asset root contains the symbolic link {name!r}; a linked "
+                        "directory can hide a writable file from the immutability scan, "
+                        "so it is refused"
+                    )
+                if os.access(entry, os.W_OK):
+                    return (
+                        "the asset root contains a writable entry; an owner can replace a "
+                        "protected file through that parent"
+                    )
+    except OSError as exc:
+        return f"the asset tree could not be inspected ({exc}); refusing to admit it"
+    return None
 
 
 def _immutable_asset_checks(declaration: dict[str, Any], repo_root: Path) -> list[CheckResult]:
@@ -4098,16 +4206,14 @@ def _immutable_asset_checks(declaration: dict[str, Any], repo_root: Path) -> lis
         path = Path(value) if isinstance(value, str) and value else None
         if path is None or not path.is_dir():
             continue
-        writable = _asset_tree_writable(path)
+        problem = _asset_tree_immutability_problem(path)
         results.append(
             _result(
                 f"assets-immutable-{key}",
-                "fail" if writable else "ok",
+                "fail" if problem else "ok",
                 "read-only shared asset root",
                 path.name,
-                "the asset root is writable by this job; mount it read-only"
-                if writable
-                else "the asset root is read-only for this job",
+                problem or "the asset root is read-only for this job",
             )
         )
     return results
@@ -5014,12 +5120,39 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
                 )
         if lock_path is not None and holder in (_observe_flock_holders(lock_path) or set()):
             return "blocked", "the recorded holder still holds the allocation lock"
+        # This process is not the holder's ancestor, so setting its own
+        # subreaper flag cannot adopt the holder's children and it cannot even
+        # observe a descendant the holder detaches during teardown.  Only a job
+        # record that already proved containment can stand in for that proof;
+        # otherwise the state is kept rather than reported free.
+        record, record_error = _read_job_run_record(descriptor_path.parent)
+        if record_error:
+            return "blocked", record_error
+        if record is not None and not record.get("containment_confirmed"):
+            return "blocked", (
+                "the recorded qualification job never confirmed descendant containment "
+                "and this process is not its ancestor, so it cannot adopt or observe "
+                "descendants the job detached during teardown; refusing to call the "
+                "allocation free"
+            )
     live_leftovers = _sweep_leftover_owned_processes()
     if live_leftovers:
         return "blocked", (
             "owned descendants are still running after release "
             f"({len(live_leftovers)} pid(s)); including "
             + ", ".join(str(pid) for pid in live_leftovers[:16])
+        )
+    # A teardown handler can fork a detached descendant after the holder's tree
+    # was snapshotted.  This process is not its ancestor, so the owned-process
+    # sweep cannot see it; the launch's inherited ownership token can.
+    record, _record_error = _read_job_run_record(descriptor_path.parent)
+    job_token = record.get("job_token") if isinstance(record, dict) else None
+    token_survivors = _await_no_token_owned_survivors(job_token)
+    if token_survivors:
+        return "blocked", (
+            "descendants of the recorded job are still running after containment "
+            f"({len(token_survivors)} pid(s)); the lease is kept because the "
+            "allocation is still in use: " + ", ".join(str(pid) for pid in token_survivors[:16])
         )
     _remove_allocation_state(descriptor_path)
     return "ok", "the owned lease was relinquished and the private job state removed"
@@ -5093,6 +5226,19 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
                 "owned descendants are still running after containment "
                 f"({len(live_leftovers)} pid(s)): "
                 + ", ".join(str(pid) for pid in live_leftovers[:16])
+            ),
+        )
+    record, _record_error = _read_job_run_record(descriptor_path.parent)
+    job_token = record.get("job_token") if isinstance(record, dict) else None
+    token_survivors = _await_no_token_owned_survivors(job_token)
+    if token_survivors:
+        return (
+            "blocked",
+            (
+                "descendants of the recorded job are still running after containment "
+                f"({len(token_survivors)} pid(s)); refusing to remove lease state "
+                "while the allocation is still in use: "
+                + ", ".join(str(pid) for pid in token_survivors[:16])
             ),
         )
     _remove_allocation_state(descriptor_path)

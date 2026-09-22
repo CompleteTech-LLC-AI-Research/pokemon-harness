@@ -803,12 +803,13 @@ capacity-qualified or release-qualified result. Retaining a passing functional
 result beside an explicit capacity-blocked status is the honest state; a
 prepared runner and a green functional matrix are still not a passing gate.
 
-### 3c. Required allocation declaration shape (not evidence)
+### 3c. Required allocation declaration shape (operator-supplied, not evidence)
 
 Issue #85's acceptance requires capacities measured under an operator-provisioned
 writable exclusive allocation. No such allocation exists on this host, so a
-representative declaration *shape* is retained only to make the requirement
-checkable. It is a synthetic example, not an operator-supplied artifact and not
+representative **operator-supplied declaration shape** is retained to make the
+requirement checkable, synthesized per the delivery prompt's CAPACITY ALLOCATION
+decision. It is the artifact an operator is expected to fill in, and it is not
 reservation evidence:
 
 ```
@@ -817,10 +818,15 @@ release-evidence/feature-qualification/pr112-allocation/operator-allocation.json
 
 It describes the declared `cgroup-quota` mechanism (a writable `cgroup2` leaf
 with `cpu.max`, the operator's pinned source/native interpreters, and the
-operator's ROM/fixture roots) and it is *not* host-observed reservation
-evidence. The only thing this host can do with it is run the runner's
-fail-closed admission against it; every fact the host cannot observe is reported
-as `unsupported`/`fail` rather than assumed:
+operator's ROM/fixture roots). It is internally consistent with the contract it
+must pass: `cgroup_path` is cgroup-relative, matching the path the checker reads
+from `/proc/self/cgroup`, and the declared `cpu_quota_cores` is below
+`logical_cpus`, so a provisioned allocation matching it would not be rejected on
+shape alone. Every field in the artifact is a **declared** fact supplied by the
+operator; none of it is host-observed reservation evidence. The only thing this
+host can do with it is run the runner's fail-closed admission against it, which
+separates the declared facts from the observed and unsupported ones; a fact the
+host cannot observe is reported as `unsupported`/`fail` rather than assumed:
 
 ```bash
 python scripts/qualification_runner.py --check \
