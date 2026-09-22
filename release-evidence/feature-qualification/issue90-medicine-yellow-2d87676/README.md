@@ -10,9 +10,11 @@ execution for Red-color, Blue-color and Yellow in both source and native; this
 bundle registers the Yellow half of that matrix. It is not the matrix.
 
 It contains no ROM bytes, no symbol tables, no save states, no traces and no
-credentials: only digests, sizes, labels, per-tier outcomes and the runtime
-identities that were measured. Every local absolute path was replaced by a
-bracket placeholder before the files were written (see `Placeholders` below).
+credentials: only digests, sizes, labels, per-tier outcomes, the runtime
+identities that were measured and one counted redaction marker per log. Every
+local absolute path was replaced by a bracket placeholder before the files were
+written (see `Placeholders` below), and the symbol-table input that PyBoy echoes
+while loading is elided (see `Redactions` below).
 
 ## Identity
 
@@ -104,7 +106,9 @@ here omit the extra `-q` and the counts appear both in the logs and in the JUnit
   is kept here unchanged too.
 - `logs/source-focused.log`, `logs/cython-focused.log` - each tier's captured
   stdout/stderr, including the `-rA` PASSED list and the captured emulator
-  output. The logs go through the same placeholder rewrite as everything else.
+  output. The logs go through the same placeholder rewrite as everything else,
+  and the private symbol-table payloads in PyBoy's loader warnings are elided
+  (see `Redactions` below).
 - `runtime-identity.json` - the measured provenance above, the guardrail
   declaration, the executed node ids and the operator-asset digests.
 - `results.txt` - the two rows in the flat form used by the other bundles in this
@@ -127,6 +131,33 @@ record it cannot prove it left otherwise untouched. A bundle-wide sweep then
 re-scans every emitted file for absolute-path fragments and fails if any survive.
 `tests/test_battle_healing_items_rom.py::test_runtime_registration_bundle_is_sanitized_and_consistent`
 re-runs that check, so the committed bytes cannot carry a machine path unnoticed.
+The guard additionally pins the file set itself, so a stray asset cannot be added
+to the directory unnoticed.
+
+## Redactions
+
+Loading the symbol table makes PyBoy emit one `Skipping .sym line` warning per
+line it cannot use, and pytest's `-rA` capture writes the warning text into the
+log. That text is a byte-exact copy of the operator's private symbol-table input,
+so it must not be committed. Both logs therefore carry a single counted marker
+where that contiguous warning run was:
+
+```text
+pyboy.pyboy                    WARNING  Skipping .sym line: <redacted: 953 private symbol payloads; see README "Redactions">
+```
+
+The marker keeps the number of elided payloads (953 per tier; lines 11-963 of the
+unredacted log) and nothing else about them. `runtime-identity.json` records the
+redaction under `redactions`: per tier the elided count, the line range, the
+SHA-256 and size of the private unredacted original, and the SHA-256 and size of
+the committed redacted file. The unredacted originals are retained outside the
+repository under the `private_original_label` named there, so the elided payloads
+remain auditable without being distributed. The guard hashes each committed log
+against its recorded redacted digest, requires the marker to appear exactly once
+with the recorded count, and fails if any unredacted `Skipping .sym line` payload
+is present. Redaction touched only those warning lines: every other line of each
+log is byte-identical to the original, which the sanitizer asserts before it
+writes.
 
 ## Operator assets (digests only)
 

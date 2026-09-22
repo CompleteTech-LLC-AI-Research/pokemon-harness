@@ -39,6 +39,41 @@
     "tests/test_state_party.py",
     "tests/test_battle_healing_items_rom.py"
   ],
+  "redactions": {
+    "note": "The captured PyBoy 'Skipping .sym line' warnings each reproduced one byte-exact line of the operator's private symbol table. Those payloads are elided from the committed logs and replaced by one counted marker per log; the unredacted originals are retained outside the repository under the private_original_label named for each tier.",
+    "reason": "committed qualification evidence must not carry symbol-table input",
+    "sanitizer": "operator-side release-log sanitizer retained with the session evidence, not committed",
+    "tiers": {
+      "cython": {
+        "file": "logs/cython-focused.log",
+        "marker": "pyboy.pyboy                    WARNING  Skipping .sym line: <redacted: 953 private symbol payloads; see README \"Redactions\">",
+        "payload_line_range": [
+          11,
+          963
+        ],
+        "payload_lines_elided": 953,
+        "private_original_label": "private-game-states/qualification-originals/issue90-medicine-yellow-2d87676/logs/cython-focused.log",
+        "private_original_sha256": "a5b385efda3eb3e61e43d5bccdcf143083f9fbb51ad24a63263028d8c85f236d",
+        "private_original_size_bytes": 85538,
+        "redacted_sha256": "1025da78275947506832bba560f46abb2733c2b2456abe45fd8fa59600fbccca",
+        "redacted_size_bytes": 3304
+      },
+      "source": {
+        "file": "logs/source-focused.log",
+        "marker": "pyboy.pyboy                    WARNING  Skipping .sym line: <redacted: 953 private symbol payloads; see README \"Redactions\">",
+        "payload_line_range": [
+          11,
+          963
+        ],
+        "payload_lines_elided": 953,
+        "private_original_label": "private-game-states/qualification-originals/issue90-medicine-yellow-2d87676/logs/source-focused.log",
+        "private_original_sha256": "60ec2463684c55aba8a89985f7d10deeadca0cda2cf93c0dd8d08526d0388ca0",
+        "private_original_size_bytes": 85539,
+        "redacted_sha256": "950d1590c6a6258330a479fba132cf2b74fb5ba81a13da40458442ee01000a46",
+        "redacted_size_bytes": 3305
+      }
+    }
+  },
   "results_by_tier": {
     "cython": {
       "errors": 0,
