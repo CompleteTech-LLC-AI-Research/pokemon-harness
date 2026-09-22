@@ -152,7 +152,11 @@ python -m ruff check \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
-    tests/test_production_gate.py \
+    tests/test_production_gate_diagnostics.py \
+    tests/test_production_gate_matrix_manifest.py \
+    tests/test_production_gate_report_loader.py \
+    tests/test_production_gate_run_tier_failures.py \
+    tests/test_production_gate_strict_matrix.py \
     tests/test_runtime_packaging.py
 python -m ruff format --check \
     scripts/bootstrap_pyboy.py \
@@ -174,7 +178,11 @@ python -m ruff format --check \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
-    tests/test_production_gate.py \
+    tests/test_production_gate_diagnostics.py \
+    tests/test_production_gate_matrix_manifest.py \
+    tests/test_production_gate_report_loader.py \
+    tests/test_production_gate_run_tier_failures.py \
+    tests/test_production_gate_strict_matrix.py \
     tests/test_runtime_packaging.py
 
 # Check runtime and link lane lint
