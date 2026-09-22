@@ -34,6 +34,7 @@ three pinned::
 from __future__ import annotations
 
 import hashlib
+import html
 import importlib
 import json
 import re
@@ -146,19 +147,30 @@ BUNDLE_UNIX_ABSOLUTE_PATTERN = re.compile(
     # Each component has to carry a word character, so a relative remainder such
     # as ``yellow}/...`` is not read as an absolute path, while a single-component
     # form (``/opt``), a spaced component (``/opt/Private Data``) and a path glued
-    # to a preceding colon or bracket are all still hits.  Components stop at
-    # markup characters, so an XML self-closing tag is not read as a path.
+    # to a preceding colon or bracket are all still hits.  The repeated group is
+    # optional precisely so a lone ``/opt`` is a hit too; components stop at markup
+    # characters, so an XML self-closing tag is not read as a path.
     r"(?<![\w\]\)<>\}])/(?=[A-Za-z0-9_.~])"
-    r"(?:[^/\n<>\"\']*\w[^/\n<>\"\']*/)+[^/\n<>\"\']*\w[^/\n<>\"\']*"
+    r"(?:[^/\n<>\"\']*\w[^/\n<>\"\']*/)*[^/\n<>\"\']*\w[^/\n<>\"\']*"
 )
 BUNDLE_WINDOWS_ABSOLUTE_PATTERN = re.compile(r"(?<![\w])[A-Za-z]:[\\/](?:[^\\/\n]+[\\/])*[^\\/\n]*")
 BUNDLE_UNC_PATTERN = re.compile(r"(?<![\w:/])//[A-Za-z0-9_.\-]+[\\/]")
-BUNDLE_UNC_BACKSLASH_PATTERN = re.compile(r"(?<![\w:\\])\\\\[A-Za-z0-9_.\-]+\\\\")
+BUNDLE_UNC_BACKSLASH_PATTERN = re.compile(r"(?<![\w:\\])\\\\[A-Za-z0-9_.\-]+[\\/]")
 
-# A PyBoy loader warning whose payload is not already the counted redaction
-# marker.  Symbol-table input must never be committed, so this must not match
-# anything in the bundle.
-BUNDLE_SYMBOL_PAYLOAD_PATTERN = re.compile(r"Skipping \.sym line: (?!<redacted:)\S")
+# A PyBoy loader warning.  The payload after any run of spaces or tabs is what
+# the operator's symbol table used to put there, so the guard compares whole
+# payloads against the counted redaction marker the record names rather than
+# looking for a ``<redacted:`` prefix: an extra space cannot smuggle a payload
+# past the match, and a fabricated marker of the right shape but the wrong text
+# is still symbol-table input.  Symbol-table input must never be committed.
+BUNDLE_SYMBOL_WARNING_PATTERN = re.compile(r"Skipping \.sym line:[ \t]*(?P<payload>[^\n]*)")
+
+# pytest's per-test outcome rows.  Anchored, so the identities behind the
+# terminal count are read from the log itself rather than inferred from it.
+BUNDLE_LOG_OUTCOME_PATTERN = re.compile(
+    r"^(?P<outcome>PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS) (?P<node_id>\S+)$",
+    re.MULTILINE,
+)
 
 # pytest's terminal summary line, parsed rather than substring-searched: the
 # whole line has to be the summary, so ``125 passed`` cannot satisfy a claim of
@@ -823,6 +835,82 @@ def _bundle_terminal_summary(log: str) -> dict:
     return {"line": line, "passed": parts["passed"], "parts": parts}
 
 
+def _bundle_logged_outcomes(log: str) -> list[str]:
+    """The node ids one log reports, in the order it lists them.
+
+    The terminal summary is only a count.  These rows are the identities behind
+    that count, so reconciling them is what stops a coordinated total change -
+    dropping a node from the record while the log still lists it, or adding one
+    the log never ran - from passing on the counter alone.
+    """
+    rows = [
+        (match.group("outcome"), match.group("node_id"))
+        for match in BUNDLE_LOG_OUTCOME_PATTERN.finditer(log)
+    ]
+    assert rows, "the log reports no per-test outcome rows"
+    non_passing = sorted({outcome for outcome, _ in rows} - {"PASSED"})
+    assert not non_passing, f"the log reports non-passing outcome rows: {non_passing}"
+    node_ids = [node_id for _, node_id in rows]
+    assert len(set(node_ids)) == len(node_ids), "the log lists a node id more than once"
+    return node_ids
+
+
+def _bundle_symbol_warning_payloads(contents: str) -> set[str]:
+    """Every PyBoy ``Skipping .sym line`` payload in one committed file."""
+    return {match.group("payload") for match in BUNDLE_SYMBOL_WARNING_PATTERN.finditer(contents)}
+
+
+def _bundle_json_strings(value: object):
+    """Every string in a decoded JSON document, keys included."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _bundle_json_strings(key)
+            yield from _bundle_json_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _bundle_json_strings(item)
+
+
+def _bundle_scan_views(relative: str, contents: str) -> list[str]:
+    """The textual views of one committed file the sanitizer must sweep.
+
+    The serialized bytes are not enough.  A JSON string escapes a quote and an
+    XML character reference spells a slash, so a payload or an absolute path can
+    sit in a structured container that the raw scan never reads as one.  Each
+    container is therefore decoded to the strings it actually holds - JSON string
+    values, XML text, tails and attribute values - and those views are swept in
+    addition to the raw text.
+    """
+    if relative.endswith(".json"):
+        views = list(_bundle_json_strings(json.loads(contents)))
+    elif relative.endswith(".xml"):
+        root = ET.fromstring(contents)
+        views = []
+        for element in root.iter():
+            views.append(element.text or "")
+            views.append(element.tail or "")
+            views.extend(str(value) for value in element.attrib.values())
+    else:
+        views = [contents]
+    decoded = html.unescape(contents)
+    if decoded != contents:
+        views.append(decoded)
+    return views
+
+
+def _bundle_marker_payload(marker: str) -> str:
+    """The payload of a recorded redaction marker, validated to be a warning."""
+    line = marker.rstrip("\n")
+    match = BUNDLE_SYMBOL_WARNING_PATTERN.search(line)
+    assert match is not None, f"the recorded marker is not a PyBoy .sym warning: {marker!r}"
+    assert match.end() == len(line), (
+        f"the recorded marker carries trailing text after the warning: {line[match.end() :]!r}"
+    )
+    return match.group("payload")
+
+
 def _bundle_results_row(results_text: str, tier: str) -> dict:
     """Parse one tier's row out of ``results.txt``."""
     rows = [
@@ -956,8 +1044,16 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
             if tier == "source"
             else not vendored_file and bool(kinds.get(".so")) and loader is None
         )
-        assert tier_identity["is_declared_runtime"] is declared, (
-            f"the {tier} tier did not measure as its declared runtime"
+        # The recorded flag is a claim and the derived predicate is the
+        # measurement.  Requiring the measurement to be true - not merely to
+        # equal the claim - is what stops a record that admits it did not run the
+        # required runtime from passing by agreeing with itself.
+        assert declared is True, (
+            f"the {tier} tier does not measure as its declared runtime: "
+            f"vendored={vendored_file}, extensions={kinds.get('.so', 0)}, loader={loader!r}"
+        )
+        assert tier_identity["is_declared_runtime"] is True, (
+            f"the {tier} tier records is_declared_runtime={tier_identity['is_declared_runtime']!r}"
         )
 
     assert source["pyboy_imported_from_vendored_tree"] is True
@@ -1024,7 +1120,24 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
         assert terminal["line"] == recorded["summary"], (
             f"the {tier} terminal line and the recorded summary disagree"
         )
-        assert log.count(f"PASSED {ACCEPTANCE_NODE_ID}") == 1, (
+        # The counter is a claim; the log's own outcome rows are the identities
+        # behind it.  Reconciling them with the record, the JUnit XML and the
+        # terminal count is what makes a coordinated count change fail: the rows
+        # still name whatever really ran.
+        logged = _bundle_logged_outcomes(log)
+        assert logged == recorded["node_ids"], (
+            f"the {tier} log's outcome rows disagree with the recorded node ids: "
+            f"missing {sorted(set(recorded['node_ids']) - set(logged))}, "
+            f"unexpected {sorted(set(logged) - set(recorded['node_ids']))}"
+        )
+        assert logged == junit["node_ids"], (
+            f"the {tier} log's outcome rows disagree with the JUnit XML"
+        )
+        assert len(logged) == terminal["passed"], (
+            f"the {tier} log lists {len(logged)} outcome rows but its summary claims "
+            f"{terminal['passed']}"
+        )
+        assert logged.count(ACCEPTANCE_NODE_ID) == 1, (
             f"the {tier} log does not report the acceptance node id exactly once as passed"
         )
 
@@ -1101,6 +1214,7 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
     # remain auditable outside the repository.
     redactions = identity["redactions"]
     assert set(redactions["tiers"]) == set(BUNDLE_TIERS)
+    permitted_symbol_payloads: set[str] = set()
     for tier in BUNDLE_TIERS:
         record = redactions["tiers"][tier]
         assert record["file"] == f"logs/{tier}-focused.log"
@@ -1119,6 +1233,7 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
         assert f"<redacted: {record['payload_lines_elided']} private symbol payloads" in text, (
             f"the committed {tier} log marker does not carry the recorded elided count"
         )
+        permitted_symbol_payloads.add(_bundle_marker_payload(record["marker"]))
         assert _is_lower_hex(record["private_original_sha256"], 64), (
             "the private original digest is not a lowercase SHA-256"
         )
@@ -1129,11 +1244,14 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
 
     for relative in sorted(present):
         contents = (QUALIFICATION_BUNDLE / relative).read_text(encoding="utf-8", errors="replace")
-        assert BUNDLE_SYMBOL_PAYLOAD_PATTERN.search(contents) is None, (
-            f"{relative} carries unredacted symbol-table input"
-        )
-        leaked = _bundle_absolute_path_leaks(contents)
-        assert not leaked, f"{relative} leaks {leaked}"
+        leaked: set[str] = set()
+        for view in _bundle_scan_views(relative, contents):
+            smuggled = _bundle_symbol_warning_payloads(view) - permitted_symbol_payloads
+            assert not smuggled, (
+                f"{relative} carries unredacted symbol-table input: {sorted(smuggled)}"
+            )
+            leaked |= set(_bundle_absolute_path_leaks(view))
+        assert not leaked, f"{relative} leaks {sorted(leaked)}"
 
 
 def test_potion_heals_the_active_mon_from_the_battle_item_menu() -> None:
