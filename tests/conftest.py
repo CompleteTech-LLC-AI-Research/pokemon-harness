@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
@@ -124,3 +126,8 @@ def mem() -> DictMemory:
 @pytest.fixture()
 def catalog() -> dict:
     return coverage.load_catalog(CATALOG_PATH)
+
+
+@pytest.fixture
+def probe():
+    return importlib.import_module("scripts._timed_battle_probe")
