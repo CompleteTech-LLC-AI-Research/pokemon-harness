@@ -397,7 +397,7 @@ def run_pair(args, *, session_factory=None, endpoint_factory=None, asset_resolve
 
     session_factory = session_factory or Session.from_files
     endpoint_factory = endpoint_factory or TimedRemoteEndpoint.from_connected_socket
-    asset_resolver = asset_resolver or resolve_assets
+    asset_resolver = asset_resolver or _entry.resolve_assets
     started = time.monotonic()
     overall = getattr(args, "absolute_deadline", started + args.overall_timeout)
     deadline = min(overall - args.cleanup_timeout, started + args.pair_timeout)
@@ -432,7 +432,7 @@ def run_pair(args, *, session_factory=None, endpoint_factory=None, asset_resolve
     sockets = (accepted, connector)
 
     def owner(index):
-        _run_owner(
+        _entry._run_owner(
             index,
             args,
             records,
@@ -581,7 +581,7 @@ def run_process_pair(
         if len(getattr(args, "owner_driver_options", [])) != 2:
             raise ValueError("owner driver requires two serialized option mappings")
     context = context or multiprocessing.get_context("spawn")
-    child_target = child_target or process_owner
+    child_target = child_target or _entry.process_owner
     started = time.monotonic()
     overall = getattr(args, "absolute_deadline", started + args.overall_timeout)
     deadline = min(overall - args.cleanup_timeout, started + args.pair_timeout)
@@ -780,5 +780,7 @@ def run_process_pair(
 
 # Bound after the definitions above so the mutual import with the entry point (which
 # imports this module from the bottom of its body) never hands back a partially
-# initialized module.
-from scripts.probe_timed_rom_pair import _run_owner, process_owner
+# initialized module. ``run_pair``/``run_process_pair`` look their call targets up on
+# this module object at call time so that monkeypatching the entry point (the historical
+# and documented seam) still redirects those internal calls, as it did before the split.
+import scripts.probe_timed_rom_pair as _entry
