@@ -9,6 +9,11 @@ import pytest
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
 from scripts import coverage_report as coverage
 from tests._mcp_timed_remote_support import failure_snapshots  # noqa: F401
+from tests._timed_link_session_support import (  # noqa: F401
+    game,
+    session_type,
+    source_lifecycle_game,
+)
 from tests._timed_remote_support import remote  # noqa: F401
 from tests._timed_wire_support import kind  # noqa: F401
 

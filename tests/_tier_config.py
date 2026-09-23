@@ -184,7 +184,10 @@ UNIT_MODULES = frozenset(
         "test_state_text.py",
         "test_stepping_loop_profile.py",
         "test_symbol_loader.py",
-        "test_timed_link_session.py",
+        "test_timed_link_session_completeness.py",
+        "test_timed_link_session_control.py",
+        "test_timed_link_session_lifecycle.py",
+        "test_timed_link_session_v3.py",
         "test_timed_battle_probe_contract.py",
         "test_timed_battle_probe_action_economy.py",
         "test_timed_battle_probe_admission.py",
@@ -723,23 +726,23 @@ TIMING_SENSITIVE_TESTS = frozenset(
         ),
         ("test_network_backend_wire_idle.py", "test_sync_with_peer_rendezvous"),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_control.py",
             "test_real_pair_repeated_public_frames_bounded_wire_volume",
         ),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_completeness.py",
             "test_real_v3_complete_progress_equal_watermark_accepts_current_prefix",
         ),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_completeness.py",
             "test_real_v3_partial_complete_progress_write_preserves_sent_frontiers",
         ),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_v3.py",
             "test_real_v3_external_cancel_interrupts_active_receive",
         ),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_v3.py",
             "test_real_v3_poll_returning_after_deadline_never_applies_edge",
         ),
         # Real peer scheduling, fragmented ingress, and bounded owner waits;
