@@ -163,6 +163,7 @@ jobs:
       - name: Check runtime and link lane lint
         run: |
           python -m ruff check \
+            src/pokered_harness/link/_serial_link_support.py \
             src/pokered_harness/link/network_backend.py \
             src/pokered_harness/link/pyboy_link_session.py \
             src/pokered_harness/link/pair.py \
