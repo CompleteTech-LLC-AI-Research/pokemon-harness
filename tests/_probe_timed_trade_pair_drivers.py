@@ -81,7 +81,7 @@ def run_authored_goal_owner(
     driver_fault=None,
 ):
     # Reuse existing authored session/endpoint models without changing old tests.
-    from tests.test_probe_timed_rom_pair import Harness, _MenuSession, arguments
+    from tests._probe_timed_rom_pair_support import Harness, _MenuSession, arguments
 
     args = arguments(
         "--input-profile=menu", "--listener-chunk=1", "--connector-chunk=1", "--frame-limit=4"
