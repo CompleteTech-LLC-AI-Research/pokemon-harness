@@ -45,6 +45,8 @@ REAL_ROM_MODULES = frozenset(
         "test_mcp_trade_records_rom.py",
         "test_battle_healing_items_rom.py",
         "test_pyboy_link_session_roms.py",
+        "test_pyboy_link_session_roms_diagnostics.py",
+        "test_pyboy_link_session_roms_serial.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
     }
@@ -272,6 +274,8 @@ LOCAL_LINK_MODULES = frozenset(
         "test_link_integration.py",
         "test_mcp_trade_records_rom.py",
         "test_pyboy_link_session_roms.py",
+        "test_pyboy_link_session_roms_diagnostics.py",
+        "test_pyboy_link_session_roms_serial.py",
     }
 )
 
@@ -321,7 +325,10 @@ TRADE_TESTS = frozenset(
             "test_pyboy_link_session_roms.py",
             "test_red_yellow_trade_swaps_real_party_records",
         ),
-        ("test_pyboy_link_session_roms.py", "test_yellow_pair_warps_to_trade_center"),
+        (
+            "test_pyboy_link_session_roms_diagnostics.py",
+            "test_yellow_pair_warps_to_trade_center",
+        ),
         (
             "test_pyboy_link_session_subprocess.py",
             "test_subprocess_pair_completes_trade_over_tcp",
@@ -359,8 +366,14 @@ TRADE_TESTS = frozenset(
 
 BATTLE_TESTS = frozenset(
     {
-        ("test_pyboy_link_session_roms.py", "test_yellow_pair_warps_to_colosseum"),
-        ("test_pyboy_link_session_roms.py", "test_yellow_pair_starts_link_battle"),
+        (
+            "test_pyboy_link_session_roms_diagnostics.py",
+            "test_yellow_pair_warps_to_colosseum",
+        ),
+        (
+            "test_pyboy_link_session_roms_diagnostics.py",
+            "test_yellow_pair_starts_link_battle",
+        ),
         ("test_pyboy_link_session_roms.py", "test_pair_completes_battle_turn"),
         (
             "test_pyboy_link_session_roms.py",
