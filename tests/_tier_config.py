@@ -189,6 +189,7 @@ UNIT_MODULES = frozenset(
         "test_timed_mcp_matrix.py",
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
+        "test_timed_remote_facade.py",
         "test_timed_wire_admission.py",
         "test_timed_wire_codec.py",
         "test_timed_wire_progress.py",
@@ -751,11 +752,11 @@ TIMING_SENSITIVE_TESTS = frozenset(
         ),
         ("test_timed_remote.py", "test_accept_wait_is_bounded_and_closes_listener"),
         (
-            "test_timed_remote.py",
+            "test_timed_remote_facade.py",
             "test_authored_runtime_two_owner_factory_attach_passive_sync_and_bilateral_fence",
         ),
         (
-            "test_timed_remote.py",
+            "test_timed_remote_facade.py",
             "test_external_cancel_survives_factory_into_real_endpoint_wait",
         ),
         (
