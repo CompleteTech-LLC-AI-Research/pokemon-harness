@@ -136,6 +136,10 @@ python -m ruff check \
     scripts/_timed_battle_probe.py \
     scripts/_timed_battle_probe_reads.py \
     scripts/_timed_battle_probe_schemas.py \
+    scripts/_coverage_report_build.py \
+    scripts/_coverage_report_catalog.py \
+    scripts/_coverage_report_model.py \
+    scripts/_coverage_report_schema.py \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
@@ -179,6 +183,10 @@ python -m ruff format --check \
     scripts/_timed_battle_probe.py \
     scripts/_timed_battle_probe_reads.py \
     scripts/_timed_battle_probe_schemas.py \
+    scripts/_coverage_report_build.py \
+    scripts/_coverage_report_catalog.py \
+    scripts/_coverage_report_model.py \
+    scripts/_coverage_report_schema.py \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
