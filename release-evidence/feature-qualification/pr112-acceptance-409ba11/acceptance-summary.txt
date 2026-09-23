@@ -1,0 +1,32 @@
+PR #112 acceptance under the qualification-runner contract (issue #85)
+Reviewed head: 409ba11d81707d95f9bfb542fe38b7ca98f40ad1
+Scope: dual-runtime nine-orientation timed MCP matrix + runner prerequisites
+
+[source] tests=143 failures=0 errors=0 skipped=0 orientations_passed=9/9
+  PASSED red_color-listen-red_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED red_color-listen-blue_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED red_color-listen-yellow-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED blue_color-listen-red_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED blue_color-listen-blue_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED blue_color-listen-yellow-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED yellow-listen-red_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED yellow-listen-blue_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED yellow-listen-yellow-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+[cython] tests=143 failures=0 errors=0 skipped=0 orientations_passed=9/9
+  PASSED red_color-listen-red_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED red_color-listen-blue_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED red_color-listen-yellow-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED blue_color-listen-red_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED blue_color-listen-blue_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED blue_color-listen-yellow-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED yellow-listen-red_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED yellow-listen-blue_color-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+  PASSED yellow-listen-yellow-connect  frames=3 mode=connected exit=[0, 0] group_alive=[False, False]
+
+Capacity samples (host-wide busy cores; NOT a reservation):
+  before busy_cores=9.4389 of 12 loadavg=[13.3828125, 12.49072265625, 11.4326171875]
+  during busy_cores=10.7188 of 12 loadavg=[17.5712890625, 14.18896484375, 12.150390625]
+  after  busy_cores=10.7162 of 12 loadavg=[17.3115234375, 14.8359375, 12.5595703125]
+
+Allocation status: BLOCKED
+No independently verifiable exclusive allocation exists on this host; the runner's reservation checks fail closed here. These runs therefore demonstrate functional dual-runtime acceptance only and are NOT a capacity-qualified result under an operator-provisioned allocation.
