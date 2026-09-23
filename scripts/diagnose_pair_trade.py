@@ -193,6 +193,10 @@ def _version_and_asset_metadata() -> dict[str, object]:
         REPO_ROOT / "src" / "pokered_harness" / "session.py",
         REPO_ROOT / "src" / "pokered_harness" / "ownership.py",
         REPO_ROOT / "src" / "pokered_harness" / "link" / "pyboy_link_session.py",
+        REPO_ROOT / "src" / "pokered_harness" / "link" / "_pyboy_link_session_network_mixin.py",
+        REPO_ROOT / "src" / "pokered_harness" / "link" / "_pyboy_link_session_lifecycle_mixin.py",
+        REPO_ROOT / "src" / "pokered_harness" / "link" / "_pyboy_link_session_stepping_mixin.py",
+        REPO_ROOT / "src" / "pokered_harness" / "link" / "_pyboy_link_session_support.py",
         REPO_ROOT / "src" / "pokered_harness" / "link" / "serial_coordinator.py",
     ]
 

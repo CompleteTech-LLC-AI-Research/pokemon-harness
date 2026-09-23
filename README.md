@@ -808,10 +808,12 @@ The current evidence boundary is deliberately narrow:
 | `tests/test_link_transport.py` and the `tests/test_network_backend_*.py` modules | In-process queues and TCP edge/response primitives | A real game trade or battle |
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
-| `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
+| `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial handshake and link-menu-pass milestones (entry module) | A full user-driven remote trade or battle |
+| `tests/test_link_integration_remote_rpc.py` and `tests/test_link_integration_remote_trade.py` | Fixture-gated remote RPC-flow, menu-vote, trade-center-exchange and agent-sync milestones | A full user-driven remote trade or battle |
 | `tests/test_pyboy_link_session_subprocess.py` | Canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints (two-subprocess TCP) | A full source release, compiled gameplay parity, or MCP-facing starter/trade/battle gameplay; recorded source strict battle passed 19/19, while source strict trade failed 18/19 |
 | `tests/test_pyboy_link_session_subprocess_link_menu_history.py` and `tests/test_pyboy_link_session_subprocess_peer_lifecycle.py` | ROM-free link-menu history recorder plus peer supervision, shutdown, sync-boundary, trace-watchdog and result-validation regressions | Emulator, game, or real-ROM behavior |
 | `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus parameterized canonical Red/Blue/Yellow local trade and battle acceptance entrypoints | Stock-variant coverage, or a release result from a skipped, RAM-mutated, or unpinned path |
+| `tests/test_pyboy_link_session_roms_serial.py` and `tests/test_pyboy_link_session_roms_diagnostics.py` | Yellow two-session serial-core and byte-exchange smoke plus link-menu warp (trade center, colosseum) and link-battle-start milestones | A completed trade or battle, or a release result from an unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
 battle needs an acceptance result from the actual release runtime, matching

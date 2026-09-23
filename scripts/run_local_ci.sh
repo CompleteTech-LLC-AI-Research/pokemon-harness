@@ -157,6 +157,15 @@ python -m ruff check \
     scripts/qualification_runner_model.py \
     scripts/qualification_runner_report.py \
     scripts/qualification_runner_reservation.py \
+    scripts/production_gate_assets.py \
+    scripts/production_gate_evidence.py \
+    scripts/production_gate_execution.py \
+    scripts/production_gate_matrix.py \
+    scripts/production_gate_model.py \
+    scripts/production_gate_render.py \
+    scripts/production_gate_runtime.py \
+    scripts/production_gate_text.py \
+    scripts/production_gate_tiers.py \
     scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_battle_scenarios.py \
@@ -230,6 +239,15 @@ python -m ruff format --check \
     scripts/qualification_runner_model.py \
     scripts/qualification_runner_report.py \
     scripts/qualification_runner_reservation.py \
+    scripts/production_gate_assets.py \
+    scripts/production_gate_evidence.py \
+    scripts/production_gate_execution.py \
+    scripts/production_gate_matrix.py \
+    scripts/production_gate_model.py \
+    scripts/production_gate_render.py \
+    scripts/production_gate_runtime.py \
+    scripts/production_gate_text.py \
+    scripts/production_gate_tiers.py \
     scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_battle_scenarios.py \
@@ -281,6 +299,10 @@ python -m ruff format --check \
 
 # Check runtime and link lane lint
 python -m ruff check \
+    src/pokered_harness/link/_pyboy_link_session_lifecycle_mixin.py \
+    src/pokered_harness/link/_pyboy_link_session_network_mixin.py \
+    src/pokered_harness/link/_pyboy_link_session_stepping_mixin.py \
+    src/pokered_harness/link/_pyboy_link_session_support.py \
     src/pokered_harness/link/_serial_link_support.py \
     src/pokered_harness/link/network_backend.py \
     src/pokered_harness/link/pyboy_link_session.py \

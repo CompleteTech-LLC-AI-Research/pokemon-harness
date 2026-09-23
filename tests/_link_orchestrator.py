@@ -1,6 +1,6 @@
 """Deterministic lockstep stepper for two-session link-cable tests.
 
-The `_SessionRunner` in :mod:`tests.test_link_integration_remote` runs
+The `_SessionRunner` in :mod:`tests._link_integration_remote_support` runs
 each session on its own daemon thread, auto-stepping without any
 coordination. That's fine for transport-level milestones (handshake,
 nybble sync, menu vote), but it makes anything that needs

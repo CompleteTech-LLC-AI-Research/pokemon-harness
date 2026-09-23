@@ -38,6 +38,8 @@ REAL_ROM_MODULES = frozenset(
         "test_rom_boot_matrix.py",
         "test_link_integration.py",
         "test_link_integration_remote.py",
+        "test_link_integration_remote_rpc.py",
+        "test_link_integration_remote_trade.py",
         "test_mcp_real_link.py",
         "test_link_symbols_real_roms.py",
         "test_mcp_stdio_integration.py",
@@ -45,6 +47,8 @@ REAL_ROM_MODULES = frozenset(
         "test_mcp_trade_records_rom.py",
         "test_battle_healing_items_rom.py",
         "test_pyboy_link_session_roms.py",
+        "test_pyboy_link_session_roms_diagnostics.py",
+        "test_pyboy_link_session_roms_serial.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
     }
@@ -280,12 +284,16 @@ LOCAL_LINK_MODULES = frozenset(
         "test_link_integration.py",
         "test_mcp_trade_records_rom.py",
         "test_pyboy_link_session_roms.py",
+        "test_pyboy_link_session_roms_diagnostics.py",
+        "test_pyboy_link_session_roms_serial.py",
     }
 )
 
 REMOTE_LINK_MODULES = frozenset(
     {
         "test_link_integration_remote.py",
+        "test_link_integration_remote_rpc.py",
+        "test_link_integration_remote_trade.py",
         "test_mcp_real_link.py",
         "test_mcp_timed_rom.py",
         "test_pyboy_link_session_subprocess.py",
@@ -306,22 +314,25 @@ MCP_STDIO_MODULES = frozenset(
 TRADE_TESTS = frozenset(
     {
         ("test_link_integration.py", "test_link_trade_roundtrip"),
-        ("test_link_integration_remote.py", "test_remote_trade_reaches_link_menu_via_tcp"),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_trade.py",
+            "test_remote_trade_reaches_link_menu_via_tcp",
+        ),
+        (
+            "test_link_integration_remote_rpc.py",
             "test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu",
         ),
         ("test_link_integration_remote.py", "test_remote_rpc_flow_past_link_menu_over_tcp"),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_rpc.py",
             "test_remote_menu_vote_converges_and_warps_to_trade_center",
         ),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_trade.py",
             "test_remote_exchange_bytes_fires_in_trade_center_blue_blue",
         ),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_trade.py",
             "test_remote_agent_sync_coordinates_link_menu_vote_blue_blue",
         ),
         ("test_pyboy_link_session_roms.py", "test_pair_completes_trade_end_to_end"),
@@ -329,7 +340,10 @@ TRADE_TESTS = frozenset(
             "test_pyboy_link_session_roms.py",
             "test_red_yellow_trade_swaps_real_party_records",
         ),
-        ("test_pyboy_link_session_roms.py", "test_yellow_pair_warps_to_trade_center"),
+        (
+            "test_pyboy_link_session_roms_diagnostics.py",
+            "test_yellow_pair_warps_to_trade_center",
+        ),
         (
             "test_pyboy_link_session_subprocess.py",
             "test_subprocess_pair_completes_trade_over_tcp",
@@ -367,8 +381,14 @@ TRADE_TESTS = frozenset(
 
 BATTLE_TESTS = frozenset(
     {
-        ("test_pyboy_link_session_roms.py", "test_yellow_pair_warps_to_colosseum"),
-        ("test_pyboy_link_session_roms.py", "test_yellow_pair_starts_link_battle"),
+        (
+            "test_pyboy_link_session_roms_diagnostics.py",
+            "test_yellow_pair_warps_to_colosseum",
+        ),
+        (
+            "test_pyboy_link_session_roms_diagnostics.py",
+            "test_yellow_pair_starts_link_battle",
+        ),
         ("test_pyboy_link_session_roms.py", "test_pair_completes_battle_turn"),
         (
             "test_pyboy_link_session_roms.py",

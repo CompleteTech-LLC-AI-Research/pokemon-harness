@@ -18,11 +18,28 @@ from typing import ClassVar
 _GATE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "production_gate.py"
 
 
-_SPEC = importlib.util.spec_from_file_location("pokered_production_gate", _GATE_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-gate = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = gate
-_SPEC.loader.exec_module(gate)
+def load_gate():
+    """Return the one gate facade loaded from source for this process.
+
+    ``scripts/production_gate.py`` is now a facade over nine support modules,
+    and those modules resolve monkeypatched call targets through the entry-point
+    module object registered as ``scripts.production_gate``.  Executing the
+    entry script a second time would build a second facade whose attribute
+    patches the shared support modules never observe, so every test module
+    reuses the first instance loaded from this path.
+    """
+    cached = sys.modules.get("scripts.production_gate")
+    if cached is not None and getattr(cached, "__file__", None) == str(_GATE_PATH):
+        return cached
+    spec = importlib.util.spec_from_file_location("pokered_production_gate", _GATE_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+gate = load_gate()
 
 
 def _matrix_report(nodeid: str, *, outcome: str = "passed") -> dict:
