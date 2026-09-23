@@ -737,10 +737,12 @@ First run the transport/serial milestones:
 
 ```bash
 python -m pytest -q -ra \
-  tests/test_link_integration_remote.py
+  tests/test_link_integration_remote.py \
+  tests/test_link_integration_remote_rpc.py \
+  tests/test_link_integration_remote_trade.py
 ```
 
-This module exercises remote TCP plumbing and selected real-ROM milestones.
+These modules exercise remote TCP plumbing and selected real-ROM milestones.
 Some cases stop at LinkMenu or use controlled menu/fixture setup; that is not
 the same as a user-driven full trade or battle.
 

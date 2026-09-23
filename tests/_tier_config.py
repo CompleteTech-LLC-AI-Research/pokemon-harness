@@ -38,6 +38,8 @@ REAL_ROM_MODULES = frozenset(
         "test_rom_boot_matrix.py",
         "test_link_integration.py",
         "test_link_integration_remote.py",
+        "test_link_integration_remote_rpc.py",
+        "test_link_integration_remote_trade.py",
         "test_mcp_real_link.py",
         "test_link_symbols_real_roms.py",
         "test_mcp_stdio_integration.py",
@@ -278,6 +280,8 @@ LOCAL_LINK_MODULES = frozenset(
 REMOTE_LINK_MODULES = frozenset(
     {
         "test_link_integration_remote.py",
+        "test_link_integration_remote_rpc.py",
+        "test_link_integration_remote_trade.py",
         "test_mcp_real_link.py",
         "test_mcp_timed_rom.py",
         "test_pyboy_link_session_subprocess.py",
@@ -298,22 +302,25 @@ MCP_STDIO_MODULES = frozenset(
 TRADE_TESTS = frozenset(
     {
         ("test_link_integration.py", "test_link_trade_roundtrip"),
-        ("test_link_integration_remote.py", "test_remote_trade_reaches_link_menu_via_tcp"),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_trade.py",
+            "test_remote_trade_reaches_link_menu_via_tcp",
+        ),
+        (
+            "test_link_integration_remote_rpc.py",
             "test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu",
         ),
         ("test_link_integration_remote.py", "test_remote_rpc_flow_past_link_menu_over_tcp"),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_rpc.py",
             "test_remote_menu_vote_converges_and_warps_to_trade_center",
         ),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_trade.py",
             "test_remote_exchange_bytes_fires_in_trade_center_blue_blue",
         ),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_trade.py",
             "test_remote_agent_sync_coordinates_link_menu_vote_blue_blue",
         ),
         ("test_pyboy_link_session_roms.py", "test_pair_completes_trade_end_to_end"),
