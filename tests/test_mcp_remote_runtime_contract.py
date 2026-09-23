@@ -8,8 +8,8 @@ import pytest
 
 from pokered_harness import mcp_server
 from pokered_harness.mcp_server import LinkState, McpHarnessError, build_server, dispatch_tool
-from tests.test_mcp_local_runtime_contract import _break_contract
 from tests._mcp_server_support import _endpoint_session
+from tests.test_mcp_local_runtime_contract import _break_contract
 
 
 def _arguments(command):
@@ -82,8 +82,8 @@ def test_argument_validation_precedes_runtime_guard(monkeypatch, command, overri
 
 
 def test_supported_serial_runtime_never_constructs_semantic_adapter(monkeypatch):
-    from tests.test_mcp_local_runtime_contract import _sessions
     from tests._mcp_server_support import _free_port
+    from tests.test_mcp_local_runtime_contract import _sessions
 
     listener, _peer, link = _sessions()
     forbidden = Mock(side_effect=AssertionError("semantic adapter selected"))
