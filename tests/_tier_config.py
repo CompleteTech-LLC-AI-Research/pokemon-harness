@@ -176,6 +176,7 @@ UNIT_MODULES = frozenset(
         "test_state_progress.py",
         "test_state_status.py",
         "test_state_text.py",
+        "test_stepping_loop_profile.py",
         "test_symbol_loader.py",
         "test_timed_link_session.py",
         "test_timed_battle_probe_contract.py",
