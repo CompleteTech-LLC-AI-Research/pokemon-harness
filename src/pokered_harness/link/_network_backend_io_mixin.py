@@ -34,6 +34,8 @@ from pokered_harness.link._network_backend_support import (
 class _NetworkBackendIOMixin:
     """On-edge exchange, frame IO and wire-idle helpers."""
 
+    # --- SerialBackend.on_edge (master path) --------------------------
+
     def on_edge(self, our_bit: int, our_role: int) -> int:
         """Master-mode: send ``our_bit`` as EDGE_REQ, wait for EDGE_RESP.
 

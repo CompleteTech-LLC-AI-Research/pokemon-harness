@@ -39,7 +39,7 @@ class _NetworkBackendLifecycleMixin:
                 pass
             raise
         self._write_lock = threading.Lock()
-        # A Game Boy serial core has one outstanding master edge at a _entry.time.
+        # A Game Boy serial core has one outstanding master edge at a time.
         # Versioned peers add an id to each edge so a late response cannot be
         # matched to a later edge.  The old two-byte mode retains its strict
         # single-slot response queue and fail-closed behavior.
@@ -78,7 +78,7 @@ class _NetworkBackendLifecycleMixin:
         self._leader_frame_inflight = False
         # Keep edge application ordered, but do not let a slow slave
         # re-arm wait block the reader from consuming control frames such
-        # as SYNC or HELLO. The master sends one EDGE_REQ at a _entry.time, so a
+        # as SYNC or HELLO. The master sends one EDGE_REQ at a time, so a
         # bounded queue is sufficient and makes overload fail closed. In
         # owner-dispatch mode this queue contains requests which only the
         # emulator owner may execute; the network threads never touch the
@@ -328,6 +328,8 @@ class _NetworkBackendLifecycleMixin:
             raise error
         return peer_version
 
+    # --- slave-side receiver ------------------------------------------
+
     def start_receiver(
         self,
         local_core: object,
@@ -448,6 +450,8 @@ class _NetworkBackendLifecycleMixin:
             )
             self._edge_worker.start()
             self._reader.start()
+
+    # --- lifecycle ----------------------------------------------------
 
     def _mark_closed(
         self,

@@ -31,6 +31,8 @@ from pokered_harness.link._network_backend_support import (
 class _NetworkBackendOwnerMixin:
     """Reader loop and emulator-owner edge dispatch."""
 
+    # --- internals ----------------------------------------------------
+
     def _reader_loop(self) -> None:
         try:
             while not self._closed:
@@ -417,7 +419,7 @@ class _NetworkBackendOwnerMixin:
         # Wait for the externally-owned serial gate before admitting a core
         # operation.  A lifecycle detach is called under that same gate by
         # the owner, so a dispatcher queued behind it must not keep the core
-        # admission count non-zero and force detach to _entry.time out. Once the
+        # admission count non-zero and force detach to time out. Once the
         # gate is held, admission and native application are one critical
         # section; a dispatcher which wakes after a successful detach fails
         # closed before it can read the cleared reference.
@@ -539,7 +541,7 @@ class _NetworkBackendOwnerMixin:
 
         A byte completed inside that frame is intentionally ineligible for
         release by this token. Its interrupt may have occurred at the very
-        end of the frame, before the CPU had _entry.time to consume its mailbox.
+        end of the frame, before the CPU had time to consume its mailbox.
         """
         with self._serial_gate, self._local_core_access(), self._owner_dispatch_lock:
             return self._held_owner_byte_response

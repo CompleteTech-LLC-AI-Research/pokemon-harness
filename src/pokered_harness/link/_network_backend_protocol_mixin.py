@@ -117,6 +117,8 @@ class _NetworkBackendProtocolMixin:
         finally:
             lock.release()
 
+    # --- negotiated frame barrier -----------------------------------
+
     def begin_frame_turn(
         self,
         *,
@@ -301,6 +303,8 @@ class _NetworkBackendProtocolMixin:
     def _clear_leader_frame_inflight(self) -> None:
         with self._frame_turn_lock:
             self._leader_frame_inflight = False
+
+    # --- out-of-band rendezvous ---------------------------------------
 
     def sync_with_peer(
         self,
