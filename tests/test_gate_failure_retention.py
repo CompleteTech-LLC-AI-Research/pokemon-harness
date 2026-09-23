@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import sys
@@ -12,14 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from tests._production_gate_support import gate
+
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location(
-    "gate_failure_retention_under_test", ROOT / "scripts" / "production_gate.py"
-)
-assert SPEC is not None and SPEC.loader is not None
-gate = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = gate
-SPEC.loader.exec_module(gate)
 
 ORIGINAL_LINE = '>       exercise_original_failure("retention-origin")'
 TERMINAL_EXCEPTION = "E       RuntimeError: retention-terminal-exception"

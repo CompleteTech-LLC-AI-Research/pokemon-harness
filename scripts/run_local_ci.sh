@@ -145,6 +145,15 @@ python -m ruff check \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
+    scripts/production_gate_assets.py \
+    scripts/production_gate_evidence.py \
+    scripts/production_gate_execution.py \
+    scripts/production_gate_matrix.py \
+    scripts/production_gate_model.py \
+    scripts/production_gate_render.py \
+    scripts/production_gate_runtime.py \
+    scripts/production_gate_text.py \
+    scripts/production_gate_tiers.py \
     scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_battle_scenarios.py \
@@ -197,6 +206,15 @@ python -m ruff format --check \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
+    scripts/production_gate_assets.py \
+    scripts/production_gate_evidence.py \
+    scripts/production_gate_execution.py \
+    scripts/production_gate_matrix.py \
+    scripts/production_gate_model.py \
+    scripts/production_gate_render.py \
+    scripts/production_gate_runtime.py \
+    scripts/production_gate_text.py \
+    scripts/production_gate_tiers.py \
     scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_battle_scenarios.py \
