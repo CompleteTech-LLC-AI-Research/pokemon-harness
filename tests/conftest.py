@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
@@ -116,3 +118,8 @@ def symbols() -> SymbolTable:
 @pytest.fixture
 def mem() -> DictMemory:
     return DictMemory()
+
+
+@pytest.fixture
+def probe():
+    return importlib.import_module("scripts._timed_battle_probe")
