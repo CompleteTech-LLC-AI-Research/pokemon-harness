@@ -59,6 +59,7 @@ UNIT_MODULES = frozenset(
         "test_agent_sync.py",
         "test_battle_coverage.py",
         "test_battle_item_evidence.py",
+        "test_battle_healing_registration.py",
         "test_battle_medicine_oracle.py",
         "test_battle_scenario_fixtures.py",
         "test_battle_turn_evidence.py",
@@ -235,14 +236,6 @@ ROM_FREE_TESTS = frozenset(
         (
             "test_battle_healing_items_rom.py",
             "test_turn_evidence_is_required_rather_than_supplied",
-        ),
-        (
-            # The dual-runtime registration record for this leaf's runtime half
-            # is a committed file set, so its consistency check reads no asset
-            # and has no skip path; it belongs in the always-selected unit tier
-            # rather than being hidden behind the module's `real_rom` marker.
-            "test_battle_healing_items_rom.py",
-            "test_runtime_registration_bundle_is_sanitized_and_consistent",
         ),
     }
 )
