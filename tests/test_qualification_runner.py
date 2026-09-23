@@ -3472,3 +3472,189 @@ def test_cgroup_v1_cpu_quota_reports_an_unreadable_period(tmp_path: Path, monkey
     quota, observable = runner._cgroup_cpu_quota_v1([path])
     assert observable is False
     assert quota is None
+
+
+def test_absent_cgroup_hierarchy_is_unknown_not_unlimited(tmp_path: Path):
+    """An unreadable hierarchy must not be admitted as unlimited capacity.
+
+    The round-15 finding: with no cgroupfs root, ``_read_cgroup_facts`` left
+    ``cpu_quota_observable`` and ``memory_limit_observable`` at ``True`` even
+    though it reported ``cgroup_version=unavailable``.  A valid cpuset
+    declaration with no optional CPU weight then admitted with ``overall=ok``.
+    """
+
+    unmounted = tmp_path / "sys-fs-cgroup"
+    observed = runner._read_cgroup_facts(unmounted, "0::/limited-job\n")
+    assert observed["cgroup_version"] == "unavailable"
+    assert observed["cpu_quota_observable"] is False
+    assert observed["memory_limit_observable"] is False
+
+    declaration, facts = held_reservation(tmp_path, "cpuset-affinity")
+    declaration.pop("cpu_weight")
+    for key, value in observed.items():
+        setattr(facts, key, value)
+    results = runner.evaluate_resources(declaration, facts, tmp_path)
+    assert statuses(results)["cpu-quota"] == "unsupported"
+    assert statuses(results)["memory"] == "unsupported"
+    assert runner.overall_status(results) != "ok"
+
+
+def test_hierarchy_with_an_observed_unlimited_quota_stays_observable(tmp_path: Path):
+    """A controller that positively reports ``max`` is observed, not unknown."""
+
+    base = tmp_path / "cgroup"
+    leaf = base / "limited-job"
+    leaf.mkdir(parents=True)
+    (leaf / "cpu.max").write_text("max 100000\n", encoding="utf-8")
+    (leaf / "memory.max").write_text("max\n", encoding="utf-8")
+    observed = runner._read_cgroup_facts(base, "0::/limited-job\n")
+    assert observed["cgroup_version"] == "v2"
+    assert observed["cpu_quota_cores"] is None
+    assert observed["cpu_quota_observable"] is True
+    assert observed["memory_limit_bytes"] is None
+    assert observed["memory_limit_observable"] is True
+
+
+def test_reserve_report_carries_the_admitted_snapshot_and_full_checks(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """A successful report must show the facts admission used, not stale ones.
+
+    The round-15 finding: ``main`` built ``payload.facts`` before the lease was
+    held, so a run admitted against affinity 0-3 reported 0-7, ``checks=[]``,
+    and no job filesystem measurements.
+    """
+
+    if not _LOCK_OBSERVATION_SUPPORTED:
+        pytest.skip("kernel lock table is not observable in this sandbox")
+    declaration = make_declaration(
+        reservation_mechanism="cpuset-affinity",
+        affinity_cpus=[0, 1, 2, 3],
+        cpu_quota_cores=None,
+    )
+    declaration["reservation"]["host_lock_path"] = str(tmp_path / "host.lock")
+    declaration["reservation"]["job_dir"] = str(tmp_path / "job")
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    samples = [
+        make_facts(affinity_cpus=list(range(8)), affinity_count=8, cpu_quota_cores=None),
+        make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None),
+    ]
+    monkeypatch.setattr(runner, "collect_facts", lambda root: samples.pop(0))
+    monkeypatch.setattr(
+        runner,
+        "prerequisite_checks",
+        lambda decl, root: [runner.CheckResult("stub", "ok", None, None, "")],
+    )
+    exit_code = runner.main(
+        [
+            "--reserve",
+            "--json",
+            "--declaration",
+            str(declaration_path),
+            "--run",
+            sys.executable,
+            "-c",
+            "pass",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0, payload
+    assert payload["facts"]["affinity_cpus"] == [0, 1, 2, 3]
+    assert payload["facts"]["job_tmp_path"] is not None
+    assert payload["facts"]["job_tmp_disk_free_bytes"] is not None
+    names = {item["name"] for item in payload["checks"]}
+    assert {"affinity", "cpu-quota", "memory"} <= names
+    assert payload["initial_facts"]["affinity_cpus"] == list(range(8))
+
+
+def test_blocked_cli_exit_refuses_a_later_reservation_on_the_same_host_lock(
+    tmp_path: Path,
+):
+    """A blocked CLI exit must not let another job take the same host lock.
+
+    The round-15 finding: the blocked path kept the lease only while the holder
+    process lived.  The kernel dropped the flock at exit, so a different job
+    directory reserved the identical host lock while a detached descendant was
+    still alive.  A host-wide unresolved record must keep exclusion across exit.
+    """
+
+    declaration = make_declaration(
+        reservation_mechanism="cpuset-affinity",
+        affinity_cpus=[0, 1, 2, 3],
+        cpu_quota_cores=None,
+    )
+    job_dir = tmp_path / "blocked-job"
+    host_lock = tmp_path / "host.lock"
+    declaration["reservation"]["host_lock_path"] = str(host_lock)
+    declaration["reservation"]["job_dir"] = str(job_dir)
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    pidfile = tmp_path / "detached.pid"
+    command = (
+        "import subprocess,sys\n"
+        "from pathlib import Path\n"
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],"
+        "start_new_session=True,stdin=subprocess.DEVNULL,"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"Path({str(pidfile)!r}).write_text(str(p.pid))\n"
+    )
+    program = (
+        "from scripts import qualification_runner as r\n"
+        "from tests.test_qualification_runner import make_facts\n"
+        "r.collect_facts=lambda root: make_facts(affinity_cpus=[0,1,2,3],"
+        "affinity_count=4,cpu_quota_cores=None)\n"
+        "r.prerequisite_checks=lambda *args: [r.CheckResult('stub-prerequisites',"
+        "'ok',None,None,'ROM-free fault injection')]\n"
+        # Force the supported subreaper-unavailable failure path; Popen,
+        # containment, the lease, main(), and the real process exit are intact.
+        "r._child_subreaper_state=lambda: 0\n"
+        "r._set_child_subreaper=lambda enabled: False\n"
+        "raise SystemExit(r.main("
+        f"{['--reserve', '--json', '--declaration', str(declaration_path), '--run', sys.executable, '-c', command]!r}"
+        "))\n"
+    )
+    env = dict(os.environ, PYTHONPATH=f"{REPO_ROOT}:{REPO_ROOT / 'src'}")
+    previous_subreaper = runner._child_subreaper_state()
+    runner._set_child_subreaper(True)
+    detached: int | None = None
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        payload = json.loads(completed.stdout)
+        assert completed.returncode == 1, payload
+        assert payload["overall"] == "blocked"
+        assert (job_dir / "allocation.json").exists(), "the blocked lease was removed"
+        assert pidfile.exists()
+        detached = int(pidfile.read_text(encoding="utf-8"))
+        assert runner._pid_alive(detached), "the detached descendant was not left running"
+        record = host_lock.with_name(host_lock.name + runner._UNRESOLVED_ALLOCATION_SUFFIX)
+        assert record.exists(), "the blocked exit left no host-wide unresolved record"
+        # A different job directory must be refused the same host-wide lock
+        # while the unresolved allocation persists, even though the flock the
+        # exited holder dropped is free.
+        other_job = tmp_path / "other-job"
+        with pytest.raises(runner.UnresolvedAllocationError):
+            runner._reserve_allocation(
+                declaration,
+                tmp_path,
+                other_job,
+                make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None),
+            )
+        assert not (other_job / "allocation.json").exists()
+    finally:
+        if detached is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(detached, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(detached, 0)
+        if previous_subreaper is not None:
+            runner._set_child_subreaper(bool(previous_subreaper))
+        runner._close_held_lease_descriptors(runner._lock_identity(host_lock))

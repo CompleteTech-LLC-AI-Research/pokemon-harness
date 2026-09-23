@@ -869,6 +869,19 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
         memory_paths, memory_filename, memory_usage_filename
     )
 
+    # An absent or unresolvable hierarchy is an *unknown* bound, not a
+    # positively observed unlimited one.  When no CPU controller file was found
+    # anywhere on the walk, this process is either in a cgroup whose controller
+    # layout cannot be resolved or in a cgroupfs mount that is absent or hidden;
+    # admission must fail closed rather than treat "I could not look" as
+    # "unlimited".  The same applies to memory when no memory controller file
+    # was observable at all, so an unreadable hierarchy cannot admit a job
+    # against unknown CPU and memory capacity.
+    if version == "unavailable":
+        quota_observable = False
+        if not any((path / memory_filename).exists() for path in memory_paths):
+            memory_limit_observable = False
+
     for path in stat_paths:
         stat_raw = _read_text(path / "cpu.stat")
         if not stat_raw:
@@ -4550,6 +4563,129 @@ def _holder_is_owned(holder: Any, start_time: Any) -> bool:
     return "qualification_runner" in command or "qualification-runner" in command
 
 
+_UNRESOLVED_ALLOCATION_SUFFIX = ".unresolved-allocation.json"
+
+
+class UnresolvedAllocationError(ValueError):
+    """A prior lease on this host lock was never proven contained.
+
+    A blocked holder keeps its lease only while the process lives; the kernel
+    drops the flock when that process exits.  A host-wide record written next to
+    the host lock keeps the exclusion in force across holder exit, and every
+    reservation checks it under the same lock before it admits a new lease.
+    """
+
+
+def _unresolved_allocation_path(host_lock: Path) -> Path:
+    """Return the host-wide record path for *host_lock*.
+
+    The record sits beside the host lock, so any job directory that reserves the
+    same host-wide lock finds the same record regardless of its own job dir.
+    """
+
+    return host_lock.with_name(host_lock.name + _UNRESOLVED_ALLOCATION_SUFFIX)
+
+
+def _declared_host_lock(declaration: dict[str, Any], repo_root: Path) -> Path | None:
+    reservation = declaration.get("reservation")
+    if not isinstance(reservation, dict):
+        return None
+    return _resolve_declared_path(reservation.get("host_lock_path"), repo_root)
+
+
+def _descriptor_lock_path(descriptor_path: Path) -> Path | None:
+    """Best-effort read of the host lock a descriptor names, without validating it."""
+
+    try:
+        document = json.loads(descriptor_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    raw = document.get("lock_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(raw)
+
+
+def _write_unresolved_allocation(
+    host_lock: Path,
+    *,
+    reason: str,
+    descriptor_path: Path | None = None,
+    lock_identity: Any = None,
+) -> Path | None:
+    """Durably record that the allocation on *host_lock* is still unresolved.
+
+    This must survive the holder's exit, so it is written to disk rather than
+    held only in process memory.  It is created atomically (write, then rename)
+    so a reader never observes a partial record.
+    """
+
+    record_path = _unresolved_allocation_path(host_lock)
+    identity = lock_identity if isinstance(lock_identity, dict) else _lock_identity(host_lock)
+    document = {
+        "record_version": 1,
+        "kind": "unresolved-allocation",
+        "lock_path": str(host_lock),
+        "lock_identity": identity,
+        "holder_pid": os.getpid(),
+        "descriptor_path": str(descriptor_path) if descriptor_path is not None else None,
+        "reason": reason,
+        "created_at": _iso_now(),
+    }
+    tmp = record_path.with_name(f"{record_path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, record_path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return None
+    return record_path
+
+
+def _mark_allocation_unresolved(descriptor_path: Path | None, reason: str) -> Path | None:
+    """Record the unresolved allocation named by a descriptor, if it is readable."""
+
+    if descriptor_path is None:
+        return None
+    lock_path = _descriptor_lock_path(descriptor_path)
+    if lock_path is None:
+        return None
+    return _write_unresolved_allocation(lock_path, reason=reason, descriptor_path=descriptor_path)
+
+
+def _blocked_allocation(descriptor_path: Path | None, reason: str) -> tuple[str, str]:
+    """Keep the lease blocked and persist the reason across this process's exit."""
+
+    _mark_allocation_unresolved(descriptor_path, reason)
+    return "blocked", reason
+
+
+def _clear_unresolved_allocation(host_lock: Path | None) -> None:
+    if host_lock is None:
+        return
+    try:
+        _unresolved_allocation_path(host_lock).unlink()
+    except OSError:
+        pass
+
+
+def _unresolved_allocation_present(host_lock: Path | None) -> Path | None:
+    """Return the unresolved record path for *host_lock* when one is present."""
+
+    if host_lock is None:
+        return None
+    record_path = _unresolved_allocation_path(host_lock)
+    if record_path.exists() or record_path.is_symlink():
+        return record_path
+    return None
+
+
 def _reserve_allocation(
     declaration: dict[str, Any], repo_root: Path, job_dir: Path, facts: RunnerFacts
 ) -> tuple[Path, dict[str, Any], int]:
@@ -4595,6 +4731,21 @@ def _reserve_allocation(
     except OSError:
         os.close(lock_fd)
         raise
+
+    # A prior holder that exited while its containment was unproven left a
+    # host-wide record beside this lock.  The flock it drops on exit is not the
+    # exclusion that matters: a new job directory reserving the same host lock
+    # must be refused until containment is proven or an operator recovers the
+    # unresolved allocation.  Check under the lock so two reservations cannot
+    # both pass the record check and then admit.
+    unresolved = _unresolved_allocation_present(host_lock)
+    if unresolved is not None:
+        os.close(lock_fd)
+        raise UnresolvedAllocationError(
+            "a previous allocation on this host lock was never proven contained "
+            f"({unresolved.name}); refusing to admit a new lease until its owned "
+            "work is contained or the unresolved allocation is recovered by an operator"
+        )
 
     lease_id = uuid.uuid4().hex
     try:
@@ -5069,22 +5220,28 @@ def _release_confirm_holder_tree(holder: int) -> tuple[bool, str]:
 
 
 def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[str, str]:
+    descriptor_path = _allocation_descriptor_path(declaration, repo_root)
+
+    def blocked(reason: str) -> tuple[str, str]:
+        # The lease state is kept, but a holder that exits drops the flock it
+        # held.  Persist the reason beside the host lock so a later reservation
+        # on the same host lock cannot admit new work until containment is
+        # proven or an operator recovers the unresolved allocation.
+        _mark_allocation_unresolved(descriptor_path, reason)
+        return "blocked", reason
+
     live_leftovers = _sweep_leftover_owned_processes()
     if live_leftovers:
-        return (
-            "blocked",
-            (
-                "owned descendants are still running "
-                f"({len(live_leftovers)} pid(s)); the lease is kept because the "
-                "allocation is still in use"
-            ),
+        return blocked(
+            "owned descendants are still running "
+            f"({len(live_leftovers)} pid(s)); the lease is kept because the "
+            "allocation is still in use"
         )
-    descriptor_path = _allocation_descriptor_path(declaration, repo_root)
     if descriptor_path is None or not descriptor_path.is_file():
         return "blocked", "no pinned allocation descriptor to release"
     binding_error = _pinned_descriptor_binding_error(declaration, descriptor_path)
     if binding_error is not None:
-        return "blocked", binding_error
+        return blocked(binding_error)
     descriptor, error = _load_allocation_descriptor(descriptor_path)
     if descriptor is None:
         return "fail", error
@@ -5099,44 +5256,41 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
     lock_path = Path(raw) if isinstance(raw, str) and raw else None
     lock_holders = _observe_flock_holders(lock_path) if lock_path is not None else None
     if lock_holders is None:
-        return "blocked", "lock ownership is not observable; refusing to remove state"
+        return blocked("lock ownership is not observable; refusing to remove state")
     if lock_path is not None:
         observed_identity = _lock_identity(lock_path)
         if observed_identity is None:
-            return "blocked", "the allocation lock identity is not observable; refusing to release"
+            return blocked("the allocation lock identity is not observable; refusing to release")
         if not _lock_identity_matches(descriptor.get("lock_identity"), observed_identity):
-            return (
-                "blocked",
-                (
-                    "the allocation lock pathname no longer names the recorded lease inode; "
-                    "refusing to release, because this state belongs to a different allocation"
-                ),
+            return blocked(
+                "the allocation lock pathname no longer names the recorded lease inode; "
+                "refusing to release, because this state belongs to a different allocation"
             )
     if holder == os.getpid():
         if lock_path is not None and not _lock_owned_by_this_process(lock_path):
-            return "blocked", "this process does not hold the recorded allocation lock"
+            return blocked("this process does not hold the recorded allocation lock")
         recorded_ok, recorded_detail = _confirm_recorded_job_containment(
             descriptor_path.parent, contain_adopted=False
         )
         if not recorded_ok:
-            return "blocked", recorded_detail
+            return blocked(recorded_detail)
     else:
         if _pid_alive(holder) or holder in lock_holders:
             terminated, detail = _release_confirm_holder_tree(holder)
             if not terminated:
-                return "blocked", detail
+                return blocked(detail)
         else:
             # The holder already exited, but it may have detached a descendant
             # that is still consuming the allocation.  Confirm containment
             # before any state is removed.
             adopted_confirmed, adopted_survivors = _contain_adopted_descendants()
             if not adopted_confirmed:
-                return "blocked", (
+                return blocked(
                     "descendants of the exited holder survived containment: "
                     + ", ".join(str(pid) for pid in adopted_survivors[:16])
                 )
         if lock_path is not None and holder in (_observe_flock_holders(lock_path) or set()):
-            return "blocked", "the recorded holder still holds the allocation lock"
+            return blocked("the recorded holder still holds the allocation lock")
         # This process is not the holder's ancestor, so setting its own
         # subreaper flag cannot adopt the holder's children and it cannot even
         # observe a descendant the holder detaches during teardown.  Only a job
@@ -5150,10 +5304,10 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
             descriptor_path.parent, contain_adopted=False
         )
         if not confirmed:
-            return "blocked", detail
+            return blocked(detail)
     live_leftovers = _sweep_leftover_owned_processes()
     if live_leftovers:
-        return "blocked", (
+        return blocked(
             "owned descendants are still running after release "
             f"({len(live_leftovers)} pid(s)); including "
             + ", ".join(str(pid) for pid in live_leftovers[:16])
@@ -5165,7 +5319,7 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
     job_token = record.get("job_token") if isinstance(record, dict) else None
     token_survivors = _await_no_token_owned_survivors(job_token)
     if token_survivors:
-        return "blocked", (
+        return blocked(
             "descendants of the recorded job are still running after containment "
             f"({len(token_survivors)} pid(s)); the lease is kept because the "
             "allocation is still in use: " + ", ".join(str(pid) for pid in token_survivors[:16])
@@ -5178,63 +5332,74 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
         # the lease.
         _close_held_lease_descriptors(descriptor.get("lock_identity"))
         if lock_path is not None and _lock_owned_by_this_process(lock_path):
-            return "blocked", "this process still holds the allocation lock after releasing it"
+            return blocked("this process still holds the allocation lock after releasing it")
     _remove_allocation_state(descriptor_path)
+    _clear_unresolved_allocation(lock_path)
     return "ok", "the owned lease was relinquished and the private job state removed"
 
 
 def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[str, str]:
     descriptor_path = _allocation_descriptor_path(declaration, repo_root)
+
+    def blocked(reason: str) -> tuple[str, str]:
+        # Recovery keeps the state, so a process that exits must not silently
+        # free the host: persist the unresolved record beside the host lock.
+        _mark_allocation_unresolved(descriptor_path, reason)
+        return "blocked", reason
+
     if descriptor_path is None or not descriptor_path.is_file():
+        pending = _unresolved_allocation_present(_declared_host_lock(declaration, repo_root))
+        if pending is not None:
+            return (
+                "blocked",
+                (
+                    "an unresolved allocation record is present for this host lock "
+                    f"({pending.name}) and no lease descriptor remains to prove containment; "
+                    "confirm no owned work survives before removing it"
+                ),
+            )
         return "ok", "no allocation descriptor to recover"
     binding_error = _pinned_descriptor_binding_error(declaration, descriptor_path)
     if binding_error is not None:
-        return "blocked", binding_error
+        return blocked(binding_error)
     # A recovery removes the lease state, so it must first prove no owned work
     # survived a cancelled command: a rejected signal path can leave a detached
     # descendant that would otherwise keep consuming the allocation after the
     # state was deleted and the lease reported free.
     live_leftovers = _sweep_leftover_owned_processes()
     if live_leftovers:
-        return (
-            "blocked",
-            (
-                "owned descendants are still running "
-                f"({len(live_leftovers)} pid(s)); refusing to remove lease state "
-                "while the allocation is still in use"
-            ),
+        return blocked(
+            "owned descendants are still running "
+            f"({len(live_leftovers)} pid(s)); refusing to remove lease state "
+            "while the allocation is still in use"
         )
     descriptor, error = _load_allocation_descriptor(descriptor_path)
     if descriptor is None:
-        return "blocked", f"the descriptor could not be read; refusing to remove state ({error})"
+        return blocked(f"the descriptor could not be read; refusing to remove state ({error})")
     holder = descriptor.get("holder_pid")
     holder_valid = isinstance(holder, int) and not isinstance(holder, bool) and holder > 0
     raw = descriptor.get("lock_path")
     if not isinstance(raw, str) or not raw.strip():
-        return "blocked", "the lease lock path is unknown; refusing to remove state"
+        return blocked("the lease lock path is unknown; refusing to remove state")
     lock_path = Path(raw)
     lock_holders = _observe_flock_holders(lock_path)
     if lock_holders is None:
-        return "blocked", "lock ownership is not observable; refusing to remove state"
+        return blocked("lock ownership is not observable; refusing to remove state")
     observed_identity = _lock_identity(lock_path)
     if observed_identity is None:
-        return "blocked", "the allocation lock identity is not observable; refusing to remove state"
+        return blocked("the allocation lock identity is not observable; refusing to remove state")
     if not _lock_identity_matches(descriptor.get("lock_identity"), observed_identity):
-        return (
-            "blocked",
-            (
-                "the allocation lock pathname no longer names the recorded lease inode; "
-                "refusing to remove state that belongs to a different allocation"
-            ),
+        return blocked(
+            "the allocation lock pathname no longer names the recorded lease inode; "
+            "refusing to remove state that belongs to a different allocation"
         )
     if holder_valid and _pid_alive(holder):
         return "fail", "the recorded holder is still running; refusing to remove state"
     if holder_valid and holder in lock_holders:
         return "fail", "the recorded holder still holds the lease; release it first"
     if lock_holders:
-        return (
-            "blocked",
-            "the lease lock is held by an unrecognized process; refusing to remove state",
+        return blocked(
+            "the lease lock is held by an unrecognized process; refusing to remove state"
         )
     # A dead holder is not evidence that its capacity is free: it may have left
     # a detached descendant consuming the allocation.  The durable job record
@@ -5242,31 +5407,25 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
     # the state is deleted and the allocation reported free.
     confirmed, detail = _confirm_recorded_job_containment(descriptor_path.parent)
     if not confirmed:
-        return "blocked", detail
+        return blocked(detail)
     live_leftovers = _sweep_leftover_owned_processes()
     if live_leftovers:
-        return (
-            "blocked",
-            (
-                "owned descendants are still running after containment "
-                f"({len(live_leftovers)} pid(s)): "
-                + ", ".join(str(pid) for pid in live_leftovers[:16])
-            ),
+        return blocked(
+            "owned descendants are still running after containment "
+            f"({len(live_leftovers)} pid(s)): " + ", ".join(str(pid) for pid in live_leftovers[:16])
         )
     record, _record_error = _read_job_run_record(descriptor_path.parent)
     job_token = record.get("job_token") if isinstance(record, dict) else None
     token_survivors = _await_no_token_owned_survivors(job_token)
     if token_survivors:
-        return (
-            "blocked",
-            (
-                "descendants of the recorded job are still running after containment "
-                f"({len(token_survivors)} pid(s)); refusing to remove lease state "
-                "while the allocation is still in use: "
-                + ", ".join(str(pid) for pid in token_survivors[:16])
-            ),
+        return blocked(
+            "descendants of the recorded job are still running after containment "
+            f"({len(token_survivors)} pid(s)); refusing to remove lease state "
+            "while the allocation is still in use: "
+            + ", ".join(str(pid) for pid in token_survivors[:16])
         )
     _remove_allocation_state(descriptor_path)
+    _clear_unresolved_allocation(lock_path)
     return "ok", "removed stale allocation state whose owner is gone"
 
 
@@ -5304,6 +5463,18 @@ def _emit(payload: dict[str, Any], args: argparse.Namespace) -> None:
     print(json.dumps(payload, indent=2) if args.json else render_text(payload))
 
 
+def _facts_payload(facts: RunnerFacts, repo_root: Path) -> dict[str, Any]:
+    """Serialize facts for a report, keeping machine-local paths out of the JSON."""
+
+    payload = asdict(facts)
+    payload["shm_path"] = _sanitize_path(facts.shm_path, repo_root)
+    for key in ("job_tmp_path", "job_evidence_path"):
+        value = payload.get(key)
+        if value is not None:
+            payload[key] = _sanitize_path(value, repo_root)
+    return payload
+
+
 def _do_reserve(
     args: argparse.Namespace,
     declaration: dict[str, Any],
@@ -5312,19 +5483,25 @@ def _do_reserve(
     facts: RunnerFacts,
 ) -> tuple[str, str, dict[str, Any]]:
     admission = validate_declaration(declaration)
+    admission_docs = [asdict(item) for item in admission]
     if overall_status(admission) != "ok":
         return (
             "fail",
             "the declaration failed prerequisite admission; refusing to reserve or run",
-            {"checks": [asdict(item) for item in admission]},
+            {"checks": admission_docs, "facts": _facts_payload(facts, repo_root)},
         )
     prerequisites = prerequisite_checks(declaration, repo_root)
+    prerequisites_docs = [asdict(item) for item in prerequisites]
     if overall_status(prerequisites) != "ok":
         return (
             "fail",
             "runtime and asset prerequisites failed admission; refusing to reserve or run",
-            {"checks": [asdict(item) for item in prerequisites]},
+            {
+                "checks": [*admission_docs, *prerequisites_docs],
+                "facts": _facts_payload(facts, repo_root),
+            },
         )
+    admission_checks = [*admission_docs, *prerequisites_docs]
 
     # Resolve the job directory before admission so disk checks measure the
     # filesystems the job will actually write to, not the caller's TMPDIR.
@@ -5335,8 +5512,21 @@ def _do_reserve(
             declaration, repo_root, job_dir, facts
         )
         digest = _pin_declaration(declaration_path, declaration, job_dir, descriptor_path)
+    except UnresolvedAllocationError as exc:
+        # A prior lease on this host lock was never proven contained.  Its flock
+        # died with the holder, but its host-wide record still forbids admitting
+        # a new lease until containment is proven or an operator recovers it.
+        return (
+            "blocked",
+            str(exc),
+            {"checks": admission_checks, "facts": _facts_payload(facts, repo_root)},
+        )
     except (OSError, ValueError) as exc:
-        return "fail", f"could not reserve the allocation: {exc}", {}
+        return (
+            "fail",
+            f"could not reserve the allocation: {exc}",
+            {"checks": admission_checks, "facts": _facts_payload(facts, repo_root)},
+        )
     extra = {
         "job_dir": _sanitize_path(job_dir, repo_root),
         "descriptor": _sanitize_path(descriptor_path, repo_root),
@@ -5349,7 +5539,11 @@ def _do_reserve(
                 "descriptor written and pinned; rerun with --run <command> to hold the lease "
                 "while the qualification job executes (a bare reserve releases the lease)"
             ),
-            extra,
+            {
+                **extra,
+                "checks": admission_checks,
+                "facts": _facts_payload(facts, repo_root),
+            },
         )
 
     # The prerequisite probes above can run for minutes and can spawn work that
@@ -5359,12 +5553,18 @@ def _do_reserve(
     admitted_facts = collect_facts(repo_root)
     _populate_job_filesystem_facts(admitted_facts, job_dir)
     resources = evaluate_resources(declaration, admitted_facts, repo_root)
+    resource_docs = [asdict(item) for item in resources]
+    # The report must carry the exact facts admission used, not the pre-lease
+    # sample: those can differ (e.g. affinity narrowed while waiting for the
+    # lease), and reporting the stale sample would misrepresent the allocation.
+    admitted_view = _facts_payload(admitted_facts, repo_root)
+    complete_checks = [*admission_checks, *resource_docs]
     if overall_status(resources) != "ok":
         _release_allocation(declaration, repo_root)
         return (
             "fail",
             "the observed allocation failed verification; refusing to launch the qualification job",
-            {"checks": [asdict(item) for item in resources], **extra},
+            {**extra, "checks": complete_checks, "facts": admitted_view},
         )
 
     command = list(args.run)
@@ -5394,7 +5594,7 @@ def _do_reserve(
         return (
             "fail",
             f"the qualification command was not launched: {exc}",
-            extra,
+            {**extra, "checks": complete_checks, "facts": admitted_view},
         )
 
     def _record_start(process: subprocess.Popen[str]) -> None:
@@ -5411,8 +5611,12 @@ def _do_reserve(
     except JobOwnershipError as exc:
         # The command was spawned but could not be attributed to this lease, so
         # ``run_command`` already tore it down.  The lease is kept because the
-        # launch intent remains and no containment proof exists for it.
-        return "blocked", f"the launched command could not be recorded: {exc}", extra
+        # launch intent remains and no containment proof exists for it.  The
+        # unresolved record persists that exclusion beyond this process's exit.
+        status, message = _blocked_allocation(
+            descriptor_path, f"the launched command could not be recorded: {exc}"
+        )
+        return status, message, {**extra, "checks": complete_checks, "facts": admitted_view}
     containment = last_command_containment()
     containment_proven = containment is not None and containment.proven
     _update_job_run_record(job_dir, containment_confirmed=containment_proven)
@@ -5426,19 +5630,25 @@ def _do_reserve(
             if containment is not None
             else "the command's containment outcome was not observed"
         )
-        return (
-            "blocked",
-            (
-                "the leased command's descendant containment could not be proven "
-                f"({detail}); the lease is kept because the allocation may still be in use"
-            ),
-            extra,
+        status, message = _blocked_allocation(
+            descriptor_path,
+            "the leased command's descendant containment could not be proven "
+            f"({detail}); the lease is kept because the allocation may still be in use",
         )
+        return status, message, {**extra, "checks": complete_checks, "facts": admitted_view}
     release_status, _release_message = _release_allocation(declaration, repo_root)
     if release_status != "ok":
-        return "fail", f"leased command exited {process.returncode}; {_release_message}", extra
+        return (
+            "fail",
+            f"leased command exited {process.returncode}; {_release_message}",
+            {**extra, "checks": complete_checks, "facts": admitted_view},
+        )
     status = "ok" if process.returncode == 0 else "fail"
-    return status, f"leased command exited {process.returncode}", extra
+    return (
+        status,
+        f"leased command exited {process.returncode}",
+        {**extra, "checks": complete_checks, "facts": admitted_view},
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5446,15 +5656,6 @@ def main(argv: list[str] | None = None) -> int:
     _install_signal_handlers()
     repo_root = args.repo_root.resolve()
     facts = collect_facts(repo_root)
-
-    def facts_payload() -> dict[str, Any]:
-        payload = asdict(facts)
-        payload["shm_path"] = _sanitize_path(facts.shm_path, repo_root)
-        for key in ("job_tmp_path", "job_evidence_path"):
-            value = payload.get(key)
-            if value is not None:
-                payload[key] = _sanitize_path(value, repo_root)
-        return payload
 
     mode = "report"
     for candidate in ("check", "setup", "reserve", "release", "recover"):
@@ -5466,7 +5667,7 @@ def main(argv: list[str] | None = None) -> int:
         "declaration_version": SCHEMA_VERSION,
         "repo_root": _sanitize_path(repo_root, repo_root),
         "checks": [],
-        "facts": facts_payload(),
+        "facts": _facts_payload(facts, repo_root),
         "overall": "report" if mode == "report" else "blocked",
     }
 
@@ -5529,6 +5730,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             payload["overall"] = status
             payload["message"] = message
+            # ``extra`` carries the admission snapshot and the complete check
+            # results; retain the pre-lease observation separately so a reader
+            # can tell what admission actually saw from what was true earlier.
+            payload["initial_facts"] = _facts_payload(facts, repo_root)
             payload.update(extra)
             payload = _redact_payload(
                 payload, _collect_redactions(repo_root, declaration, declaration_path)
@@ -5547,7 +5752,7 @@ def main(argv: list[str] | None = None) -> int:
     if mode in {"check", "setup"}:
         payload["overall"] = overall_status(checks) if declaration is not None else "blocked"
     payload["checks"] = [asdict(item) for item in checks]
-    payload["facts"] = facts_payload()
+    payload["facts"] = _facts_payload(facts, repo_root)
     payload = _redact_payload(
         payload, _collect_redactions(repo_root, declaration, declaration_path)
     )
