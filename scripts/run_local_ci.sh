@@ -144,6 +144,10 @@ python -m ruff check \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
+    scripts/produce_battle_scenario_capture.py \
+    scripts/produce_battle_scenario_catalog.py \
+    scripts/produce_battle_scenario_model.py \
+    scripts/produce_battle_scenario_runtime.py \
     scripts/production_gate.py \
     scripts/qualification_runner.py \
     scripts/qualification_runner_allocation.py \
@@ -226,6 +230,10 @@ python -m ruff format --check \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
+    scripts/produce_battle_scenario_capture.py \
+    scripts/produce_battle_scenario_catalog.py \
+    scripts/produce_battle_scenario_model.py \
+    scripts/produce_battle_scenario_runtime.py \
     scripts/production_gate.py \
     scripts/qualification_runner.py \
     scripts/qualification_runner_allocation.py \

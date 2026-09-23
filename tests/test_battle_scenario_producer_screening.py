@@ -315,8 +315,10 @@ def test_producer_refuses_missing_or_substituted_assets(tmp_path: Path) -> None:
 
 
 def test_producer_source_never_enables_hash_bypass() -> None:
-    source = (ROOT / "scripts" / "produce_battle_scenario.py").read_text(encoding="utf-8")
-    assert "POKERED_SKIP_SHA1" not in source
+    producer_sources = sorted((ROOT / "scripts").glob("produce_battle_scenario*.py"))
+    assert producer_sources, "producer sources must exist"
+    for path in producer_sources:
+        assert "POKERED_SKIP_SHA1" not in path.read_text(encoding="utf-8"), path
 
 
 def test_producer_role_resolution_and_suffixes() -> None:
