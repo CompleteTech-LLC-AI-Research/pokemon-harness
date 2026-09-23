@@ -147,7 +147,11 @@ python -m ruff check \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
-    tests/test_battle_coverage.py \
+    tests/test_battle_coverage_accounting.py \
+    tests/test_battle_coverage_catalog.py \
+    tests/test_battle_coverage_gate_assets.py \
+    tests/test_battle_coverage_identity.py \
+    tests/test_battle_coverage_mechanics.py \
     tests/test_battle_item_evidence_inventory.py \
     tests/test_battle_item_evidence_medicine.py \
     tests/test_battle_item_evidence_targets.py \
@@ -156,8 +160,15 @@ python -m ruff check \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
-    tests/test_production_gate.py \
-    tests/test_runtime_packaging.py
+    tests/test_production_gate_diagnostics.py \
+    tests/test_production_gate_matrix_manifest.py \
+    tests/test_production_gate_report_loader.py \
+    tests/test_production_gate_run_tier_failures.py \
+    tests/test_production_gate_strict_matrix.py \
+    tests/test_runtime_packaging_bootstrap.py \
+    tests/test_runtime_packaging_build_contract.py \
+    tests/test_runtime_packaging_dependency_pins.py \
+    tests/test_runtime_packaging_hygiene.py
 python -m ruff format --check \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
@@ -173,7 +184,11 @@ python -m ruff format --check \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
-    tests/test_battle_coverage.py \
+    tests/test_battle_coverage_accounting.py \
+    tests/test_battle_coverage_catalog.py \
+    tests/test_battle_coverage_gate_assets.py \
+    tests/test_battle_coverage_identity.py \
+    tests/test_battle_coverage_mechanics.py \
     tests/test_battle_item_evidence_inventory.py \
     tests/test_battle_item_evidence_medicine.py \
     tests/test_battle_item_evidence_targets.py \
@@ -182,8 +197,15 @@ python -m ruff format --check \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
-    tests/test_production_gate.py \
-    tests/test_runtime_packaging.py
+    tests/test_production_gate_diagnostics.py \
+    tests/test_production_gate_matrix_manifest.py \
+    tests/test_production_gate_report_loader.py \
+    tests/test_production_gate_run_tier_failures.py \
+    tests/test_production_gate_strict_matrix.py \
+    tests/test_runtime_packaging_bootstrap.py \
+    tests/test_runtime_packaging_build_contract.py \
+    tests/test_runtime_packaging_dependency_pins.py \
+    tests/test_runtime_packaging_hygiene.py
 
 # Check runtime and link lane lint
 python -m ruff check \
