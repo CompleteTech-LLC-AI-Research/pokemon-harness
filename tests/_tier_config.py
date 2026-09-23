@@ -145,6 +145,7 @@ UNIT_MODULES = frozenset(
         "test_production_gate_strict_matrix.py",
         "test_pyboy_link_imports.py",
         "test_pyboy_link_session.py",
+        "test_qualification_runner.py",
         "test_remote_endpoint.py",
         "test_runtime_packaging_bootstrap.py",
         "test_runtime_packaging_build_contract.py",

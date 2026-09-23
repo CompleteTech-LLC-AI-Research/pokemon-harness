@@ -166,6 +166,7 @@ python -m ruff check \
     tests/test_production_gate_report_loader.py \
     tests/test_production_gate_run_tier_failures.py \
     tests/test_production_gate_strict_matrix.py \
+    tests/test_qualification_runner.py \
     tests/test_runtime_packaging_bootstrap.py \
     tests/test_runtime_packaging_build_contract.py \
     tests/test_runtime_packaging_dependency_pins.py \
@@ -204,6 +205,7 @@ python -m ruff format --check \
     tests/test_production_gate_report_loader.py \
     tests/test_production_gate_run_tier_failures.py \
     tests/test_production_gate_strict_matrix.py \
+    tests/test_qualification_runner.py \
     tests/test_runtime_packaging_bootstrap.py \
     tests/test_runtime_packaging_build_contract.py \
     tests/test_runtime_packaging_dependency_pins.py \
