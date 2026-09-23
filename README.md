@@ -502,7 +502,8 @@ it explicitly; the gate then fails if any required PyBoy module resolves to
 vendored source instead of an installed extension:
 
 ```bash
-python scripts/bootstrap_pyboy.py --mode cython
+python scripts/bootstrap_pyboy.py --mode cython \
+  --build-evidence "$EVIDENCE_DIR/native-build-evidence.json"
 python scripts/bootstrap_pyboy.py --mode cython --check
 python scripts/production_gate.py --runtime-mode cython --unit-only \
   --repeat-timing 5 --evidence-dir "$EVIDENCE_DIR"
@@ -511,13 +512,22 @@ python scripts/production_gate.py --runtime-mode cython --unit-only \
 Native bootstrap stages the complete vendored source and resources in a fresh
 directory under ignored `build/`, excluding generated C, objects, and extension
 binaries. It prints a SHA-256 fingerprint of the staged inputs and removes the
-staging directory after installation or failure. Keep that fingerprint and the
-build output with native qualification evidence. A change to a shared `.pxd`
-requires rebuilding all dependent extensions together; copying a single rebuilt
-extension into an older installation can leave incompatible method tables.
-The `--check` command verifies imports, module origins, and the runtime contract;
-it does not prove that manually replaced binaries share a build. Run a complete
-bootstrap after vendor changes or binary replacement.
+staging directory after installation or failure. With `--build-evidence PATH`
+the procedure that performed the build also writes its own record at `PATH`,
+tying the staged input bytes, the completed install, and the resulting
+extension identities together. `--build-evidence` is rejected with `--check`
+and is not written when the build fails, so an absent record means no
+successful build ran. Pin the emitted record with
+`interpreters.native_build_evidence` and
+`interpreters.native_build_evidence_sha256`; the qualification runner
+recomputes the staged-input digest, the extension hashes, and the fingerprint
+from the live runtime, so a hand-written record does not satisfy the check. A
+change to a shared `.pxd` requires rebuilding all dependent extensions
+together; copying a single rebuilt extension into an older installation can
+leave incompatible method tables. The `--check` command verifies imports,
+module origins, and the runtime contract; it does not prove that manually
+replaced binaries share a build. Run a complete bootstrap after vendor changes
+or binary replacement.
 
 To run the dual-runtime gate with independently installed environments, pass
 the source interpreter with `--python` and the native interpreter with
