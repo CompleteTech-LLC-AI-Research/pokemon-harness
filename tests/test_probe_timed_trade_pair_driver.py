@@ -137,7 +137,7 @@ def test_owner_tolerates_only_exact_cancelled_after_joint_goal(
 
 @pytest.mark.parametrize("with_driver", [False, True])
 def test_spawn_supervisor_joint_goal_and_baseline_first_done_contract(tmp_path, with_driver):
-    from tests.test_probe_timed_rom_pair import _NoSharedEventContext, arguments
+    from tests._probe_timed_rom_pair_support import _NoSharedEventContext, arguments
 
     args = arguments(
         "--owner-mode=process",

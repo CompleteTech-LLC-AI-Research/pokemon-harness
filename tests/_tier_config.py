@@ -137,7 +137,11 @@ UNIT_MODULES = frozenset(
         "test_network_write_deadlines.py",
         "test_owner_boundary_runtime.py",
         "test_physical_clock_runtime.py",
-        "test_probe_timed_rom_pair.py",
+        "test_probe_timed_rom_pair_assets.py",
+        "test_probe_timed_rom_pair_cli.py",
+        "test_probe_timed_rom_pair_menu.py",
+        "test_probe_timed_rom_pair_process.py",
+        "test_probe_timed_rom_pair_startup.py",
         "test_probe_owner_phases.py",
         "test_probe_timed_battle_pair.py",
         "test_probe_timed_trade_pair_cli.py",
@@ -622,93 +626,93 @@ TIMING_SENSITIVE_TESTS = frozenset(
         ),
         # Synthetic owners still exercise real supervisor/thread waits.
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_supervisor_cancels_both_and_owner_detaches_before_stop",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_interrupted_multiframe_call_records_actual_partial_progress",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_detach_failure_never_stops_session_with_live_binding",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_unpublished_factory_failure_cancels_peer_original_event",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_no_progress_return_is_explicit_and_does_not_count_requested_frames",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_first_supervisor_cancel_exception_does_not_skip_second_endpoint",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_live_owners_report_incomplete_cleanup_without_mutating_returned_report",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_attach_failure_retains_loaded_native_evidence_without_binding",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_partial_normal_public_return_is_not_frame_bound_success",
         ),
         # Spawned owners, cancellation watchers, and pipe drainers use real
         # scheduling and bounded waits even with synthetic or missing assets.
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_spawn_missing_assets_reports_both_child_failures",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_spawn_failure_cancels_waiting_peer",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_spawn_deadline_terminates_unresponsive_owners",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_spawn_rejects_invalid_child_report",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_cancellation_bridge_sets_local_event_before_publication",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_cancellation_bridge_continues_after_endpoint_cancel_error",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_stderr_capture_drains_native_fd_flood_with_bounded_retention",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_stdout_capture_drains_native_fd_flood_with_bounded_retention",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_startup.py",
             "test_process_startup_failure_signals_without_shared_event_locks",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_startup.py",
             "test_process_early_startup_failure_forces_termination_without_shared_event_locks",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_startup.py",
             "test_process_partial_report_kill_reaps_reader_without_shared_event_locks",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_menu.py",
             "test_process_spawn_propagates_explicit_menu_profile",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_menu.py",
             "test_process_report_overflow_is_explicit_bounded_and_not_success",
         ),
         ("test_network_backend_transport.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
