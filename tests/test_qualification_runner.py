@@ -3710,6 +3710,176 @@ def test_unreadable_process_table_is_unproven_containment(tmp_path: Path, monkey
                 os.waitpid(detached, 0)
 
 
+def test_unreadable_live_process_stat_is_unproven_containment(tmp_path: Path, monkeypatch):
+    """A live process whose stat cannot be read is unknown, not absent.
+
+    Round-18 finding: ``_direct_child_pids``/``_process_group_members`` skipped
+    any error reading ``/proc/<pid>/stat``, so a detached descendant whose stat
+    record was unreadable vanished from the sweep and a live child was reported
+    as contained.
+    """
+
+    pidfile = tmp_path / "detached.pid"
+    command = (
+        "import subprocess,sys\nfrom pathlib import Path\n"
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],"
+        "start_new_session=True,stdin=subprocess.DEVNULL,"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"Path({str(pidfile)!r}).write_text(str(p.pid))\n"
+    )
+    original_read_text = Path.read_text
+
+    def deny_live_child_stat(path: Path, *args, **kwargs):
+        if (
+            path.name == "stat"
+            and path.parent.parent == Path("/proc")
+            and pidfile.exists()
+            and path.parent.name == original_read_text(pidfile, *args, **kwargs).strip()
+        ):
+            raise PermissionError("injected unreadable live descendant stat")
+        return original_read_text(path, *args, **kwargs)
+
+    detached: int | None = None
+    try:
+        result = runner.run_command(
+            [sys.executable, "-c", command],
+            tmp_path,
+            timeout=10,
+            on_start=lambda process: monkeypatch.setattr(Path, "read_text", deny_live_child_stat),
+        )
+        assert result.returncode == 0
+        assert pidfile.exists()
+        detached = int(pidfile.read_text(encoding="utf-8"))
+        assert runner._pid_alive(detached), "the negative-control child exited"
+        containment = runner.last_command_containment()
+        assert containment is not None
+        assert not containment.proven, (
+            f"an unreadable live descendant was reported as contained: {containment.detail!r}"
+        )
+    finally:
+        monkeypatch.setattr(Path, "read_text", original_read_text)
+        if detached is None and pidfile.exists():
+            detached = int(pidfile.read_text(encoding="utf-8"))
+        if detached is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(detached, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(detached, 0)
+
+
+def test_unreadable_process_group_member_stat_is_unproven_containment(tmp_path: Path, monkeypatch):
+    """A live member of the command's group with an unreadable stat is unknown.
+
+    Round-18 finding: ``_process_group_members`` skipped unreadable ``/proc``
+    stat records, so a surviving same-group member disappeared from the group
+    sweep and ``_terminate_process_group`` reported the group empty without ever
+    signalling it.
+    """
+
+    pidfile = tmp_path / "group-member.pid"
+    command = (
+        "import subprocess,sys,time\nfrom pathlib import Path\n"
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'])\n"
+        f"Path({str(pidfile)!r}).write_text(str(p.pid))\n"
+        "time.sleep(120)\n"
+    )
+    original_read_text = Path.read_text
+
+    def deny_live_member_stat(path: Path, *args, **kwargs):
+        if (
+            path.name == "stat"
+            and path.parent.parent == Path("/proc")
+            and pidfile.exists()
+            and path.parent.name == original_read_text(pidfile, *args, **kwargs).strip()
+        ):
+            raise PermissionError("injected unreadable live group member stat")
+        return original_read_text(path, *args, **kwargs)
+
+    member: int | None = None
+    try:
+        result = runner.run_command(
+            [sys.executable, "-c", command],
+            tmp_path,
+            timeout=10,
+            on_start=lambda process: monkeypatch.setattr(Path, "read_text", deny_live_member_stat),
+        )
+        assert result.returncode == runner._TIMEOUT_RETURNCODE
+        assert pidfile.exists()
+        member = int(pidfile.read_text(encoding="utf-8"))
+        assert runner._pid_alive(member), "the negative-control group member exited"
+        containment = runner.last_command_containment()
+        assert containment is not None
+        assert not containment.proven, (
+            f"an unreadable live group member was reported as contained: {containment.detail!r}"
+        )
+    finally:
+        monkeypatch.setattr(Path, "read_text", original_read_text)
+        if member is None and pidfile.exists():
+            member = int(pidfile.read_text(encoding="utf-8"))
+        if member is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(member, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(member, 0)
+
+
+def test_unwritable_host_lock_directory_refuses_to_launch(tmp_path: Path, monkeypatch):
+    """A lock that cannot carry the durable exclusion must never launch work.
+
+    Round-18 finding: the pre-spawn record write was best-effort, so a writable
+    lock file inside an unwritable directory permitted launching a command with
+    no host-wide exclusion; after the holder died, a second lease admitted over
+    the still-live descendant.
+    """
+
+    lock_dir = tmp_path / "operator-owned-locks"
+    lock_dir.mkdir()
+    lock = lock_dir / "host.lock"
+    lock.touch(mode=0o600)
+    lock_dir.chmod(0o555)
+    declaration = make_declaration(
+        reservation_mechanism="cpuset-affinity",
+        affinity_cpus=[0, 1, 2, 3],
+        cpu_quota_cores=None,
+    )
+    declaration["reservation"]["host_lock_path"] = str(lock)
+    declaration["reservation"]["job_dir"] = str(tmp_path / "job")
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    marker = tmp_path / "command-launched"
+    facts = make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None)
+    monkeypatch.setattr(runner, "collect_facts", lambda root: facts)
+    monkeypatch.setattr(
+        runner,
+        "prerequisite_checks",
+        lambda *args: [
+            runner.CheckResult("stub-prerequisites", "ok", None, None, "ROM-free fault injection")
+        ],
+    )
+    try:
+        status, message, _extra = runner._do_reserve(
+            argparse.Namespace(
+                job_dir=tmp_path / "job",
+                run=[
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(marker)!r}).touch()",
+                ],
+                run_timeout=10.0,
+            ),
+            declaration,
+            declaration_path,
+            tmp_path,
+            facts,
+        )
+        assert not marker.exists(), "launched without a durable host exclusion"
+        assert status != "ok", message
+        assert not runner._unresolved_allocation_path(lock).exists()
+    finally:
+        lock_dir.chmod(0o755)
+        runner._close_held_lease_descriptors(runner._lock_identity(lock))
+
+
 def test_abrupt_holder_death_keeps_host_exclusion(tmp_path: Path):
     """SIGKILL of the holder must not free a host lease with live work.
 

@@ -239,19 +239,28 @@ def _process_ancestor_pids(pid: int | None = None) -> list[int]:
     current = pid
     while current > 1 and current not in seen:
         seen.add(current)
-        try:
-            stat_text = Path(f"/proc/{current}/stat").read_text(encoding="utf-8")
-        except (OSError, ValueError):
+        stat_text = _read_proc_stat(current)
+        if stat_text is None:
             break
         closing = stat_text.rfind(")")
         if closing == -1:
+            _note_proc_enumeration_failure(
+                f"the state of live process {current} was malformed while walking the process tree"
+            )
             break
         fields = stat_text[closing + 1 :].split()
         if len(fields) < 2:
+            _note_proc_enumeration_failure(
+                f"the state of live process {current} was incomplete while walking the process tree"
+            )
             break
         try:
             current = int(fields[1])
         except ValueError:
+            _note_proc_enumeration_failure(
+                f"the parent pid of live process {current} was unreadable while walking the "
+                "process tree"
+            )
             break
         if current <= 1:
             break
@@ -2830,6 +2839,28 @@ def _proc_enumeration_failures() -> list[str]:
     return list(_PROC_ENUMERATION_FAILURES)
 
 
+def _read_proc_stat(pid: int) -> str | None:
+    """Read ``/proc/<pid>/stat``, separating a gone pid from an unreadable one.
+
+    A pid whose ``/proc`` entry has vanished has confirmed exited and is skipped
+    silently.  A pid whose entry still exists but cannot be read or decoded is
+    *unknown*, not absent: it is recorded as a process-enumeration failure so the
+    containment decision that folds in these failures stays unproven and keeps
+    the lease and the host exclusion.  Treating an unreadable live process as
+    absent would let it survive an otherwise-clean sweep.
+    """
+
+    try:
+        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except (OSError, ValueError):
+        _note_proc_enumeration_failure(
+            f"the state of live process {pid} could not be read while scanning for owned work"
+        )
+        return None
+
+
 def _process_group_members(pgid: int) -> list[int]:
     """Return every live pid whose process group is *pgid* (excluding self)."""
 
@@ -2850,15 +2881,22 @@ def _process_group_members(pgid: int) -> list[int]:
         pid = int(entry.name)
         if pid == me:
             continue
-        try:
-            raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        except (OSError, ValueError):
+        raw = _read_proc_stat(pid)
+        if raw is None:
             continue
         closing = raw.rfind(")")
         if closing == -1:
+            _note_proc_enumeration_failure(
+                f"the state of live process {pid} was malformed while sweeping the "
+                "command's process group"
+            )
             continue
         fields = raw[closing + 1 :].split()
         if len(fields) < 3:
+            _note_proc_enumeration_failure(
+                f"the state of live process {pid} was incomplete while sweeping the "
+                "command's process group"
+            )
             continue
         if fields[0] == "Z":
             # An exited descendant awaiting reaping holds no CPU capacity.
@@ -2868,6 +2906,10 @@ def _process_group_members(pgid: int) -> list[int]:
             if int(fields[2]) == pgid:
                 members.append(pid)
         except ValueError:
+            _note_proc_enumeration_failure(
+                f"the process-group id of live process {pid} was unreadable while sweeping "
+                "the command's process group"
+            )
             continue
     return sorted(members)
 
@@ -2959,20 +3001,29 @@ def _direct_child_pids(parent_pid: int | None = None) -> list[int]:
         pid = int(entry.name)
         if pid == parent_pid:
             continue
-        try:
-            raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        except (OSError, ValueError):
+        raw = _read_proc_stat(pid)
+        if raw is None:
             continue
         closing = raw.rfind(")")
         if closing == -1:
+            _note_proc_enumeration_failure(
+                f"the state of live process {pid} was malformed while scanning for direct children"
+            )
             continue
         fields = raw[closing + 1 :].split()
         if len(fields) < 2:
+            _note_proc_enumeration_failure(
+                f"the state of live process {pid} was incomplete while scanning for direct children"
+            )
             continue
         try:
             if int(fields[1]) == parent_pid:
                 children.append(pid)
         except ValueError:
+            _note_proc_enumeration_failure(
+                f"the parent pid of live process {pid} was unreadable while scanning for "
+                "direct children"
+            )
             continue
     return sorted(children)
 
@@ -5696,12 +5747,30 @@ def _do_reserve(
     # The host-wide record is persisted *before* the command is spawned so that
     # an abrupt holder death (SIGKILL, which cannot run any handler) still leaves
     # the exclusion in force; ``_release_allocation`` clears it only after
-    # containment is positively confirmed.
-    _mark_allocation_unresolved(
+    # containment is positively confirmed.  Persisting it is mandatory: if the
+    # record cannot be written (for example a writable lock file inside an
+    # unwritable directory), the flock alone would not exclude a later holder,
+    # so refuse to launch and release the unused lease instead of running work
+    # whose death could not be contained.
+    exclusion_record = _mark_allocation_unresolved(
         descriptor_path,
         "an allocation is active on this host lock; it may be released only after its "
         "launched work is proven contained",
     )
+    if exclusion_record is None:
+        release_status, release_message = _release_allocation(declaration, repo_root)
+        trailer = (
+            ""
+            if release_status == "ok"
+            else f"; the unused lease could not be released ({release_message})"
+        )
+        return (
+            "fail",
+            "the host-wide unresolved-allocation record could not be written, so a later "
+            "holder could be admitted over this job's uncontained work; refusing to launch "
+            "the qualification command" + trailer,
+            {**extra, "checks": complete_checks, "facts": admitted_view},
+        )
     try:
         _write_job_launch_intent(job_dir, command)
     except JobOwnershipError as exc:
