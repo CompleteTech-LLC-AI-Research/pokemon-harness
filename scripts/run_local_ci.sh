@@ -142,6 +142,7 @@ python -m ruff check \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
     tests/_battle_item_evidence.py \
+    tests/_battle_item_evidence_factories.py \
     tests/_gate_report.py \
     tests/_rom_assets.py \
     tests/_tier_config.py \
@@ -151,7 +152,10 @@ python -m ruff check \
     tests/test_battle_coverage_gate_assets.py \
     tests/test_battle_coverage_identity.py \
     tests/test_battle_coverage_mechanics.py \
-    tests/test_battle_item_evidence.py \
+    tests/test_battle_item_evidence_inventory.py \
+    tests/test_battle_item_evidence_medicine.py \
+    tests/test_battle_item_evidence_targets.py \
+    tests/test_battle_item_evidence_timeline.py \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
@@ -175,6 +179,7 @@ python -m ruff format --check \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
     tests/_battle_item_evidence.py \
+    tests/_battle_item_evidence_factories.py \
     tests/_gate_report.py \
     tests/_rom_assets.py \
     tests/_tier_config.py \
@@ -184,7 +189,10 @@ python -m ruff format --check \
     tests/test_battle_coverage_gate_assets.py \
     tests/test_battle_coverage_identity.py \
     tests/test_battle_coverage_mechanics.py \
-    tests/test_battle_item_evidence.py \
+    tests/test_battle_item_evidence_inventory.py \
+    tests/test_battle_item_evidence_medicine.py \
+    tests/test_battle_item_evidence_targets.py \
+    tests/test_battle_item_evidence_timeline.py \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
