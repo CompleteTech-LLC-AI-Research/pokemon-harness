@@ -3658,3 +3658,227 @@ def test_blocked_cli_exit_refuses_a_later_reservation_on_the_same_host_lock(
         if previous_subreaper is not None:
             runner._set_child_subreaper(bool(previous_subreaper))
         runner._close_held_lease_descriptors(runner._lock_identity(host_lock))
+
+
+def test_clear_unresolved_allocation_only_removes_the_records_own_lease(tmp_path: Path):
+    """A release must not erase a *different* lease's host-wide exclusion.
+
+    Round-16 finding: the marker is host-wide, so a release can race a competing
+    reservation that admitted after the holder dropped its flock and recorded
+    its own exclusion in that window.  Clearing by pathname alone deleted the
+    other lease's record and admitted new work over live, uncontained use.
+    """
+
+    host_lock = tmp_path / "host.lock"
+    own_descriptor = tmp_path / "own-job" / "allocation.json"
+    other_descriptor = tmp_path / "other-job" / "allocation.json"
+    record_path = runner._write_unresolved_allocation(
+        host_lock,
+        reason="competing job still has uncontained work",
+        descriptor_path=other_descriptor,
+    )
+    assert record_path is not None and record_path.exists()
+
+    # Without a verifiable descriptor there is no lease identity to match.
+    runner._clear_unresolved_allocation(host_lock)
+    assert record_path.exists(), "a descriptor-less clear erased the record"
+
+    # A release of an unrelated lease must leave the record in force.
+    runner._clear_unresolved_allocation(host_lock, descriptor_path=own_descriptor)
+    assert record_path.exists(), "the record of another lease was erased"
+
+    # Only the record's own lease may clear it.
+    runner._clear_unresolved_allocation(host_lock, descriptor_path=other_descriptor)
+    assert not record_path.exists(), "the record's own lease could not clear it"
+
+
+def test_release_preserves_another_leases_unresolved_record(tmp_path: Path, monkeypatch):
+    """A successful release that races a competitor keeps the competitor's block.
+
+    This reproduces the round-16 interleaving deterministically: while the first
+    release is removing its private state (after dropping its flock), a
+    competing job admits and persists its own unresolved record.  The first
+    release must still report success without deleting that other record, and a
+    third reservation must then be refused.
+    """
+
+    declaration = make_declaration(
+        reservation_mechanism="cpuset-affinity",
+        affinity_cpus=[0, 1, 2, 3],
+        cpu_quota_cores=None,
+    )
+    job_dir = tmp_path / "job"
+    host_lock = tmp_path / "host.lock"
+    declaration["reservation"]["host_lock_path"] = str(host_lock)
+    declaration["reservation"]["job_dir"] = str(job_dir)
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    facts = make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None)
+    descriptor_path, _descriptor, _lock_fd = runner._reserve_allocation(
+        declaration, tmp_path, job_dir, facts
+    )
+    runner._pin_declaration(declaration_path, declaration, job_dir, descriptor_path)
+
+    other_descriptor = tmp_path / "other-job" / "allocation.json"
+    original_remove = runner._remove_allocation_state
+
+    def interleave(path: Path) -> None:
+        # The first runner has already dropped its flock at this point, which is
+        # exactly when a competing job can admit and record its own exclusion.
+        runner._write_unresolved_allocation(
+            host_lock,
+            reason="simulated competing job with uncontained work",
+            descriptor_path=other_descriptor,
+        )
+        original_remove(path)
+
+    monkeypatch.setattr(runner, "_remove_allocation_state", interleave)
+    try:
+        status, message = runner._release_allocation(declaration, tmp_path)
+    finally:
+        runner._close_held_lease_descriptors(runner._lock_identity(host_lock))
+
+    assert status == "ok", message
+    record = runner._unresolved_allocation_path(host_lock)
+    assert record.exists(), "the release erased another lease's unresolved record"
+    with pytest.raises(runner.UnresolvedAllocationError):
+        runner._reserve_allocation(declaration, tmp_path, tmp_path / "third-job", facts)
+
+
+def test_failed_command_spawn_releases_the_unused_lease(tmp_path: Path, monkeypatch):
+    """A launch that never created a process must not strand the lease.
+
+    Round-16 finding: a nonexistent executable reported exit 127, but the
+    recorded launch intent remained, so the release refused and left the lock
+    held and a blocking record behind even though no process ever existed.
+    """
+
+    declaration = make_declaration(
+        reservation_mechanism="cpuset-affinity",
+        affinity_cpus=[0, 1, 2, 3],
+        cpu_quota_cores=None,
+    )
+    job_dir = tmp_path / "job"
+    host_lock = tmp_path / "host.lock"
+    declaration["reservation"]["host_lock_path"] = str(host_lock)
+    declaration["reservation"]["job_dir"] = str(job_dir)
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    monkeypatch.setattr(
+        runner,
+        "collect_facts",
+        lambda root: make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None),
+    )
+    monkeypatch.setattr(
+        runner,
+        "prerequisite_checks",
+        lambda *args: [
+            runner.CheckResult("stub-prerequisites", "ok", None, None, "ROM-free fault injection")
+        ],
+    )
+    args = argparse.Namespace(
+        job_dir=job_dir, run=[str(tmp_path / "no-such-command")], run_timeout=5.0
+    )
+    try:
+        status, message, _ = runner._do_reserve(
+            args, declaration, declaration_path, tmp_path, make_facts()
+        )
+    finally:
+        runner._close_held_lease_descriptors(runner._lock_identity(host_lock))
+
+    assert status == "fail", message
+    assert "127" in message
+    assert not (job_dir / runner._JOB_RUN_RECORD_NAME).exists()
+    assert not (job_dir / runner._JOB_LAUNCH_INTENT_NAME).exists()
+    assert not runner._unresolved_allocation_path(host_lock).exists()
+    assert runner._observe_flock_holders(host_lock) == set()
+
+
+def test_cancellation_records_durable_exclusion_before_exit(tmp_path: Path):
+    """SIGTERM with an unavailable subreaper must still persist the exclusion.
+
+    Round-16 finding: a cancel raised ``SystemExit`` straight out of the run,
+    dropping the flock without writing the host-wide record, so another job
+    reserved the same lock while a detached descendant was still alive.
+    """
+
+    declaration = make_declaration(
+        reservation_mechanism="cpuset-affinity",
+        affinity_cpus=[0, 1, 2, 3],
+        cpu_quota_cores=None,
+    )
+    job_dir = tmp_path / "cancel-job"
+    host_lock = tmp_path / "host.lock"
+    declaration["reservation"]["host_lock_path"] = str(host_lock)
+    declaration["reservation"]["job_dir"] = str(job_dir)
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    pidfile = tmp_path / "detached.pid"
+    command = (
+        "import subprocess,sys,time\n"
+        "from pathlib import Path\n"
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],"
+        "start_new_session=True,stdin=subprocess.DEVNULL,"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"Path({str(pidfile)!r}).write_text(str(p.pid))\n"
+        "time.sleep(120)\n"
+    )
+    program = (
+        "from scripts import qualification_runner as r\n"
+        "from tests.test_qualification_runner import make_facts\n"
+        "r.collect_facts=lambda root: make_facts(affinity_cpus=[0,1,2,3],"
+        "affinity_count=4,cpu_quota_cores=None)\n"
+        "r.prerequisite_checks=lambda *args: [r.CheckResult('stub-prerequisites',"
+        "'ok',None,None,'ROM-free fault injection')]\n"
+        "r._child_subreaper_state=lambda: 0\n"
+        "r._set_child_subreaper=lambda enabled: False\n"
+        "raise SystemExit(r.main("
+        f"{['--reserve', '--json', '--declaration', str(declaration_path), '--run', sys.executable, '-c', command]!r}"
+        "))\n"
+    )
+    env = dict(os.environ, PYTHONPATH=f"{REPO_ROOT}:{REPO_ROOT / 'src'}")
+    previous_subreaper = runner._child_subreaper_state()
+    runner._set_child_subreaper(True)
+    child: subprocess.Popen[str] | None = None
+    detached: int | None = None
+    try:
+        child = subprocess.Popen(
+            [sys.executable, "-c", program],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 30
+        while not pidfile.exists():
+            if child.poll() is not None or time.monotonic() >= deadline:
+                raise AssertionError("the leased command never launched")
+            time.sleep(0.02)
+        detached = int(pidfile.read_text(encoding="utf-8"))
+        child.send_signal(signal.SIGTERM)
+        child.communicate(timeout=60)
+        assert child.returncode == 143, child.returncode
+        assert runner._pid_alive(detached), "the detached descendant was not left running"
+        record = runner._unresolved_allocation_path(host_lock)
+        assert record.exists(), "the cancelled run left no host-wide unresolved record"
+        with pytest.raises(runner.UnresolvedAllocationError):
+            runner._reserve_allocation(
+                declaration,
+                tmp_path,
+                tmp_path / "second-job",
+                make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None),
+            )
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        if detached is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(detached, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(detached, 0)
+        if previous_subreaper is not None:
+            runner._set_child_subreaper(bool(previous_subreaper))
+        runner._close_held_lease_descriptors(runner._lock_identity(host_lock))

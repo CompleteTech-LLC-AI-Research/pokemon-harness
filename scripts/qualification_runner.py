@@ -4666,13 +4666,61 @@ def _blocked_allocation(descriptor_path: Path | None, reason: str) -> tuple[str,
     return "blocked", reason
 
 
-def _clear_unresolved_allocation(host_lock: Path | None) -> None:
-    if host_lock is None:
+def _read_unresolved_allocation(record_path: Path) -> dict[str, Any] | None:
+    """Return the parsed host-wide unresolved record, or ``None`` if unusable."""
+
+    try:
+        document = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _clear_unresolved_allocation(
+    host_lock: Path | None, *, descriptor_path: Path | None = None
+) -> None:
+    """Remove the unresolved record for *host_lock* only when it names this lease.
+
+    The record is host-wide, so a release can race another job directory that
+    reserves the same lock and writes its own record: the holder drops its flock
+    before the state removal finishes, which lets a competing reservation admit,
+    block, and record its exclusion in that window.  Removal therefore runs
+    while holding the host lock and deletes the record only when its recorded
+    descriptor names the lease being cleared.  Anything else -- a different
+    lease's record, an unreadable record, no verifiable descriptor, or a lock
+    this process cannot acquire -- is left in force rather than erased.
+    """
+
+    import fcntl
+
+    if host_lock is None or descriptor_path is None:
+        return
+    record_path = _unresolved_allocation_path(host_lock)
+    if not record_path.exists() and not record_path.is_symlink():
         return
     try:
-        _unresolved_allocation_path(host_lock).unlink()
+        lock_fd = os.open(host_lock, os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
-        pass
+        return
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # A competing reservation (or a live lease) holds the lock, so the
+            # record cannot be inspected and removed atomically; keep it.
+            return
+        document = _read_unresolved_allocation(record_path)
+        recorded = document.get("descriptor_path") if isinstance(document, dict) else None
+        if recorded != str(descriptor_path):
+            # The record belongs to a different lease; erasing it would drop that
+            # allocation's durable exclusion and admit new work over live use.
+            return
+        try:
+            record_path.unlink()
+        except OSError:
+            pass
+    finally:
+        os.close(lock_fd)
 
 
 def _unresolved_allocation_present(host_lock: Path | None) -> Path | None:
@@ -5334,7 +5382,7 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
         if lock_path is not None and _lock_owned_by_this_process(lock_path):
             return blocked("this process still holds the allocation lock after releasing it")
     _remove_allocation_state(descriptor_path)
-    _clear_unresolved_allocation(lock_path)
+    _clear_unresolved_allocation(lock_path, descriptor_path=descriptor_path)
     return "ok", "the owned lease was relinquished and the private job state removed"
 
 
@@ -5425,7 +5473,7 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
             + ", ".join(str(pid) for pid in token_survivors[:16])
         )
     _remove_allocation_state(descriptor_path)
-    _clear_unresolved_allocation(lock_path)
+    _clear_unresolved_allocation(lock_path, descriptor_path=descriptor_path)
     return "ok", "removed stale allocation state whose owner is gone"
 
 
@@ -5608,6 +5656,58 @@ def _do_reserve(
             env=child_env,
             on_start=_record_start,
         )
+        if not (job_dir / _JOB_RUN_RECORD_NAME).is_file():
+            # ``run_command`` reports a spawn that never happened (for example a
+            # missing executable) as return code 127 only after proving no
+            # descendant exists.  No process was created, so the recorded launch
+            # intent must not keep the host blocked: remove it and release the
+            # unused lease instead of stranding capacity behind a phantom job.
+            _remove_launch_intent(job_dir)
+            release_status, release_message = _release_allocation(declaration, repo_root)
+            detail = (process.stderr or "").strip()
+            trailer = (
+                ""
+                if release_status == "ok"
+                else f"; the lease could not be released ({release_message})"
+            )
+            return (
+                "fail",
+                "the qualification command was not launched; no process was created "
+                f"(exit {process.returncode})" + (f": {detail}" if detail else "") + trailer,
+                {**extra, "checks": complete_checks, "facts": admitted_view},
+            )
+        containment = last_command_containment()
+        containment_proven = containment is not None and containment.proven
+        _update_job_run_record(job_dir, containment_confirmed=containment_proven)
+        if process.stdout:
+            print(process.stdout, end="")
+        if process.stderr:
+            print(process.stderr, end="", file=sys.stderr)
+        if not containment_proven:
+            detail = (
+                containment.detail
+                if containment is not None
+                else "the command's containment outcome was not observed"
+            )
+            status, message = _blocked_allocation(
+                descriptor_path,
+                "the leased command's descendant containment could not be proven "
+                f"({detail}); the lease is kept because the allocation may still be in use",
+            )
+            return status, message, {**extra, "checks": complete_checks, "facts": admitted_view}
+        release_status, _release_message = _release_allocation(declaration, repo_root)
+        if release_status != "ok":
+            return (
+                "fail",
+                f"leased command exited {process.returncode}; {_release_message}",
+                {**extra, "checks": complete_checks, "facts": admitted_view},
+            )
+        status = "ok" if process.returncode == 0 else "fail"
+        return (
+            status,
+            f"leased command exited {process.returncode}",
+            {**extra, "checks": complete_checks, "facts": admitted_view},
+        )
     except JobOwnershipError as exc:
         # The command was spawned but could not be attributed to this lease, so
         # ``run_command`` already tore it down.  The lease is kept because the
@@ -5617,38 +5717,19 @@ def _do_reserve(
             descriptor_path, f"the launched command could not be recorded: {exc}"
         )
         return status, message, {**extra, "checks": complete_checks, "facts": admitted_view}
-    containment = last_command_containment()
-    containment_proven = containment is not None and containment.proven
-    _update_job_run_record(job_dir, containment_confirmed=containment_proven)
-    if process.stdout:
-        print(process.stdout, end="")
-    if process.stderr:
-        print(process.stderr, end="", file=sys.stderr)
-    if not containment_proven:
-        detail = (
-            containment.detail
-            if containment is not None
-            else "the command's containment outcome was not observed"
-        )
-        status, message = _blocked_allocation(
+    except BaseException as exc:
+        # A cancellation (SIGINT/SIGTERM raises ``SystemExit`` out of the run) or
+        # any other error can end this process while a spawned command's
+        # containment is unproven.  The flock dies with the process, so persist
+        # the host-wide exclusion first; a later reservation then refuses to
+        # admit until containment is proven or an operator recovers the lease.
+        _mark_allocation_unresolved(
             descriptor_path,
-            "the leased command's descendant containment could not be proven "
-            f"({detail}); the lease is kept because the allocation may still be in use",
+            "the leased command could not be finalized before the run ended "
+            f"({type(exc).__name__}: {exc}); the lease is kept because the allocation "
+            "may still be in use",
         )
-        return status, message, {**extra, "checks": complete_checks, "facts": admitted_view}
-    release_status, _release_message = _release_allocation(declaration, repo_root)
-    if release_status != "ok":
-        return (
-            "fail",
-            f"leased command exited {process.returncode}; {_release_message}",
-            {**extra, "checks": complete_checks, "facts": admitted_view},
-        )
-    status = "ok" if process.returncode == 0 else "fail"
-    return (
-        status,
-        f"leased command exited {process.returncode}",
-        {**extra, "checks": complete_checks, "facts": admitted_view},
-    )
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:
