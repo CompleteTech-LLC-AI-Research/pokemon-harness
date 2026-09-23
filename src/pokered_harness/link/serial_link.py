@@ -80,15 +80,28 @@ from collections import defaultdict
 from typing import Protocol
 
 from pokered_harness.link._serial_link_support import (
+    _DEFAULT_ACCEPT_TIMEOUT_SECONDS,
+    _FRAME_READ_TIMEOUT_SECONDS,  # noqa: F401  (re-exported for module-surface parity)
+    _HELLO_TIMEOUT_SECONDS,
+    _IO_POLL_S,
+    _MAX_EXCHANGE_PAYLOAD_SIZE,  # noqa: F401  (re-exported for module-surface parity)
+    _MAX_FRAME_SIZE,
+    _MAX_INBOUND_BYTES,
+    _MAX_INBOUND_FRAMES,
+    _MAX_INBOUND_FRAMES_PER_KIND,
+    _MAX_INBOUND_KINDS,
+    _READER_JOIN_TIMEOUT_S,
+    _SUPPORTED_ROM_VERSIONS,  # noqa: F401  (re-exported for module-surface parity)
+    _WRITE_TIMEOUT_S,
     SUPPORTED_ROM_VERSIONS,
     SerialLinkClosed,
     SerialLinkError,
     SerialLinkProtocolError,
     SerialLinkTimeout,
-    _Hello,  # noqa: F401  (re-exported for module-surface parity)
     _acquire_exchange_slot,
     _coerce_exchange_payload,
     _connect_socket,
+    _Hello,  # noqa: F401  (re-exported for module-surface parity)
     _pack_lp_bytes,
     _pack_lp_str,
     _raise_if_cancelled,
@@ -102,19 +115,6 @@ from pokered_harness.link._serial_link_support import (
     _validate_timeout_ms,
     _validate_timeout_seconds,
     validate_rom_version,
-    _DEFAULT_ACCEPT_TIMEOUT_SECONDS,  # noqa: F401  (re-exported for module-surface parity)
-    _FRAME_READ_TIMEOUT_SECONDS,  # noqa: F401  (re-exported for module-surface parity)
-    _HELLO_TIMEOUT_SECONDS,
-    _IO_POLL_S,
-    _MAX_EXCHANGE_PAYLOAD_SIZE,  # noqa: F401  (re-exported for module-surface parity)
-    _MAX_FRAME_SIZE,
-    _MAX_INBOUND_BYTES,
-    _MAX_INBOUND_FRAMES,
-    _MAX_INBOUND_FRAMES_PER_KIND,
-    _MAX_INBOUND_KINDS,
-    _READER_JOIN_TIMEOUT_S,
-    _SUPPORTED_ROM_VERSIONS,  # noqa: F401  (re-exported for module-surface parity)
-    _WRITE_TIMEOUT_S,
 )
 from pokered_harness.link.network_backend import (
     _validate_connected_socket_loopback,
