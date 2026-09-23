@@ -180,7 +180,11 @@ UNIT_MODULES = frozenset(
         "test_timed_mcp_matrix.py",
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
-        "test_timed_wire.py",
+        "test_timed_wire_admission.py",
+        "test_timed_wire_codec.py",
+        "test_timed_wire_progress.py",
+        "test_timed_wire_transport.py",
+        "test_timed_wire_wirecontrol.py",
         "test_timed_wire_batch.py",
         "test_timed_trade_probe.py",
     }
@@ -746,32 +750,32 @@ TIMING_SENSITIVE_TESTS = frozenset(
             "test_external_cancel_survives_factory_into_real_endpoint_wait",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_wirecontrol.py",
             "test_wirecontrol_handshake_rejects_caps_and_revision_without_downgrade",
         ),
-        ("test_timed_wire.py", "test_handshake_writer_preserves_terminal_reason"),
+        ("test_timed_wire_codec.py", "test_handshake_writer_preserves_terminal_reason"),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_progress.py",
             "test_bidirectional_concurrent_requests_and_responses",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_admission.py",
             "test_fast_response_before_writer_return_and_before_request_consumption",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_admission.py",
             "test_waiting_writer_admission_is_bounded_and_does_not_skip_sequence",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_transport.py",
             "test_peer_application_waits_for_local_hello_send_publication",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_transport.py",
             "test_one_absolute_deadline_covers_admission_and_partial_write",
         ),
-        ("test_timed_wire.py", "test_close_wakes_receive"),
-        ("test_timed_wire.py", "test_close_wakes_partial_frame_reader"),
+        ("test_timed_wire_progress.py", "test_close_wakes_receive"),
+        ("test_timed_wire_transport.py", "test_close_wakes_partial_frame_reader"),
     }
 )
 

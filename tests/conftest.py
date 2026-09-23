@@ -8,6 +8,7 @@ import pytest
 
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
 from scripts import coverage_report as coverage
+from tests._timed_wire_support import kind  # noqa: F401
 
 try:
     from tests._battle_coverage_support import CATALOG_PATH
