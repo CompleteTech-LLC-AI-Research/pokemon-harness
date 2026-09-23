@@ -3660,6 +3660,201 @@ def test_blocked_cli_exit_refuses_a_later_reservation_on_the_same_host_lock(
         runner._close_held_lease_descriptors(runner._lock_identity(host_lock))
 
 
+def test_unreadable_process_table_is_unproven_containment(tmp_path: Path, monkeypatch):
+    """An unreadable ``/proc`` is unknown visibility, not an empty process table.
+
+    Round-17 finding: enumeration errors returned empty lists, so a sweep that
+    could not see the process table reported a live detached child as contained.
+    """
+
+    pidfile = tmp_path / "detached.pid"
+    command = (
+        "import subprocess,sys\nfrom pathlib import Path\n"
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],"
+        "start_new_session=True,stdin=subprocess.DEVNULL,"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"Path({str(pidfile)!r}).write_text(str(p.pid))\n"
+    )
+    original_iterdir = Path.iterdir
+
+    def unreadable_proc(path: Path):
+        if path == Path("/proc"):
+            raise PermissionError("injected unavailable process enumeration")
+        return original_iterdir(path)
+
+    detached: int | None = None
+    try:
+        result = runner.run_command(
+            [sys.executable, "-c", command],
+            tmp_path,
+            timeout=10,
+            on_start=lambda process: monkeypatch.setattr(Path, "iterdir", unreadable_proc),
+        )
+        assert result.returncode == 0
+        assert pidfile.exists()
+        detached = int(pidfile.read_text(encoding="utf-8"))
+        assert runner._pid_alive(detached), "the negative-control child exited"
+        containment = runner.last_command_containment()
+        assert containment is not None
+        assert not containment.proven, (
+            f"a sweep that could not enumerate processes claimed proof: {containment.detail!r}"
+        )
+    finally:
+        monkeypatch.setattr(Path, "iterdir", original_iterdir)
+        if detached is None and pidfile.exists():
+            detached = int(pidfile.read_text(encoding="utf-8"))
+        if detached is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(detached, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(detached, 0)
+
+
+def test_abrupt_holder_death_keeps_host_exclusion(tmp_path: Path):
+    """SIGKILL of the holder must not free a host lease with live work.
+
+    Round-17 finding: the host-wide record was written only on handled failure
+    paths, so an abrupt signal dropped the flock with no record and a competing
+    job reserved the same lock while a detached descendant was still alive.
+    """
+
+    declaration = make_declaration(
+        reservation_mechanism="cpuset-affinity",
+        affinity_cpus=[0, 1, 2, 3],
+        cpu_quota_cores=None,
+    )
+    job_dir = tmp_path / "job"
+    host_lock = tmp_path / "host.lock"
+    declaration["reservation"]["host_lock_path"] = str(host_lock)
+    declaration["reservation"]["job_dir"] = str(job_dir)
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    pidfile = tmp_path / "detached.pid"
+    command = (
+        "import subprocess,sys,time\nfrom pathlib import Path\n"
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],"
+        "start_new_session=True,stdin=subprocess.DEVNULL,"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"Path({str(pidfile)!r}).write_text(str(p.pid))\n"
+        "time.sleep(120)\n"
+    )
+    program = (
+        "from scripts import qualification_runner as r\n"
+        "from tests.test_qualification_runner import make_facts\n"
+        "r.collect_facts=lambda root: make_facts(affinity_cpus=[0,1,2,3],"
+        "affinity_count=4,cpu_quota_cores=None)\n"
+        "r.prerequisite_checks=lambda *args: [r.CheckResult('stub-prerequisites',"
+        "'ok',None,None,'ROM-free fault injection')]\n"
+        "raise SystemExit(r.main("
+        f"{['--reserve', '--json', '--declaration', str(declaration_path), '--run', sys.executable, '-c', command]!r}"
+        "))\n"
+    )
+    env = dict(os.environ, PYTHONPATH=f"{REPO_ROOT}:{REPO_ROOT / 'src'}")
+    previous_subreaper = runner._child_subreaper_state()
+    runner._set_child_subreaper(True)
+    holder: subprocess.Popen[str] | None = None
+    detached: int | None = None
+    job_pid: int | None = None
+    try:
+        holder = subprocess.Popen(
+            [sys.executable, "-c", program],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 30
+        while not pidfile.exists():
+            if holder.poll() is not None or time.monotonic() >= deadline:
+                raise AssertionError("the leased command never launched")
+            time.sleep(0.02)
+        detached = int(pidfile.read_text(encoding="utf-8"))
+        record = json.loads((job_dir / runner._JOB_RUN_RECORD_NAME).read_text(encoding="utf-8"))
+        job_pid = record["job_pid"]
+        holder.kill()
+        holder.communicate(timeout=30)
+        assert holder.returncode == -signal.SIGKILL
+        assert runner._pid_alive(detached), "the detached descendant exited unexpectedly"
+        with pytest.raises(runner.UnresolvedAllocationError):
+            runner._reserve_allocation(
+                declaration,
+                tmp_path,
+                tmp_path / "second-job",
+                make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None),
+            )
+    finally:
+        if holder is not None and holder.poll() is None:
+            holder.kill()
+            holder.communicate(timeout=30)
+        if detached is None and pidfile.exists():
+            detached = int(pidfile.read_text(encoding="utf-8"))
+        for pid in (detached, job_pid):
+            if pid is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+                with contextlib.suppress(ChildProcessError):
+                    os.waitpid(pid, 0)
+        if previous_subreaper is not None:
+            runner._set_child_subreaper(bool(previous_subreaper))
+        runner._close_held_lease_descriptors(runner._lock_identity(host_lock))
+
+
+def test_json_report_keeps_child_output_sanitized(tmp_path: Path, monkeypatch, capsys):
+    """A ``--json`` report must stay one sanitized document with child output.
+
+    Round-17 finding: the child's stdout was echoed before the JSON document and
+    never sanitized, so a raw absolute path corrupted and leaked from the report.
+    """
+
+    declaration = make_declaration(
+        reservation_mechanism="cpuset-affinity",
+        affinity_cpus=[0, 1, 2, 3],
+        cpu_quota_cores=None,
+    )
+    job_dir = tmp_path / "job"
+    host_lock = tmp_path / "host.lock"
+    declaration["reservation"]["host_lock_path"] = str(host_lock)
+    declaration["reservation"]["job_dir"] = str(job_dir)
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    monkeypatch.setattr(
+        runner,
+        "collect_facts",
+        lambda root: make_facts(affinity_cpus=[0, 1, 2, 3], affinity_count=4, cpu_quota_cores=None),
+    )
+    monkeypatch.setattr(
+        runner,
+        "prerequisite_checks",
+        lambda *args: [
+            runner.CheckResult("stub-prerequisites", "ok", None, None, "ROM-free fault injection")
+        ],
+    )
+    try:
+        status = runner.main(
+            [
+                "--reserve",
+                "--json",
+                "--declaration",
+                str(declaration_path),
+                "--run",
+                sys.executable,
+                "-c",
+                "print('child output /private/operator/rom.gb')",
+            ]
+        )
+        stdout = capsys.readouterr().out
+        assert status == 0, stdout
+        assert "/private/operator/rom.gb" not in stdout
+        payload = json.loads(stdout)
+        assert payload["overall"] == "ok"
+        assert "child output" in payload["command_stdout"]
+        assert "<redacted-path>" in payload["command_stdout"]
+    finally:
+        runner._close_held_lease_descriptors(runner._lock_identity(host_lock))
+
+
 def test_clear_unresolved_allocation_only_removes_the_records_own_lease(tmp_path: Path):
     """A release must not erase a *different* lease's host-wide exclusion.
 

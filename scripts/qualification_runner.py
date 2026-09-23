@@ -310,6 +310,9 @@ def _process_tree_pids(root_pid: int | None = None) -> list[int]:
     try:
         entries = list(Path("/proc").iterdir())
     except OSError:
+        _note_proc_enumeration_failure(
+            "the process table could not be enumerated while scanning the process tree"
+        )
         return sorted(tree)
     for entry in entries:
         if not entry.name.isdigit():
@@ -2639,6 +2642,10 @@ _OWNED_PROCESSES: set[subprocess.Popen[str]] = set()
 # Descendants of an owned command that survived the group sweep.  While this is
 # non-empty the capacity is still in use and the lease must not be released.
 _LEFTOVER_OWNED_PIDS: set[int] = set()
+# A process scan that could not read the whole process table is *not* evidence
+# that the table was empty.  Every scan that fails appends a reason here, and a
+# containment decision that folds in these reasons refuses to report proof.
+_PROC_ENUMERATION_FAILURES: list[str] = []
 # A durable record of the command a lease is actually running.  It lives in the
 # job directory so a later ``--recover``/``--release`` process can identify the
 # job's own process group and session even after its holder died.
@@ -2809,6 +2816,20 @@ class _adopted_descendants:
         return False
 
 
+def _note_proc_enumeration_failure(context: str) -> None:
+    """Record that a process scan could not observe the whole process table."""
+
+    _PROC_ENUMERATION_FAILURES.append(context)
+
+
+def _reset_proc_enumeration_failures() -> None:
+    _PROC_ENUMERATION_FAILURES.clear()
+
+
+def _proc_enumeration_failures() -> list[str]:
+    return list(_PROC_ENUMERATION_FAILURES)
+
+
 def _process_group_members(pgid: int) -> list[int]:
     """Return every live pid whose process group is *pgid* (excluding self)."""
 
@@ -2819,6 +2840,9 @@ def _process_group_members(pgid: int) -> list[int]:
     try:
         entries = list(Path("/proc").iterdir())
     except OSError:
+        _note_proc_enumeration_failure(
+            "the process table could not be enumerated while sweeping the command's process group"
+        )
         return members
     for entry in entries:
         if not entry.name.isdigit():
@@ -2925,6 +2949,9 @@ def _direct_child_pids(parent_pid: int | None = None) -> list[int]:
     try:
         entries = list(Path("/proc").iterdir())
     except OSError:
+        _note_proc_enumeration_failure(
+            "the process table could not be enumerated while scanning for direct children"
+        )
         return children
     for entry in entries:
         if not entry.name.isdigit():
@@ -3047,6 +3074,9 @@ def _token_owned_live_pids(job_token: Any) -> list[int]:
     try:
         entries = os.listdir("/proc")
     except OSError:
+        _note_proc_enumeration_failure(
+            "the process table could not be enumerated while scanning for token-owned survivors"
+        )
         return []
     found: list[int] = []
     for entry in entries:
@@ -3285,6 +3315,7 @@ def run_command(
     notes: list[str] = []
     group_leftovers: list[int] = []
     detached_leftovers: list[int] = []
+    enumeration_failures: list[str] = []
     pending_error: BaseException | None = None
     deferred_signum: int | None = None
     with _adopted_descendants() as adoption:
@@ -3366,6 +3397,7 @@ def run_command(
 
         # Containment runs on every path, including the cancellation path, so a
         # signal cannot leave an owned descendant holding the allocation.
+        _reset_proc_enumeration_failures()
         try:
             group_confirmed, group_leftovers = _terminate_process_group(process.pid)
             detached_confirmed, detached_leftovers = _contain_adopted_descendants(preexisting)
@@ -3377,12 +3409,23 @@ def run_command(
                 )
         finally:
             deferred_signum = _end_cleanup()
+        enumeration_failures = _proc_enumeration_failures()
 
     leftovers = sorted(set(group_leftovers) | set(detached_leftovers))
     if not group_confirmed or not detached_confirmed:
         _LEFTOVER_OWNED_PIDS.update(leftovers)
-    containment_proven = bool(group_confirmed and detached_confirmed and adoption_active)
-    if not adoption_active:
+    containment_proven = bool(
+        group_confirmed and detached_confirmed and adoption_active and not enumeration_failures
+    )
+    if enumeration_failures:
+        # An unreadable process table is unknown visibility, not an empty table.
+        # A sweep that could not enumerate processes cannot prove containment,
+        # so the lease must stay blocked rather than be released.
+        containment_detail = (
+            "the process table could not be fully enumerated, so containment is unproven: "
+            + "; ".join(sorted(set(enumeration_failures))[:4])
+        )
+    elif not adoption_active:
         containment_detail = (
             "the runner could not become a child subreaper, so detached descendants "
             "could not be observed or contained"
@@ -5278,6 +5321,7 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
         _mark_allocation_unresolved(descriptor_path, reason)
         return "blocked", reason
 
+    _reset_proc_enumeration_failures()
     live_leftovers = _sweep_leftover_owned_processes()
     if live_leftovers:
         return blocked(
@@ -5372,6 +5416,14 @@ def _release_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
             f"({len(token_survivors)} pid(s)); the lease is kept because the "
             "allocation is still in use: " + ", ".join(str(pid) for pid in token_survivors[:16])
         )
+    enumeration_failures = _proc_enumeration_failures()
+    if enumeration_failures:
+        # An unreadable process table is unknown visibility, so the sweeps above
+        # may have missed a live descendant; keep the lease and the exclusion.
+        return blocked(
+            "the process table could not be fully enumerated, so containment cannot be "
+            "proven: " + "; ".join(sorted(set(enumeration_failures))[:4])
+        )
     if holder == os.getpid():
         # Relinquish the lock only after every containment check has passed.  A
         # blocked release must keep effective exclusion: closing the descriptors
@@ -5395,6 +5447,7 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
         _mark_allocation_unresolved(descriptor_path, reason)
         return "blocked", reason
 
+    _reset_proc_enumeration_failures()
     if descriptor_path is None or not descriptor_path.is_file():
         pending = _unresolved_allocation_present(_declared_host_lock(declaration, repo_root))
         if pending is not None:
@@ -5471,6 +5524,14 @@ def _recover_allocation(declaration: dict[str, Any], repo_root: Path) -> tuple[s
             f"({len(token_survivors)} pid(s)); refusing to remove lease state "
             "while the allocation is still in use: "
             + ", ".join(str(pid) for pid in token_survivors[:16])
+        )
+    enumeration_failures = _proc_enumeration_failures()
+    if enumeration_failures:
+        # An unreadable process table is unknown visibility, so containment was
+        # not actually proven; refuse to remove the state.
+        return blocked(
+            "the process table could not be fully enumerated, so containment cannot be "
+            "proven: " + "; ".join(sorted(set(enumeration_failures))[:4])
         )
     _remove_allocation_state(descriptor_path)
     _clear_unresolved_allocation(lock_path, descriptor_path=descriptor_path)
@@ -5632,6 +5693,15 @@ def _do_reserve(
 
     # Durable job ownership is written before the command runs, so a holder that
     # dies mid-run still leaves a verifiable record of what it launched.
+    # The host-wide record is persisted *before* the command is spawned so that
+    # an abrupt holder death (SIGKILL, which cannot run any handler) still leaves
+    # the exclusion in force; ``_release_allocation`` clears it only after
+    # containment is positively confirmed.
+    _mark_allocation_unresolved(
+        descriptor_path,
+        "an allocation is active on this host lock; it may be released only after its "
+        "launched work is proven contained",
+    )
     try:
         _write_job_launch_intent(job_dir, command)
     except JobOwnershipError as exc:
@@ -5679,10 +5749,17 @@ def _do_reserve(
         containment = last_command_containment()
         containment_proven = containment is not None and containment.proven
         _update_job_run_record(job_dir, containment_confirmed=containment_proven)
-        if process.stdout:
-            print(process.stdout, end="")
-        if process.stderr:
-            print(process.stderr, end="", file=sys.stderr)
+        if process.stdout or process.stderr:
+            # The child's streams are retained in the report rather than echoed
+            # to this process's stdout, so a ``--json`` report stays a single
+            # parseable document and the streams are sanitized by the same
+            # redaction pass as the rest of the payload (absolute paths never
+            # leak and can never prepend raw text to the JSON).
+            extra = {
+                **extra,
+                "command_stdout": process.stdout or "",
+                "command_stderr": process.stderr or "",
+            }
         if not containment_proven:
             detail = (
                 containment.detail
