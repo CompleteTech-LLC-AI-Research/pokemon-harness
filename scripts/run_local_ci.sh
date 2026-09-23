@@ -146,7 +146,11 @@ python -m ruff check \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
-    tests/test_battle_coverage.py \
+    tests/test_battle_coverage_accounting.py \
+    tests/test_battle_coverage_catalog.py \
+    tests/test_battle_coverage_gate_assets.py \
+    tests/test_battle_coverage_identity.py \
+    tests/test_battle_coverage_mechanics.py \
     tests/test_battle_item_evidence.py \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
@@ -175,7 +179,11 @@ python -m ruff format --check \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
-    tests/test_battle_coverage.py \
+    tests/test_battle_coverage_accounting.py \
+    tests/test_battle_coverage_catalog.py \
+    tests/test_battle_coverage_gate_assets.py \
+    tests/test_battle_coverage_identity.py \
+    tests/test_battle_coverage_mechanics.py \
     tests/test_battle_item_evidence.py \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \

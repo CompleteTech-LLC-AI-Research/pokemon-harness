@@ -7,10 +7,13 @@ import importlib
 import pytest
 
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
+from scripts import coverage_report as coverage
 
 try:
+    from tests._battle_coverage_support import CATALOG_PATH
     from tests._tier_config import MARKERS, classify_test
 except ModuleNotFoundError:  # pragma: no cover - direct conftest loading
+    from _battle_coverage_support import CATALOG_PATH
     from _tier_config import MARKERS, classify_test
 
 
@@ -118,6 +121,11 @@ def symbols() -> SymbolTable:
 @pytest.fixture
 def mem() -> DictMemory:
     return DictMemory()
+
+
+@pytest.fixture()
+def catalog() -> dict:
+    return coverage.load_catalog(CATALOG_PATH)
 
 
 @pytest.fixture
