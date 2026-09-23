@@ -186,7 +186,11 @@ python -m ruff check \
     src/pokered_harness/link/serial_coordinator.py \
     src/pokered_harness/link/serial_link.py \
     scripts/network_concurrency_probe.py \
-    tests/test_network_backend.py \
+    tests/test_network_backend_dispatch.py \
+    tests/test_network_backend_rearm.py \
+    tests/test_network_backend_serial_transcript.py \
+    tests/test_network_backend_transport.py \
+    tests/test_network_backend_wire_idle.py \
     tests/test_fixture_provenance.py \
     tests/test_pyboy_link_session.py \
     tests/test_link_pair.py \
