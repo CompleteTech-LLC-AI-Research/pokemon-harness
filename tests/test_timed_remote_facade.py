@@ -201,7 +201,7 @@ def authored_game(remote, monkeypatch):
     # isolated wire module or requiring installation of this uncommitted tree.
     spec = importlib.util.spec_from_file_location(
         "_remote_authored_helper",
-        Path(__file__).with_name("test_timed_link_session.py"),
+        Path(__file__).with_name("_timed_link_session_support.py"),
     )
     helper = importlib.util.module_from_spec(spec)
     with monkeypatch.context() as context:
