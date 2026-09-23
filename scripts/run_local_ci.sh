@@ -168,7 +168,9 @@ python -m ruff check \
     tests/test_runtime_packaging_bootstrap.py \
     tests/test_runtime_packaging_build_contract.py \
     tests/test_runtime_packaging_dependency_pins.py \
-    tests/test_runtime_packaging_hygiene.py
+    tests/test_runtime_packaging_hygiene.py \
+    tests/test_timed_remote.py \
+    tests/test_timed_remote_facade.py
 python -m ruff format --check \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
@@ -205,7 +207,9 @@ python -m ruff format --check \
     tests/test_runtime_packaging_bootstrap.py \
     tests/test_runtime_packaging_build_contract.py \
     tests/test_runtime_packaging_dependency_pins.py \
-    tests/test_runtime_packaging_hygiene.py
+    tests/test_runtime_packaging_hygiene.py \
+    tests/test_timed_remote.py \
+    tests/test_timed_remote_facade.py
 
 # Check runtime and link lane lint
 python -m ruff check \
