@@ -72,34 +72,49 @@ def test_tier_classifier_marks_late_rearm_as_timing_sensitive():
 
 
 _SUBPROCESS_MODULE = "tests/test_pyboy_link_session_subprocess.py"
+_SUBPROCESS_LINK_MENU_MODULE = "tests/test_pyboy_link_session_subprocess_link_menu_history.py"
+_SUBPROCESS_PEER_LIFECYCLE_MODULE = "tests/test_pyboy_link_session_subprocess_peer_lifecycle.py"
 
 
-_REVIEWED_SUBPROCESS_UNIT_TESTS = (
-    "test_link_menu_history_preserves_first_samples_across_buffer_reuse",
-    "test_link_menu_history_validates_call_and_bank",
-    "test_link_menu_history_rejects_call_to_wrong_target",
-    "test_link_menu_history_additive_result_compatibility",
-    "test_link_menu_history_reports_missing_symbols_and_registration_errors",
-    "test_link_menu_history_bounds_callback_errors_and_keeps_partial_samples",
-    "test_link_menu_history_decisive_directions_ignore_stale_second_bytes",
-    "test_link_menu_history_received_candidate_follows_rom_order",
-    "test_link_menu_history_failure_summary_survives_large_result_tail",
-    "test_link_menu_history_missing_call_symbols_remains_observable",
-    "test_link_menu_history_rejects_post_call_outside_bank",
-    "test_peer_trace_watchdog",
-    "test_setup_handshake_failure_returns_bounded_non_success_sentinels",
-    "test_collect_pair_rejects_missing_or_partial_required_rows",
-    "test_strict_acceptance_rejects_link_menu_only_result",
-    "test_strict_acceptance_rejects_missing_native_edge_req",
-    "test_peer_shutdown_drains_live_serial_work_before_starting_teardown_marker",
-    "test_peer_shutdown_protocol_propagates_backend_errors",
-    "test_peer_shutdown_ready_marker_times_out_without_post_marker_ticks",
-    "test_link_menu_finish_starts_teardown_only_through_draining_helper",
-    "test_hold_at_sync_boundary_does_not_tick_past_ready_marker",
-    "test_hold_at_sync_boundary_ticks_timed_rom_phase",
-    "test_collect_pair_enforces_hard_deadline_without_waiting_for_peers",
-    "test_partial_peer_sentinel_is_fatal_before_gameplay_assertions",
-)
+# The ROM-free cases were split out of the real-ROM module for #131.  They now
+# live in dedicated unit modules and are pinned per module below, so a test that
+# drifts into the wrong file is caught rather than hidden by a shared inventory.
+_REVIEWED_SUBPROCESS_UNIT_TESTS = {
+    _SUBPROCESS_LINK_MENU_MODULE: (
+        "test_link_menu_history_preserves_first_samples_across_buffer_reuse",
+        "test_link_menu_history_validates_call_and_bank",
+        "test_link_menu_history_rejects_call_to_wrong_target",
+        "test_link_menu_history_additive_result_compatibility",
+        "test_link_menu_history_reports_missing_symbols_and_registration_errors",
+        "test_link_menu_history_bounds_callback_errors_and_keeps_partial_samples",
+        "test_link_menu_history_decisive_directions_ignore_stale_second_bytes",
+        "test_link_menu_history_received_candidate_follows_rom_order",
+        "test_link_menu_history_failure_summary_survives_large_result_tail",
+        "test_link_menu_history_missing_call_symbols_remains_observable",
+        "test_link_menu_history_rejects_post_call_outside_bank",
+    ),
+    _SUBPROCESS_PEER_LIFECYCLE_MODULE: (
+        "test_peer_trace_watchdog",
+        "test_setup_handshake_failure_returns_bounded_non_success_sentinels",
+        "test_collect_pair_rejects_missing_or_partial_required_rows",
+        "test_strict_acceptance_rejects_link_menu_only_result",
+        "test_strict_acceptance_rejects_missing_native_edge_req",
+        "test_peer_shutdown_drains_live_serial_work_before_starting_teardown_marker",
+        "test_peer_shutdown_protocol_propagates_backend_errors",
+        "test_peer_shutdown_ready_marker_times_out_without_post_marker_ticks",
+        "test_link_menu_finish_starts_teardown_only_through_draining_helper",
+        "test_hold_at_sync_boundary_does_not_tick_past_ready_marker",
+        "test_hold_at_sync_boundary_ticks_timed_rom_phase",
+        "test_collect_pair_enforces_hard_deadline_without_waiting_for_peers",
+        "test_partial_peer_sentinel_is_fatal_before_gameplay_assertions",
+    ),
+}
+
+_SUBPROCESS_UNIT_TEST_MODULES = {
+    test_name: module
+    for module, names in _REVIEWED_SUBPROCESS_UNIT_TESTS.items()
+    for test_name in names
+}
 
 
 _REVIEWED_SUBPROCESS_REAL_TESTS = {
@@ -121,9 +136,9 @@ _REVIEWED_SUBPROCESS_REAL_TESTS = {
 }
 
 
-@pytest.mark.parametrize("test_name", _REVIEWED_SUBPROCESS_UNIT_TESTS)
+@pytest.mark.parametrize("test_name", _SUBPROCESS_UNIT_TEST_MODULES)
 def test_tier_classifier_subprocess_reviewed_fakes_are_exactly_unit(test_name):
-    assert classify_test(_SUBPROCESS_MODULE, test_name) == {"unit"}
+    assert classify_test(_SUBPROCESS_UNIT_TEST_MODULES[test_name], test_name) == {"unit"}
 
 
 @pytest.mark.parametrize("test_name,expected", _REVIEWED_SUBPROCESS_REAL_TESTS.items())
@@ -160,19 +175,39 @@ def test_tier_classifier_subprocess_fake_exceptions_are_module_scoped():
 
 def test_tier_classifier_subprocess_reviewed_inventory_matches_source():
     # Parse only: importing or collecting the live peer module is unnecessary.
-    source = Path(__file__).resolve().parent / Path(_SUBPROCESS_MODULE).name
-    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-    names = [
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name.startswith("test_")
-    ]
-    reviewed = set(_REVIEWED_SUBPROCESS_UNIT_TESTS) | set(_REVIEWED_SUBPROCESS_REAL_TESTS)
-    assert len(_REVIEWED_SUBPROCESS_UNIT_TESTS) == len(set(_REVIEWED_SUBPROCESS_UNIT_TESTS))
-    assert set(_REVIEWED_SUBPROCESS_UNIT_TESTS).isdisjoint(_REVIEWED_SUBPROCESS_REAL_TESTS)
-    assert len(names) == len(set(names)), "duplicate test definitions hide reviewed coverage"
-    assert set(names) == reviewed, "subprocess test inventory changed; review tier membership"
+    base = Path(__file__).resolve().parent
+
+    def source_tests(module: str) -> list[str]:
+        source = base / Path(module).name
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        return [
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+        ]
+
+    unit_names = [name for names in _REVIEWED_SUBPROCESS_UNIT_TESTS.values() for name in names]
+    reviewed = set(unit_names) | set(_REVIEWED_SUBPROCESS_REAL_TESTS)
+    assert len(unit_names) == len(set(unit_names))
+    assert set(unit_names).isdisjoint(_REVIEWED_SUBPROCESS_REAL_TESTS)
+    # Each reviewed unit name is pinned to exactly one split module, and that
+    # module must define exactly the reviewed names and nothing else.
+    for module, reviewed_names in _REVIEWED_SUBPROCESS_UNIT_TESTS.items():
+        defined = source_tests(module)
+        assert len(defined) == len(set(defined)), (
+            f"duplicate test definitions in {module} hide reviewed coverage"
+        )
+        assert set(defined) == set(reviewed_names), (
+            f"{module} inventory changed; review tier membership"
+        )
+    assert set(source_tests(_SUBPROCESS_MODULE)) == set(_REVIEWED_SUBPROCESS_REAL_TESTS), (
+        "subprocess real-ROM inventory changed; review tier membership"
+    )
+    total_defined = len(source_tests(_SUBPROCESS_MODULE)) + sum(
+        len(source_tests(module)) for module in _REVIEWED_SUBPROCESS_UNIT_TESTS
+    )
+    assert total_defined == len(reviewed)
 
 
 def test_relative_python_path_does_not_dereference_virtualenv_symlink(tmp_path):

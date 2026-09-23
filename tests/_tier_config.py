@@ -151,6 +151,8 @@ UNIT_MODULES = frozenset(
         "test_production_gate_strict_matrix.py",
         "test_pyboy_link_imports.py",
         "test_pyboy_link_session.py",
+        "test_pyboy_link_session_subprocess_link_menu_history.py",
+        "test_pyboy_link_session_subprocess_peer_lifecycle.py",
         "test_remote_endpoint.py",
         "test_runtime_packaging_bootstrap.py",
         "test_runtime_packaging_build_contract.py",
@@ -224,35 +226,6 @@ KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES | OPT_IN_MODULES
 # belong here; unlisted future functions retain the module's real-ROM tier.
 ROM_FREE_TESTS = frozenset(
     {
-        ("test_pyboy_link_session_subprocess.py", name)
-        for name in (
-            "test_link_menu_history_preserves_first_samples_across_buffer_reuse",
-            "test_link_menu_history_validates_call_and_bank",
-            "test_link_menu_history_rejects_call_to_wrong_target",
-            "test_link_menu_history_additive_result_compatibility",
-            "test_link_menu_history_reports_missing_symbols_and_registration_errors",
-            "test_link_menu_history_bounds_callback_errors_and_keeps_partial_samples",
-            "test_link_menu_history_decisive_directions_ignore_stale_second_bytes",
-            "test_link_menu_history_received_candidate_follows_rom_order",
-            "test_link_menu_history_failure_summary_survives_large_result_tail",
-            "test_link_menu_history_missing_call_symbols_remains_observable",
-            "test_link_menu_history_rejects_post_call_outside_bank",
-            "test_peer_trace_watchdog",
-            "test_setup_handshake_failure_returns_bounded_non_success_sentinels",
-            "test_collect_pair_rejects_missing_or_partial_required_rows",
-            "test_strict_acceptance_rejects_link_menu_only_result",
-            "test_strict_acceptance_rejects_missing_native_edge_req",
-            "test_peer_shutdown_drains_live_serial_work_before_starting_teardown_marker",
-            "test_peer_shutdown_protocol_propagates_backend_errors",
-            "test_peer_shutdown_ready_marker_times_out_without_post_marker_ticks",
-            "test_link_menu_finish_starts_teardown_only_through_draining_helper",
-            "test_hold_at_sync_boundary_does_not_tick_past_ready_marker",
-            "test_hold_at_sync_boundary_ticks_timed_rom_phase",
-            "test_collect_pair_enforces_hard_deadline_without_waiting_for_peers",
-            "test_partial_peer_sentinel_is_fatal_before_gameplay_assertions",
-        )
-    }
-    | {
         (
             "test_mcp_timed_rom.py",
             "test_rom_client_load_state_timeout_redacts_data",
