@@ -64,7 +64,7 @@ def test_tier_classifier_separates_required_remote_and_diagnostic_trade():
 
 def test_tier_classifier_marks_late_rearm_as_timing_sensitive():
     marks = classify_test(
-        "tests/test_network_backend.py",
+        "tests/test_network_backend_rearm.py",
         "test_on_edge_waits_for_late_rearm",
     )
     assert "unit" in marks
