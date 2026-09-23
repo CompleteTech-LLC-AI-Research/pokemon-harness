@@ -9,14 +9,17 @@ that needs no operator asset:
 * it authors its own 32 KiB ROM-only cartridge in a temporary directory, so no
   Nintendo file, BYO ROM, symbol table or save state is opened, and nothing is
   written outside that temporary directory;
-* it drives that cartridge down four declared paths - the production scheduler
-  loop, a minimal hand-rolled singlestep loop, and the compiled frame loop at one
-  and at 64 frames per call - reporting emulated cycles and retired instructions
-  per second for each;
+* it drives that cartridge down five declared paths - the production scheduler
+  loop, a hoisting *candidate* model of it, a minimal hand-rolled singlestep loop,
+  and the compiled frame loop at one frame per call and at an adaptive whole-frame
+  batch per call - reporting emulated cycles and retired instructions per second
+  for each;
 * every sample is validated against a deterministic oracle derived from the
   cartridge's own declared instruction mix, and reported only when the runtime
-  retired exactly the instructions that mix describes and the PC never left the
-  authored loop.
+  retired exactly the instructions that mix describes, the final PC is inside the
+  authored window, **and** the authored body re-read from the runtime's memory seam
+  is still byte-identical to the declared mix - so the guard only holds if the loop
+  still *is* the declared one, not merely if execution ended where it started.
 
 Wall-clock numbers are host-dependent and are reported as medians of repeated
 samples.  The instruction and cycle counts are exact, so the measurement can be
@@ -61,7 +64,6 @@ INTERRUPT_FLAG = 0xFF0F
 BOOTROM_CHECKSUM_DELTA = 25
 DEFAULT_CYCLES = 4_000_000
 DEFAULT_REPEATS = 5
-BATCHED_FRAMES = 64
 
 # The two declared mixes.  Every opcode is a register or HRAM-only instruction
 # with a fixed length and no control flow except the closing jump back to the
@@ -292,10 +294,16 @@ def _optimized_step_chunk(p: object, cycle_budget: int, *, stop_on_frame: bool =
     exactly equal to the shipped path; ``tests/test_stepping_loop_profile.py``
     asserts that parity directly.
 
-    Treat the resulting rate as an *upper bound* on what a pure-Python edit to
-    the shipped function could recover: a real change must keep working for
-    callers whose ``mb``/``lcd``/``cpu`` are lightweight test doubles that rely
-    on the shipped ``getattr(..., None)`` defaults.
+    This is **one candidate, not a ceiling.**  Its rate bounds only what *this*
+    transformation recovers on *this* workload and estimator; further hoisting
+    remains, and a candidate that additionally binds the compiled breakpoint
+    methods and reads the LCD directly preserved the same counts in an
+    independent review and ran faster still.  A real edit must also keep working
+    for callers whose ``mb``/``lcd``/``cpu`` are lightweight test doubles that
+    rely on the shipped ``getattr(..., None)`` defaults, so the transformation
+    that is *permitted* is not the same as the transformation that is *fastest*.
+    Report the measured difference for this candidate as an observation, never
+    as a proven maximum recovery.
     """
 
     mb = p.mb
@@ -376,10 +384,16 @@ def compiled_frame_loop(game, cycles_target: int) -> int:
 
 
 def compiled_batched_loop(game, cycles_target: int) -> int:
-    """One Python call for a whole batch of emulated frames."""
+    """One Python call for a whole batch of emulated frames.
 
-    cycles_per_frame = max(1, int(game.mb.lcd._cycles_to_frame) or 70224)
-    frames = max(1, cycles_target // cycles_per_frame)
+    The batch is *adaptive*, not a fixed frame count: the declared policy asks for
+    enough whole frames to cover the requested cycle budget in as few calls as
+    possible, so on the reference runtime the batch is 56 frames per call at a 4M
+    cycle target and 113 at 8M.  The frame argument actually used is recorded per
+    sample, because the work one call performs is part of what is being compared.
+    """
+
+    frames = batched_frames_for(cycles_target, int(game.mb.lcd._cycles_to_frame) or 70224)
     start = game.mb.cpu.cycles
     calls = 0
     while game.mb.cpu.cycles - start < cycles_target:
@@ -387,6 +401,12 @@ def compiled_batched_loop(game, cycles_target: int) -> int:
             break
         calls += 1
     return calls
+
+
+def batched_frames_for(cycles_target: int, cycles_per_frame: int) -> int:
+    """Whole frames the declared adaptive batch policy asks for in one call."""
+
+    return max(1, cycles_target // max(1, cycles_per_frame))
 
 
 PATHS: tuple[tuple[str, Callable[[object, int], int]], ...] = (
@@ -406,6 +426,7 @@ class Sample:
     retired: int
     python_calls: int
     end_pc: int
+    batch_frames_per_call: int | None = None
 
 
 def run_sample(mix: Mix, cartridge: Path, path: str, cycles_target: int) -> Sample:
@@ -428,9 +449,25 @@ def run_sample(mix: Mix, cartridge: Path, path: str, cycles_target: int) -> Samp
         cycles = cpu.cycles - start_cycles
         retired = cpu.retired_instructions - start_retired
         end_pc = int(game.register_file.PC)
+        # Loop integrity, checked outside the timed region so it cannot move the
+        # clock.  An endpoint and a cycle count are both satisfiable by a loop
+        # that was relocated and re-pointed back into the window; re-reading the
+        # authored bytes from the runtime's own memory seam is not.
+        installed = bytes(game.memory[LOOP_BASE : LOOP_BASE + len(mix.body)])
+        batch_frames = (
+            batched_frames_for(cycles_target, int(game.mb.lcd._cycles_to_frame) or 70224)
+            if path == "compiled_batched_loop"
+            else None
+        )
     finally:
         game.stop(save=False)
 
+    if installed != mix.body:
+        raise ProfileRefused(
+            f"{path} no longer runs the declared {mix.name} body: the bytes at "
+            f"{LOOP_BASE:#06x} re-read from the memory seam are {installed.hex()}, "
+            f"declared {mix.body.hex()}"
+        )
     if cycles_target > 0 and cycles < cycles_target - (
         0x4000 if path.startswith("compiled") else 0
     ):
@@ -455,10 +492,20 @@ def run_sample(mix: Mix, cartridge: Path, path: str, cycles_target: int) -> Samp
         retired=retired,
         python_calls=calls,
         end_pc=end_pc,
+        batch_frames_per_call=batch_frames,
     )
 
 
 def summarize(mix: Mix, path: str, samples: list[Sample]) -> dict[str, object]:
+    # A summary binds one sample's counts to another sample's fastest time.  That
+    # is only meaningful while every sample retired the same work, so drift is
+    # refused here rather than silently collapsed into one number.
+    counts = {(sample.cycles, sample.retired, sample.python_calls) for sample in samples}
+    if len(counts) != 1:
+        raise ProfileRefused(
+            f"{path} produced {len(counts)} distinct (cycles, retired, python_calls) triples "
+            "across its samples; a summary would mix one sample's work with another's time"
+        )
     seconds = statistics.median(sample.seconds for sample in samples)
     best_seconds = min(sample.seconds for sample in samples)
     cycles = samples[0].cycles
@@ -479,8 +526,8 @@ def summarize(mix: Mix, path: str, samples: list[Sample]) -> dict[str, object]:
         "retired_instructions_per_second": retired / seconds,
         "best_emulated_cycles_per_second": cycles / best_seconds,
         "best_retired_instructions_per_second": retired / best_seconds,
-        "deterministic_counts_agree": len({(s.cycles, s.retired, s.python_calls) for s in samples})
-        == 1,
+        "deterministic_counts_agree": True,
+        "batch_frames_per_call": samples[0].batch_frames_per_call,
     }
 
 
@@ -557,18 +604,28 @@ def profile_production_loop(mix: Mix, cycles_target: int, top: int) -> dict[str,
 def compute_ratios(results: dict[str, dict[str, dict[str, object]]]) -> dict[str, object]:
     ratios: dict[str, object] = {}
     for mix_name, paths in results.items():
-        production = paths["production_chunk_loop"]["retired_instructions_per_second"]
-        production_best = paths["production_chunk_loop"]["best_retired_instructions_per_second"]
         entry: dict[str, float] = {}
-        for path, summary in paths.items():
-            if path == "production_chunk_loop":
-                continue
-            entry[f"production_to_{path}"] = production / summary["retired_instructions_per_second"]
-            entry[f"production_best_to_{path}_best"] = (
-                production_best / summary["best_retired_instructions_per_second"]
+        # Ratios are relative to the production baseline, so they only exist when
+        # that baseline was measured.  A valid path subset that omits it must still
+        # produce a report instead of raising ``KeyError``.
+        production = paths.get("production_chunk_loop")
+        if production is not None:
+            throughput = production["retired_instructions_per_second"]
+            throughput_best = production["best_retired_instructions_per_second"]
+            for path, summary in paths.items():
+                if path == "production_chunk_loop":
+                    continue
+                entry[f"production_to_{path}"] = (
+                    throughput / summary["retired_instructions_per_second"]
+                )
+                entry[f"production_best_to_{path}_best"] = (
+                    throughput_best / summary["best_retired_instructions_per_second"]
+                )
+        densities = [paths[name]["python_calls_per_instruction"] for name in paths]
+        if densities:
+            entry["python_calls_per_instruction_median_over_paths"] = float(
+                statistics.median(densities)
             )
-        smallest = min(paths[name]["python_calls_per_instruction"] for name in paths)
-        entry["python_calls_per_instruction_median_over_paths"] = float(smallest)
         ratios[mix_name] = entry
     return ratios
 
@@ -603,10 +660,17 @@ def format_report(payload: dict[str, object]) -> str:
                 f"{summary['python_calls_per_instruction']:15.5f} "
                 f"{summary['deterministic_counts_agree']!s:>7s}"
             )
+        for path, summary in paths.items():
+            if summary.get("batch_frames_per_call"):
+                lines.append(
+                    f"  {path}: adaptive batch = {summary['batch_frames_per_call']} frames per call"
+                )
     lines.append("")
     lines.append("ratios: median-based, then best-of-repeat-based (load-robust). Both are")
-    lines.append("seconds-per-unit-work of the production loop divided by the other path, so")
-    lines.append("a value below 1.0 means the production loop is slower.")
+    lines.append("throughput ratios - production instructions per second divided by the")
+    lines.append("other path's instructions per second. A value below 1.0 means the")
+    lines.append("production loop retires fewer instructions per second, i.e. it is slower;")
+    lines.append("its time per unit of work is the reciprocal (0.79 is about 1.27x the time).")
     for mix_name, entry in payload["ratios"].items():
         for key, value in entry.items():
             lines.append(f"  [{mix_name}] {key} = {value:.3f}")
@@ -650,6 +714,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"unknown path(s): {', '.join(unknown)}")
     if args.profile_mix is not None and args.profile_mix not in MIXES_BY_NAME:
         raise SystemExit(f"unknown --profile-mix: {args.profile_mix}")
+    if not mix_names:
+        raise SystemExit("--mixes must name at least one mix")
+    if not path_names:
+        raise SystemExit("--paths must name at least one stepping path")
 
     results: dict[str, dict[str, dict[str, object]]] = {}
     # Every refusal path reports the same bounded outcome: a ``REFUSED`` line on

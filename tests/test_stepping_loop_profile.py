@@ -212,7 +212,9 @@ def test_declared_path_names_and_cli_defaults_agree():
         ["--cycles", "-1"],
         ["--repeats", "0"],
         ["--mixes", "reg-only,nope"],
+        ["--mixes", ""],
         ["--paths", "production_chunk_loop,nope"],
+        ["--paths", ""],
         ["--profile-mix", "nope"],
     ],
 )
@@ -305,10 +307,10 @@ def test_summarize_reports_count_determinism_and_rejects_drift():
     assert summary["deterministic_counts_agree"] is True
 
     drifted = stable + [_sample("minimal_singlestep_loop", 0.4, cycles + 4, retired, retired)]
-    assert (
-        profile.summarize(mix, "minimal_singlestep_loop", drifted)["deterministic_counts_agree"]
-        is False
-    )
+    # Drift must be refused outright rather than summarised: the old behaviour
+    # bound one sample's counts to another sample's fastest time.
+    with pytest.raises(profile.ProfileRefused, match="distinct"):
+        profile.summarize(mix, "minimal_singlestep_loop", drifted)
 
 
 def test_ratios_are_relative_to_the_production_path():
@@ -339,9 +341,100 @@ def test_ratios_are_relative_to_the_production_path():
         0.5
     )
     assert ratios["reg-only"]["production_best_to_compiled_frame_loop_best"] == pytest.approx(0.1)
+    # This is the *median* across paths (0.025), not the minimum (0.0001).
     assert ratios["reg-only"]["python_calls_per_instruction_median_over_paths"] == pytest.approx(
-        0.0001
+        0.025
     )
+
+
+def test_ratios_are_throughput_ratios_and_omit_unmeasured_baseline():
+    """A ratio below 1.0 means the production loop is slower, in throughput units.
+
+    Production retires 500k instructions/s and the comparison 1M, so the stored
+    ratio is 0.5: production's *throughput* is half the other path's, which is the
+    same as its time per unit of work being twice as large.
+    """
+
+    results = {
+        "reg-only": {
+            "production_chunk_loop": {
+                "retired_instructions_per_second": 500_000.0,
+                "best_retired_instructions_per_second": 625_000.0,
+                "python_calls_per_instruction": 0.025,
+            },
+            "minimal_singlestep_loop": {
+                "retired_instructions_per_second": 1_000_000.0,
+                "best_retired_instructions_per_second": 1_250_000.0,
+                "python_calls_per_instruction": 1.0,
+            },
+        }
+    }
+    ratio = profile.compute_ratios(results)["reg-only"]["production_to_minimal_singlestep_loop"]
+
+    assert ratio == pytest.approx(0.5)
+    assert ratio < 1.0
+    assert 1 / ratio == pytest.approx(2.0)  # production takes twice the time per unit work
+
+    # A valid subset that does not include the production baseline has no ratios
+    # to report, but must not crash; the across-path density is still produced.
+    subset = {
+        "reg-only": {"minimal_singlestep_loop": results["reg-only"]["minimal_singlestep_loop"]}
+    }
+    entries = profile.compute_ratios(subset)["reg-only"]
+    assert "production_to_minimal_singlestep_loop" not in entries
+    assert entries["python_calls_per_instruction_median_over_paths"] == pytest.approx(1.0)
+
+
+def test_run_sample_refuses_a_repointed_loop_body(monkeypatch):
+    """The containment guard is a body-integrity check, not just an endpoint check.
+
+    A loop that is relocated and re-pointed back into the authored window satisfies
+    a final-PC and cycle-count check. Re-reading the authored bytes from the memory
+    seam does not, so this negative control (closing jump re-pointed to 0xD000) must
+    be refused.
+    """
+
+    mix = profile.MIXES_BY_NAME["reg-only"]
+    retired = mix.loop_instructions
+    cycles = mix.expected_cycles(retired)
+
+    class _CPU:
+        def __init__(self):
+            self.cycles = 0
+            self.retired_instructions = 0
+
+    class _Mb:
+        def __init__(self):
+            self.cpu = _CPU()
+            self.lcd = types.SimpleNamespace(_cycles_to_frame=70224)
+
+    class _Game:
+        def __init__(self, body):
+            self.mb = _Mb()
+            self.register_file = types.SimpleNamespace(PC=profile.LOOP_BASE)
+            self._body = body
+            self.memory = self
+
+        def __getitem__(self, key):
+            return self._body[key]
+
+        def stop(self, save=False):
+            return None
+
+    repointed = mix.body[:-3] + bytes([0xC3, 0x00, 0xD0])
+    assert repointed != mix.body
+    game = _Game(repointed)
+
+    def _fake_runner(g, cycles_target):
+        g.mb.cpu.cycles = cycles
+        g.mb.cpu.retired_instructions = retired
+        return 1
+
+    monkeypatch.setattr(profile, "open_loop_game", lambda *a, **k: game)
+    monkeypatch.setattr(profile, "PATHS", (("fake_path", _fake_runner),))
+
+    with pytest.raises(profile.ProfileRefused, match="no longer runs the declared"):
+        profile.run_sample(mix, Path("unused"), "fake_path", cycles)
 
 
 def test_measure_mix_interleaves_paths_across_repeats(monkeypatch):
@@ -394,6 +487,7 @@ def test_format_report_states_identity_paths_and_ratios():
     assert mix.description in report
     assert "minimal_singlestep_loop" in report
     assert "production_to_minimal_singlestep_loop = 0.500" in report
+    assert "throughput ratios" in report
 
 
 def test_json_payload_is_serializable_and_free_of_paths():
@@ -431,6 +525,9 @@ def test_probe_module_and_its_tier_are_part_of_the_ci_contract():
 
 SHORT_CYCLES = 40_000
 CHUNK_CYCLES = profile.PyBoyLinkSession._REAL_SCHEDULER_CHUNK_CYCLES
+# DMG frame horizon used by the reference runtime; budgets above it cross a real
+# frame boundary, which budgets below it (like SHORT_CYCLES) do not.
+FRAME_CYCLES = 70_224
 
 
 def probe_native_declared_mixes_match_the_oracle():
@@ -518,11 +615,19 @@ def probe_native_optimized_path_is_semantically_identical():
     """The optimized model must reproduce the shipped path exactly.
 
     Its rate is only meaningful if the emulated work is unchanged, so this probe
-    compares the two paths on freshly opened games at several budgets and across
-    a frame boundary: identical cycle counts, retired instructions, and end PC.
+    compares the two paths on freshly opened games at several budgets, including
+    budgets above the runtime's frame horizon so that a real frame crossing is
+    exercised: identical cycle counts, retired instructions, end PC, and calls.
     """
 
-    targets = (CHUNK_CYCLES, 1_000, 4_096, SHORT_CYCLES, SHORT_CYCLES + 251)
+    targets = (
+        CHUNK_CYCLES,
+        1_000,
+        4_096,
+        SHORT_CYCLES,
+        FRAME_CYCLES + 251,
+        2 * FRAME_CYCLES + 251,
+    )
     for mix in profile.MIXES:
         with TemporaryDirectory(prefix="stepping-profile-probe-") as directory:
             cartridge = profile.author_cartridge(Path(directory))
