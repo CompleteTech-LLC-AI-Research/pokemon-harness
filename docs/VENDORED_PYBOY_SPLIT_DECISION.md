@@ -93,16 +93,36 @@ must satisfy all of the following before any of the eight leaves is closed:
 
 ## Why the leaves stay OPEN here
 
-None of the option-B conditions can be exercised in this environment:
+The option-B conditions are **not all** exercisable in this environment. Condition 1's
+reproducibility requirement is now met (see the second bullet); conditions 2 and 3 remain blocked:
 
-- **No compiled runtime.** There is no `.venv-cython` and no built `pyboy` extension modules, so
-  condition 3 (Cython ABI) cannot be verified. Source-only success is explicitly insufficient.
-- **Generator cannot be proven.** `opcodes_gen.py` fetches the upstream opcode tables over the
-  network at generation time; regeneration determinism against the pinned tables cannot be
-  established reliably here, and the generated outputs' hashes are not reproducible under this
-  constraint.
-- **Identity re-pin is a release-identity change** with a required native lane, so it cannot be
-  declared terminal without the runtime modes above.
+- **No compiled runtime (condition 3).** There is no built `pyboy` extension module set and the
+  native build cannot be produced here. Re-verified 2026-09-23:
+  - the toolchain is partly present — `gcc (Debian 12.2.0-14+deb12u1) 12.2.0`, `Cython 3.0.12`, and
+    a scratch venv with `numpy` — so the blocker is not a missing compiler;
+  - the **CPython development headers are absent**: `/usr/include/python3.11/` does not exist,
+    `python3.11-dev` is not installed, `python3-config` is unavailable, and `uid=1000` with
+    `CapEff=0000000000000000` and no `sudo` means no package can be added. Every `cdef`/C-extension
+    compile therefore fails with `fatal error: Python.h: No such file or directory`;
+  - **`/dev/shm` is mounted read-only** (`tmpfs ro,nosuid,nodev,noexec,size=64000k`), so the vendor
+    `setup.py` `build_ext` path — which passes `nthreads=cpu_count()` into
+    `Cython.Build.cythonize` — dies inside `multiprocessing.Pool` with
+    `OSError: [Errno 30] Read-only file system`. Forcing `cpu_count()` to 0 runs the Cython stage
+    serially and emits the 55 generated `.c` files, but the subsequent compile still fails on the
+    missing `Python.h` above.
+  Condition 3 (native/Cython ABI verified on the split tree) therefore cannot be exercised, and
+  source-only success is explicitly insufficient.
+- **Generator determinism — proven (condition 1's reproducibility requirement met).** The prior
+  claim that regeneration "cannot be established reliably here" is **withdrawn as stale**. Re-run
+  2026-09-23 from a clean scratch directory: `opcodes_gen.py` fetches
+  `http://pastraiser.com/cpu/gameboy/gameboy_opcodes.html` (`HTTP 200`, `56659` bytes) and a fresh
+  execution reproduces **byte-identical** output that matches the pinned files:
+  `opcodes.py` sha256 `2538898d44bc74deb448b995cc4888b94296fce58ab324f59f8d18ef75b06dd6`,
+  `opcodes.pxd` sha256 `b1c0c5ad1298789c13a3eec1aca9cd3d1bc701a1209f96803f03898bfea07cf5` (both equal
+  to the tracked files). Regeneration determinism is no longer a blocker; what still blocks the
+  generated pair — and every other leaf — is condition 2 plus the condition 3 native lane.
+- **Identity re-pin is a release-identity change (condition 2)** with a required native lane, so it
+  cannot be declared terminal without the runtime modes above.
 
 Therefore the eight leaves are **not completed, not closed, and not merged**, and the decision here
 fixes the approach and the evidence bar rather than marking them done. `#122`'s vendored group
@@ -119,9 +139,11 @@ remains "decision recorded, execution blocked".
 
 ## Unblocking
 
-The smallest action that unblocks the group is an environment with (i) the Cython build toolchain
-and a buildable PyBoy checkout, and (ii) reproducible `opcodes_gen.py` output against the pinned
-upstream tables. With both, a single pilot leaf — expected **#138
+Requirement (ii) — reproducible `opcodes_gen.py` output against the pinned upstream tables — is now
+**satisfied** (byte-identical regeneration proved above). The group therefore reduces to one
+remaining external prerequisite: **(i) an environment with the Cython build toolchain plus the
+CPython development headers and a writable shared-memory/temp device**, so `build_ext` can build
+and condition 3 (native ABI) can be verified. With that, a single pilot leaf — expected **#138
 `plugins/game_wrapper_pokemon_pinball.py`**, whose Python-only plugin surface has no Cython `.pxd`
 sibling — can be split and reviewed first, followed by the `.pxd`-backed cores and finally the
 generated opcode pair.
