@@ -1,0 +1,15 @@
+ordinary battle medicine - Yellow, source and cython - TERMINAL
+
+tested head   : 2d876763cdcc42e824a883c3c8d93646ceefbcd3
+tested tree   : 0445ad29d7f6330debfc13413798c04d0ed13997
+acceptance    : tests/test_battle_healing_items_rom.py::test_potion_heals_the_active_mon_from_the_battle_item_menu
+modules       : tests/test_state_bag.py tests/test_state_party.py tests/test_battle_healing_items_rom.py
+
+PASS  source  25 passed, 1 warning in 15.65s  tests=25 failures=0 errors=0 skipped=0  wall=15.66s
+PASS  cython  25 passed, 1 warning in 1.24s  tests=25 failures=0 errors=0 skipped=0  wall=1.24s
+
+pass by runtime: {"cython": 1, "source": 1}
+
+runtime provenance (measured by probe_runtime.py under the same environment):
+  source python=3.11.2 pyboy=2.7.0 revision=c565df66c3731fad2856169a90f6bbec99925915 vendored=True compiled_imported=0 is_declared_runtime=True
+  cython python=3.11.2 pyboy=2.7.0 revision=c565df66c3731fad2856169a90f6bbec99925915 vendored=False compiled_imported=58 is_declared_runtime=True

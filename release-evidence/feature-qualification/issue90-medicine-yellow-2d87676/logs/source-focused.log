@@ -1,0 +1,41 @@
+.........................                                                [100%]
+=============================== warnings summary ===============================
+tests/test_battle_healing_items_rom.py::test_potion_heals_the_active_mon_from_the_battle_item_menu
+  [source-venv]/lib/python3.11/site-packages/sdl2/_internal.py:24: UserWarning: Using SDL2 binaries from pysdl2-dll 2.32.10
+    warnings.warn(msg, warntype)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+__________ test_potion_heals_the_active_mon_from_the_battle_item_menu __________
+----------------------------- Captured stdout call -----------------------------
+pyboy.pyboy                    WARNING  Skipping .sym line: <redacted: 953 private symbol payloads; see README "Redactions">
+pyboy.api.screen               WARNING  Cannot generate screen image. Missing dependency "Pillow".
+pyboy.plugins.screen_recorder  WARNING  pyboy.plugins.screen_recorder: Missing dependency "Pillow". Recording disabled
+pyboy.plugins.screenshot_recorder WARNING  pyboy.plugins.screenshot_recorder: Missing dependency "Pillow". Screenshots disabled
+=========================== short test summary info ============================
+PASSED tests/test_state_bag.py::test_empty_bag
+PASSED tests/test_state_bag.py::test_single_stack
+PASSED tests/test_state_bag.py::test_multiple_stacks_preserves_order
+PASSED tests/test_state_bag.py::test_duplicate_item_across_stacks_sums_quantity
+PASSED tests/test_state_bag.py::test_count_clamped_to_maximum
+PASSED tests/test_state_bag.py::test_bag_reads_loaded_symbol_addresses_not_canonical_defaults
+PASSED tests/test_state_bag.py::test_zero_count_is_known_empty_without_item_base_symbol
+PASSED tests/test_state_bag.py::test_missing_count_symbol_is_an_explicit_unknown_not_empty
+PASSED tests/test_state_bag.py::test_nonempty_bag_missing_item_base_symbol_does_not_guess_address
+PASSED tests/test_state_party.py::test_empty_party
+PASSED tests/test_state_party.py::test_single_pokemon_at_full_hp
+PASSED tests/test_state_party.py::test_multiple_slots_parsed_independently
+PASSED tests/test_state_party.py::test_all_fainted_detection
+PASSED tests/test_state_party.py::test_status_decoded_per_slot
+PASSED tests/test_state_party.py::test_hp_is_big_endian_inside_struct
+PASSED tests/test_state_party.py::test_party_count_clamped_to_max_slots
+PASSED tests/test_state_party.py::test_party_reads_relocated_symbol_addresses_not_canonical_guesses
+PASSED tests/test_state_party.py::test_party_sentinel_bytes_are_exposed_without_guessing
+PASSED tests/test_state_party.py::test_party_parser_requires_core_symbols
+PASSED tests/test_state_party.py::test_nonempty_party_requires_party_mons_symbol
+PASSED tests/test_battle_healing_items_rom.py::test_turn_evidence_is_required_rather_than_supplied
+PASSED tests/test_battle_healing_items_rom.py::test_release_evidence_names_the_pinned_assets_and_producer
+PASSED tests/test_battle_healing_items_rom.py::test_fixture_bytes_match_the_release_evidence
+PASSED tests/test_battle_healing_items_rom.py::test_producer_refuses_existing_output_and_unpinned_assets
+PASSED tests/test_battle_healing_items_rom.py::test_potion_heals_the_active_mon_from_the_battle_item_menu
+25 passed, 1 warning in 15.65s
