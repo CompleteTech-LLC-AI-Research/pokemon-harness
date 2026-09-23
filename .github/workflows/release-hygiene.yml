@@ -78,6 +78,9 @@ jobs:
       - name: Check packaging and gate lint/format
         run: |
           python -m ruff check \
+            scripts/_timed_battle_probe.py \
+            scripts/_timed_battle_probe_reads.py \
+            scripts/_timed_battle_probe_schemas.py \
             scripts/bootstrap_pyboy.py \
             scripts/coverage_report.py \
             scripts/network_concurrency_probe.py \
@@ -116,6 +119,9 @@ jobs:
             tests/test_runtime_packaging_dependency_pins.py \
             tests/test_runtime_packaging_hygiene.py
           python -m ruff format --check \
+            scripts/_timed_battle_probe.py \
+            scripts/_timed_battle_probe_reads.py \
+            scripts/_timed_battle_probe_schemas.py \
             scripts/bootstrap_pyboy.py \
             scripts/coverage_report.py \
             scripts/network_concurrency_probe.py \
