@@ -63,6 +63,7 @@ UNIT_MODULES = frozenset(
         "test_battle_coverage_identity.py",
         "test_battle_coverage_mechanics.py",
         "test_battle_healing_fixture_producer.py",
+        "test_battle_healing_registration.py",
         "test_battle_item_evidence_inventory.py",
         "test_battle_item_evidence_medicine.py",
         "test_battle_item_evidence_targets.py",
