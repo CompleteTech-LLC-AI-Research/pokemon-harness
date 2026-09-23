@@ -138,6 +138,7 @@ python -m ruff check \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
+    scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
@@ -177,6 +178,7 @@ python -m ruff format --check \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
+    scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
