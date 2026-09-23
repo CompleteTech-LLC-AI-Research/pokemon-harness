@@ -7,10 +7,10 @@ import pytest
 
 from pokered_harness import mcp_server
 from pokered_harness.mcp_server import LinkState, McpHarnessError, dispatch_tool
+from tests._mcp_server_support import _free_port, _wait_remote_mode
 from tests.test_link_pair import _make_session
 from tests.test_mcp_local_locking import TrackedRLock
 from tests.test_mcp_local_runtime_contract import _forbid_pair_mutation, _sessions
-from tests.test_mcp_server import _free_port, _wait_remote_mode
 
 
 @pytest.mark.parametrize("field,value", [
