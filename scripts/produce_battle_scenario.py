@@ -133,6 +133,7 @@ from scripts.produce_battle_scenario_model import (
     _BUTTON_NAMES,  # noqa: F401  (retained facade attribute: producer._BUTTON_NAMES)
     _CAPTURE_MESSAGE,  # noqa: F401  (retained facade attribute: producer._CAPTURE_MESSAGE)
     _CAPTURE_PRODUCER,  # noqa: F401  (retained facade attribute: producer._CAPTURE_PRODUCER)
+    _CAPTURE_RECORD_FIELDS,  # noqa: F401  (retained facade attribute: producer._CAPTURE_RECORD_FIELDS)
     _CATALOG_PATH,
     _DEFAULT_PRESS_DURATION,  # noqa: F401  (retained facade attribute: producer._DEFAULT_PRESS_DURATION)
     _DEFAULT_STEP_FRAMES,  # noqa: F401  (retained facade attribute: producer._DEFAULT_STEP_FRAMES)
