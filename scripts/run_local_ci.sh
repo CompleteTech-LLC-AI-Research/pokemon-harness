@@ -229,6 +229,10 @@ python -m ruff format --check \
 
 # Check runtime and link lane lint
 python -m ruff check \
+    src/pokered_harness/link/_pyboy_link_session_lifecycle_mixin.py \
+    src/pokered_harness/link/_pyboy_link_session_network_mixin.py \
+    src/pokered_harness/link/_pyboy_link_session_stepping_mixin.py \
+    src/pokered_harness/link/_pyboy_link_session_support.py \
     src/pokered_harness/link/_serial_link_support.py \
     src/pokered_harness/link/network_backend.py \
     src/pokered_harness/link/pyboy_link_session.py \
