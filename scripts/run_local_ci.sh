@@ -164,7 +164,12 @@ python -m ruff check \
     tests/test_battle_item_evidence_medicine.py \
     tests/test_battle_item_evidence_targets.py \
     tests/test_battle_item_evidence_timeline.py \
-    tests/test_battle_scenario_fixtures.py \
+    tests/test_battle_scenario_catalog.py \
+    tests/test_battle_scenario_producer_capture.py \
+    tests/test_battle_scenario_producer_run.py \
+    tests/test_battle_scenario_producer_runtime.py \
+    tests/test_battle_scenario_producer_screening.py \
+    tests/test_battle_scenario_validator.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
@@ -211,7 +216,12 @@ python -m ruff format --check \
     tests/test_battle_item_evidence_medicine.py \
     tests/test_battle_item_evidence_targets.py \
     tests/test_battle_item_evidence_timeline.py \
-    tests/test_battle_scenario_fixtures.py \
+    tests/test_battle_scenario_catalog.py \
+    tests/test_battle_scenario_producer_capture.py \
+    tests/test_battle_scenario_producer_run.py \
+    tests/test_battle_scenario_producer_runtime.py \
+    tests/test_battle_scenario_producer_screening.py \
+    tests/test_battle_scenario_validator.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \

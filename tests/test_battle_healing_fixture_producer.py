@@ -18,7 +18,7 @@ committed control here, reverting the producer's own subject matter - the
 Red/Blue encounter column, the entry route, the save-boundary gate, or the
 full-HP refusal - leaves the committed suite green.  The sibling producer
 ``scripts/produce_battle_scenario.py`` carries the equivalent ROM-free contract
-module in ``tests/test_battle_scenario_fixtures.py``.
+module in the ``tests/test_battle_scenario_*.py`` suite.
 """
 
 from __future__ import annotations
