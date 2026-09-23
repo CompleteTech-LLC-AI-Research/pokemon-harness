@@ -67,6 +67,7 @@ UNIT_MODULES = frozenset(
         "test_battle_item_evidence_medicine.py",
         "test_battle_item_evidence_targets.py",
         "test_battle_item_evidence_timeline.py",
+        "test_battle_medicine_boundary_matrix.py",
         "test_battle_medicine_oracle.py",
         "test_battle_scenario_fixtures.py",
         "test_battle_turn_evidence.py",
