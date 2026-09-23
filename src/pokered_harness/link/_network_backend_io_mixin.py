@@ -475,13 +475,17 @@ class _NetworkBackendIOMixin:
                 self._stats["slave_armed_edges"] = slave_armed_edges
                 self._consecutive_armed_edges += 1
                 if slave_armed_edges >= _ACTIVE_EXCHANGE_EDGE_THRESHOLD:
-                    self._active_exchange_until = _entry.time.monotonic() + _ACTIVE_EXCHANGE_GRACE_SECONDS
+                    self._active_exchange_until = (
+                        _entry.time.monotonic() + _ACTIVE_EXCHANGE_GRACE_SECONDS
+                    )
                 our_bit = core.peek_out_bit()
                 completed = core.apply_external_edge(peer_bit)
                 completion_context = self._serial_completion_context() if completed else None
                 if completed:
                     self._stats["last_slave_byte_complete_at"] = _entry.time.monotonic()
-                    self._post_byte_rearm_until = _entry.time.monotonic() + _POST_BYTE_REARM_GRACE_SECONDS
+                    self._post_byte_rearm_until = (
+                        _entry.time.monotonic() + _POST_BYTE_REARM_GRACE_SECONDS
+                    )
                 # Reset keep-alive counter so the next idle stretch starts
                 # fresh at the top of a 0xFE byte boundary rather than
                 # mid-byte.
