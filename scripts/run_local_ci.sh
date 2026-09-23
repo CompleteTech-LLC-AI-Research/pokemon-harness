@@ -133,6 +133,9 @@ python -m pip install -e ".[dev]"
 
 # Check packaging and gate lint/format
 python -m ruff check \
+    scripts/_timed_battle_probe.py \
+    scripts/_timed_battle_probe_reads.py \
+    scripts/_timed_battle_probe_schemas.py \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
@@ -173,6 +176,9 @@ python -m ruff check \
     tests/test_timed_remote.py \
     tests/test_timed_remote_facade.py
 python -m ruff format --check \
+    scripts/_timed_battle_probe.py \
+    scripts/_timed_battle_probe_reads.py \
+    scripts/_timed_battle_probe_schemas.py \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
