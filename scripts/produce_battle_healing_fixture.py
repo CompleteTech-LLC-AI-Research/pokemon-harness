@@ -52,6 +52,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -570,6 +571,91 @@ def flee_battle(driver: Driver, budget: int = 8) -> None:
     raise CaptureRefused("the wild battle could not be left through RUN")
 
 
+def require_damage_source(
+    active_hp: int | None,
+    active_max_hp: int | None,
+    burn_move: int | None,
+) -> None:
+    """Refuse a capture whose active mon could neither be damaged nor be already hurt.
+
+    The milestone is acceptable as-is only on a *known* HP pair that is already
+    below its maximum, and acceptable for a burn only when ``--burn-move``
+    supplied the move to burn.  A full-HP milestone with no ``--burn-move`` is
+    refused before the emulator is touched, because a fixture saved there would
+    hold a Potion with nothing to heal.
+    """
+    if active_hp is not None and active_max_hp is not None and active_hp < active_max_hp:
+        return
+    if burn_move is None:
+        raise CaptureRefused("the milestone is at full HP and no --burn-move was given")
+
+
+def require_fresh_battle(selected_move: int | None) -> None:
+    """Refuse to save a battle whose opponent has already queued a move.
+
+    The merged acceptance driver reads the opponent's ordering, so a state saved
+    one turn in (``wEnemySelectedMove`` already set) is not an ordinary-battle
+    fixture; the throwaway-battle path exists precisely to re-enter the grass and
+    save a fresh one.
+    """
+    if selected_move != 0:
+        raise CaptureRefused(
+            "the saved battle already has the opponent's move queued: "
+            f"wEnemySelectedMove={selected_move}"
+        )
+
+
+def resolve_capture(
+    driver: Driver,
+    *,
+    burn_move: int | None,
+    first_encounter: dict,
+    first_battle: dict,
+    capture_battle: Callable[[], tuple[dict, dict]],
+) -> dict:
+    """Damage the active mon as needed and refuse to save a stale battle.
+
+    This is the capture's decision boundary, kept out of :func:`main` so that a
+    fake driver can exercise it without an emulator.  It refuses in two places,
+    both before anything is written: a full-HP milestone with no ``--burn-move``
+    (nothing to heal) and a battle whose opponent has already queued a move (not
+    a fresh ordinary battle).  When a burn is needed the first battle is
+    *throwaway*: it is left through RUN and the grass is re-entered so the saved
+    fixture is a fresh one, and the discarded battle is recorded under
+    ``throwaway_battle`` so the two are not confused.
+    """
+    active = driver.state().party.active_mon
+    require_damage_source(
+        active.hp if active is not None else None,
+        active.max_hp if active is not None else None,
+        burn_move,
+    )
+    if active is not None and active.hp < active.max_hp:
+        signals: dict = {
+            "encounter": first_encounter,
+            "battle": first_battle,
+            "damage": {
+                "burns": 0,
+                "hp": [active.hp, active.max_hp],
+                "already_damaged": True,
+            },
+        }
+    else:
+        signals = {
+            "damage": burn_turns_until_damaged(driver, burn_move=burn_move),
+            "throwaway_battle": {"encounter": first_encounter, "battle": first_battle},
+        }
+        flee_battle(driver)
+        print("  left the throwaway battle; re-encountering on the grass", flush=True)
+        signals["encounter"], signals["battle"] = capture_battle()
+    print(f"  damage: {signals['damage']}", flush=True)
+
+    selected = driver.byte("wEnemySelectedMove")
+    signals["enemy_selected_move"] = selected
+    require_fresh_battle(selected)
+    return signals
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--source", required=True, help="pinned milestone state to drive")
@@ -582,7 +668,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--game",
         default="yellow",
         choices=sorted(GAMES),
-        help="which game's encounter cell and entry route to drive (default yellow)",
+        help=(
+            "which game's encounter cell and entry route to drive (default "
+            "yellow); red's retained Pewter milestone is at full HP with only "
+            "damaging moves, so driving red needs a non-damaging --burn-move"
+        ),
     )
     parser.add_argument(
         "--burn-move",
@@ -677,33 +767,15 @@ def main(argv: list[str] | None = None) -> int:
             return encounter, observed
 
         first_encounter, first_battle = capture_battle()
-
-        active = driver.state().party.active_mon
-        if active is not None and active.hp < active.max_hp:
-            signals["encounter"], signals["battle"] = first_encounter, first_battle
-            signals["damage"] = {
-                "burns": 0,
-                "hp": [active.hp, active.max_hp],
-                "already_damaged": True,
-            }
-        else:
-            if args.burn_move is None:
-                raise CaptureRefused("the milestone is at full HP and no --burn-move was given")
-            signals["damage"] = burn_turns_until_damaged(driver, burn_move=args.burn_move)
-            print(f"  damage: {signals['damage']}", flush=True)
-            signals["throwaway_battle"] = {"encounter": first_encounter, "battle": first_battle}
-            flee_battle(driver)
-            print("  left the throwaway battle; re-encountering on the grass", flush=True)
-            signals["encounter"], signals["battle"] = capture_battle()
-        print(f"  damage: {signals['damage']}", flush=True)
-
-        selected = driver.byte("wEnemySelectedMove")
-        signals["enemy_selected_move"] = selected
-        if selected != 0:
-            raise CaptureRefused(
-                "the saved battle already has the opponent's move queued: "
-                f"wEnemySelectedMove={selected}"
+        signals.update(
+            resolve_capture(
+                driver,
+                burn_move=args.burn_move,
+                first_encounter=first_encounter,
+                first_battle=first_battle,
+                capture_battle=capture_battle,
             )
+        )
 
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(session.save_state())
