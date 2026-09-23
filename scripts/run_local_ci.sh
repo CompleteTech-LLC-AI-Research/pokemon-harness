@@ -142,18 +142,33 @@ python -m ruff check \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
     tests/_battle_item_evidence.py \
+    tests/_battle_item_evidence_factories.py \
     tests/_gate_report.py \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
-    tests/test_battle_coverage.py \
-    tests/test_battle_item_evidence.py \
+    tests/test_battle_coverage_accounting.py \
+    tests/test_battle_coverage_catalog.py \
+    tests/test_battle_coverage_gate_assets.py \
+    tests/test_battle_coverage_identity.py \
+    tests/test_battle_coverage_mechanics.py \
+    tests/test_battle_item_evidence_inventory.py \
+    tests/test_battle_item_evidence_medicine.py \
+    tests/test_battle_item_evidence_targets.py \
+    tests/test_battle_item_evidence_timeline.py \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
-    tests/test_production_gate.py \
-    tests/test_runtime_packaging.py
+    tests/test_production_gate_diagnostics.py \
+    tests/test_production_gate_matrix_manifest.py \
+    tests/test_production_gate_report_loader.py \
+    tests/test_production_gate_run_tier_failures.py \
+    tests/test_production_gate_strict_matrix.py \
+    tests/test_runtime_packaging_bootstrap.py \
+    tests/test_runtime_packaging_build_contract.py \
+    tests/test_runtime_packaging_dependency_pins.py \
+    tests/test_runtime_packaging_hygiene.py
 python -m ruff format --check \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
@@ -164,18 +179,33 @@ python -m ruff format --check \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
     tests/_battle_item_evidence.py \
+    tests/_battle_item_evidence_factories.py \
     tests/_gate_report.py \
     tests/_rom_assets.py \
     tests/_tier_config.py \
     tests/conftest.py \
-    tests/test_battle_coverage.py \
-    tests/test_battle_item_evidence.py \
+    tests/test_battle_coverage_accounting.py \
+    tests/test_battle_coverage_catalog.py \
+    tests/test_battle_coverage_gate_assets.py \
+    tests/test_battle_coverage_identity.py \
+    tests/test_battle_coverage_mechanics.py \
+    tests/test_battle_item_evidence_inventory.py \
+    tests/test_battle_item_evidence_medicine.py \
+    tests/test_battle_item_evidence_targets.py \
+    tests/test_battle_item_evidence_timeline.py \
     tests/test_battle_scenario_fixtures.py \
     tests/test_fixture_provenance.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
-    tests/test_production_gate.py \
-    tests/test_runtime_packaging.py
+    tests/test_production_gate_diagnostics.py \
+    tests/test_production_gate_matrix_manifest.py \
+    tests/test_production_gate_report_loader.py \
+    tests/test_production_gate_run_tier_failures.py \
+    tests/test_production_gate_strict_matrix.py \
+    tests/test_runtime_packaging_bootstrap.py \
+    tests/test_runtime_packaging_build_contract.py \
+    tests/test_runtime_packaging_dependency_pins.py \
+    tests/test_runtime_packaging_hygiene.py
 
 # Check runtime and link lane lint
 python -m ruff check \
@@ -186,7 +216,11 @@ python -m ruff check \
     src/pokered_harness/link/serial_coordinator.py \
     src/pokered_harness/link/serial_link.py \
     scripts/network_concurrency_probe.py \
-    tests/test_network_backend.py \
+    tests/test_network_backend_dispatch.py \
+    tests/test_network_backend_rearm.py \
+    tests/test_network_backend_serial_transcript.py \
+    tests/test_network_backend_transport.py \
+    tests/test_network_backend_wire_idle.py \
     tests/test_fixture_provenance.py \
     tests/test_pyboy_link_session.py \
     tests/test_link_pair.py \

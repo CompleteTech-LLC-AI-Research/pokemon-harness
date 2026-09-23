@@ -43,6 +43,7 @@ REAL_ROM_MODULES = frozenset(
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
         "test_mcp_trade_records_rom.py",
+        "test_battle_healing_items_rom.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
@@ -56,8 +57,16 @@ REAL_ROM_MODULES = frozenset(
 UNIT_MODULES = frozenset(
     {
         "test_agent_sync.py",
-        "test_battle_coverage.py",
-        "test_battle_item_evidence.py",
+        "test_battle_coverage_accounting.py",
+        "test_battle_coverage_catalog.py",
+        "test_battle_coverage_gate_assets.py",
+        "test_battle_coverage_identity.py",
+        "test_battle_coverage_mechanics.py",
+        "test_battle_healing_fixture_producer.py",
+        "test_battle_item_evidence_inventory.py",
+        "test_battle_item_evidence_medicine.py",
+        "test_battle_item_evidence_targets.py",
+        "test_battle_item_evidence_timeline.py",
         "test_battle_medicine_boundary_matrix.py",
         "test_battle_medicine_oracle.py",
         "test_battle_scenario_fixtures.py",
@@ -74,8 +83,11 @@ UNIT_MODULES = frozenset(
         "test_network_provider_locking.py",
         "test_ownership_core.py",
         "test_cpu_instruction_counter.py",
-        "test_emulated_time.py",
+        "test_emulated_time_budget.py",
+        "test_emulated_time_episode.py",
+        "test_emulated_time_failure.py",
         "test_emulated_time_held_delivery.py",
+        "test_emulated_time_lateness.py",
         "test_emulated_time_segments.py",
         "test_events.py",
         "test_execution_adapter.py",
@@ -104,7 +116,11 @@ UNIT_MODULES = frozenset(
         "test_mcp_timed_stdio.py",
         "test_native_execution_governor.py",
         "test_native_hook_exceptions.py",
-        "test_network_backend.py",
+        "test_network_backend_dispatch.py",
+        "test_network_backend_rearm.py",
+        "test_network_backend_serial_transcript.py",
+        "test_network_backend_transport.py",
+        "test_network_backend_wire_idle.py",
         "test_network_backend_shutdown.py",
         "test_network_byte_progress.py",
         "test_network_cpu_owner.py",
@@ -118,12 +134,22 @@ UNIT_MODULES = frozenset(
         "test_probe_timed_rom_pair.py",
         "test_probe_owner_phases.py",
         "test_probe_timed_battle_pair.py",
-        "test_probe_timed_trade_pair.py",
-        "test_production_gate.py",
+        "test_probe_timed_trade_pair_cli.py",
+        "test_probe_timed_trade_pair_driver.py",
+        "test_probe_timed_trade_pair_evidence.py",
+        "test_probe_timed_trade_pair_proof.py",
+        "test_production_gate_diagnostics.py",
+        "test_production_gate_matrix_manifest.py",
+        "test_production_gate_report_loader.py",
+        "test_production_gate_run_tier_failures.py",
+        "test_production_gate_strict_matrix.py",
         "test_pyboy_link_imports.py",
         "test_pyboy_link_session.py",
         "test_remote_endpoint.py",
-        "test_runtime_packaging.py",
+        "test_runtime_packaging_bootstrap.py",
+        "test_runtime_packaging_build_contract.py",
+        "test_runtime_packaging_dependency_pins.py",
+        "test_runtime_packaging_hygiene.py",
         "test_local_ci_policy.py",
         "test_scheduler_lcd_phase.py",
         "test_scheduler_physical_time.py",
@@ -152,13 +178,21 @@ UNIT_MODULES = frozenset(
         "test_state_text.py",
         "test_symbol_loader.py",
         "test_timed_link_session.py",
-        "test_timed_battle_probe.py",
+        "test_timed_battle_probe_contract.py",
+        "test_timed_battle_probe_action_economy.py",
+        "test_timed_battle_probe_admission.py",
+        "test_timed_battle_probe_ownership.py",
+        "test_timed_battle_probe_terminal.py",
         "test_timed_input_observation.py",
         "test_timed_menu_probe.py",
         "test_timed_mcp_matrix.py",
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
-        "test_timed_wire.py",
+        "test_timed_wire_admission.py",
+        "test_timed_wire_codec.py",
+        "test_timed_wire_progress.py",
+        "test_timed_wire_transport.py",
+        "test_timed_wire_wirecontrol.py",
         "test_timed_wire_batch.py",
         "test_timed_trade_probe.py",
     }
@@ -214,6 +248,27 @@ ROM_FREE_TESTS = frozenset(
         (
             "test_mcp_timed_rom.py",
             "test_rom_client_load_state_timeout_redacts_data",
+        ),
+    }
+    | {
+        # This module drives a real ROM for its capture assertions, but its
+        # manifest cross-check, its producer guards, and its turn-timeline
+        # negative control touch no asset and have no skip path, so they belong
+        # in the always-selected unit tier rather than being masked by the
+        # module's `real_rom` classification.  The two asset-consuming tests stay
+        # in `real_rom`: they skip when the operator fixture or the BYO ROM/SYM
+        # is absent, and the unit tier fails closed on any skip.
+        (
+            "test_battle_healing_items_rom.py",
+            "test_release_evidence_names_the_pinned_assets_and_producer",
+        ),
+        (
+            "test_battle_healing_items_rom.py",
+            "test_producer_refuses_existing_output_and_unpinned_assets",
+        ),
+        (
+            "test_battle_healing_items_rom.py",
+            "test_turn_evidence_is_required_rather_than_supplied",
         ),
     }
 )
@@ -648,17 +703,17 @@ TIMING_SENSITIVE_TESTS = frozenset(
             "test_probe_timed_rom_pair.py",
             "test_process_report_overflow_is_explicit_bounded_and_not_success",
         ),
-        ("test_network_backend.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
+        ("test_network_backend_transport.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
         (
-            "test_network_backend.py",
+            "test_network_backend_serial_transcript.py",
             "test_two_serialcores_exchange_byte_via_network_backend",
         ),
-        ("test_network_backend.py", "test_multiple_bytes_exchange"),
+        ("test_network_backend_serial_transcript.py", "test_multiple_bytes_exchange"),
         (
-            "test_network_backend.py",
+            "test_network_backend_rearm.py",
             "test_listen_and_connect_over_loopback_exchange_byte",
         ),
-        ("test_network_backend.py", "test_sync_with_peer_rendezvous"),
+        ("test_network_backend_wire_idle.py", "test_sync_with_peer_rendezvous"),
         (
             "test_timed_link_session.py",
             "test_real_pair_repeated_public_frames_bounded_wire_volume",
@@ -703,32 +758,32 @@ TIMING_SENSITIVE_TESTS = frozenset(
             "test_external_cancel_survives_factory_into_real_endpoint_wait",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_wirecontrol.py",
             "test_wirecontrol_handshake_rejects_caps_and_revision_without_downgrade",
         ),
-        ("test_timed_wire.py", "test_handshake_writer_preserves_terminal_reason"),
+        ("test_timed_wire_codec.py", "test_handshake_writer_preserves_terminal_reason"),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_progress.py",
             "test_bidirectional_concurrent_requests_and_responses",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_admission.py",
             "test_fast_response_before_writer_return_and_before_request_consumption",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_admission.py",
             "test_waiting_writer_admission_is_bounded_and_does_not_skip_sequence",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_transport.py",
             "test_peer_application_waits_for_local_hello_send_publication",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_transport.py",
             "test_one_absolute_deadline_covers_admission_and_partial_write",
         ),
-        ("test_timed_wire.py", "test_close_wakes_receive"),
-        ("test_timed_wire.py", "test_close_wakes_partial_frame_reader"),
+        ("test_timed_wire_progress.py", "test_close_wakes_receive"),
+        ("test_timed_wire_transport.py", "test_close_wakes_partial_frame_reader"),
     }
 )
 

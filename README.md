@@ -795,7 +795,7 @@ The current evidence boundary is deliberately narrow:
 | Test surface | What it can establish | What it cannot establish |
 |---|---|---|
 | `tests/test_link_protocol.py` | ROM-free Pokémon serial constants and synthetic exchange behavior | Emulator or game compatibility |
-| `tests/test_link_transport.py` and `tests/test_network_backend.py` | In-process queues and TCP edge/response primitives | A real game trade or battle |
+| `tests/test_link_transport.py` and the `tests/test_network_backend_*.py` modules | In-process queues and TCP edge/response primitives | A real game trade or battle |
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
 | `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
