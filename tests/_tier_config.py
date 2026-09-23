@@ -163,6 +163,7 @@ UNIT_MODULES = frozenset(
         "test_pyboy_link_session.py",
         "test_pyboy_link_session_subprocess_link_menu_history.py",
         "test_pyboy_link_session_subprocess_peer_lifecycle.py",
+        "test_qualification_runner.py",
         "test_remote_endpoint.py",
         "test_runtime_packaging_bootstrap.py",
         "test_runtime_packaging_build_contract.py",

@@ -145,6 +145,7 @@ python -m ruff check \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
+    scripts/qualification_runner.py \
     scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_battle_scenarios.py \
@@ -178,6 +179,7 @@ python -m ruff check \
     tests/test_production_gate_report_loader.py \
     tests/test_production_gate_run_tier_failures.py \
     tests/test_production_gate_strict_matrix.py \
+    tests/test_qualification_runner.py \
     tests/test_runtime_packaging_bootstrap.py \
     tests/test_runtime_packaging_build_contract.py \
     tests/test_runtime_packaging_dependency_pins.py \
@@ -197,6 +199,7 @@ python -m ruff format --check \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
     scripts/production_gate.py \
+    scripts/qualification_runner.py \
     scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
     scripts/validate_battle_scenarios.py \
@@ -230,6 +233,7 @@ python -m ruff format --check \
     tests/test_production_gate_report_loader.py \
     tests/test_production_gate_run_tier_failures.py \
     tests/test_production_gate_strict_matrix.py \
+    tests/test_qualification_runner.py \
     tests/test_runtime_packaging_bootstrap.py \
     tests/test_runtime_packaging_build_contract.py \
     tests/test_runtime_packaging_dependency_pins.py \

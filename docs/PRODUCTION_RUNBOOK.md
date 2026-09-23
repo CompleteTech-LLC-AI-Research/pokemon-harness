@@ -578,6 +578,303 @@ tests are missing. Keep the evidence directory outside version control. The
 stdout `--format json` output remains available for callers that need it, but
 the evidence directory is the retained, sanitized bundle.
 
+## 3a. Provision a dedicated qualification runner
+
+Issue #85 requires an operator-owned allocation whose competing workloads are
+controlled. Affinity, a CPU quota, or a `dedicated-host` label is not a
+reservation by itself. `scripts/qualification_runner.py` binds a qualification
+job to a pinned, immutable allocation descriptor and re-observes the lease on
+the host; a declaration that merely matches deployment IDs never passes.
+
+Choose one reservation mechanism:
+
+- `cgroup-quota`: the job runs in a non-root cgroup with a finite `cpu.max`
+  quota narrower than the host, and that cgroup contains only the lease holder
+  and its job descendants. The cgroup must also have no descendant cgroups
+  (`cgroup.stat` `nr_descendants` and `nr_dying_descendants` both `0`); a
+  quota on one cgroup is a ceiling, not a reservation, while child or sibling
+  cgroups are allowed to compete for the same CPUs. The allocation cgroup's
+  parent must contain no other populated child cgroups for the same reason.
+  "Populated" is decided over each competing cgroup's **whole subtree**, and
+  the walk continues through every ancestor level, not just the immediate
+  parent. A sibling scope frequently holds no processes directly while its
+  child scope is busy, and a busy cgroup beside an ancestor competes for the
+  same CPUs just the same; checking only a sibling's own `cgroup.procs` would
+  miss both.
+- `cpuset-affinity`: the job's observed affinity exactly equals a reserved
+  cpuset that is a strict subset of the host CPUs, and no other live process
+  has an allowed-CPU list that intersects that cpuset. Affinity only confines
+  where this job may run; it does not move a competing workload off those CPUs,
+  so the check enumerates foreign processes' `Cpus_allowed_list` and fails when
+  any of them overlaps the reserved set.
+- `dedicated-host`: the allocation owns every host CPU, records no competing
+  quota or weight, and carries an operator-created exclusive marker whose
+  contents match an operator-issued exclusive token, plus a held lease. Because
+  affinity and a marker are both labels, admission also samples host-wide
+  `/proc/stat` CPU accounting before the job starts and requires the measured
+  busy cores to be within `competing_cpu_cores_max` (descriptor, then
+  declaration, then the default `0.25`). When host CPU accounting is
+  unreadable the check reports `unsupported` and admission fails closed.
+
+When the competing-affinity data or the cgroup descendant counters cannot be
+read, the check reports `unsupported` and admission fails closed; it never
+assumes exclusivity it could not observe. In particular, a process whose
+`Cpus_allowed_list` cannot be read is **not** omitted from the competitor set:
+an unreadable process is unproven, not absent, so a permission error, an
+unreadable `cgroup.procs`, or an unenumerable cgroup directory all surface as
+`unsupported` rather than as a passing reservation. Only a process that has
+exited, or that is an exited zombie awaiting reaping, is skipped, because
+neither can consume CPU time.
+
+`POKERED_QUALIFICATION_FOREIGN_SAMPLE_SECONDS` (default `2`) sets the
+competing-CPU sampling window used by the `dedicated-host` check;
+`competing_cpu_cores_max` in the descriptor or declaration sets its tolerance.
+
+Every mechanism also requires `reservation.host_lock_path`: one host-wide lock
+file that concurrent jobs contend on. A lock inside the per-job directory is
+rejected, because two overlapping jobs could then hold independent leases. The
+kernel must report the recorded holder as the only holder, so a competing
+unregistered process fails the lease. The descriptor also records the lock's
+kernel identity (`device`, `inode`). Pathname equality alone is not mutual
+exclusion: if the path were removed and recreated, a second job would lock a
+different inode while the original holder still held the old one. Every lease
+and release check therefore re-observes the identity and fails closed when the
+pathname no longer names the recorded inode, so operators must keep the lock
+file in place and never delete it.
+
+The declaration is operator-owned and external to the repository. It records
+`reservation_mechanism`, the allocation facts, the source/native interpreters
+and their pinned native build fingerprints, a SHA-256 pin on retained evidence
+from the fresh native build procedure, and the complete pinned ROM, symbol, and
+fixture input set for the declared scope. `POKERED_QUALIFICATION_DECLARATION`
+or `--declaration` selects it. `--setup` prints the deterministic
+`native_build_inputs_sha256` and `native_fingerprint` to pin in the declaration.
+
+Required operator procedure:
+
+```bash
+# 1. Prepare owner-only per-job directories and print native build pins.
+python scripts/qualification_runner.py --setup \
+  --declaration /absolute/qualification-declaration.json \
+  --job-dir /absolute/private/qualification-job
+
+# 2. Under one held lease, verify the allocation and run the qualification job.
+#    The check must execute as a descendant of the lease holder.
+python scripts/qualification_runner.py --reserve \
+  --declaration /absolute/qualification-declaration.json \
+  --job-dir /absolute/private/qualification-job \
+  --run bash -c '
+    python scripts/qualification_runner.py --check \
+      --declaration /absolute/qualification-declaration.json &&
+    python scripts/production_gate.py ... --python "$SOURCE_PYTHON" ...'
+
+# 3. Release an owned lease, or clear only stale state whose owner is gone.
+python scripts/qualification_runner.py --release \
+  --declaration /absolute/qualification-declaration.json
+python scripts/qualification_runner.py --recover \
+  --declaration /absolute/qualification-declaration.json
+```
+
+A standalone `--check` without a live lease fails closed, because the
+declared capacity is not held. `--reserve` is what writes and pins the
+descriptor; `--release` and `--recover` only ever touch resources whose owner
+is identifiable. They remove only the private per-job `allocation.json`; the
+host-wide lock and any operator-created exclusive marker are shared allocation
+infrastructure that outlives the job and are never unlinked. Relinquishing a
+lease means releasing the kernel lock held by this process's descriptor and
+confirming from the lock table that it is gone, not deleting the lock path.
+
+`--reserve` validates the declaration and runtime/asset prerequisites, then
+acquires the host-wide lock, verifies the observed allocation, and only then
+launches `--run`. It refuses to launch when admission fails. The `--run` child
+receives `TMPDIR` under the job's private `tmp/`, plus
+`POKERED_QUALIFICATION_JOB_DIR` and `POKERED_QUALIFICATION_EVIDENCE_DIR` for its
+evidence. Disk admission is resolved against the job directory first and checks
+free space on the job's real `tmp/` and `evidence/` filesystems (reported as
+`disk-free-temp` and `disk-free-job-evidence`), because an external job or
+evidence filesystem can be full even when the caller's `TMPDIR` is not. It
+writes an owner-only `allocation.json` inside the private job
+directory, pins its SHA-256 in the declaration, and holds the host-wide lease
+lock while the command executes as a descendant of the holder. A lease is
+accepted only when the recorded holder is alive, its start time matches, the
+lock is host-wide, and the kernel reports it as the only holder. `--setup`
+creates `tmp/`, `evidence/`, and `logs/` under the job directory. Assets are
+expected to be read-only shared inputs; a writable asset root fails the
+prerequisite check. `--release` refuses to touch state it cannot attribute to an
+owned qualification-runner lease, and `--recover` preserves state and fails
+closed whenever the holder is still alive, still holds the lock, or lock
+ownership cannot be observed. Before reporting a released lease, `--release`
+terminates the recorded holder when it is not this process, waits for positive
+confirmation that it has exited, and re-checks the lock table; an unconfirmed
+termination or a still-held lock keeps the state and reports blocked cleanup
+instead of a false success. Interrupted prerequisite subprocesses are bounded
+by `POKERED_QUALIFICATION_COMMAND_TIMEOUT_SECONDS` (default `300`) and their
+owned process group is terminated without discarding the original failure; the
+`--run` qualification command has its own deadline,
+`POKERED_QUALIFICATION_RUN_TIMEOUT_SECONDS` or `--run-timeout` (default
+`86400`).
+
+Admission is re-measured under the held lease, immediately before `--run` is
+launched: the prerequisite probes can run for minutes and can spawn work that
+competes for the same host, so the effective CPUs, competing affinity, and
+admission inputs are re-collected rather than reused from before the lease was
+acquired. An unreadable cgroup CPU quota, including an unreadable ancestor
+controller, is reported as `unsupported` instead of being treated as unlimited
+capacity, matching the cgroup memory bound.
+
+`--reserve` writes an owner-only `job-launch-intent.json` beside
+`allocation.json` before the command is spawned, and records the launched
+command's pid, start time, process group, and session as soon as it starts. A
+write failure is terminal: the command is torn down and the lease is kept,
+because capacity that cannot be attributed to a recorded job must never be
+reported as free. A launch intent without an ownership record, an incomplete
+record, or a record whose pid was reused by an unrelated process all keep the
+state and report blocked. `--release` and `--recover` signal a recorded process
+group only after proving every live member of it can belong to the recorded
+job.
+
+The runner installs itself as a child subreaper (`PR_SET_CHILD_SUBREAPER`) and
+contains descendants on every command exit path, not only on timeout. Two
+sweeps run after the parent exits: the command's whole process group, and the
+orphans the runner adopted as subreaper. The second sweep matters because a
+command can detach a grandchild with `start_new_session=True`, which moves it
+out of the command's process group; such an orphan is reparented to the
+subreaper and is therefore still reachable and containable. A command that
+returns `0` or a failure while leaving a descendant behind no longer counts as
+a completed job: the descendant is terminated and confirmed gone, and if any
+owned descendant cannot be confirmed gone the pids are retained and `--release`
+reports `blocked` instead of relinquishing capacity that is still in use. When
+the runner cannot become a subreaper at all, the result carries an explicit
+note that containment is unproven rather than a silent pass. The original exit
+status and captured output are preserved.
+
+Both peers of every TCP pair stay on the host because the supported transport
+is loopback-only. Provisioning new paid infrastructure or uploading
+ROM-derived inputs requires separate operator authorization; this procedure
+does not grant it. A prepared runner is not a passing gate: keep provisioning
+status, test status, and release qualification separate.
+
+### 3b. Current host provisioning status (BLOCKED, not a pass)
+
+The shared Linux host this repository currently runs on does not provide an
+exclusive allocation, and the above checks correctly report that. Observed,
+sanitized facts from `qualification_runner.py --report` on this host:
+
+| Fact | Observed | Consequence |
+| --- | --- | --- |
+| `cgroup_version` | `v2` | `cpu.max`/`cpu.stat` exist but are read-only |
+| `cgroup_relative_path` | `/` | the job runs in the root cgroup, not a child allocation |
+| `cpu_quota_cores` | `null` (`cpu.max` = `max 100000`) | no finite quota to reserve |
+| `cgroup_member_pids` | 87 processes | many unrelated processes share the cgroup |
+| `affinity_cpus` | `0-11` (all 12 CPUs) | no narrower cpuset is available |
+| `cgroup_sibling_competitors` | `[]` at the root | root cgroup is the whole hierarchy |
+| `/sys/fs/cgroup` mount | `ro,nosuid,nodev,noexec` | a child quota/cpuset cannot be created |
+| user namespaces | `unshare` → `EPERM` | cannot isolate a writable cgroup namespace |
+| capabilities | `CapEff=0` | cannot delegate a controller or write `cgroup.procs` |
+
+Every reservation mechanism therefore fails admission here, which is the
+correct, fail-closed outcome: `cpuset-affinity` has overlapping foreign
+processes, `cgroup-quota` has no non-root cgroup and no finite quota, and
+`dedicated-host` measures competing CPU cores far above the tolerance. The
+`source`/`native` Red/Red MCP comparison and the nine-orientation timed MCP
+matrix required by issue #85 must be executed under an operator-provisioned
+allocation (a writable cgroup2 leaf with `cpu.max`, or an exclusive host with
+no competing load). Because no such allocation exists on this host, those
+acceptance runs are **BLOCKED** and are not claimed as passing. This section is
+a provisioning status record, not release evidence, and it must not be used to
+promote any qualification result.
+
+#### 3b-1. Functional acceptance retained, capacity qualification withheld
+
+The unchanged comparison and the complete nine-orientation timed MCP matrix
+were executed from this branch's head and their sanitized terminal results are
+retained at
+`release-evidence/feature-qualification/pr112-acceptance-409ba11/`. Both
+runtimes passed all `143` collected tests with `0` failures, errors, or skips,
+and all nine ordered orientations passed in each runtime, ending
+`mode=connected` with both peers at `returncode=0` and `group_alive=false`.
+
+That bundle is deliberately read as **functional** acceptance only. The same
+bundle records the host-wide capacity samples taken before, during, and after
+those runs: `9.44`, `10.72`, and `10.72` busy cores out of `12`. Competing
+tenants were therefore active for the whole measurement, so the run does not
+satisfy issue #85's "under that allocation" clause and cannot be promoted to a
+capacity-qualified or release-qualified result. Retaining a passing functional
+result beside an explicit capacity-blocked status is the honest state; a
+prepared runner and a green functional matrix are still not a passing gate.
+
+### 3c. Required allocation declaration shape (operator-supplied, not evidence)
+
+Issue #85's acceptance requires capacities measured under an operator-provisioned
+writable exclusive allocation. No such allocation exists on this host, so a
+representative **operator-supplied declaration shape** is retained to make the
+requirement checkable, synthesized per the delivery prompt's CAPACITY ALLOCATION
+decision. It is the artifact an operator is expected to fill in, and it is not
+reservation evidence:
+
+```
+release-evidence/feature-qualification/pr112-allocation/operator-allocation.json
+```
+
+It describes the declared `cgroup-quota` mechanism (a writable `cgroup2` leaf
+with `cpu.max`, the operator's pinned source/native interpreters, and the
+operator's ROM/fixture roots). It is internally consistent with the contract it
+must pass: `cgroup_path` is cgroup-relative, matching the path the checker reads
+from `/proc/self/cgroup`, and the declared `cpu_quota_cores` is below
+`logical_cpus`, so a provisioned allocation matching it would not be rejected on
+shape alone. Every field in the artifact is a **declared** fact supplied by the
+operator; none of it is host-observed reservation evidence. The only thing this
+host can do with it is run the runner's fail-closed admission against it, which
+separates the declared facts from the observed and unsupported ones; a fact the
+host cannot observe is reported as `unsupported`/`fail` rather than assumed:
+
+```bash
+python scripts/qualification_runner.py --check \
+  --declaration release-evidence/feature-qualification/pr112-allocation/operator-allocation.json \
+  --json
+```
+
+The sanitized terminal result is retained beside it as `check-report.json`. On
+this host the check ends `overall = fail`, with the allocation-specific rows
+(`cpu-quota`, `reservation-evidence`, `shm`, the operator interpreter roots, and
+the pinned native fingerprint) all rejected. That outcome is the correct,
+fail-closed reading: the example documents what an operator must provide, and
+the runner refuses to promote an unobserved allocation to a reservation. The
+example is not a substitute for the allocation, and nothing in this repository
+claims one. Until an operator provisions the real allocation described here, the
+source/native comparison and the nine-orientation timed matrix required by issue
+#85 remain **BLOCKED**, and no result from the shared host may be promoted to a
+capacity-qualified or release-qualified outcome.
+
+#### 3c-1. Why this host cannot supply the allocation itself
+
+The two acceptance criteria that require an *available* allocation and the
+comparison/matrix executed *under* it are unmet because supplying that
+allocation needs host privilege this job does not have. No substitute satisfies
+those criteria and none is claimed here; §3b and §3c record the blocking facts
+and the fail-closed admission the runner performs against the declaration an
+operator must supply. Neither record is reservation evidence, and the runner
+reports every fact it cannot observe as `unsupported`/`blocked` rather than
+assuming it. The blocking facts are observable and sanitized:
+
+| Provisioning prerequisite | Observed on this host | Effect |
+| --- | --- | --- |
+| `cgroup2` mount options | `ro,nosuid,nodev,noexec` | no writable leaf with `cpu.max` can be created |
+| process identity | `uid=1000` (`agent`) | the job is not the host owner |
+| effective/bounding capabilities | `CapEff=0`, `CapBnd=0` | cannot delegate a controller or write `cgroup.procs` |
+| privilege escalation path | no `sudo`, no setuid helper | the missing privilege cannot be acquired |
+| unprivileged user namespaces | `unshare --map-root-user -m` → `EPERM` | cannot bind-mount a private `cgroup2` |
+| host-wide competition | `9.44`–`10.72` busy cores of `12` during the retained runs | `dedicated-host` admission fails |
+
+The comparison and the nine-orientation matrix were nonetheless executed and
+their sanitized terminal results are retained at
+`release-evidence/feature-qualification/pr112-acceptance-409ba11/`, where they
+are read as functional acceptance only. Because the job does not own the host,
+it cannot turn these criteria green: their status stays **BLOCKED** until an
+operator provisions the allocation declared in §3c, which is an action outside
+this job's authority. Nothing here may be used to promote a shared-host result
+to capacity qualification.
+
 ## 4. Run the evidence tiers
 
 Run the tiers in order and save the complete output with the commit and
