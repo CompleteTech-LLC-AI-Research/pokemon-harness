@@ -238,3 +238,30 @@ earlier record that still expected the pin to read `c565df66…`.
   the earlier wheel (the first Update) embeds the old pin; its native-unit-lane half still needs
   the quiet, non-root, CPU-allocated runner. Condition 5 (independent review of the exact head) is
   pending. `#138` and `#122` therefore stay **OPEN**, and release status stays **PARTIAL**.
+
+## Update — 2026-09-24 (c): the #138 pilot leaf is MERGED and CLOSED (`975f1a5`)
+
+This supersedes the "Still open for `#138`" bullet and the "`#138` and `#122` therefore stay **OPEN**"
+closing line of Update (b).
+
+- **`#138` is completed by PR `#228`.** Head `1f438517fb0216aada6e8ebfbcc920d3885aaacf` merged as the
+  merge commit `975f1a57de90a3a02ac349d58726245a0fb2fcdf` (parents
+  `ca4d7a2192898c7e02d78932685de95fc49c8b03` + `1f43851…`); merge tree
+  `295be2216b21c7bffe32ea18697e73bbeb2bd6e3`. `#138` was **CLOSED** 2026-09-24T16:52:28Z. `#122`
+  remains **OPEN** as the umbrella.
+- **Condition 2 (honest re-pin)** and **condition 4 (public API / import identity)** were verified on
+  the head: the divergence revision `d78fb7253f0d290c15ddb392d05b327aea0faa82` recomputes from the
+  tracked `vendor/pyboy-src` manifest and every live-identity site carries it, with none carrying the
+  upstream base `c565df66…`.
+- **Condition 3 (Cython ABI)** was discharged on the split head: a fresh native rebuild of the
+  vendored tree was installed into the Cython venv, `scripts/bootstrap_pyboy.py --mode cython --check`
+  returned **0**, the required modules resolve to compiled extensions, and the focused native unit lane
+  passed (**47 passed, 1 skipped** — the skip is the real-ROM asset row).
+- **Condition 5 (independent non-author review)** was discharged by a separate reviewer agent:
+  `ledger/REVIEW_RESULT_VENDORED_138.md` — **APPROVE WITH FINDINGS, no code blocker**.
+- **The remaining seven leaves are unchanged.** `#123`, `#133`, `#142`, `#150`, `#153`, `#155`, `#161`
+  stay **OPEN**, still handled by option B, each requiring its own honest re-pin, native verification,
+  and independent review. The single remaining external prerequisite is unchanged: a **quiet,
+  non-root, CPU-allocated** runner able to take the native unit lane to green.
+- **Not waived.** ROM-gated Pokemon Pinball behaviour remains unexercised (no `.gb`/`.sym`/`.sav`
+  assets exist here). Release status stays **PARTIAL**.
