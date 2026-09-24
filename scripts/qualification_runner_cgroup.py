@@ -8,6 +8,7 @@ attribute patches on ``scripts.qualification_runner`` stay visible.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -34,13 +35,24 @@ def parse_cpuset(value: str | list[int]) -> list[int]:
 
 
 def _parse_cpu_max(text: str) -> float | None:
+    """Return the quota in cores, or ``None`` for an explicit ``max``.
+
+    A malformed controller file raises ``ValueError`` so the caller fails
+    closed: an unparseable quota is an *unknown* bound, never an unlimited one.
+    """
+
     parts = text.split()
-    if not parts or parts[0] == "max" or len(parts) < 2:
-        return None
+    if len(parts) != 2:
+        raise ValueError("malformed cpu.max")
     period = int(parts[1])
     if period <= 0:
+        raise ValueError("invalid cpu.max period")
+    if parts[0] == "max":
         return None
-    return int(parts[0]) / period
+    quota = int(parts[0])
+    if quota <= 0:
+        raise ValueError("invalid cpu.max quota")
+    return quota / period
 
 
 def _cgroup_relative_path(controller: str | None, cgroup_text: str | None = None) -> str | None:
@@ -193,7 +205,10 @@ def _cgroup_cpu_quota_v1(paths: list[Path]) -> tuple[float | None, bool]:
         except ValueError:
             observable = False
             continue
-        if quota_us >= 0 and period_us > 0:
+        if period_us <= 0 or quota_us < -1:
+            observable = False
+            continue
+        if quota_us >= 0:
             quotas.append(quota_us / period_us)
     return (min(quotas) if quotas else None), observable
 
@@ -217,10 +232,23 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
     memory_limit_observable = True
 
     v2_relative = _cgroup_relative_path(None, cgroup_text)
-    v2_paths = _iter_cgroup_paths(base, v2_relative)
     v1_base = base / "cpu"
     v1_relative = _cgroup_relative_path("cpu", cgroup_text)
-    v1_paths = _iter_cgroup_paths(v1_base, v1_relative)
+    visibility: list[str] = [_CGROUP_VISIBILITY_NOTE]
+    escaped_mount = any(
+        relative is not None and ".." in Path(relative).parts
+        for relative in (v2_relative, v1_relative)
+    )
+    if escaped_mount:
+        # A membership path that walks out of the visible mount is unobservable:
+        # reading ancestors that are not part of the observed hierarchy would
+        # report boundaries this process cannot actually see.  Fail closed.
+        visibility.append("Process membership lies outside the visible cgroup mount.")
+        v2_paths = [base]
+        v1_paths = [v1_base]
+    else:
+        v2_paths = _iter_cgroup_paths(base, v2_relative)
+        v1_paths = _iter_cgroup_paths(v1_base, v1_relative)
 
     primary: Path | None = None
     if any((path / "cpu.max").exists() for path in v2_paths):
@@ -248,6 +276,14 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
     else:
         stat_paths = v2_paths
         primary = v2_paths[0] if v2_paths else None
+
+    if escaped_mount:
+        version = "unavailable"
+        relative = None
+        quota_cores = None
+        quota_observable = False
+        primary = None
+        stat_paths = [base]
 
     # The memory bound is read independently of the CPU controller: a hierarchy
     # that exposes ``memory.max`` without a delegated ``cpu.max`` still bounds
@@ -280,6 +316,7 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
     # against unknown CPU and memory capacity.
     if version == "unavailable":
         quota_observable = False
+        visibility.append("Process cgroup membership is unavailable.")
         if not any((path / memory_filename).exists() for path in memory_paths):
             memory_limit_observable = False
 
@@ -304,10 +341,25 @@ def _read_cgroup_facts(root: Path | None = None, cgroup_text: str | None = None)
             for token in procs_raw.split():
                 if token.isdigit():
                     member_pids.append(int(token))
+
+    # The capacity policy consumes a tri-state status in addition to the raw
+    # bound: ``unknown`` (fail closed) is never evidence of ``unlimited``.
+    if not quota_observable:
+        quota_status = "unknown"
+    elif quota_cores is None:
+        quota_status = "unlimited"
+    else:
+        quota_status = "limited"
+    cgroup_pressure = _read_cgroup_cpu_pressure(primary)
+    if cgroup_pressure is None:
+        visibility.append("Process cgroup CPU pressure is unavailable or malformed.")
     return {
         "cgroup_version": version,
         "cpu_quota_cores": quota_cores,
         "cpu_quota_observable": quota_observable,
+        "cpu_quota_status": quota_status,
+        "cgroup_cpu_some_avg300": cgroup_pressure,
+        "cgroup_visibility": visibility,
         "cpu_weight": weight,
         "cpu_throttled": throttled,
         "cgroup_relative_path": relative,
@@ -489,17 +541,48 @@ def _cgroup_sibling_competitors(cgroup_dir: str | None) -> list[str] | None:
     return sorted(set(competitors))
 
 
-def _read_psi_cpu() -> float | None:
-    raw = _entry._read_text(Path("/proc/pressure/cpu"))
+# A fixed caveat recorded with every fact sample: the reader only ever sees the
+# cgroup hierarchy it is mounted into, so an observed "unlimited" bound can be
+# an artifact of a hidden ancestor.  Consumers must treat it as advisory.
+_CGROUP_VISIBILITY_NOTE = (
+    "Only the visible cgroup hierarchy is observed; namespace or mount boundaries "
+    "can hide ancestor limits and competing workloads."
+)
+
+
+def _parse_psi_cpu(raw: str | None) -> float | None:
+    """Parse the ``some avg300`` pressure percentage from PSI text.
+
+    Returns ``None`` for absent, malformed, non-finite, or out-of-range values so
+    a bogus pressure reading is never mistaken for a valid one.
+    """
+
     if raw is None:
         return None
     for line in raw.splitlines():
-        if not line.startswith("some"):
+        parts = line.split()
+        if not parts or parts[0] != "some":
             continue
-        for token in line.split():
+        for token in parts[1:]:
             if token.startswith("avg300="):
-                return float(token.split("=", 1)[1])
+                try:
+                    value = float(token.split("=", 1)[1])
+                except ValueError:
+                    return None
+                return value if math.isfinite(value) and 0 <= value <= 100 else None
     return None
+
+
+def _read_psi_cpu() -> float | None:
+    return _parse_psi_cpu(_entry._read_text(Path("/proc/pressure/cpu")))
+
+
+def _read_cgroup_cpu_pressure(primary: Path | None) -> float | None:
+    """Read this cgroup's own CPU pressure, or ``None`` when it is unobservable."""
+
+    if primary is None:
+        return None
+    return _parse_psi_cpu(_entry._read_text(primary / "cpu.pressure"))
 
 
 # Call-time indirection so facade-level monkeypatches stay visible here.

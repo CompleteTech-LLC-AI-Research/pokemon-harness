@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 
 # Direct names this module calls; cyclic back-edges go through _entry.
+from scripts.production_gate_capacity import _capacity_text_lines
 from scripts.production_gate_model import (
     AssetRecord,
     CollectionResult,
@@ -28,13 +29,13 @@ from scripts.production_gate_model import (
     TierResult,
     _execution_plan_lines,
 )
+from scripts.production_gate_runtime_gates import runtime_gate_passes
 from scripts.production_gate_text import (
     _failure_detail_lines,
     _format_counts,
     _jsonable_tier,
     _payload_counts_text,
 )
-from scripts.production_gate_tiers import runtime_gate_passes
 
 
 def render_text(
@@ -51,6 +52,8 @@ def render_text(
     fixture_manifest: dict[str, Any] | None = None,
     matrix_audit: dict[str, Any] | None = None,
     execution_plan: dict[str, Any] | None = None,
+    capacity: dict[str, Any] | None = None,
+    cancellation: str = "",
 ) -> str:
     lines = [
         "Pokémon harness production gate",
@@ -81,6 +84,9 @@ def render_text(
         lines.extend(f"  FAIL: {problem}" for problem in gate_problems)
     else:
         lines.append("  PASS")
+    if cancellation:
+        lines.append("cancellation:")
+        lines.append(f"  {cancellation}")
 
     lines.append("collection:")
     for collection in collections:
@@ -170,6 +176,8 @@ def render_text(
         if tier.status in {"FAIL", "BLOCKED", "INTERRUPTED"} and tier.output_tail:
             lines.append("    output tail:")
             lines.extend(f"      {line}" for line in tier.output_tail.splitlines()[-60:])
+    if capacity is not None:
+        lines.extend(_capacity_text_lines(capacity))
     lines.append(f"overall: {overall}")
     return "\n".join(lines)
 
@@ -182,6 +190,7 @@ def render_dual_text(
     assets: Sequence[AssetRecord],
     runtime_results: Sequence[RuntimeGateResult],
     overall: str,
+    capacity: dict[str, Any] | None = None,
 ) -> str:
     """Render explicit source/Cython results without collapsing either run."""
 
@@ -224,8 +233,11 @@ def render_dual_text(
             fixture_manifest=result.fixture_manifest,
             matrix_audit=result.matrix_audit,
             execution_plan=result.execution_plan,
+            cancellation=result.cancellation,
         )
         lines.extend(f"    {line}" for line in detail.splitlines()[4:])
+    if capacity is not None:
+        lines.extend(_capacity_text_lines(capacity))
     lines.append(f"overall: {overall}")
     return "\n".join(lines)
 
@@ -241,6 +253,7 @@ def _runtime_result_json(result: RuntimeGateResult) -> dict[str, Any]:
         "matrix_audit": result.matrix_audit,
         "tiers": [_jsonable_tier(tier) for tier in result.tiers],
         "gate_problems": result.gate_problems,
+        "cancellation": result.cancellation,
         "overall": "PASS" if runtime_gate_passes(result) else "FAIL",
         **({"execution_plan": result.execution_plan} if result.execution_plan else {}),
     }
@@ -282,6 +295,7 @@ def _render_dual_evidence_text(payload: dict[str, Any]) -> str:
             "matrix_audit": result.get("matrix_audit"),
             "tiers": result.get("tiers", []),
             "gate_problems": result.get("gate_problems", []),
+            "cancellation": result.get("cancellation", ""),
             "execution_plan": result.get("execution_plan", {}),
             "safety": {},
         }
@@ -291,6 +305,8 @@ def _render_dual_evidence_text(payload: dict[str, Any]) -> str:
         # parent already identifies the combined evidence bundle.
         lines.extend(f"    {line}" for line in child_lines[3:])
 
+    if isinstance(payload.get("capacity"), dict):
+        lines.extend(_capacity_text_lines(payload["capacity"]))
     if payload.get("evidence_error"):
         lines.append(f"evidence-error: {payload['evidence_error']}")
     lines.append("safety:")
@@ -334,6 +350,10 @@ def render_evidence_text(payload: dict[str, Any]) -> str:
         lines.extend(f"  FAIL: {problem}" for problem in problems)
     else:
         lines.append("  PASS")
+    cancellation = payload.get("cancellation", "")
+    if cancellation:
+        lines.append("cancellation:")
+        lines.append(f"  {cancellation}")
 
     lines.append("collection:")
     for collection in payload.get("collections", []):
@@ -429,6 +449,8 @@ def render_evidence_text(payload: dict[str, Any]) -> str:
             lines.append("    output tail:")
             lines.extend(f"      {line}" for line in tier["output_tail"].splitlines())
 
+    if isinstance(payload.get("capacity"), dict):
+        lines.extend(_capacity_text_lines(payload["capacity"]))
     if payload.get("evidence_error"):
         lines.append(f"evidence-error: {payload['evidence_error']}")
     lines.append("safety:")

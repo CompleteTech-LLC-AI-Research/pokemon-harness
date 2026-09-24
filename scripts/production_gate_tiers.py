@@ -12,8 +12,9 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -21,14 +22,16 @@ if str(ROOT) not in sys.path:
 
 
 # Direct names this module calls; cyclic back-edges go through _entry.
-from scripts.production_gate_assets import required_asset_problems, runtime_modes_for_gate
-from scripts.production_gate_matrix import (
-    _matrix_execution_problems,
-    _required_nodeid_problems,
-    _required_test_problems,
-    run_matrix_tier,
-    synthetic_optional_skip,
+from scripts.production_gate_assets import required_asset_problems
+from scripts.production_gate_capacity import (
+    TierInterruptedDuringCleanup,
+    _capacity_execution,
+    _completed_tier_sink,
+    _defer_sigint_while_finalizing,
+    register_blocked_rows,
 )
+from scripts.production_gate_matrix import _matrix_execution_problems, run_matrix_tier
+from scripts.production_gate_matrix_audit import _required_nodeid_problems, _required_test_problems
 from scripts.production_gate_model import (
     _EVIDENCE_OMITTED,
     COLLECTION_TIMEOUT_SECONDS,
@@ -54,12 +57,12 @@ from scripts.production_gate_model import (
     PreparedRuntimeGate,
     RuntimeGateResult,
     TierResult,
-    _valid_execution_plan,
-    build_execution_plan,
+    _normalize_nodeid,
 )
 from scripts.production_gate_text import _bounded_failure_text, _retain_failure_detail
 
 
+@_capacity_execution
 def run_tier(
     *,
     name: str,
@@ -75,6 +78,10 @@ def run_tier(
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
+    capacity_session: Any | None = None,
+    collections: Sequence[CollectionResult] = (),
+    scope: str = "",
+    publish: Callable[[TierResult], None] | None = None,
 ) -> TierResult:
     if name == "smoke":
         required_test_keys = frozenset(required_test_keys) | SMOKE_REQUIRED_TESTS
@@ -93,11 +100,23 @@ def run_tier(
             matrix_workers=matrix_workers,
             matrix_timeout_override=matrix_timeout_override,
             raw_output_directory=raw_output_directory,
+            capacity_session=capacity_session,
+            scope=scope,
+            publish=publish,
         )
 
     required = name not in _entry.OPTIONAL_TIERS
     if required and name in REQUIRED_TIER_ASSETS and required_problems:
         reason = "required assets unavailable: " + "; ".join(required_problems)
+        register_blocked_rows(
+            capacity_session,
+            name=name,
+            collections=collections,
+            project_root=project_root,
+            reason=reason,
+            required_nodeids=required_nodeids,
+            scope=scope,
+        )
         return TierResult(
             name=name,
             description=TIER_DESCRIPTIONS[name],
@@ -105,6 +124,70 @@ def run_tier(
             required=True,
             status="BLOCKED",
             reason=reason,
+            selected_nodeids=sorted(
+                {_normalize_nodeid(nodeid) for nodeid in required_nodeids}
+                | (set(SMOKE_REQUIRED_NODEIDS) if name == "smoke" else set())
+            ),
+        )
+
+    if capacity_session is not None and name in REQUIRED_TIER_ASSETS:
+        # Emulator pairs inside one ordinary tier are admitted individually.
+        # A declared capacity policy must be able to stop the *next* pair when
+        # observed capacity becomes unavailable, which a single batch process
+        # could never notice.  The tier's own preflight enumeration supplies the
+        # exact planned rows, so dispatch and admission cannot drift.  The
+        # per-case timeout stays the tier's declared budget while the aggregate
+        # timeout keeps the whole tier inside that same wall-clock bound.
+        # Rows stay sequential: the batch ran one pytest process at a time, so
+        # a capacity policy must not silently add emulator concurrency.
+        planned, problem = _entry.planned_tier_nodeids(collections, name, project_root)
+        if not planned:
+            if problem:
+                # Fail closed: without the exact planned set a per-pair policy
+                # cannot prove it admitted every emulator pair, so the tier must
+                # not run as an unaccounted batch.
+                return _unrun_tier(
+                    name,
+                    f"capacity could not enumerate planned rows for tier {name}: {problem}",
+                    required_nodeids,
+                    status="BLOCKED",
+                    capacity_session=capacity_session,
+                    collections=collections,
+                    project_root=project_root,
+                    scope=scope,
+                )
+            # A genuinely empty planned set is the ordinary "selected no tests"
+            # failure, not a capacity prerequisite; keep it a FAIL so an empty
+            # tier cannot be excused as unavailable capacity.
+            return _unrun_tier(
+                name,
+                f"tier {name} selected no tests for its marker expression",
+                required_nodeids,
+                status="FAIL",
+            )
+        tier_timeout = timeout_override or DEFAULT_TIMEOUT_SECONDS[name]
+        # Union the strict required manifest so a row the collection could not
+        # enumerate is still demanded (and reported missing) rather than silently
+        # dropped from the dispatched set.
+        dispatched = sorted(
+            set(planned) | {_normalize_nodeid(nodeid) for nodeid in required_nodeids}
+        )
+        return run_matrix_tier(
+            name=name,
+            project_root=project_root,
+            python_executable=python_executable,
+            environment=environment,
+            required_problems=required_problems,
+            timeout_override=tier_timeout,
+            report_directory=report_directory,
+            required_test_keys=required_test_keys,
+            required_nodeids=dispatched,
+            matrix_workers=1,
+            matrix_timeout_override=tier_timeout,
+            raw_output_directory=raw_output_directory,
+            capacity_session=capacity_session,
+            scope=scope,
+            publish=publish,
         )
 
     timeout = timeout_override or DEFAULT_TIMEOUT_SECONDS[name]
@@ -128,116 +211,136 @@ def run_tier(
     baseline_nodeids: set[str] | None = None
     selected_nodeids: list[str] = []
     started = time.monotonic()
-    for iteration in range(1, repeat + 1):
-        report_path = report_directory / f"{name}-{iteration}.json"
-        returncode, report, output, command = _entry.run_pytest_once(
-            project_root=project_root,
-            python_executable=python_executable,
-            environment=environment,
-            expression=TIER_EXPRESSIONS[name],
-            timeout_seconds=timeout,
-            report_path=report_path,
-            raw_output_directory=raw_output_directory,
-            **({"selectors": SMOKE_SELECTORS} if name == "smoke" else {}),
-        )
-        counts = report.counts
-        aggregate.total += counts.total
-        aggregate.passed += counts.passed
-        aggregate.failed += counts.failed
-        aggregate.skipped += counts.skipped
-        aggregate.xfailed += counts.xfailed
-        aggregate.xpassed += counts.xpassed
-        aggregate.errors += counts.errors
-        aggregate_reasons.update(report.skip_reasons)
-        returncodes.append(returncode)
-        if output.strip():
-            output_tail = _bounded_failure_text(output, MAX_FAILED_OUTPUT_CHARS, tail=True)
+    interrupted_between_iterations = False
+    try:
+        for iteration in range(1, repeat + 1):
+            report_path = report_directory / f"{name}-{iteration}.json"
+            returncode, report, output, command = _entry.run_pytest_once(
+                project_root=project_root,
+                python_executable=python_executable,
+                environment=environment,
+                expression=TIER_EXPRESSIONS[name],
+                timeout_seconds=timeout,
+                report_path=report_path,
+                raw_output_directory=raw_output_directory,
+                **({"selectors": SMOKE_SELECTORS} if name == "smoke" else {}),
+            )
+            counts = report.counts
+            aggregate.total += counts.total
+            aggregate.passed += counts.passed
+            aggregate.failed += counts.failed
+            aggregate.skipped += counts.skipped
+            aggregate.xfailed += counts.xfailed
+            aggregate.xpassed += counts.xpassed
+            aggregate.errors += counts.errors
+            aggregate_reasons.update(report.skip_reasons)
+            returncodes.append(returncode)
+            if output.strip():
+                output_tail = _bounded_failure_text(output, MAX_FAILED_OUTPUT_CHARS, tail=True)
 
-        problems: list[str] = []
-        if report.error:
-            problems.append(report.error)
-        if returncode != 0:
-            problems.append(f"pytest returned exit code {returncode}")
-        if report.collection_errors:
-            problems.append(f"pytest reported {len(report.collection_errors)} collection error(s)")
-        if report.collection_skips:
-            problems.append(f"pytest reported {len(report.collection_skips)} collection skip(s)")
-        if counts.total == 0:
-            problems.append("pytest selected no tests for the tier expression")
-        if counts.failed or counts.errors or counts.xfailed or counts.xpassed:
-            problems.append(
-                "unexpected outcomes: "
-                f"failed={counts.failed} errors={counts.errors} "
-                f"xfailed={counts.xfailed} xpassed={counts.xpassed}"
-            )
-        if required and counts.skipped:
-            problems.append(f"required tier produced {counts.skipped} test skip(s)")
-        if not counts.passed and not counts.xpassed:
-            problems.append("iteration produced no passing test outcome")
-
-        required_problems = _required_test_problems(report.nodeids, required_test_keys)
-        problems.extend(required_problems)
-        problems.extend(_required_nodeid_problems(report.nodeids, required_nodeids))
-        current_nodeids = set(report.nodeids)
-        if baseline_nodeids is None:
-            baseline_nodeids = current_nodeids
-            selected_nodeids = list(report.nodeids)
-        elif name == "timing" and current_nodeids != baseline_nodeids:
-            problems.append(
-                "timing-tier selected test set changed between repetitions: "
-                f"baseline={len(baseline_nodeids)} current={len(current_nodeids)}"
-            )
-        if problems:
-            # Put actionable case evidence before generic accounting summaries.
-            for records, outcome in (
-                (report.failed_records, None),
-                (report.collection_errors, "collection_error"),
-                (report.collection_skips, "collection_skip"),
-            ):
-                for record in records:
-                    failure_detail_budget, omitted = _retain_failure_detail(
-                        failure_details,
-                        record if outcome is None else {**record, "outcome": outcome},
-                        iteration=iteration,
-                        remaining_chars=failure_detail_budget,
-                    )
-                    failure_details_omitted += omitted
-            details = (
-                f"{_bounded_failure_text(record['nodeid'], 500)}: {record['outcome']}: "
-                f"{_bounded_failure_text(record['reason'], 1300, tail=True)}"
-                for record in report.failed_records
-            )
-            collection_details = (
-                f"{_bounded_failure_text(record['nodeid'], 500)}: collection: "
-                f"{_bounded_failure_text(record['reason'], 1300, tail=True)}"
-                for record in (*report.collection_errors, *report.collection_skips)
-            )
-            for detail_group in (details, collection_details, problems):
-                for detail in detail_group:
-                    if len(iteration_failures) < MAX_ITERATION_FAILURES:
-                        iteration_failures.append(
-                            _bounded_failure_text(
-                                f"iteration {iteration}: {detail}", MAX_ITERATION_FAILURE_CHARS
-                            )
-                        )
-                    else:
-                        omitted_failures += 1
-            if not output_omitted:
-                excerpt = f"iteration {iteration}:\n" + _bounded_failure_text(
-                    output if output.strip() else "[no subprocess output]", 3900, tail=True
+            problems: list[str] = []
+            if report.error:
+                problems.append(report.error)
+            if returncode != 0:
+                problems.append(f"pytest returned exit code {returncode}")
+            if report.collection_errors:
+                problems.append(
+                    f"pytest reported {len(report.collection_errors)} collection error(s)"
                 )
-                candidate = failed_output + ("\n\n" if failed_output else "") + excerpt
-                budget = MAX_FAILED_OUTPUT_CHARS - len(_EVIDENCE_OMITTED)
-                if len(candidate) > budget:
-                    # Never evict the first failure to make room for later runs.
-                    failed_output += _EVIDENCE_OMITTED
-                    output_omitted = True
-                else:
-                    failed_output = candidate
+            if report.collection_skips:
+                problems.append(
+                    f"pytest reported {len(report.collection_skips)} collection skip(s)"
+                )
+            if counts.total == 0:
+                problems.append("pytest selected no tests for the tier expression")
+            if counts.failed or counts.errors or counts.xfailed or counts.xpassed:
+                problems.append(
+                    "unexpected outcomes: "
+                    f"failed={counts.failed} errors={counts.errors} "
+                    f"xfailed={counts.xfailed} xpassed={counts.xpassed}"
+                )
+            if required and counts.skipped:
+                problems.append(f"required tier produced {counts.skipped} test skip(s)")
+            if not counts.passed and not counts.xpassed:
+                problems.append("iteration produced no passing test outcome")
 
-        if returncode == 130:
-            break
+            required_problems = _required_test_problems(report.nodeids, required_test_keys)
+            problems.extend(required_problems)
+            problems.extend(_required_nodeid_problems(report.nodeids, required_nodeids))
+            current_nodeids = set(report.nodeids)
+            if baseline_nodeids is None:
+                baseline_nodeids = current_nodeids
+                selected_nodeids = list(report.nodeids)
+            elif name == "timing" and current_nodeids != baseline_nodeids:
+                problems.append(
+                    "timing-tier selected test set changed between repetitions: "
+                    f"baseline={len(baseline_nodeids)} current={len(current_nodeids)}"
+                )
+            if problems:
+                # Put actionable case evidence before generic accounting summaries.
+                for records, outcome in (
+                    (report.failed_records, None),
+                    (report.collection_errors, "collection_error"),
+                    (report.collection_skips, "collection_skip"),
+                ):
+                    for record in records:
+                        failure_detail_budget, omitted = _retain_failure_detail(
+                            failure_details,
+                            record if outcome is None else {**record, "outcome": outcome},
+                            iteration=iteration,
+                            remaining_chars=failure_detail_budget,
+                        )
+                        failure_details_omitted += omitted
+                details = (
+                    f"{_bounded_failure_text(record['nodeid'], 500)}: {record['outcome']}: "
+                    f"{_bounded_failure_text(record['reason'], 1300, tail=True)}"
+                    for record in report.failed_records
+                )
+                collection_details = (
+                    f"{_bounded_failure_text(record['nodeid'], 500)}: collection: "
+                    f"{_bounded_failure_text(record['reason'], 1300, tail=True)}"
+                    for record in (*report.collection_errors, *report.collection_skips)
+                )
+                for detail_group in (details, collection_details, problems):
+                    for detail in detail_group:
+                        if len(iteration_failures) < MAX_ITERATION_FAILURES:
+                            iteration_failures.append(
+                                _bounded_failure_text(
+                                    f"iteration {iteration}: {detail}", MAX_ITERATION_FAILURE_CHARS
+                                )
+                            )
+                        else:
+                            omitted_failures += 1
+                if not output_omitted:
+                    excerpt = f"iteration {iteration}:\n" + _bounded_failure_text(
+                        output if output.strip() else "[no subprocess output]", 3900, tail=True
+                    )
+                    candidate = failed_output + ("\n\n" if failed_output else "") + excerpt
+                    budget = MAX_FAILED_OUTPUT_CHARS - len(_EVIDENCE_OMITTED)
+                    if len(candidate) > budget:
+                        # Never evict the first failure to make room for later runs.
+                        failed_output += _EVIDENCE_OMITTED
+                        output_omitted = True
+                    else:
+                        failed_output = candidate
 
+            if returncode == 130:
+                break
+    except KeyboardInterrupt:
+        # A cancellation delivered between an already-loaded iteration and
+        # the next subprocess used to escape past this loop, discarding every
+        # aggregate, diagnostic, output tail and return code collected so far.
+        # Record it here so the accumulated iteration evidence is finalized
+        # as an interrupted partial tier instead.
+        interrupted_between_iterations = True
+
+    # Every child report has been loaded by now and the remaining work is
+    # in-memory assembly.  A cancellation delivered inside that window used to
+    # escape with the executed evidence unreachable, so a batch tier lost its
+    # counts and diagnostics the same way an unguarded matrix tier did.  Defer
+    # the signal, assemble the complete tier, and carry the cancellation out
+    # afterwards instead.
+    finalization_guard = _defer_sigint_while_finalizing()
     if omitted_failures:
         iteration_failures.append(f"[...{omitted_failures} additional failure entries omitted...]")
     if failed_output:
@@ -245,7 +348,7 @@ def run_tier(
 
     duration = time.monotonic() - started
     unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
-    if 130 in returncodes:
+    if interrupted_between_iterations or 130 in returncodes:
         status = "INTERRUPTED"
     elif iteration_failures or any(code != 0 for code in returncodes) or unexpected:
         status = "FAIL"
@@ -266,7 +369,7 @@ def run_tier(
     else:
         status = "PASS" if aggregate.passed else "SKIP"
 
-    return TierResult(
+    tier_result = TierResult(
         name=name,
         description=TIER_DESCRIPTIONS[name],
         expression=TIER_EXPRESSIONS[name],
@@ -283,6 +386,28 @@ def run_tier(
         failure_details=failure_details,
         failure_details_omitted=failure_details_omitted,
     )
+    # Durable publication before the signal handler is restored, for the same
+    # reason as the matrix supervisor: otherwise a ``SIGINT`` landing between
+    # ``restore()`` and the caller's receipt of the return value loses every
+    # accumulated timing iteration.
+    if publish is not None:
+        publish(tier_result)
+    if interrupted_between_iterations:
+        # The repetition loop was cancelled.  Carry the accumulated iterations
+        # out as an interrupted tier instead of letting the cancellation escape
+        # with the aggregates unreachable.
+        raise TierInterruptedDuringCleanup(
+            tier_result,
+            f"{name} cancelled between timing repetitions after loading iteration evidence",
+        ) from None
+    if finalization_guard.restore():
+        # The evidence is complete; carry it out and record the cancellation
+        # separately instead of letting the orchestrator synthesize an empty row.
+        raise TierInterruptedDuringCleanup(
+            tier_result,
+            f"{name} finalization interrupted after loading case evidence",
+        ) from None
+    return tier_result
 
 
 def _optional_preflight_reason(name: str, records: list[AssetRecord]) -> str | None:
@@ -459,32 +584,102 @@ def run_prepared_tier(
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
+    capacity_session: Any | None = None,
+    scope: str = "",
 ) -> TierResult:
-    """Execute one planned tier with the already verified runtime environment."""
+    """Execute one planned tier with the already verified runtime environment.
+
+    A completed tier is written to the runtime result's durable
+    ``completed_tiers`` mapping before this call returns.  A cancellation
+    delivered between the return and the caller's bookkeeping used to leave a
+    tier that really ran indistinguishable from a tier that never started, so
+    the orchestrator synthesized an empty ``INTERRUPTED`` row and the loaded
+    evidence was lost.  A per-call sink cannot fix that: it only lives in the
+    frame that invoked this function, so a cancellation escaping *that* frame
+    - or the dispatch helper built on top of it - left no reachable copy.  The
+    mapping travels with ``prepared.result``, which is published to the
+    caller's accumulator before any tier is dispatched, so the CLI's
+    interrupted-result finalizer can recover the executed tier too.
+    """
 
     mode = prepared.result.mode
+    # Row identity is per runtime scope.  Deriving it from the prepared runtime
+    # keeps every dispatch path (including the early-smoke branch, which used to
+    # omit it) consistent with the cancellation and finalization paths that
+    # already account rows under the runtime mode.
+    scope = scope or mode
     runtime_output_directory = raw_output_directory / mode if raw_output_directory else None
-    with tempfile.TemporaryDirectory(prefix=f"pokered-gate-{mode}-{name}-") as directory:
-        return _entry.run_tier(
-            name=name,
-            project_root=project_root,
-            python_executable=python_executable,
-            environment=prepared.environment,
-            required_problems=prepared.required_problems,
-            repeat=repeat,
-            timeout_override=timeout_override,
-            report_directory=Path(directory),
-            required_test_keys=required_tests_by_tier.get(name, ()),
-            required_nodeids=required_nodeids_by_tier.get(name, ()),
-            matrix_workers=matrix_workers,
-            matrix_timeout_override=matrix_timeout_override,
-            raw_output_directory=runtime_output_directory,
-        )
+    tier: TierResult | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"pokered-gate-{mode}-{name}-") as directory:
+            tier = _entry.run_tier(
+                name=name,
+                project_root=project_root,
+                python_executable=python_executable,
+                environment=prepared.environment,
+                required_problems=prepared.required_problems,
+                repeat=repeat,
+                timeout_override=timeout_override,
+                report_directory=Path(directory),
+                required_test_keys=required_tests_by_tier.get(name, ()),
+                required_nodeids=required_nodeids_by_tier.get(name, ()),
+                matrix_workers=matrix_workers,
+                matrix_timeout_override=matrix_timeout_override,
+                raw_output_directory=runtime_output_directory,
+                capacity_session=capacity_session,
+                collections=prepared.result.collections,
+                scope=scope,
+                publish=_completed_tier_sink(prepared),
+            )
+    except TierInterruptedDuringCleanup:
+        # The tier supervisor already captured the completed result; keep it.
+        raise
+    except KeyboardInterrupt:
+        # The return value only exists once ``run_tier`` returned, so a
+        # cancellation raised while unwinding the scratch directory would lose
+        # it.  Carry the finished tier out instead of reporting it unstarted.
+        if tier is None:
+            raise
+        raise TierInterruptedDuringCleanup(
+            tier,
+            f"{name} completed but its scratch-directory cleanup was interrupted",
+        ) from None
+    finally:
+        # Runs before this frame returns, even when a signal raises out of the
+        # ``return`` below, so a completed tier is never left reachable only
+        # from this frame.
+        if tier is not None:
+            prepared.result.completed_tiers[tier.name] = tier
+    return tier
 
 
 def _unrun_tier(
-    name: str, reason: str, required_nodeids: Iterable[str] = (), *, status: str = "NOT_STARTED"
+    name: str,
+    reason: str,
+    required_nodeids: Iterable[str] = (),
+    *,
+    status: str = "NOT_STARTED",
+    capacity_session: Any | None = None,
+    collections: Iterable[CollectionResult] = (),
+    project_root: Path | None = None,
+    scope: str = "",
 ) -> TierResult:
+    if status in {"BLOCKED", "NOT_STARTED", "INTERRUPTED"} and capacity_session is not None:
+        # A row blocked before dispatch must not disappear from capacity
+        # accounting: record each planned row and its terminal block decision
+        # here, where every pre-dispatch BLOCKED/cancelled/interrupted path
+        # converges.  Cancellation terminalizes the row the same way an expiry
+        # does, so a queued waiter is never promoted after the run stopped.
+        register_blocked_rows(
+            capacity_session,
+            name=name,
+            collections=collections,
+            project_root=project_root if project_root is not None else Path("."),
+            reason=reason,
+            required_nodeids=required_nodeids,
+            status=status,
+            scope=scope,
+        )
     nodes = sorted(set(required_nodeids) | (SMOKE_REQUIRED_NODEIDS if name == "smoke" else set()))
     return TierResult(
         name=name,
@@ -540,285 +735,6 @@ def _unstarted_preparation(
         environment={},
         required_problems=[],
     )
-
-
-def run_runtime_gate(
-    *,
-    mode: str,
-    project_root: Path,
-    python_executable: Path,
-    rom_root: Path,
-    fixture_root: Path,
-    expected_sha1: dict[Path, str],
-    assets: list[AssetRecord],
-    selected: Sequence[str],
-    required_tests_by_tier: dict[str, frozenset[tuple[str, str]]],
-    required_nodeids_by_tier: dict[str, frozenset[str]],
-    configuration_problems: Iterable[str] = (),
-    repeat: int = 5,
-    timeout_override: float | None = None,
-    matrix_workers: int = DEFAULT_MATRIX_WORKERS,
-    matrix_timeout_override: float | None = None,
-    raw_output_directory: Path | None = None,
-) -> RuntimeGateResult:
-    """Run a selected single-runtime scope, retaining its existing tier order."""
-
-    try:
-        prepared = prepare_runtime_gate(
-            mode=mode,
-            project_root=project_root,
-            python_executable=python_executable,
-            rom_root=rom_root,
-            fixture_root=fixture_root,
-            expected_sha1=expected_sha1,
-            assets=assets,
-            selected=selected,
-            required_tests_by_tier=required_tests_by_tier,
-            required_nodeids_by_tier=required_nodeids_by_tier,
-            configuration_problems=configuration_problems,
-            timeout_override=timeout_override,
-            raw_output_directory=raw_output_directory,
-        )
-    except KeyboardInterrupt:
-        prepared = _unstarted_preparation(
-            mode,
-            f"{mode} preflight interrupted",
-            interrupted=True,
-        )
-    stop_reason = (
-        f"not started after {mode} preflight was interrupted"
-        if any(item.status == "INTERRUPTED" for item in prepared.result.collections)
-        else ""
-    )
-    for name in selected:
-        if stop_reason:
-            prepared.result.tiers.append(
-                _unrun_tier(
-                    name,
-                    stop_reason,
-                    required_nodeids_by_tier.get(name, ()),
-                )
-            )
-            continue
-        if name in _entry.OPTIONAL_TIERS:
-            reason = _optional_preflight_reason(name, assets)
-            if reason:
-                prepared.result.tiers.append(synthetic_optional_skip(name, reason))
-                continue
-        prepared.result.tiers.append(
-            run_prepared_tier(
-                prepared=prepared,
-                name=name,
-                project_root=project_root,
-                python_executable=python_executable,
-                required_tests_by_tier=required_tests_by_tier,
-                required_nodeids_by_tier=required_nodeids_by_tier,
-                repeat=repeat,
-                timeout_override=timeout_override,
-                matrix_workers=matrix_workers,
-                matrix_timeout_override=matrix_timeout_override,
-                raw_output_directory=raw_output_directory,
-            )
-        )
-        if prepared.result.tiers[-1].status == "INTERRUPTED":
-            stop_reason = f"not started after {mode} {name} INTERRUPTED"
-    return prepared.result
-
-
-def run_runtime_gates(
-    *,
-    runtime_mode: str,
-    project_root: Path,
-    python_executable: Path,
-    cython_python_executable: Path | None = None,
-    rom_root: Path,
-    fixture_root: Path,
-    expected_sha1: dict[Path, str],
-    assets: list[AssetRecord],
-    selected: Sequence[str],
-    required_tests_by_tier: dict[str, frozenset[tuple[str, str]]],
-    required_nodeids_by_tier: dict[str, frozenset[str]],
-    configuration_problems: Iterable[str] = (),
-    repeat: int = 5,
-    timeout_override: float | None = None,
-    matrix_workers: int = DEFAULT_MATRIX_WORKERS,
-    matrix_timeout_override: float | None = None,
-    raw_output_directory: Path | None = None,
-    early_smoke: bool = False,
-    fail_fast: bool = False,
-) -> tuple[RuntimeGateResult, ...]:
-    """Execute one declared plan without borrowing results from another run.
-
-    Full CLI gates probe both runtimes and run both additional smokes before
-    long tiers. A smoke failure still permits the other runtime's smoke, so a
-    source failure cannot hide native status. The original qualification rows
-    remain required and run separately; smoke passes do not replace them.
-    """
-
-    modes = runtime_modes_for_gate(runtime_mode)
-    selected = tuple(selected)
-    plan = build_execution_plan(modes, selected, early_smoke=early_smoke, fail_fast=fail_fast)
-    python_by_mode = {
-        "source": python_executable,
-        "cython": cython_python_executable or python_executable,
-    }
-    preparation_arguments = {
-        "project_root": project_root,
-        "rom_root": rom_root,
-        "fixture_root": fixture_root,
-        "expected_sha1": expected_sha1,
-        "assets": assets,
-        "selected": selected,
-        "required_tests_by_tier": required_tests_by_tier,
-        "required_nodeids_by_tier": required_nodeids_by_tier,
-        "configuration_problems": tuple(configuration_problems),
-        "timeout_override": timeout_override,
-        "raw_output_directory": raw_output_directory,
-    }
-    execution_arguments = {
-        "project_root": project_root,
-        "required_tests_by_tier": required_tests_by_tier,
-        "required_nodeids_by_tier": required_nodeids_by_tier,
-        "repeat": repeat,
-        "timeout_override": timeout_override,
-        "matrix_workers": matrix_workers,
-        "matrix_timeout_override": matrix_timeout_override,
-        "raw_output_directory": raw_output_directory,
-    }
-    if not early_smoke and not fail_fast and selected != ("smoke",):
-        results = []
-        cancel_reason = ""
-        for mode in modes:
-            if cancel_reason:
-                result = _unstarted_preparation(mode, cancel_reason).result
-                result.tiers = [
-                    _unrun_tier(name, cancel_reason, required_nodeids_by_tier.get(name, ()))
-                    for name in selected
-                ]
-            else:
-                result = _entry.run_runtime_gate(
-                    mode=mode,
-                    python_executable=python_by_mode[mode],
-                    **preparation_arguments,
-                    repeat=repeat,
-                    matrix_workers=matrix_workers,
-                    matrix_timeout_override=matrix_timeout_override,
-                )
-                if any(tier.status == "INTERRUPTED" for tier in result.tiers) or any(
-                    item.status == "INTERRUPTED" for item in result.collections
-                ):
-                    cancel_reason = f"not started after {mode} was interrupted"
-            result.execution_plan = plan
-            results.append(result)
-        return tuple(results)
-
-    prepared_runtimes: list[PreparedRuntimeGate] = []
-    stop_reason = ""
-    cancel_reason = ""
-    for mode in modes:
-        if cancel_reason:
-            prepared = _unstarted_preparation(mode, cancel_reason)
-        else:
-            try:
-                prepared = prepare_runtime_gate(
-                    mode=mode,
-                    python_executable=python_by_mode[mode],
-                    **preparation_arguments,
-                )
-            except KeyboardInterrupt:
-                prepared = _unstarted_preparation(
-                    mode,
-                    f"{mode} preflight interrupted",
-                    interrupted=True,
-                )
-        if any(item.status == "INTERRUPTED" for item in prepared.result.collections):
-            cancel_reason = stop_reason = f"not started after {mode} preflight was interrupted"
-        prepared.result.execution_plan = plan
-        prepared_runtimes.append(prepared)
-        if early_smoke or selected == ("smoke",):
-            reason = _preflight_reason(prepared)
-            smoke = (
-                _unrun_tier("smoke", reason, status="NOT_STARTED" if cancel_reason else "BLOCKED")
-                if reason
-                else run_prepared_tier(
-                    prepared=prepared,
-                    name="smoke",
-                    python_executable=python_by_mode[mode],
-                    **execution_arguments,
-                )
-            )
-            prepared.result.tiers.append(smoke)
-            if smoke.status == "INTERRUPTED":
-                cancel_reason = stop_reason = f"not started after {mode} smoke INTERRUPTED"
-            if fail_fast and smoke.status != "PASS" and not stop_reason:
-                stop_reason = f"not started after {mode} smoke {smoke.status}"
-
-    if selected == ("smoke",):
-        return tuple(prepared.result for prepared in prepared_runtimes)
-
-    for prepared in prepared_runtimes:
-        mode = prepared.result.mode
-        preflight_reason = _preflight_reason(prepared)
-        for name in selected:
-            if stop_reason or preflight_reason:
-                tier = _unrun_tier(
-                    name,
-                    stop_reason or f"{mode} preflight failed: {preflight_reason}",
-                    required_nodeids_by_tier.get(name, ()),
-                )
-            else:
-                tier = run_prepared_tier(
-                    prepared=prepared,
-                    name=name,
-                    python_executable=python_by_mode[mode],
-                    **execution_arguments,
-                )
-            prepared.result.tiers.append(tier)
-            if tier.status == "INTERRUPTED":
-                stop_reason = f"not started after {mode} {name} INTERRUPTED"
-            if fail_fast and tier.status != "PASS" and not stop_reason:
-                stop_reason = f"not started after {mode} {name} {tier.status}"
-    return tuple(prepared.result for prepared in prepared_runtimes)
-
-
-def runtime_gate_passes(result: RuntimeGateResult) -> bool:
-    """Return whether one runtime result satisfies every existing gate rule."""
-
-    if result.execution_plan:
-        if not _valid_execution_plan(result.execution_plan):
-            return False
-        expected = [
-            step["tier"] for step in result.execution_plan["steps"] if step["mode"] == result.mode
-        ]
-        if [tier.name for tier in result.tiers] != expected:
-            return False
-    tier_ok = all(
-        tier.status == "PASS" if tier.required else tier.status in {"PASS", "SKIP"}
-        for tier in result.tiers
-    )
-    return (
-        result.runtime.get("pyboy_mode") == result.mode
-        and bool(result.collections)
-        and bool(result.tiers)
-        and not result.gate_problems
-        and all(collection.status == "PASS" for collection in result.collections)
-        and tier_ok
-    )
-
-
-def runtime_gates_pass(results: Iterable[RuntimeGateResult]) -> bool:
-    """Aggregate runtime results fail-closed, including an empty result set."""
-
-    result_list = tuple(results)
-    plans = [result.execution_plan for result in result_list if result.execution_plan]
-    if plans and (
-        len(plans) != len(result_list)
-        or any(not _valid_execution_plan(plan) for plan in plans)
-        or any(plan != plans[0] for plan in plans)
-        or [result.mode for result in result_list] != plans[0].get("runtime_modes")
-    ):
-        return False
-    return bool(result_list) and all(runtime_gate_passes(result) for result in result_list)
 
 
 # Call-time indirection so facade-level monkeypatches stay visible here.

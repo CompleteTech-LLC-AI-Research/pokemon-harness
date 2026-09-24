@@ -23,6 +23,7 @@ are reported as blocked rather than converted into a green skip.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib  # noqa: F401  (retained facade attribute: gate.hashlib)
 import json
 import os  # noqa: F401  (retained facade attribute: gate.os)
@@ -58,6 +59,11 @@ from pathlib import (  # noqa: F401  (retained facade attribute: gate.PureWindow
 )
 from typing import Any  # noqa: F401  (retained facade attribute: gate.Any)
 
+try:
+    from scripts import gate_capacity
+except ImportError:  # pragma: no cover - executed as ``python scripts/production_gate.py``.
+    import gate_capacity  # type: ignore[no-redef]
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -78,6 +84,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=project_root_from_script())
     parser.add_argument("--rom-root", type=Path)
     parser.add_argument("--fixture-root", type=Path)
+    parser.add_argument(
+        "--capacity-policy",
+        type=Path,
+        help=(
+            "path to a versioned JSON capacity policy; when omitted the report "
+            "records capacity_policy: unavailable and gate behavior is unchanged"
+        ),
+    )
     parser.add_argument(
         "--python", dest="python_executable", type=Path, default=Path(sys.executable)
     )
@@ -239,6 +253,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if nodeid_config_error:
         configuration_problems.append(nodeid_config_error)
 
+    capacity_session = None
+    capacity_payload = gate_capacity.unavailable_capacity(
+        "no --capacity-policy supplied; capacity admission is not enforced"
+    )
+    if args.capacity_policy is not None:
+        capacity_path = _path_from_project_root(project_root, args.capacity_policy)
+        policy, policy_error = gate_capacity.load_capacity_policy(capacity_path)
+        if policy is None:
+            capacity_payload = gate_capacity.unavailable_capacity(
+                f"capacity policy blocked: {policy_error}"
+            )
+            capacity_payload["status"] = "blocked"
+            configuration_problems.append(f"capacity policy blocked: {policy_error}")
+        else:
+            capacity_session = gate_capacity.CapacitySession(policy, repo_root=project_root)
+
     early_smoke = not (args.unit_only or args.tier or args.smoke_only)
     fail_fast = early_smoke if args.fail_fast is None else args.fail_fast
     if args.smoke_only:
@@ -249,27 +279,79 @@ def main(argv: Sequence[str] | None = None) -> int:
         selected = list(dict.fromkeys(args.tier))
     else:
         selected = list(DEFAULT_TIERS)
-    runtime_results = run_runtime_gates(
-        runtime_mode=args.runtime_mode,
-        project_root=project_root,
-        python_executable=python_executable,
-        cython_python_executable=cython_python_executable,
-        rom_root=rom_root,
-        fixture_root=fixture_root,
-        expected_sha1=expected_sha1,
-        assets=assets,
-        selected=selected,
-        required_tests_by_tier=required_tests_by_tier,
-        required_nodeids_by_tier=required_nodeids_by_tier,
-        configuration_problems=configuration_problems,
-        repeat=args.repeat_timing,
-        timeout_override=args.timeout_seconds,
-        matrix_workers=args.matrix_workers,
-        matrix_timeout_override=args.matrix_timeout_seconds,
-        raw_output_directory=raw_output_directory,
-        early_smoke=early_smoke,
-        fail_fast=fail_fast,
-    )
+    accumulated_runtime_results: list[RuntimeGateResult] = []
+    try:
+        runtime_results = run_runtime_gates(
+            runtime_mode=args.runtime_mode,
+            project_root=project_root,
+            python_executable=python_executable,
+            cython_python_executable=cython_python_executable,
+            rom_root=rom_root,
+            fixture_root=fixture_root,
+            expected_sha1=expected_sha1,
+            assets=assets,
+            selected=selected,
+            required_tests_by_tier=required_tests_by_tier,
+            required_nodeids_by_tier=required_nodeids_by_tier,
+            configuration_problems=configuration_problems,
+            repeat=args.repeat_timing,
+            timeout_override=args.timeout_seconds,
+            matrix_workers=args.matrix_workers,
+            matrix_timeout_override=args.matrix_timeout_seconds,
+            raw_output_directory=raw_output_directory,
+            early_smoke=early_smoke,
+            fail_fast=fail_fast,
+            capacity_session=capacity_session,
+            accumulator=accumulated_runtime_results,
+        )
+    except KeyboardInterrupt:
+        # An operator SIGINT must still produce the evidence bundle, but it must
+        # never erase work that already ran.  Results accumulated before the
+        # interrupt keep their own counts, diagnostics, runtime identity, and
+        # rows; only genuinely unfinished tiers are finalized as interrupted.
+        interrupt_reason = "gate cancelled by an interrupt"
+        interrupt_plan = build_execution_plan(
+            runtime_modes_for_gate(args.runtime_mode),
+            selected,
+            early_smoke=early_smoke,
+            fail_fast=fail_fast,
+        )
+        if accumulated_runtime_results:
+            runtime_results = _finalize_interrupted_results(
+                accumulated=accumulated_runtime_results,
+                modes=runtime_modes_for_gate(args.runtime_mode),
+                plan=interrupt_plan,
+                reason=interrupt_reason,
+                required_nodeids_by_tier=required_nodeids_by_tier,
+                capacity_session=capacity_session,
+                project_root=project_root,
+            )
+        else:
+            # Interrupted before the first runtime produced a result: record
+            # every expected runtime as interrupted with its unrun tiers.
+            interrupted_results = []
+            for mode in runtime_modes_for_gate(args.runtime_mode):
+                interrupted = _unstarted_preparation(
+                    mode, interrupt_reason, interrupted=True
+                ).result
+                interrupted.execution_plan = interrupt_plan
+                interrupted.cancellation = interrupt_reason
+                interrupted.tiers = [
+                    _unrun_tier(
+                        step["tier"],
+                        interrupt_reason,
+                        required_nodeids_by_tier.get(step["tier"], ()),
+                        status="INTERRUPTED",
+                        capacity_session=capacity_session,
+                        collections=interrupted.collections,
+                        project_root=project_root,
+                        scope=mode,
+                    )
+                    for step in interrupt_plan["steps"]
+                    if step["mode"] == mode
+                ]
+                interrupted_results.append(interrupted)
+            runtime_results = tuple(interrupted_results)
 
     expected_modes = runtime_modes_for_gate(args.runtime_mode)
     observed_modes = tuple(result.mode for result in runtime_results)
@@ -291,6 +373,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         step["tier"],
                         reason,
                         required_nodeids_by_tier.get(step["tier"], ()),
+                        capacity_session=capacity_session,
+                        project_root=project_root,
+                        scope=mode,
                     )
                     for step in plan["steps"]
                     if step["mode"] == mode
@@ -331,6 +416,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             for problem in result.gate_problems
         ]
         overall = "PASS" if runtime_gates_pass(runtime_results) else "FAIL"
+    if capacity_session is not None:
+        if set(selected) & REQUIRED_TIER_ASSETS:
+            with contextlib.suppress(Exception):
+                capacity_session.ensure_started()
+            failed = sum(
+                tier.status == "FAIL" for result in runtime_results for tier in result.tiers
+            )
+            capacity_payload = capacity_session.report(failed=failed)
+        else:
+            # Asset-free selections dispatch no emulator pairs, so the capacity
+            # section must not contradict a unit-only PASS with a blocked status.
+            capacity_payload = capacity_session.not_applicable_report()
+    if args.capacity_policy is not None and capacity_payload.get("status") not in {
+        "ok",
+        "not_applicable",
+    }:
+        overall = "FAIL"
+        gate_problems.append(f"capacity prerequisite: {capacity_payload.get('status')}")
     evidence_error = ""
     if args.evidence_dir is not None:
         evidence_dir = args.evidence_dir.expanduser()
@@ -345,6 +448,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runtime_results=runtime_results,
                 overall=overall,
                 requested_mode="both",
+                capacity=capacity_payload,
             )
         else:
             evidence_payload = build_evidence_payload(
@@ -360,6 +464,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fixture_manifest=fixture_manifest,
                 matrix_audit=matrix_audit,
                 execution_plan=runtime_results[0].execution_plan,
+                capacity=capacity_payload,
+                cancellation=runtime_results[0].cancellation,
             )
         try:
             write_evidence_bundle(evidence_dir, evidence_payload)
@@ -381,6 +487,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "assets": [asdict(asset) for asset in assets],
                 "gate_problems": gate_problems,
                 "overall": overall,
+                "capacity": capacity_payload,
             }
         else:
             payload = {
@@ -392,9 +499,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "assets": [asdict(asset) for asset in assets],
                 "tiers": [_jsonable_tier(tier) for tier in tiers],
                 "gate_problems": gate_problems,
+                "cancellation": runtime_results[0].cancellation,
                 "overall": overall,
                 "fixture_manifest": fixture_manifest,
                 "matrix_audit": matrix_audit,
+                "capacity": capacity_payload,
                 **(
                     {"execution_plan": runtime_results[0].execution_plan}
                     if runtime_results[0].execution_plan
@@ -413,6 +522,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 assets=assets,
                 runtime_results=runtime_results,
                 overall=overall,
+                capacity=capacity_payload,
             )
         else:
             output = render_text(
@@ -428,14 +538,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fixture_manifest=fixture_manifest,
                 matrix_audit=matrix_audit,
                 execution_plan=runtime_results[0].execution_plan,
+                capacity=capacity_payload,
+                cancellation=runtime_results[0].cancellation,
             )
         print(output)
-    if any(
-        tier.status == "INTERRUPTED" for result in runtime_results for tier in result.tiers
-    ) or any(
-        collection.status == "INTERRUPTED"
-        for result in runtime_results
-        for collection in result.collections
+    if (
+        any(tier.status == "INTERRUPTED" for result in runtime_results for tier in result.tiers)
+        or any(result.cancellation for result in runtime_results)
+        or any(
+            collection.status == "INTERRUPTED"
+            for result in runtime_results
+            for collection in result.collections
+        )
     ):
         return 130
     return 0 if overall == "PASS" else 1
@@ -445,7 +559,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 # (and every ``gate.<name>`` monkeypatch target the gate tests rely on) is unchanged.
 from scripts.production_gate_assets import (
     _path_from_env,  # noqa: F401  (retained facade attribute: gate._path_from_env)
-    _path_from_project_root,  # noqa: F401  (retained facade attribute: gate._path_from_project_root)
+    _path_from_project_root,
     _python_path_from_argument,
     find_fixture_root,
     find_rom_root,
@@ -457,6 +571,26 @@ from scripts.production_gate_assets import (
     required_asset_problems,  # noqa: F401  (retained facade attribute: gate.required_asset_problems)
     runtime_modes_for_gate,
     sha1_of_file,  # noqa: F401  (retained facade attribute: gate.sha1_of_file)
+)
+from scripts.production_gate_capacity import (
+    CAPACITY_STREAM_FILENAME,  # noqa: F401  (retained facade attribute: gate.CAPACITY_STREAM_FILENAME)
+    MAX_CAPACITY_SAMPLES,  # noqa: F401  (retained facade attribute: gate.MAX_CAPACITY_SAMPLES)
+    TierInterruptedDuringCleanup,  # noqa: F401  (retained facade attribute: gate.TierInterruptedDuringCleanup)
+    _capacity_execution,  # noqa: F401  (retained facade attribute: gate._capacity_execution)
+    _capacity_text_lines,  # noqa: F401  (retained facade attribute: gate._capacity_text_lines)
+    _capacity_tier_reason,  # noqa: F401  (retained facade attribute: gate._capacity_tier_reason)
+    _completed_tier_sink,  # noqa: F401  (retained facade attribute: gate._completed_tier_sink)
+    _defer_sigint_while_finalizing,  # noqa: F401  (retained facade attribute: gate._defer_sigint_while_finalizing)
+    _DeferredSigintGuard,  # noqa: F401  (retained facade attribute: gate._DeferredSigintGuard)
+    _dispatch_prepared_tier,  # noqa: F401  (retained facade attribute: gate._dispatch_prepared_tier)
+    _finalize_interrupted_results,
+    _record_completed_tier,  # noqa: F401  (retained facade attribute: gate._record_completed_tier)
+    _recover_completed_tier,  # noqa: F401  (retained facade attribute: gate._recover_completed_tier)
+    _safe_capacity,  # noqa: F401  (retained facade attribute: gate._safe_capacity)
+    _safe_capacity_sample,  # noqa: F401  (retained facade attribute: gate._safe_capacity_sample)
+    _tier_row_manifest,  # noqa: F401  (retained facade attribute: gate._tier_row_manifest)
+    planned_tier_nodeids,  # noqa: F401  (retained facade attribute: gate.planned_tier_nodeids)
+    register_blocked_rows,  # noqa: F401  (retained facade attribute: gate.register_blocked_rows)
 )
 from scripts.production_gate_evidence import (
     _evidence_roots,  # noqa: F401  (retained facade attribute: gate._evidence_roots)
@@ -490,16 +624,18 @@ from scripts.production_gate_execution import (
 )
 from scripts.production_gate_matrix import (
     _add_counts,  # noqa: F401  (retained facade attribute: gate._add_counts)
-    _audited_matrix_nodeids,  # noqa: F401  (retained facade attribute: gate._audited_matrix_nodeids)
     _drain_matrix_stream,  # noqa: F401  (retained facade attribute: gate._drain_matrix_stream)
     _kill_matrix_process,  # noqa: F401  (retained facade attribute: gate._kill_matrix_process)
     _matrix_execution_problems,  # noqa: F401  (retained facade attribute: gate._matrix_execution_problems)
     _matrix_report_path,  # noqa: F401  (retained facade attribute: gate._matrix_report_path)
+    run_matrix_tier,  # noqa: F401  (retained facade attribute: gate.run_matrix_tier)
+)
+from scripts.production_gate_matrix_audit import (
+    _audited_matrix_nodeids,  # noqa: F401  (retained facade attribute: gate._audited_matrix_nodeids)
     _required_nodeid_problems,  # noqa: F401  (retained facade attribute: gate._required_nodeid_problems)
     _required_test_problems,  # noqa: F401  (retained facade attribute: gate._required_test_problems)
     _test_key_from_nodeid,  # noqa: F401  (retained facade attribute: gate._test_key_from_nodeid)
     run_matrix_collection_audit,  # noqa: F401  (retained facade attribute: gate.run_matrix_collection_audit)
-    run_matrix_tier,  # noqa: F401  (retained facade attribute: gate.run_matrix_tier)
     synthetic_optional_skip,  # noqa: F401  (retained facade attribute: gate.synthetic_optional_skip)
 )
 from scripts.production_gate_model import (
@@ -546,7 +682,7 @@ from scripts.production_gate_model import (
     PYBOY_RUNTIME_MODULES,  # noqa: F401  (retained facade attribute: gate.PYBOY_RUNTIME_MODULES)
     PYTEST_GATE_ARGUMENTS,  # noqa: F401  (retained facade attribute: gate.PYTEST_GATE_ARGUMENTS)
     REQUIRED_FIXTURES,  # noqa: F401  (retained facade attribute: gate.REQUIRED_FIXTURES)
-    REQUIRED_TIER_ASSETS,  # noqa: F401  (retained facade attribute: gate.REQUIRED_TIER_ASSETS)
+    REQUIRED_TIER_ASSETS,
     RUNTIME_MODE_ALIASES,  # noqa: F401  (retained facade attribute: gate.RUNTIME_MODE_ALIASES)
     RUNTIME_MODE_CHOICES,
     RUNTIME_MODES,  # noqa: F401  (retained facade attribute: gate.RUNTIME_MODES)
@@ -562,7 +698,7 @@ from scripts.production_gate_model import (
     GateReport,  # noqa: F401  (retained facade attribute: gate.GateReport)
     MatrixCaseResult,  # noqa: F401  (retained facade attribute: gate.MatrixCaseResult)
     PreparedRuntimeGate,  # noqa: F401  (retained facade attribute: gate.PreparedRuntimeGate)
-    RuntimeGateResult,  # noqa: F401  (retained facade attribute: gate.RuntimeGateResult)
+    RuntimeGateResult,
     TierResult,  # noqa: F401  (retained facade attribute: gate.TierResult)
     _asset_key,  # noqa: F401  (retained facade attribute: gate._asset_key)
     _execution_plan_lines,  # noqa: F401  (retained facade attribute: gate._execution_plan_lines)
@@ -593,6 +729,12 @@ from scripts.production_gate_runtime import (
     probe_runtime,  # noqa: F401  (retained facade attribute: gate.probe_runtime)
     runtime_problems,  # noqa: F401  (retained facade attribute: gate.runtime_problems)
 )
+from scripts.production_gate_runtime_gates import (
+    run_runtime_gate,  # noqa: F401  (retained facade attribute: gate.run_runtime_gate)
+    run_runtime_gates,
+    runtime_gate_passes,
+    runtime_gates_pass,
+)
 from scripts.production_gate_text import (
     _bounded_failure_text,  # noqa: F401  (retained facade attribute: gate._bounded_failure_text)
     _failure_detail_lines,  # noqa: F401  (retained facade attribute: gate._failure_detail_lines)
@@ -610,11 +752,7 @@ from scripts.production_gate_tiers import (
     _unstarted_preparation,
     prepare_runtime_gate,  # noqa: F401  (retained facade attribute: gate.prepare_runtime_gate)
     run_prepared_tier,  # noqa: F401  (retained facade attribute: gate.run_prepared_tier)
-    run_runtime_gate,  # noqa: F401  (retained facade attribute: gate.run_runtime_gate)
-    run_runtime_gates,
     run_tier,  # noqa: F401  (retained facade attribute: gate.run_tier)
-    runtime_gate_passes,
-    runtime_gates_pass,
 )
 
 if __name__ == "__main__":

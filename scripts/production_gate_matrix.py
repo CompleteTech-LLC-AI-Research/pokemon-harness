@@ -8,16 +8,16 @@ on the loaded gate module stay visible.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
-import runpy
 import signal
 import subprocess
 import sys
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,14 @@ if str(ROOT) not in sys.path:
 
 
 # Direct names this module calls; cyclic back-edges go through _entry.
+from scripts.production_gate_capacity import (
+    TierInterruptedDuringCleanup,
+    _capacity_execution,
+    _defer_sigint_while_finalizing,
+    register_blocked_rows,
+)
 from scripts.production_gate_execution import _process_creation_kwargs, _retain_raw_output
+from scripts.production_gate_matrix_audit import _test_key_from_nodeid
 from scripts.production_gate_model import (
     DEFAULT_MATRIX_WORKERS,
     DEFAULT_TIMEOUT_SECONDS,
@@ -38,7 +45,6 @@ from scripts.production_gate_model import (
     REQUIRED_TIER_ASSETS,
     TIER_DESCRIPTIONS,
     TIER_EXPRESSIONS,
-    CollectionResult,
     Counts,
     FailureDetail,
     GateReport,
@@ -48,133 +54,6 @@ from scripts.production_gate_model import (
 )
 from scripts.production_gate_runtime import _load_gate_report
 from scripts.production_gate_text import _retain_failure_detail
-
-
-def run_matrix_collection_audit(
-    *,
-    project_root: Path,
-    collections: Iterable[CollectionResult],
-) -> dict[str, Any]:
-    """Apply the repository matrix auditor to the gate's collection result."""
-
-    collection_list = list(collections)
-    matrix_path = project_root / "scripts" / "tcp_link_matrix.py"
-    try:
-        namespace = runpy.run_path(str(matrix_path))
-        audit_collection = namespace["audit_collection"]
-        audited_nodeids = _audited_matrix_nodeids(namespace)
-    except (OSError, KeyError, TypeError, ValueError) as exc:
-        return {
-            "status": "FAIL",
-            "structural_pass": False,
-            "acceptance_matrix_complete": False,
-            "collected": 0,
-            "groups": {},
-            "acceptance_gaps": {},
-            "runtime": "not-run",
-            "reason": f"matrix auditor could not be loaded: {type(exc).__name__}: {exc}",
-        }
-
-    nodeids = collection_list[0].nodeids if collection_list else ()
-    errors = tuple(
-        collection.reason
-        for collection in collection_list
-        if collection.status != "PASS" and collection.reason
-    )
-    skips = tuple(
-        collection.reason
-        for collection in collection_list
-        if collection.status == "PASS" and collection.reason
-    )
-    try:
-        audit = audit_collection(
-            nodeids,
-            collection_errors=errors,
-            collection_skips=skips,
-        )
-    except (TypeError, ValueError) as exc:
-        return {
-            "status": "FAIL",
-            "structural_pass": False,
-            "acceptance_matrix_complete": False,
-            "collected": len(nodeids),
-            "groups": {},
-            "acceptance_gaps": {},
-            "runtime": "not-run",
-            "reason": f"matrix audit failed: {type(exc).__name__}: {exc}",
-        }
-    audit["status"] = (
-        "PASS"
-        if audit.get("structural_pass") and audit.get("acceptance_matrix_complete")
-        else "FAIL"
-    )
-    audit["audited_nodeids"] = audited_nodeids
-    return audit
-
-
-def synthetic_optional_skip(
-    name: str,
-    reason: str,
-) -> TierResult:
-    return TierResult(
-        name=name,
-        description=TIER_DESCRIPTIONS[name],
-        expression=TIER_EXPRESSIONS[name],
-        required=False,
-        status="SKIP",
-        counts=Counts(total=1, skipped=1),
-        skip_reasons={reason: 1},
-        reason=reason,
-    )
-
-
-def _test_key_from_nodeid(nodeid: str) -> tuple[str, str] | None:
-    if "::" not in nodeid:
-        return None
-    path, test_name = nodeid.split("::", 1)
-    return Path(path).name, test_name.split("[", 1)[0]
-
-
-def _audited_matrix_nodeids(namespace: dict[str, Any]) -> dict[str, tuple[str, ...]]:
-    """Return the exact strict rows used by the collection auditor."""
-
-    raw = namespace.get("STRICT_ACCEPTANCE_NODEIDS")
-    if not isinstance(raw, dict):
-        raise TypeError("matrix auditor has no strict acceptance node IDs")
-
-    result: dict[str, tuple[str, ...]] = {}
-    for name in ("trade", "battle"):
-        values = raw.get(name)
-        if not isinstance(values, (set, frozenset, tuple, list)):
-            raise TypeError(f"matrix auditor has no strict {name} node IDs")
-        if any(not isinstance(nodeid, str) or "::" not in nodeid for nodeid in values):
-            raise ValueError(f"matrix auditor has invalid strict {name} node ID")
-        normalized = tuple(sorted({_normalize_nodeid(nodeid) for nodeid in values}))
-        if not normalized:
-            raise ValueError(f"matrix auditor has no strict {name} node IDs")
-        result[name] = normalized
-    return result
-
-
-def _required_test_problems(
-    nodeids: Iterable[str],
-    required_test_keys: Iterable[tuple[str, str]],
-) -> list[str]:
-    actual = {key for nodeid in nodeids if (key := _test_key_from_nodeid(nodeid)) is not None}
-    missing = sorted(set(required_test_keys) - actual)
-    return [
-        f"required acceptance test is absent from selected items: {module}::{name}"
-        for module, name in missing
-    ]
-
-
-def _required_nodeid_problems(
-    nodeids: Iterable[str],
-    required_nodeids: Iterable[str],
-) -> list[str]:
-    actual = {_normalize_nodeid(nodeid) for nodeid in nodeids}
-    missing = sorted({_normalize_nodeid(nodeid) for nodeid in required_nodeids} - actual)
-    return [f"required matrix case is absent from selected items: {nodeid}" for nodeid in missing]
 
 
 def _matrix_execution_problems(
@@ -338,6 +217,7 @@ def _kill_matrix_process(
     return reaped
 
 
+@_capacity_execution
 def run_matrix_tier(
     *,
     name: str,
@@ -352,6 +232,9 @@ def run_matrix_tier(
     matrix_workers: int = DEFAULT_MATRIX_WORKERS,
     matrix_timeout_override: float | None = None,
     raw_output_directory: Path | None = None,
+    capacity_session: Any | None = None,
+    scope: str = "",
+    publish: Callable[[TierResult], None] | None = None,
 ) -> TierResult:
     """Run strict acceptance rows under hard per-case and aggregate bounds.
 
@@ -377,6 +260,19 @@ def run_matrix_tier(
         raise ValueError("matrix_workers must be positive")
     if required and name in REQUIRED_TIER_ASSETS and required_problems:
         reason = "required assets unavailable: " + "; ".join(required_problems)
+        # This pre-dispatch exit is a terminal BLOCKED for every row the tier
+        # would have run: without it those rows had no admission decision and
+        # no lifecycle state, so the blocked tier looked like a tier that ran
+        # nothing.
+        register_blocked_rows(
+            capacity_session,
+            name=name,
+            collections=(),
+            project_root=project_root,
+            reason=reason,
+            required_nodeids=nodeids,
+            scope=scope,
+        )
         return TierResult(
             name=name,
             description=TIER_DESCRIPTIONS[name],
@@ -398,6 +294,13 @@ def run_matrix_tier(
         name, DEFAULT_TIMEOUT_SECONDS[name]
     )
     max_workers = min(matrix_workers, len(nodeids))
+    if capacity_session is not None:
+        # The declared policy may be tighter than the CLI worker count; never
+        # admit more concurrent pairs than the policy permits.  A telemetry
+        # failure here leaves the existing worker count in effect.
+        with contextlib.suppress(Exception):
+            capacity_session.ensure_started()
+            max_workers = max(1, min(max_workers, capacity_session.policy.max_concurrent_pairs))
     waves = (len(nodeids) + max_workers - 1) // max_workers
     aggregate_timeout = matrix_timeout_override or (
         timeout * waves + _entry.MATRIX_AGGREGATE_GRACE_SECONDS
@@ -416,6 +319,11 @@ def run_matrix_tier(
     output_tails: list[str] = []
     pending = deque(nodeids)
     active: dict[str, dict[str, Any]] = {}
+    # A row that never started because declared capacity could not admit it is
+    # not a product failure.  Keep those reasons separate so a tier whose only
+    # problem is unavailable capacity reports BLOCKED, while a real execution
+    # failure anywhere still reports FAIL.
+    capacity_blocked: list[str] = []
 
     def record_case(
         *,
@@ -513,11 +421,20 @@ def run_matrix_tier(
             partial=timed_out or interrupted or report_kind == "partial",
         )
 
-    def record_not_started(nodeid: str, reason: str) -> None:
-        failures.append(f"{nodeid}: {reason}")
+    def record_not_started(
+        nodeid: str,
+        reason: str,
+        *,
+        status: str = "NOT_STARTED",
+        capacity_block: bool = False,
+    ) -> None:
+        if capacity_block:
+            capacity_blocked.append(f"{nodeid}: {reason}")
+        else:
+            failures.append(f"{nodeid}: {reason}")
         case_results_by_nodeid[nodeid] = MatrixCaseResult(
             nodeid=nodeid,
-            status="NOT_STARTED",
+            status=status,
             returncode=None,
             duration_seconds=0.0,
             reason=reason,
@@ -525,6 +442,64 @@ def run_matrix_tier(
             report_kind="not-started",
             partial=True,
         )
+        if capacity_session is not None:
+            with contextlib.suppress(Exception):
+                capacity_session.telemetry.mark(capacity_key(nodeid), "not_started")
+
+    capacity_run_id = capacity_session.next_run_id(name, scope=scope) if capacity_session else ""
+
+    def capacity_key(nodeid: str) -> str:
+        return f"{capacity_run_id}:{nodeid}"
+
+    def capacity_admit(nodeid: str) -> tuple[str, str]:
+        """Return the admission status and reason for one matrix row."""
+
+        if capacity_session is None:
+            return "ok", ""
+        try:
+            capacity_session.maybe_observe()
+            decision = capacity_session.admission.admit(capacity_key(nodeid))
+        except Exception as exc:  # noqa: BLE001 - fail closed, never crash.
+            return "blocked", f"capacity admission failed: {type(exc).__name__}: {exc}"
+        reason = decision.reason
+        if decision.status != "ok" and capacity_session.availability_reasons:
+            reason = "; ".join(capacity_session.availability_reasons)
+        return decision.status, reason
+
+    def release_capacity(nodeid: str, state: str) -> None:
+        if capacity_session is None:
+            return
+        # Releasing the slot may promote a queued pair.  A telemetry failure
+        # here must never erase an original failure or block cleanup.
+        with contextlib.suppress(Exception):
+            capacity_session.admission.release(capacity_key(nodeid))
+            capacity_session.telemetry.mark(capacity_key(nodeid), state)
+
+    def capacity_end_unstarted(nodeid: str, state: str, reason: str) -> bool:
+        """Terminalize a never-started row; return whether capacity was why.
+
+        A queued waiter that is recorded as never started while still holding
+        queue state is a live hazard: the next ``release`` promotes it into a
+        slot and starves a real row.  Ending the admission entry here keeps
+        every terminal unstarted row terminal, and the returned flag lets the
+        caller report a capacity-only stop as BLOCKED rather than FAIL.
+        """
+
+        if capacity_session is None:
+            return False
+        try:
+            capacity = capacity_session.end_unstarted(
+                capacity_key(nodeid), state=state, reason=reason
+            )
+        except Exception:  # noqa: BLE001 - accounting must never mask a failure.
+            return False
+        if capacity == "capacity":
+            return True
+        # Declared capacity that is not currently healthy cannot admit any
+        # remaining row, so a stop taken under it is a capacity stop.
+        with contextlib.suppress(Exception):
+            return capacity_session.availability_status != "ok"
+        return False
 
     def load_case_report(
         state: dict[str, Any],
@@ -568,6 +543,7 @@ def run_matrix_tier(
                     duration=0.0,
                     report_kind="missing",
                 )
+                release_capacity(nodeid, "not_started")
                 return
         child_environment = dict(environment)
         child_environment["POKERED_GATE_REPORT"] = str(report_path)
@@ -606,6 +582,7 @@ def run_matrix_tier(
                 duration=0.0,
                 report_kind="missing",
             )
+            release_capacity(nodeid, "not_started")
             return
         active[nodeid] = {
             "process": process,
@@ -624,6 +601,9 @@ def run_matrix_tier(
         )
         active[nodeid]["reader"] = reader
         reader.start()
+        if capacity_session is not None:
+            with contextlib.suppress(Exception):
+                capacity_session.telemetry.mark(capacity_key(nodeid), "running")
 
     def finish_case(
         nodeid: str,
@@ -701,6 +681,7 @@ def run_matrix_tier(
             cleanup_error=cleanup_error,
         )
         active.pop(nodeid, None)
+        release_capacity(nodeid, "interrupted" if interrupted else "completed")
 
     interrupted = False
     try:
@@ -748,18 +729,55 @@ def run_matrix_tier(
                         cleanup_deadline=aggregate_cleanup_deadline,
                     )
                 while pending:
-                    record_not_started(
-                        pending.popleft(),
-                        "matrix aggregate deadline expired before the case started",
-                    )
+                    nodeid = pending.popleft()
+                    reason = "matrix aggregate deadline expired before the case started"
+                    if capacity_end_unstarted(nodeid, "not_started", reason):
+                        # Capacity, not the product, is why this row never
+                        # started: record it as a block so the tier reports
+                        # BLOCKED while a real failure anywhere still reports
+                        # FAIL.
+                        record_not_started(
+                            nodeid,
+                            f"{reason}; {capacity_session.capacity_reason()}",
+                            status="BLOCKED",
+                            capacity_block=True,
+                        )
+                    else:
+                        record_not_started(nodeid, reason)
                 break
 
             while pending and len(active) < max_workers:
                 if time.monotonic() >= aggregate_deadline:
                     break
-                start_case(pending.popleft())
+                candidate = pending[0]
+                admission_status, admission_reason = capacity_admit(candidate)
+                if admission_status == "queued":
+                    # No slot for this row yet; wait rather than spin so an
+                    # active owner's deadline is never enlarged or reprioritized.
+                    break
+                pending.popleft()
+                if admission_status in {"blocked", "expired"}:
+                    # A row the controller refused (including an admission
+                    # failure) is terminal: end any queue or ownership state it
+                    # still holds before it is recorded, so a later release
+                    # cannot promote it into a live slot.
+                    capacity_end_unstarted(
+                        candidate,
+                        "not_started",
+                        f"capacity {admission_status}: {admission_reason}",
+                    )
+                    record_not_started(
+                        candidate,
+                        f"capacity {admission_status}: {admission_reason}",
+                        status="BLOCKED",
+                        capacity_block=True,
+                    )
+                    continue
+                start_case(candidate)
 
             if not active:
+                if pending:
+                    time.sleep(min(0.05, max(0.0, aggregate_deadline - time.monotonic())))
                 continue
             remaining = aggregate_deadline - time.monotonic()
             if remaining > 0:
@@ -780,13 +798,30 @@ def run_matrix_tier(
             )
         for nodeid in nodeids:
             if nodeid not in case_results_by_nodeid:
+                capacity_end_unstarted(
+                    nodeid, "interrupted", "matrix interrupted before this case started"
+                )
                 record_not_started(nodeid, "matrix interrupted before this case started")
 
+    # Every child report has been loaded at this point.  A cancellation during
+    # the in-memory finalization below is deferred so the assembled tier still
+    # carries its counts, diagnostics, output, and rows.
+    finalization_guard = _defer_sigint_while_finalizing()
     case_results = [case_results_by_nodeid[nodeid] for nodeid in sorted(nodeids)]
     unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
+    capacity_only = (
+        bool(capacity_blocked)
+        and not failures
+        and not unexpected
+        and aggregate.total + len(capacity_blocked) == len(nodeids)
+        and aggregate.skipped == 0
+        and aggregate.failed + aggregate.errors == 0
+    )
     status = (
         "INTERRUPTED"
         if interrupted
+        else "BLOCKED"
+        if capacity_only
         else "PASS"
         if not failures
         and not unexpected
@@ -796,7 +831,7 @@ def run_matrix_tier(
         and aggregate.passed == len(nodeids)
         else "FAIL"
     )
-    return TierResult(
+    tier_result = TierResult(
         name=name,
         description=TIER_DESCRIPTIONS[name],
         expression=TIER_EXPRESSIONS[name],
@@ -819,11 +854,33 @@ def run_matrix_tier(
         ],
         output_tail="\n\n".join(output_tails)[-8000:],
         iteration_failures=failures,
+        reason=(
+            "capacity could not admit every required row: " + "; ".join(capacity_blocked[:3])
+            if capacity_only
+            else ""
+        ),
         selected_nodeids=list(nodeids),
         case_results=case_results,
         failure_details=failure_details,
         failure_details_omitted=failure_details_omitted,
     )
+    # Publish the assembled tier while signal deferral is still installed.  A
+    # ``SIGINT`` delivered between ``restore()`` and the caller's receipt of the
+    # return value is raised by the restored handler, so the value never reaches
+    # the caller; without a durable copy the orchestrator would then replace an
+    # executed tier with an empty ``INTERRUPTED`` row.  The sink is the runtime's
+    # ``completed_tiers`` mapping, which every cancellation handoff already
+    # consults, so the loaded evidence survives that window.
+    if publish is not None:
+        publish(tier_result)
+    if finalization_guard.restore():
+        # The evidence is complete; carry it out and record the cancellation
+        # separately instead of letting the orchestrator synthesize an empty row.
+        raise TierInterruptedDuringCleanup(
+            tier_result,
+            "matrix finalization interrupted after loading case evidence",
+        ) from None
+    return tier_result
 
 
 # Call-time indirection so facade-level monkeypatches stay visible here.
