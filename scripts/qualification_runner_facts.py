@@ -48,6 +48,9 @@ class RunnerFacts:
     cgroup_sibling_competitors: list[str] | None = None
     cpu_quota_cores: float | None = None
     cpu_quota_observable: bool = True
+    cpu_quota_status: str = "unknown"
+    cgroup_cpu_some_avg300: float | None = None
+    cgroup_visibility: list[str] = field(default_factory=list)
     cpu_weight: int | None = None
     cpu_throttled: dict[str, int] | None = None
     memory_total_bytes: int | None = None
@@ -175,6 +178,9 @@ def collect_facts(repo_root: Path, temp_root: Path | None = None) -> RunnerFacts
     facts.cgroup_sibling_competitors = _cgroup_sibling_competitors(cgroup["cgroup_dir"])
     facts.cpu_quota_cores = cgroup["cpu_quota_cores"]
     facts.cpu_quota_observable = cgroup["cpu_quota_observable"]
+    facts.cpu_quota_status = cgroup["cpu_quota_status"]
+    facts.cgroup_cpu_some_avg300 = cgroup["cgroup_cpu_some_avg300"]
+    facts.cgroup_visibility = cgroup["cgroup_visibility"]
     facts.cpu_weight = cgroup["cpu_weight"]
     facts.cpu_throttled = cgroup["cpu_throttled"]
     facts.memory_limit_bytes = cgroup["memory_limit_bytes"]

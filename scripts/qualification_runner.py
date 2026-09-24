@@ -112,6 +112,8 @@ from scripts.qualification_runner_cgroup import (
     _is_cgroup_directory,  # noqa: F401  (retained facade attribute: runner._is_cgroup_directory)
     _iter_cgroup_paths,  # noqa: F401  (retained facade attribute: runner._iter_cgroup_paths)
     _parse_cpu_max,  # noqa: F401  (retained facade attribute: runner._parse_cpu_max)
+    _parse_psi_cpu,  # noqa: F401  (retained facade attribute: runner._parse_psi_cpu)
+    _read_cgroup_cpu_pressure,  # noqa: F401  (retained facade attribute: runner._read_cgroup_cpu_pressure)
     _read_cgroup_facts,  # noqa: F401  (retained facade attribute: runner._read_cgroup_facts)
     _read_memory_facts,  # noqa: F401  (retained facade attribute: runner._read_memory_facts)
     _read_psi_cpu,  # noqa: F401  (retained facade attribute: runner._read_psi_cpu)

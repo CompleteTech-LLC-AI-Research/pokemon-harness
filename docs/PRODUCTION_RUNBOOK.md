@@ -540,6 +540,66 @@ A requested capture failure fails the affected result while preserving
 pytest's actual outcome counts and exit code. Without this option, the gate
 retains only the bounded report diagnostics.
 
+### Capacity policy (opt-in, not yet enforced by default)
+
+`--capacity-policy PATH` reads an operator-owned, versioned JSON document and
+evaluates declared capacity before real-ROM tiers dispatch. When the option is
+absent the report records `capacity_policy: unavailable` and gate behavior is
+unchanged. When it is present the gate reports a real-ROM tier `BLOCKED` (with
+the reason) if the declared allocation is unavailable, and retains the policy,
+timestamped host samples, their SHA-256 reference, and the admission/lifecycle
+decisions in the report. Unit-only and other asset-free selections are not
+capacity-gated;
+their retained section reports `capacity-policy: not_applicable` (never a
+contradictory `blocked`) so a unit-only `PASS` stays consistent.
+
+Admission is **per emulator pair, not per tier**. Every planned row of an
+ordinary real-ROM tier (`local`, `remote`, `smoke`) is admitted immediately
+before its pair starts, up to `max_concurrent_pairs` concurrent pairs, and the
+tier re-checks declared capacity between pairs while the observer runs. A pair
+that cannot be admitted while observed capacity is unavailable is recorded
+`BLOCKED` with a terminal admission decision, so a tier that already ran one
+pair cannot report `PASS` while an unstarted pair was blocked; when capacity
+alone prevents completion the tier reports `BLOCKED`, and any real execution
+failure still reports `FAIL`. The `trade`/`battle` matrix tiers use the same
+per-row supervisor. When a tier is rejected before dispatch (unavailable
+capacity, failed preflight, or cancellation) each planned row is registered
+with a terminal `blocked` decision and `not_started` lifecycle state, so
+pre-dispatch blockage can never disappear from capacity accounting with
+`not_started=0`. If a gated ordinary tier's planned rows cannot be enumerated,
+the tier fails closed with `BLOCKED` rather than run as an unaccounted batch.
+
+Capacity policy schema **2** requires `policy_version`, `runner_id`, `effective_cpus`,
+`max_concurrent_pairs`, `memory_bytes_min`, `disk_free_bytes_min`,
+`observation_seconds`, `admission_deadline_seconds`, `max_system_some_avg300`,
+`max_cgroup_some_avg300`, `max_load_per_cpu`, and `measurement_sha256`.
+The last field identifies the operator's measured runner-capacity evidence;
+pressure percentages and load per allocated CPU must come from that measurement.
+Schema 1 policies are rejected because they cannot declare pressure criteria.
+No universal PSI or load cutoff is supplied. Both system and cgroup CPU `some`
+pressure and all three load averages participate in admission; `full=0` is never
+proof of capacity. Unknown quota, missing CPU stat, and missing pressure fail
+closed. Confirmed unlimited quota is distinguished from inaccessible data, and
+visible cgroup hierarchy limitations remain in the samples.
+
+A separate observer collects throughout matrix and ordinary real-ROM tiers.
+A zero observation interval uses a 0.01-second minimum background interval;
+collection never runs in the active child dispatcher. Initial collection and
+refreshes between tiers are bounded by the admission deadline. Expired healthy
+samples cannot admit new work, and late observations cannot restore health.
+Owners retain their original priority and deadlines; unavailable observations
+only prevent new admission. Observer shutdown waits at most 0.25 seconds and
+reports an unresponsive collector as unsupported. Every admitted pair and every
+planned-but-blocked row has an explicit admission decision and lifecycle
+record; unresolved capacity prevents an overall PASS and product failures
+remain failures. Asset-free selections remain `not_applicable`.
+
+Evidence bundles include the complete sanitized `capacity-samples.json` stream,
+its exact-byte SHA-256/size/count, and up to 256 inline summary samples. Bundle
+verification checks the stream against both its manifest and summary reference.
+This policy remains opt-in: default thresholds and ordinary source/native
+qualification on a verified #85 allocation remain open under #86.
+
 The release workflow uses an explicit Ruff boundary for the production files it
 owns and explicitly excludes the pinned third-party `vendor/pyboy-src` tree.
 That configured CI boundary is clean; the repository still contains legacy

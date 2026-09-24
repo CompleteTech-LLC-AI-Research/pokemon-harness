@@ -149,6 +149,7 @@ python -m ruff check \
     scripts/produce_battle_scenario_model.py \
     scripts/produce_battle_scenario_runtime.py \
     scripts/production_gate.py \
+    scripts/gate_capacity.py \
     scripts/qualification_runner.py \
     scripts/qualification_runner_allocation.py \
     scripts/qualification_runner_assets.py \
@@ -162,12 +163,15 @@ python -m ruff check \
     scripts/qualification_runner_report.py \
     scripts/qualification_runner_reservation.py \
     scripts/production_gate_assets.py \
+    scripts/production_gate_capacity.py \
     scripts/production_gate_evidence.py \
     scripts/production_gate_execution.py \
     scripts/production_gate_matrix.py \
+    scripts/production_gate_matrix_audit.py \
     scripts/production_gate_model.py \
     scripts/production_gate_render.py \
     scripts/production_gate_runtime.py \
+    scripts/production_gate_runtime_gates.py \
     scripts/production_gate_text.py \
     scripts/production_gate_tiers.py \
     scripts/stepping_loop_profile.py \
@@ -197,6 +201,7 @@ python -m ruff check \
     tests/test_battle_scenario_producer_screening.py \
     tests/test_battle_scenario_validator.py \
     tests/test_fixture_provenance.py \
+    tests/test_gate_capacity.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
     tests/test_production_gate_diagnostics.py \
@@ -235,6 +240,7 @@ python -m ruff format --check \
     scripts/produce_battle_scenario_model.py \
     scripts/produce_battle_scenario_runtime.py \
     scripts/production_gate.py \
+    scripts/gate_capacity.py \
     scripts/qualification_runner.py \
     scripts/qualification_runner_allocation.py \
     scripts/qualification_runner_assets.py \
@@ -248,12 +254,15 @@ python -m ruff format --check \
     scripts/qualification_runner_report.py \
     scripts/qualification_runner_reservation.py \
     scripts/production_gate_assets.py \
+    scripts/production_gate_capacity.py \
     scripts/production_gate_evidence.py \
     scripts/production_gate_execution.py \
     scripts/production_gate_matrix.py \
+    scripts/production_gate_matrix_audit.py \
     scripts/production_gate_model.py \
     scripts/production_gate_render.py \
     scripts/production_gate_runtime.py \
+    scripts/production_gate_runtime_gates.py \
     scripts/production_gate_text.py \
     scripts/production_gate_tiers.py \
     scripts/stepping_loop_profile.py \
@@ -283,6 +292,7 @@ python -m ruff format --check \
     tests/test_battle_scenario_producer_screening.py \
     tests/test_battle_scenario_validator.py \
     tests/test_fixture_provenance.py \
+    tests/test_gate_capacity.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
     tests/test_production_gate_diagnostics.py \

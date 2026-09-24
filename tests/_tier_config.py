@@ -14,6 +14,7 @@ unlisted module is intentional: silently classifying a newly added ROM test as
 from __future__ import annotations
 
 import runpy
+from collections.abc import Iterable
 from pathlib import Path
 
 MARKERS = (
@@ -103,6 +104,7 @@ UNIT_MODULES = frozenset(
         "test_execution_adapter.py",
         "test_fixture_provenance.py",
         "test_game_state.py",
+        "test_gate_capacity.py",
         "test_gate_early_smoke.py",
         "test_gate_failure_retention.py",
         "test_link_orchestrator.py",
@@ -865,6 +867,41 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     return frozenset(marks)
 
 
+# The gate selects a tier either through a pytest marker expression or, for
+# capacity accounting, by classifying each collected row.  Keep the
+# classification rule here so the executable marker expression and the row
+# accounting cannot drift: the production gate and its pytest-side capacity
+# plugin both call ``tier_matches``.
+_TIER_MATCHERS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "smoke": (("unit", "mcp_stdio"), ()),
+    "unit": (("unit",), ()),
+    "local": (("real_rom",), ("remote_link", "acceptance")),
+    "remote": (("real_rom", "remote_link"), ("acceptance",)),
+    "trade": (("real_rom", "trade_acceptance"), ()),
+    "battle": (("real_rom", "battle_acceptance"), ()),
+    "timing": (("timing_sensitive",), ()),
+}
+
+
+def tier_matches(name: str, markers: Iterable[str]) -> bool:
+    """Return whether a classified row is dispatched by tier ``name``.
+
+    ``smoke`` is the union of its two marker sets, so its required and
+    required-any sets are handled by checking either marker.
+    """
+
+    marks = set(markers)
+    if name == "smoke":
+        return "unit" in marks or "mcp_stdio" in marks
+    spec = _TIER_MATCHERS.get(name)
+    if spec is None:
+        return False
+    required, excluded = spec
+    return all(marker in marks for marker in required) and not any(
+        marker in marks for marker in excluded
+    )
+
+
 __all__ = [
     "BATTLE_ACCEPTANCE_TESTS",
     "BATTLE_TESTS",
@@ -888,4 +925,5 @@ __all__ = [
     "TRADE_TESTS",
     "UNIT_MODULES",
     "classify_test",
+    "tier_matches",
 ]

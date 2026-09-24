@@ -428,6 +428,22 @@ class RuntimeGateResult:
     tiers: list[TierResult]
     gate_problems: list[str] = field(default_factory=list)
     execution_plan: dict[str, Any] = field(default_factory=dict)
+    # A cancellation delivered *after* a tier finished loading its evidence
+    # cannot be represented by that tier's status without rewriting work that
+    # really ran.  It is therefore carried separately so the run is still
+    # reported as cancelled (never a clean PASS) while the executed tier keeps
+    # its own counts, failures, and rows.
+    cancellation: str = ""
+    # Durable record of the tiers whose evidence was fully loaded, keyed by
+    # tier name.  ``run_prepared_tier`` writes here before its frame can be
+    # unwound by a cancellation, so every downstream handoff - the dispatch
+    # helper, the per-tier loops, and the CLI's interrupted-result finalizer -
+    # can recover an executed tier instead of synthesizing an empty
+    # ``INTERRUPTED`` row that erases the failures that really ran.  The tier
+    # stays reachable even after the frame that dispatched it has been unwound,
+    # because the mapping travels with ``prepared.result``, which is published
+    # to the caller's accumulator before any tier is dispatched.
+    completed_tiers: dict[str, TierResult] = field(default_factory=dict)
 
 
 @dataclass

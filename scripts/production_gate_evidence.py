@@ -23,6 +23,11 @@ if str(ROOT) not in sys.path:
 
 
 # Direct names this module calls; cyclic back-edges go through _entry.
+from scripts.production_gate_capacity import (
+    CAPACITY_STREAM_FILENAME,
+    MAX_CAPACITY_SAMPLES,
+    _safe_capacity,
+)
 from scripts.production_gate_model import (
     EVIDENCE_MANIFEST_FILENAME,
     EVIDENCE_REPORT_FILENAME,
@@ -39,8 +44,8 @@ from scripts.production_gate_model import (
     _safe_execution_plan,
 )
 from scripts.production_gate_render import _evidence_file_metadata, render_evidence_text
+from scripts.production_gate_runtime_gates import runtime_gate_passes
 from scripts.production_gate_text import _jsonable_tier, _retain_failure_detail, _safe_text
-from scripts.production_gate_tiers import runtime_gate_passes
 
 
 def _evidence_roots(
@@ -347,6 +352,8 @@ def build_evidence_payload(
     fixture_manifest: dict[str, Any] | None = None,
     matrix_audit: dict[str, Any] | None = None,
     execution_plan: dict[str, Any] | None = None,
+    capacity: dict[str, Any] | None = None,
+    cancellation: str = "",
 ) -> dict[str, Any]:
     """Build the sanitized, metadata-only payload retained by the gate.
 
@@ -374,6 +381,9 @@ def build_evidence_payload(
             _safe_diagnostic(problem, roots, replacements=replacements, limit=2000)
             for problem in gate_problems
         ],
+        "cancellation": _safe_diagnostic(cancellation, roots, replacements=replacements, limit=2000)
+        if cancellation
+        else "",
         "overall": overall,
         "safety": {
             "rom_bytes": "not included",
@@ -387,6 +397,7 @@ def build_evidence_payload(
         payload["matrix_audit"] = _safe_matrix_audit(matrix_audit)
     if execution_plan:
         payload["execution_plan"] = _safe_execution_plan(execution_plan)
+    payload["capacity"] = _safe_capacity(capacity, roots, replacements=replacements)
     if evidence_error:
         payload["evidence_error"] = _safe_diagnostic(
             evidence_error, roots, replacements=replacements, limit=2000
@@ -405,6 +416,7 @@ def build_dual_evidence_payload(
     requested_mode: str = "both",
     generated_at: str | None = None,
     evidence_error: str = "",
+    capacity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a sanitized evidence bundle containing both runtime executions."""
 
@@ -429,6 +441,11 @@ def build_dual_evidence_payload(
                     _safe_diagnostic(problem, roots, replacements=replacements, limit=2000)
                     for problem in result.gate_problems
                 ],
+                "cancellation": _safe_diagnostic(
+                    result.cancellation, roots, replacements=replacements, limit=2000
+                )
+                if result.cancellation
+                else "",
                 "overall": "PASS" if runtime_gate_passes(result) else "FAIL",
                 **(
                     {"execution_plan": _safe_execution_plan(result.execution_plan)}
@@ -448,6 +465,7 @@ def build_dual_evidence_payload(
         "runtimes": runtimes,
         "assets": [_safe_asset(item, roots) for item in assets],
         "overall": overall,
+        "capacity": _safe_capacity(capacity, roots, replacements=replacements),
         "safety": {
             "rom_bytes": "not included",
             "credentials": "environment is not captured; free-form diagnostics are redacted",
@@ -476,6 +494,8 @@ def verify_evidence_bundle(evidence_dir: Path) -> None:
         raise ValueError(
             f"could not enumerate evidence bundle: {type(exc).__name__}: {exc}"
         ) from exc
+    if CAPACITY_STREAM_FILENAME in actual_bundle_names:
+        expected_bundle_names.add(CAPACITY_STREAM_FILENAME)
     unexpected_files = sorted(actual_bundle_names - expected_bundle_names)
     if unexpected_files:
         raise ValueError(
@@ -498,7 +518,7 @@ def verify_evidence_bundle(evidence_dir: Path) -> None:
     entries = manifest.get("files")
     if not isinstance(entries, list):
         raise TypeError("evidence manifest files is not a list")
-    expected_names = {EVIDENCE_REPORT_FILENAME, EVIDENCE_TEXT_FILENAME}
+    expected_names = expected_bundle_names - {EVIDENCE_MANIFEST_FILENAME}
     actual_names: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict):
@@ -536,9 +556,7 @@ def verify_evidence_bundle(evidence_dir: Path) -> None:
             raise ValueError(f"evidence file sha256 mismatch for {relative_name!r}")
 
     if actual_names != expected_names:
-        raise ValueError(
-            "evidence manifest must cover exactly gate-report.json and gate-report.txt"
-        )
+        raise ValueError("evidence manifest must cover exactly the retained report files")
     try:
         report = json.loads((evidence_dir / EVIDENCE_REPORT_FILENAME).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -549,6 +567,23 @@ def verify_evidence_bundle(evidence_dir: Path) -> None:
         raise TypeError("retained gate report root is not an object")
     if report.get("overall") != manifest.get("overall"):
         raise ValueError("evidence manifest overall status does not match gate report")
+    capacity = report.get("capacity", {})
+    reference = capacity.get("sample_reference", {}) if isinstance(capacity, dict) else {}
+    if reference or CAPACITY_STREAM_FILENAME in actual_bundle_names:
+        if reference.get("path") != CAPACITY_STREAM_FILENAME:
+            raise ValueError("capacity stream reference is missing or invalid")
+        content = (evidence_dir / CAPACITY_STREAM_FILENAME).read_bytes()
+        if reference.get("sha256") != hashlib.sha256(content).hexdigest():
+            raise ValueError("capacity stream reference hash mismatch")
+        if reference.get("size") != len(content):
+            raise ValueError("capacity stream reference size mismatch")
+        samples = json.loads(content)
+        if not isinstance(samples, list) or len(samples) != reference.get("sample_count"):
+            raise ValueError("capacity stream reference count mismatch")
+        if capacity.get("samples") != samples[:MAX_CAPACITY_SAMPLES]:
+            raise ValueError("capacity summary does not match stream")
+        if capacity.get("samples_omitted") != max(0, len(samples) - MAX_CAPACITY_SAMPLES):
+            raise ValueError("capacity omitted count does not match stream")
 
 
 def write_evidence_bundle(
@@ -562,6 +597,17 @@ def write_evidence_bundle(
     report_path = evidence_dir / EVIDENCE_REPORT_FILENAME
     text_path = evidence_dir / EVIDENCE_TEXT_FILENAME
     manifest_path = evidence_dir / EVIDENCE_MANIFEST_FILENAME
+
+    payload = dict(payload)
+    stream_path = None
+    capacity = payload.get("capacity")
+    if isinstance(capacity, dict) and "sample_stream" in capacity:
+        capacity = dict(capacity)
+        payload["capacity"] = capacity
+        samples = capacity.pop("sample_stream")
+        encoded = (json.dumps(samples, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+        stream_path = evidence_dir / CAPACITY_STREAM_FILENAME
+        stream_path.write_bytes(encoded)
 
     report_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -578,6 +624,8 @@ def write_evidence_bundle(
         ],
         "safety": payload.get("safety", {}),
     }
+    if stream_path is not None:
+        manifest["files"].append(_evidence_file_metadata(stream_path, CAPACITY_STREAM_FILENAME))
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

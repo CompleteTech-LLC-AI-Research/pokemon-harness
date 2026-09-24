@@ -603,3 +603,101 @@ def test_cgroup_v1_detected_below_hierarchy_root(tmp_path: Path):
     facts = runner._read_cgroup_facts(tmp_path, "12:cpu,cpuacct:/user.slice/session.scope\n")
     assert facts["cgroup_version"] == "v1"
     assert facts["cpu_quota_cores"] == 0.5
+
+
+@pytest.mark.parametrize("ancestor", ["broken", "max 0", "-1 100000", "max"])
+def test_cgroup_malformed_ancestor_quota_is_unknown(tmp_path: Path, ancestor):
+    """A malformed ancestor ``cpu.max`` is an unknown bound, not an absent one."""
+
+    child = tmp_path / "job"
+    child.mkdir()
+    (child / "cpu.max").write_text("200000 100000", encoding="utf-8")
+    (tmp_path / "cpu.max").write_text(ancestor, encoding="utf-8")
+    facts = runner._read_cgroup_facts(tmp_path, "0::/job")
+    assert facts["cpu_quota_status"] == "unknown"
+    assert facts["cpu_quota_cores"] == 2.0
+    assert facts["cpu_quota_observable"] is False
+
+
+@pytest.mark.parametrize(
+    ("root_quota", "expected"),
+    [("max 100000", "unlimited"), ("100000 100000", "limited"), (None, "unlimited")],
+)
+def test_cgroup_visible_v2_quota_and_pressure(tmp_path: Path, root_quota, expected):
+    """A visible v2 hierarchy reports its quota status and its own CPU pressure."""
+
+    child = tmp_path / "job"
+    child.mkdir()
+    (tmp_path / "cgroup.controllers").write_text("cpu memory", encoding="utf-8")
+    if root_quota is not None:
+        (tmp_path / "cpu.max").write_text(root_quota, encoding="utf-8")
+    (child / "cpu.max").write_text("max 100000", encoding="utf-8")
+    (child / "cpu.pressure").write_text(
+        "some avg10=1.0 avg60=2.0 avg300=3.5 total=1", encoding="utf-8"
+    )
+    (child / "cpu.stat").write_text("nr_throttled 12\nthrottled_usec 1234", encoding="utf-8")
+    facts = runner._read_cgroup_facts(tmp_path, "0::/job")
+    assert facts["cpu_quota_status"] == expected
+    assert facts["cgroup_cpu_some_avg300"] == 3.5
+    assert facts["cpu_throttled"] == {"nr_throttled": 12, "throttled_usec": 1234}
+    assert "namespace" in facts["cgroup_visibility"][0]
+
+
+def test_cgroup_root_permission_denied_is_unknown(tmp_path: Path, monkeypatch):
+    """A present but unreadable root ``cpu.max`` must fail closed as unknown."""
+
+    (tmp_path / "cpu.max").write_text("100000 100000", encoding="utf-8")
+    original = Path.read_text
+
+    def read(path: Path, *args, **kwargs):
+        if path == tmp_path / "cpu.max":
+            raise PermissionError("denied")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    assert runner._read_cgroup_facts(tmp_path, "0::/")["cpu_quota_status"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("quota", "expected"),
+    [("-1", "unlimited"), ("50000", "limited"), ("oops", "unknown"), ("-2", "unknown")],
+)
+def test_cgroup_v1_quota_status(tmp_path: Path, quota, expected):
+    """v1 quota files expose a tri-state status; only ``-1`` means unlimited."""
+
+    base = tmp_path / "cpu"
+    base.mkdir()
+    (base / "cpu.cfs_quota_us").write_text(quota, encoding="utf-8")
+    (base / "cpu.cfs_period_us").write_text("100000", encoding="utf-8")
+    assert runner._read_cgroup_facts(tmp_path, "1:cpu:/")["cpu_quota_status"] == expected
+
+
+@pytest.mark.parametrize(
+    "pressure",
+    [
+        None,
+        "some avg300=nan",
+        "some avg300=inf",
+        "some avg300=-1",
+        "some avg300=bad",
+        "full avg300=1",
+    ],
+)
+def test_invalid_cpu_pressure_is_unknown(pressure):
+    """Non-finite, out-of-range, or malformed PSI readings are rejected."""
+
+    assert runner._parse_psi_cpu(pressure) is None
+
+
+def test_cpu_pressure_parses_a_valid_percentage():
+    assert runner._parse_psi_cpu("some avg10=1.0 avg60=2.0 avg300=3.5 total=1") == 3.5
+
+
+def test_cgroup_namespace_escape_is_unknown(tmp_path: Path):
+    """Membership that walks out of the visible mount is unobservable."""
+
+    (tmp_path / "cpu.max").write_text("max 100000", encoding="utf-8")
+    facts = runner._read_cgroup_facts(tmp_path, "0::/../../outside")
+    assert facts["cpu_quota_status"] == "unknown"
+    assert facts["cgroup_dir"] is None
+    assert any("outside" in item for item in facts["cgroup_visibility"])
