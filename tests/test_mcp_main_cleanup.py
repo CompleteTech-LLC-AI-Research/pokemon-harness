@@ -66,12 +66,24 @@ def _configure_main(
         if error is not None:
             raise error
 
-    primary = SimpleNamespace(
-        name="primary", close=lambda **_kwargs: close("primary", primary_error)
-    )
-    peer = SimpleNamespace(
-        name="peer", close=lambda **_kwargs: close("peer", peer_error)
-    )
+    def observation() -> bool:
+        return True
+
+    def fake_session(name, error):
+        # ``main`` arms the battle-observation hooks on every session it
+        # constructs, so the fake must expose that public surface; a bare
+        # namespace raises ``AttributeError`` before the cleanup path under
+        # test can run.
+        return SimpleNamespace(
+            name=name,
+            close=lambda **_kwargs: close(name, error),
+            enable_battle_menu_observation=observation,
+            enable_battle_resolution_observation=observation,
+            enable_battle_end_observation=observation,
+        )
+
+    primary = fake_session("primary", primary_error)
+    peer = fake_session("peer", peer_error)
 
     def from_files(_cls, rom, sym, **kwargs):
         name = "primary" if rom == primary_rom else "peer"
