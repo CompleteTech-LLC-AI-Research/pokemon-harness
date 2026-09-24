@@ -8,6 +8,7 @@ import pytest
 
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
 from scripts import coverage_report as coverage
+from tests._gate_capacity_support import runtime_gate_stubs  # noqa: F401
 from tests._mcp_timed_remote_support import failure_snapshots  # noqa: F401
 from tests._probe_timed_rom_pair_support import spawned_probe_args  # noqa: F401
 from tests._timed_link_session_support import (  # noqa: F401

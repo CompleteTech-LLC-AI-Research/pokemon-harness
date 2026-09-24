@@ -150,6 +150,9 @@ python -m ruff check \
     scripts/produce_battle_scenario_runtime.py \
     scripts/production_gate.py \
     scripts/gate_capacity.py \
+    scripts/gate_capacity_admission.py \
+    scripts/gate_capacity_policy.py \
+    scripts/gate_capacity_report.py \
     scripts/qualification_runner.py \
     scripts/qualification_runner_allocation.py \
     scripts/qualification_runner_assets.py \
@@ -180,6 +183,7 @@ python -m ruff check \
     scripts/validate_fixture_manifest.py \
     tests/_battle_item_evidence.py \
     tests/_battle_item_evidence_factories.py \
+    tests/_gate_capacity_support.py \
     tests/_gate_report.py \
     tests/_qualification_runner_support.py \
     tests/_rom_assets.py \
@@ -201,7 +205,10 @@ python -m ruff check \
     tests/test_battle_scenario_producer_screening.py \
     tests/test_battle_scenario_validator.py \
     tests/test_fixture_provenance.py \
-    tests/test_gate_capacity.py \
+    tests/test_gate_capacity_boundaries.py \
+    tests/test_gate_capacity_interrupts.py \
+    tests/test_gate_capacity_main.py \
+    tests/test_gate_capacity_policy.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
     tests/test_production_gate_diagnostics.py \
@@ -241,6 +248,9 @@ python -m ruff format --check \
     scripts/produce_battle_scenario_runtime.py \
     scripts/production_gate.py \
     scripts/gate_capacity.py \
+    scripts/gate_capacity_admission.py \
+    scripts/gate_capacity_policy.py \
+    scripts/gate_capacity_report.py \
     scripts/qualification_runner.py \
     scripts/qualification_runner_allocation.py \
     scripts/qualification_runner_assets.py \
@@ -271,6 +281,7 @@ python -m ruff format --check \
     scripts/validate_fixture_manifest.py \
     tests/_battle_item_evidence.py \
     tests/_battle_item_evidence_factories.py \
+    tests/_gate_capacity_support.py \
     tests/_gate_report.py \
     tests/_qualification_runner_support.py \
     tests/_rom_assets.py \
@@ -292,7 +303,10 @@ python -m ruff format --check \
     tests/test_battle_scenario_producer_screening.py \
     tests/test_battle_scenario_validator.py \
     tests/test_fixture_provenance.py \
-    tests/test_gate_capacity.py \
+    tests/test_gate_capacity_boundaries.py \
+    tests/test_gate_capacity_interrupts.py \
+    tests/test_gate_capacity_main.py \
+    tests/test_gate_capacity_policy.py \
     tests/test_gate_early_smoke.py \
     tests/test_party_record_audit.py \
     tests/test_production_gate_diagnostics.py \
