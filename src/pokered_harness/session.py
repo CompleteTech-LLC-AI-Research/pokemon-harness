@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Self
 
 from pokered_harness._session_mixins import _SessionEventMixin, _SessionTimedMixin
+from pokered_harness._session_observation import _SessionObservationMixin
 from pokered_harness._session_support import (
     _DEFAULT_CLOSE_TIMEOUT_S,
     InvalidStateError,
@@ -29,8 +30,10 @@ from pokered_harness._session_support import (
     SessionCloseError,
     SessionCloseTimeout,
     SessionConfigurationError,
+    SessionEpoch,
     SessionError,
     SessionLockTimeout,
+    StateSnapshot,
     SymbolHashMismatch,
     SymbolNotFoundError,
     VersionMismatch,
@@ -48,7 +51,11 @@ from pokered_harness.events.hooks import EventBus, GameEvent, HookRegistration
 from pokered_harness.input import Button, validate_button
 from pokered_harness.ownership import EmulatorOwnershipError, owner_for
 from pokered_harness.pyboy_protocol import PyBoyLike
-from pokered_harness.state import GameState, PartyRecords, parse_game_state, parse_party_records
+from pokered_harness.state import (
+    GameState,
+    PartyRecords,
+    parse_party_records,
+)
 from pokered_harness.symbols.loader import SymbolTable, load_sym_file
 
 __all__ = [
@@ -62,8 +69,10 @@ __all__ = [
     "SessionCloseTimeout",
     "SessionClosedError",
     "SessionConfigurationError",
+    "SessionEpoch",
     "SessionError",
     "SessionLockTimeout",
+    "StateSnapshot",
     "SymbolHashMismatch",
     "SymbolNotFoundError",
     "VersionMismatch",
@@ -71,8 +80,7 @@ __all__ = [
     "sha1_of_file",
 ]
 
-
-class Session(_SessionEventMixin, _SessionTimedMixin):
+class Session(_SessionEventMixin, _SessionTimedMixin, _SessionObservationMixin):
     """Owns one PyBoy instance, a loaded symbol table, and an event bus.
 
     Construct via :meth:`from_files` for real use (loads the ROM and
@@ -94,6 +102,7 @@ class Session(_SessionEventMixin, _SessionTimedMixin):
         # bus is falsy and ``event_bus or EventBus()`` would drop it.
         self._events = event_bus if event_bus is not None else EventBus()
         self._tick: int = 0
+        self._init_observation_state()
         # The owner registry is shared with raw link providers.  Keep the
         # Session-facing ``_lock`` property below for compatibility with
         # existing tests/instrumentation, but make the owner lock the one
@@ -682,7 +691,6 @@ class Session(_SessionEventMixin, _SessionTimedMixin):
         with self._emulator_access(allow_closed=True):
             return self._tick
 
-    @property
     def events(self) -> EventBus:
         return self._events
 
@@ -773,7 +781,7 @@ class Session(_SessionEventMixin, _SessionTimedMixin):
         self._ensure_open()
         with self._emulator_access():
             self._ensure_open()
-            return parse_game_state(self._pyboy.memory, self._symbols)
+            return self._read_game_state_locked()
 
     def read_party_records(self) -> PartyRecords:
         """Read-only per-slot raw party-record digests under the owner lock.
@@ -824,7 +832,16 @@ class Session(_SessionEventMixin, _SessionTimedMixin):
             self._pyboy.load_state(BytesIO(payload))
             # After load_state the emulated clock has been restored, but our
             # external tick counter is just bookkeeping — callers can reset
-            # it via reset_tick if they care about matching exactly.
+            # it via reset_tick if they care about matching exactly.  The
+            # monotonic load-generation counter always advances so callers
+            # can detect that a load happened even when the tick repeats.
+            self._load_generation += 1
+            # A load replaces the emulated state with a different instant;
+            # any battle observed before the load must not qualify a
+            # terminal outcome afterwards.  Menu entry/exit state recorded
+            # before the load is equally stale, so it becomes unknown until
+            # a fresh hook event is observed.
+            self._invalidate_battle_observations()
 
     def reset_tick(self, value: int = 0) -> None:
         if self._timed_endpoint is not None:
@@ -841,6 +858,30 @@ class Session(_SessionEventMixin, _SessionTimedMixin):
             if self._timed_endpoint is not None:
                 raise SessionError("cannot reset tick during a bound timed epoch")
             self._tick = value
+            self._reset_generation += 1
+            # A tick reset starts a distinct observation epoch; stale battle
+            # history must not span it.
+            self._invalidate_battle_observations()
+
+    def _advance_tick(self, count: int) -> int:
+        """Advance the bookkeeping clock for an interleaved link step.
+
+        The linked path drives the emulators directly and only needs the
+        session's bookkeeping clock kept in step.  This is ordinary forward
+        advancement, not a rewind, so it must not start a new observation
+        epoch or discard the battle lifecycle/menu evidence the execution
+        hooks recorded while stepping.  :meth:`reset_tick` remains the
+        intentional-rewind path that invalidates that evidence.
+        """
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError(f"advance must be a non-negative integer, got {count!r}")
+        self._ensure_open()
+        with self._emulator_access():
+            self._ensure_open()
+            if self._timed_endpoint is not None:
+                raise SessionError("cannot advance tick during a bound timed epoch")
+            self._tick += count
+            return self._tick
 
     # --- event-driven advance -----------------------------------------
 
@@ -914,3 +955,4 @@ class Session(_SessionEventMixin, _SessionTimedMixin):
         validate = getattr(backend, "validate_session_operation", None)
         if callable(validate):
             validate(operation)
+

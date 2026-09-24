@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from pokered_harness.symbols.loader import read_wram_u8
 from tests._battle_turn_evidence import BattleTurnObserver, choose_supported_battle_move
 from tests._rom_assets import fixture_path, rom_path, sym_path
 
@@ -412,15 +413,20 @@ def _assert_battle_fixture_is_legal(session) -> None:
 
 
 def _read_active_battle_moves(session) -> tuple[tuple[int, int], ...]:
-    """Read the ROM-owned active move/PP slots without changing emulator RAM."""
-    pb = session._pyboy
+    """Read the ROM-owned active move/PP slots without changing emulator RAM.
+
+    ``wBattleMonMoves``/``wBattleMonPP`` live in WRAM bank 1, so the reads
+    resolve that bank instead of the ``SVBK`` window: the color build banks its
+    own scratch region into ``0xD000``-``0xDFFF`` mid-battle, and a window read
+    there reports another bank's bytes as a fabricated move list.
+    """
     addr_of = session.symbols.addr_of
     moves_addr = addr_of("wBattleMonMoves")
     pp_addr = addr_of("wBattleMonPP")
     return tuple(
         (
-            int(pb.memory[moves_addr + move_idx]),
-            int(pb.memory[pp_addr + move_idx]) & 0x3F,
+            read_wram_u8(session._pyboy.memory, moves_addr + move_idx),
+            read_wram_u8(session._pyboy.memory, pp_addr + move_idx) & 0x3F,
         )
         for move_idx in range(4)
     )

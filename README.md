@@ -725,6 +725,98 @@ Oak's Lab map 40, and lab movement. A bounded starter attempt ended at map 40
 establish MCP control and observation plus lifecycle behavior, but not starter
 acquisition or MCP-facing trade/battle; those remain unproven.
 
+### Battle state schema
+
+`pokered://game-state` (and `pokered://peer-game-state` for an in-process
+peer) carries a `battle` object plus an `epoch` object. The schema is
+additive. Every optional field is `null` when its backing symbol is absent
+from the loaded `.sym`; a value is never guessed.
+
+Identity and combatants:
+
+- `battle.kind`, `battle.raw_is_in_battle`, `battle.battle_type`,
+  `battle.engaged_trainer_class`, `battle.engaged_trainer_set`,
+  `battle.player_mon_slot`.
+- `battle.enemy_mon` (species/level/HP/max HP/status/types/moves/PP and slot)
+  and `battle.enemy_mon_valid`: `true`/`false` where a trainer slot can be
+  checked, `null` for a wild battle with no meaningful slot; `null` whenever
+  the `wEnemyMon*` symbols are absent.
+  `false` is reserved for a value the harness actually read and rejected
+  (a party slot outside `0..5`, or a combatant whose own validity check
+  failed); unavailable evidence is always `null`, never `false`.
+- `battle.player_stat_stages` / `battle.enemy_stat_stages`: the six
+  `w*MonStatMods` bytes decoded as Gen-1 stages in `-6..+6` (`raw - 7`,
+  where `7` is neutral), with `valid` `true` when all six are present and in
+  range, `false` when a present byte is outside `1..13` (no engine writer),
+  and `null` when the family is only partially present. These are exposed
+  only while a wild/trainer battle is active; out of battle the bytes are
+  stale and report `null`.
+
+Phase and terminal state:
+
+- `battle.phase` is a candidate derived from several ROM-owned observations;
+  there is no single sub-phase byte. `battle.phase_valid` is `true` only when
+  exactly one surviving signal supports the phase, `false` when evidence is
+  missing, ambiguous, or contradictory, and `battle.phase_evidence` lists the
+  symbols consulted. `intro` is retained for schema compatibility but is
+  never derived.
+- `battle.raw_battle_result` is always the raw `wBattleResult` byte.
+  `battle.terminal_result` is set only for a non-zero outcome byte that
+  survived an observed active-to-inactive battle transition; an ambiguous
+  zero (win, blackout, and escape all leave or clear zero) stays `null`.
+  `battle.escaped_from_battle` is the raw escape byte.
+- `battle.menu_open` / `battle.menu_evidence`: the session-maintained
+  execution-hook state for the battle command/move menu. `wMoveMenuType` is a
+  mode selector, not an open/closed flag, so `command_selection` is reported
+  only when `menu_open` is `true`; the evidence names the hooked ROM labels.
+  `menu_open` is `null` when observation is unavailable and after a
+  `load_state`/`reset_tick` until the next hook event.
+- `battle.resolution_open` / `battle.resolution_evidence`: the
+  session-maintained execution-hook state for ROM move execution
+  (`ExecutePlayerMove`/`ExecuteEnemyMove` entered and their matching `*Done`
+  exit not yet reached). An ordinary FIGHT turn is otherwise unobservable:
+  `ExecutePlayerMoveDone` clears `wActionResultOrTookBattleTurn` to zero on
+  the way out, so a client polling at any interval only ever sees that flag
+  set for the item/switch/run turns that never execute a move.
+  `action_resolution` is reported when the flag is non-zero *or* the hook
+  shows the engine is resolving a move; `resolution_open` is `null` when
+  observation is unavailable and after a `load_state`/`reset_tick` until the
+  next hook event.
+
+Forced replacement is reported from the ROM's own live replacement-menu
+signal: `ChooseNextMon` writes `BATTLE_PARTY_MENU` to
+`wPartyMenuTypeOrMessageID` and `DisplayPartyMenu`'s input loop raises
+`wPartyMenuAnimMonEnabled` to `$40` while it awaits input, clearing it on
+exit. Both must hold, and the party must have a living member
+(`AnyPartyAlive` corroboration). The faint flag
+`wInHandlePlayerMonFainted` is *not* sufficient and not required: it is
+cleared on the enemy-faint path before that path calls `ChooseNextMon` (so a
+genuine replacement can have it at zero), it can read stale after the menu
+closes, and the final-faint path sets it while jumping to blackout or victory
+without ever opening a menu.
+
+Transient mechanics:
+
+- `battle.move_menu_type` (raw `wMoveMenuType`), `battle.player_move_list_index`,
+  `battle.current_menu_item`, `battle.player_selected_move`,
+  `battle.enemy_selected_move`, `battle.action_result_or_took_turn`, and
+  `battle.in_handle_player_mon_fainted`.
+
+Per-mode availability: the primary MCP server enables the menu, move-execution,
+and battle-end observations on its session and its configured peer at startup.
+The menu observation is installed only when `SelectMenuItem`,
+`DisplayBattleMenu.handleBattleMenuInput`, `MainInBattleLoop`, and
+`MainInBattleLoop.selectEnemyMove` all exist in that session's symbol table
+(they do in the pinned Red/Blue/Yellow `.sym` files); otherwise `menu_open` is
+`null` and `command_selection` is never emitted. The move-execution
+observation needs `ExecutePlayerMove`, `ExecuteEnemyMove`,
+`ExecutePlayerMoveDone`, and `ExecuteEnemyMoveDone`; otherwise
+`resolution_open` is `null` and `action_resolution` can only come from a
+non-zero `wActionResultOrTookBattleTurn`. Each
+session observes only its own emulator, so `pokered://peer-game-state`
+reflects the peer's hooks. Timed remote mode has no local peer resource; its
+`pokered://game-state` is read through the timed owner.
+
 ## Link cable modes
 
 The bundled PyBoy fork provides the bit-accurate serial backend required by

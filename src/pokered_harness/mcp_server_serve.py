@@ -644,6 +644,9 @@ def main() -> None:
                 expected_pyboy_revision=expected_pyboy_revision,
             )
             _entry.register_default_hooks(session)
+            session.enable_battle_menu_observation()
+            session.enable_battle_resolution_observation()
+            session.enable_battle_end_observation()
             if peer_rom is not None and peer_sym is not None:
                 peer_session = Session.from_files(
                     peer_rom,
@@ -654,6 +657,9 @@ def main() -> None:
                     expected_pyboy_revision=expected_pyboy_revision,
                 )
                 _entry.register_default_hooks(peer_session)
+                peer_session.enable_battle_menu_observation()
+                peer_session.enable_battle_resolution_observation()
+                peer_session.enable_battle_end_observation()
                 if peer_state is not None:
                     # The pin was verified before the emulator existed; the
                     # load itself is the same public state entry the primary

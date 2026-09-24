@@ -43,6 +43,7 @@ REAL_ROM_MODULES = frozenset(
         "test_link_integration_remote_trade.py",
         "test_mcp_real_link.py",
         "test_link_symbols_real_roms.py",
+        "test_mcp_battle_phase_rom.py",
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
         "test_mcp_trade_records_rom.py",
@@ -81,6 +82,7 @@ UNIT_MODULES = frozenset(
         "test_battle_scenario_producer_runtime.py",
         "test_battle_scenario_producer_screening.py",
         "test_battle_scenario_validator.py",
+        "test_battle_menu_liveness.py",
         "test_battle_turn_evidence.py",
         "test_config.py",
         "test_coordinator_detach_callback.py",
@@ -115,6 +117,8 @@ UNIT_MODULES = frozenset(
         "test_local_acceptance_driver_contract.py",
         "test_live_trade_demo_contract.py",
         "test_local_scheduler_candidate.py",
+        "test_mcp_battle_state.py",
+        "test_mcp_battle_state_parse.py",
         "test_mcp_lifecycle_hardening.py",
         "test_mcp_local_locking.py",
         "test_mcp_local_runtime_contract.py",
@@ -285,6 +289,7 @@ LOCAL_LINK_MODULES = frozenset(
     {
         "test_link_integration.py",
         "test_mcp_trade_records_rom.py",
+        "test_mcp_battle_phase_rom.py",
         "test_pyboy_link_session_roms.py",
         "test_pyboy_link_session_roms_diagnostics.py",
         "test_pyboy_link_session_roms_serial.py",
@@ -307,6 +312,7 @@ MCP_STDIO_MODULES = frozenset(
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
         "test_mcp_trade_records_rom.py",
+        "test_mcp_battle_phase_rom.py",
     }
 )
 

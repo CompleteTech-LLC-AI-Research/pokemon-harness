@@ -10,7 +10,7 @@
     "observed_location": "operator-managed external fixture root using the fixture_root layout",
     "validation_command": "python scripts/validate_fixture_manifest.py --fixture-root <fixture-root>",
     "validation_policy": "fail closed on missing, size, SHA-1, or SHA-256 mismatch",
-    "provenance_policy": "verified means the exact bytes were reproduced from the recorded source and pinned ROM/runtime; original operator timestamps are explicitly distinguished from verification timestamps"
+    "provenance_policy": "verified means the exact bytes were reproduced from the recorded source and pinned ROM/runtime; original operator timestamps are explicitly distinguished from verification timestamps; captured means the exact bytes are a real-play drive from the recorded admitted input, bound to it by SHA-1 and SHA-256, with the same required provenance fields as verified; no byte-reproduction of an external state is claimed"
   },
   "fixtures": [
     {
@@ -333,6 +333,396 @@
       }
     },
     {
+      "expected_rom": {
+        "path": "rom/red/pokemon-red-color.gb",
+        "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "id": "red-color-battle-faint",
+      "kind": "boundary",
+      "path": "red/cable_club-battle-faint.state",
+      "provenance": {
+        "boundary": "forced-replacement",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:38:03Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 1837.397,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "fainted_side": "primary",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external red/cable_club-battle.state; SHA-1 4343278b018187ed4bf7c4eda3b202097456f048; SHA-256 4f165f3ddd9b03710d94bf6702fabfc35b9408b03a8973c6407d474d8801f461; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 30,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "red"
+      },
+      "repository_distributed": false,
+      "sha1": "3e669f36fa63b398b0d0c551ec637599a4fca5b0",
+      "sha256": "ccf1ec096c0814a8581fa32a9cce55bbd6852b91554c7584c6046bb5addb6f57",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "red"
+    },
+    {
+      "expected_rom": {
+        "path": "rom/red/pokemon-red-color.gb",
+        "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "id": "red-color-battle-faint-peer",
+      "kind": "boundary",
+      "path": "red/cable_club-battle-faint-peer.state",
+      "provenance": {
+        "boundary": "forced-replacement",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:38:03Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 1837.397,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "fainted_side": "primary",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external red/cable_club-battle.state; SHA-1 4343278b018187ed4bf7c4eda3b202097456f048; SHA-256 4f165f3ddd9b03710d94bf6702fabfc35b9408b03a8973c6407d474d8801f461; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 30,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "red"
+      },
+      "repository_distributed": false,
+      "sha1": "2f261e0ff4accf1bf795e52063c283641e4d1381",
+      "sha256": "2be02dda0136cfa6e43f72e5508c766afaa3838191b26eec910405b95ae7b95b",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "red"
+    },
+    {
+      "capture": {
+        "boundary_turn": 36,
+        "terminal_turn": 36,
+        "terminal_turn_plan": [
+          {
+            "move": 33,
+            "policy": "supported",
+            "slot": 1
+          },
+          {
+            "move": 33,
+            "policy": "supported",
+            "slot": 1
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/red/pokemon-red-color.gb",
+        "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "id": "red-color-battle-pre-terminal",
+      "kind": "boundary",
+      "path": "red/cable_club-pre-terminal.state",
+      "provenance": {
+        "boundary": "pre-terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:40:48Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 2002.664,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external red/cable_club-battle.state; SHA-1 4343278b018187ed4bf7c4eda3b202097456f048; SHA-256 4f165f3ddd9b03710d94bf6702fabfc35b9408b03a8973c6407d474d8801f461; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 36,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "red"
+      },
+      "repository_distributed": false,
+      "sha1": "b6a5d674def9b567a19ff3488b5abdb4de87c29a",
+      "sha256": "9ff8fb6d00f3b0580b7149f6236067b331b6f0731552f2c2eeb39ad1d9d6258e",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "red"
+    },
+    {
+      "capture": {
+        "boundary_turn": 36,
+        "terminal_turn": 36,
+        "terminal_turn_plan": [
+          {
+            "move": 33,
+            "policy": "supported",
+            "slot": 1
+          },
+          {
+            "move": 33,
+            "policy": "supported",
+            "slot": 1
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/red/pokemon-red-color.gb",
+        "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "id": "red-color-battle-pre-terminal-peer",
+      "kind": "boundary",
+      "path": "red/cable_club-pre-terminal-peer.state",
+      "provenance": {
+        "boundary": "pre-terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:40:48Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 2002.664,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external red/cable_club-battle.state; SHA-1 4343278b018187ed4bf7c4eda3b202097456f048; SHA-256 4f165f3ddd9b03710d94bf6702fabfc35b9408b03a8973c6407d474d8801f461; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 36,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "red"
+      },
+      "repository_distributed": false,
+      "sha1": "2528e133a8bae489afba30e19fd1fcefa562bba8",
+      "sha256": "317ee0adcba827c4c86d5c4173dbdc166000dc89f4f7ca5bddf8e750263b594b",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "red"
+    },
+    {
+      "capture": {
+        "party": {
+          "peer": {
+            "active_hp": 0,
+            "active_max_hp": 154,
+            "battle_result": 1,
+            "in_handle_player_mon_fainted": 1,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "party_menu_type": 79,
+            "species": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "wram_bank": 0
+          },
+          "primary": {
+            "active_hp": 21,
+            "active_max_hp": 154,
+            "battle_result": 0,
+            "in_handle_player_mon_fainted": 0,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "party_menu_type": 79,
+            "species": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "wram_bank": 0
+          }
+        },
+        "pre_terminal_turn": 36,
+        "terminal_turn": 36,
+        "terminal_turn_plan": [
+          {
+            "move": 33,
+            "policy": "supported",
+            "slot": 1
+          },
+          {
+            "move": 33,
+            "policy": "supported",
+            "slot": 1
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/red/pokemon-red-color.gb",
+        "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "id": "red-color-battle-terminal-return",
+      "kind": "boundary",
+      "path": "red/cable_club-terminal.state",
+      "provenance": {
+        "boundary": "terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:42:46Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 2120.789,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 11,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external red/cable_club-battle.state; SHA-1 4343278b018187ed4bf7c4eda3b202097456f048; SHA-256 4f165f3ddd9b03710d94bf6702fabfc35b9408b03a8973c6407d474d8801f461; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 36,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "red"
+      },
+      "repository_distributed": false,
+      "sha1": "e263470468fd12b83f7d6fa7d8fe5ece4ece440f",
+      "sha256": "cbf66ade6f5e300b0ad2cc47ab6a96fe4c873c427fc8cb565cef0e0236ac4cb3",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "red"
+    },
+    {
+      "capture": {
+        "party": {
+          "peer": {
+            "active_hp": 0,
+            "active_max_hp": 154,
+            "battle_result": 1,
+            "in_handle_player_mon_fainted": 1,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "party_menu_type": 79,
+            "species": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "wram_bank": 0
+          },
+          "primary": {
+            "active_hp": 21,
+            "active_max_hp": 154,
+            "battle_result": 0,
+            "in_handle_player_mon_fainted": 0,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "party_menu_type": 79,
+            "species": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "wram_bank": 0
+          }
+        },
+        "pre_terminal_turn": 36,
+        "terminal_turn": 36,
+        "terminal_turn_plan": [
+          {
+            "move": 33,
+            "policy": "supported",
+            "slot": 1
+          },
+          {
+            "move": 33,
+            "policy": "supported",
+            "slot": 1
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/red/pokemon-red-color.gb",
+        "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "id": "red-color-battle-terminal-return-peer",
+      "kind": "boundary",
+      "path": "red/cable_club-terminal-peer.state",
+      "provenance": {
+        "boundary": "terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version red --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:42:46Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 2120.789,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 11,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external red/cable_club-battle.state; SHA-1 4343278b018187ed4bf7c4eda3b202097456f048; SHA-256 4f165f3ddd9b03710d94bf6702fabfc35b9408b03a8973c6407d474d8801f461; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 36,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted red/cable_club-battle.state bytes (SHA-1 4343278b018187ed4bf7c4eda3b202097456f048); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "red"
+      },
+      "repository_distributed": false,
+      "sha1": "741a8e2e7bf94ca252506e2b839095cb23507425",
+      "sha256": "1aa1e606fab87ba13aa5c5d5aed9e1854c9f6eebf58b9060c1450fcb7094a7a8",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "red"
+    },
+    {
       "id": "blue-color-slots",
       "path": "blue/cable_club-slots.state",
       "version": "blue",
@@ -362,6 +752,396 @@
       }
     },
     {
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "id": "blue-color-battle-faint",
+      "kind": "boundary",
+      "path": "blue/cable_club-battle-faint.state",
+      "provenance": {
+        "boundary": "forced-replacement",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T05:05:27Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 3481.365,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "fainted_side": "primary",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external blue/cable_club-battle.state; SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a; SHA-256 2a49a3d27ab73f86460083bb8fb5b6b63c9546816c69656fe50448e88d9c6e0e; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 35,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "blue"
+      },
+      "repository_distributed": false,
+      "sha1": "8d06732843bf070eafcd37531ab6c6e827aedf71",
+      "sha256": "f7da26bfddc80b8be2c2c556468e032be161596e708d20fdb6a0a4e7cc474cff",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "blue"
+    },
+    {
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "id": "blue-color-battle-faint-peer",
+      "kind": "boundary",
+      "path": "blue/cable_club-battle-faint-peer.state",
+      "provenance": {
+        "boundary": "forced-replacement",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T05:05:27Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 3481.365,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "fainted_side": "primary",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external blue/cable_club-battle.state; SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a; SHA-256 2a49a3d27ab73f86460083bb8fb5b6b63c9546816c69656fe50448e88d9c6e0e; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 35,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "blue"
+      },
+      "repository_distributed": false,
+      "sha1": "cbfdd7238f1e9c5bf1e4b500e5a11d698a854b8c",
+      "sha256": "bd6605509583b7311a35f4471d30ee60cb94c7cf82350b1e5d5703e12c520e79",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "blue"
+    },
+    {
+      "capture": {
+        "boundary_turn": 44,
+        "terminal_turn": 44,
+        "terminal_turn_plan": [
+          {
+            "move": 76,
+            "policy": "fallback",
+            "slot": 0
+          },
+          {
+            "move": 76,
+            "policy": "fallback",
+            "slot": 0
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "id": "blue-color-battle-pre-terminal",
+      "kind": "boundary",
+      "path": "blue/cable_club-pre-terminal.state",
+      "provenance": {
+        "boundary": "pre-terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T05:14:09Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 4004.009,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external blue/cable_club-battle.state; SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a; SHA-256 2a49a3d27ab73f86460083bb8fb5b6b63c9546816c69656fe50448e88d9c6e0e; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 44,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "blue"
+      },
+      "repository_distributed": false,
+      "sha1": "01ca20eabaa33e0e6cfcd87136432db9b84911f2",
+      "sha256": "fbadf039316e0d3e2c768729ce2c0f19bf8749e446e65b7942e00803c4c7929d",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "blue"
+    },
+    {
+      "capture": {
+        "boundary_turn": 44,
+        "terminal_turn": 44,
+        "terminal_turn_plan": [
+          {
+            "move": 76,
+            "policy": "fallback",
+            "slot": 0
+          },
+          {
+            "move": 76,
+            "policy": "fallback",
+            "slot": 0
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "id": "blue-color-battle-pre-terminal-peer",
+      "kind": "boundary",
+      "path": "blue/cable_club-pre-terminal-peer.state",
+      "provenance": {
+        "boundary": "pre-terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T05:14:09Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 4004.009,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external blue/cable_club-battle.state; SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a; SHA-256 2a49a3d27ab73f86460083bb8fb5b6b63c9546816c69656fe50448e88d9c6e0e; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 44,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "blue"
+      },
+      "repository_distributed": false,
+      "sha1": "ed9c680cff2af1e64c66a78132685411d2497a38",
+      "sha256": "5f260032875cad72e422b2e020054749bc1aba8c80fafcc3d201459130293156",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "blue"
+    },
+    {
+      "capture": {
+        "party": {
+          "peer": {
+            "active_hp": 3,
+            "active_max_hp": 152,
+            "battle_result": 0,
+            "in_handle_player_mon_fainted": 0,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              152,
+              152,
+              152,
+              152,
+              152,
+              152
+            ],
+            "party_menu_type": 79,
+            "species": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "wram_bank": 0
+          },
+          "primary": {
+            "active_hp": 0,
+            "active_max_hp": 152,
+            "battle_result": 1,
+            "in_handle_player_mon_fainted": 1,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              152,
+              152,
+              152,
+              152,
+              152,
+              152
+            ],
+            "party_menu_type": 79,
+            "species": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "wram_bank": 0
+          }
+        },
+        "pre_terminal_turn": 44,
+        "terminal_turn": 44,
+        "terminal_turn_plan": [
+          {
+            "move": 76,
+            "policy": "fallback",
+            "slot": 0
+          },
+          {
+            "move": 76,
+            "policy": "fallback",
+            "slot": 0
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "id": "blue-color-battle-terminal-return",
+      "kind": "boundary",
+      "path": "blue/cable_club-terminal.state",
+      "provenance": {
+        "boundary": "terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T05:16:29Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 4144.237,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 11,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external blue/cable_club-battle.state; SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a; SHA-256 2a49a3d27ab73f86460083bb8fb5b6b63c9546816c69656fe50448e88d9c6e0e; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 44,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "blue"
+      },
+      "repository_distributed": false,
+      "sha1": "4cbc31c960742c362d75ee016a52273889b734b7",
+      "sha256": "d380a19f2295982f51128f4d0e7576d870603426c59fc271395fb83f5a33040f",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "blue"
+    },
+    {
+      "capture": {
+        "party": {
+          "peer": {
+            "active_hp": 3,
+            "active_max_hp": 152,
+            "battle_result": 0,
+            "in_handle_player_mon_fainted": 0,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              152,
+              152,
+              152,
+              152,
+              152,
+              152
+            ],
+            "party_menu_type": 79,
+            "species": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "wram_bank": 0
+          },
+          "primary": {
+            "active_hp": 0,
+            "active_max_hp": 152,
+            "battle_result": 1,
+            "in_handle_player_mon_fainted": 1,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              152,
+              152,
+              152,
+              152,
+              152,
+              152
+            ],
+            "party_menu_type": 79,
+            "species": [
+              154,
+              154,
+              154,
+              154,
+              154,
+              154
+            ],
+            "wram_bank": 0
+          }
+        },
+        "pre_terminal_turn": 44,
+        "terminal_turn": 44,
+        "terminal_turn_plan": [
+          {
+            "move": 76,
+            "policy": "fallback",
+            "slot": 0
+          },
+          {
+            "move": 76,
+            "policy": "fallback",
+            "slot": 0
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "id": "blue-color-battle-terminal-return-peer",
+      "kind": "boundary",
+      "path": "blue/cable_club-terminal-peer.state",
+      "provenance": {
+        "boundary": "terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T05:16:29Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 4144.237,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 11,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external blue/cable_club-battle.state; SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a; SHA-256 2a49a3d27ab73f86460083bb8fb5b6b63c9546816c69656fe50448e88d9c6e0e; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 44,
+        "variant": "color",
+        "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "blue"
+      },
+      "repository_distributed": false,
+      "sha1": "d2c6d3a6fe75e80b295949f3c66c3db27479c94e",
+      "sha256": "3490607ed2435b14586724da80be687e6b5e67533c9f721a8753588697dab66d",
+      "size_bytes": 200548,
+      "variant": "color",
+      "version": "blue"
+    },
+    {
       "id": "yellow-cgb-slots",
       "path": "yellow/cable_club-slots.state",
       "version": "yellow",
@@ -389,6 +1169,396 @@
         "verification_method": "produced from the verified Yellow ordinary fixture with the tracked slots generator; the producer re-loads the persisted bytes and fails closed unless all six occupied 44-byte party records are pairwise distinct, and six distinct digests were observed",
         "evidence_note": "The six occupied records differ only in the 2-byte original-trainer ID, so species, level, HP, moves, PP, EVs, DVs, stats, OT name, and nickname stay identical while a wrong-slot copy becomes detectable."
       }
+    },
+    {
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "id": "yellow-cgb-battle-faint",
+      "kind": "boundary",
+      "path": "yellow/cable_club-battle-faint.state",
+      "provenance": {
+        "boundary": "forced-replacement",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:18:34Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 668.949,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "fainted_side": "peer",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external yellow/cable_club-battle.state; SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9; SHA-256 96574cba6b3dbd370adad0a7f5df0d2520dea30af4bffdfbfb9fe1b70e4d3ecc; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 19,
+        "variant": "cgb",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "yellow"
+      },
+      "repository_distributed": false,
+      "sha1": "e28a61e83da08fc8d4617a516534019135d8e7aa",
+      "sha256": "14e4bf66f1a36097e4ffbadb136586f68c12616228a82a42a29f4f49c0a283e3",
+      "size_bytes": 200548,
+      "variant": "cgb",
+      "version": "yellow"
+    },
+    {
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "id": "yellow-cgb-battle-faint-peer",
+      "kind": "boundary",
+      "path": "yellow/cable_club-battle-faint-peer.state",
+      "provenance": {
+        "boundary": "forced-replacement",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:18:34Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 668.949,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "fainted_side": "peer",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external yellow/cable_club-battle.state; SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9; SHA-256 96574cba6b3dbd370adad0a7f5df0d2520dea30af4bffdfbfb9fe1b70e4d3ecc; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 19,
+        "variant": "cgb",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "yellow"
+      },
+      "repository_distributed": false,
+      "sha1": "1274cd78b8a0cb307c4848e37040cc84e808e4a7",
+      "sha256": "a01e9bce13181eea2d8cbe43bd8b1426dc0ffc8db0abf6661df7a310085480c8",
+      "size_bytes": 200548,
+      "variant": "cgb",
+      "version": "yellow"
+    },
+    {
+      "capture": {
+        "boundary_turn": 20,
+        "terminal_turn": 20,
+        "terminal_turn_plan": [
+          {
+            "move": 85,
+            "policy": "supported",
+            "slot": 0
+          },
+          {
+            "move": 85,
+            "policy": "supported",
+            "slot": 0
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "id": "yellow-cgb-battle-pre-terminal",
+      "kind": "boundary",
+      "path": "yellow/cable_club-pre-terminal.state",
+      "provenance": {
+        "boundary": "pre-terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:18:40Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 674.769,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external yellow/cable_club-battle.state; SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9; SHA-256 96574cba6b3dbd370adad0a7f5df0d2520dea30af4bffdfbfb9fe1b70e4d3ecc; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 20,
+        "variant": "cgb",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "yellow"
+      },
+      "repository_distributed": false,
+      "sha1": "798d79c8b6e6fba2c807ae77c45ca85a33ec9cbe",
+      "sha256": "87fffc23a0768631c38d52c33183d146b0d43b5034052987bb3db001918af914",
+      "size_bytes": 200548,
+      "variant": "cgb",
+      "version": "yellow"
+    },
+    {
+      "capture": {
+        "boundary_turn": 20,
+        "terminal_turn": 20,
+        "terminal_turn_plan": [
+          {
+            "move": 85,
+            "policy": "supported",
+            "slot": 0
+          },
+          {
+            "move": 85,
+            "policy": "supported",
+            "slot": 0
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "id": "yellow-cgb-battle-pre-terminal-peer",
+      "kind": "boundary",
+      "path": "yellow/cable_club-pre-terminal-peer.state",
+      "provenance": {
+        "boundary": "pre-terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:18:40Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 674.769,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 10,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external yellow/cable_club-battle.state; SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9; SHA-256 96574cba6b3dbd370adad0a7f5df0d2520dea30af4bffdfbfb9fe1b70e4d3ecc; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 20,
+        "variant": "cgb",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "yellow"
+      },
+      "repository_distributed": false,
+      "sha1": "e4cb97370e616358b78943e879ac24ac87304604",
+      "sha256": "018432233bac4252ba203587d894548a1f612e5f1594e308fdcceef2cf527151",
+      "size_bytes": 200548,
+      "variant": "cgb",
+      "version": "yellow"
+    },
+    {
+      "capture": {
+        "party": {
+          "peer": {
+            "active_hp": 0,
+            "active_max_hp": 102,
+            "battle_result": 1,
+            "in_handle_player_mon_fainted": 1,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              102,
+              102,
+              102,
+              102,
+              102,
+              102
+            ],
+            "party_menu_type": 79,
+            "species": [
+              84,
+              84,
+              84,
+              84,
+              84,
+              84
+            ],
+            "wram_bank": 0
+          },
+          "primary": {
+            "active_hp": 21,
+            "active_max_hp": 102,
+            "battle_result": 0,
+            "in_handle_player_mon_fainted": 0,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              102,
+              102,
+              102,
+              102,
+              102,
+              102
+            ],
+            "party_menu_type": 79,
+            "species": [
+              84,
+              84,
+              84,
+              84,
+              84,
+              84
+            ],
+            "wram_bank": 0
+          }
+        },
+        "pre_terminal_turn": 20,
+        "terminal_turn": 20,
+        "terminal_turn_plan": [
+          {
+            "move": 85,
+            "policy": "supported",
+            "slot": 0
+          },
+          {
+            "move": 85,
+            "policy": "supported",
+            "slot": 0
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "id": "yellow-cgb-battle-terminal-return",
+      "kind": "boundary",
+      "path": "yellow/cable_club-terminal.state",
+      "provenance": {
+        "boundary": "terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:20:16Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 770.768,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 11,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external yellow/cable_club-battle.state; SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9; SHA-256 96574cba6b3dbd370adad0a7f5df0d2520dea30af4bffdfbfb9fe1b70e4d3ecc; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 20,
+        "variant": "cgb",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "yellow"
+      },
+      "repository_distributed": false,
+      "sha1": "a4dfb7afb6684a2a6c95894bbcaca173cca595cd",
+      "sha256": "53e87421f02849d9b3ff7568feba8de0c82ab822084572df95ccda9221c03d46",
+      "size_bytes": 200548,
+      "variant": "cgb",
+      "version": "yellow"
+    },
+    {
+      "capture": {
+        "party": {
+          "peer": {
+            "active_hp": 0,
+            "active_max_hp": 102,
+            "battle_result": 1,
+            "in_handle_player_mon_fainted": 1,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              102,
+              102,
+              102,
+              102,
+              102,
+              102
+            ],
+            "party_menu_type": 79,
+            "species": [
+              84,
+              84,
+              84,
+              84,
+              84,
+              84
+            ],
+            "wram_bank": 0
+          },
+          "primary": {
+            "active_hp": 21,
+            "active_max_hp": 102,
+            "battle_result": 0,
+            "in_handle_player_mon_fainted": 0,
+            "is_in_battle": 0,
+            "party_count": 6,
+            "party_hp": [
+              102,
+              102,
+              102,
+              102,
+              102,
+              102
+            ],
+            "party_menu_type": 79,
+            "species": [
+              84,
+              84,
+              84,
+              84,
+              84,
+              84
+            ],
+            "wram_bank": 0
+          }
+        },
+        "pre_terminal_turn": 20,
+        "terminal_turn": 20,
+        "terminal_turn_plan": [
+          {
+            "move": 85,
+            "policy": "supported",
+            "slot": 0
+          },
+          {
+            "move": 85,
+            "policy": "supported",
+            "slot": 0
+          }
+        ]
+      },
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "id": "yellow-cgb-battle-terminal-return-peer",
+      "kind": "boundary",
+      "path": "yellow/cable_club-terminal-peer.state",
+      "provenance": {
+        "boundary": "terminal",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version yellow --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
+        "captured_at_utc": "2026-09-18T04:20:16Z",
+        "commit": "1f2ae95e4a2ebaa5292d78b9ebdf1548e738870d",
+        "elapsed_seconds": 770.768,
+        "evidence_note": "operator-managed external input; the fixture is a driven save-state pair, not a deterministic byte reproduction of an external state",
+        "faints_observed": 11,
+        "producer": "scripts/produce_battle_state_fixtures.py",
+        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "source_state": "external yellow/cable_club-battle.state; SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9; SHA-256 96574cba6b3dbd370adad0a7f5df0d2520dea30af4bffdfbfb9fe1b70e4d3ecc; real-play Cable Club link drive from the admitted battle boundary (no byte-reproduction claim)",
+        "status": "captured",
+        "turns": 20,
+        "variant": "cgb",
+        "verification_method": "real-play Cable Club link drive from the admitted yellow/cable_club-battle.state bytes (SHA-1 78c7d0b32006b11baa9ac9c71efc73b0a8d807b9); the produced pair is reload-validated against the boundary invariants before this producer exits",
+        "version": "yellow"
+      },
+      "repository_distributed": false,
+      "sha1": "5e2ac879818071e36121b2b18d2312597ffd7b2d",
+      "sha256": "5a388124c3c97d24e165ddcf7ea59a59d93266c0b9f326e438ca22c59bd75708",
+      "size_bytes": 200548,
+      "variant": "cgb",
+      "version": "yellow"
     }
   ]
 }

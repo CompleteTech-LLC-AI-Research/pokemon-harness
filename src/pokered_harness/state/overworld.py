@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pokered_harness.state.base import Direction, parse_direction
-from pokered_harness.symbols.loader import MemoryLike, SymbolTable
+from pokered_harness.symbols.loader import MemoryLike, SymbolTable, read_wram_u8
 
 # ``BIT_SCRIPTED_MOVEMENT_STATE`` in
 # ``pret/pokered/constants/ram_constants.asm`` and the matching
@@ -70,5 +70,4 @@ def _read_direction(memory: MemoryLike, symbols: SymbolTable) -> Direction | Non
     base = symbols.get("wSpriteStateData1")
     if base is None:
         return None
-    raw = memory[base.addr + 0x09]
-    return parse_direction(int(raw) & 0xFF)
+    return parse_direction(read_wram_u8(memory, base.addr + 0x09))
