@@ -15,6 +15,72 @@ RUNNER = ROOT / "scripts" / "run_local_ci.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "release-hygiene.yml"
 
 
+def _ruff_invocations(text: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Return each `ruff check` / `ruff format --check` file list in order.
+
+    The runner and the workflow are different languages (bash vs YAML), so the
+    comparison is made over the *file lists* rather than the surrounding text.
+    Comment lines are ignored; a `#` comment inside a shell list is not a path.
+    """
+
+    invocations: list[tuple[str, tuple[str, ...]]] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        kind = ""
+        if stripped.startswith("python -m ruff check"):
+            kind = "check"
+        elif stripped.startswith("python -m ruff format --check"):
+            kind = "format"
+        if not kind:
+            index += 1
+            continue
+        paths: list[str] = []
+        cursor = index + 1
+        while cursor < len(lines):
+            raw = lines[cursor]
+            segment = raw.strip()
+            continues = raw.rstrip().endswith("\\")
+            for token in segment.rstrip("\\").split():
+                if token.endswith(".py") and ":" not in token and not token.startswith("#"):
+                    paths.append(token)
+            if not continues:
+                break
+            cursor += 1
+        invocations.append((kind, tuple(paths)))
+        index = cursor + 1
+    return invocations
+
+
+def test_runner_ruff_file_lists_match_the_workflow_exactly() -> None:
+    """Both lanes must lint the same files, in the same order.
+
+    The workflow and the local runner intentionally duplicate their Ruff
+    boundaries so a local run cannot lint a smaller (or stale) set.  A split
+    that updates only one of them silently weakens the hosted lane, so the two
+    lists are asserted equal here rather than trusted to stay in sync.
+    """
+
+    workflow = _ruff_invocations(WORKFLOW.read_text(encoding="utf-8"))
+    runner = _ruff_invocations(RUNNER.read_text(encoding="utf-8"))
+
+    assert workflow, "workflow declares no Ruff file lists"
+    assert runner, "local runner declares no Ruff file lists"
+    assert [(kind, len(paths)) for kind, paths in workflow] == [
+        (kind, len(paths)) for kind, paths in runner
+    ], "workflow and local runner declare a different number of Ruff invocations"
+    for (workflow_kind, workflow_paths), (runner_kind, runner_paths) in zip(
+        workflow, runner, strict=True
+    ):
+        assert workflow_kind == runner_kind
+        assert workflow_paths == runner_paths, (
+            f"{workflow_kind} list diverges: "
+            f"workflow-only={sorted(set(workflow_paths) - set(runner_paths))} "
+            f"runner-only={sorted(set(runner_paths) - set(workflow_paths))}"
+        )
+
+
 def test_hosted_job_requires_explicit_public_visibility() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert (

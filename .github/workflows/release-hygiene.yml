@@ -172,7 +172,9 @@ jobs:
             tests/test_runtime_packaging_bootstrap.py \
             tests/test_runtime_packaging_build_contract.py \
             tests/test_runtime_packaging_dependency_pins.py \
-            tests/test_runtime_packaging_hygiene.py
+            tests/test_runtime_packaging_hygiene.py \
+            tests/test_timed_remote.py \
+            tests/test_timed_remote_facade.py
           python -m ruff format --check \
             scripts/_timed_battle_probe.py \
             scripts/_timed_battle_probe_reads.py \
@@ -268,7 +270,9 @@ jobs:
             tests/test_runtime_packaging_bootstrap.py \
             tests/test_runtime_packaging_build_contract.py \
             tests/test_runtime_packaging_dependency_pins.py \
-            tests/test_runtime_packaging_hygiene.py
+            tests/test_runtime_packaging_hygiene.py \
+            tests/test_timed_remote.py \
+            tests/test_timed_remote_facade.py
 
       - name: Check runtime and link lane lint
         run: |
