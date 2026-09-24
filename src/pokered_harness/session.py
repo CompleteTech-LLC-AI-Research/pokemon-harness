@@ -691,6 +691,7 @@ class Session(_SessionEventMixin, _SessionTimedMixin, _SessionObservationMixin):
         with self._emulator_access(allow_closed=True):
             return self._tick
 
+    @property
     def events(self) -> EventBus:
         return self._events
 
@@ -955,4 +956,3 @@ class Session(_SessionEventMixin, _SessionTimedMixin, _SessionObservationMixin):
         validate = getattr(backend, "validate_session_operation", None)
         if callable(validate):
             validate(operation)
-
