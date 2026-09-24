@@ -176,21 +176,18 @@ def _git_output(*arguments: str) -> str:
     return result.stdout
 
 
-def _versions_at_recorded_head(head: str, tree: str) -> VersionsConfig | None:
+def _versions_at_recorded_head(head: str, tree: str) -> VersionsConfig:
     """Return the ``VERSIONS.md`` pins declared at a bundle's recorded head.
 
     The committed qualification bundle is a *historical* record, so its identity
     is checked against the state it names rather than the state that is live now.
-    The named head must be a real ancestor of the checked-out ``HEAD`` whose git
-    tree is the recorded tree, and the returned pin comes from the ``VERSIONS.md``
-    that existed at that head.  This is fail-closed: a well-formed but fabricated
-    head, tree, or revision is rejected here, which is exactly what the historical
-    provision has to be unable to launder.
-
-    ``None`` is returned only when this checkout has no history for ``head`` (a
-    shallow clone); the caller then falls back to the live pin so the guard still
-    fails closed instead of erroring on a pruned object.  In a full clone a head
-    that does not resolve is a fabrication and is rejected rather than excused.
+    The named head must resolve to a commit in this checkout that is an ancestor
+    of the checked-out ``HEAD`` and carries exactly the recorded git tree, and the
+    returned pin is read from the ``VERSIONS.md`` blob that existed at that head.
+    This is fail-closed in both directions: a well-formed but fabricated head or
+    tree is rejected, and so is a head whose object is absent here (a pruned
+    shallow checkout), because the guard can then no longer bind the record to the
+    commit it names.  It therefore cannot be used to launder a bad record.
     """
     assert _is_lower_hex(head, 40) and _is_lower_hex(tree, 40), (
         "the recorded head and tree must be lowercase hex object ids"
@@ -201,12 +198,10 @@ def _versions_at_recorded_head(head: str, tree: str) -> VersionsConfig | None:
         check=False,
         text=True,
     )
-    if tree_probe.returncode != 0:
-        if _git_output("rev-parse", "--is-shallow-repository").strip() == "true":
-            return None
-        raise AssertionError(
-            f"the bundle's recorded worktree_head {head} is not a commit in this checkout"
-        )
+    assert tree_probe.returncode == 0, (
+        f"the bundle's recorded worktree_head {head} is not a commit in this checkout; "
+        "the guard requires the record's own head to be resolvable"
+    )
     assert tree_probe.stdout.strip() == tree, (
         f"the bundle's recorded worktree_tree {tree} is not the tree of worktree_head {head}"
     )
@@ -484,8 +479,7 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
     # relaxation cannot launder a bad record.  Current-identity pin enforcement
     # lives in scripts/production_gate.py (the measured runtime revision must equal
     # the manifest pin) and the runtime-packaging tests, not in this guard.
-    recorded = _versions_at_recorded_head(identity["worktree_head"], identity["worktree_tree"])
-    reference = recorded if recorded is not None else pins
+    reference = _versions_at_recorded_head(identity["worktree_head"], identity["worktree_tree"])
     declared_revision = identity["vendored_revision_marker"]
     assert declared_revision == reference.pyboy_revision, (
         "the bundle's vendored revision marker disagrees with the pin VERSIONS.md "
@@ -743,10 +737,10 @@ def test_recorded_head_identity_is_verified_against_history() -> None:
     """The historical-bundle provision is fail-closed on fabricated provenance.
 
     The committed record is validated against the state it names, not the live
-    tree, so this test pins the two properties that keep that relaxation honest:
-    the recorded head/tree pair resolves to the revision the record claims, and a
-    head or tree that is not a real ancestor commit is rejected rather than
-    accepted for its shape alone.
+    tree, so this test pins the properties that keep that relaxation honest: the
+    recorded head/tree pair resolves to the revision the record claims, a head or
+    tree that is not the real pair, and a head whose object is absent here, are
+    each rejected rather than accepted for their shape alone.
     """
     identity = json.loads(
         (QUALIFICATION_BUNDLE / "runtime-identity.json").read_text(encoding="utf-8")
@@ -755,9 +749,8 @@ def test_recorded_head_identity_is_verified_against_history() -> None:
     tree = identity["worktree_tree"]
 
     recorded = _versions_at_recorded_head(head, tree)
-    assert recorded is not None, "this checkout has no history for the bundle's recorded head"
     assert recorded.pyboy_revision == identity["vendored_revision_marker"]
 
-    for bad_head, bad_tree in ((head, "f" * 40), ("f" * 40, tree)):
+    for bad_head, bad_tree in ((head, "f" * 40), ("f" * 40, tree), ("f" * 40, "f" * 40)):
         with pytest.raises(AssertionError):
             _versions_at_recorded_head(bad_head, bad_tree)
