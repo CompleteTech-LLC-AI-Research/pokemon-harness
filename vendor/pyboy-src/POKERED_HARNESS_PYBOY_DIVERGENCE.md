@@ -1,10 +1,11 @@
 # Harness-local divergence record — vendored PyBoy
 
-Status: **DIVERGENCE DRAFTED, NOT RE-PINNED.** This tree is *no longer* byte-identical to the
-upstream base revision `c565df66c3731fad2856169a90f6bbec99925915`. The revision pins still carry
-that upstream string, so the identity is currently **stale by design of this draft** and the
-honest re-pin (decision-doc condition 2) is the lead-owned integration step, not part of this
-split. Do not treat the pin as truthful until that step lands.
+Status: **RE-PINNED — harness-local divergence revision.** This tree is *no longer* byte-identical
+to the upstream base revision `c565df66c3731fad2856169a90f6bbec99925915`. The revision pins now
+carry the harness-local divergence revision `d78fb7253f0d290c15ddb392d05b327aea0faa82`, and the
+upstream base is recorded below rather than reused as the pin. The pin is a content identity, not
+a git object; its exact definition and recomputation are given under "Harness-local divergence
+revision".
 
 Authority: `docs/VENDORED_PYBOY_SPLIT_DECISION.md` (option B, explicit in-fork divergence) and
 the `#122` file-split program (`#138`).
@@ -13,9 +14,43 @@ the `#122` file-split program (`#138`).
 
 - Repository: `Baekalfen/PyBoy`, PyBoy `2.7.0` source snapshot.
 - Base revision: `c565df66c3731fad2856169a90f6bbec99925915`.
-- Pinned by `POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py::__pokered_harness_revision__`,
-  `scripts/bootstrap_pyboy.py::EXPECTED_REVISION` and
-  `tests/_runtime_packaging_support.py::EXPECTED_PYBOY_REVISION`.
+- This is the revision the tree was forked from, **not** the current pin. The current pin is the
+  harness-local divergence revision below.
+
+## Harness-local divergence revision
+
+- Value: `d78fb7253f0d290c15ddb392d05b327aea0faa82`, carried by `POKERED_HARNESS_PYBOY_REVISION`,
+  `pyboy/__init__.py::__pokered_harness_revision__`, `scripts/bootstrap_pyboy.py::EXPECTED_REVISION`
+  and `tests/_runtime_packaging_support.py::EXPECTED_PYBOY_REVISION`, plus the CI assertion in
+  `.github/workflows/release-hygiene.yml` / `scripts/run_local_ci.sh`.
+- Definition (deterministic, verifiable): for every git-tracked file under `vendor/pyboy-src/`,
+  in ascending path order, feed `path + "\0" + sha1(file bytes).hexdigest() + "\n"` into a SHA-1.
+  Two files are handled specially because they embed the pin: `POKERED_HARNESS_PYBOY_REVISION` and
+  this divergence record are excluded, and in `pyboy/__init__.py` every 40-hex run is replaced with
+  `@POKERED_REV@` before hashing. No other file is altered, so the identity covers all vendored
+  source, resources and configuration.
+- Recompute:
+
+  ```python
+  import hashlib, re, subprocess
+  files = sorted(subprocess.check_output(["git", "ls-files", "vendor/pyboy-src"], text=True).split())
+  skip = {"vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION",
+          "vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md"}
+  pat = re.compile(rb"[0-9a-f]{40}")
+  h = hashlib.sha1()
+  for rel in files:
+      if rel in skip:
+          continue
+      body = open(rel, "rb").read()
+      if rel == "vendor/pyboy-src/pyboy/__init__.py":
+          body = pat.sub(b"@POKERED_REV@", body)
+      h.update(rel.encode() + b"\0" + hashlib.sha1(body).hexdigest().encode() + b"\n")
+  print(h.hexdigest())
+  ```
+
+  It prints `d78fb7253f0d290c15ddb392d05b327aea0faa82` for this head. The digest deliberately
+  excludes the marker file and this record, so a later in-fork split changes the revision and
+  requires the pins above to be refreshed together (decision-doc condition 2).
 
 ## Divergence 1 — `#138` split of the Pokemon Pinball plugin
 
@@ -85,10 +120,12 @@ stays intact in its original module.
 
 ## Open items (not done here)
 
-1. **Honest re-pin (condition 2).** `POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py`,
-   `scripts/bootstrap_pyboy.py` and `tests/_runtime_packaging_support.py` still carry the upstream
-   base string while the files differ. `README.md` / `VERSIONS.md` prose is untouched. This is a
-   release-identity change and stays with the lead integrator.
+1. **Honest re-pin (condition 2) — DONE.** `POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py`,
+   `scripts/bootstrap_pyboy.py`, `tests/_runtime_packaging_support.py`, the CI/local-runner
+   assertions, and the current-identity prose in `README.md` / `VERSIONS.md` / `agents.md` /
+   `docs/RELEASE_CHECKLIST.md` / `docs/LINUX_RESUME_PROMPT.md` all carry the harness-local
+   divergence revision. Historical gate/evidence records that name the upstream base are left
+   untouched on purpose — they record what ran under the pre-divergence identity.
 2. **Native ABI re-verification (condition 3).** A fresh `bootstrap_pyboy.py --mode cython --check`
    plus the native unit lane must pass on this split tree. Both modules Cython-compile cleanly in
    isolation (see the review brief), but the full native rebuild has not been re-run for this
