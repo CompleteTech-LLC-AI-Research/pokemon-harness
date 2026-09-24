@@ -108,7 +108,7 @@ reproducibility requirement is now met (see the second bullet); conditions 2 and
     `setup.py` `build_ext` path — which passes `nthreads=cpu_count()` into
     `Cython.Build.cythonize` — dies inside `multiprocessing.Pool` with
     `OSError: [Errno 30] Read-only file system`. Forcing `cpu_count()` to 0 runs the Cython stage
-    serially and emits the 55 generated `.c` files, but the subsequent compile still fails on the
+    serially and emits the 58 generated `.c` files, but the subsequent compile still fails on the
     missing `Python.h` above.
   Condition 3 (native/Cython ABI verified on the split tree) therefore cannot be exercised, and
   source-only success is explicitly insufficient.
