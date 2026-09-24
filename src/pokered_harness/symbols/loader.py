@@ -40,7 +40,106 @@ class MemoryLike(Protocol):
     dict/bytearray backing store.
     """
 
-    def __getitem__(self, key: int | slice) -> int | Iterable[int]: ...
+    def __getitem__(self, key: int | slice | tuple[int, int]) -> int | Iterable[int]: ...
+
+
+# ``0xC000``-``0xCFFF`` is fixed WRAM bank 0, but ``0xD000``-``0xDFFF`` is
+# remapped by the CGB WRAM bank register (``SVBK``, ``0xFF70``): an
+# unqualified ``memory[addr]`` read follows whichever bank the ROM has
+# currently mapped there.  The linker places the battle WRAM section holding
+# ``wIsInBattle``, ``wBattleMonHP``, ``wPartyCount``, ``wPartyMons`` and the
+# battle mon's move/PP block in the ``$D000``-``$DFFF`` half of WRAM bank 1
+# (``ram/wram.asm:198`` "WRAM" WRAM0, ``:1720`` "Party Data" WRAM0), and the
+# color Red/Blue build banks its own scratch region into that window while a
+# link battle is in the faint/replacement exchange.  Reading those addresses
+# through the mapped window therefore returns another bank's bytes at exactly
+# the moment the battle state matters most.
+WRAM_SWITCHABLE_START = 0xD000
+WRAM_SWITCHABLE_END = 0xE000
+WRAM_BATTLE_BANK = 1
+
+# A backing store either exposes the bank dimension (PyBoy's emulator memory,
+# which accepts ``memory[bank, addr]``) or is a flat address space (the plain
+# dict/bytearray stores the loader documents and tests against).  Only these
+# failures mean "this store cannot answer a bank-qualified read"; anything else
+# is a real error and must propagate rather than silently fall back to a read
+# that would return another bank's bytes.
+#
+#   * ``TypeError``   -- ``bytearray``/``bytes``/``list`` reject the tuple key.
+#   * ``KeyError``    -- a sparse ``dict`` has no ``(bank, addr)`` entry.
+#   * ``PyBoyInvalidInputException`` -- PyBoy on DMG ("Selecting bank of WRAM
+#     is only supported for CGB mode"); a DMG has no bank register, so the
+#     ordinary mapped read is the correct one.
+#
+# The set is deliberately narrow: a store that raises anything else (for
+# example a real out-of-bounds bank) must propagate instead of silently
+# falling back to a read that could return another bank's bytes.
+_NO_BANK_DIMENSION_BASE: tuple[type[BaseException], ...] = (
+    TypeError,
+    KeyError,
+)
+
+_no_bank_dimension_cache: tuple[type[BaseException], ...] | None = None
+
+
+def _no_bank_dimension_exceptions() -> tuple[type[BaseException], ...]:
+    """Exceptions meaning "this backing store has no bank dimension".
+
+    Resolved once, lazily: PyBoy is an optional dependency of this module, so
+    it is imported only when a bank-qualified read is actually attempted, and
+    its DMG refusal (``Selecting bank of WRAM is only supported for CGB
+    mode``) joins the set when available.
+    """
+    global _no_bank_dimension_cache
+    if _no_bank_dimension_cache is None:
+        try:
+            from pyboy.utils import PyBoyInvalidInputException
+        except ImportError:  # pragma: no cover - PyBoy absent in asset-free checkouts
+            extra: tuple[type[BaseException], ...] = ()
+        else:
+            extra = (PyBoyInvalidInputException,)
+        _no_bank_dimension_cache = (*_NO_BANK_DIMENSION_BASE, *extra)
+    return _no_bank_dimension_cache
+
+
+def _read_banked(memory: MemoryLike, address: int) -> int | None:
+    """Read ``address`` from the battle WRAM bank, or ``None`` if unbanked.
+
+    ``None`` means the backing store has no bank dimension at all, so the
+    caller must use the ordinary mapped read instead of treating the absence
+    as a failure.
+    """
+    try:
+        return int(memory[WRAM_BATTLE_BANK, address]) & 0xFF  # type: ignore[index]
+    except _no_bank_dimension_exceptions():
+        return None
+
+
+def read_wram_u8(memory: MemoryLike, address: int) -> int:
+    """One byte of the ROM's own battle WRAM, independent of the ``SVBK`` window.
+
+    ``0xD000``-``0xDFFF`` is resolved from WRAM bank 1, where the linker
+    assigns the battle WRAM section, so the read survives the ROM banking
+    another region into that window.  The fixed ``0xC000``-``0xCFFF`` range has
+    no bank register and keeps its ordinary mapped read.
+
+    Flat backing stores with no bank dimension (a plain ``dict`` or
+    ``bytearray``, as the module documents) keep working: when the store
+    cannot answer a bank-qualified read, the ordinary mapped read is used,
+    which is the same byte on a single-bank store.
+    """
+    if WRAM_SWITCHABLE_START <= address < WRAM_SWITCHABLE_END:
+        banked = _read_banked(memory, address)
+        if banked is not None:
+            return banked
+    return int(memory[address]) & 0xFF  # type: ignore[arg-type]
+
+
+def read_wram_bytes(memory: MemoryLike, address: int, length: int) -> bytes:
+    """``length`` bytes of the ROM's own battle WRAM (see :func:`read_wram_u8`)."""
+    if length <= 0:
+        raise ValueError(f"length must be positive, got {length}")
+    return bytes(read_wram_u8(memory, address + index) for index in range(length))
 
 
 _SYM_LINE = re.compile(
@@ -106,15 +205,17 @@ class SymbolTable:
     # --- typed reads (WRAM/HRAM CPU-space) -------------------------------
 
     def read_u8(self, memory: MemoryLike, name: str) -> int:
-        value = memory[self.addr_of(name)]
-        return int(value) & 0xFF
+        # ``0xD000``-``0xDFFF`` is remapped by ``SVBK``, and the ROM banks its
+        # own scratch region into that window during a link battle, so a
+        # symbol read must name the bank the linker assigned instead of
+        # following whatever the ROM currently has mapped.  See
+        # :func:`read_wram_u8`.
+        return read_wram_u8(memory, self.addr_of(name))
 
     def read_bytes(self, memory: MemoryLike, name: str, length: int) -> bytes:
         if length <= 0:
             raise ValueError(f"length must be positive, got {length}")
-        addr = self.addr_of(name)
-        raw = memory[addr : addr + length]
-        return bytes(raw)  # type: ignore[arg-type]
+        return read_wram_bytes(memory, self.addr_of(name), length)
 
     def read_u16_le(self, memory: MemoryLike, name: str) -> int:
         lo, hi = self.read_bytes(memory, name, 2)

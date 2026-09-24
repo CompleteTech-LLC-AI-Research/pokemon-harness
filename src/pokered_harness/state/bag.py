@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pokered_harness.symbols.loader import MemoryLike, SymbolTable
+from pokered_harness.symbols.loader import MemoryLike, SymbolTable, read_wram_u8
 
 MAX_BAG_STACKS = 20
 MAX_ITEM_QUANTITY = 99
@@ -140,7 +140,7 @@ def parse_bag(memory: MemoryLike, symbols: SymbolTable) -> Bag:
 def _find_terminator(memory: MemoryLike, base: int) -> int | None:
     """Return the first sentinel slot without reading past bag storage."""
     for index in range(MAX_BAG_STACKS + 1):
-        item_id = int(memory[base + index * _ITEM_STACK_SIZE]) & 0xFF
+        item_id = read_wram_u8(memory, base + index * _ITEM_STACK_SIZE)
         if item_id == BAG_TERMINATOR:
             return index
     return None
@@ -153,8 +153,8 @@ def _read_stacks(
 ) -> tuple[BagStack, ...]:
     return tuple(
         BagStack(
-            item_id=int(memory[base + i * _ITEM_STACK_SIZE]) & 0xFF,
-            quantity=int(memory[base + i * _ITEM_STACK_SIZE + 1]) & 0xFF,
+            item_id=read_wram_u8(memory, base + i * _ITEM_STACK_SIZE),
+            quantity=read_wram_u8(memory, base + i * _ITEM_STACK_SIZE + 1),
         )
         for i in range(count)
     )

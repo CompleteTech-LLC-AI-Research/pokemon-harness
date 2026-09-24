@@ -384,9 +384,10 @@ def _dispatch_link_tool(
                 )
                 # PyBoyLinkSession drives the underlying emulators
                 # directly; keep Session-level bookkeeping aligned with
-                # the same frame count.
-                session.reset_tick(session.current_tick() + count)
-                peer.reset_tick(peer.current_tick() + count)
+                # the same frame count.  This is ordinary advancement, so
+                # it must not invalidate battle/menu observations.
+                session._advance_tick(count)
+                peer._advance_tick(count)
                 return {
                     "primary_tick": session.current_tick(),
                     "peer_tick": peer.current_tick(),

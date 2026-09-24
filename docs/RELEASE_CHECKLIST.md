@@ -422,9 +422,11 @@ release readiness.
 
 ## Fixture provenance and generation
 
-- [x] `release-evidence/fixture-manifest.json` records thirteen external state
+- [x] `release-evidence/fixture-manifest.json` records thirty-one external state
   entries with sizes, SHA-1/SHA-256 values, expected ROM/SYM pins, source-state
-  records, runtime identity, and command templates.
+  records, runtime identity, and command templates: ten ordinary/battle rows
+  plus eighteen `captured` boundary rows driven from the admitted battle
+  fixtures by `scripts/produce_battle_state_fixtures.py`.
 - [ ] Deterministic reproduction of the four vanilla-derived fixture bytes is
   established. Static validation confirms the stock ROM/SYM
   pins and existing vanilla fixture bytes, but vanilla ordinary capture
@@ -434,15 +436,19 @@ release readiness.
 - [x] `scripts/produce_cable_club_fixture.py` validates pins and has bounded
   defaults of 180 seconds and 64 movement steps.
 - [x] `scripts/prepare_battle_cable_club_fixtures.py` is tracked and produces
-  immutable derived battle fixtures and six-member `slots` fixtures whose party
-  records are pairwise distinct; acceptance does not prepare party state in
+  entries: the immutable derived battle fixtures, the six-member `slots`
+  fixtures whose party records are pairwise distinct, and the eighteen
+  captured boundary fixture rows; acceptance does not prepare party state in
   emulator RAM.
 - [x] Provenance is verified for nine canonical fixture entries.
+- [x] Provenance is captured for the eighteen boundary fixture entries: each
+  row names the admitted battle fixture it was driven from by SHA-1 and
+  carries its runtime identity, capture timestamp, and verification method.
 - [ ] Provenance for the four vanilla-derived entries is verified. Their
   vanilla source states are not proven to match the vanilla ROM; replay against
   the retained source failed at the 64-step bound, and the manifest's ordinary
   producer revision is historical (`25e231c`), so those rows remain `PARTIAL`.
-- [ ] The operator validates all ten manifest entries with
+- [ ] The operator validates all 28 manifest entries with
   `python scripts/validate_fixture_manifest.py --fixture-root ...` and keeps
   the external fixture root available to the release runner.
 - [ ] A retained evidence bundle includes the exact source-state hashes,

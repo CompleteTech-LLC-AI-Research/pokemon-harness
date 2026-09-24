@@ -174,6 +174,9 @@ DEFAULT_HOOKS: tuple[tuple[str, str], ...] = (
 _URI_GAME_STATE = "pokered://game-state"
 
 
+_URI_STATE_EPOCH = "pokered://state-epoch"
+
+
 _URI_EVENT_LOG = "pokered://events"
 
 

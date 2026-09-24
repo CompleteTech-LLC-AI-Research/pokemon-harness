@@ -237,7 +237,25 @@ async def _prelink(client, asset):
     drained = await client.tool("step", {"count": 2})
     assert set(drained) == {"tick"} and type(drained["tick"]) is int, drained
     assert await client.tool("load_state", saved) == {"ok": True}
-    assert await client.request("resources/read", {"uri": "pokered://game-state"}) == before
+    restored = await client.request("resources/read", {"uri": "pokered://game-state"})
+    # ``pokered://game-state`` embeds the session epoch.  load_state restores
+    # the emulated board exactly but advances the monotonic load generation
+    # (the external tick is deliberately not rewound), so compare the state
+    # without the epoch and assert the generation delta instead of full
+    # byte equality.
+    before_body = json.loads(before["contents"][0]["text"])
+    restored_body = json.loads(restored["contents"][0]["text"])
+
+    def without_epoch(body):
+        return {key: value for key, value in body.items() if key != "epoch"}
+
+    assert without_epoch(restored_body) == without_epoch(before_body), (
+        restored_body,
+        before_body,
+    )
+    assert (
+        restored_body["epoch"]["load_generation"] == before_body["epoch"]["load_generation"] + 1
+    ), (restored_body["epoch"], before_body["epoch"])
     assert await client.tool("save_state") == saved
 
 

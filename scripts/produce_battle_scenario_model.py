@@ -37,13 +37,21 @@ _CAPTURE_PRODUCER = "scripts/produce_battle_scenario.py"
 # ``CableClubNPC``.
 _LINK_RECEPTION_TILE = (11, 3)
 # ``wLinkState`` values the producer is willing to assert, taken from the
-# pinned pret sources (``LINK_STATE_NONE EQU $00 ; not using link``).  Only
-# states with a verified meaning are listed; an unlisted label is refused
-# rather than skipped.
-_LINK_STATE_CODES = {"disconnected": 0}
+# pinned pret sources (``constants/serial_constants.asm``): ``LINK_STATE_NONE
+# EQU $00 ; not using link``, ``LINK_STATE_IN_CABLE_CLUB`` is 1, and
+# ``LINK_STATE_BATTLING`` is 4.  Only states with a verified meaning are
+# listed; an unlisted label is refused rather than skipped.
+_LINK_STATE_CODES = {"disconnected": 0, "in_cable_club": 1, "battling": 4}
 # Provenance statuses the catalog may declare.  Anything else is refused rather
 # than copied into a record a consumer might read as an admission.
-_PROVENANCE_STATUSES = ("verified", "partial", "derived", "unknown")
+# ``captured`` is the strict status for a real-play drive whose bytes were
+# recorded from an admitted input with a full provenance chain; it carries the
+# same required fields as ``verified`` plus the input binding of ``derived``.
+_PROVENANCE_STATUSES = ("verified", "captured", "partial", "derived", "unknown")
+# Statuses backed only by a complete provenance chain; the catalog screening
+# refuses a ``captured`` row that omits its admitted-input binding rather than
+# admitting an unbound capture.
+_STRICT_PROVENANCE_STATUSES = ("verified", "captured")
 # How a declared fixture producer is located.  ``repository`` names a tracked
 # script whose bytes can be re-read here; ``external`` names an operator- or
 # out-of-tree producer whose identity can only be pinned by digest; ``derived``

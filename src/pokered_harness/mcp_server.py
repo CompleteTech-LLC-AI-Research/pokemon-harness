@@ -103,6 +103,7 @@ from pokered_harness.mcp_server_model import (
     _URI_PEER_EVENTS,
     _URI_PEER_GAME_STATE,
     _URI_PEER_PARTY_RECORDS,
+    _URI_STATE_EPOCH,
     DEFAULT_HOOKS,
     LinkState,
     McpHarnessError,
@@ -152,6 +153,8 @@ from pokered_harness.mcp_server_remote_contract import (
     _wait_for_remote_hello,
 )
 from pokered_harness.mcp_server_resources import (
+    _epoch_payload,
+    _game_state_payload,
     _resource_specs,
     read_resource,
 )
@@ -204,8 +207,10 @@ from pokered_harness.session import (
     SessionCloseError,
     SessionCloseTimeout,
     SessionConfigurationError,
+    SessionEpoch,
     SessionError,
     SessionLockTimeout,
+    StateSnapshot,
     SymbolHashMismatch,
     SymbolNotFoundError,
     VersionMismatch,

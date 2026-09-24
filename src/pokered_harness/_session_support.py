@@ -10,9 +10,12 @@ lifecycle records, and the module-level helpers are re-exported from
 from __future__ import annotations
 
 import hashlib
+import itertools
 import math
+import os
 import re
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,6 +25,7 @@ from typing import TYPE_CHECKING
 from pokered_harness.events.hooks import GameEvent
 from pokered_harness.ownership import owner_group
 from pokered_harness.pyboy_protocol import PyBoyLike
+from pokered_harness.state import GameState
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
     from pokered_harness.session import Session
@@ -260,3 +264,134 @@ def _default_pyboy_factory(
         cgb=cgb,
         sound_emulated=sound_emulated,
     )
+
+# Monotonic identity for each Session.  A replacement session (a new Session
+# object over a fresh emulator) must not be able to reuse the tick/load
+# generation pair of the session it replaced, so the identity is included in
+# every epoch snapshot.
+#
+# A bare per-process counter is not enough: it restarts at 1 in every new
+# process, so two fresh processes would report the same ``session_id`` for
+# their first session and a client comparing epochs across a restart could
+# accept a stale snapshot.
+#
+# The id is therefore a string naming the process lifetime and the in-process
+# session index:
+#
+#     <pid>-<process-start-ns>-<index>
+#
+# ``pid`` separates concurrent processes, and the system-wide monotonic clock
+# separates sequential process lifetimes that reuse a pid.  A string (rather
+# than a packed integer) keeps both components exact: a 53-bit float-safe
+# integer cannot hold a nanosecond timestamp together with a pid and a
+# counter without mangling one of them, and JSON transports numbers through
+# IEEE-754 doubles.
+_PROCESS_START_NS = time.monotonic_ns()
+_PROCESS_LIFETIME_ID = f"{os.getpid()}-{_PROCESS_START_NS}"
+_SESSION_ID_SEQUENCE = itertools.count(1)
+_SESSION_ID_LOCK = threading.Lock()
+
+
+def _next_session_id() -> str:
+    with _SESSION_ID_LOCK:
+        return f"{_PROCESS_LIFETIME_ID}-{next(_SESSION_ID_SEQUENCE)}"
+
+
+# ROM labels whose execution brackets the battle command/move menu.  There is
+# no RAM byte that reports "menu open": ``wMoveMenuType`` is a mode selector
+# (0 regular, 1 mimic, 2 relearn/PP) written before every ``MoveSelectionMenu``
+# call and left set after the menu closes.  The session instead observes the
+# control flow.  Entry into ``SelectMenuItem`` (the move-menu input loop) or
+# ``DisplayBattleMenu.handleBattleMenuInput`` (the FIGHT/ITEM/POKéMON/RUN
+# input setup) proves the menu was drawn and is awaiting input; entry into the
+# per-turn ``MainInBattleLoop`` or its post-selection continuation
+# ``MainInBattleLoop.selectEnemyMove`` proves the menu closed.  Observation is
+# only available when every one of these labels exists in the loaded ``.sym``;
+# otherwise the session reports no menu evidence and ``COMMAND_SELECTION`` is
+# never derived (fail closed).
+_BATTLE_MENU_OPEN_SYMBOLS = (
+    "SelectMenuItem",
+    "DisplayBattleMenu.handleBattleMenuInput",
+)
+# The routine every battle end funnels through (``core.asm``:
+# ``_InitBattleCommon`` calls ``callfar EndOfBattle``).  Its entry is the last
+# instant the outcome bytes are still meaningful, so the session samples them
+# there rather than trusting a client-timed read.
+_BATTLE_END_SYMBOL = "EndOfBattle"
+_BATTLE_MENU_CLOSE_SYMBOLS = (
+    "MainInBattleLoop",
+    "MainInBattleLoop.selectEnemyMove",
+    # Both the regular move-selection return (core.asm: ``call MoveSelectionMenu
+    # / call LoadScreenTilesFromBuffer1``) and the Mimic submenu return
+    # (effects.asm: ``call MoveSelectionMenu / call LoadScreenTilesFromBuffer1``)
+    # redraw the screen immediately after the menu closes.  ``MainInBattleLoop``
+    # alone does not fire on Mimic's return into animation/result text, so this
+    # closes the observation on the shared post-menu redraw path.
+    "LoadScreenTilesFromBuffer1",
+)
+# Move execution brackets, used to observe ``ACTION_RESOLUTION`` for an
+# ordinary FIGHT turn.  ``wActionResultOrTookBattleTurn`` cannot report it:
+# ``ExecutePlayerMoveDone`` clears the byte as it returns, so a client polling
+# at any interval only ever sees the flag set for the item/switch/run turns
+# that never execute a move.  Both combatants' routines are bracketed because
+# either side can be resolving when a client reads.
+#
+# ``Execute*MoveDone`` is not the only exit.  A status or residual move jumps
+# straight to ``JumpMoveEffect`` (``engine/battle/effects.asm``), whose handler
+# returns to the caller of ``Execute*Move``, and the damage paths return
+# directly once the target's HP reaches zero (``core.asm``: the player routine
+# returns with ``ret z`` beside the faint check).  Those returns bypass both
+# ``*Done`` labels, so the bracket would stay open while the ROM moved on,
+# turning the next command or replacement menu into a spurious contradiction.
+# The exits therefore also include the post-move continuations that every one
+# of those returns lands on: ``HandlePoisonBurnLeechSeed`` runs immediately
+# after either move routine returns, ``HandlePlayerMonFainted`` /
+# ``HandleEnemyMonFainted`` are the faint continuations (they run *before*
+# ``ChooseNextMon`` opens the replacement menu), ``MainInBattleLoop`` is the
+# per-turn entry every finished turn comes back to, and ``EndOfBattle`` is the
+# escape/run tail that returns out of the loop without re-entering it.
+_BATTLE_RESOLUTION_OPEN_SYMBOLS = (
+    "ExecutePlayerMove",
+    "ExecuteEnemyMove",
+)
+_BATTLE_RESOLUTION_CLOSE_SYMBOLS = (
+    "ExecutePlayerMoveDone",
+    "ExecuteEnemyMoveDone",
+    "HandlePoisonBurnLeechSeed",
+    "HandlePlayerMonFainted",
+    "HandleEnemyMonFainted",
+    "MainInBattleLoop",
+    "EndOfBattle",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionEpoch:
+    """Identity and clock counters captured atomically with a snapshot.
+
+    ``tick`` advances with :meth:`Session.step`; ``load_generation`` advances
+    on every successful :meth:`Session.load_state` (the tick is restored by a
+    load, so the pair alone can repeat); ``reset_generation`` advances on
+    every :meth:`Session.reset_tick` (which can intentionally rewind the
+    tick); ``session_id`` distinguishes a replacement :class:`Session` from
+    the one it replaced, including across process restarts (it names the
+    process lifetime and the in-process session index).
+    """
+
+    tick: int
+    load_generation: int
+    reset_generation: int
+    session_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class StateSnapshot:
+    """A game-state observation paired with its :class:`SessionEpoch`.
+
+    Both fields are read under one owner-locked emulator scope, so the epoch
+    always describes the same instant as ``state``; a concurrent step or load
+    cannot tear the two apart.
+    """
+
+    state: GameState
+    epoch: SessionEpoch

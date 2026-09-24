@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import merge_battle_boundary_scenarios as boundary_merge
 from scripts import produce_battle_scenario as producer
 from scripts import validate_battle_scenarios as validator
 from tests._battle_scenario_fixtures_support import (
@@ -18,11 +19,23 @@ from tests._battle_scenario_fixtures_support import (
 
 
 def test_all_shipped_scenarios_pass_the_new_screening() -> None:
-    """The stricter screening must not narrow the ten declared scenarios."""
+    """The stricter screening must not narrow any declared scenario.
+
+    Every shipped declaration must pass the metadata screening.  The bounded
+    single-console drive's precondition screening applies only to the rows that
+    drive owns: a ``link_battle_boundary`` row is captured by the linked
+    producer and declares real prior actions, and ``capture_battle_scenario``
+    refuses its boundary before the precondition screening is ever reached.  So
+    the row must be outside the bounded boundary, not fail the bounded screen.
+    """
     catalog = _load_catalog()
     for scenario in catalog["scenarios"]:
         scenario_id = scenario["scenario_id"]
         producer.validate_scenario_metadata(scenario, scenario_id)
+        if scenario["battle"]["type"] == boundary_merge._BOUNDARY_BATTLE_TYPE:
+            boundary = scenario["capture_boundary"]
+            assert (boundary["stage"], boundary["when"]) not in (producer._SUPPORTED_BOUNDARY,)
+            continue
         producer._assert_supported_conditions(scenario, scenario_id)
 
 

@@ -17,7 +17,10 @@ from tests._battle_coverage_support import (
 
 def test_catalog_shape_still_validates_and_declares_nineteen_pairing_cases(catalog: dict) -> None:
     scenarios = validator._validate_schema(catalog, _manifest())
-    assert len(scenarios) == 10
+    # Every admitted manifest row is declared, including the captured boundary
+    # rows; the one-turn pairing dimension still resolves its canonical
+    # settled-battle scenario per version.
+    assert len(scenarios) == 28
     coverage.validate_catalog(catalog)
 
     cases = coverage.one_turn_pairing_cases(catalog)

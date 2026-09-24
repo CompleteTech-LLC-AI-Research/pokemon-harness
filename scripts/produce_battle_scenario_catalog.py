@@ -27,6 +27,7 @@ from scripts.produce_battle_scenario_model import (
     _PROVENANCE_STATUSES,
     _RUNTIME_MEASUREMENTS,
     _RUNTIME_MODES,
+    _STRICT_PROVENANCE_STATUSES,
     _UNMEASURED_RUNTIME,
     ScenarioBlocked,
     ScenarioRefusal,
@@ -191,6 +192,45 @@ def validate_scenario_metadata(scenario: dict[str, Any], scenario_id: str) -> No
                 f"got {declared_size!r}"
             )
         _positive_int(declared_size, f"scenario {scenario_id!r} fixture.size_bytes")
+
+    # ``verified`` and ``captured`` are the strict statuses: each claims a real
+    # recorded run, so it must name the runtime it was produced on, when it was
+    # recorded, and how it was verified.  The public catalog validator refuses a
+    # strict row that omits any of these, so the two screens must agree here.
+    if provenance["status"] in _STRICT_PROVENANCE_STATUSES:
+        for key in ("runtime_identity", "captured_at_utc", "verification_method"):
+            value = provenance.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ScenarioRefusal(
+                    f"scenario {scenario_id!r}.provenance.{key} is required for "
+                    f"{provenance['status']} provenance"
+                )
+
+    # A ``captured`` row claims a real-play drive from a specific admitted input,
+    # so it must name that input by id, pin it by SHA-1, and describe the input
+    # sequence.  The public validator cross-references the pin against the
+    # manifest; here the binding itself must at least be complete.
+    if provenance["status"] == "captured":
+        source_fixture_id = provenance.get("source_fixture_id")
+        if not isinstance(source_fixture_id, str) or not source_fixture_id.strip():
+            raise ScenarioRefusal(
+                f"scenario {scenario_id!r}.provenance.source_fixture_id is required for "
+                "captured provenance"
+            )
+        if not _is_digest(provenance.get("input_fixture_sha1"), 40):
+            raise ScenarioRefusal(
+                f"scenario {scenario_id!r}.provenance.input_fixture_sha1 is required for "
+                "captured provenance"
+            )
+        input_sequence = provenance.get("input_sequence")
+        if not (
+            (isinstance(input_sequence, str) and input_sequence.strip())
+            or (isinstance(input_sequence, list) and input_sequence)
+        ):
+            raise ScenarioRefusal(
+                f"scenario {scenario_id!r}.provenance.input_sequence is required for "
+                "captured provenance"
+            )
 
     boundary = scenario.get("capture_boundary")
     if not isinstance(boundary, dict):
