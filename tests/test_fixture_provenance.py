@@ -284,6 +284,8 @@ def test_slots_provenance_binds_each_six_member_row_to_its_ordinary_input() -> N
         assert f"--variants {recipe_key}" in provenance["capture_command_template"]
         assert "pairwise distinct" in provenance["verification_method"]
         assert slots["sha1"] != battle["sha1"]
+
+
 def test_boundary_provenance_binds_each_captured_pair_to_admitted_battle_input() -> None:
     document = _load_manifest()
     by_id = {fixture["id"]: fixture for fixture in document["fixtures"]}
