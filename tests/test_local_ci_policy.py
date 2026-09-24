@@ -8,6 +8,7 @@ bounded production gate, which is outside the unit-test tier.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,6 +180,46 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         assert fragment in workflow
         assert fragment in runner
     assert '"pokered-harness.exe" if os.name == "nt"' in runner
+
+
+def _ruff_lane_paths(source: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Return each ``ruff`` invocation as ``(mode, explicit file paths)``.
+
+    The workflow and the local runner must lint the *same* explicit file set;
+    a path present in only one of them silently shrinks one lane.  Parsing the
+    backslash-continued commands keeps the unit tier free of a YAML dependency.
+    """
+
+    lanes: list[tuple[str, tuple[str, ...]]] = []
+    for match in re.finditer(r"python -m ruff (check|format --check)", source):
+        lines = source[match.start() :].splitlines()
+        block = [lines[0]]
+        for line in lines[1:]:
+            block.append(line)
+            if not line.rstrip().endswith("\\"):
+                break
+        paths = tuple(
+            token
+            for token in (line.strip().rstrip("\\").strip() for line in block[1:])
+            if token.endswith((".py", ".sh", ".yml"))
+        )
+        lanes.append((match.group(1), paths))
+    return lanes
+
+
+def test_local_runner_lints_exactly_the_workflow_file_set() -> None:
+    workflow_lanes = _ruff_lane_paths(WORKFLOW.read_text(encoding="utf-8"))
+    runner_lanes = _ruff_lane_paths(RUNNER.read_text(encoding="utf-8"))
+
+    assert [mode for mode, _ in workflow_lanes] == [mode for mode, _ in runner_lanes]
+    assert workflow_lanes, "no ruff lanes were discovered"
+    for (mode, workflow_paths), (_, runner_paths) in zip(workflow_lanes, runner_lanes):
+        assert set(workflow_paths) == set(runner_paths), (
+            f"ruff {mode} lanes disagree: "
+            f"only in workflow: {sorted(set(workflow_paths) - set(runner_paths))}; "
+            f"only in local runner: {sorted(set(runner_paths) - set(workflow_paths))}"
+        )
+        assert len(workflow_paths) == len(runner_paths), f"ruff {mode} lane lists a duplicated path"
 
 
 def test_local_runner_retains_external_evidence() -> None:
