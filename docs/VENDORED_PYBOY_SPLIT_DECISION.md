@@ -1,8 +1,8 @@
 # Decision: handling the eight vendored PyBoy split leaves (#123, #133, #138, #142, #150, #153, #155, #161)
 
-Status: **DECIDED — explicit in-fork divergence is the target handling; the leaves remain OPEN and
-BLOCKED in this environment.** No leaf is completed by this document, and no leaf may be closed
-merely because its original file disappears (#122 requirement).
+Status: **DECIDED — explicit in-fork divergence; execution has started (see the "Update —
+2026-09-24" sections below, including the re-pin).** No leaf is completed by this document, and no
+leaf may be closed merely because its original file disappears (#122 requirement).
 
 Scope: the vendored sub-issue group listed under "Vendored pyboy (decision pending)" in #122.
 Owner of this decision: the lead integrator (shared integration / release-identity file owner).
@@ -12,8 +12,14 @@ Owner of this decision: the lead integrator (shared integration / release-identi
 `vendor/pyboy-src/` is a pinned third-party PyBoy `2.7.0` source snapshot, not harness source and
 not an upstream branch. Its identity is recorded twice and asserted by the repository:
 
-- `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` = `c565df66c3731fad2856169a90f6bbec99925915`
+- `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` = the current pin (see the Update section: it
+  is now the harness-local divergence revision, not the upstream base)
 - `vendor/pyboy-src/pyboy/__init__.py` `__pokered_harness_revision__` = the same value
+
+The **upstream base** this tree was forked from remains
+`c565df66c3731fad2856169a90f6bbec99925915`, recorded in
+`vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`. It stopped being the pin once the tree
+diverged.
 
 That identity is load-bearing:
 
@@ -200,3 +206,35 @@ toolchain now shown buildable here, the group reduces to a single external prere
 pilot leaf `#138` can be split, rebuilt natively, its lane run, and independently reviewed. The
 eight leaves stay **OPEN**, `#122` stays **OPEN**, release status stays **PARTIAL**; this update
 fixes the record and advances no leaf.
+
+## Update — 2026-09-24 (b): the #138 pilot split and the honest re-pin have landed
+
+The pilot in the "Unblocking" section was executed. This section supersedes the parts of the
+earlier record that still expected the pin to read `c565df66…`.
+
+- **`#138` split (PR #228).** `pyboy/plugins/game_wrapper_pokemon_pinball.py` (1552) is now a
+  791-line facade plus `game_wrapper_pokemon_pinball_data.py` (875), both under the bound. The
+  `cdef class` could not move: `game_wrapper_pokemon_pinball.pxd` declares it and
+  `plugins/manager.pxd` cimports it as a `cdef public` extension type. So the "no Cython `.pxd`
+  sibling" claim in "Unblocking" is wrong, and only module-level data was relocated. The split
+  also exposed a native-only defect that source mode hid (`from … import *` leaking `Enum`, which
+  shadows the C type `Enum` in the facade's translation unit); it is fixed with an explicit
+  `__all__`.
+- **Honest re-pin (condition 2) executed.** `POKERED_HARNESS_PYBOY_REVISION`,
+  `pyboy/__init__.py::__pokered_harness_revision__`, `scripts/bootstrap_pyboy.py::EXPECTED_REVISION`,
+  `tests/_runtime_packaging_support.py::EXPECTED_PYBOY_REVISION`, the CI assertions in
+  `.github/workflows/release-hygiene.yml` / `scripts/run_local_ci.sh`, and the current-identity
+  prose in `README.md` / `VERSIONS.md` / `agents.md` / `docs/RELEASE_CHECKLIST.md` /
+  `docs/LINUX_RESUME_PROMPT.md` now carry the harness-local divergence revision
+  `d78fb7253f0d290c15ddb392d05b327aea0faa82`. The upstream base
+  `c565df66c3731fad2856169a90f6bbec99925915` is recorded, not reused as the pin. The revision is a
+  content identity of the vendored source manifest (definition and a recomputation snippet are in
+  `vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`), kept in the SHA-1 shape the code
+  enforces (`src/pokered_harness/config.py`, `scripts/production_gate.py`,
+  `src/pokered_harness/_session_support.py::_normalise_sha1`). Historical gate and
+  `release-evidence/` records that name the upstream base are left untouched — they describe runs
+  under the pre-divergence identity.
+- **Still open for `#138`.** Condition 3's `--check` half must be re-run on the split head because
+  the earlier wheel (the first Update) embeds the old pin; its native-unit-lane half still needs
+  the quiet, non-root, CPU-allocated runner. Condition 5 (independent review of the exact head) is
+  pending. `#138` and `#122` therefore stay **OPEN**, and release status stays **PARTIAL**.

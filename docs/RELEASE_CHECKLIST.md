@@ -284,8 +284,9 @@ release readiness.
 - [x] Python requirement is `>=3.11`; NumPy is pinned separately for Python
   3.11 and 3.12+. Historical Python 3.12 gate results do not establish a
   complete Python 3.11 release gate.
-- [x] The distribution bundles source PyBoy `2.7.0` at fork revision
-  `c565df66c3731fad2856169a90f6bbec99925915`.
+- [x] The distribution bundles source PyBoy `2.7.0` at the harness-local
+  divergence revision `d78fb7253f0d290c15ddb392d05b327aea0faa82` (upstream base
+  `c565df66c3731fad2856169a90f6bbec99925915`).
 - [x] `mcp==1.29.1` is pinned in `pyproject.toml`.
 - [x] The asset-free source gate resolves the bundled source runtime and the
   bit-accurate serial contract; the native gate resolves the same contract
