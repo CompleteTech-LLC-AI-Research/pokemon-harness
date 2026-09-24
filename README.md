@@ -439,10 +439,8 @@ fixture provenance is partial.
 Requirements:
 
 - Python 3.11 or newer.
-- The bundled PyBoy runtime (`2.7.0`, harness-local divergence revision
-  `d78fb7253f0d290c15ddb392d05b327aea0faa82`; upstream base
-  `c565df66c3731fad2856169a90f6bbec99925915`). Earlier recorded runs below name
-  the upstream base because they predate the in-fork divergence.
+- The bundled PyBoy runtime (`2.7.0`, harness revision
+  `c565df66c3731fad2856169a90f6bbec99925915`).
 - `mcp==1.29.1`, the certified runtime API used by the server.
 - A legally obtained ROM and a matching debug symbol file for any real-ROM
   run.
