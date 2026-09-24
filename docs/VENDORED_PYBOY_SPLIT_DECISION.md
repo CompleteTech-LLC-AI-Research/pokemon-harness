@@ -98,8 +98,8 @@ reproducibility requirement is now met (see the second bullet); conditions 2 and
 
 - **No compiled runtime (condition 3).** There is no built `pyboy` extension module set and the
   native build cannot be produced here. Re-verified 2026-09-23:
-  - the toolchain is partly present — `gcc (Debian 12.2.0-14+deb12u1) 12.2.0`, `Cython 3.0.12`, and
-    a scratch venv with `numpy` — so the blocker is not a missing compiler;
+  - the compiler and Cython are present — `gcc (Debian 12.2.0-14+deb12u1) 12.2.0` and a virtualenv
+    with `Cython 3.0.12` — so the blocker is not a missing compiler;
   - the **CPython development headers are absent**: `/usr/include/python3.11/` does not exist,
     `python3.11-dev` is not installed, `python3-config` is unavailable, and `uid=1000` with
     `CapEff=0000000000000000` and no `sudo` means no package can be added. Every `cdef`/C-extension
