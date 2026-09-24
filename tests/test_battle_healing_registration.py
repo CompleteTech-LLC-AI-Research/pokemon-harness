@@ -19,10 +19,12 @@ import html
 import importlib
 import json
 import re
+import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from pokered_harness.config import load_versions
+from pokered_harness.config import VersionsConfigError, load_versions
 from tests._rom_assets import PROJECT_ROOT
 from tests._tier_config import KNOWN_TEST_MODULES
 
@@ -147,6 +149,59 @@ BUNDLE_RESULTS_ROW_PATTERN = re.compile(
     r"errors=(?P<errors>\d+) skipped=(?P<skipped>\d+)",
     re.MULTILINE,
 )
+
+
+def _vendored_pin_at_head(head: str) -> str | None:
+    """Return the vendored PyBoy revision ``VERSIONS.md`` declares at ``head``.
+
+    The registration bundle is a *historical* record: it names the commit it was
+    produced at (``worktree_head``) and its own README states it is not a claim
+    about any later commit.  The option-B divergence decision re-pins the
+    harness-local revision, and that re-pin is a later commit, so the record has
+    to be checked against the pin that was in effect at *its* head rather than
+    against the live pin.  The pin is read from the committed blob at ``head``,
+    never from the working tree.
+
+    Returns ``None`` only when this checkout has no history for ``head`` (for
+    example a shallow clone); the caller then falls back to the live pin so the
+    guard still fails closed on a marker that matches neither.
+    """
+    try:
+        shown = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "show", f"{head}:VERSIONS.md"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    # ``load_versions`` is the single parser for the pin rows, so feed it the
+    # committed text rather than re-implementing the row grammar here.
+    try:
+        with tempfile.TemporaryDirectory() as scratch_dir:
+            scratch = Path(scratch_dir) / "VERSIONS.md"
+            scratch.write_text(shown.stdout, encoding="utf-8")
+            historical = load_versions(scratch)
+    except VersionsConfigError as exc:
+        raise AssertionError(
+            f"VERSIONS.md at the bundle's recorded head {head} is unreadable: {exc}"
+        ) from exc
+
+    revision = historical.pyboy_revision
+    assert revision is not None, (
+        f"VERSIONS.md at the bundle's recorded head {head} declares no PyBoy fork revision"
+    )
+
+    # The recorded head has to be a commit in this history, not a fabricated one
+    # whose blob happens to parse.  Only reached when the history is available.
+    ancestor = subprocess.run(
+        ["git", "-C", str(PROJECT_ROOT), "merge-base", "--is-ancestor", head, "HEAD"],
+        check=False,
+        capture_output=True,
+    )
+    assert ancestor.returncode == 0, f"the bundle's recorded head {head} is not an ancestor of HEAD"
+    return revision
 
 
 def _is_lower_hex(value: object, length: int) -> bool:
@@ -356,11 +411,11 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
     """The committed dual-runtime record must be true, complete and clean.
 
     ROM-free: it reads only committed files.  It fails closed when the bundle is
-    absent, disagrees with the harness pins, hides a missing tier, reports a
-    non-terminal row, drops the acceptance node id, or carries an absolute local
-    path, still carries symbol-table input, or gains a file the record does not
-    describe.  A registration record that can drift from the run it describes is
-    not evidence, so the drift is made to fail here.
+    absent, disagrees with the pin recorded at its own head, hides a missing
+    tier, reports a non-terminal row, drops the acceptance node id, or carries
+    an absolute local path, still carries symbol-table input, or gains a file the
+    record does not describe.  A registration record that can drift from the run
+    it describes is not evidence, so the drift is made to fail here.
     """
     acceptance_module_path, _, acceptance_name = ACCEPTANCE_NODE_ID.partition("::")
     acceptance_module = importlib.import_module(
@@ -407,8 +462,18 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
 
     pins = load_versions(PROJECT_ROOT / "VERSIONS.md")
     declared_revision = identity["vendored_revision_marker"]
-    assert declared_revision == pins.pyboy_revision, (
-        "the bundle's vendored revision marker disagrees with VERSIONS.md"
+    # The bundle names the commit it was produced at, and its README states it is
+    # not a claim about any later commit.  A divergence re-pin *is* a later
+    # commit, so the marker is checked against the pin that was in effect at the
+    # record's own head; the live pin is used only when this checkout has no
+    # history for that head (a shallow clone), so a marker that matches neither
+    # still fails closed.
+    recorded_head = identity["worktree_head"]
+    head_pin = _vendored_pin_at_head(recorded_head)
+    expected_revision = head_pin if head_pin is not None else pins.pyboy_revision
+    assert declared_revision == expected_revision, (
+        "the bundle's vendored revision marker disagrees with the pin recorded at its "
+        f"head {recorded_head} ({expected_revision})"
     )
     assert set(identity["tiers"]) == set(BUNDLE_TIERS), "a declared runtime is missing"
 
@@ -419,7 +484,7 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
             tier_identity["python_version"] == identity["tiers"][BUNDLE_TIERS[0]]["python_version"]
         ), "the two tiers did not run the same interpreter version"
         assert tier_identity["pyboy_version"] == pins.pyboy_version
-        assert tier_identity["pyboy_revision"] == pins.pyboy_revision
+        assert tier_identity["pyboy_revision"] == declared_revision
         assert tier_identity["revision_matches_vendored_pin"] is True
 
     # The dual-runtime claim rests on the imports each tier actually resolved:

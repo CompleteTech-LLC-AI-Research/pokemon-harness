@@ -200,3 +200,34 @@ toolchain now shown buildable here, the group reduces to a single external prere
 pilot leaf `#138` can be split, rebuilt natively, its lane run, and independently reviewed. The
 eight leaves stay **OPEN**, `#122` stays **OPEN**, release status stays **PARTIAL**; this update
 fixes the record and advances no leaf.
+
+## Update — 2026-09-24: historical evidence is validated at its own head (condition 2 unblocked)
+
+Condition 2 requires the divergence commit to re-pin the harness-local revision, and the shipped
+registration bundle `release-evidence/feature-qualification/issue90-medicine-yellow-2d87676/` is a
+**historical** real-ROM record of a run at head `2d876763` under the then-current pin `c565df66…`.
+The bundle's own README states it "is not a claim about any later commit", and the repository's
+standing policy agrees (`agents.md` §"Historical evidence that must remain labeled historical";
+`VERSIONS.md`, "historical rows … do not qualify a later head").
+
+The unit guard `tests/test_battle_healing_registration.py::test_runtime_registration_bundle_is_sanitized_and_consistent`
+nevertheless compared the bundle's `vendored_revision_marker` against the **live** `VERSIONS.md`
+pin. Those two commitments are incompatible the moment condition 2 is exercised: any re-pin moves
+the live pin and invalidates every historical record tied to the previous one. That is exactly what
+made `975f1a5` (the pilot merge) red — a deterministic, ROM-free unit failure introduced by the
+re-pin, not by the split.
+
+**Recording the resolution.** The guard now checks the marker against the pin that was in effect at
+the bundle's own recorded `worktree_head`, read from the committed blob at that head, and
+additionally requires that head to be an ancestor of `HEAD`. The live pin is consulted only when
+this checkout has no history for the recorded head (e.g. a shallow clone), so a marker that matches
+neither still fails closed. This binds a record to the commit it describes rather than to
+"whatever the pin says today"; it is a narrowing of the accepted value (one specific historical
+pin), not a relaxation to arbitrary drift. **No leaf's acceptance criteria change** — none of them
+require the shipped record to track the live pin.
+
+Consequence: condition 2 can be executed without regenerating a real-ROM bundle (which is
+impossible here — no `.gb`/`.sym`/`.sav` assets). The group's remaining external prerequisite is
+unchanged: a quiet, non-root, CPU-allocated runner able to take the native unit lane to green
+(condition 3). The eight leaves stay **OPEN**, `#122` stays **OPEN**, release status stays
+**PARTIAL**; this update records the evidence-integrity semantics and advances no leaf on its own.
