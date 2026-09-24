@@ -71,9 +71,13 @@ Cython-generated translation unit for the facade that shadows the C type `Enum`,
 `import pyboy` with `TypeError: Cannot overwrite C type Enum`. Source mode does not reproduce it —
 only the native build does (see "Verification" below).
 
-### Verification performed on this head
+### Verification performed
 
-- **Native ABI (condition 3), demonstrated.** Both modules were Cythonized and compiled
+Unless noted otherwise these are source-level results, re-measured on the re-landed head; the
+native item below was measured at the pilot pin and does **not** transfer to this head.
+
+- **Native ABI (condition 3), demonstrated — at the pilot pin `d78fb725…`, not this head.** Both
+  modules were Cythonized and compiled
   (`gcc 12.2.0`, userland-extracted CPython 3.11 headers, `-O3 -DCYTHON_WITHOUT_ASSERTIONS`),
   link rc=0. Loading the resulting tree: `pyboy`, the facade, the data module and
   `pyboy.plugins.manager` all resolve to `.cpython-311-x86_64-linux-gnu.so`. `Pokemon`/`Maps` are
@@ -190,19 +194,29 @@ Status of the two divergences recorded above:
    recomputation snippet above prints it for this head. Historical `release-evidence/` records and
    the earlier prose that names `c565df66…` are left untouched on purpose — they record what ran
    under the identity of their time, and they are not current-identity statements.
-2. **Native ABI re-verification (condition 3).** `#138` completed a fresh native rebuild +
-   `--mode cython --check` (rc=0) + native unit lane on its merge tree. `#142` does not touch the
+2. **Native ABI re-verification (condition 3).** `#138`'s native ABI was verified on the loaded
+   artifacts at the **pilot** pin `d78fb725…` (the two changed modules recompiled inside an
+   existing native tree, plus an independent `Enum`-shadowing control). A from-scratch rebuild and
+   `--mode cython --check` **on this head** (pin `eceaa3bb…`) remain owed — see item 4; note the
+   head asserts its own `EXPECTED_REVISION` and fails closed until the stage is rebuilt against it,
+   so the pilot's `rc=0 --check` cannot be carried onto this pin. `#142` does not touch the
    generated pair or any compiled module: `opcodes_gen.py` and the new handlers module are both
    excluded from Cythonization by `setup.py`, and the generated `opcodes.py`/`opcodes.pxd` are
    byte-identical to the pre-split files, so this divergence adds no new build input and cannot
    change the compiled artifact. A native lane is still required for the leaves that do move
    compiled code (#123/#161/#133/#150/#153/#155); it remains gated on the quiet, non-root,
    CPU-allocated runner.
-3. **Independent review (condition 5).** Required for each divergence on its exact head. `#138`
-   was reviewed APPROVE-WITH-FINDINGS (non-blocking). `#142`'s review is the open item.
+3. **Independent review (condition 5).** Required for each divergence on its exact head. The `#138`
+   pilot review (APPROVE-WITH-FINDINGS at `1f43851`) and the `#142` review (REQUEST-CHANGES at an
+   earlier head) were taken on **other** heads and do not transfer; a single non-author review on
+   the re-landed head's exact identity is the open item.
 4. **Full native rebuild not re-run end to end for `#138`.** Its evidence recompiles the two
    changed modules inside an existing native tree; `bootstrap_pyboy.py --mode cython --check` has
    not been re-executed on that head (a concurrent attempt hit the script's own 1800 s install
    timeout under host contention, unrelated to the change).
 5. ROM-gated pinball behaviour is **not** exercised anywhere in this environment (no `.gb`/`.sym`/
    `.sav` assets); a synthetic substitute is not acceptable evidence.
+6. **Historical records re-qualified under this pin.** #90.3's Yellow registration and #170's
+   runtime record were validated at their own heads and do **not** qualify this one; re-qualifying
+   them under `eceaa3bb…` is tracked by #235 and stated in the decision doc's
+   "a historical record is validated at its own head" update.
