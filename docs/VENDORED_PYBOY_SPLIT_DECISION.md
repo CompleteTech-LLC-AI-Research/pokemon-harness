@@ -200,3 +200,46 @@ toolchain now shown buildable here, the group reduces to a single external prere
 pilot leaf `#138` can be split, rebuilt natively, its lane run, and independently reviewed. The
 eight leaves stay **OPEN**, `#122` stays **OPEN**, release status stays **PARTIAL**; this update
 fixes the record and advances no leaf.
+
+## Update — 2026-09-24: a historical record is validated at its own head, and it does not qualify a later head
+
+Condition 2 requires the divergence commit to re-pin the harness-local revision. The shipped
+registration bundle `release-evidence/feature-qualification/issue90-medicine-yellow-2d87676/` is a
+**historical** real-ROM record of a run at head `2d876763` under the then-current pin `c565df66…`.
+Its own README states that nothing in it "is a claim about any later commit", and the repository's
+standing policy agrees (`agents.md` §"Historical evidence that must remain labeled historical";
+`VERSIONS.md`, "historical rows … do not qualify a later head").
+
+The unit guard `tests/test_battle_healing_registration.py::test_runtime_registration_bundle_is_sanitized_and_consistent`
+nevertheless compared the bundle's `vendored_revision_marker` against the **live** `VERSIONS.md`
+pin. Those two commitments are incompatible the moment condition 2 is exercised: any re-pin moves
+the live pin and invalidates every historical record tied to the previous one. That is exactly what
+made `975f1a5` (the pilot merge) red — a deterministic, ROM-free unit failure introduced by the
+re-pin, not by the split.
+
+**Recording the resolution.** The guard now checks the marker against the pin that was in effect at
+the bundle's own recorded `worktree_head`, read from the committed blob at that head, and
+additionally requires that head to resolve here, to carry exactly the recorded `worktree_tree`, and
+to be an ancestor of `HEAD`. A fabricated marker, head, or tree — or a head whose object is absent
+in this checkout — fails closed rather than falling back to the live pin, so the provision cannot
+launder a bad record. This binds a record to the commit it describes rather than to "whatever the
+pin says today", a narrowing of the accepted value (one specific historical pin), not a relaxation
+to arbitrary drift. Current-identity pin enforcement is unchanged and lives elsewhere
+(`scripts/production_gate.py` requires the measured runtime revision to equal the manifest pin at
+gate time, and the runtime-packaging tests and `scripts/bootstrap_pyboy.py --check` assert it).
+
+**This is a coverage statement, not a green light.** Because the divergence re-pin changes the
+vendored runtime identity, the pre-divergence bundle describes a different measured runtime than
+the post-divergence candidate. Under the policy quoted above it therefore **does not qualify a
+later head**: #90.3's Yellow registration and #170's runtime record must be **re-qualified under
+the new pin** before that evidence may be read as describing the current candidate. Correcting the
+guard so it validates the record against the state the record names keeps the record honestly
+labeled as historical; it does **not** establish #90.3 or #170 for any later head, and it changes
+no leaf's acceptance status.
+
+Consequence: condition 2 can be executed without regenerating a real-ROM bundle (impossible here —
+no `.gb`/`.sym`/`.sav` assets). The group's remaining external prerequisite is unchanged: the
+native unit lane still needs a **quiet, non-root, CPU-allocated** runner to reach green (condition
+3), and #90.3/#170 re-qualification is a new owed row. The eight leaves stay **OPEN**, `#122` stays
+**OPEN**, release status stays **PARTIAL**; this update records the evidence-integrity semantics and
+advances no leaf on its own.

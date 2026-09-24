@@ -19,10 +19,14 @@ import html
 import importlib
 import json
 import re
+import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from pokered_harness.config import load_versions
+import pytest
+
+from pokered_harness.config import VersionsConfig, load_versions
 from tests._rom_assets import PROJECT_ROOT
 from tests._tier_config import KNOWN_TEST_MODULES
 
@@ -156,6 +160,65 @@ def _is_lower_hex(value: object, length: int) -> bool:
         and value == value.lower()
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _git_output(*arguments: str) -> str:
+    """Return stdout for a git command run in the project checkout."""
+    result = subprocess.run(
+        ["git", "-C", str(PROJECT_ROOT), *arguments],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"git {' '.join(arguments)} failed in {PROJECT_ROOT}: {result.stderr.strip()}"
+    )
+    return result.stdout
+
+
+def _versions_at_recorded_head(head: str, tree: str) -> VersionsConfig:
+    """Return the ``VERSIONS.md`` pins declared at a bundle's recorded head.
+
+    The committed qualification bundle is a *historical* record, so its identity
+    is checked against the state it names rather than the state that is live now.
+    The named head must resolve to a commit in this checkout that is an ancestor
+    of the checked-out ``HEAD`` and carries exactly the recorded git tree, and the
+    returned pin is read from the ``VERSIONS.md`` blob that existed at that head.
+    This is fail-closed in both directions: a well-formed but fabricated head or
+    tree is rejected, and so is a head whose object is absent here (a pruned
+    shallow checkout), because the guard can then no longer bind the record to the
+    commit it names.  It therefore cannot be used to launder a bad record.
+    """
+    assert _is_lower_hex(head, 40) and _is_lower_hex(tree, 40), (
+        "the recorded head and tree must be lowercase hex object ids"
+    )
+    tree_probe = subprocess.run(
+        ["git", "-C", str(PROJECT_ROOT), "rev-parse", "--verify", "--quiet", f"{head}^{{tree}}"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert tree_probe.returncode == 0, (
+        f"the bundle's recorded worktree_head {head} is not a commit in this checkout; "
+        "the guard requires the record's own head to be resolvable"
+    )
+    assert tree_probe.stdout.strip() == tree, (
+        f"the bundle's recorded worktree_tree {tree} is not the tree of worktree_head {head}"
+    )
+    ancestor = subprocess.run(
+        ["git", "-C", str(PROJECT_ROOT), "merge-base", "--is-ancestor", head, "HEAD"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert ancestor.returncode == 0, (
+        f"the bundle's recorded worktree_head {head} is not an ancestor of the checked-out HEAD"
+    )
+    text = _git_output("show", f"{head}:VERSIONS.md")
+    with tempfile.TemporaryDirectory() as scratch:
+        historical = Path(scratch) / "VERSIONS.md"
+        historical.write_text(text, encoding="utf-8")
+        return load_versions(historical)
 
 
 def _load_evidence() -> dict:
@@ -355,8 +418,9 @@ def _bundle_absolute_path_leaks(contents: str) -> list[str]:
 def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
     """The committed dual-runtime record must be true, complete and clean.
 
-    ROM-free: it reads only committed files.  It fails closed when the bundle is
-    absent, disagrees with the harness pins, hides a missing tier, reports a
+    ROM-free: it reads only committed files (and the committed git objects at the
+    record's own head).  It fails closed when the bundle is absent, disagrees with
+    the identity declared at the state it names, hides a missing tier, reports a
     non-terminal row, drops the acceptance node id, or carries an absolute local
     path, still carries symbol-table input, or gains a file the record does not
     describe.  A registration record that can drift from the run it describes is
@@ -406,9 +470,20 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
         assert _is_lower_hex(identity[key], 40), f"{key} is not a lowercase hex object id"
 
     pins = load_versions(PROJECT_ROOT / "VERSIONS.md")
+    # This bundle is a *historical* record - its own README states that nothing
+    # in it is a claim about any later commit, and agents.md / VERSIONS.md make
+    # historical rows explicitly non-qualifying for a later head.  So its vendored
+    # identity is checked against the state it names (a real ancestor commit whose
+    # tree matches, with the pin VERSIONS.md declared there), not against the pin
+    # that is live now.  A fabricated marker, head or tree still fails here, so the
+    # relaxation cannot launder a bad record.  Current-identity pin enforcement
+    # lives in scripts/production_gate.py (the measured runtime revision must equal
+    # the manifest pin) and the runtime-packaging tests, not in this guard.
+    reference = _versions_at_recorded_head(identity["worktree_head"], identity["worktree_tree"])
     declared_revision = identity["vendored_revision_marker"]
-    assert declared_revision == pins.pyboy_revision, (
-        "the bundle's vendored revision marker disagrees with VERSIONS.md"
+    assert declared_revision == reference.pyboy_revision, (
+        "the bundle's vendored revision marker disagrees with the pin VERSIONS.md "
+        "declared at the record's own worktree_head"
     )
     assert set(identity["tiers"]) == set(BUNDLE_TIERS), "a declared runtime is missing"
 
@@ -418,8 +493,8 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
         assert (
             tier_identity["python_version"] == identity["tiers"][BUNDLE_TIERS[0]]["python_version"]
         ), "the two tiers did not run the same interpreter version"
-        assert tier_identity["pyboy_version"] == pins.pyboy_version
-        assert tier_identity["pyboy_revision"] == pins.pyboy_revision
+        assert tier_identity["pyboy_version"] == reference.pyboy_version
+        assert tier_identity["pyboy_revision"] == declared_revision
         assert tier_identity["revision_matches_vendored_pin"] is True
 
     # The dual-runtime claim rests on the imports each tier actually resolved:
@@ -656,3 +731,26 @@ def test_runtime_registration_bundle_is_sanitized_and_consistent() -> None:
             )
             leaked |= set(_bundle_absolute_path_leaks(view))
         assert not leaked, f"{relative} leaks {sorted(leaked)}"
+
+
+def test_recorded_head_identity_is_verified_against_history() -> None:
+    """The historical-bundle provision is fail-closed on fabricated provenance.
+
+    The committed record is validated against the state it names, not the live
+    tree, so this test pins the properties that keep that relaxation honest: the
+    recorded head/tree pair resolves to the revision the record claims, a head or
+    tree that is not the real pair, and a head whose object is absent here, are
+    each rejected rather than accepted for their shape alone.
+    """
+    identity = json.loads(
+        (QUALIFICATION_BUNDLE / "runtime-identity.json").read_text(encoding="utf-8")
+    )
+    head = identity["worktree_head"]
+    tree = identity["worktree_tree"]
+
+    recorded = _versions_at_recorded_head(head, tree)
+    assert recorded.pyboy_revision == identity["vendored_revision_marker"]
+
+    for bad_head, bad_tree in ((head, "f" * 40), ("f" * 40, tree), ("f" * 40, "f" * 40)):
+        with pytest.raises(AssertionError):
+            _versions_at_recorded_head(bad_head, bad_tree)
