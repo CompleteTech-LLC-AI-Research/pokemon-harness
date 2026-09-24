@@ -25,11 +25,33 @@ the `#122` file-split program (`#138`).
 | File | Lines | Contents |
 |---|---|---|
 | `pyboy/plugins/game_wrapper_pokemon_pinball.py` | 791 | facade: `__pdoc__`, imports, `Stage`, `SpecialMode`, `BallType`, `BallSize`, the stage lists, and the `cdef class GameWrapperPokemonPinball` |
-| `pyboy/plugins/game_wrapper_pokemon_pinball_data.py` | 771 | relocated `Pokemon` and `Maps` enums, plus the RAM-address / bank-offset constants and the four `*StageMapWildMons*` tables |
+| `pyboy/plugins/game_wrapper_pokemon_pinball_data.py` | 875 | relocated `Pokemon` and `Maps` enums, plus the RAM-address / bank-offset constants and the four `*StageMapWildMons*` tables |
 
 The facade re-exports every relocated name with
-`from .game_wrapper_pokemon_pinball_data import *  # noqa: F403`, so the module's public surface
-is unchanged.
+`from .game_wrapper_pokemon_pinball_data import *`, so the module's public surface is unchanged.
+
+The star import is **guarded by an explicit 92-name `__all__`** in the data module, and that is
+load-bearing rather than tidiness: a bare star import also re-exports `Enum`, and inside the
+Cython-generated translation unit for the facade that shadows the C type `Enum`, aborting
+`import pyboy` with `TypeError: Cannot overwrite C type Enum`. Source mode does not reproduce it —
+only the native build does (see "Verification" below).
+
+### Verification performed on this head
+
+- **Native ABI (condition 3), demonstrated.** Both modules were Cythonized and compiled
+  (`gcc 12.2.0`, userland-extracted CPython 3.11 headers, `-O3 -DCYTHON_WITHOUT_ASSERTIONS`),
+  link rc=0. Loading the resulting tree: `pyboy`, the facade, the data module and
+  `pyboy.plugins.manager` all resolve to `.cpython-311-x86_64-linux-gnu.so`. `Pokemon`/`Maps` are
+  the same objects in both modules, `Enum` is not shadowed in the facade, and the compiled
+  `manager.so` still carries `PluginManager.game_wrapper_pokemon_pinball` (the `cdef public`
+  attribute from `manager.pxd`). This tree is a full earlier native build with only these two
+  modules recompiled from the split sources; the rest of the runtime was not rebuilt.
+- **AST parity.** 48 pre-existing top-level/nested defs+classes present exactly once, 0 altered, 0
+  extra. (Plus the new `__all__` assignment, which the base had no counterpart for.)
+- **Collection parity.** `pytest tests --collect-only -q` byte-identical to base `3fdd0c9`.
+- **Tests.** ROM-free unit lane 63 passed; runtime-packaging contract/deps/hygiene 19 passed
+  (82 passed together).
+- **Lint.** `ruff check --no-cache` clean on both files.
 
 ### Why the class itself could not move
 
@@ -72,5 +94,9 @@ stays intact in its original module.
    isolation (see the review brief), but the full native rebuild has not been re-run for this
    head.
 3. **Independent review (condition 5).** See `ledger/REVIEW_TASK_VENDORED_138.md`.
-4. ROM-gated pinball behaviour is **not** exercised anywhere in this environment (no `.gb`/`.sym`/
+4. **Full native rebuild not re-run end to end.** The evidence above recompiles the two changed
+   modules inside an existing native tree; `bootstrap_pyboy.py --mode cython --check` has not been
+   re-executed on this head (a concurrent attempt hit the script's own 1800 s install timeout under
+   host contention, unrelated to this change).
+5. ROM-gated pinball behaviour is **not** exercised anywhere in this environment (no `.gb`/`.sym`/
    `.sav` assets); a synthetic substitute is not acceptable evidence.
