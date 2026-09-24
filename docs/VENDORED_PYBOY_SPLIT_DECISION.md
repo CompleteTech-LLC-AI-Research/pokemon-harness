@@ -147,3 +147,56 @@ and condition 3 (native ABI) can be verified. With that, a single pilot leaf —
 `plugins/game_wrapper_pokemon_pinball.py`**, whose Python-only plugin surface has no Cython `.pxd`
 sibling — can be split and reviewed first, followed by the `.pxd`-backed cores and finally the
 generated opcode pair.
+
+## Update — 2026-09-24: the native build CAN be produced here (supersedes the condition-3 bullet)
+
+The "No compiled runtime (condition 3)" bullet above concludes the native build "cannot be produced
+here" and that every C-extension compile fails on `fatal error: Python.h: No such file or
+directory`. Re-audited **2026-09-24** on `origin/master`: that conclusion is an artifact of the
+*default* interpreter, not a hard limit. A native build **was** produced and its identity check
+passed.
+
+Root causes of the earlier failure, and their remedy:
+
+- The system `/usr/bin/python3.11` has no `python3.11-dev` headers and there is no root/sudo — true.
+  But other CPythons on the box ship development headers. A uv-managed **CPython 3.12.14** provides
+  `Python.h` and `libpython3.12.so` (any CPython with dev headers works; e.g. `uv python install
+  3.12`). Building against it is the remedy, not a blocked path.
+- `/dev/shm` is read-only — true. Cython's `build_ext` passes `nthreads=cpu_count()` into
+  `cythonize`, whose `multiprocessing.Pool` needs a writable shared-memory device. Remedy: run the
+  build under a private mount namespace with a writable tmpfs on `/dev/shm` (the same pattern the
+  test lanes already use).
+
+Verified in an isolated worktree at `origin/master` `0f1b824` (`docs` content unchanged at
+`cd3c3fe`):
+
+```bash
+unshare -rm --propagation private bash -c \
+  'mount -t tmpfs -o size=8g tmpfs /dev/shm; export TMPDIR=/tmp; \
+   "$VENV312/bin/python" scripts/bootstrap_pyboy.py --mode cython'
+"$VENV312/bin/python" scripts/bootstrap_pyboy.py --mode cython --check   # exit 0
+```
+
+- Built wheel `pyboy-2.7.0-cp312-cp312-linux_x86_64.whl`, sha256
+  `803b1cc08dbe2b1d5f24e9eed5f8cf4e599233baacf049146ab3aa2ab980d803`.
+- `--mode cython --check` returns **0** (deterministic re-run); the required modules resolve to
+  compiled extensions (`pyboy.core.mb/serial/lcd/opcodes` →
+  `*.cpython-312-x86_64-linux-gnu.so`); `pyboy.utils.cython_compiled == True`; and
+  `pyboy.__pokered_harness_revision__ == c565df66c3731fad2856169a90f6bbec99925915` (pin intact).
+
+So condition 3's **build + identity-check** half is satisfiable here. What still cannot be shown is
+its **native-lane-passes** half: `production_gate.py --runtime-mode cython --tier unit` on
+unmodified master returns **FAIL**, entirely on the already-known host-resource families —
+contention-sensitive `test_mcp_timed_*` / `test_probe_timed_rom_pair_*` deadline tests (host was at
+~34/4 CPUs), a root-in-mount-namespace artifact in `test_qualification_runner_lockstate` (root maps
+the asset root "writable by this job"), and
+`test_qualification_runner_release::test_unwritable_host_lock_directory_refuses_to_launch` (the same
+operator CPU-allocation blocker recorded for #85/#86); one wheel-build test also hit the gate's
+900s per-tier timeout under load. None of these failures is native-specific.
+
+**Revised bar.** With requirement (ii) already satisfied (see the generator bullet above) and the
+toolchain now shown buildable here, the group reduces to a single external prerequisite: a
+**quiet, non-root, CPU-allocated** runner able to take the native unit lane to green. With that,
+pilot leaf `#138` can be split, rebuilt natively, its lane run, and independently reviewed. The
+eight leaves stay **OPEN**, `#122` stays **OPEN**, release status stays **PARTIAL**; this update
+fixes the record and advances no leaf.
