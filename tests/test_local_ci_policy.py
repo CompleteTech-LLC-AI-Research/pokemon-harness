@@ -15,70 +15,90 @@ RUNNER = ROOT / "scripts" / "run_local_ci.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "release-hygiene.yml"
 
 
-def _ruff_invocations(text: str) -> list[tuple[str, tuple[str, ...]]]:
-    """Return each `ruff check` / `ruff format --check` file list in order.
+def _ruff_invocations(text: str) -> list[tuple[str, ...]]:
+    """Return the full argument vector of each `python -m ruff` call, in order.
 
     The runner and the workflow are different languages (bash vs YAML), so the
-    comparison is made over the *file lists* rather than the surrounding text.
+    comparison is made over the *arguments* rather than the surrounding text.
     Comment lines are ignored; a `#` comment inside a shell list is not a path.
+
+    The whole argument vector is compared, not only the ``.py`` tokens: an
+    option such as ``--exclude`` combined with ``--force-exclude`` can drop a
+    declared file from the effective lint set, and an option such as
+    ``--line-length`` changes the verdict, so a flags-only edit to one lane is
+    exactly the kind of divergence this contract must catch.
     """
 
-    invocations: list[tuple[str, tuple[str, ...]]] = []
+    invocations: list[tuple[str, ...]] = []
     lines = text.splitlines()
     index = 0
     while index < len(lines):
         stripped = lines[index].strip()
-        kind = ""
-        if stripped.startswith("python -m ruff check"):
-            kind = "check"
-        elif stripped.startswith("python -m ruff format --check"):
-            kind = "format"
-        if not kind:
+        if not stripped.startswith("python -m ruff "):
             index += 1
             continue
-        paths: list[str] = []
+        arguments = [token for token in stripped.rstrip("\\").split() if token]
         cursor = index + 1
         while cursor < len(lines):
             raw = lines[cursor]
             segment = raw.strip()
             continues = raw.rstrip().endswith("\\")
-            for token in segment.rstrip("\\").split():
-                if token.endswith(".py") and ":" not in token and not token.startswith("#"):
-                    paths.append(token)
+            if not segment.startswith("#"):
+                for token in segment.rstrip("\\").split():
+                    if token:
+                        arguments.append(token)
             if not continues:
                 break
             cursor += 1
-        invocations.append((kind, tuple(paths)))
+        invocations.append(tuple(arguments))
         index = cursor + 1
     return invocations
 
 
 def test_runner_ruff_file_lists_match_the_workflow_exactly() -> None:
-    """Both lanes must lint the same files, in the same order.
+    """Both lanes must run the same Ruff commands, file lists and flags alike.
 
     The workflow and the local runner intentionally duplicate their Ruff
     boundaries so a local run cannot lint a smaller (or stale) set.  A split
     that updates only one of them silently weakens the hosted lane, so the two
-    lists are asserted equal here rather than trusted to stay in sync.
+    invocations are asserted equal here rather than trusted to stay in sync.
     """
 
     workflow = _ruff_invocations(WORKFLOW.read_text(encoding="utf-8"))
     runner = _ruff_invocations(RUNNER.read_text(encoding="utf-8"))
 
-    assert workflow, "workflow declares no Ruff file lists"
-    assert runner, "local runner declares no Ruff file lists"
-    assert [(kind, len(paths)) for kind, paths in workflow] == [
-        (kind, len(paths)) for kind, paths in runner
-    ], "workflow and local runner declare a different number of Ruff invocations"
-    for (workflow_kind, workflow_paths), (runner_kind, runner_paths) in zip(
-        workflow, runner, strict=True
-    ):
-        assert workflow_kind == runner_kind
-        assert workflow_paths == runner_paths, (
-            f"{workflow_kind} list diverges: "
-            f"workflow-only={sorted(set(workflow_paths) - set(runner_paths))} "
-            f"runner-only={sorted(set(runner_paths) - set(workflow_paths))}"
+    assert workflow, "workflow declares no Ruff invocations"
+    assert runner, "local runner declares no Ruff invocations"
+    assert len(workflow) == len(runner), (
+        "workflow and local runner declare a different number of Ruff invocations"
+    )
+    for workflow_arguments, runner_arguments in zip(workflow, runner, strict=True):
+        assert workflow_arguments == runner_arguments, (
+            "Ruff invocation diverges: "
+            f"workflow-only={sorted(set(workflow_arguments) - set(runner_arguments))} "
+            f"runner-only={sorted(set(runner_arguments) - set(workflow_arguments))}"
         )
+
+
+def test_ruff_invocation_parser_keeps_options_that_change_the_lint_set() -> None:
+    """The lockstep comparison must cover Ruff options, not only `.py` tokens."""
+
+    workflow_style = (
+        "          python -m ruff check \\\n            src/a.py \\\n            src/b.py\n"
+    )
+    runner_style = "python -m ruff check \\\n    src/a.py \\\n    src/b.py\n"
+    flags_only_drift = (
+        "python -m ruff check --exclude=src/a.py --force-exclude \\\n"
+        "    src/a.py \\\n"
+        "    src/b.py\n"
+    )
+
+    # The same invocation written in the two languages still compares equal.
+    assert _ruff_invocations(workflow_style) == _ruff_invocations(runner_style)
+
+    # A change to the flags alone is a divergence even though the `.py` tokens
+    # are untouched, because it can shrink or reshape the effective lint set.
+    assert _ruff_invocations(flags_only_drift) != _ruff_invocations(runner_style)
 
 
 def test_hosted_job_requires_explicit_public_visibility() -> None:
