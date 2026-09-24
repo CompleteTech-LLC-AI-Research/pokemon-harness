@@ -15,23 +15,27 @@ RUNNER = ROOT / "scripts" / "run_local_ci.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "release-hygiene.yml"
 
 
-def _ruff_invocations(text: str) -> list[tuple[str, tuple[str, ...]]]:
-    """Return each `ruff check` / `ruff format --check` file list in order.
+def _ruff_invocations(text: str) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Return each Ruff invocation's header, mode and file list, in order.
 
     The runner and the workflow are different languages (bash vs YAML), so the
-    comparison is made over the *file lists* rather than the surrounding text.
-    Comment lines are ignored; a `#` comment inside a shell list is not a path.
+    comparison is made over the *invocation* rather than the surrounding text:
+    the normalised command header (``ruff check`` plus any options) and the
+    explicit file list.  Comparing only the file list would let a flag-only edit
+    such as ``--exclude=...`` shrink one lane while both lists still looked
+    equal.  Comment lines are ignored; a `#` comment inside a shell list is not
+    a path.
     """
 
-    invocations: list[tuple[str, tuple[str, ...]]] = []
+    invocations: list[tuple[str, str, tuple[str, ...]]] = []
     lines = text.splitlines()
     index = 0
     while index < len(lines):
-        stripped = lines[index].strip()
+        header = lines[index].strip().rstrip("\\").strip()
         kind = ""
-        if stripped.startswith("python -m ruff check"):
+        if header.startswith("python -m ruff check"):
             kind = "check"
-        elif stripped.startswith("python -m ruff format --check"):
+        elif header.startswith("python -m ruff format --check"):
             kind = "format"
         if not kind:
             index += 1
@@ -48,7 +52,7 @@ def _ruff_invocations(text: str) -> list[tuple[str, tuple[str, ...]]]:
             if not continues:
                 break
             cursor += 1
-        invocations.append((kind, tuple(paths)))
+        invocations.append((" ".join(header.split()), kind, tuple(paths)))
         index = cursor + 1
     return invocations
 
@@ -58,8 +62,10 @@ def test_runner_ruff_file_lists_match_the_workflow_exactly() -> None:
 
     The workflow and the local runner intentionally duplicate their Ruff
     boundaries so a local run cannot lint a smaller (or stale) set.  A split
-    that updates only one of them silently weakens the hosted lane, so the two
-    lists are asserted equal here rather than trusted to stay in sync.
+    that updates only one of them silently weakens the hosted lane, and a
+    flag-only edit (for example ``--exclude=``) can shrink a lane without
+    changing any path, so the whole invocation -- header and file list -- is
+    asserted equal here rather than trusted to stay in sync.
     """
 
     workflow = _ruff_invocations(WORKFLOW.read_text(encoding="utf-8"))
@@ -67,12 +73,17 @@ def test_runner_ruff_file_lists_match_the_workflow_exactly() -> None:
 
     assert workflow, "workflow declares no Ruff file lists"
     assert runner, "local runner declares no Ruff file lists"
-    assert [(kind, len(paths)) for kind, paths in workflow] == [
-        (kind, len(paths)) for kind, paths in runner
+    assert [(kind, len(paths)) for _, kind, paths in workflow] == [
+        (kind, len(paths)) for _, kind, paths in runner
     ], "workflow and local runner declare a different number of Ruff invocations"
-    for (workflow_kind, workflow_paths), (runner_kind, runner_paths) in zip(
-        workflow, runner, strict=True
-    ):
+    for (
+        workflow_header,
+        workflow_kind,
+        workflow_paths,
+    ), (runner_header, runner_kind, runner_paths) in zip(workflow, runner, strict=True):
+        assert workflow_header == runner_header, (
+            f"Ruff invocation options diverge: {workflow_header!r} != {runner_header!r}"
+        )
         assert workflow_kind == runner_kind
         assert workflow_paths == runner_paths, (
             f"{workflow_kind} list diverges: "
