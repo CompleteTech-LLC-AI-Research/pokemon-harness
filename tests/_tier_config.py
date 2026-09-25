@@ -226,6 +226,7 @@ UNIT_MODULES = frozenset(
         "test_timed_battle_probe_contract.py",
         "test_timed_battle_probe_action_economy.py",
         "test_timed_battle_probe_admission.py",
+        "test_timed_frame_admission.py",
         "test_timed_battle_probe_ownership.py",
         "test_timed_battle_probe_terminal.py",
         "test_timed_input_observation.py",

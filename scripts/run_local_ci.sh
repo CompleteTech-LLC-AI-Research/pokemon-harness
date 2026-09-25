@@ -179,6 +179,9 @@ python -m ruff check \
     scripts/production_gate_tiers.py \
     scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
+    scripts/timed_frame_admission.py \
+    scripts/timed_frame_runner.py \
+    scripts/timed_frame_window.py \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
     tests/_battle_item_evidence.py \
@@ -230,6 +233,7 @@ python -m ruff check \
     tests/test_runtime_packaging_hygiene.py \
     tests/test_timed_remote.py \
     tests/test_timed_remote_facade.py \
+    tests/test_timed_frame_admission.py \
     tests/test_mcp_server_import_order.py
 python -m ruff format --check \
     scripts/_timed_battle_probe.py \
@@ -278,6 +282,9 @@ python -m ruff format --check \
     scripts/production_gate_tiers.py \
     scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
+    scripts/timed_frame_admission.py \
+    scripts/timed_frame_runner.py \
+    scripts/timed_frame_window.py \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
     tests/_battle_item_evidence.py \
@@ -329,6 +336,7 @@ python -m ruff format --check \
     tests/test_runtime_packaging_hygiene.py \
     tests/test_timed_remote.py \
     tests/test_timed_remote_facade.py \
+    tests/test_timed_frame_admission.py \
     tests/test_mcp_server_import_order.py
 
 # Check runtime and link lane lint
