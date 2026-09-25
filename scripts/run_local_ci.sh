@@ -132,6 +132,13 @@ PY
 python -m pip install -e ".[dev]"
 
 # Check packaging and gate lint/format
+# Boundary decision: `ruff format --check` runs only here, and only over
+# `scripts/` and `tests/` paths. No `src/` path is format-checked in this script
+# or in the workflow (0 of 16 `src/` files at 061fa15c, 0 of 17 at bfc2920), so
+# this is a pre-existing boundary rather than something #242 changed. The `src/`
+# files that are linted are checked, never format-checked, by the runtime/link
+# block below. Treating that split as intentional keeps this script in lockstep
+# with .github/workflows/release-hygiene.yml.
 python -m ruff check \
     scripts/_timed_battle_probe.py \
     scripts/_timed_battle_probe_reads.py \
