@@ -8,13 +8,16 @@ pass or failure is supplied by the caller's own result.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
 
 from scripts import timed_frame_admission as admission
+from scripts import timed_frame_window as window
 
 pytestmark = pytest.mark.unit
 
@@ -711,3 +714,51 @@ def test_every_nine_row_orientation_is_a_separate_admission():
     assert report["counts"]["rows"] == 9
     assert len(admissions) == 9, "each of the nine rows needs its own fresh window"
     assert report["matrix_success"] is True
+
+
+def test_doc_pin_table_matches_the_sources_it_pins():
+    """Every in-repo row of the §2 pin table must match the file it pins.
+
+    The table is what a row record is checked against, so a stale byte count or
+    digest makes the recorded identity unverifiable.  Rows naming files that are
+    not tracked here (the external observers) are not checked: they are pinned to
+    their retained copies, not to a path in this tree.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    document = repo_root / "docs" / "TIMED_FRAME_DEADLINE_PROTOCOL_20260921.md"
+    rows = re.findall(
+        r"^\|\s*`([^`]+\.py)`\s*\|\s*(\d+)\s*\|\s*`([0-9a-f]{64})`",
+        document.read_text(),
+        re.MULTILINE,
+    )
+
+    pinned = {name: (int(size), digest) for name, size, digest in rows}
+    assert pinned, "the §2 pin table must declare the validator and the wrapper"
+
+    for name in (
+        "scripts/timed_frame_window.py",
+        "scripts/timed_frame_admission.py",
+        "scripts/timed_frame_runner.py",
+    ):
+        assert name in pinned, f"{name} must be pinned in §2"
+
+    for name, (size, digest) in pinned.items():
+        source = repo_root / name
+        if not source.exists():
+            continue
+        raw = source.read_bytes()
+        assert size == len(raw), f"{name}: §2 says {size} bytes, source is {len(raw)}"
+        assert digest == hashlib.sha256(raw).hexdigest(), f"{name}: §2 digest is stale"
+
+
+def test_the_pinned_validator_identity_is_the_validator_actually_used():
+    """``validator_identity()`` must describe the code that makes the decision."""
+
+    identity = admission.validator_identity()
+    source = Path(window.__file__).resolve()
+
+    assert identity["name"] == window.GapAdmissionValidator.NAME
+    assert identity["module"] == "timed_frame_window.py"
+    assert identity["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert identity["bytes"] == len(source.read_bytes())
