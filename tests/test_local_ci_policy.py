@@ -262,6 +262,38 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         assert path in workflow
         assert path in runner
 
+    # The tuple above is membership-only, so it cannot see *which lane* holds a
+    # path. That gap is what let `src/pokered_harness/_mcp_facade_entry.py` be
+    # `ruff check`ed while no `ruff format --check` lane named it. Assert the
+    # lane itself: a path that is linted but never format-checked can drift out
+    # of format silently, which is exactly what this row pins.
+    facade = "src/pokered_harness/_mcp_facade_entry.py"
+    for label, text in (("workflow", workflow), ("local runner", runner)):
+        format_lanes = [
+            arguments
+            for arguments in _ruff_invocations(text)
+            if "--check" in arguments and "format" in arguments
+        ]
+        assert format_lanes, f"{label} declares no `ruff format --check` lane"
+        covered = {token for lane in format_lanes for token in lane if token.endswith(".py")}
+        assert facade in covered, f"{label} no longer format-checks {facade}"
+
+        # Keep the documented reason honest: the rest of the runtime/link lane's
+        # `src/` files are deliberately outside the format boundary because the
+        # lane is not format-clean. If that ever changes, this row should be
+        # revisited rather than silently kept.
+        runtime_lane = [
+            arguments
+            for arguments in _ruff_invocations(text)
+            if "check" in arguments and "format" not in arguments
+        ][-1]
+        runtime_src = {token for token in runtime_lane if token.startswith("src/")}
+        assert facade in runtime_src, f"{label} no longer checks {facade}"
+        assert runtime_src - covered, (
+            f"{label} now format-checks the whole runtime/link `src/` set; "
+            "the boundary comment in this file and in both CI files is stale"
+        )
+
     # The embedded Python verifiers are also part of the workflow contract;
     # command-prefix checks alone would permit a local runner to omit them.
     verifier_fragments = (

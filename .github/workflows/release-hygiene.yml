@@ -77,14 +77,18 @@ jobs:
 
       - name: Check packaging and gate lint/format
         run: |
-          # Boundary decision: `ruff format --check` runs only here, and only
-          # over `scripts/` and `tests/` paths. No `src/` path is format-checked
-          # in this workflow (0 of 16 `src/` files at 061fa15c, 0 of 17 at
-          # bfc2920), so this is a pre-existing boundary rather than something
-          # #242 changed. The `src/` files that are linted are checked, never
-          # format-checked, by the "Check runtime and link lane lint" step
-          # below. Treating that split as intentional keeps the two lanes in
-          # lockstep with scripts/run_local_ci.sh.
+          # Boundary decision: the `ruff format --check` lane below covers
+          # `scripts/`, `tests/`, and exactly one `src/` file -- the #242 facade
+          # entry, added so that new source path is format-checked and not
+          # merely checked. The remaining `src/` paths of the runtime/link lane
+          # stay outside the format boundary on purpose and are named in
+          # `tests/test_local_ci_policy.py`. Measured reason: 7 of that lane's
+          # 29 paths are not format-clean today (3 of its 17 `src/` files), so
+          # format-checking the whole lane would fail the gate and belongs in a
+          # separate change that fixes those files first. The narrow boundary is
+          # pre-existing -- 0 of 16 `src/` files were format-checked at
+          # 061fa15c. The two lanes stay in lockstep with
+          # scripts/run_local_ci.sh.
           python -m ruff check \
             scripts/_timed_battle_probe.py \
             scripts/_timed_battle_probe_reads.py \
@@ -189,6 +193,7 @@ jobs:
             tests/test_timed_frame_admission.py \
             tests/test_mcp_server_import_order.py
           python -m ruff format --check \
+            src/pokered_harness/_mcp_facade_entry.py \
             scripts/_timed_battle_probe.py \
             scripts/_timed_battle_probe_reads.py \
             scripts/_timed_battle_probe_schemas.py \

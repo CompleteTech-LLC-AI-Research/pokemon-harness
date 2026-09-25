@@ -132,13 +132,16 @@ PY
 python -m pip install -e ".[dev]"
 
 # Check packaging and gate lint/format
-# Boundary decision: `ruff format --check` runs only here, and only over
-# `scripts/` and `tests/` paths. No `src/` path is format-checked in this script
-# or in the workflow (0 of 16 `src/` files at 061fa15c, 0 of 17 at bfc2920), so
-# this is a pre-existing boundary rather than something #242 changed. The `src/`
-# files that are linted are checked, never format-checked, by the runtime/link
-# block below. Treating that split as intentional keeps this script in lockstep
-# with .github/workflows/release-hygiene.yml.
+# Boundary decision: the `ruff format --check` lane below covers `scripts/`,
+# `tests/`, and exactly one `src/` file -- the #242 facade entry, added so that
+# new source path is format-checked and not merely checked. The remaining `src/`
+# paths of the runtime/link block stay outside the format boundary on purpose
+# and are named in tests/test_local_ci_policy.py. Measured reason: 7 of that
+# block's 29 paths are not format-clean today (3 of its 17 `src/` files), so
+# format-checking the whole block would fail the gate and belongs in a separate
+# change that fixes those files first. The narrow boundary is pre-existing --
+# 0 of 16 `src/` files were format-checked at 061fa15c. This script stays in
+# lockstep with .github/workflows/release-hygiene.yml.
 python -m ruff check \
     scripts/_timed_battle_probe.py \
     scripts/_timed_battle_probe_reads.py \
@@ -243,6 +246,7 @@ python -m ruff check \
     tests/test_timed_frame_admission.py \
     tests/test_mcp_server_import_order.py
 python -m ruff format --check \
+    src/pokered_harness/_mcp_facade_entry.py \
     scripts/_timed_battle_probe.py \
     scripts/_timed_battle_probe_reads.py \
     scripts/_timed_battle_probe_schemas.py \
