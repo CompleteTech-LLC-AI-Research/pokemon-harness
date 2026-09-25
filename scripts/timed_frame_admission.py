@@ -742,16 +742,29 @@ def _main(argv: Sequence[str] | None = None) -> int:
         default=[],
         metavar="ROW=CMD",
         help=(
-            "the unchanged per-row command, as ROW=<shell command>; repeat once "
-            "per row. The row is dispatched only after it is admitted"
+            "the unchanged per-row command, as ROW=<argv-style command line>; "
+            "repeat once per row. The line is split into argv and executed "
+            "directly, never through a shell, so pipes, redirection, quoting "
+            "for a shell, and $VARS are literal arguments. The row is "
+            "dispatched only after it is admitted"
         ),
     )
     parser.add_argument(
         "--allocation-probe",
-        help="a shell command whose zero exit status proves the recorded "
-        "allocation is still held; re-checked after each row",
+        help="an argv-style command line, split and executed without a shell, "
+        "whose zero exit status proves the recorded allocation is still held; "
+        "re-checked after each row",
     )
-    parser.add_argument("--timeout-seconds", type=float, default=None)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=None,
+        help=(
+            "per-row budget in seconds. A row that overruns it is recorded as a "
+            "failure (returncode 124, timed_out true) and classified in place of "
+            "the row; it is never re-run and never converted into a pass"
+        ),
+    )
     parser.add_argument(
         "--observation-bound-seconds",
         type=float,
