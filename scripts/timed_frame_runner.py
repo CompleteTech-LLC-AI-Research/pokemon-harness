@@ -44,6 +44,13 @@ from scripts.timed_frame_admission import (
     load_allocation,
 )
 
+# A row that overruns its declared budget is recorded with this sentinel return
+# code: non-zero, so an overrun is always a failure and never a pass, and the
+# conventional ``timeout(1)`` status so a reader of the record recognises it.
+# The authoritative discriminator is the ``timed_out`` flag, not the code: a
+# command that happened to exit 124 is reported with ``timed_out`` False.
+ROW_TIMEOUT_RETURN_CODE = 124
+
 
 @dataclass(frozen=True)
 class RowCommand:
@@ -63,25 +70,66 @@ class RowRun:
     returncode: int
     stdout: str
     stderr: str
+    timed_out: bool = False
 
     @property
     def failed(self) -> bool:
         return self.returncode != 0
 
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "row": self.row,
+            "command": self.command,
+            "returncode": self.returncode,
+            "timed_out": self.timed_out,
+            "failed": self.failed,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+        }
+
 
 def _run_command(item: RowCommand, timeout_seconds: float | None) -> RowRun:
-    """Run one row's command untouched and capture its terminal result."""
+    """Run one row's command untouched and capture its terminal result.
+
+    A row that overruns its own declared budget is a **recorded** row
+    termination, not an unrecorded abort of the whole wrapper: §5.1 leans on the
+    failure record being preserved, so the overrun is captured with a sentinel
+    return code and a ``timed_out`` flag and handed to ``classify_row`` like any
+    other terminal status.  The row is never re-run, and the sentinel is a
+    failure, so an overrun can never be read as a pass.
+    """
 
     argv = shlex.split(item.command)
     if not argv:
         raise ValueError(f"row {item.row!r} has an empty command")
-    completed = subprocess.run(
-        argv,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=item.timeout_seconds if item.timeout_seconds is not None else timeout_seconds,
-    )
+    budget = item.timeout_seconds if item.timeout_seconds is not None else timeout_seconds
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=budget,
+        )
+    except subprocess.TimeoutExpired as expired:
+        stdout = expired.stdout or ""
+        stderr = expired.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        return RowRun(
+            row=item.row,
+            command=item.command,
+            returncode=ROW_TIMEOUT_RETURN_CODE,
+            stdout=stdout,
+            stderr=stderr
+            + (
+                f"\nrow {item.row!r} exceeded its {budget!r} s budget and was "
+                f"terminated by the wrapper; recorded as a failure, not re-run\n"
+            ),
+            timed_out=True,
+        )
     return RowRun(
         row=item.row,
         command=item.command,
@@ -147,17 +195,7 @@ def run_wrapper(
     record = wrapper.run(
         dispatch, outcome=outcome, allocation_held=lambda: _probe(allocation_probe)
     )
-    record["row_runs"] = [
-        {
-            "row": run.row,
-            "command": run.command,
-            "returncode": run.returncode,
-            "failed": run.failed,
-            "stdout": run.stdout,
-            "stderr": run.stderr,
-        }
-        for run in runs
-    ]
+    record["row_runs"] = [run.as_dict() for run in runs]
     return record
 
 

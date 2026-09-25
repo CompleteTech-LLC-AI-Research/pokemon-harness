@@ -18,6 +18,10 @@ This module supplies the two things §5 and §9.1 require to close that gap:
 * :class:`HostSample` / :func:`read_host_sample` — one read-only sample of the
   frozen watcher's own two sources (``/proc/loadavg`` and the ``some`` line of
   ``/proc/pressure/cpu``).
+* :class:`AllocationRecord` — the #85 allocation held for a row.  §5 requires the
+  record to state *which* allocation was held, its extent, and its **span**, so
+  a record whose span is missing, unparseable, or already ended is not a held
+  allocation and cannot admit a row.
 
 It holds no policy of its own: every threshold is the frozen §5 value, stated
 once as a module constant.  A row's pass or failure is never read here.
@@ -29,6 +33,7 @@ import hashlib
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +82,34 @@ INADMISSIBLE_STATES = (S0_NOT_ADMITTED, S3_CONTROL_LOST, S4_SAMPLE_GAP, S5_ADMIS
 S5_REMAINING_ROWS_REASON = "not run — blocked on the capacity prerequisite"
 
 _ALLOCATION_KINDS = ("reservation", "affinity", "cgroup_quota")
+
+# §5 requires the allocation's span to be recorded.  Only this one ISO-8601 UTC
+# form is accepted: a naive, offset, or non-UTC instant cannot be compared with
+# the run's own UTC clock without assuming an offset it never declared.
+_ALLOCATION_INSTANT_FORMAT = "YYYY-MM-DDTHH:MM:SS[.ffffff]Z"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _allocation_instant(value: Any) -> datetime | None:
+    """Parse one recorded span instant, or ``None`` when it is not usable.
+
+    Deterministic and clock-free: this decides whether a *record* states a
+    parseable instant, never whether that instant is still in the future.
+    """
+
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1])
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return None
+    return parsed
+
 
 # A during-row observer must not grow the retained series without bound, and a
 # degenerate interval must not spin.  The floor keeps the observer at a real
@@ -188,6 +221,15 @@ class AllocationRecord:
     expires_utc: str | None = None
 
     def problems(self) -> list[str]:
+        """Everything that stops this record being a *verified, held* allocation.
+
+        §5 requires the record to state its span as well as its extent, so an
+        absent, unparseable, inverted, or already-elapsed span is a problem
+        exactly like an absent extent.  The elapsed check reads this process's
+        own UTC clock, so ``held`` is honest about the present instead of being
+        true forever for any reservation-shaped document.
+        """
+
         found: list[str] = []
         if self.kind not in _ALLOCATION_KINDS:
             found.append(
@@ -206,11 +248,47 @@ class AllocationRecord:
             found.append("allocation holder is empty")
         if not self.source:
             found.append("allocation source is empty")
+
+        started = _allocation_instant(self.started_utc)
+        if started is None:
+            found.append(
+                f"allocation span start {self.started_utc!r} is not a "
+                f"{_ALLOCATION_INSTANT_FORMAT} instant (§5 requires the span)"
+            )
+        expires = _allocation_instant(self.expires_utc)
+        if expires is None:
+            found.append(
+                f"allocation span end {self.expires_utc!r} is not a "
+                f"{_ALLOCATION_INSTANT_FORMAT} instant (§5 requires the span)"
+            )
+        elif started is not None:
+            if expires < started:
+                found.append(
+                    f"allocation span ends ({self.expires_utc}) before it starts "
+                    f"({self.started_utc})"
+                )
+            elif _utc_now() >= expires.replace(tzinfo=UTC):
+                found.append(
+                    f"allocation span ended at {self.expires_utc}, so the reservation "
+                    "is no longer held (§5 requires a verified allocation)"
+                )
         return found
 
     @property
     def held(self) -> bool:
         return not self.problems()
+
+    def span_expired(self) -> bool:
+        """Whether the recorded span has already ended (§5).
+
+        Distinct from :meth:`problems`, which reports *why* it is not held.
+        """
+
+        started = _allocation_instant(self.started_utc)
+        expires = _allocation_instant(self.expires_utc)
+        if started is None or expires is None or expires < started:
+            return False
+        return _utc_now() >= expires.replace(tzinfo=UTC)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -221,6 +299,7 @@ class AllocationRecord:
             "source": self.source,
             "started_utc": self.started_utc,
             "expires_utc": self.expires_utc,
+            "span_expired": self.span_expired(),
             "problems": self.problems(),
             "held": self.held,
         }

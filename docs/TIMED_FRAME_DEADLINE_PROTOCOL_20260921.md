@@ -101,9 +101,9 @@ admitted it:
 
 | Component | Bytes | SHA-256 | Establishes |
 |---|---:|---|---|
-| `scripts/timed_frame_window.py` | 14760 | `9869ca252701705594c1c91eb1e65a1cd6432260dc662e8f817ea0e9763eb70f` | The named, pinned gap/admission validator (§5, §9.1) and the read-only §5 sample |
-| `scripts/timed_frame_admission.py` | 32586 | `adee9a952dad3b9ed0f1aeb7cd4bb742447473a5f68b7d7d4849c990d1c59659` | The declared per-row admission wrapper: fresh window per row, during-row sampling, `S0`–`S6` classification, `S5` stop |
-| `scripts/timed_frame_runner.py` | 5240 | `914071fb120cef2a6633cae7281d05424cdc2368442665f1f19712fac70c3517` | The wrapper's executable half: runs each row's unchanged command and captures its terminal result |
+| `scripts/timed_frame_window.py` | 18015 | `82a721109396c102f1f5e583e02c6c317eb3ecb8d918ff35467bbd190cf304b9` | The named, pinned gap/admission validator (§5, §9.1) and the read-only §5 sample; also enforces the recorded allocation **span**, so an expired, absent, or unparseable span is not a held allocation |
+| `scripts/timed_frame_admission.py` | 33147 | `2c2a0e73c61dc3148a23e3f50cd3fe12e45cdc58a6e467c74e5390d1f33158e3` | The declared per-row admission wrapper: fresh window per row, during-row sampling, `S0`–`S6` classification, `S5` stop |
+| `scripts/timed_frame_runner.py` | 7010 | `1f888360c26457b05f872d0c87d213c9fc37f613eb9defefcf0e4f5bbdadb722` | The wrapper's executable half: runs each row's unchanged command and captures its terminal result. A row that overruns its own declared budget is recorded (`returncode 124`, `timed_out true`) and classified, so the failure record survives |
 
 The validator is pinned by name as well as by digest:
 `timed-frame-gap-admission-validator`. A run records
@@ -113,6 +113,25 @@ row is reproducible from the retained record alone. These byte counts and
 digests are **not** the row's own `§6` output digests; a row that runs must
 re-compute both from the retained sources and record the values it actually
 loaded.
+
+Three guarantees these components make are now checked **behaviourally** as well
+as structurally, because a regression in any of them previously left
+`tests/test_timed_frame_admission.py` fully green (recorded on #243):
+
+- a row's qualifying window is built only from samples taken **after** that row
+  became due — a later row can no longer inherit an earlier row's window (§5.1
+  rule 3);
+- a during-row observer that cannot be shown to have stopped defines **no**
+  terminal sample, so the row stays non-terminal rather than being read as a
+  valid observation;
+- a `S0`/`S5` stop **blocks** every remaining row instead of retrying them, and
+  the remaining rows are reported as not run.
+
+The exact-equality boundaries are pinned too, in the direction the frozen §5
+text states: a sample gap of exactly `6.0 s` stays continuous ("at most
+`6.0 s`"), a launch delay of exactly `6.0 s` is still admitted ("within one
+permitted gap"), and a breach that appears only in the **terminal** sample is
+`S3` — a lost control is replaced, never believed (§5.1).
 
 ### 2.1 Original full-gate failure — attempt `72f` at `7516f16`
 
