@@ -440,9 +440,9 @@ Requirements:
 
 - Python 3.11 or newer.
 - The bundled PyBoy runtime (`2.7.0`, harness-local divergence revision
-  `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`; upstream base
+  `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`; pre-divergence harness fork revision
   `c565df66c3731fad2856169a90f6bbec99925915`). Earlier recorded runs below name
-  the upstream base because they predate the in-fork divergence.
+  that fork revision because they predate the in-fork divergence.
 - `mcp==1.29.1`, the certified runtime API used by the server.
 - A legally obtained ROM and a matching debug symbol file for any real-ROM
   run.

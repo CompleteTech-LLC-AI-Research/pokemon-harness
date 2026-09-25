@@ -13,13 +13,15 @@ Owner of this decision: the lead integrator (shared integration / release-identi
 not an upstream branch. Its identity is recorded twice and asserted by the repository:
 
 - `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` = the current pin (see the Update sections: it
-  is now the harness-local divergence revision, not the upstream base)
+  is now the harness-local divergence revision, not the pre-divergence fork revision)
 - `vendor/pyboy-src/pyboy/__init__.py` `__pokered_harness_revision__` = the same value
 
-The **upstream base** this tree was forked from remains
+The **pre-divergence fork revision** this tree descended from remains
 `c565df66c3731fad2856169a90f6bbec99925915`, recorded in
-`vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`. It stopped being the pin once the tree
-diverged.
+`vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`. It is a commit of the harness's own PyBoy
+fork (`CompleteDotTech/pyboy-link-cable-fork`, 32 commits ahead of upstream tag `v2.7.0` =
+`4627b90b878e91faff443b3acd6d4e4be09a4387`), **not** an upstream `Baekalfen/PyBoy` revision. It
+stopped being the pin once the tree diverged.
 
 That identity is load-bearing:
 
@@ -78,7 +80,9 @@ must satisfy all of the following before any of the eight leaves is closed:
 
 2. **Identity is re-pinned honestly.** Before divergence, the revision pin is not truthful for a
    modified tree. The divergence commit must (a) add a harness-local divergence revision and record
-   the upstream base revision, (b) update `POKERED_HARNESS_PYBOY_REVISION`, `README`/`VERSIONS.md`,
+   the inherited (pre-divergence, harness-fork) revision — not an upstream base, because none of the
+   PyBoy revisions this tree descends from is an upstream commit — (b) update
+   `POKERED_HARNESS_PYBOY_REVISION`, `README`/`VERSIONS.md`,
    and `__pokered_harness_revision__` consistently, (c) keep
    `scripts/bootstrap_pyboy.py --check`, `tests/test_runtime_packaging_build_contract.py`, and
    `tests/test_runtime_packaging_dependency_pins.py` passing against the new pin. Leaving the old
@@ -279,9 +283,20 @@ re-landed, and both pilot leaves were re-landed **together** on the post-`#234` 
   `tests/_qualification_runner_support.py`, the CI assertions in
   `.github/workflows/release-hygiene.yml` / `scripts/run_local_ci.sh`, and the current-identity
   prose in `README.md` / `VERSIONS.md` / `agents.md` / `docs/RELEASE_CHECKLIST.md` /
-  `docs/LINUX_RESUME_PROMPT.md`) moved together. The upstream base `c565df66…` is recorded, not
-  reused as the pin. Historical `release-evidence/` records and earlier prose that names
-  `c565df66…` are left untouched — they describe runs under the identity of their time.
+  `docs/LINUX_RESUME_PROMPT.md`) moved together. The pre-divergence fork revision `c565df66…` is
+  recorded, not reused as the pin (it is a harness-fork revision, not an upstream `Baekalfen/PyBoy`
+  commit; upstream `v2.7.0` is `4627b90b…`). Historical `release-evidence/` records and earlier prose
+  that names `c565df66…` are left untouched — they describe runs under the identity of their time.
+
+  One pin-covered comment is deliberately left mis-attributed in this pass: `pyboy/__init__.py`'s
+  revision comment still ends *"it replaced the upstream base revision `c565df66…`"*. That comment is
+  **inside the content identity**, so rewording it moves the pin and would reopen #235's
+  re-qualification target for a prose-only change. The correction is folded into the **next
+  pin-moving** vendored change instead; the residual is recorded as open item 7 in
+  `vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`.
+  A guard pins the residual rather than trusting it: `tests/test_vendored_provenance_wording.py`
+  fails if that comment is reworded without a matching re-pin, or if any of the corrected carriers
+  regress to "upstream base".
 
 Condition status for the two re-landed leaves: 1 (generation) satisfied byte-identically; 2
 (re-pin) executed; 4 (public API) preserved — no public symbol, module path, or `cdef` surface

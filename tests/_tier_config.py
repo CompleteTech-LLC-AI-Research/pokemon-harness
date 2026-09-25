@@ -189,6 +189,7 @@ UNIT_MODULES = frozenset(
         "test_runtime_packaging_build_contract.py",
         "test_runtime_packaging_dependency_pins.py",
         "test_runtime_packaging_hygiene.py",
+        "test_vendored_provenance_wording.py",
         "test_local_ci_policy.py",
         "test_scheduler_lcd_phase.py",
         "test_scheduler_physical_time.py",
