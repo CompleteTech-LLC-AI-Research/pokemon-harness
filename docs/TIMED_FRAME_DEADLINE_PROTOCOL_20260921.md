@@ -94,6 +94,26 @@ of the copies on disk:
 | `run_timed_mcp_84_matrix.py` | 6293 | `fa064cbe5600f6e562265cb1bc5f1454ac4d69f97a1f0a73c2a16643281fa6cd` |
 | `watch_cpu_capacity_84.py` | 3419 | `24d719bb4d1d0fad8b8cfcf79f14fc59fdb37e7a78cc7bfd31401acf3caa15bf` |
 
+§5.1's runner prerequisite is discharged by two tracked components, added
+under issue #84. They are declared here with the identities of their sources at
+this revision, so a row record can name the exact admission machinery that
+admitted it:
+
+| Component | Bytes | SHA-256 | Establishes |
+|---|---:|---|---|
+| `scripts/timed_frame_window.py` | 14760 | `9869ca252701705594c1c91eb1e65a1cd6432260dc662e8f817ea0e9763eb70f` | The named, pinned gap/admission validator (§5, §9.1) and the read-only §5 sample |
+| `scripts/timed_frame_admission.py` | 32586 | `adee9a952dad3b9ed0f1aeb7cd4bb742447473a5f68b7d7d4849c990d1c59659` | The declared per-row admission wrapper: fresh window per row, during-row sampling, `S0`–`S6` classification, `S5` stop |
+| `scripts/timed_frame_runner.py` | 5240 | `914071fb120cef2a6633cae7281d05424cdc2368442665f1f19712fac70c3517` | The wrapper's executable half: runs each row's unchanged command and captures its terminal result |
+
+The validator is pinned by name as well as by digest:
+`timed-frame-gap-admission-validator`. A run records
+`validator_identity()`, which reports the validator's name, source file, byte
+count, SHA-256, and the procedure it applies, so the admission decision for a
+row is reproducible from the retained record alone. These byte counts and
+digests are **not** the row's own `§6` output digests; a row that runs must
+re-compute both from the retained sources and record the values it actually
+loaded.
+
 ### 2.1 Original full-gate failure — attempt `72f` at `7516f16`
 
 The complete native remote tier collected 21 tests and exited `1`:
@@ -409,6 +429,18 @@ an explicit read-only validation/restart procedure over the retained sample
 series — must exist and be recorded with the row before even the first row is
 dispatched. The frozen runner's own `1800 s` value remains only the supervisor
 bound of §3.
+
+The wrapper and validator are tracked as `scripts/timed_frame_admission.py` and
+`scripts/timed_frame_window.py`, pinned in §2. The frozen runner is **not**
+modified and is never described as applying this table: it remains the tool that
+dispatches one row, and the wrapper is what decides whether that row may be
+dispatched and whether its result is admissible.
+
+The wrapper is a prerequisite, not a substitute for the others. In this table,
+`S1`/`S2` still require a *qualifying window* under §5 and a *recorded
+allocation*, so the wrapper alone cannot admit a row: with no verified
+allocation it stops at `S0`/`S5`, and the per-row window is never inherited from
+an earlier row. Its own tests fail if a row could be dispatched without either.
 
 ## 6. Required terminal artifacts
 
