@@ -264,4 +264,6 @@ def _resource_specs(has_peer: bool = False) -> list[mcp_types.Resource]:
 
 
 # Call-time indirection so facade-level monkeypatches stay visible here.
-import pokered_harness.mcp_server as _entry
+# Deferred (issue #240) instead of an eager back-edge, so this module can
+# be imported first in a fresh interpreter.
+from pokered_harness._mcp_facade_entry import entry as _entry

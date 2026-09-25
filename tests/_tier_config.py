@@ -133,6 +133,7 @@ UNIT_MODULES = frozenset(
         "test_mcp_server_endpoint.py",
         "test_mcp_server_endpoint_cleanup.py",
         "test_mcp_server_handlers.py",
+        "test_mcp_server_import_order.py",
         "test_mcp_server_link.py",
         "test_mcp_server_session.py",
         "test_mcp_timed_remote_cached_failure.py",
