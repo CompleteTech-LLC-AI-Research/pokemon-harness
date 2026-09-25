@@ -229,7 +229,8 @@ python -m ruff check \
     tests/test_runtime_packaging_dependency_pins.py \
     tests/test_runtime_packaging_hygiene.py \
     tests/test_timed_remote.py \
-    tests/test_timed_remote_facade.py
+    tests/test_timed_remote_facade.py \
+    tests/test_mcp_server_import_order.py
 python -m ruff format --check \
     scripts/_timed_battle_probe.py \
     scripts/_timed_battle_probe_reads.py \
@@ -327,10 +328,12 @@ python -m ruff format --check \
     tests/test_runtime_packaging_dependency_pins.py \
     tests/test_runtime_packaging_hygiene.py \
     tests/test_timed_remote.py \
-    tests/test_timed_remote_facade.py
+    tests/test_timed_remote_facade.py \
+    tests/test_mcp_server_import_order.py
 
 # Check runtime and link lane lint
 python -m ruff check \
+    src/pokered_harness/_mcp_facade_entry.py \
     src/pokered_harness/link/_network_backend_io_mixin.py \
     src/pokered_harness/link/_network_backend_lifecycle_mixin.py \
     src/pokered_harness/link/_network_backend_owner_mixin.py \
