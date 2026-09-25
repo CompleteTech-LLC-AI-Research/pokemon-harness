@@ -1,8 +1,8 @@
 # Decision: handling the eight vendored PyBoy split leaves (#123, #133, #138, #142, #150, #153, #155, #161)
 
-Status: **DECIDED — explicit in-fork divergence is the target handling; the leaves remain OPEN and
-BLOCKED in this environment.** No leaf is completed by this document, and no leaf may be closed
-merely because its original file disappears (#122 requirement).
+Status: **DECIDED — explicit in-fork divergence; execution has started (see the "Update" sections
+below, including the re-pin). The leaves remain OPEN.** No leaf is completed by this document, and
+no leaf may be closed merely because its original file disappears (#122 requirement).
 
 Scope: the vendored sub-issue group listed under "Vendored pyboy (decision pending)" in #122.
 Owner of this decision: the lead integrator (shared integration / release-identity file owner).
@@ -12,8 +12,14 @@ Owner of this decision: the lead integrator (shared integration / release-identi
 `vendor/pyboy-src/` is a pinned third-party PyBoy `2.7.0` source snapshot, not harness source and
 not an upstream branch. Its identity is recorded twice and asserted by the repository:
 
-- `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` = `c565df66c3731fad2856169a90f6bbec99925915`
+- `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` = the current pin (see the Update sections: it
+  is now the harness-local divergence revision, not the upstream base)
 - `vendor/pyboy-src/pyboy/__init__.py` `__pokered_harness_revision__` = the same value
+
+The **upstream base** this tree was forked from remains
+`c565df66c3731fad2856169a90f6bbec99925915`, recorded in
+`vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`. It stopped being the pin once the tree
+diverged.
 
 That identity is load-bearing:
 
@@ -243,3 +249,43 @@ native unit lane still needs a **quiet, non-root, CPU-allocated** runner to reac
 3), and #90.3/#170 re-qualification is a new owed row. The eight leaves stay **OPEN**, `#122` stays
 **OPEN**, release status stays **PARTIAL**; this update records the evidence-integrity semantics and
 advances no leaf on its own.
+
+## Update — 2026-09-24 (d): the #138 and #142 splits re-landed together after the historical-pin guard fix
+
+The pilot merge (`975f1a5`) was reverted by `#230` **because the condition-2 re-pin broke the
+registration guard** — not because of the split. **`#234` fixed that guard** (it now validates the
+`#90.3` bundle against the pin in force at the bundle's own recorded `worktree_head`, not against
+the live pin; see the section above). With that regression removed, the divergence can be
+re-landed, and both pilot leaves were re-landed **together** on the post-`#234` `master`:
+
+- **`#138` (Divergence 1).** `pyboy/plugins/game_wrapper_pokemon_pinball.py` (1552) is now a
+  791-line facade plus `game_wrapper_pokemon_pinball_data.py` (875), both under the bound. The
+  `cdef class` stays put (`game_wrapper_pokemon_pinball.pxd` declares it and `plugins/manager.pxd`
+  cimports it as a `cdef public` extension type), so only module-level data moved; the data module
+  re-exports its names under an explicit `__all__`, because a bare `import *` leaked `Enum`, which
+  shadows the C type `Enum` in the facade's translation unit — a native-only failure that source
+  mode hid.
+- **`#142` (Divergence 2).** `pyboy/core/opcodes_gen.py` (1457) is now a 565-line facade plus
+  `pyboy/core/opcodes_gen_handlers.py` (923) holding the 48 `OpcodeData` handler methods;
+  `OpcodeData` is `class OpcodeData(OpcodeDataHandlers)`. Both files are under the bound. The
+  generator and the new handlers module are excluded from Cythonization by `setup.py`, and
+  regeneration stays byte-identical (`opcodes.py` `2538898d…`, `opcodes.pxd` `b1c0c5ad…`), so this
+  leaf adds no compiled build input and the generated pair is untouched.
+- **Honest re-pin (condition 2) executed once, covering both.** The vendored manifest now hashes to
+  the harness-local divergence revision `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`. Every
+  current-identity carrier (`POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py`'s
+  `__pokered_harness_revision__`, `scripts/bootstrap_pyboy.py::EXPECTED_REVISION`,
+  `tests/_runtime_packaging_support.py::EXPECTED_PYBOY_REVISION`,
+  `tests/_qualification_runner_support.py`, the CI assertions in
+  `.github/workflows/release-hygiene.yml` / `scripts/run_local_ci.sh`, and the current-identity
+  prose in `README.md` / `VERSIONS.md` / `agents.md` / `docs/RELEASE_CHECKLIST.md` /
+  `docs/LINUX_RESUME_PROMPT.md`) moved together. The upstream base `c565df66…` is recorded, not
+  reused as the pin. Historical `release-evidence/` records and earlier prose that names
+  `c565df66…` are left untouched — they describe runs under the identity of their time.
+
+Condition status for the two re-landed leaves: 1 (generation) satisfied byte-identically; 2
+(re-pin) executed; 4 (public API) preserved — no public symbol, module path, or `cdef` surface
+moved; 3 (Cython ABI) — `#138`'s earlier native rebuild is **not** re-run on this head, and the
+native unit lane still requires the quiet, non-root, CPU-allocated runner, so **condition 3 is not
+terminal**; 5 (independent review) pending on the exact head. `#138` and `#142` therefore stay
+**OPEN**, `#122` stays **OPEN**, and release status stays **PARTIAL**.
