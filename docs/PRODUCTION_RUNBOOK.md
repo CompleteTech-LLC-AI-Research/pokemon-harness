@@ -587,6 +587,14 @@ A zero observation interval uses a 0.01-second minimum background interval;
 collection never runs in the active child dispatcher. Initial collection and
 refreshes between tiers are bounded by the admission deadline. Expired healthy
 samples cannot admit new work, and late observations cannot restore health.
+An admission retry is handed whatever remains of that deadline, so its budget
+shrinks toward zero as the deadline approaches. A retry whose budget is shorter
+than one real collection on the host lapses without ever reading it; that lapse
+is a statement about the budget, not about capacity, so it is retained as an
+explicit failed sample but cannot replace the verdict and actionable reason of
+the last real observation (for example "effective CPUs 1 below declared minimum
+4"). A collection that fails against the *declared* deadline remains a real
+`unsupported` observation.
 Owners retain their original priority and deadlines; unavailable observations
 only prevent new admission. Observer shutdown waits at most 0.25 seconds and
 reports an unresponsive collector as unsupported. Every admitted pair and every
