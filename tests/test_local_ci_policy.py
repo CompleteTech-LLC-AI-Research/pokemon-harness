@@ -162,9 +162,12 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     # than left out. The complete boundary is asserted by
     # `test_runner_ruff_file_lists_match_the_workflow_exactly` above, which
     # compares the workflow's and the runner's full argument vectors for every
-    # `python -m ruff` invocation. Adding a path here is therefore still
-    # required when it is added to a lane, but a path missing here is not by
-    # itself evidence that the boundary lost it.
+    # `python -m ruff` invocation. The converse is *not* enforced: no assertion
+    # here fails when a lane carries a path this tuple omits, which is why the
+    # lane-placement row below exists to pin the one property the tuple cannot
+    # see. Read this tuple as a selected membership floor, not as a claim that
+    # it enumerates the boundary; a path missing here is not by itself evidence
+    # that the boundary lost it.
     workflow_paths = (
         "scripts/bootstrap_pyboy.py",
         "scripts/coverage_report.py",
