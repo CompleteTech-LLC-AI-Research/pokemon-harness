@@ -455,6 +455,11 @@ class CapacitySession:
         )
         self.availability_status = "unknown"
         self.availability_reasons: list[str] = []
+        # Set when the most recent observation lapsed because its budget was a
+        # shrinking retry budget rather than the declared admission deadline.
+        # Such an observation never saw the host, so it is not evidence and must
+        # not be allowed to restate the availability.
+        self._retry_lapsed_without_observing = False
         self.started = False
         self.interrupted = False
         self._monitor_depth = 0
@@ -648,6 +653,8 @@ class CapacitySession:
         )
         complete = threading.Event()
         result = []
+        # A fresh attempt must not inherit the outcome of an earlier one.
+        self._retry_lapsed_without_observing = False
 
         def collect():
             try:
@@ -667,19 +674,32 @@ class CapacitySession:
             or time.monotonic() >= collection_deadline
             or not result
         ):
+            # A retry is handed whatever is left of the admission deadline, so
+            # it can lapse without ever reading the host.  Name the budget that
+            # actually ran out, otherwise the retained sample records a cause
+            # that was never observed.
+            if timeout_seconds is None:
+                problem = "capacity collection exceeded admission deadline"
+            else:
+                problem = (
+                    f"capacity collection exceeded its remaining admission budget "
+                    f"({budget:.6f}s) on a retry whose budget shrinks toward the deadline"
+                )
             sample = CapacitySample(
                 sequence=len(self.telemetry.samples),
                 monotonic_seconds=self.clock(),
                 utc_timestamp=_utc_now(),
                 status="failed",
-                problems=["capacity collection exceeded admission deadline"],
+                problems=[problem],
                 facts={},
             )
+            self._retry_lapsed_without_observing = timeout_seconds is not None
             self.telemetry.collection_failures += 1
         else:
             sample = result[0]
             sample.sequence = len(self.telemetry.samples)
             self.telemetry.collection_failures += recorder.collection_failures
+            self._retry_lapsed_without_observing = False
             for assumption in recorder.capability_assumptions:
                 if assumption not in self.telemetry.capability_assumptions:
                     self.telemetry.capability_assumptions.append(assumption)
@@ -729,10 +749,22 @@ class CapacitySession:
         return self.availability_status
 
     def wait_until_available(self, *, sleep: Any = time.sleep) -> str:
-        """Retry unavailable observations within the declared admission budget."""
+        """Retry unavailable observations within the declared admission budget.
+
+        Every retry re-observes with whatever remains of the admission budget,
+        which shrinks toward zero as the deadline approaches.  A retry whose
+        budget is shorter than one real collection on this host cannot observe
+        anything: it lapses before the host is read, which is a statement about
+        the budget, not about capacity.  Such a lapse must never replace a
+        determinate verdict and its actionable reason ("effective CPUs N below
+        declared minimum M"), so it is discarded and that verdict stands.  A
+        lapse of the *declared* deadline is real evidence and is kept.
+        """
 
         deadline = self.clock() + self.policy.admission_deadline_seconds
         status = self.ensure_started()
+        settled_status = self.availability_status
+        settled_reasons = list(self.availability_reasons)
         while status != "ok":
             remaining = deadline - self.clock()
             if remaining <= 0:
@@ -740,7 +772,20 @@ class CapacitySession:
             sleep(min(max(self.policy.observation_seconds, 0.01), remaining))
             if self.clock() >= deadline:
                 break
-            status = self.maybe_observe(timeout_seconds=deadline - self.clock())
+            retry = self.maybe_observe(timeout_seconds=deadline - self.clock())
+            if self._retry_lapsed_without_observing:
+                # The retry never read the host, so it cannot revise what the
+                # last real observation established.  Its failed sample is kept
+                # for the record; the verdict and its reason are restored.  Keep
+                # retrying: a smaller budget can still succeed, so a later retry
+                # may yet observe the host and legitimately replace that verdict.
+                self._retry_lapsed_without_observing = False
+                self.availability_status = settled_status
+                self.availability_reasons = list(settled_reasons)
+                continue
+            status = retry
+            settled_status = self.availability_status
+            settled_reasons = list(self.availability_reasons)
         return status
 
     def report(self, *, failed: int = 0, outcome: str | None = None) -> dict[str, Any]:

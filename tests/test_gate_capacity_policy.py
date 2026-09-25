@@ -698,3 +698,86 @@ def test_monitor_restart_refreshes_before_admitting_next_tier(tmp_path):
         assert sampler.calls >= 2
         assert session.admission.admit("next-tier").status == "queued"
         assert session.availability_status == "blocked"
+
+
+def test_retry_budget_lapse_never_overwrites_determinate_verdict(tmp_path):
+    """Regression: a shrinking retry budget must not invent a collection failure.
+
+    ``wait_until_available`` re-observes with whatever is left of the admission
+    deadline, so each retry is handed a smaller budget than the last and the
+    final one shrinks toward zero.  A collector that cannot finish inside that
+    shard lapses, and the lapse used to replace the real policy verdict with
+    "capacity collection exceeded admission deadline" - a cause the host never
+    demonstrated.  The gate then reported a collection error instead of the
+    actionable reason ("effective CPUs 1 below declared minimum 4") that the
+    first real sample had already established.
+
+    The injected clock advances far past the declared deadline, so the retry
+    budget is a shard by construction and the test does not depend on how
+    slowly this host happens to schedule a thread.  The declared first
+    collection keeps a realistic budget, so *it* is never the thing under test.
+    """
+
+    import threading
+
+    clock = FakeClock()
+    release = threading.Event()
+    calls = 0
+
+    def sampler():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # The one real collection: instantly reports insufficient capacity,
+            # so the policy verdict is determinate before any retry runs.
+            return make_facts(affinity_count=1, affinity_cpus=[0], cpu_quota_cores=1.0)
+        # Far longer than every retry budget the loop can hand out.
+        release.wait(5)
+        return make_facts(affinity_count=1, affinity_cpus=[0], cpu_quota_cores=1.0)
+
+    def jump(_seconds):
+        # One sleep step lands just short of the declared deadline, so the next
+        # retry is handed a small fraction of it.
+        clock.advance(0.97)
+
+    session = gate_capacity.CapacitySession(
+        make_policy(observation_seconds=0.01, admission_deadline_seconds=1.0),
+        repo_root=tmp_path,
+        clock=clock,
+        sampler=sampler,
+    )
+    try:
+        assert session.wait_until_available(sleep=jump) == "blocked"
+        reason = "; ".join(session.availability_reasons)
+        assert "below declared minimum" in reason
+        assert "exceeded" not in reason
+        # A retry really was attempted and really did lapse, so the verdict
+        # above is the restored determinate one rather than an untried loop.
+        assert calls > 1
+        assert session.telemetry.collection_failures >= 1
+        failed = [sample for sample in session.telemetry.samples if sample.status == "failed"]
+        assert failed
+        assert "remaining admission budget" in failed[0].problems[0]
+    finally:
+        release.set()
+
+
+def test_declared_deadline_lapse_is_still_reported_as_unsupported(tmp_path):
+    """A lapse of the declared deadline stays real evidence, not a retry shard."""
+
+    import threading
+
+    release = threading.Event()
+
+    def sampler():
+        release.wait(2)
+        return make_facts()
+
+    session = gate_capacity.CapacitySession(
+        make_policy(admission_deadline_seconds=0.02), repo_root=tmp_path, sampler=sampler
+    )
+    try:
+        assert session.wait_until_available() == "unsupported"
+        assert "exceeded admission deadline" in "; ".join(session.availability_reasons)
+    finally:
+        release.set()
