@@ -50,7 +50,8 @@ python scripts/bootstrap_pyboy.py --mode source --check
 
 The contract is Python >=3.11, MCP 1.29.1, and the bundled patched PyBoy at
 the revision in `VERSIONS.md` (checkpoint: harness-local divergence revision
-`eceaa3bb15dedd6847a3a37d3400421e3024cb5c`; upstream base `c565df66c3731fad2856169a90f6bbec99925915`).
+`eceaa3bb15dedd6847a3a37d3400421e3024cb5c`; pre-divergence harness fork revision
+`c565df66c3731fad2856169a90f6bbec99925915`).
 Stock PyBoy is not a substitute for its serial backend API. Create a SEPARATE
 clean environment for native Cython; use `scripts/bootstrap_pyboy.py --mode
 cython` and its `--check` command there. Follow the runbook for build prerequisites.

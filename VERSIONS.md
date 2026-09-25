@@ -60,7 +60,7 @@ fixture-backed acceptance matrix.
 
 The default packaged runtime is the bundled PyBoy `2.7.0` source fork at the
 harness-local divergence revision `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`
-(the in-fork tree is no longer byte-identical to its upstream base
+(the in-fork tree is no longer byte-identical to the pre-divergence harness fork revision
 `c565df66c3731fad2856169a90f6bbec99925915`; see
 `vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`). Source mode is
 selected explicitly by `scripts/bootstrap_pyboy.py --mode source`; Cython is an
@@ -307,7 +307,7 @@ reformatted.
 |---|---|---|
 | Python | `>=3.11` | `pyproject.toml` |
 | NumPy | `2.4.6` on Python 3.11; `2.5.2` on Python 3.12+ | `pyproject.toml`, `uv.lock`, and `scripts/bootstrap_pyboy.py` |
-| PyBoy | `2.7.0` + fork `eceaa3bb15dedd6847a3a37d3400421e3024cb5c` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `vendor/pyboy-src/pyboy/__init__.py` (harness-local divergence revision; upstream base `c565df66c3731fad2856169a90f6bbec99925915`) |
+| PyBoy | `2.7.0` + fork `eceaa3bb15dedd6847a3a37d3400421e3024cb5c` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `vendor/pyboy-src/pyboy/__init__.py` (harness-local divergence revision; pre-divergence harness fork revision `c565df66c3731fad2856169a90f6bbec99925915`) |
 | MCP | `1.29.1` | `pyproject.toml` and `uv.lock` |
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes

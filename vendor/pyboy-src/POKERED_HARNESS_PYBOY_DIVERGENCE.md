@@ -1,21 +1,51 @@
 # Harness-local divergence record — vendored PyBoy
 
-Status: **RE-PINNED — harness-local divergence revision.** This tree is *no longer* byte-identical
-to the upstream base revision `c565df66c3731fad2856169a90f6bbec99925915`. The revision pins now
-carry the harness-local divergence revision `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`, and the
-upstream base is recorded below rather than reused as the pin. The pin is a content identity, not
+Status: **RE-PINNED — harness-local divergence revision.** The vendored tree has diverged from the
+**harness fork revision** `c565df66c3731fad2856169a90f6bbec99925915` it was vendored from: of the
+115 paths it shares with that revision, 98 are byte-identical and the rest carry harness patches
+(measured figures and how to reproduce them are under "Provenance of the pre-divergence revision").
+The revision pins now carry the harness-local divergence revision
+`eceaa3bb15dedd6847a3a37d3400421e3024cb5c`, and the
+fork revision is recorded below rather than reused as the pin. The pin is a content identity, not
 a git object; its exact definition and recomputation are given under "Harness-local divergence
 revision".
 
 Authority: `docs/VENDORED_PYBOY_SPLIT_DECISION.md` (option B, explicit in-fork divergence) and
 the `#122` file-split program (`#138`).
 
-## Upstream base
+## Provenance of the pre-divergence revision
 
-- Repository: `Baekalfen/PyBoy`, PyBoy `2.7.0` source snapshot.
-- Base revision: `c565df66c3731fad2856169a90f6bbec99925915`.
-- This is the revision the tree was forked from, **not** the current pin. The current pin is the
-  harness-local divergence revision below.
+- Upstream project: `Baekalfen/PyBoy`. Upstream tag `v2.7.0` =
+  `4627b90b878e91faff443b3acd6d4e4be09a4387` (2026-01-24).
+- Pre-divergence revision: `c565df66c3731fad2856169a90f6bbec99925915` — a commit of the harness's own
+  PyBoy fork, `CompleteDotTech/pyboy-link-cable-fork` ("Serial: fix 4 init/API edge cases, pass full
+  9-trade matrix", 2026-04-23). In that repository it is **32 commits ahead of upstream `v2.7.0`**
+  (`compare` reports `status: ahead`, `ahead_by: 32`, `merge_base_commit: 4627b90b…`).
+- It is **not** an upstream `Baekalfen/PyBoy` commit: the upstream API returns *422 — No commit found
+  for SHA* for it. Nothing here should be read as an upstream revision of PyBoy.
+- The vendored tree is **not** that revision's tree either: of the 119 git-tracked files under
+  `vendor/pyboy-src/`, **115 paths are common** with that revision and **98 are byte-identical**
+  (blob SHA-1). The four paths with no counterpart there are exactly the two split outputs and the
+  two identity carriers — `pyboy/plugins/game_wrapper_pokemon_pinball_data.py`,
+  `pyboy/core/opcodes_gen_handlers.py`, `POKERED_HARNESS_PYBOY_REVISION` and this record.
+- So the vendored tree descends from a **fork line** that contains `c565df66…`; no byte-identity with
+  any single fork or upstream commit is claimed, and none should be. This revision is the recorded
+  provenance, **not** the current pin. The current pin is the harness-local divergence revision below.
+
+Reproduce the provenance measurements above:
+
+```bash
+gh api repos/Baekalfen/PyBoy/commits/c565df66c3731fad2856169a90f6bbec99925915   # 422: not upstream
+gh api repos/Baekalfen/PyBoy/commits/v2.7.0 --jq .sha                          # 4627b90b…
+gh api repos/CompleteDotTech/pyboy-link-cable-fork/commits/c565df66c3731fad2856169a90f6bbec99925915 \
+  --jq '.commit.committer.date + " " + (.commit.message | split("\n")[0])'     # 2026-04-23 …
+gh api repos/CompleteDotTech/pyboy-link-cable-fork/compare/4627b90b878e91faff443b3acd6d4e4be09a4387...c565df66c3731fad2856169a90f6bbec99925915 \
+  --jq '{status, ahead_by, merge_base_commit: .merge_base_commit.sha}'         # ahead 32 / 4627b90b…
+```
+
+The path counts are blob-SHA comparisons between `git ls-tree -r <vendored-head> -- vendor/pyboy-src`
+and the `git/trees/<sha>?recursive=1` listing of `c565df66…` in the fork; they move only when the
+vendored tree moves, so re-measure them per head rather than copying the numbers forward.
 
 ## Harness-local divergence revision
 
@@ -182,8 +212,9 @@ Status of the two divergences recorded above:
 
 1. **Honest re-pin (condition 2).** Executed. The identity is a content identity over the tracked
    manifest, so the tree carrying both Divergence 1 and Divergence 2 hashes to
-   `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`; the pin is no longer the upstream base
-   `c565df66c3731fad2856169a90f6bbec99925915`. Both splits were re-landed **together** on the
+   `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`; the pin is no longer the pre-divergence fork revision
+   `c565df66c3731fad2856169a90f6bbec99925915` (see "Provenance of the pre-divergence revision"
+   above: it is a harness-fork revision, not an upstream commit). Both splits were re-landed **together** on the
    post-#234 `master` after the historical-pin guard fix, so the pin advanced `c565df66…` →
    `eceaa3bb…` in one coordinated change rather than through the intermediate steps of the
    reverted pilot merge (`d78fb725…` was never a pin on this history). Every current-identity
@@ -220,3 +251,10 @@ Status of the two divergences recorded above:
    runtime record were validated at their own heads and do **not** qualify this one; re-qualifying
    them under `eceaa3bb…` is tracked by #235 and stated in the decision doc's
    "a historical record is validated at its own head" update.
+7. **One pin-covered comment still says "upstream base".** `pyboy/__init__.py`'s revision comment
+   ends with *"it replaced the upstream base revision `c565df66…`"*, which is the same mis-attribution
+   corrected everywhere else in this record: `c565df66…` is a **harness-fork** revision, not an
+   upstream `Baekalfen/PyBoy` commit (see "Provenance of the pre-divergence revision"). It is left
+   in place deliberately because that comment is **inside the content identity** — rewording it
+   moves the pin and would re-open #235's re-qualification target for a prose fix. Fold it into the
+   **next** pin-moving change rather than triggering a re-pin for it alone.
