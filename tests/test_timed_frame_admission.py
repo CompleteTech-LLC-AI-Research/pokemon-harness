@@ -591,6 +591,7 @@ def write_allocation(tmp_path: Path, **overrides) -> Path:
     document.pop("problems", None)
     document.pop("held", None)
     document.pop("span_expired", None)
+    document.pop("span_not_started", None)
     path = tmp_path / "allocation.json"
     path.write_text(json.dumps(document))
     return path
@@ -801,6 +802,10 @@ def test_the_pinned_validator_identity_is_the_validator_actually_used():
         ("naive offset form", {"expires_utc": "2026-09-25T06:00:00+00:00"}),
         ("absent start", {"started_utc": ""}),
         ("inverted", {"expires_utc": "2020-01-01T00:00:00Z"}),
+        (
+            "not yet started",
+            {"started_utc": "2999-01-01T00:00:00Z", "expires_utc": "2999-12-31T00:00:00Z"},
+        ),
     ],
 )
 def test_a_span_that_does_not_state_a_live_reservation_is_not_held(label, overrides):
@@ -819,6 +824,10 @@ def test_a_span_that_does_not_state_a_live_reservation_is_not_held(label, overri
         ("absent", {"expires_utc": None}),
         ("unparseable", {"expires_utc": "not-a-date"}),
         ("inverted", {"expires_utc": "2020-01-01T00:00:00Z"}),
+        (
+            "not yet started",
+            {"started_utc": "2999-01-01T00:00:00Z", "expires_utc": "2999-12-31T00:00:00Z"},
+        ),
     ],
 )
 def test_a_row_is_never_dispatched_under_a_dead_or_absent_span(tmp_path, label, overrides):
@@ -859,8 +868,53 @@ def test_a_live_span_is_held_and_still_admits_rows(tmp_path):
 
     assert record["allocation"]["held"] is True
     assert record["allocation"]["span_expired"] is False
+    assert record["allocation"]["span_not_started"] is False
     assert record["rows"][0]["state"] == admission.S1_ADMITTED
     assert record["matrix_success"] is True
+
+
+def test_a_span_that_has_not_started_yet_is_not_held_and_blocks_every_row(tmp_path):
+    """The mirror of the expired span: the present can lie *before* the span.
+
+    A reservation whose span begins in the future is not an allocation held at
+    read time, so a row dispatched under it would be reported as a valid
+    controlled observation while no capacity was actually reserved for it.
+    """
+
+    from scripts import timed_frame_runner as runner
+
+    clock = FakeClock()
+    reader = SeriesReader(clock, quiet_series(40))
+    wrapper = make_wrapper(
+        clock,
+        reader,
+        ["row-a", "row-b"],
+        allocation=make_allocation(
+            started_utc="2999-01-01T00:00:00Z", expires_utc="2999-12-31T00:00:00Z"
+        ),
+    )
+
+    record = runner.run_wrapper(
+        commands=[
+            runner.RowCommand(row="row-a", command=f"{sys.executable} -c pass"),
+            runner.RowCommand(row="row-b", command=f"{sys.executable} -c pass"),
+        ],
+        allocation_path=write_allocation(
+            tmp_path, started_utc="2999-01-01T00:00:00Z", expires_utc="2999-12-31T00:00:00Z"
+        ),
+        allowed_cpus=ALLOWED_CPUS,
+        wrapper=wrapper,
+    )
+
+    assert record["row_runs"] == [], "no row may run before the span has started"
+    assert record["rows"][0]["state"] == admission.S5_ADMISSION_UNAVAILABLE
+    assert record["allocation"]["held"] is False
+    assert record["allocation"]["span_expired"] is False
+    assert record["allocation"]["span_not_started"] is True
+    assert any("future" in item for item in record["allocation"]["problems"]), (
+        "the reason must name the lower end, not merely report 'not held'"
+    )
+    assert record["matrix_success"] is False
 
 
 def test_a_span_that_ends_during_the_row_makes_it_s3(monkeypatch):
@@ -1065,6 +1119,14 @@ def test_a_gap_of_exactly_the_permitted_maximum_stays_continuous():
     assert max(gaps) == admission.MAX_SAMPLE_GAP_SECONDS
     assert window.qualifying is True
     assert window.quiet_seconds == pytest.approx(60.0)
+    # The diagnostic restart loop is a *second* comparison site, and it must
+    # read the same equality: a series whose every gap is exactly the permitted
+    # maximum reports no restart at all.  Asserting only the run length above
+    # leaves this site unpinned, so flipping it alone would fill a retained
+    # record with false "continuity restarted" lines while staying green here.
+    assert window.restarts == (), (
+        "a gap of exactly the permitted maximum must not be reported as a restart"
+    )
 
     past_bound = [
         admission.HostSample(index, index * admission.MAX_SAMPLE_GAP_SECONDS, 1.0, 2.0, 0.5)

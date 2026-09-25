@@ -227,7 +227,9 @@ class AllocationRecord:
         absent, unparseable, inverted, or already-elapsed span is a problem
         exactly like an absent extent.  The elapsed check reads this process's
         own UTC clock, so ``held`` is honest about the present instead of being
-        true forever for any reservation-shaped document.
+        true forever for any reservation-shaped document.  The present has two
+        ends: a span that has not **started** yet is not an allocation held at
+        read time either, so the lower end is checked by the same clock.
         """
 
         found: list[str] = []
@@ -267,6 +269,12 @@ class AllocationRecord:
                     f"allocation span ends ({self.expires_utc}) before it starts "
                     f"({self.started_utc})"
                 )
+            elif _utc_now() < started.replace(tzinfo=UTC):
+                found.append(
+                    f"allocation span starts at {self.started_utc}, which is in the "
+                    "future, so the reservation is not held yet (§5 requires a "
+                    "verified allocation)"
+                )
             elif _utc_now() >= expires.replace(tzinfo=UTC):
                 found.append(
                     f"allocation span ended at {self.expires_utc}, so the reservation "
@@ -290,6 +298,22 @@ class AllocationRecord:
             return False
         return _utc_now() >= expires.replace(tzinfo=UTC)
 
+    def span_not_started(self) -> bool:
+        """Whether the recorded span has not begun yet (§5).
+
+        The mirror of :meth:`span_expired`: a span whose start is still in the
+        future is a reservation that is not held at read time, so a row must not
+        be admitted under it.  Kept separate from ``problems`` for the same
+        reason ``span_expired`` is: a record should say *which* side of the span
+        the present lies on, not merely that it is not held.
+        """
+
+        started = _allocation_instant(self.started_utc)
+        expires = _allocation_instant(self.expires_utc)
+        if started is None or expires is None or expires < started:
+            return False
+        return _utc_now() < started.replace(tzinfo=UTC)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "allocation_id": self.allocation_id,
@@ -300,6 +324,7 @@ class AllocationRecord:
             "started_utc": self.started_utc,
             "expires_utc": self.expires_utc,
             "span_expired": self.span_expired(),
+            "span_not_started": self.span_not_started(),
             "problems": self.problems(),
             "held": self.held,
         }

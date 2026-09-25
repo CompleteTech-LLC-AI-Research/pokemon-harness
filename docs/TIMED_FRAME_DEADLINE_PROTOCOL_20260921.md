@@ -101,7 +101,7 @@ admitted it:
 
 | Component | Bytes | SHA-256 | Establishes |
 |---|---:|---|---|
-| `scripts/timed_frame_window.py` | 18015 | `82a721109396c102f1f5e583e02c6c317eb3ecb8d918ff35467bbd190cf304b9` | The named, pinned gap/admission validator (§5, §9.1) and the read-only §5 sample; also enforces the recorded allocation **span**, so an expired, absent, or unparseable span is not a held allocation |
+| `scripts/timed_frame_window.py` | 19319 | `c05aea343ac7ddc25b8aaeed6483073fb88daefd8afc13227ca1a18d3432dd50` | The named, pinned gap/admission validator (§5, §9.1) and the read-only §5 sample; also enforces the recorded allocation **span**, so a span that is absent, unparseable, inverted, already ended, **or not yet begun** is not a held allocation |
 | `scripts/timed_frame_admission.py` | 33147 | `2c2a0e73c61dc3148a23e3f50cd3fe12e45cdc58a6e467c74e5390d1f33158e3` | The declared per-row admission wrapper: fresh window per row, during-row sampling, `S0`–`S6` classification, `S5` stop |
 | `scripts/timed_frame_runner.py` | 7010 | `1f888360c26457b05f872d0c87d213c9fc37f613eb9defefcf0e4f5bbdadb722` | The wrapper's executable half: runs each row's unchanged command and captures its terminal result. A row that overruns its own declared budget is recorded (`returncode 124`, `timed_out true`) and classified, so the failure record survives |
 
@@ -127,11 +127,23 @@ as structurally, because a regression in any of them previously left
 - a `S0`/`S5` stop **blocks** every remaining row instead of retrying them, and
   the remaining rows are reported as not run.
 
+The recorded allocation **span** is enforced at both ends, because a span is a
+closed interval and the process clock decides in which part of it the present
+lies. A span that is absent, unparseable, or inverted is not held; one that has
+already ended is not held; and one that has **not started yet** is not held
+either — a future reservation is not evidence that capacity was reserved while
+a row ran, so a row dispatched under it would be an uncontrolled observation
+reported as a controlled one. The record states which side of the span the
+present lies on (`span_expired`, `span_not_started`) rather than only that the
+record is not held.
+
 The exact-equality boundaries are pinned too, in the direction the frozen §5
 text states: a sample gap of exactly `6.0 s` stays continuous ("at most
 `6.0 s`"), a launch delay of exactly `6.0 s` is still admitted ("within one
-permitted gap"), and a breach that appears only in the **terminal** sample is
-`S3` — a lost control is replaced, never believed (§5.1).
+permitted gap"), a gap of exactly the permitted maximum is reported as **no**
+restart (the validator's diagnostic loop reads the same equality as its run
+builder), and a breach that appears only in the **terminal** sample is `S3` — a
+lost control is replaced, never believed (§5.1).
 
 ### 2.1 Original full-gate failure — attempt `72f` at `7516f16`
 
