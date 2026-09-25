@@ -151,8 +151,20 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     assert '["git", "ls-files", "-z"]' in workflow
     assert '["git", "ls-files", "-z"]' in runner
 
-    # Assert the complete explicit Ruff file boundaries, not only the command
-    # prefixes, so a local run cannot silently lint a smaller set.
+    # Spot-check a declared core of the Ruff file boundaries, not only the
+    # command prefixes, so a local run cannot silently lint a smaller set.
+    #
+    # This is a *subset floor*, not the full contract: every path it names is
+    # in a lane, but the lanes carry more entries than it lists, and they did
+    # before #242 too (38 lane paths were absent from it at 061fa15c; the two
+    # #242 paths added here leave 40 absent at bfc2920). A path that matters is
+    # still expected to be listed, so the two new #242 paths were added rather
+    # than left out. The complete boundary is asserted by
+    # `test_runner_ruff_file_lists_match_the_workflow_exactly` above, which
+    # compares the workflow's and the runner's full argument vectors for every
+    # `python -m ruff` invocation. Adding a path here is therefore still
+    # required when it is added to a lane, but a path missing here is not by
+    # itself evidence that the boundary lost it.
     workflow_paths = (
         "scripts/bootstrap_pyboy.py",
         "scripts/coverage_report.py",
@@ -227,6 +239,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "tests/test_runtime_packaging_build_contract.py",
         "tests/test_runtime_packaging_dependency_pins.py",
         "tests/test_runtime_packaging_hygiene.py",
+        "src/pokered_harness/_mcp_facade_entry.py",
         "src/pokered_harness/link/network_backend.py",
         "src/pokered_harness/link/pyboy_link_session.py",
         "src/pokered_harness/link/pair.py",
@@ -241,12 +254,45 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "tests/test_pyboy_link_session.py",
         "tests/test_link_pair.py",
         "tests/test_link_serial_bridge.py",
+        "tests/test_mcp_server_import_order.py",
         "tests/test_serial_coordinator.py",
         "tests/test_serial_link.py",
     )
     for path in workflow_paths:
         assert path in workflow
         assert path in runner
+
+    # The tuple above is membership-only, so it cannot see *which lane* holds a
+    # path. That gap is what let `src/pokered_harness/_mcp_facade_entry.py` be
+    # `ruff check`ed while no `ruff format --check` lane named it. Assert the
+    # lane itself: a path that is linted but never format-checked can drift out
+    # of format silently, which is exactly what this row pins.
+    facade = "src/pokered_harness/_mcp_facade_entry.py"
+    for label, text in (("workflow", workflow), ("local runner", runner)):
+        format_lanes = [
+            arguments
+            for arguments in _ruff_invocations(text)
+            if "--check" in arguments and "format" in arguments
+        ]
+        assert format_lanes, f"{label} declares no `ruff format --check` lane"
+        covered = {token for lane in format_lanes for token in lane if token.endswith(".py")}
+        assert facade in covered, f"{label} no longer format-checks {facade}"
+
+        # Keep the documented reason honest: the rest of the runtime/link lane's
+        # `src/` files are deliberately outside the format boundary because the
+        # lane is not format-clean. If that ever changes, this row should be
+        # revisited rather than silently kept.
+        runtime_lane = [
+            arguments
+            for arguments in _ruff_invocations(text)
+            if "check" in arguments and "format" not in arguments
+        ][-1]
+        runtime_src = {token for token in runtime_lane if token.startswith("src/")}
+        assert facade in runtime_src, f"{label} no longer checks {facade}"
+        assert runtime_src - covered, (
+            f"{label} now format-checks the whole runtime/link `src/` set; "
+            "the boundary comment in this file and in both CI files is stale"
+        )
 
     # The embedded Python verifiers are also part of the workflow contract;
     # command-prefix checks alone would permit a local runner to omit them.
