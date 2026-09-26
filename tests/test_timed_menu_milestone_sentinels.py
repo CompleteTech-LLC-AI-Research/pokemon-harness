@@ -19,12 +19,18 @@ assertions in the milestones module remain the contract; this file is the
 backstop that keeps them from being quietly removed.
 """
 
+import ast
+import pathlib
+
+import pytest
+
 from tests._timed_menu_milestone_sentinel_support import (
     DEADLINE_TERMINATION,
     GUARD_FUNCTION,
     RETENTION_COUNT_SITES,
     RETENTION_SUBSCRIPT_COUNT_SITES,
     RUN_OWNER,
+    _is_enforced,
     count_sites_that_bypass_the_guard,
     guard_is_wired_on_the_fast_clock_path,
     guard_rejects_the_deadline_terminal_state,
@@ -124,3 +130,123 @@ def test_the_pinned_record_subscript_counts_are_still_exact_equalities():
         "the pinned record-subscript retention counts are no longer exact "
         f"equality assertions; expected {expected}, observed {observed}"
     )
+
+
+#: ``(label, body, live)`` -- can the assert in this body actually fail?
+#: #288 covers the ``try``/handler half and #280 the presence half. These rows
+#: pin the reachability half (#287): a pinned assert that is present, correctly
+#: bounded, and never evaluated. Each ``live=False`` row leaves the owning
+#: behavioural test *green*, so nothing else in the repository notices.
+REACHABILITY_SHAPES = (
+    # --- defeats: the assert cannot fail ---
+    ("if False", "if False:\n assert x == 1", False),
+    ("if 0", "if 0:\n assert x == 1", False),
+    ("if None", "if None:\n assert x == 1", False),
+    ("if empty string", "if '':\n assert x == 1", False),
+    # An empty *collection* literal is also falsy, but recognising it would mean
+    # evaluating an expression rather than reading a literal. Left deliberately
+    # unclaimed: a wrong "defeated" verdict drops a live contract, while a
+    # missed one leaves the shape weak rather than unprotected.
+    ("if empty list", "if []:\n assert x == 1", True),
+    ("while False", "while False:\n assert x == 1", False),
+    ("uncalled nested def", "def helper():\n assert x == 1", False),
+    (
+        "suppress AssertionError",
+        "import contextlib\nwith contextlib.suppress(AssertionError):\n assert x == 1",
+        False,
+    ),
+    (
+        "from-import suppress",
+        "from contextlib import suppress\nwith suppress(AssertionError):\n assert x == 1",
+        False,
+    ),
+    ("suppress bare", "import contextlib\nwith contextlib.suppress():\n assert x == 1", False),
+    (
+        "suppress tuple",
+        "import contextlib\nwith contextlib.suppress(ValueError, AssertionError):\n assert x == 1",
+        False,
+    ),
+    (
+        "async with suppress",
+        "import contextlib\nasync with contextlib.suppress(AssertionError):\n assert x == 1",
+        False,
+    ),
+    # --- must stay live, or the rule cries wolf on a real regression ---
+    ("plain assert", "assert x == 1", True),
+    ("double negative", "assert not (x != 1)", True),
+    ("if True", "if True:\n assert x == 1", True),
+    ("if False else branch", "if False:\n pass\nelse:\n assert x == 1", True),
+    (
+        "suppress ValueError",
+        "import contextlib\nwith contextlib.suppress(ValueError):\n assert x == 1",
+        True,
+    ),
+    (
+        "suppress unrelated name",
+        "import contextlib\nwith contextlib.suppress(TimeoutError):\n assert x == 1",
+        True,
+    ),
+    ("callback nested def", "def cb():\n assert x == 1\nsession = cb", True),
+    ("undecidable BoolOp test", "if 1 and False:\n assert x == 1", True),
+    ("runtime condition", "if flag:\n assert x == 1", True),
+    ("try ValueError", "try:\n assert x == 1\nexcept ValueError:\n pass", True),
+    ("finally branch", "try:\n pass\nfinally:\n assert x == 1", True),
+    ("handler body", "try:\n pass\nexcept ValueError:\n assert x == 1", True),
+    ("orelse branch", "try:\n pass\nexcept ValueError:\n pass\nelse:\n assert x == 1", True),
+    ("sibling swallowing try", "try:\n pass\nexcept AssertionError:\n pass\nassert x == 1", True),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    REACHABILITY_SHAPES,
+    ids=[shape[0] for shape in REACHABILITY_SHAPES],
+)
+def test_the_enforcement_check_separates_reachable_asserts_from_defeated_ones(label, body, live):
+    """A pinned assert counts only if it can actually run and fail.
+
+    The defeat rows are the #287 shapes. ``if False:`` and the uncalled nested
+    ``def`` are the dangerous pair: they keep the owning behavioural test green
+    as well, so nothing in the repository notices. ``contextlib.suppress`` is
+    different in kind -- the assert does run and does raise, and only the raise
+    is discarded -- which is why it needs this static check rather than a
+    behavioural one.
+
+    The must-stay-live rows carry as much weight as the defeats: a wrong
+    "defeated" verdict removes a live contract from the sentinel's view, which
+    is the more damaging error.
+    """
+    source = "async def probe(x, flag, record, session):\n" + "\n".join(
+        f"    {line}" for line in body.splitlines()
+    )
+    function = ast.parse(source).body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be {'enforced' if live else 'defeated'}, got {results}"
+    )
+
+
+def test_the_reachability_rule_drops_none_of_the_real_asserts():
+    """No real assert in the milestones module may be reported as defeated.
+
+    The false-positive direction is the damaging one: a live contract assert
+    reported as defeated stops being pinned, silently. This walks all of them
+    rather than trusting the table above to have covered the real shapes -- the
+    callback pattern in particular (``def checkpoint`` handed to the session) is
+    not in the table and is why the nested-def rule is a reference check rather
+    than a blanket one.
+    """
+    from tests import test_timed_menu_milestones as milestones
+
+    source = pathlib.Path(milestones.__file__).read_text()
+    tree = ast.parse(source)
+    defeated = [
+        (function.name, ast.unparse(node.test)[:60])
+        for function in ast.walk(tree)
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assert) and not _is_enforced(function, node)
+    ]
+    assert not defeated, f"the reachability rule reports real, live asserts as defeated: {defeated}"

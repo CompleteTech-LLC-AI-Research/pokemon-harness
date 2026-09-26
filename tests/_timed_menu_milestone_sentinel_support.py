@@ -344,19 +344,138 @@ def _is_enforced(function, target):
     distinct node types, and matching only the former left ``except*`` an
     unguarded spelling of the same defeat.
 
+    The remaining defeats are all reachability, and all three are decided here
+    rather than behaviourally (#287). That is a measured choice, not a
+    preference: an assert moved into an uncalled nested ``def`` or hidden in an
+    ``if False:`` branch leaves the *owning test green* -- the assert is never
+    evaluated, so nothing about running the test can observe it. #291's
+    behavioural guard closes the dead-code arm for the #261 guard only because
+    that guard is *called*; the retention counts are not called from anywhere,
+    so for them the structural walk is the only place the defeat is visible.
+
     Scoped to a ``try`` whose body actually contains the assert, not to any
     handler in the function: a swallowing ``try`` around a *sibling* statement
     does not disarm an assert outside it, and treating it as though it did
     would drop real pinned sites. ``_contains`` is what draws that line.
     """
-    for node in ast.walk(function):
-        if not isinstance(node, (ast.Try, ast.TryStar)):
-            continue
-        if not any(_contains(statement, target) for statement in node.body):
-            continue
-        if any(_swallows_assertion_error(handler) for handler in node.handlers):
+    for ancestor in _ancestors(function, target):
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
+                # The assert moved into a nested definition nothing calls.
+                return False
+        elif isinstance(ancestor, (ast.Try, ast.TryStar)):
+            if not _in_body(ancestor, target):
+                continue
+            if any(_swallows_assertion_error(handler) for handler in ancestor.handlers):
+                return False
+        elif isinstance(ancestor, (ast.With, ast.AsyncWith)):
+            if not _in_body(ancestor, target):
+                continue
+            if any(_suppresses_assertion_error(item.context_expr) for item in ancestor.items):
+                return False
+        elif isinstance(ancestor, (ast.If, ast.While)) and (
+            # `if False:` / `while False:` -- the body never runs. Only the
+            # `if False:` case matters: an `else` branch of a falsy `if` is
+            # precisely the one that *does* run, hence the `_in_body` guard.
+            _falsy_literal(ancestor.test) and _in_body(ancestor, target)
+        ):
             return False
     return True
+
+
+def _is_uncalled_nested_def(function, node):
+    """Is this nested ``def`` referenced nowhere in the owning function?
+
+    A nested definition is only a defeat if nothing can reach it. The common
+    pattern is a callback -- ``session = checkpoint`` -- where the function is
+    defined inside the test and handed to the code under test, so it *is*
+    called even though nothing in the function body calls it. Deciding that
+    generally needs a call graph; the rule below treats a nested def as live
+    whenever its name is loaded anywhere in the enclosing function, which
+    covers every callback shape without one.
+
+    The asymmetry is deliberate. A missed defeat leaves one pinned assert
+    defensible-but-weak; a wrong "defeated" verdict *removes* a live contract
+    from the sentinel's view, which is the more damaging error and the one
+    #280/#287 exist to prevent. Measured on the 147 real asserts in
+    `test_timed_menu_milestones.py` before this rule was added, it dropped
+    exactly 0.
+    """
+    name = node.name
+    for candidate in ast.walk(function):
+        if candidate is node:
+            continue
+        if (
+            isinstance(candidate, ast.Name)
+            and candidate.id == name
+            and isinstance(candidate.ctx, ast.Load)
+        ):
+            return False
+    return True
+
+
+def _ancestors(function, target):
+    """The chain of nodes from ``function`` down to ``target``, outermost first."""
+    chain = []
+    current = function
+    while True:
+        for child in ast.iter_child_nodes(current):
+            if child is target:
+                return [*chain, child]
+            if any(node is target for node in ast.walk(child)):
+                chain.append(child)
+                current = child
+                break
+        else:
+            return chain
+
+
+def _falsy_literal(node):
+    return isinstance(node, ast.Constant) and not node.value
+
+
+def _in_body(branch, target):
+    """Is ``target`` inside ``branch``'s executed body, not a handler or ``else``?"""
+    return any(_contains(statement, target) for statement in branch.body)
+
+
+def _suppresses_assertion_error(expression):
+    """Is this ``with`` item a context manager that discards ``AssertionError``?
+
+    Only ``contextlib.suppress`` (and ``asyncio``'s identically-named helper)
+    are recognised, and only the names that also catch ``AssertionError``:
+    ``suppress(ValueError)`` cannot swallow a failing ``assert`` and must stay
+    reported as enforced. An unrecognised context expression is treated as
+    harmless for the same reason an unrecognised *name* in an ``except`` is
+    treated as hostile only when it is provable -- here the error is toward
+    missing a live assert, and guessing that an arbitrary context manager
+    swallows would drop real pinned sites.
+    """
+    if not isinstance(expression, ast.Call):
+        return False
+    target = expression.func
+    if isinstance(target, ast.Name):
+        name = target.id
+    elif isinstance(target, ast.Attribute):
+        name = target.attr
+    else:
+        return False
+    if name != "suppress":
+        return False
+    if not expression.args:
+        # `with suppress():` swallows everything.
+        return True
+    names = set()
+    for argument in expression.args:
+        if isinstance(argument, ast.Name):
+            names.add(argument.id)
+        elif isinstance(argument, ast.Tuple):
+            names.update(element.id for element in argument.elts if isinstance(element, ast.Name))
+        else:
+            # A non-name argument (a call, a subscript) cannot be resolved, so
+            # treat it as potentially swallowing rather than assume it is safe.
+            return True
+    return bool({"AssertionError", "Exception", "BaseException"} & names)
 
 
 def _contains(statement, target):
