@@ -141,7 +141,7 @@ def _count_comparison(tree, node, comparison):
         return
     if isinstance(right, ast.Constant) and isinstance(right.value, int):
         owner = _enclosing_function_node(tree, node)
-        if owner is not None and not _is_enforced(owner, node):
+        if owner is not None and (not _is_enforced(owner, node) or _may_bypass(node.test)):
             return
         yield (_enclosing_function(tree, node), op, right.value)
 
@@ -256,7 +256,7 @@ def subscript_count_comparisons():
             if not (isinstance(right, ast.Constant) and isinstance(right.value, int)):
                 continue
             owner = _enclosing_function_node(tree, node)
-            if owner is not None and not _is_enforced(owner, node):
+            if owner is not None and (not _is_enforced(owner, node) or _may_bypass(node.test)):
                 continue
             yield (_enclosing_function(tree, node), path, op, right.value)
 
@@ -333,6 +333,143 @@ def _swallows_assertion_error(handler):
     return bool({"AssertionError", "Exception", "BaseException"} & set(names))
 
 
+#: Operand kinds whose truthiness can decide a ``BoolOp`` on its own. A nested
+#: ``Compare`` is deliberately absent: it is not a decision on its own, and
+#: treating it as one would flag a legitimate ``and`` of two comparisons.
+_DECIDING_OPERANDS = (
+    ast.Name,
+    ast.Attribute,
+    ast.Call,
+    ast.Subscript,
+    ast.Constant,
+    ast.List,
+    ast.Dict,
+    ast.Set,
+    ast.Tuple,
+    ast.JoinedStr,
+    ast.Await,
+)
+
+
+def _as_number(value):
+    """This value if it is a real number, else ``None``.
+
+    ``bool`` is excluded even though it subclasses ``int``: ``len(y) >= True``
+    is a real comparison, not a tautology about a non-negative count.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _numeric_literal(node):
+    """The value of a numeric literal node, or ``None``.
+
+    ``-1`` parses as a ``UnaryOp(USub, Constant)`` rather than a negative
+    ``Constant``, so a negative bound has to be folded here or every
+    lower-bounded form would be missed.
+    """
+    if isinstance(node, ast.Constant):
+        return _as_number(node.value)
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.USub, ast.UAdd))
+        and isinstance(node.operand, ast.Constant)
+    ):
+        value = _as_number(node.operand.value)
+        if value is None:
+            return None
+        return -value if isinstance(node.op, ast.USub) else value
+    return None
+
+
+def _is_count_like(node):
+    """Is this expression a count or length, so it cannot be negative?
+
+    ``len(...)``, ``count(...)`` and ``bit_count(...)`` are the forms that
+    appear in these tests. Anything else -- a bare name, an arithmetic
+    expression, a record subscript -- is not assumed non-negative, because
+    assuming it would turn a real comparison into a false tautology.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id in {"len", "count", "bit_count"}
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr in {"len", "count", "bit_count"}
+    return False
+
+
+def _is_tautology(node):
+    """Is this expression true regardless of the values it reads?
+
+    Only the literal, decidable forms are recognised -- a constant, and a count
+    compared against a bound a length can never cross. A comparison against
+    anything else (``len(calls) == 300``,
+    ``record["termination"] != "cancelled_or_deadline"``) is a real check and is
+    never treated as a tautology.
+
+    A tautology is what makes an ``or`` bypass its sibling: the comparison the
+    contract depends on is never evaluated because the other operand is true
+    whatever the record says. Verified to survive on ``aef56d6``:
+
+        assert record["termination"] != "cancelled_or_deadline" or \
+            len(record.get("errors", [])) >= 0
+        -> guard RETURNS on the deadline record; suite exits 0
+
+    The left operand must look count-like before a numeric bound is believed:
+    ``x > -1`` is only a tautology when ``x`` cannot be negative, and assuming
+    that would report a live assert as dead -- the rule would then cry wolf on
+    a real regression.
+
+    Deliberately one-directional. Proving an expression is always *false* is
+    not attempted: it needs real evaluation, and a wrong answer there reports a
+    live assert as dead. For the same reason ``len(y) < 1`` and ``len(y) <= 0``
+    are not tautologies -- they hold only for an empty container.
+    """
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
+        return False
+    bound = _numeric_literal(node.comparators[0])
+    if bound is None or not _is_count_like(node.left):
+        return False
+    # A count is >= 0 by construction, so only the lower-bounded forms can be
+    # tautologies.
+    operator = node.ops[0]
+    if isinstance(operator, ast.GtE):
+        return bound == 0
+    return isinstance(operator, ast.Gt) and bound < 0
+
+
+def _may_bypass(expression):
+    """Can a comparison nested in this expression still go unchecked?
+
+    ``assert x != y or True`` and ``assert True or x != y`` both parse to a
+    ``BoolOp``, and both leave the comparison unchecked: the ``or`` decides the
+    assert on its own when the other operand is truthy. The comparison node is
+    still present, so a presence-only check -- and ``_is_enforced``, which only
+    inspects ``try`` -- reports the contract as intact.
+
+    A tautological operand decides it just as effectively as a bare ``True``,
+    which is why the spelling of the bypass does not matter. Recursion covers
+    every operand shape for the same reason: an earlier version inspected only
+    ``Name/Attribute/Call/Subscript/Constant`` and missed a ``Compare`` operand
+    that was trivially true.
+
+    A bare ``Compare`` operand does not count as a decision by itself, so
+    ``assert x != 1 and y != 2`` -- the shape the real retention sites use --
+    stays enforced. That distinction is pinned by table rows, because an
+    over-broad rule here would report a live assert as dead.
+    """
+    if not isinstance(expression, ast.BoolOp):
+        return False
+    operands = expression.values
+    if any(_is_tautology(value) for value in operands):
+        return True
+    return any(isinstance(value, _DECIDING_OPERANDS) or _may_bypass(value) for value in operands)
+
+
 def _is_enforced(function, target):
     """Is ``target`` an assert that can actually fail?
 
@@ -395,6 +532,7 @@ def guard_rejects_the_deadline_terminal_state():
                     and isinstance(right, ast.Constant)
                     and right.value == DEADLINE_TERMINATION
                     and _is_enforced(func, node)
+                    and not _may_bypass(node.test)
                 ):
                     return True
     return False
