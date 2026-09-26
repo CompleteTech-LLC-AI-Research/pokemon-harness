@@ -243,7 +243,12 @@ python -m ruff check \
     tests/test_runtime_packaging_hygiene.py \
     tests/test_timed_remote.py \
     tests/test_timed_remote_facade.py \
-    tests/test_timed_frame_admission.py \
+    tests/test_timed_frame_admission_invariants.py \
+    tests/test_timed_frame_admission_overrun.py \
+    tests/test_timed_frame_admission_rows.py \
+    tests/test_timed_frame_admission_span.py \
+    tests/test_timed_frame_admission_state_table.py \
+    tests/test_timed_frame_admission_validator.py \
     tests/test_mcp_server_import_order.py
 python -m ruff format --check \
     src/pokered_harness/_mcp_facade_entry.py \
@@ -347,7 +352,12 @@ python -m ruff format --check \
     tests/test_runtime_packaging_hygiene.py \
     tests/test_timed_remote.py \
     tests/test_timed_remote_facade.py \
-    tests/test_timed_frame_admission.py \
+    tests/test_timed_frame_admission_invariants.py \
+    tests/test_timed_frame_admission_overrun.py \
+    tests/test_timed_frame_admission_rows.py \
+    tests/test_timed_frame_admission_span.py \
+    tests/test_timed_frame_admission_state_table.py \
+    tests/test_timed_frame_admission_validator.py \
     tests/test_mcp_server_import_order.py
 
 # Check runtime and link lane lint
