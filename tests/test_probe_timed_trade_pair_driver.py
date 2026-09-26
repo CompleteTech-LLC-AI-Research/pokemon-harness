@@ -16,6 +16,43 @@ from tests._probe_timed_trade_pair_drivers import (
     authored_spawn_owner,
     run_authored_goal_owner,
 )
+from tests._timed_menu_frame_bound_support import assert_not_deadline_truncated
+
+
+def test_trade_pair_deadline_is_read_through_the_injected_clock():
+    """The trade-pair helper must reach its frame bound, not a wall clock (#274).
+
+    The rows above all run at `--frame-limit=4`, where the owner retires in
+    about a millisecond. A 3 s wall-clock deadline cannot fire in that time, so
+    on their own they pass whether or not the helper reads the injected clock --
+    which is how the #268 seam could be reverted with every row still green.
+
+    These two rows close that gap from both sides, and the pair is what pins
+    the seam rather than either row alone:
+
+    * A fast clock must reach the frame bound and terminate as ``frame_bound``.
+      The owner has spent none of its 3 s budget, so the deadline branch is not
+      what stopped it.
+    * A slow clock must instead be cut off by the deadline. Only a clock whose
+      reads the helper controls can consume 3 s of budget across four calls, so
+      this row can only truncate if the seam is wired through.
+
+    Reverting the helper to ``time.monotonic()`` makes the second row retire at
+    the frame bound like the first, and it fails.
+    """
+    _session, fast_record, _goal, _done_at = run_authored_goal_owner(clock_step=0.0)
+    assert fast_record["errors"] == []
+    assert_not_deadline_truncated(fast_record)
+    assert fast_record["termination"] == "frame_bound"
+    assert len(fast_record["calls"]) == 4
+
+    _session, slow_record, _goal, _done_at = run_authored_goal_owner(clock_step=0.5)
+    assert slow_record["errors"] == []
+    # 0.5 s per read exhausts the 3 s deadline before four calls complete, so
+    # the deadline genuinely wins and the run is truncated. That is the deadline
+    # contract, not a retention result, which is why it is asserted separately.
+    assert slow_record["termination"] == "cancelled_or_deadline"
+    assert len(slow_record["calls"]) < 4
 
 
 def test_first_local_goal_keeps_whole_cpu_steps_until_bound_without_early_done():

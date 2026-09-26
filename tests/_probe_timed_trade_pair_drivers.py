@@ -79,6 +79,8 @@ def run_authored_goal_owner(
     close_failure=False,
     milestones=False,
     driver_fault=None,
+    clock_step=0.0,
+    frame_limit=4,
 ):
     # Reuse existing authored session/endpoint models without changing old tests.
     from tests._probe_timed_rom_pair_support import Harness, _MenuSession, arguments
@@ -88,15 +90,27 @@ def run_authored_goal_owner(
     # cut off by a wall clock (#252). `#255` added the `clock` seam for this; the
     # milestone and menu rows use it and this helper still did not. A step of 0
     # models an arbitrarily fast host, so the counts hold on any machine.
+    #
+    # On its own the seam above is not pinned by these rows: at the default
+    # `--frame-limit=4` the owner retires in about a millisecond, so a 3 s
+    # deadline can never fire and every row passes with or without the seam
+    # (#274). `clock_step` and `frame_limit` exist so a sentinel row can make
+    # the fake clock consume enough of the 3 s budget for the deadline branch to
+    # genuinely compete with the frame bound, which is the only way to prove the
+    # helper reads the injected clock. The trade-pair rows keep the defaults, so
+    # their counts are unchanged.
     # `FakeClock` lives in the shared frame-bound support module (#262), not in
     # either test module, so importing it here cannot re-introduce a cycle
     # between this helper and the two timed-menu test modules.
     from tests._timed_menu_frame_bound_support import FakeClock
 
-    clock = FakeClock(step=0.0)
+    clock = FakeClock(step=clock_step)
     clock_deadline_base = clock()
     args = arguments(
-        "--input-profile=menu", "--listener-chunk=1", "--connector-chunk=1", "--frame-limit=4"
+        "--input-profile=menu",
+        "--listener-chunk=1",
+        "--connector-chunk=1",
+        f"--frame-limit={frame_limit}",
     )
     harness = Harness()
     session = _MenuSession(harness, "blue", "complete")
