@@ -17,6 +17,13 @@ behavioural assertion cannot catch it -- the same reasoning that made #271 pin
 the clock read by inspecting source. These helpers therefore parse the test
 module's AST and assert on structure. They are the backstop for structure; the
 behavioural assertions remain the load-bearing contract.
+
+The structural checks ask whether a pinned assertion is *enforced*, not merely
+*present*. Presence alone is satisfiable by an assertion wrapped in
+``try/except AssertionError: pass``, which leaves the node in the AST, leaves
+the comparison in place, and leaves the owning test unable to fail (#280).
+``_is_enforced`` is the shared answer to that question and is used by both the
+teeth check and the count check.
 """
 
 import ast
@@ -92,6 +99,12 @@ def count_comparisons():
     when a site is relaxed to ``>=``, because the relaxed line would simply stop
     being found. Pinning the full observed set means relaxing, deleting, or
     adding a site all change the set and fail.
+
+    Asserts that cannot fail are excluded. ``retention_sites_observed()``
+    otherwise reports a wrapped ``try/except AssertionError: pass`` as an intact
+    ``== 300`` contract while the owning test has stopped being able to fail at
+    all (#280, mutation M7), which is the worse half of that finding: the
+    sentinel and the behaviour it protects go unenforced together.
     """
     tree = _module_tree()
     for node in ast.walk(tree):
@@ -127,8 +140,10 @@ def _count_comparison(tree, node, comparison):
     if not (isinstance(left, ast.Call) and getattr(left.func, "id", None) == "len"):
         return
     if isinstance(right, ast.Constant) and isinstance(right.value, int):
-        function = _enclosing_function(tree, node)
-        yield (function, op, right.value)
+        owner = _enclosing_function_node(tree, node)
+        if owner is not None and not _is_enforced(owner, node):
+            return
+        yield (_enclosing_function(tree, node), op, right.value)
 
 
 def _enclosing_function(tree, target):
@@ -136,6 +151,14 @@ def _enclosing_function(tree, target):
         if isinstance(func, ast.FunctionDef) and any(child is target for child in ast.walk(func)):
             return func.name
     return "<module>"
+
+
+def _enclosing_function_node(tree, target):
+    """The ``FunctionDef`` that owns ``target``, or ``None`` at module level."""
+    for func in tree.body:
+        if isinstance(func, ast.FunctionDef) and any(child is target for child in ast.walk(func)):
+            return func
+    return None
 
 
 def observed_count_comparisons():
@@ -186,6 +209,54 @@ def _is_termination_key(node):
     )
 
 
+def _swallows_assertion_error(handler):
+    """True for a handler that can swallow the failure of an ``assert``.
+
+    ``except AssertionError`` is the direct case, and a bare ``except:`` or
+    ``except BaseException:`` swallows it too. ``except Exception`` is counted
+    for the same reason: ``AssertionError`` derives from ``Exception``, so a
+    handler naming that class also swallows the failure. It is named explicitly
+    to keep the rule from depending on the reader knowing the exception
+    hierarchy. Handlers for anything else -- ``except ValueError`` and friends
+    -- cannot swallow an ``assert`` and are not counted.
+    """
+    caught = handler.type
+    if caught is None:
+        return True
+    names = []
+    for node in ast.walk(caught):
+        if isinstance(node, ast.Name):
+            names.append(node.id)
+        elif isinstance(node, ast.Tuple):
+            names.extend(element.id for element in node.elts if isinstance(element, ast.Name))
+    return bool({"AssertionError", "Exception", "BaseException"} & set(names))
+
+
+def _is_enforced(function, target):
+    """Is ``target`` an assert that can actually fail?
+
+    An ``assert`` is defeated, without being removed, if it sits inside a
+    ``try`` whose handler swallows ``AssertionError`` (#280). ``ast.walk`` is
+    scope-blind -- it descends into ``try`` bodies -- so presence-based checks
+    report such an assert as intact while the owning test can no longer fail.
+    This rejects the assert if *any* handler anywhere in the same function is
+    capable of swallowing it.
+    """
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Try):
+            continue
+        if not any(_contains(statement, target) for statement in node.body):
+            continue
+        if any(_swallows_assertion_error(handler) for handler in node.handlers):
+            return False
+    return True
+
+
+def _contains(statement, target):
+    """True if ``target`` is ``statement`` or lies anywhere beneath it."""
+    return statement is target or any(node is target for node in ast.walk(statement))
+
+
 def guard_rejects_the_deadline_terminal_state():
     """Does the guard still *reject* ``termination == "cancelled_or_deadline"``?
 
@@ -195,6 +266,11 @@ def guard_rejects_the_deadline_terminal_state():
     a deadline-truncated run as a retention result again -- the confusion #261
     was filed to remove. This asks for the ``!=`` comparison that does the
     rejecting, so a gutted guard body fails.
+
+    The comparison must also be *enforced*. Wrapping it in
+    ``try/except AssertionError: pass`` keeps the node, keeps the operator, and
+    leaves the guard unable to fail -- while satisfying a presence-only check
+    (#280, mutation M6). ``_is_enforced`` is what closes that.
     """
     tree = _guard_source_tree()
     for func in tree.body:
@@ -211,6 +287,7 @@ def guard_rejects_the_deadline_terminal_state():
                     _is_termination_key(comparison.left)
                     and isinstance(right, ast.Constant)
                     and right.value == DEADLINE_TERMINATION
+                    and _is_enforced(func, node)
                 ):
                     return True
     return False
