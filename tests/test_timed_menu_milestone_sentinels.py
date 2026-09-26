@@ -19,6 +19,11 @@ assertions in the milestones module remain the contract; this file is the
 backstop that keeps them from being quietly removed.
 """
 
+import ast
+
+import pytest
+
+import tests._timed_menu_milestone_sentinel_support as support
 from tests._timed_menu_milestone_sentinel_support import (
     DEADLINE_TERMINATION,
     GUARD_FUNCTION,
@@ -31,6 +36,164 @@ from tests._timed_menu_milestone_sentinel_support import (
     retention_sites_observed,
     retention_subscript_sites_observed,
 )
+
+
+#: ``(label, guard body, may it still be able to fail?)``
+#:
+#: Each row is a distinct way the #261 guard can be present in the source,
+#: keep its ``!=`` comparison, and yet be unable to fail. The predicate under
+#: test is ``guard_rejects_the_deadline_terminal_state``, applied to a guard
+#: module built from the row's body.
+#:
+#: The ``False`` rows are the defeats; they are what each of the three
+#: mechanisms exists to catch. The ``True`` rows are the controls, and they
+#: matter as much: a rule that reported those as defused would cry wolf on a
+#: real regression, and the over-broad ``or True`` / ``if False`` readings are
+#: exactly where that has already happened on this code. Each control was
+#: confirmed to still reject the deadline record at runtime when the table
+#: passed.
+def _shape(label, body, expected):
+    """One row of :data:`ENFORCEMENT_SHAPES`."""
+    return (label, body, expected)
+
+
+#: Bodies are written at zero indentation relative to the guard's own body;
+#: :func:`_guard_tree_for` indents them.
+_TERMINATION = "record['termination'] != 'cancelled_or_deadline'"
+_ASSERT = f"assert {_TERMINATION}"
+
+
+def _in_try(handler_body, handler_head="except AssertionError:"):
+    return f"try:\n    {_ASSERT}\n{handler_head}\n    pass\n"
+
+
+def _in_suppress(exception):
+    return f"with contextlib.suppress({exception}):\n    {_ASSERT}\n"
+
+
+def _in_if(condition):
+    return f"if {condition}:\n    {_ASSERT}\n"
+
+
+#: ``(label, guard body, must still be reported as able to fail?)``
+#:
+#: Each row is a distinct way the #261 guard can sit in the source, keep its
+#: ``!=`` comparison, and still be unable to fail. The predicate under test is
+#: ``guard_rejects_the_deadline_terminal_state``, applied to a guard module
+#: built from the row's body.
+#:
+#: The ``False`` rows are the defeats, and each maps to one of the three
+#: mechanisms that exist to catch them: a handler that swallows the failure
+#: (``try``/``except``, ``except*``, ``contextlib.suppress``), an operand that
+#: short-circuits the comparison away, and a branch the interpreter statically
+#: skips. The ``True`` rows are controls and they matter as much: a rule that
+#: reported those as defused would cry wolf on a real regression, and the
+#: over-broad ``or True`` / ``if False`` readings are exactly where that has
+#: already happened on this code. Every ``True`` row was separately confirmed
+#: to still raise at runtime when this table passed.
+ENFORCEMENT_SHAPES = (
+    # --- swallowed by a handler ---
+    _shape("except_assertion_error", _in_try(None), False),
+    _shape("except_star_assertion_error", _in_try(None, "except* AssertionError:"), False),
+    _shape("except_base_exception", _in_try(None, "except BaseException:"), False),
+    _shape("except_tuple", _in_try(None, "except (AssertionError, TypeError):"), False),
+    _shape("bare_except", _in_try(None, "except:"), False),
+    _shape("except_exception", _in_try(None, "except Exception:"), False),
+    _shape(
+        "local_assertion_error_subclass",
+        "class Truncated(AssertionError):\n    pass\n" + _in_try(None, "except Truncated:"),
+        False,
+    ),
+    # --- swallowed by contextlib.suppress ---
+    _shape("suppress_assertion_error", _in_suppress("AssertionError"), False),
+    _shape("suppress_exception", _in_suppress("Exception"), False),
+    _shape("suppress_base_exception", _in_suppress("BaseException"), False),
+    # --- short-circuited by a tautological operand ---
+    _shape("or_true", f"{_ASSERT} or True\n", False),
+    _shape(
+        "or_trivially_true_comparison",
+        f"{_ASSERT} or len(record.get('errors', [])) >= 0\n",
+        False,
+    ),
+    _shape("true_or_comparison", f"assert True or {_TERMINATION}\n", False),
+    _shape("or_nonempty_list_literal", f"{_ASSERT} or [1]\n", False),
+    # --- unreachable: statically dead branch ---
+    _shape("if_false", _in_if("False"), False),
+    _shape("if_none", _in_if("None"), False),
+    _shape("if_zero", _in_if("0"), False),
+    # --- gutted: nothing left to enforce ---
+    _shape("empty_body", "pass\n", False),
+    _shape("operator_flipped", "assert record['termination'] == 'cancelled_or_deadline'\n", False),
+    _shape("no_assert_at_all", "return None\n", False),
+    # --- controls: these must keep being reported as able to fail ---
+    _shape("plain_assert", f"{_ASSERT}\n", True),
+    _shape("message_argument", f"{_ASSERT}, record['termination']\n", True),
+    _shape("except_value_error", _in_try(None, "except ValueError:"), True),
+    _shape("suppress_value_error", _in_suppress("ValueError"), True),
+    _shape(
+        "and_of_two_real_comparisons",
+        f"{_ASSERT} and len(record.get('errors', [])) > 0\n",
+        True,
+    ),
+    _shape("or_of_two_real_comparisons", f"{_ASSERT} or len(calls) == 300\n", True),
+    _shape("if_true", _in_if("True"), True),
+    _shape("runtime_condition", _in_if("record.get('checked')"), True),
+    _shape("try_finally", f"try:\n    {_ASSERT}\nfinally:\n    pass\n", True),
+    # `assert not x == y` is a `UnaryOp(Not, Compare(Eq))`, not a `NotEq`
+    # comparison, so the teeth check does not recognise this spelling. The
+    # guard still rejects at runtime, so this row pins the *conservative*
+    # direction the helpers document: an assert it cannot prove live is
+    # reported defused rather than the reverse. Reporting a live assert as
+    # defused costs a false alarm; missing a dead one loses the contract.
+    _shape(
+        "not_eq_spelled_as_not_eq",
+        "assert not record['termination'] == 'cancelled_or_deadline'\n",
+        False,
+    ),
+)
+
+
+def _guard_tree_for(body):
+    """A guard module AST containing ``body`` as the #261 guard's body."""
+    source = "def assert_not_deadline_truncated(record):\n"
+    source += "".join(f"    {line}\n" if line.strip() else "\n" for line in body.splitlines())
+    tree = ast.parse(source)
+    return tree.body[0]
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    ENFORCEMENT_SHAPES,
+    ids=[shape[0] for shape in ENFORCEMENT_SHAPES],
+)
+def test_an_assert_that_cannot_fail_is_never_counted_as_the_teeth_check(
+    label, body, expected, monkeypatch
+):
+    """Each defeat shape must be reported defused; each control must not be.
+
+    This is the table that keeps the three mechanisms from being quietly
+    narrowed. The rows were each confirmed against a real guard module: every
+    ``False`` row leaves the guard returning normally for
+    ``{"termination": "cancelled_or_deadline"}``, and every ``True`` row has it
+    raise.
+
+    A ``False`` row is a defeat when the guard is genuinely unable to fail, and
+    a pinned conservatism when the helper simply cannot *prove* the assert
+    live. Both are the documented direction of error: reporting a live assert
+    as defused costs a false alarm, missing a dead one loses the contract. The
+    table therefore pins ``expected=False`` for the handful of spellings that
+    land in that second category, and each says so in a comment.
+    """
+    function = _guard_tree_for(body)
+    monkeypatch.setattr(support, "_guard_source_tree", lambda: ast.Module(body=[function]))
+    monkeypatch.setattr(support, "GUARD_FUNCTION", "assert_not_deadline_truncated")
+    monkeypatch.setattr(support, "_guard_globals", lambda: {"contextlib": __import__("contextlib")})
+
+    assert support.guard_rejects_the_deadline_terminal_state() is expected, (
+        f"{label}: expected the teeth check to report "
+        f"{'enforced' if expected else 'defused'}, "
+        "so the #261 guard would be certified while unable to fail"
+    )
 
 
 def test_the_261_guard_is_still_wired_to_the_fast_clock_path():
