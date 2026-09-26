@@ -115,7 +115,7 @@ class build_ext(_build_ext):
             # relative ROOT_DIR onto the package directory gave
             # `pyboy/pyboy/core`, whose missing manifest aborted metadata
             # generation with "No such file or directory".
-            directory = os.path.join(ROOT_ABS, "pyboy", os.path.dirname(relative))
+            directory = os.path.join(ROOT_ABS, ROOT_DIR, os.path.dirname(relative))
             staged_components[relative] = _component_build.stage_native_source(
                 directory, stem, relative.replace(os.sep, "/"),
                 declarations=declarations,

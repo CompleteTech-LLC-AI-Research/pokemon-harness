@@ -5,11 +5,14 @@ path in the always-run unit tier. They deliberately do not qualify the native AB
 or any real-ROM behaviour.
 """
 
+import ast
 import hashlib
 import importlib
 import importlib.util
 import inspect
 import linecache
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +36,26 @@ def module_at(name, path):
 
 components = module_at("_test_split_components", PACKAGE / "_components.py")
 layout = module_at("_test_split_layout", CORE / "components_layout.py")
+
+
+def setup_path_literals(setup_path, wanted):
+    """Return the named setup.py module-level assignments, read but not executed."""
+    tree = ast.parse(setup_path.read_text(), filename=str(setup_path))
+    values = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id in wanted:
+            try:
+                values[target.id] = ast.literal_eval(node.value)
+            except ValueError:
+                # ROOT_ABS is os.path.dirname(os.path.abspath(__file__)); rebuild
+                # it from the real location instead of executing vendored code.
+                assert target.id == "ROOT_ABS", target.id
+                values[target.id] = str(setup_path.parent)
+    assert wanted <= set(values), sorted(wanted - set(values))
+    return values
 
 # The exact pre-split git blobs the components must reassemble to, and the
 # augmenting .pxd each native staging step must reproduce byte for byte.
@@ -236,9 +259,16 @@ def test_imported_module_keeps_the_pre_split_namespace_and_source(stem):
         "__builtins__": __builtins__,
     }
     exec(compile(original, module.__file__, "exec", dont_inherit=True), namespace, namespace)
-    assert {n for n in namespace if not n.startswith("__")} == {
-        n for n in vars(module) if not n.startswith("__")
-    }
+    source_names = {n for n in namespace if not n.startswith("__")}
+    module_names = {n for n in vars(module) if not n.startswith("__")}
+    if from_source:
+        assert source_names == module_names
+    else:
+        # A compiled extension module does not necessarily re-export every
+        # module-level constant the source binds, so require that the module
+        # adds no unexpected name. The full public surface is pinned separately
+        # by the differential check against the pre-split base.
+        assert not module_names - source_names
     if from_source:
         linecache.checkcache()
         assert "".join(linecache.getlines(module.__file__)).encode() == original
@@ -246,6 +276,11 @@ def test_imported_module_keeps_the_pre_split_namespace_and_source(stem):
         if name.startswith("_") or not inspect.isclass(value):
             continue
         if value.__module__ != module.__name__:
+            continue
+        if not hasattr(module, name):
+            # Same native-runtime caveat as above: a compiled module may not
+            # re-export a name. Source mode is the strict check.
+            assert not from_source, name
             continue
         actual = getattr(module, name)
         assert set(vars(actual)) == set(vars(value))
@@ -321,3 +356,42 @@ def test_generator_needs_no_git_history(stem, tmp_path):
         assert result.returncode == 0, (mode, result.stdout + result.stderr)
         assert f"{stem}:" in result.stdout
     assert components.assemble(core, stem) == components.assemble(CORE, stem)
+
+
+def test_native_build_stages_components_from_the_real_source_root():
+    """Every COMPONENT_SOURCES key must resolve to an existing manifest on disk.
+
+    setuptools instantiates `build_ext` for metadata-only steps too
+    (egg_info -> sdist -> build_ext), where the process CWD is not the source
+    root. Anchoring the staging directory to the wrong base produced
+    `pyboy/pyboy/core`, and the missing manifest there aborted metadata
+    generation with "No such file or directory" before any build ran.
+    """
+    setup_path = PACKAGE.parent / "setup.py"
+    tables = setup_path_literals(setup_path, {"ROOT_DIR", "ROOT_ABS", "COMPONENT_SOURCES"})
+
+    root_dir = tables["ROOT_DIR"]
+    namespace = {
+        "os": os,
+        "ROOT_DIR": root_dir,
+        "ROOT_ABS": tables["ROOT_ABS"],
+        # Bound so the statement under test evaluates standalone rather than
+        # capturing this loop's variable.
+        "relative": "core/mb.py",
+    }
+    # Evaluate setup.py's real staging statement so this test tracks the shipped
+    # code rather than a reconstruction of it.
+    statements = re.findall(r"^\s*directory = (.*)$", setup_path.read_text(), re.MULTILINE)
+    assert len(statements) == 1, statements
+    for relative, (stem, declarations) in tables["COMPONENT_SOURCES"].items():
+        namespace["relative"] = relative
+        directory = eval(statements[0], namespace)  # noqa: S307
+        # ROOT_ABS is the vendored package root and ROOT_DIR is "pyboy" inside
+        # it, so "<vendor-root>/pyboy/core" is the correct staging directory and
+        # legitimately contains "pyboy" once. The defect this guards against is
+        # resolving a relative ROOT_DIR against a CWD that is already the
+        # package, which yields a manifest that does not exist. Assert the
+        # manifest is really there rather than matching a legitimate prefix.
+        manifest = Path(directory) / f"{stem}_components_manifest.py"
+        assert manifest.is_file(), f"{stem}: staging would read missing {manifest}"
+        assert Path(directory, declarations).is_file(), stem

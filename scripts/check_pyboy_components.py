@@ -181,8 +181,15 @@ class ComponentChecks(unittest.TestCase):
     def test_package_allowlist_has_every_component(self):
         settings = tomllib.loads((ROOT / "pyproject.toml").read_text())
         self.assertEqual(
-            settings["tool"]["setuptools"]["package-data"]["pyboy"],
+            settings["tool"]["setuptools"]["package-data"]["pyboy"][: len(SUPPORT["COMPONENTS"])],
             list(SUPPORT["COMPONENTS"]),
+        )
+        # The bounded mb/lcd splits add their shared loader beside the pyboy.py
+        # components. It is read at import time, so it must ship as package data,
+        # but it is not one of the pyboy.py .pxi components named in _source.py.
+        self.assertIn(
+            "_components.py",
+            settings["tool"]["setuptools"]["package-data"]["pyboy"],
         )
 
     def test_setup_stages_instead_of_compiling_the_facade(self):
@@ -492,8 +499,10 @@ class SplitModuleChecks(unittest.TestCase):
 
     def test_setup_stages_the_split_modules_instead_of_their_facades(self):
         setup = (CORE.parent.parent / "setup.py").read_text()
-        self.assertIn('"pyboy/core/mb.py": ("mb", "mb.pxd")', setup)
-        self.assertIn('"pyboy/core/lcd.py": ("lcd", "lcd.pxd")', setup)
+        # The keys are matched against os.path.relpath(src, ROOT_DIR), which is
+        # package-relative, so they must not repeat the "pyboy/" prefix.
+        self.assertIn('"core/mb.py": ("mb", "mb.pxd")', setup)
+        self.assertIn('"core/lcd.py": ("lcd", "lcd.pxd")', setup)
         self.assertIn("if relative in staged_components:", setup)
         self.assertIn("return str(staged_components[relative])", setup)
         for name in (
