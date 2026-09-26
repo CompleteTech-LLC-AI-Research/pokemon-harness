@@ -1,3 +1,21 @@
+# Unqualified serial-split candidate for #122 / #153
+
+Candidate content identity: `0a0f7f315e58e1c06a8c2cb9a716b8116fdf92ef`. Prior identity: `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`.
+Base harness commit: `3e865d5b0348d0c7c462ed8b40a107ae2b158277`. This is a content digest, not a Git commit.
+
+`pyboy/core/serial.py` is split from 1117 to 996 lines; the new
+`serial_types.py` is 168 lines. Eight class definitions move verbatim.
+The complete Serial implementation and serial.pxd remain unchanged.
+Historical facade class/pickle paths are preserved. The existing digest
+algorithm is unchanged and includes the added helper in the tracked manifest.
+
+Status: PARTIAL / UNQUALIFIED. Isolated serial checks are not a complete
+PyBoy build, the pinned-toolchain gate, packaging acceptance, full pytest,
+production-gate equivalence, or independent review. No historical passing
+result below is transferred to this new identity. Other #122 leaves remain open.
+
+## Previous two-split identity record — historical, retained verbatim
+
 # Harness-local divergence record — vendored PyBoy
 
 Status: **RE-PINNED — harness-local divergence revision.** The vendored tree has diverged from the

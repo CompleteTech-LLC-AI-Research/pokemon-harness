@@ -20,6 +20,6 @@ __all__ = ["PyBoy", "PyBoyMemoryView", "PyBoyRegisterFile"]
 # c565df66c3731fad2856169a90f6bbec99925915 once the tree diverged. See
 # POKERED_HARNESS_PYBOY_DIVERGENCE.md.
 __version__ = "2.7.0"
-__pokered_harness_revision__ = "eceaa3bb15dedd6847a3a37d3400421e3024cb5c"
+__pokered_harness_revision__ = "0a0f7f315e58e1c06a8c2cb9a716b8116fdf92ef"
 
 from .pyboy import PyBoy, PyBoyMemoryView, PyBoyRegisterFile
