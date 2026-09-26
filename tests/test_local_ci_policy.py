@@ -8,7 +8,7 @@ bounded production gate, which is outside the unit-test tier.
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "scripts" / "run_local_ci.sh"
@@ -66,11 +66,26 @@ def _ruff_excluded_prefixes() -> tuple[str, ...]:
 
 
 def _is_excluded(relative_path: str, excluded: tuple[str, ...]) -> bool:
-    """Return True when Ruff's `extend-exclude` would drop this path."""
+    """Return True when Ruff's `extend-exclude` would drop this path.
 
-    return any(
-        relative_path == entry or relative_path.startswith(f"{entry}/") for entry in excluded
-    )
+    `extend-exclude` entries are glob patterns, not just literal prefixes, so
+    match them the way Ruff does.  A prefix-only test would pass for
+    `extend-exclude = ["tests/legacy"]` while silently ignoring
+    `["tests/test_*.py"]`, which drops the great majority of the test suite:
+    measured on this tree, that glob removes 209 of 267 test files from the
+    lanes.  The coverage assertion below is the last line of defence against a
+    silent exclusion, so it must use the same resolution Ruff does.
+    """
+
+    path = PurePosixPath(relative_path)
+    for entry in excluded:
+        pattern = PurePosixPath(entry)
+        if path.match(pattern) or path.match(f"{pattern}/**"):
+            return True
+        # Ruff also treats a bare directory entry as covering its contents.
+        if relative_path == entry or relative_path.startswith(f"{entry}/"):
+            return True
+    return False
 
 
 def _main_lane(invocations: list[tuple[str, ...]], subcommand: str) -> tuple[str, ...]:
