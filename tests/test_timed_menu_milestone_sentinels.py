@@ -20,8 +20,13 @@ backstop that keeps them from being quietly removed.
 """
 
 from tests._timed_menu_milestone_sentinel_support import (
+    DEADLINE_TERMINATION,
+    GUARD_FUNCTION,
     RETENTION_COUNT_SITES,
+    RUN_OWNER,
+    count_sites_that_bypass_the_guard,
     guard_is_wired_on_the_fast_clock_path,
+    guard_rejects_the_deadline_terminal_state,
     retention_sites_observed,
 )
 
@@ -55,4 +60,38 @@ def test_the_four_retention_counts_are_still_exact_equalities():
     assert observed == expected, (
         "the frame-bound retention counts are no longer exact equality "
         f"assertions at the pinned sites; expected {expected}, observed {observed}"
+    )
+
+
+def test_the_261_guard_still_rejects_the_deadline_terminal_state():
+    """The guard must have teeth, not merely be called.
+
+    ``test_the_261_guard_is_still_wired_to_the_fast_clock_path`` proves the
+    guard is invoked, but not that invoking it rejects anything. Reducing the
+    guard body to ``pass`` leaves the wiring check green while the #261 contract
+    no longer exists -- and the exact-count assertions it exists to qualify would
+    then read a deadline-truncated run as a retention result, which is the exact
+    confusion #261 was filed to remove.
+    """
+    assert guard_rejects_the_deadline_terminal_state(), (
+        f"{GUARD_FUNCTION}() no longer rejects termination == "
+        f"{DEADLINE_TERMINATION!r}; it is wired but toothless, so a "
+        "deadline-truncated run would again be reported as a retention failure"
+    )
+
+
+def test_the_pinned_counts_are_reached_with_the_261_precondition_active():
+    """No pinned count site may opt out of the #261 terminal-state guard.
+
+    Criterion 3 of #270 asks about the sites at ``:746``, ``:755`` and ``:971``,
+    which do not each call the guard themselves. They get the precondition
+    centrally, from ``run_owner()``, which applies it whenever ``clock_step`` is
+    the default ``0.0``. Duplicating four guard calls would add noise without
+    adding coverage; what matters is that no site can pass its own
+    ``clock_step`` and quietly lose the precondition its exact count depends on.
+    """
+    offenders = count_sites_that_bypass_the_guard()
+    assert not offenders, (
+        f"these pinned retention sites call {RUN_OWNER}() with a clock_step "
+        f"that bypasses the #261 terminal-state guard: {offenders}"
     )
