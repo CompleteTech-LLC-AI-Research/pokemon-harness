@@ -580,7 +580,7 @@ def run_owner(
     bound, not a host-speed statement (#252). ``clock_step=None`` restores the
     real monotonic clock that production uses.
     """
-    from tests._timed_menu_frame_bound_support import FakeClock
+    from tests._timed_menu_frame_bound_support import FakeClock, assert_not_deadline_truncated
 
     clock = None if clock_step is None else FakeClock(step=clock_step)
     from scripts import probe_timed_rom_pair as probe
@@ -685,6 +685,8 @@ def run_owner(
         evidence_path=path,
         clock=clock,
     )
+    if clock_step == 0.0:
+        assert_not_deadline_truncated(record)
     return record, path, lifecycle, checkpoints, clock
 
 
