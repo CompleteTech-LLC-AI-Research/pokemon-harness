@@ -520,20 +520,30 @@ def _is_enforced(function, node):
 def _is_tautology(node):
     """Is this expression true regardless of the values it reads?
 
-    Only the literal, decidable forms are recognised -- a constant, and a
-    comparison against a numeric bound that a length or count can never cross.
-    A comparison against anything else (``len(calls) == 300``,
-    ``record["termination"] != "cancelled_or_deadline"``) is a real check and is
-    never treated as a tautology.
+    Only the decidable forms are recognised: a truthy constant, a comparison
+    built purely from literals, and a count compared against a bound a length
+    can never cross. A comparison that reads any runtime value
+    (``len(calls) == 300``, ``record["termination"] != "cancelled_or_deadline"``)
+    is a real check and is never treated as a tautology.
 
     A tautology is what makes an ``or`` bypass its sibling: the comparison the
     contract depends on is never evaluated because the other operand is true
     whatever the record says. Proving an expression is always *false* is the
     symmetric case and is deliberately not attempted -- it would need real
     evaluation, and a wrong answer there would report a live assert as dead.
+
+    The literal-only fold covers the spellings the count heuristic cannot see.
+    ``1 == 1`` is true without reading any state, so it short-circuits the ``or``
+    exactly as a bare ``True`` does -- but its left operand is a constant, not a
+    call, so ``_is_count_like`` rejects it and the operand would otherwise be
+    misreported as enforced. Restricting the fold to literals keeps the
+    conservative direction: ``x == x`` reads a ``Name``, is not constant, and
+    therefore stays enforced.
     """
     if isinstance(node, ast.Constant):
         return bool(node.value)
+    if _is_literal_true(node):
+        return True
     if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
         return False
     bound = _numeric_literal(node.comparators[0])
@@ -552,6 +562,122 @@ def _is_tautology(node):
     if isinstance(operator, ast.GtE):
         return bound == 0
     return isinstance(operator, ast.Gt) and bound < 0
+
+
+def _is_literal_true(node):
+    """Is this expression decidable to ``True`` without reading any value?
+
+    An operand built only from literals cannot be influenced by the record, so
+    a truthy result means the surrounding ``or`` decides the assert on its own
+    and the comparison beside it is never evaluated.
+
+    Only ``True`` counts. A literal that folds to ``False`` -- ``1 == 2`` --
+    cannot short-circuit anything, so it is not a bypass.
+    """
+    value = _literal_value(node)
+    return value is not _NOT_LITERAL and bool(value)
+
+
+def _literal_value(node):
+    """The value of a literal-only expression, or ``_NOT_LITERAL``.
+
+    ``ast.literal_eval`` is the obvious tool here and is the wrong one: it
+    refuses every ``Compare`` node, so it cannot answer the question this
+    exists to answer. ``1 == 1`` raises ``ValueError`` there, yet it is exactly
+    the decisive case -- decidable to true without reading any state, so it
+    short-circuits the ``or`` precisely as a bare ``True`` does.
+
+    The fold is therefore done structurally, over the literal expression
+    grammar: constants, containers of constants, unary and binary operators,
+    and chained comparisons between them. Anything that could read runtime
+    state -- ``Name``, ``Call``, ``Attribute``, ``Subscript`` -- makes the walk
+    bail and return ``_NOT_LITERAL``. That boundary is what keeps ``x == x``
+    enforced: it reads a ``Name``, so it is not decidable, and reporting a live
+    assert as dead is the worse error.
+
+    A ``None`` fallback would be wrong here, because ``None`` is itself a
+    literal (it parses to a ``Constant``) and so would be indistinguishable
+    from a genuine ``None``.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        items = [_literal_value(element) for element in node.elts]
+        if any(item is _NOT_LITERAL for item in items):
+            return _NOT_LITERAL
+        try:
+            if isinstance(node, ast.Tuple):
+                return tuple(items)
+            if isinstance(node, ast.List):
+                return items
+            return set(items)
+        except TypeError:
+            return _NOT_LITERAL
+    if isinstance(node, ast.Dict):
+        keys = [_literal_value(key) for key in node.keys]
+        values = [_literal_value(value) for value in node.values]
+        if any(item is _NOT_LITERAL for item in keys + values):
+            return _NOT_LITERAL
+        try:
+            return dict(zip(keys, values))
+        except TypeError:
+            return _NOT_LITERAL
+    if isinstance(node, ast.UnaryOp):
+        operand = _literal_value(node.operand)
+        if operand is _NOT_LITERAL:
+            return _NOT_LITERAL
+        try:
+            if isinstance(node.op, ast.USub):
+                return -operand
+            if isinstance(node.op, ast.UAdd):
+                return +operand
+            if isinstance(node.op, ast.Not):
+                return not operand
+            if isinstance(node.op, ast.Invert):
+                return ~operand
+        except TypeError:
+            return _NOT_LITERAL
+        return _NOT_LITERAL
+    if isinstance(node, ast.BinOp) and type(node.op) in _LITERAL_OPERATORS:
+        left = _literal_value(node.left)
+        right = _literal_value(node.right)
+        if left is _NOT_LITERAL or right is _NOT_LITERAL:
+            return _NOT_LITERAL
+        try:
+            return _LITERAL_OPERATORS[type(node.op)](left, right)
+        except (ArithmeticError, TypeError):
+            return _NOT_LITERAL
+    if isinstance(node, ast.BoolOp):
+        result = isinstance(node.op, ast.And)
+        for value in node.values:
+            item = _literal_value(value)
+            if item is _NOT_LITERAL:
+                return _NOT_LITERAL
+            if isinstance(node.op, ast.And):
+                result = result and bool(item)
+            else:
+                result = result or bool(item)
+        return result
+    if isinstance(node, ast.Compare):
+        left = _literal_value(node.left)
+        if left is _NOT_LITERAL:
+            return _NOT_LITERAL
+        for operator, comparator in zip(node.ops, node.comparators):
+            right = _literal_value(comparator)
+            if right is _NOT_LITERAL:
+                return _NOT_LITERAL
+            handler = _LITERAL_COMPARISONS.get(type(operator))
+            if handler is None:
+                return _NOT_LITERAL
+            try:
+                matched = handler(left, right)
+            except TypeError:
+                return _NOT_LITERAL
+            if not matched:
+                return False
+            left = right
+        return True
+    return _NOT_LITERAL
 
 
 def _numeric_literal(node):
@@ -595,6 +721,38 @@ def _is_count_like(node):
         return node.func.attr in {"len", "count", "bit_count"}
     return False
 
+
+#: Distinct from ``None``, which is itself a literal and so cannot double as a
+#: bail-out signal.
+_NOT_LITERAL = object()
+
+_LITERAL_OPERATORS = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b,
+    ast.FloorDiv: lambda a, b: a // b,
+    ast.Mod: lambda a, b: a % b,
+    ast.Pow: lambda a, b: a**b,
+    ast.BitOr: lambda a, b: a | b,
+    ast.BitAnd: lambda a, b: a & b,
+    ast.BitXor: lambda a, b: a ^ b,
+    ast.LShift: lambda a, b: a << b,
+    ast.RShift: lambda a, b: a >> b,
+}
+
+_LITERAL_COMPARISONS = {
+    ast.Eq: lambda a, b: a == b,
+    ast.NotEq: lambda a, b: a != b,
+    ast.Lt: lambda a, b: a < b,
+    ast.LtE: lambda a, b: a <= b,
+    ast.Gt: lambda a, b: a > b,
+    ast.GtE: lambda a, b: a >= b,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
+    ast.Is: lambda a, b: a is b,
+    ast.IsNot: lambda a, b: a is not b,
+}
 
 #: Operand kinds whose truthiness can decide a ``BoolOp`` on its own. A nested
 #: ``Compare`` is deliberately absent: it is not a decision on its own, and
