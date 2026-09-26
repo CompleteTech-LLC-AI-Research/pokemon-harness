@@ -402,7 +402,7 @@ def _run_owner(
         if owner_driver is None or record.get("termination") != "goal_cancelled":
             done.set()
         # Supervisor signals BOTH peers before either owner tears down.
-        cancelled.wait(max(0, overall - time.monotonic()))
+        cancelled.wait(max(0, overall - now()))
         if session is not None:
             if driver is not None:
                 try:
@@ -456,7 +456,7 @@ def _run_owner(
                         record["errors"].append(f"milestone snapshot: {type(exc).__name__}: {exc}")
             if session is not None and detached:
                 try:
-                    session.close(save=False, timeout_s=max(0.001, overall - time.monotonic()))
+                    session.close(save=False, timeout_s=max(0.001, overall - now()))
                     record["cleanup"].append("session_closed_without_save")
                 except BaseException as exc:
                     record["errors"].append(f"cleanup: {type(exc).__name__}: {exc}")
