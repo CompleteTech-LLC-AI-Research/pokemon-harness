@@ -69,6 +69,7 @@ pyboy = "vendor/pyboy-src/pyboy"
     "_pyboy_controls.pxi",
     "_pyboy_api.pxi",
     "_pyboy_memory.pxi",
+    "_components.py",
 ]
 "pyboy.core" = [
     "bootrom_cgb.bin",
@@ -79,6 +80,11 @@ pyboy = "vendor/pyboy-src/pyboy"
     "mb_components_manifest.py",
     "lcd_components/*.pxi",
     "lcd_components_manifest.py",
+    "_opcodes_runtime.py",
+    "_opcodes_manifest.py",
+    "opcodes_layout.py",
+    "opcodes_gen.py",
+    "opcodes_gen_handlers.py",
 ]
 "pyboy.plugins" = ["font.txt"]
 

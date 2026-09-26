@@ -12,7 +12,11 @@ import numpy as np
 from setuptools import Extension, setup
 
 CYTHON = platform.python_implementation() == "CPython" and not os.getenv("PYBOY_NO_CYTHON")
-ROOT_DIR = "pyboy"
+# Absolute, because setuptools instantiates build_ext for metadata-only steps
+# (egg_info -> sdist -> build_ext) where the process CWD is not the source root.
+# A relative "pyboy" resolved against that CWD and produced doubled paths such as
+# `pyboy/pyboy/core/...`, which fails metadata generation before any build runs.
+ROOT_DIR = os.path.abspath("pyboy")
 DEBUG = bool(os.getenv("GITHUB_ACTIONS"))
 
 if not CYTHON:
@@ -99,10 +103,17 @@ class build_ext(_build_ext):
         py_pxd_files = prep_pxd_py_files()
         staged_components = {}
         for relative, (stem, declarations) in COMPONENT_SOURCES.items():
-            directory = os.path.join(ROOT_DIR, os.path.dirname(relative))
+            # setuptools builds this command object for metadata-only steps too,
+            # where the process CWD is not the source root. Each COMPONENT_SOURCES
+            # key is already a source-root-relative path, so strip ROOT_DIR to get
+            # the package directory. Joining ROOT_DIR onto the unstripped key gave
+            # `pyboy/pyboy/core`, whose missing manifest aborted metadata
+            # generation with "No such file or directory".
+            directory = os.path.join(ROOT_DIR, os.path.dirname(os.path.relpath(relative, ROOT_DIR)))
             staged_components[relative] = _component_build.stage_native_source(
                 directory, stem, relative.replace(os.sep, "/"),
-                declarations=declarations, build_root=os.path.join("build", "components"),
+                declarations=declarations,
+                build_root=os.path.join(ROOT_DIR, "build", "components"),
             )
 
         def compiler_source(src):
