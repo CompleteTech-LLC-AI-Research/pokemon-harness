@@ -301,8 +301,10 @@ re-landed, and both pilot leaves were re-landed **together** on the post-`#234` 
   generator and the new handlers module are excluded from Cythonization by `setup.py`, and
   regeneration stays byte-identical (`opcodes.py` `2538898d…`, `opcodes.pxd` `b1c0c5ad…`), so this
   leaf adds no compiled build input and the generated pair is untouched.
-- **Honest re-pin (condition 2) executed once, covering both.** The vendored manifest now hashes to
-  the harness-local divergence revision `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`. Every
+- **Honest re-pin (condition 2) executed, covering both.** On the `master` tree these two splits
+  shared, the vendored manifest hashed to the harness-local divergence revision
+  `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`; the later `#150`/`#155` vendored split moved it again,
+  and the **current** pin on this head is `e91b07c39474e40265ca88684f7ce3d9ea171096`. Every
   current-identity carrier (`POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py`'s
   `__pokered_harness_revision__`, `scripts/bootstrap_pyboy.py::EXPECTED_REVISION`,
   `tests/_runtime_packaging_support.py::EXPECTED_PYBOY_REVISION`,
