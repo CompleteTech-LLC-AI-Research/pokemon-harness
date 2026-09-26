@@ -19,27 +19,8 @@ import inspect
 import pytest
 
 from scripts import probe_timed_rom_pair as probe
+from tests._probe_timed_rom_pair_support import _run_menu_owner
 from tests.test_timed_menu_milestones import FRAME_BOUND, run_owner
-
-class FakeClock:
-    """Monotonic stand-in that advances a fixed amount per read.
-
-    ``step`` is the wall time the owner "consumes" per observation: ``0`` models
-    an arbitrarily fast host and a large step an arbitrarily slow one. Neither
-    may change how many calls the frame bound authorizes.
-    """
-
-    def __init__(self, start=1000.0, step=0.0):
-        self.value = start
-        self.step = step
-        self.reads = 0
-
-    def __call__(self):
-        self.reads += 1
-        current = self.value
-        self.value += self.step
-        return current
-
 
 INLINE_STEPS = [0.0, 0.001, 0.002, 0.005]
 STREAM_STEPS = [0.0, 0.001, 0.005]
@@ -55,7 +36,7 @@ def test_frame_bound_evidence_is_independent_of_wall_clock_speed(monkeypatch, tm
     contract asserted by the retention test must hold as a property of the
     frame bound and not of machine load.
     """
-    record, path, _, _, clock = run_owner(
+    record, _path, _, _, clock = run_owner(
         monkeypatch, tmp_path, clock_step=clock_step, stream=False, milestones=False
     )
     assert record["errors"] == []
@@ -122,3 +103,49 @@ def test_real_clock_still_guards_the_owner_loop(monkeypatch, tmp_path):
     )
     assert record["termination"] in {"frame_bound", "cancelled_or_deadline"}
     assert len(record["calls"]) <= FRAME_BOUND
+
+
+MENU_FRAME_BOUND = 77
+
+
+@pytest.mark.parametrize("clock_step", INLINE_STEPS)
+def test_menu_profile_schedule_is_independent_of_wall_clock_speed(clock_step):
+    """The menu profile's 77-input schedule is a frame bound, not a CPU claim (#260).
+
+    ``_run_menu_owner`` used to supply a hardcoded ``time.monotonic() + 3``, so
+    asserting ``termination == "frame_bound"`` asserted "77 menu inputs within
+    three seconds of wall clock" and failed on a loaded host with
+    ``cancelled_or_deadline``. The step may not change the schedule.
+    """
+    _session, record = _run_menu_owner(clock_step=clock_step)
+    assert record["errors"] == []
+    assert record["termination"] == "frame_bound"
+    assert [call["frame_offset"] for call in record["calls"]] == list(range(MENU_FRAME_BOUND))
+    assert all(
+        call["actual_completed_frames"] == call["requested_frames"] == 1 for call in record["calls"]
+    )
+
+
+def test_menu_profile_deadline_still_terminates_a_slow_host():
+    """A clock slow enough to exhaust the budget still stops on the deadline.
+
+    Same reasoning as the milestone deadline test: the seam must not be usable to
+    delete the real deadline contract.
+    """
+    # A step of 0.1 against the 3-unit budget retires a few frames before the
+    # deadline, so the run is genuinely mid-schedule rather than empty.
+    _session, record = _run_menu_owner(clock_step=0.1)
+    assert record["errors"] == []
+    assert record["termination"] == "cancelled_or_deadline"
+    assert 0 < len(record["calls"]) < MENU_FRAME_BOUND
+
+
+def test_menu_profile_real_clock_path_still_terminates():
+    """``clock_step=None`` keeps the no-injection path reachable.
+
+    This asserts termination only, never a count, so the real-clock path cannot
+    reintroduce the host-speed coupling the seam removes.
+    """
+    _session, record = _run_menu_owner(clock_step=None)
+    assert record["termination"] in {"frame_bound", "cancelled_or_deadline"}
+    assert len(record["calls"]) <= MENU_FRAME_BOUND

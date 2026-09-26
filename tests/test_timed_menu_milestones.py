@@ -573,9 +573,9 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
     bound, not a host-speed statement (#252). ``clock_step=None`` restores the
     real monotonic clock that production uses.
     """
-    from tests.test_timed_menu_frame_bound import FakeClock
+    from tests._probe_timed_rom_pair_support import StepClock
 
-    clock = None if clock_step is None else FakeClock(step=clock_step)
+    clock = None if clock_step is None else StepClock(step=clock_step)
     from scripts import probe_timed_rom_pair as probe
 
     args = probe_args("--input-profile", "menu", "--connector-chunk", "1", "--frame-limit", "300")

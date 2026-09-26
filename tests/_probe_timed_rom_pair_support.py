@@ -25,6 +25,27 @@ import pytest
 from scripts import probe_timed_rom_pair as probe
 
 
+class StepClock:
+    """Monotonic stand-in that advances a fixed amount per read.
+
+    ``step`` is the wall time the owner "consumes" per observation: ``0`` models
+    an arbitrarily fast host and a large step an arbitrarily slow one. Neither
+    may change how many calls the frame bound authorizes -- that is the #252
+    contract, which otherwise becomes a CPU-throughput measurement.
+    """
+
+    def __init__(self, start: float = 1000.0, step: float = 0.0) -> None:
+        self.value = float(start)
+        self.step = float(step)
+        self.reads = 0
+
+    def __call__(self) -> float:
+        self.reads += 1
+        current = self.value
+        self.value += self.step
+        return current
+
+
 def arguments(*extra):
     return probe.parse_args(
         [
@@ -506,8 +527,27 @@ class _MenuSession(FakeSession):
             raise RuntimeError("interrupted after actual frame")
 
 
-def _run_menu_owner(*extra, behavior="complete", profile="menu", checkpoint=None):
-    """One synthetic owner runs production scheduling without a peer CPU or ROM."""
+def _run_menu_owner(
+    *extra,
+    behavior="complete",
+    profile="menu",
+    checkpoint=None,
+    clock_step=0.0,
+    deadline_budget=3,
+):
+    """One synthetic owner runs production scheduling without a peer CPU or ROM.
+
+    The owner runs on an injected clock by default so the ``--frame-limit``
+    schedule is asserted as a frame bound rather than as "N menu inputs within
+    ``deadline_budget`` seconds of wall clock" (#260, the same defect class as
+    #252). ``clock_step=None`` restores the real monotonic clock that production
+    uses, so the no-injection path stays reachable.
+    """
+    clock = None if clock_step is None else StepClock(step=clock_step)
+    if clock is None:
+        base = time.monotonic
+    else:
+        base = clock
     args = arguments(
         "--input-profile",
         profile,
@@ -544,12 +584,13 @@ def _run_menu_owner(*extra, behavior="complete", profile="menu", checkpoint=None
                     threading.Barrier(1),
                     [None, None],
                     threading.Lock(),
-                    time.monotonic() + 3,
-                    time.monotonic() + 5,
+                    base() + deadline_budget,
+                    base() + deadline_budget + 2,
                     lambda *args, **kwargs: session,
                     harness.endpoint,
                     harness.assets,
                     checkpoint,
+                    clock=clock,
                 )
             finally:
                 accepted.close()
