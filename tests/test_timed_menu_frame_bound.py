@@ -15,7 +15,6 @@ quietly delete that contract.
 """
 
 import inspect
-import time
 
 import pytest
 
@@ -185,5 +184,16 @@ def test_teardown_deadline_reads_the_injected_clock():
     for _ in range(5):
         clock()
     assert max(0.001, overall - clock()) == pytest.approx(15.0)
-    # The real clock is ~300000, so the unfixed expression collapses to the floor.
-    assert max(0.001, overall - time.monotonic()) == 0.001
+
+    # Mixing the two clocks is the defect, so demonstrate the mix with an
+    # *arbitrary* real-clock reading rather than the live one. Comparing against
+    # the live ``time.monotonic()`` asserts a property of the runner -- that its
+    # monotonic epoch is far above ``FakeClock``'s 1000.0 start -- which is not
+    # a property of this code and is not true on a short-lived host. That is
+    # exactly how this test failed on the hosted runner, whose
+    # ``time.monotonic()`` was ~567s: ``overall`` (1026.0) minus 567 is
+    # *positive*, so the clamped timeout was 458.75 rather than the 0.001 floor.
+    # The property under test is "the two clocks are not interchangeable", which
+    # holds for any real reading outside the fake's own range.
+    for real_reading in (567.0, 303_300.0, 1e9):
+        assert max(0.001, overall - real_reading) != pytest.approx(15.0)
