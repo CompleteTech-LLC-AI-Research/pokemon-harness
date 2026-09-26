@@ -158,3 +158,101 @@ RETENTION_COUNT_SITES = {
 def retention_sites_observed():
     """The ``(function, operator, literal)`` triples for the pinned sites only."""
     return sorted(triple for triple in count_comparisons() if triple[0] in RETENTION_COUNT_SITES)
+
+
+# --- #270 criterion 1, second half: the guard must have teeth, not just be called ---
+
+#: The module that defines the #261 guard, and the terminal state it exists to reject.
+GUARD_MODULE = "tests._timed_menu_frame_bound_support"
+GUARD_FUNCTION = "assert_not_deadline_truncated"
+DEADLINE_TERMINATION = "cancelled_or_deadline"
+
+
+def _guard_source_tree():
+    """Return the parsed AST of the module that defines the #261 guard."""
+    import importlib
+
+    return ast.parse(inspect.getsource(importlib.import_module(GUARD_MODULE)))
+
+
+def _is_termination_key(node):
+    """True for the ``record["termination"]`` subscript."""
+    return (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "record"
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value == "termination"
+    )
+
+
+def guard_rejects_the_deadline_terminal_state():
+    """Does the guard still *reject* ``termination == "cancelled_or_deadline"``?
+
+    ``guard_is_wired_on_the_fast_clock_path`` only proves the guard is *called*.
+    That is not sufficient: a guard whose body asserts nothing is wired to
+    nothing, and the exact-count assertions it exists to qualify would then read
+    a deadline-truncated run as a retention result again -- the confusion #261
+    was filed to remove. This asks for the ``!=`` comparison that does the
+    rejecting, so a gutted guard body fails.
+    """
+    tree = _guard_source_tree()
+    for func in tree.body:
+        if not (isinstance(func, ast.FunctionDef) and func.name == GUARD_FUNCTION):
+            continue
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assert):
+                continue
+            for comparison in _comparisons_in(node.test):
+                if not (len(comparison.ops) == 1 and isinstance(comparison.ops[0], ast.NotEq)):
+                    continue
+                right = comparison.comparators[0]
+                if (
+                    _is_termination_key(comparison.left)
+                    and isinstance(right, ast.Constant)
+                    and right.value == DEADLINE_TERMINATION
+                ):
+                    return True
+    return False
+
+
+# --- #270 criterion 3: the pinned counts must be reached WITH the #261 precondition ---
+
+#: ``run_owner`` applies the guard whenever ``clock_step`` is this value.
+GUARDED_CLOCK_STEP = 0.0
+RUN_OWNER = "run_owner"
+
+
+def count_sites_that_bypass_the_guard():
+    """Pinned retention sites whose ``run_owner`` call overrides ``clock_step``.
+
+    All four sites get the #261 terminal-state precondition centrally, from
+    ``run_owner()``, which applies the guard whenever ``clock_step`` is the
+    default ``0.0``. A site that passed its own ``clock_step`` would silently
+    opt out of the precondition, leaving its exact count asserting something the
+    guard never qualified. Returns the offending ``(function, clock_step)``
+    pairs; empty is correct.
+    """
+    tree = _module_tree()
+    offenders = []
+    for func_name in RETENTION_COUNT_SITES:
+        for func in tree.body:
+            if not (isinstance(func, ast.FunctionDef) and func.name == func_name):
+                continue
+            for node in ast.walk(func):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == RUN_OWNER
+                ):
+                    continue
+                for keyword in node.keywords:
+                    if keyword.arg != "clock_step":
+                        continue
+                    guarded = (
+                        isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value == GUARDED_CLOCK_STEP
+                    )
+                    if not guarded:
+                        offenders.append((func_name, ast.unparse(keyword.value)))
+    return offenders
