@@ -52,6 +52,19 @@ BYPASS_SHAPES = (
     ("runtime condition", "if flag:\n assert x == 1", True),
     # A lone call cannot short-circuit on its own, so this stays enforced.
     ("lone call operand", "assert x != 1 or len(y) > 0", True),
+    # Tautological operands decide the `or` whatever the record says, so the
+    # comparison beside them is never evaluated. These are the shapes an
+    # earlier version of _may_bypass missed by not recursing into Compare.
+    ("tautology len >= 0", "assert x != 1 or len(y) >= 0", False),
+    ("tautology len > -1", "assert x != 1 or len(y) > -1", False),
+    ("tautology count > -1", "assert x != 1 or len(y) > -1", False),
+    ("tautology call compare", 'assert x != 1 or len(y.get("e", [])) >= 0', False),
+    ("tautology on the left", "assert len(y) >= 0 or x != 1", False),
+    # A comparison against a real bound is a genuine check, not a tautology,
+    # so these must stay enforced or the rule would cry wolf.
+    ("real count comparison", "assert x != 1 or len(y) == 300", True),
+    ("real count and", "assert len(y) == 300 and len(z) == 271", True),
+    ("non-numeric bound", 'assert x != 1 or len(y) > "a"', True),
 )
 
 
