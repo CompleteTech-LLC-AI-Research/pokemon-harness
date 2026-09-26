@@ -241,15 +241,87 @@ def _is_enforced(function, target):
     report such an assert as intact while the owning test can no longer fail.
     This rejects the assert if *any* handler anywhere in the same function is
     capable of swallowing it.
+
+    Presence and handler-swallowing are not the only ways an assert can be inert
+    while still being an ``ast.walk`` descendant. Two more, both verified by
+    execution against this tree:
+
+    * an assert parked in a nested function body, which never runs as part of
+      the guard call;
+    * an assert inside a branch guarded by a literal-false constant.
+
+    Either shape leaves the guard returning normally on the deadline state while
+    a presence-based check reports it intact, which is the same defect #280 was
+    filed for. So the assert must additionally be *reachable*: this walks the
+    function body directly rather than through ``ast.walk``, and skips asserts
+    that cannot execute.
+
+    This is a structural approximation of reachability, not a proof of it. A
+    guard whose rejection depends on runtime data flow is out of scope for an
+    AST sentinel, and the limit is stated rather than papered over.
     """
-    for node in ast.walk(function):
-        if not isinstance(node, ast.Try):
+    return target in set(_reachable_asserts(function))
+
+
+def _reachable_asserts(function):
+    """Yield each assert in ``function`` that is able to fail the call.
+
+    Skipped as unable to fail:
+
+    * asserts under a ``try`` handler that swallows ``AssertionError``;
+    * asserts in a nested function/lambda body, which does not run;
+    * asserts inside a branch guarded by a literal-false constant.
+
+    ``finally`` bodies are deliberately included: a ``finally`` runs on the way
+    out and does not consume the exception, so an assert there can still fail
+    the call. Asserts under a handler that cannot swallow (``except ValueError``
+    and friends) are included for the same reason.
+    """
+    yield from _walk_for_reachable_asserts(function.body, ())
+
+
+def _is_literal_false(node) -> bool:
+    """True for a condition that is decidably false at runtime."""
+    if isinstance(node, ast.Constant):
+        return not bool(node.value)
+    if isinstance(node, ast.Tuple):
+        return not node.elts
+    return False
+
+
+def _walk_for_reachable_asserts(body, swallowing):
+    """Recurse through ``body``, carrying the handlers that swallow assertions."""
+    for statement in body:
+        if isinstance(statement, ast.Assert):
+            if not swallowing:
+                yield statement
             continue
-        if not any(_contains(statement, target) for statement in node.body):
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # A nested body does not run as part of this call. Decorators and
+            # default arguments are evaluated, but they hold no assert.
             continue
-        if any(_swallows_assertion_error(handler) for handler in node.handlers):
-            return False
-    return True
+        if isinstance(statement, ast.If) and _is_literal_false(statement.test):
+            continue
+        if isinstance(statement, ast.While) and _is_literal_false(statement.test):
+            continue
+        if isinstance(statement, ast.Try):
+            inner = swallowing
+            for handler in statement.handlers:
+                if _swallows_assertion_error(handler):
+                    inner = inner + (handler,)
+            yield from _walk_for_reachable_asserts(statement.body, inner)
+            for handler in statement.handlers:
+                # A handler body is reached because its own try raised, not
+                # because the guarded block ran to completion, so it inherits
+                # the *outer* swallowing set, not the one just extended.
+                yield from _walk_for_reachable_asserts(handler.body, swallowing)
+            yield from _walk_for_reachable_asserts(statement.orelse, swallowing)
+            yield from _walk_for_reachable_asserts(statement.finalbody, swallowing)
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            nested = getattr(statement, field, None)
+            if isinstance(nested, list):
+                yield from _walk_for_reachable_asserts(nested, swallowing)
 
 
 def _contains(statement, target):

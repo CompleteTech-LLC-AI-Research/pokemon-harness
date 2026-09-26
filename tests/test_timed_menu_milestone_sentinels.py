@@ -24,6 +24,8 @@ from tests._timed_menu_milestone_sentinel_support import (
     GUARD_FUNCTION,
     RETENTION_COUNT_SITES,
     RUN_OWNER,
+    _reachable_asserts,
+    _swallows_assertion_error,
     count_sites_that_bypass_the_guard,
     guard_is_wired_on_the_fast_clock_path,
     guard_rejects_the_deadline_terminal_state,
@@ -95,3 +97,79 @@ def test_the_pinned_counts_are_reached_with_the_261_precondition_active():
         f"these pinned retention sites call {RUN_OWNER}() with a clock_step "
         f"that bypasses the #261 terminal-state guard: {offenders}"
     )
+
+
+def test_the_swallow_classifier_recognises_exactly_the_handlers_it_claims():
+    """Control: the classifier must not be a check that cannot fail.
+
+    ``except ValueError`` must stay out, otherwise the reachability walk would
+    discard legitimate asserts. ``except Exception`` must stay in, because
+    ``AssertionError`` derives from it.
+    """
+    import ast as _ast
+
+    def handler(exception):
+        if exception is None:
+            return _ast.ExceptHandler(type=None, name=None, body=[])
+        return _ast.ExceptHandler(type=_ast.parse(exception, mode="eval").body, name=None, body=[])
+
+    for expression in (None, "AssertionError", "BaseException", "Exception"):
+        assert _swallows_assertion_error(handler(expression)) is True, (
+            f"{expression!r} was not recognised as swallowing an AssertionError"
+        )
+
+    for expression in ("ValueError", "(ValueError, TypeError)", "KeyboardInterrupt"):
+        assert _swallows_assertion_error(handler(expression)) is False, (
+            f"{expression!r} was wrongly treated as swallowing an AssertionError"
+        )
+
+
+def test_asserts_that_cannot_execute_are_not_counted_as_teeth():
+    """Control: the reachability walk must reject each inert shape.
+
+    Every case below keeps the rejecting ``!=`` comparison present in the
+    source, so a presence-based check accepts it, while the guard would return
+    normally on the state it exists to reject.
+    """
+    import ast as _ast
+
+    top = '    assert record["termination"] != "cancelled_or_deadline"\n'
+    nested = '        assert record["termination"] != "cancelled_or_deadline"\n'
+
+    def build(body: str):
+        return _ast.parse("def assert_not_deadline_truncated(record):\n" + body).body[0]
+
+    assert len(list(_reachable_asserts(build(top)))) == 1
+    # An assert under a handler that cannot swallow is still able to fail.
+    assert (
+        len(
+            list(
+                _reachable_asserts(
+                    build("    try:\n" + nested + "    except ValueError:\n        pass\n")
+                )
+            )
+        )
+        == 1
+    )
+    # `finally` does not consume the exception, so an assert there can still fail.
+    assert (
+        len(list(_reachable_asserts(build("    try:\n        pass\n    finally:\n" + nested)))) == 1
+    )
+
+    for label, body in (
+        (
+            "swallowed by except AssertionError",
+            "    try:\n" + nested + "    except AssertionError:\n        pass\n",
+        ),
+        ("swallowed by a bare except", "    try:\n" + nested + "    except:\n        pass\n"),
+        (
+            "swallowed by except Exception",
+            "    try:\n" + nested + "    except Exception:\n        pass\n",
+        ),
+        ("parked in a never-called nested function", "    def _inner():\n" + nested),
+        ("inside a decidably dead if branch", "    if False:\n" + nested),
+        ("inside a decidably dead while branch", "    while False:\n" + nested),
+    ):
+        assert not list(_reachable_asserts(build(body))), (
+            f"an assert {label} was counted as able to reject the deadline state"
+        )
