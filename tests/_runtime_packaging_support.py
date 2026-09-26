@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-EXPECTED_PYBOY_REVISION = "6547c47ddc747b665fa43a5c3b4c9f42ef9cd85a"
+EXPECTED_PYBOY_REVISION = "5cf09a639cbddf92978dac96a663df0f41926cde"
 
 
 EXPECTED_RUNTIME_DEPENDENCIES = {

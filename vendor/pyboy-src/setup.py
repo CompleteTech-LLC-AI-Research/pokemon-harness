@@ -12,11 +12,13 @@ import numpy as np
 from setuptools import Extension, setup
 
 CYTHON = platform.python_implementation() == "CPython" and not os.getenv("PYBOY_NO_CYTHON")
-# Absolute, because setuptools instantiates build_ext for metadata-only steps
-# (egg_info -> sdist -> build_ext) where the process CWD is not the source root.
-# A relative "pyboy" resolved against that CWD and produced doubled paths such as
-# `pyboy/pyboy/core/...`, which fails metadata generation before any build runs.
-ROOT_DIR = os.path.abspath("pyboy")
+# Relative on purpose: Cython derives each extension's module name from this
+# path, so an absolute ROOT_DIR yields module names like
+# `.home.runner.work...pyboy.api.constants`, which is not a valid module name.
+# Metadata-only steps run with a different CWD, so the component staging below
+# anchors its own paths against the file location instead (see ROOT_ABS).
+ROOT_DIR = "pyboy"
+ROOT_ABS = os.path.dirname(os.path.abspath(__file__))
 DEBUG = bool(os.getenv("GITHUB_ACTIONS"))
 
 if not CYTHON:
@@ -104,16 +106,16 @@ class build_ext(_build_ext):
         staged_components = {}
         for relative, (stem, declarations) in COMPONENT_SOURCES.items():
             # setuptools builds this command object for metadata-only steps too,
-            # where the process CWD is not the source root. Each COMPONENT_SOURCES
-            # key is already a source-root-relative path, so strip ROOT_DIR to get
-            # the package directory. Joining ROOT_DIR onto the unstripped key gave
+            # where the process CWD is not the source root. Anchoring these
+            # staging paths to ROOT_ABS keeps them CWD-independent: joining the
+            # relative ROOT_DIR onto the package directory gave
             # `pyboy/pyboy/core`, whose missing manifest aborted metadata
             # generation with "No such file or directory".
-            directory = os.path.join(ROOT_DIR, os.path.dirname(os.path.relpath(relative, ROOT_DIR)))
+            directory = os.path.join(ROOT_ABS, os.path.dirname(relative))
             staged_components[relative] = _component_build.stage_native_source(
                 directory, stem, relative.replace(os.sep, "/"),
                 declarations=declarations,
-                build_root=os.path.join(ROOT_DIR, "build", "components"),
+                build_root=os.path.join(ROOT_ABS, "build", "components"),
             )
 
         def compiler_source(src):
