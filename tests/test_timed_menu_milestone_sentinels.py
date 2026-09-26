@@ -23,11 +23,13 @@ from tests._timed_menu_milestone_sentinel_support import (
     DEADLINE_TERMINATION,
     GUARD_FUNCTION,
     RETENTION_COUNT_SITES,
+    RETENTION_SUBSCRIPT_COUNT_SITES,
     RUN_OWNER,
     count_sites_that_bypass_the_guard,
     guard_is_wired_on_the_fast_clock_path,
     guard_rejects_the_deadline_terminal_state,
     retention_sites_observed,
+    retention_subscript_sites_observed,
 )
 
 
@@ -94,4 +96,31 @@ def test_the_pinned_counts_are_reached_with_the_261_precondition_active():
     assert not offenders, (
         f"these pinned retention sites call {RUN_OWNER}() with a clock_step "
         f"that bypasses the #261 terminal-state guard: {offenders}"
+    )
+
+
+def test_the_pinned_record_subscript_counts_are_still_exact_equalities():
+    """The ``record[...]`` retention counts must keep using ``==`` against their literals.
+
+    ``test_the_four_retention_counts_are_still_exact_equalities`` works through
+    ``count_comparisons()``, which only yields comparisons whose left side is a
+    ``len(...)`` call. The same test also pins its counts through record
+    subscripts -- ``record["call_log"]["record_count"]``,
+    ``record["call_counts"]["requested_frames"]`` and
+    ``record["call_counts"]["total"]`` -- and those were outside the mechanism
+    entirely, so relaxing any of them to ``>= 1`` left this module green while
+    the "at least one call was retained" contract came back.
+
+    Same set-comparison design, so relaxing, deleting, duplicating, or
+    neutralising any of these sites changes the observed set and fails.
+    """
+    expected = sorted(
+        (function, path, op, literal)
+        for function, sites in RETENTION_SUBSCRIPT_COUNT_SITES.items()
+        for path, literal, op in sites
+    )
+    observed = retention_subscript_sites_observed()
+    assert observed == expected, (
+        "the pinned record-subscript retention counts are no longer exact "
+        f"equality assertions; expected {expected}, observed {observed}"
     )
