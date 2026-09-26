@@ -616,17 +616,63 @@ def _may_bypass(expression):
     ``Name/Attribute/Call/Subscript/Constant`` and missed a ``Compare`` operand
     that was trivially true.
 
-    A bare ``Compare`` operand does not count as a decision by itself, so
-    ``assert x != 1 and y != 2`` -- the shape the real retention sites use --
-    stays enforced. That distinction is pinned by table rows, because an
-    over-broad rule here would report a live assert as dead.
+    ``and`` and ``or`` are handled separately, and they differ in a way that
+    matters. In ``A or B`` a truthy ``B`` skips ``A`` entirely, so a ``Compare``
+    sitting on the *right* of an ``or`` is a decision the contract depends on:
+
+        assert record["termination"] != "cancelled_or_deadline" \\
+            or len(record.get("errors", [])) < 99
+
+    ``B`` is true for every record, so ``A`` is never evaluated -- the same
+    neutralisation as ``or True``, one comparison and one literal away. In
+    ``A and B`` nothing is skipped, because ``A`` is always evaluated first and
+    a false ``A`` already fails the assert. So a ``Compare`` on the right of an
+    ``and`` is a genuine second check, and ``assert x != 1 and y != 2`` -- the
+    shape the real retention sites use -- stays enforced.
+
+    Only the right-hand operands are considered for that reason, plus every
+    operand of a nested ``BoolOp``. Both directions are pinned by table rows,
+    because an over-broad rule here would report a live assert as dead.
     """
     if not isinstance(expression, ast.BoolOp):
         return False
     operands = expression.values
     if any(_is_tautology(value) for value in operands):
         return True
-    return any(isinstance(value, _DECIDING_OPERANDS) or _may_bypass(value) for value in operands)
+    if isinstance(expression.op, ast.Or):
+        # In `A or B`, a truthy B skips A. So a B that is a *decider* -- a name, a
+        # call, a literal, or a comparison whose own truth value decides -- makes
+        # A unchecked. A is itself never the deciding operand: something to its
+        # left is what skips it, and that is the outer walk's job.
+        return any(
+            isinstance(value, _DECIDING_OPERANDS) or _may_bypass(value) for value in operands[1:]
+        ) or any(
+            isinstance(value, ast.Compare) and _compare_decides(value) for value in operands[1:]
+        )
+    # In `A and B` nothing is skipped: A is always evaluated and a false A
+    # already fails the assert. Only a nested BoolOp can decide.
+    return any(_may_bypass(value) for value in operands[1:])
+
+
+def _compare_decides(node):
+    """Does this comparison's own truth value decide the surrounding ``or``?
+
+    In ``A or B`` the assert holds whenever ``B`` is true, whatever ``A`` says.
+    So a ``Compare`` in the B position decides the assert -- and a comparison
+    against a value the record actually takes, ``len(y) == 300``, is exactly as
+    capable of deciding it as ``True`` is. That is the same neutralisation the
+    rule exists to catch, with the deciding operand spelled as a comparison
+    instead of a literal.
+
+    This is deliberately broad rather than clever. Deciding whether ``B`` is
+    *provably* true would need evaluation of the record, and the two errors are
+    not symmetric: reporting a live assert as bypassed is a red test somebody
+    investigates, while missing a real bypass is a silently unenforceable
+    contract. The bound direction is therefore not consulted -- ``len(y) < 1``
+    and ``len(y) == 300`` are treated alike, because both make the left operand
+    unevaluated on some input.
+    """
+    return True
 
 
 def _is_enforced(function, target):

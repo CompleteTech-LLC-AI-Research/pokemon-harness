@@ -229,12 +229,14 @@ BYPASS_SHAPES = (
     ("double negative", "assert not (x != 1)", True),
     ("comparison or True", "assert x != 1 or True", False),
     ("True or comparison", "assert True or x != 1", False),
-    ("comparison and flag", "assert x != 1 and flag", False),
-    ("flag and comparison", "assert flag and x != 1", False),
+    # In `A and B` nothing is skipped -- A is always evaluated -- so a bare flag
+    # is not a bypass. These two rows were `False` before the `or`/`and` split
+    # and were wrong: they encoded a claim about Python that does not hold, and
+    # a red test is a cheaper thing to carry than a false rule.
+    ("comparison and flag", "assert x != 1 and flag", True),
+    ("flag and comparison", "assert flag and x != 1", True),
     ("nested or", "assert x != 1 or (y or True)", False),
     ("runtime condition", "if flag:\n assert x == 1", True),
-    # A lone call cannot short-circuit on its own, so this stays enforced.
-    ("lone call operand", "assert x != 1 or len(y) > 0", True),
     # Tautological operands decide the `or` whatever the record says, so the
     # comparison beside them is never evaluated. These are the shapes an
     # earlier version of _may_bypass missed by not recursing into Compare.
@@ -254,22 +256,28 @@ BYPASS_SHAPES = (
     ("literal compare gt", "assert x != 1 or (2 > 1)", False),
     ("literal container", "assert x != 1 or [1, 2]", False),
     ("literal arithmetic", "assert x != 1 or (1 + 1 == 2)", False),
-    # Real comparisons that must stay enforced, or the rule would cry wolf and
-    # a genuine regression would be waved through as a known shape.
-    ("real count comparison", "assert x != 1 or len(y) == 300", True),
+    # A Compare on the RIGHT of an `or` is a bypass whatever it compares: in
+    # `A or B` a truthy `B` skips `A`, and whether `B` is truthy is not decidable
+    # from the syntax. `x > 5` decides the assert for a real record exactly as
+    # `or True` does, so it is reported even though it is a "real" comparison.
+    # This fails safe -- a false report is a red test somebody investigates,
+    # never a silently unenforceable contract.
+    ("count compare right of or", "assert x != 1 or len(y) == 300", False),
+    ("runtime compare right of or", "assert x != 1 or x > 5", False),
+    ("self compare right of or", "assert x != 1 or (x == x)", False),
+    ("runtime value compare right of or", "assert x != 1 or (a == b)", False),
+    ("call compare right of or", "assert x != 1 or f(a) == f(a)", False),
+    ("subscript compare right of or", 'assert x != 1 or record["k"] == record["k"]', False),
+    ("bool bound right of or", "assert x != 1 or len(y) >= True", False),
+    ("arithmetic right of or", "assert x != 1 or a - b >= 0", False),
+    ("subscript bound right of or", 'assert x != 1 or record["n"] >= 0', False),
+    ("non-numeric bound right of or", 'assert x != 1 or len(y) > "a"', False),
+    ("lone call operand", "assert x != 1 or len(y) > 0", False),
     ("real count and", "assert len(y) == 300 and len(z) == 271", True),
-    ("real upper bound", "assert x != 1 or len(y) <= 100", True),
-    ("empty-only bound", "assert x != 1 or len(y) < 1", True),
-    ("non-numeric bound", 'assert x != 1 or len(y) > "a"', True),
-    ("subscript left operand", 'assert x != 1 or record["n"] >= 0', True),
-    ("bool is not a number", "assert x != 1 or len(y) >= True", True),
-    ("arithmetic left operand", "assert x != 1 or a - b >= 0", True),
-    # Reads a Name, so it is not constant-foldable and stays enforced. This is
-    # the safe direction: a wrong answer reports a live assert as dead.
-    ("self compare", "assert x != 1 or (x == x)", True),
-    ("runtime value compare", "assert x != 1 or (a == b)", True),
-    ("call compare", "assert x != 1 or f(a) == f(a)", True),
-    ("subscript compare", 'assert x != 1 or record["k"] == record["k"]', True),
+    ("upper bound right of or", "assert x != 1 or len(y) <= 100", False),
+    # A bound a count can actually satisfy is not *provably* truthy, so it is
+    # the same case: unevaluatable, therefore bypass-capable.
+    ("empty-only bound", "assert x != 1 or len(y) < 1", False),
     ("runtime condition on count", "if len(y) > 0:\n assert x == 1", True),
 )
 
