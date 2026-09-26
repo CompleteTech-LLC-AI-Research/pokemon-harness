@@ -1,11 +1,57 @@
 # Current combined harness-local divergence
 
 The tracked vendor tree now includes the generated opcode layout (#123), the main PyBoy
-source components (#133), and the serial type split (#153). Its recomputed full-manifest
-content identity is `b94bf5dfb042c502ff4bc1bcd417599b02a9419b`. Earlier identities below
-are historical snapshots and do not qualify this combined tree. The native build,
-source/native unit gates, packaging checks, and exact-head review remain required.
-Issue #122 remains open because other file splits are outstanding.
+source components (#133), the serial type split (#153), and the bounded motherboard and
+LCD component splits (#150, #155). Its recomputed full-manifest content identity is
+`7ecd4b73db822340467a28796b39504aad8d66c5`. Earlier identities below are historical
+snapshots and do not qualify this combined tree. The native build, source/native unit
+gates, packaging checks, and exact-head review remain required. Issue #122 remains open
+because other file splits are outstanding.
+
+---
+
+# Combined #150 and #155 harness-local divergence
+
+`pyboy/core/mb.py` (1220 lines) and `pyboy/core/lcd.py` (1087 lines) exceeded the
+repository's 1000-line file-split bound. Each is now a 6-line generated facade over
+bounded `.pxi` components that reassemble to the exact pre-split bytes:
+
+| Module | Components | Largest component |
+|---|---|---|
+| `pyboy/core/mb.py` | 4 (`mb_preamble`, `mb_core`, `mb_coord`, `mb_hdma`) | 580 lines |
+| `pyboy/core/lcd.py` | 5 (`lcd_preamble`, `lcd_lcdmain`, `lcd_registers`, `lcd_renderer`, `lcd_palettes`) | 459 lines |
+
+Design and constraints, all verified rather than assumed:
+
+- **Verbatim slices, not re-authored code.** Every component is a byte-exact slice of
+  the pre-split source. The reassembled modules are blob-identical to the originals:
+  `mb.py` blob `bab52c95220a8e422ea6d1b7f5f01377ac13dda5` (54068 bytes, 1220 lines) and
+  `lcd.py` blob `db45fb06fde169055c38a102f611312071b83b82` (42117 bytes, 1087 lines).
+  `mb.pxd` and `lcd.pxd` are untouched.
+- **One namespace, not new modules.** The components are never imported separately.
+  `pyboy/_components.py` concatenates them and executes the result once in the facade
+  module's own namespace, so Cython's augmenting declarations, private name mangling,
+  public identity and globals are all unchanged. `inspect` and `linecache` still see the
+  original 1220/1087 logical lines.
+- **Fail-closed, digest-pinned assembly.** `pyboy/_components.py` reads each manifest
+  with `ast` and takes only literal assignments — a manifest is never executed. Every
+  component is pinned by SHA-256, the joined result by a whole-source digest, each
+  component is bounded below 1000 lines, and symlinks or traversal are rejected. A
+  missing, edited, blanked, reordered, symlinked or over-long component raises rather
+  than silently assembling a partial module.
+- **Compiler input is staged outside the package.** `setup.py` stages the reassembled
+  `.py` and its `.pxd` under `build/components/` and cythonizes that, instead of
+  compiling the 6-line facade. Staging refuses to write anywhere inside the importable
+  source package, so a wheel never contains two import paths for one module. The loader,
+  the manifests and `components_layout.py` are excluded from Cythonization, and
+  `pyproject.toml` ships every component and manifest.
+- **Regeneration is deterministic and idempotent.** `components_layout.py` reproduces the
+  tracked facades and manifests byte for byte, and `--check` fails on any drift in the
+  components, the manifest or the facade.
+
+Observable consequences: none. No public name, signature, byte-code, extension name,
+cimport, or generated file changes. The only added runtime work is one hash of each
+component at import, in both source and native modes.
 
 ---
 

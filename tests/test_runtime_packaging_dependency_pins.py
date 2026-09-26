@@ -67,6 +67,10 @@ def test_project_exposes_the_installed_mcp_entrypoint_and_explicit_package_data(
             "bootrom_dmg.bin",
             "opcodes.pxd",
             "opcode_components/*.pxi",
+            "mb_components/*.pxi",
+            "mb_components_manifest.py",
+            "lcd_components/*.pxi",
+            "lcd_components_manifest.py",
         ],
         "pyboy.plugins": ["font.txt"],
     }

@@ -13,9 +13,11 @@ from __future__ import annotations
 import ast
 import builtins
 import hashlib
+import importlib
 import inspect
 import linecache
 import runpy
+import shutil
 import sys
 import tempfile
 import tomllib
@@ -30,6 +32,15 @@ PACKAGE = ROOT / "vendor" / "pyboy-src" / "pyboy"
 SUPPORT = runpy.run_path(str(PACKAGE / "_source.py"))
 BASE_BLOB = "7899e2df64b889372589c81ee74263b5ef7e9389"
 PXD_BLOB = "472d5bb71a50d53de51a9b134c26eb890cefbc5c"
+CORE = PACKAGE / "core"
+COMPONENTS = runpy.run_path(str(PACKAGE / "_components.py"))
+# The exact pre-split blobs these components must reassemble to, and the
+# augmenting .pxd each native staging step must reproduce byte for byte.
+SPLIT_BLOBS = {
+    "mb": ("bab52c95220a8e422ea6d1b7f5f01377ac13dda5", "de820c64eb096fcb3ca215a143d6a05fb57424b3"),
+    "lcd": ("db45fb06fde169055c38a102f611312071b83b82", "d8bff147655dbca94543d7e21259f049e4a2a3da"),
+}
+SPLIT_LINES = {"mb": 1220, "lcd": 1087}
 
 
 def blob_id(data: bytes) -> str:
@@ -303,6 +314,243 @@ class ComponentChecks(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             module.PyBoy(None, window="null")
         module.PyBoy.__new__(module.PyBoy).__del__()
+
+
+class SplitModuleChecks(unittest.TestCase):
+    """Bounded-component splits of pyboy/core/mb.py and pyboy/core/lcd.py."""
+
+    def stage(self, stem, root):
+        return COMPONENTS["stage_native_source"](
+            CORE,
+            stem,
+            f"pyboy/core/{stem}.py",
+            declarations=f"{stem}.pxd",
+            build_root=root,
+        )
+
+    def copy_tree(self, stem, tmp):
+        """Snapshot one stem's facade, manifest and components into `tmp`."""
+        target = Path(tmp) / stem
+        (target / f"{stem}_components").mkdir(parents=True)
+        (target / f"{stem}.py").write_bytes((CORE / f"{stem}.py").read_bytes())
+        shutil.copyfile(
+            CORE / f"{stem}_components_manifest.py", target / f"{stem}_components_manifest.py"
+        )
+        for shard in (CORE / f"{stem}_components").iterdir():
+            shutil.copyfile(shard, target / f"{stem}_components" / shard.name)
+        return target
+
+    def test_reconstruction_is_the_verified_pre_split_blob(self):
+        for stem, (source_blob, _pxd) in SPLIT_BLOBS.items():
+            with self.subTest(stem=stem):
+                source = COMPONENTS["assemble"](CORE, stem)
+                self.assertEqual(blob_id(source), source_blob)
+                self.assertEqual(len(source.splitlines()), SPLIT_LINES[stem])
+
+    def test_facades_and_components_stay_bounded(self):
+        for stem in SPLIT_BLOBS:
+            with self.subTest(stem=stem):
+                paths = [
+                    CORE / f"{stem}.py",
+                    CORE / f"{stem}_components_manifest.py",
+                    *(CORE / f"{stem}_components").iterdir(),
+                ]
+                for path in paths:
+                    with self.subTest(path=path.name):
+                        self.assertLess(len(path.read_bytes().splitlines()), 1000)
+
+    def test_declarations_are_unchanged(self):
+        for stem, (_source, pxd_blob) in SPLIT_BLOBS.items():
+            with self.subTest(stem=stem):
+                self.assertEqual(blob_id((CORE / f"{stem}.pxd").read_bytes()), pxd_blob)
+
+    def test_generator_output_matches_the_tracked_artifacts(self):
+        """The generator reproduces the tracked artifacts and is idempotent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "core"
+            copy.mkdir()
+            for name in (
+                "mb.py",
+                "lcd.py",
+                "components_layout.py",
+                "mb_components_manifest.py",
+                "lcd_components_manifest.py",
+            ):
+                shutil.copyfile(CORE / name, copy / name)
+            for stem in SPLIT_BLOBS:
+                shutil.copytree(CORE / f"{stem}_components", copy / f"{stem}_components")
+            layout = runpy.run_path(str(copy / "components_layout.py"))
+            runtime = runpy.run_path(str(PACKAGE / "_components.py"))
+            layout["CORE"] = copy
+            for stem in SPLIT_BLOBS:
+                before = {p: p.read_bytes() for p in (copy / f"{stem}_components").iterdir()}
+                rebuilt = runtime["assemble"](copy, stem)
+                self.assertEqual(blob_id(rebuilt), SPLIT_BLOBS[stem][0])
+                self.assertEqual((copy / f"{stem}.py").read_bytes(), layout["FACADES"][stem])
+                self.assertEqual(
+                    (copy / f"{stem}_components_manifest.py").read_text(),
+                    layout["render_manifest"](stem, rebuilt, layout["SPLITS"][stem][1]),
+                )
+                # Regenerating over the copy must not move a single byte.
+                layout["emit"](stem, f"{stem}.py", layout["SPLITS"][stem][1], rebuilt)
+                self.assertEqual(
+                    {p: p.read_bytes() for p in (copy / f"{stem}_components").iterdir()},
+                    before,
+                )
+
+    def test_missing_component_fails_closed(self):
+        for stem in SPLIT_BLOBS:
+            with self.subTest(stem=stem), tempfile.TemporaryDirectory() as tmp:
+                copy = self.copy_tree(stem, tmp)
+                names = COMPONENTS["_manifest"](copy, stem)["SOURCE_PARTS"]
+                (copy / names[-1][0]).unlink()
+                with self.assertRaises((OSError, ValueError)):
+                    COMPONENTS["assemble"](copy, stem)
+
+    def test_edited_blanked_or_symlinked_component_fails_closed(self):
+        for stem in SPLIT_BLOBS:
+            names = [n for n, _ in COMPONENTS["_manifest"](CORE, stem)["SOURCE_PARTS"]]
+
+            def body(path):
+                path.write_bytes(path.read_bytes() + b"\nX\n")
+
+            def blank(path):
+                path.write_bytes(b"")
+
+            def symlink(path):
+                path.unlink()
+                path.symlink_to(CORE / f"{stem}.pxd")
+
+            for label, mutate in (("body", body), ("blank", blank), ("symlink", symlink)):
+                with self.subTest(stem=stem, case=label), tempfile.TemporaryDirectory() as tmp:
+                    copy = self.copy_tree(stem, tmp)
+                    mutate(copy / names[0])
+                    with self.assertRaises((OSError, ValueError)):
+                        COMPONENTS["assemble"](copy, stem)
+
+    def test_reordered_components_fail_closed(self):
+        for stem in SPLIT_BLOBS:
+            with self.subTest(stem=stem), tempfile.TemporaryDirectory() as tmp:
+                copy = self.copy_tree(stem, tmp)
+                manifest = copy / f"{stem}_components_manifest.py"
+                text = manifest.read_text()
+                first, second = [n for n, _ in COMPONENTS["_manifest"](CORE, stem)["SOURCE_PARTS"]][
+                    :2
+                ]
+                # Swap the two leading entries without touching the digests.
+                lines = text.splitlines(keepends=True)
+                i = lines.index([ln for ln in lines if f"'{first}'" in ln][0])
+                j = lines.index([ln for ln in lines if f"'{second}'" in ln][0])
+                lines[i], lines[j] = lines[j], lines[i]
+                manifest.write_text("".join(lines))
+                with self.assertRaises((OSError, ValueError)):
+                    COMPONENTS["assemble"](copy, stem)
+
+    def test_manifest_must_stay_literal_versioned_and_bounded(self):
+        for stem in SPLIT_BLOBS:
+            with tempfile.TemporaryDirectory() as tmp:
+                copy = self.copy_tree(stem, tmp)
+                manifest = copy / f"{stem}_components_manifest.py"
+                original = manifest.read_text()
+                # Injected code is never executed, and is rejected.
+                manifest.write_text("import os\n" + original)
+                with self.assertRaises(ValueError):
+                    COMPONENTS["_manifest"](copy, stem)
+                for label, old, new in (
+                    ("unsupported-version", "FORMAT_VERSION = 1", "FORMAT_VERSION = 2"),
+                    ("raised-line-bound", "MAX_LINES = 900", "MAX_LINES = 1000"),
+                    ("unknown-key", "FORMAT_VERSION = 1", "FORMAT_VERSION = 1\nEXTRA = 1"),
+                ):
+                    with self.subTest(stem=stem, case=label):
+                        manifest.write_text(original.replace(old, new, 1))
+                        with self.assertRaises(ValueError):
+                            COMPONENTS["_manifest"](copy, stem)
+
+    def test_native_stage_uses_identical_source_and_declarations(self):
+        for stem, (source_blob, pxd_blob) in SPLIT_BLOBS.items():
+            with self.subTest(stem=stem), tempfile.TemporaryDirectory() as tmp:
+                staged = self.stage(stem, tmp)
+                self.assertEqual(blob_id(staged.read_bytes()), source_blob)
+                self.assertEqual(blob_id(staged.with_suffix(".pxd").read_bytes()), pxd_blob)
+                # Staged input is compiler input, never a new import path.
+                self.assertNotIn(CORE.resolve(), staged.resolve().parents)
+                before = staged.stat().st_mtime_ns
+                self.stage(stem, tmp)
+                self.assertEqual(before, staged.stat().st_mtime_ns)
+
+    def test_native_stage_refuses_overwriting_tracked_package(self):
+        for stem in SPLIT_BLOBS:
+            with self.subTest(stem=stem):
+                with self.assertRaises(ValueError):
+                    COMPONENTS["stage_native_source"](
+                        CORE,
+                        stem,
+                        f"pyboy/core/{stem}.py",
+                        declarations=f"{stem}.pxd",
+                        build_root=CORE.parent.parent,
+                    )
+
+    def test_setup_stages_the_split_modules_instead_of_their_facades(self):
+        setup = (CORE.parent.parent / "setup.py").read_text()
+        self.assertIn('"pyboy/core/mb.py": ("mb", "mb.pxd")', setup)
+        self.assertIn('"pyboy/core/lcd.py": ("lcd", "lcd.pxd")', setup)
+        self.assertIn("if relative in staged_components:", setup)
+        self.assertIn("return str(staged_components[relative])", setup)
+        for name in (
+            "_components.py",
+            "mb_components_manifest.py",
+            "lcd_components_manifest.py",
+            "components_layout.py",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(f'"{name}"', setup)
+
+    def test_package_data_ships_every_component(self):
+        core_data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        core_data = core_data["tool"]["setuptools"]["package-data"]["pyboy.core"]
+        for pattern in (
+            "mb_components/*.pxi",
+            "lcd_components/*.pxi",
+            "mb_components_manifest.py",
+            "lcd_components_manifest.py",
+        ):
+            with self.subTest(pattern=pattern):
+                self.assertIn(pattern, core_data)
+
+    def test_imported_split_modules_match_the_pre_split_public_surface(self):
+        """Import the real split modules and compare against the pre-split source."""
+        for stem in SPLIT_BLOBS:
+            with self.subTest(stem=stem):
+                module = importlib.import_module(f"pyboy.core.{stem}")
+                self.assertEqual(Path(module.__file__).resolve(), (CORE / f"{stem}.py").resolve())
+                original = COMPONENTS["assemble"](CORE, stem)
+                namespace = {
+                    "__file__": module.__file__,
+                    "__name__": module.__name__,
+                    "__package__": module.__package__,
+                    "__builtins__": __builtins__,
+                }
+                exec(  # noqa: S102
+                    compile(original, module.__file__, "exec", dont_inherit=True),
+                    namespace,
+                    namespace,
+                )
+                self.assertEqual(
+                    {n for n in namespace if not n.startswith("__")},
+                    {n for n in vars(module) if not n.startswith("__")},
+                )
+                # inspect and linecache still see the original logical lines.
+                linecache.checkcache()
+                self.assertEqual("".join(linecache.getlines(module.__file__)).encode(), original)
+                for name, value in namespace.items():
+                    if name.startswith("_") or not inspect.isclass(value):
+                        continue
+                    if value.__module__ != module.__name__:
+                        continue
+                    with self.subTest(symbol=name):
+                        actual = getattr(module, name)
+                        self.assertEqual(set(vars(actual)), set(vars(value)))
+                        self.assertTrue(inspect.getsource(actual).startswith("class "))
 
 
 if __name__ == "__main__":

@@ -478,7 +478,7 @@ import pokered_harness
 
 assert pyboy.__version__ == "2.7.0"
 assert pyboy.__pokered_harness_revision__ == (
-    "b94bf5dfb042c502ff4bc1bcd417599b02a9419b"
+    "7ecd4b73db822340467a28796b39504aad8d66c5"
 )
 assert utils.cython_compiled is False
 serial = Serial(False)

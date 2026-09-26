@@ -30,6 +30,21 @@ _opcode_spec = importlib.util.spec_from_file_location(
 _opcode_build = importlib.util.module_from_spec(_opcode_spec)
 _opcode_spec.loader.exec_module(_opcode_build)
 
+# Same constraint for the bounded .pxi component loader used by pyboy.py,
+# pyboy/core/mb.py and pyboy/core/lcd.py.
+_component_spec = importlib.util.spec_from_file_location(
+    "_pyboy_component_build", Path(__file__).parent / "pyboy/_components.py"
+)
+_component_build = importlib.util.module_from_spec(_component_spec)
+_component_spec.loader.exec_module(_component_build)
+
+# Split modules whose compiler input is the checksum-verified reassembly of their
+# .pxi components. Maps the tracked source path to (component stem, .pxd name).
+COMPONENT_SOURCES = {
+    "pyboy/core/mb.py": ("mb", "mb.pxd"),
+    "pyboy/core/lcd.py": ("lcd", "lcd.pxd"),
+}
+
 
 def patched_error(position, message):
     if message == "Python object cannot be passed as a varargs parameter":
@@ -82,9 +97,20 @@ class build_ext(_build_ext):
         main_dependencies = [os.path.join(ROOT_DIR, name) for name in source_support["COMPONENTS"]]
         main_dependencies.append(os.path.join(ROOT_DIR, "pyboy.pxd"))
         py_pxd_files = prep_pxd_py_files()
+        staged_components = {}
+        for relative, (stem, declarations) in COMPONENT_SOURCES.items():
+            directory = os.path.join(ROOT_DIR, os.path.dirname(relative))
+            staged_components[relative] = _component_build.stage_native_source(
+                directory, stem, relative.replace(os.sep, "/"),
+                declarations=declarations, build_root=os.path.join("build", "components"),
+            )
+
         def compiler_source(src):
             if src == main_path:
                 return str(main_source)
+            relative = os.path.relpath(src, ROOT_DIR).replace(os.sep, "/")
+            if relative in staged_components:
+                return str(staged_components[relative])
             return _opcode_build.prepare_opcode_source(src)
 
         cythonize_files = map(
@@ -131,6 +157,8 @@ def prep_pxd_py_files():
         "__main__.py", "manager_gen.py", "opcodes_gen.py",
         "opcodes_gen_handlers.py", "conftest.py", "_source.py",
         "opcodes_layout.py", "_opcodes_runtime.py", "_opcodes_manifest.py",
+        "_components.py", "mb_components_manifest.py", "lcd_components_manifest.py",
+        "components_layout.py",
     ]
     # Cython doesn't trigger a recompile on .py files, where only the .pxd file has changed. So we fix this here.
     # We also yield the py_files that have a .pxd file, as we feed these into the cythonize call.

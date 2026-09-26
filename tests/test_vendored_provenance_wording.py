@@ -31,7 +31,7 @@ VENDOR_ROOT = PROJECT_ROOT / "vendor" / "pyboy-src"
 
 FORK_REVISION = "c565df66c3731fad2856169a90f6bbec99925915"
 UPSTREAM_TAG_REVISION = "4627b90b878e91faff443b3acd6d4e4be09a4387"
-PIN = "b94bf5dfb042c502ff4bc1bcd417599b02a9419b"
+PIN = "7ecd4b73db822340467a28796b39504aad8d66c5"
 
 REVISION_MARKER = VENDOR_ROOT / "POKERED_HARNESS_PYBOY_REVISION"
 DIVERGENCE_RECORD = VENDOR_ROOT / "POKERED_HARNESS_PYBOY_DIVERGENCE.md"
@@ -165,6 +165,28 @@ def test_pin_is_a_content_identity_over_the_vendored_manifest() -> None:
     ``pyboy/__init__.py`` every 40-hex run is masked before hashing.
     """
 
+    # The identity describes the tree that will be committed. If a vendored file is
+    # edited but not staged, this recomputation would describe a different tree than
+    # the one carrying the pin, so fail loudly instead of quietly validating it.
+    unstaged = subprocess.run(
+        ["git", "diff", "--name-only", "--", "vendor/pyboy-src"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert not unstaged, (
+        "vendored files are modified but not staged; the content identity would "
+        f"describe a different tree than the committed one: {unstaged}"
+    )
+    # Staged build output under the importable package would create a second import
+    # path for a module and silently enter the manifest.
+    shadowed = [
+        path
+        for path in _tracked_vendored_files()
+        if path.startswith("vendor/pyboy-src/pyboy/pyboy/")
+    ]
+    assert not shadowed, f"tracked staged build output shadows the package: {shadowed}"
     excluded = {
         "vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION",
         "vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md",
