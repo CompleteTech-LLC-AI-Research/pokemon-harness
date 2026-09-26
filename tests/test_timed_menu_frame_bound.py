@@ -19,44 +19,15 @@ import inspect
 import pytest
 
 from scripts import probe_timed_rom_pair as probe
-from tests.test_timed_menu_milestones import FRAME_BOUND, run_owner
-
-
-class FakeClock:
-    """Monotonic stand-in that advances a fixed amount per read.
-
-    ``step`` is the wall time the owner "consumes" per observation: ``0`` models
-    an arbitrarily fast host and a large step an arbitrarily slow one. Neither
-    may change how many calls the frame bound authorizes.
-    """
-
-    def __init__(self, start=1000.0, step=0.0):
-        self.value = start
-        self.step = step
-        self.reads = 0
-
-    def __call__(self):
-        self.reads += 1
-        current = self.value
-        self.value += self.step
-        return current
-
-
-INLINE_STEPS = [0.0, 0.001, 0.002, 0.005]
-STREAM_STEPS = [0.0, 0.001, 0.005]
-SLOW_STEP = 1.0
-
-
-def assert_not_deadline_truncated(record):
-    """A deadline-truncated run must never pass as a retention result.
-
-    The owner loop leaves ``termination`` at its default when it exits on the
-    wall clock, so a short call list is indistinguishable from a dropped record
-    unless the terminal state is checked. Every scenario that is meant to reach
-    the frame bound must therefore assert a non-default terminal state. Carried
-    over from #256, where it was proposed against the shared helper.
-    """
-    assert record["termination"] != "cancelled_or_deadline", record["termination"]
+from tests._timed_menu_frame_bound_support import (
+    FRAME_BOUND,
+    INLINE_STEPS,
+    SLOW_STEP,
+    STREAM_STEPS,
+    FakeClock,
+    assert_not_deadline_truncated,
+)
+from tests.test_timed_menu_milestones import run_owner
 
 
 @pytest.mark.parametrize("clock_step", INLINE_STEPS)
@@ -128,12 +99,41 @@ def test_injected_clock_is_optional_and_defaults_to_real_monotonic():
     assert probe.time.monotonic is not None
 
 
-def test_real_clock_still_guards_the_owner_loop(monkeypatch, tmp_path):
-    """With no clock injected the real monotonic clock is the only deadline guard.
+def test_the_owner_loop_actually_reads_the_injected_clock(monkeypatch, tmp_path):
+    """The seam is read, not merely accepted.
 
-    This does not assert a call count -- that would reinstate the host-speed
-    coupling -- but it does assert that the loop still terminates and never
-    reports a call count beyond the frame bound.
+    A signature test cannot tell an honoured ``clock`` parameter from an
+    ignored one, so this asserts the observable consequence: when a clock is
+    injected, the owner loop reads *it* rather than the real monotonic source.
+    ``FakeClock.reads`` counts every call, so this fails if the loop reverts to
+    ``time.monotonic`` while still accepting the parameter.
+    """
+    _record, _path, _lifecycle, _checkpoints, clock = run_owner(
+        monkeypatch,
+        tmp_path,
+        stream=False,
+        milestones=False,
+    )
+    assert isinstance(clock, FakeClock)
+    # The loop reads the clock many times per retired call, so a bound far
+    # above one read per call is stable; a loop that ignored the seam would
+    # leave this at zero.
+    assert clock.reads > FRAME_BOUND
+
+
+def test_real_clock_run_terminates_and_never_exceeds_the_frame_bound(monkeypatch, tmp_path):
+    """With no clock injected the run terminates and respects the frame bound.
+
+    The name deliberately does not claim the real clock *guards* the loop. With
+    a real clock the outcome is host-speed dependent -- either bound may win --
+    so asserting which one stopped the loop would reinstate exactly the
+    wall-clock coupling #252 removed. What is asserted here is only what holds
+    on every host: the run terminates, it never reports more calls than the
+    frame bound authorises, and it never errors.
+
+    The real-clock guard itself is pinned by
+    ``test_deadline_still_terminates_a_slow_host_before_the_frame_bound``, which
+    reaches the deadline branch deterministically via ``SLOW_STEP``.
     """
     record, _, _, _, _clock = run_owner(
         monkeypatch,
@@ -142,5 +142,6 @@ def test_real_clock_still_guards_the_owner_loop(monkeypatch, tmp_path):
         stream=False,
         milestones=False,
     )
+    assert record["errors"] == []
     assert record["termination"] in {"frame_bound", "cancelled_or_deadline"}
     assert len(record["calls"]) <= FRAME_BOUND
