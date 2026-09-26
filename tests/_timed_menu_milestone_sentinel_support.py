@@ -27,6 +27,7 @@ teeth check and the count check.
 """
 
 import ast
+import builtins
 import inspect
 
 import tests.test_timed_menu_milestones as milestones
@@ -43,6 +44,11 @@ _OPERATORS = {
     ast.In: "in",
     ast.NotIn: "not in",
 }
+
+#: Handler types that catch ``AssertionError`` without naming it. ``AssertionError``
+#: derives from ``Exception``, which derives from ``BaseException``, so a handler
+#: for any of the three can swallow an assert's failure.
+UNIVERSAL_HANDLERS = ("AssertionError", "Exception", "BaseException")
 
 
 def _module_tree():
@@ -303,48 +309,296 @@ def _is_termination_key(node):
     )
 
 
-def _swallows_assertion_error(handler):
-    """True for a handler that can swallow the failure of an ``assert``.
+def _guard_globals():
+    """The namespace the #261 guard is defined in, for local-class lookup."""
+    import importlib
 
-    ``except AssertionError`` is the direct case, and a bare ``except:`` or
-    ``except BaseException:`` swallows it too. ``except Exception`` is counted
-    for the same reason: ``AssertionError`` derives from ``Exception``, so a
-    handler naming that class also swallows the failure. It is named explicitly
-    to keep the rule from depending on the reader knowing the exception
-    hierarchy. Handlers for anything else -- ``except ValueError`` and friends
-    -- cannot swallow an ``assert`` and are not counted.
+    return vars(importlib.import_module(GUARD_MODULE))
 
-    A re-raising handler (``except AssertionError: raise``) is conservatively
-    counted as swallowing. The failure does propagate, so the assert is in fact
-    enforced; deciding that needs real control-flow analysis, and this is a
-    structural sentinel, so it asks only whether a handler *can* swallow. The
-    error is toward reporting a live assert as unenforced, never toward missing
-    a dead one.
+
+def _exception_names(exception):
+    """The names an ``except`` clause catches, or ``None`` if unrecognised.
+
+    A bare ``except:`` has no type node and catches everything, so it resolves
+    to the universal base. A tuple is flattened. Anything else -- a subscript,
+    a call, a starred expression -- returns ``None`` so the caller can treat the
+    clause as hostile instead of silently assuming it is harmless.
     """
-    caught = handler.type
-    if caught is None:
+    if exception is None:
+        return ("BaseException",)
+    if isinstance(exception, ast.Name):
+        return (exception.id,)
+    if isinstance(exception, ast.Attribute):
+        return (ast.unparse(exception),)
+    if isinstance(exception, ast.Tuple):
+        names = []
+        for element in exception.elts:
+            resolved = _exception_names(element)
+            if resolved is None:
+                return None
+            names.extend(resolved)
+        return tuple(names)
+    return None
+
+
+def _name_catches_assertion_error(name):
+    """Is this caught name one that also catches ``AssertionError``?
+
+    Resolution is attempted against builtins and the defining module's
+    globals, so a locally declared ``class Truncated(AssertionError)`` is
+    recognised. A name that resolves to nothing is reported as swallowing: an
+    assert that cannot be proven live must not be counted as enforced.
+    """
+    if name in UNIVERSAL_HANDLERS:
         return True
+    for namespace in (vars(builtins), _guard_globals()):
+        candidate = namespace.get(name.rsplit(".", 1)[-1])
+        if isinstance(candidate, type):
+            return issubclass(candidate, AssertionError)
+    return True
+
+
+def _handler_catches_assertion_error(handler):
+    """Could this handler let an ``AssertionError`` pass without propagating?"""
+    names = _exception_names(handler.type)
+    if names is None:
+        return True
+    return any(_name_catches_assertion_error(name) for name in names)
+
+
+def _encloses(outer, node):
+    """Is ``node`` a strict descendant of ``outer``?"""
+    return any(child is node for child in ast.walk(outer) if child is not outer)
+
+
+#: ``ast.Try`` and its ``try/except*`` counterpart, which catch the same way.
+_TRY_NODES = (ast.Try, ast.TryStar)
+
+
+def _exception_names_of_suppress(call):
+    """The exception names passed to ``contextlib.suppress(...)``."""
     names = []
-    for node in ast.walk(caught):
-        if isinstance(node, ast.Name):
-            names.append(node.id)
-        elif isinstance(node, ast.Tuple):
-            names.extend(element.id for element in node.elts if isinstance(element, ast.Name))
-    return bool({"AssertionError", "Exception", "BaseException"} & set(names))
+    for argument in call.args:
+        if isinstance(argument, ast.Name):
+            names.append(argument.id)
+        else:
+            # Anything that is not a plain name is reported as universal, so an
+            # unrecognised argument is never assumed to be harmless.
+            names.append("BaseException")
+    return names or ["BaseException"]
 
 
-#: Operand kinds whose truthiness can decide an ``or`` on its own. A nested
+def _suppressed_by(entered, name):
+    """Is this statement inside a ``with`` that suppresses assertion failure?"""
+    for item in entered:
+        if not isinstance(item, (ast.With, ast.AsyncWith)):
+            continue
+        for with_item in item.items:
+            call = with_item.context_expr
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == name
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "contextlib"
+                and any(
+                    _name_catches_assertion_error(caught)
+                    for caught in _exception_names_of_suppress(call)
+                )
+            ):
+                return True
+    return False
+
+
+def _always_false_branch(node):
+    """Is this statement under a branch the interpreter can statically skip?
+
+    Only literal conditions are considered, so a guard nested under a genuine
+    runtime condition is never mistaken for a dead one. ``if False:`` is the
+    shape that unwired the #261 guard in the first place, and it is the same
+    "present in the source but unreachable" defect as a swallowed assert.
+    """
+    return any(
+        isinstance(entered, ast.If)
+        and isinstance(entered.test, ast.Constant)
+        and not entered.test.value
+        for entered in node
+    )
+
+
+def _swallowing_handlers(function, target):
+    """Scopes inside ``function`` that can eat ``target``'s assertion failure.
+
+    A ``try`` body is covered by that same ``try``'s handlers, which is a
+    sibling relationship rather than an ancestor one -- the shape that made an
+    earlier version of this helper return a false negative. ``orelse`` is not
+    covered (it runs only when nothing was raised), and one handler body is
+    never covered by a sibling handler in the same chain. ``with
+    contextlib.suppress(...)`` and statically dead ``if False:`` branches are
+    handled here too, because both make an assert present but unfailable.
+    """
+    found = []
+
+    def enclosing_names(entered):
+        names = []
+        for item in entered:
+            if isinstance(item, ast.ExceptHandler):
+                names.extend(_exception_names(item.type) or ("BaseException",))
+        if _suppressed_by(entered, "suppress"):
+            names.append("BaseException")
+        return names
+
+    def visit(node, entered):
+        if node is target:
+            if any(_name_catches_assertion_error(name) for name in enclosing_names(entered)):
+                found.append(node)
+            if _always_false_branch(entered):
+                found.append(node)
+            return True
+        if isinstance(node, _TRY_NODES):
+            handlers = [item for item in node.handlers if _handler_catches_assertion_error(item)]
+            for child in node.body:
+                if visit(child, [*entered, *handlers]):
+                    return True
+            for child in node.orelse + node.finalbody:
+                if visit(child, entered):
+                    return True
+            for handler in node.handlers:
+                # `elif`-style chains are sibling handlers, but they attach to
+                # the same orelse. In a chain, handler N+1 sees the exceptions
+                # that reached it, which excludes what handler N already caught.
+                siblings = [
+                    item
+                    for item in node.handlers[node.handlers.index(handler) + 1 :]
+                    if _handler_catches_assertion_error(item)
+                ]
+                for child in handler.body:
+                    # Not `handler` itself: an AssertionError raised inside a
+                    # handler body propagates out of the whole try, it is not
+                    # re-caught by the clause that caught the first one.
+                    if visit(child, [*entered, *siblings]):
+                        return True
+            return False
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Constant) and not node.test.value:
+            if any(visit(child, [*entered, node]) for child in node.body):
+                return True
+            return any(visit(child, entered) for child in node.orelse)
+        if isinstance(node, (ast.With, ast.AsyncWith)) and _suppressed_by((node,), "suppress"):
+            return any(visit(child, [*entered, node]) for child in node.body)
+        for child in ast.iter_child_nodes(node):
+            if visit(child, entered):
+                return True
+        return False
+
+    for statement in function.body:
+        visit(statement, [])
+    return found
+
+
+def _is_enforced(function, node):
+    """Is ``target`` an assert that can actually fail?
+
+    An ``assert`` is defeated, without being removed, by three distinct
+    mechanisms, and all three are silent to ``ast.walk``:
+
+    1. a ``try`` whose handler swallows ``AssertionError`` (#280);
+    2. a ``with contextlib.suppress(...)`` that catches it;
+    3. a statically dead branch the interpreter never enters (#285).
+
+    ``ast.Try`` and ``ast.TryStar`` are both matched: they are distinct node
+    types, and matching only the former left ``except*`` an unguarded spelling
+    of defeat (1).
+
+    Scoped to scopes that actually contain the assert, not to any handler in the
+    function: a swallowing ``try`` around a *sibling* statement does not disarm
+    an assert outside it, and treating it as though it did would drop real
+    pinned sites.
+    """
+    return not _swallowing_handlers(function, node)
+
+
+def _is_tautology(node):
+    """Is this expression true regardless of the values it reads?
+
+    Only the literal, decidable forms are recognised -- a constant, and a
+    comparison against a numeric bound that a length or count can never cross.
+    A comparison against anything else (``len(calls) == 300``,
+    ``record["termination"] != "cancelled_or_deadline"``) is a real check and is
+    never treated as a tautology.
+
+    A tautology is what makes an ``or`` bypass its sibling: the comparison the
+    contract depends on is never evaluated because the other operand is true
+    whatever the record says. Proving an expression is always *false* is the
+    symmetric case and is deliberately not attempted -- it would need real
+    evaluation, and a wrong answer there would report a live assert as dead.
+    """
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
+        return False
+    bound = _numeric_literal(node.comparators[0])
+    if bound is None:
+        return False
+    operator = node.ops[0]
+    if not _is_count_like(node.left):
+        # `x > -1` is only a tautology when x cannot be negative. Without
+        # proving that, treat it as a real check: a false "always true" would
+        # make the rule cry wolf, and a missed tautology is the lesser error.
+        return False
+    # A count is >= 0 by construction, so only the lower-bounded forms can be
+    # tautologies. `len(y) < 1` and `len(y) <= 0` hold only for an empty or
+    # absent container, so they are not tautologies either, and proving that
+    # would need real evaluation.
+    if isinstance(operator, ast.GtE):
+        return bound == 0
+    return isinstance(operator, ast.Gt) and bound < 0
+
+
+def _numeric_literal(node):
+    """The value of a numeric literal node, or ``None``.
+
+    ``-1`` parses as a ``UnaryOp(USub, Constant)`` rather than a negative
+    ``Constant``, so a negative bound has to be folded here or every
+    lower-bounded form would be missed.
+    """
+    if isinstance(node, ast.Constant):
+        return None if isinstance(node.value, bool) else _as_number(node.value)
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.USub, ast.UAdd))
+        and isinstance(node.operand, ast.Constant)
+    ):
+        value = _as_number(node.operand.value)
+        if value is None:
+            return None
+        return -value if isinstance(node.op, ast.USub) else value
+    return None
+
+
+def _as_number(value):
+    return value if isinstance(value, (int, float)) else None
+
+
+def _is_count_like(node):
+    """Is this expression a count or length, so it cannot be negative?
+
+    ``len(...)``, ``.count(...)`` and ``str.count``-shaped calls are the forms
+    that appear in these tests. Anything else -- a bare name, an arithmetic
+    expression, a subtraction -- is not assumed non-negative, because assuming
+    it would turn a real comparison into a false tautology.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id in {"len", "count", "bit_count"}
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr in {"len", "count", "bit_count"}
+    return False
+
+
+#: Operand kinds whose truthiness can decide a ``BoolOp`` on its own. A nested
 #: ``Compare`` is deliberately absent: it is not a decision on its own, and
 #: treating it as one would flag a legitimate ``and`` of two comparisons.
-#:
-#: This applies to ``or`` only. In ``A or B`` a truthy ``A`` means ``B`` is
-#: never evaluated, so the comparison in ``B`` goes unchecked. In ``A and B``
-#: the opposite holds: ``B`` is skipped when ``A`` is *falsy*, and a truthy
-#: runtime value in ``A`` -- a ``Name``, ``Call`` or ``Subscript`` -- carries no
-#: information about whether ``B`` runs. Applying this tuple to ``and`` too
-#: reported the live contract
-#: ``assert len(errors) == 1 and isinstance(errors[0], RuntimeError)`` as
-#: bypassed, silently dropping it from the pinned count set.
 _DECIDING_OPERANDS = (
     ast.Name,
     ast.Attribute,
@@ -360,256 +614,6 @@ _DECIDING_OPERANDS = (
 )
 
 
-#: Distinct from ``None``, which is itself a literal and so cannot double as a
-#: bail-out signal.
-_NOT_LITERAL = object()
-
-_LITERAL_OPERATORS = {
-    ast.Add: lambda a, b: a + b,
-    ast.Sub: lambda a, b: a - b,
-    ast.Mult: lambda a, b: a * b,
-    ast.Div: lambda a, b: a / b,
-    ast.FloorDiv: lambda a, b: a // b,
-    ast.Mod: lambda a, b: a % b,
-    ast.Pow: lambda a, b: a**b,
-    ast.BitOr: lambda a, b: a | b,
-    ast.BitAnd: lambda a, b: a & b,
-    ast.BitXor: lambda a, b: a ^ b,
-    ast.LShift: lambda a, b: a << b,
-    ast.RShift: lambda a, b: a >> b,
-}
-
-_LITERAL_COMPARISONS = {
-    ast.Eq: lambda a, b: a == b,
-    ast.NotEq: lambda a, b: a != b,
-    ast.Lt: lambda a, b: a < b,
-    ast.LtE: lambda a, b: a <= b,
-    ast.Gt: lambda a, b: a > b,
-    ast.GtE: lambda a, b: a >= b,
-    ast.In: lambda a, b: a in b,
-    ast.NotIn: lambda a, b: a not in b,
-    ast.Is: lambda a, b: a is b,
-    ast.IsNot: lambda a, b: a is not b,
-}
-
-
-def _literal_value(node):
-    """The value of a literal-only expression, or ``_NOT_LITERAL``.
-
-    ``ast.literal_eval`` is the obvious tool here and is the wrong one: it
-    refuses every ``Compare`` node, so it cannot answer the question this
-    exists to answer. ``1 == 1`` raises ``ValueError`` there, yet it is exactly
-    the decisive case -- decidable to true without reading any state, so it
-    short-circuits the ``or`` precisely as a bare ``True`` does.
-
-    The fold is therefore done structurally, over the literal expression
-    grammar: constants, containers of constants, unary and binary operators,
-    and chained comparisons between them. Anything that could read runtime
-    state -- ``Name``, ``Call``, ``Attribute``, ``Subscript`` -- makes the walk
-    bail and return ``_NOT_LITERAL``. That boundary is what keeps ``x == x``
-    enforced: it reads a ``Name``, so it is not decidable, and reporting a live
-    assert as dead is the worse error.
-
-    A ``None`` fallback would be wrong here, because ``None`` is itself a
-    literal (it parses to a ``Constant``) and so would be indistinguishable
-    from a genuine ``None``.
-    """
-    if isinstance(node, ast.Constant):
-        return node.value
-    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-        items = [_literal_value(element) for element in node.elts]
-        if any(item is _NOT_LITERAL for item in items):
-            return _NOT_LITERAL
-        try:
-            if isinstance(node, ast.Tuple):
-                return tuple(items)
-            if isinstance(node, ast.List):
-                return items
-            return set(items)
-        except TypeError:
-            return _NOT_LITERAL
-    if isinstance(node, ast.Dict):
-        keys = [_literal_value(key) for key in node.keys]
-        values = [_literal_value(value) for value in node.values]
-        if any(item is _NOT_LITERAL for item in keys + values):
-            return _NOT_LITERAL
-        try:
-            return dict(zip(keys, values))
-        except TypeError:
-            return _NOT_LITERAL
-    if isinstance(node, ast.UnaryOp):
-        operand = _literal_value(node.operand)
-        if operand is _NOT_LITERAL:
-            return _NOT_LITERAL
-        try:
-            if isinstance(node.op, ast.USub):
-                return -operand
-            if isinstance(node.op, ast.UAdd):
-                return +operand
-            if isinstance(node.op, ast.Not):
-                return not operand
-            if isinstance(node.op, ast.Invert):
-                return ~operand
-        except TypeError:
-            return _NOT_LITERAL
-        return _NOT_LITERAL
-    if isinstance(node, ast.BinOp) and type(node.op) in _LITERAL_OPERATORS:
-        left = _literal_value(node.left)
-        right = _literal_value(node.right)
-        if left is _NOT_LITERAL or right is _NOT_LITERAL:
-            return _NOT_LITERAL
-        try:
-            return _LITERAL_OPERATORS[type(node.op)](left, right)
-        except (ArithmeticError, TypeError):
-            return _NOT_LITERAL
-    if isinstance(node, ast.BoolOp):
-        result = isinstance(node.op, ast.And)
-        for value in node.values:
-            item = _literal_value(value)
-            if item is _NOT_LITERAL:
-                return _NOT_LITERAL
-            if isinstance(node.op, ast.And):
-                result = result and bool(item)
-            else:
-                result = result or bool(item)
-        return result
-    if isinstance(node, ast.Compare):
-        left = _literal_value(node.left)
-        if left is _NOT_LITERAL:
-            return _NOT_LITERAL
-        for operator, comparator in zip(node.ops, node.comparators):
-            right = _literal_value(comparator)
-            if right is _NOT_LITERAL:
-                return _NOT_LITERAL
-            handler = _LITERAL_COMPARISONS.get(type(operator))
-            if handler is None:
-                return _NOT_LITERAL
-            try:
-                matched = handler(left, right)
-            except TypeError:
-                return _NOT_LITERAL
-            if not matched:
-                return False
-            left = right
-        return True
-    return _NOT_LITERAL
-
-
-def _as_number(value):
-    """This value if it is a real number, else ``None``.
-
-    ``bool`` is excluded even though it subclasses ``int``: ``len(y) >= True``
-    is a real comparison, not a tautology about a non-negative count.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return value
-
-
-def _numeric_literal(node):
-    """The value of a numeric literal node, or ``None``.
-
-    ``-1`` parses as a ``UnaryOp(USub, Constant)`` rather than a negative
-    ``Constant``, so a negative bound has to be folded here or every
-    lower-bounded form would be missed.
-    """
-    if isinstance(node, ast.Constant):
-        return _as_number(node.value)
-    if (
-        isinstance(node, ast.UnaryOp)
-        and isinstance(node.op, (ast.USub, ast.UAdd))
-        and isinstance(node.operand, ast.Constant)
-    ):
-        value = _as_number(node.operand.value)
-        if value is None:
-            return None
-        return -value if isinstance(node.op, ast.USub) else value
-    return None
-
-
-def _is_count_like(node):
-    """Is this expression a count or length, so it cannot be negative?
-
-    ``len(...)``, ``count(...)`` and ``bit_count(...)`` are the forms that
-    appear in these tests. Anything else -- a bare name, an arithmetic
-    expression, a record subscript -- is not assumed non-negative, because
-    assuming it would turn a real comparison into a false tautology.
-    """
-    if not isinstance(node, ast.Call):
-        return False
-    if isinstance(node.func, ast.Name):
-        return node.func.id in {"len", "count", "bit_count"}
-    if isinstance(node.func, ast.Attribute):
-        return node.func.attr in {"len", "count", "bit_count"}
-    return False
-
-
-def _is_tautology(node):
-    """Is this expression true regardless of the values it reads?
-
-    Only the decidable forms are recognised: a truthy constant, a comparison
-    built purely from literals, and a count compared against a bound a length
-    can never cross. A comparison that reads any runtime value
-    (``len(calls) == 300``, ``record["termination"] != "cancelled_or_deadline"``,
-    ``x == x``) is a real check and is never treated as a tautology.
-
-    A tautology is what makes an ``or`` bypass its sibling: the comparison the
-    contract depends on is never evaluated because the other operand is true
-    whatever the record says. Verified to survive on ``aef56d6``:
-
-        assert record["termination"] != "cancelled_or_deadline" or \
-            len(record.get("errors", [])) >= 0
-        -> guard RETURNS on the deadline record; suite exits 0
-
-    The left operand must look count-like before a numeric bound is believed:
-    ``x > -1`` is only a tautology when ``x`` cannot be negative, and assuming
-    that would report a live assert as dead -- the rule would then cry wolf on
-    a real regression.
-
-    The literal-only fold covers the spellings the count heuristic cannot see.
-    ``1 == 1`` is true without reading any state, so it short-circuits the ``or``
-    exactly as a bare ``True`` does -- but its left operand is a constant, not a
-    call, so ``_is_count_like`` rejects it and the operand was previously
-    misreported as enforced. Restricting the fold to literals keeps the
-    conservative direction: ``x == x`` reads a ``Name``, is not constant, and
-    therefore stays enforced.
-
-    Deliberately one-directional. Proving an expression is always *false* is
-    not attempted: it needs real evaluation, and a wrong answer there reports a
-    live assert as dead. For the same reason ``len(y) < 1`` and ``len(y) <= 0``
-    are not tautologies -- they hold only for an empty container.
-    """
-    if isinstance(node, ast.Constant):
-        return bool(node.value)
-    if _is_literal_true(node):
-        return True
-    if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
-        return False
-    bound = _numeric_literal(node.comparators[0])
-    if bound is None or not _is_count_like(node.left):
-        return False
-    # A count is >= 0 by construction, so only the lower-bounded forms can be
-    # tautologies.
-    operator = node.ops[0]
-    if isinstance(operator, ast.GtE):
-        return bound == 0
-    return isinstance(operator, ast.Gt) and bound < 0
-
-
-def _is_literal_true(node):
-    """Is this expression decidable to ``True`` without reading any value?
-
-    An operand built only from literals cannot be influenced by the record, so
-    a truthy result means the surrounding ``or`` decides the assert on its own
-    and the comparison beside it is never evaluated.
-
-    Only ``True`` counts. A literal that folds to ``False`` -- ``1 == 2`` --
-    cannot short-circuit anything, so it is not a bypass.
-    """
-    value = _literal_value(node)
-    return value is not _NOT_LITERAL and bool(value)
-
-
 def _may_bypass(expression):
     """Can a comparison nested in this expression still go unchecked?
 
@@ -617,83 +621,30 @@ def _may_bypass(expression):
     ``BoolOp``, and both leave the comparison unchecked: the ``or`` decides the
     assert on its own when the other operand is truthy. The comparison node is
     still present, so a presence-only check -- and ``_is_enforced``, which only
-    inspects ``try`` -- reports the contract as intact.
+    inspects scopes -- reports the contract as intact.
 
-    A tautological operand decides it just as effectively as a bare ``True``,
-    which is why the spelling of the bypass does not matter. Recursion covers
-    every operand shape for the same reason: an earlier version inspected only
-    ``Name/Attribute/Call/Subscript/Constant`` and missed a ``Compare`` operand
-    that was trivially true.
+    Recursion covers *every* operand shape, which is what closes the deeper
+    version of the same hole. A trivially-true comparison is just as capable of
+    short-circuiting as a bare ``True``, and an earlier version of this helper
+    missed it because ``ast.Compare`` was in neither the deciding list nor the
+    recursion, so it reported the contract intact:
 
-    The two operators are handled separately, because they bypass in opposite
-    conditions. Under ``or`` any deciding operand skips its sibling when
-    truthy, so every operand is a candidate. Under ``and`` a sibling is skipped
-    only when the other side is *falsy*, which no decidable-true operand can
-    establish, so a runtime value is not a bypass there. Only a tautology
-    remains a bypass under ``and``, and only in the operand positions that
-    decide the result: a leading tautology short-circuits to true and the rest
-    never runs.
+        assert record["termination"] != "cancelled_or_deadline" or \
+            len(record.get("errors", [])) >= 0
+        -> guard RETURNS on the deadline record; suite exits 0
 
-    A bare ``Compare`` operand does not count as a decision by itself, so
+    A bare ``Compare`` operand still does not count as a decision by itself, so
     ``assert x != 1 and y != 2`` -- the shape the real retention sites use --
     stays enforced. That distinction is pinned by table rows, because an
-    over-broad rule here would report a live assert as dead.
+    over-broad rule here would report a live assert as dead and the sentinels
+    would then cry wolf on a real regression.
     """
     if not isinstance(expression, ast.BoolOp):
         return False
     operands = expression.values
-    tautologies = [_is_tautology(value) for value in operands]
-    if any(tautologies):
-        if isinstance(expression.op, ast.Or):
-            return True
-        # Under `and`, a tautology only decides the result when it is the
-        # first operand: `True and <comparison>` never evaluates the
-        # comparison. In any later position it is only decisive when every
-        # operand before it is itself truthy -- `a and True and <comparison>`
-        # still short-circuits to true without reaching the comparison, while
-        # `<comparison> and True` evaluates the comparison first and so is not
-        # a bypass. An earlier operand that could be falsy leaves the
-        # comparison reachable, so the tautology is not the deciding one.
-        return any(
-            tautology and all(_is_literal_true(operand) for operand in operands[:position])
-            for position, tautology in enumerate(tautologies)
-        )
-    if isinstance(expression.op, ast.And):
-        return False
-    if any(isinstance(value, _DECIDING_OPERANDS) for value in operands):
+    if any(_is_tautology(value) for value in operands):
         return True
-    return any(_may_bypass(value) for value in operands)
-
-
-def _is_enforced(function, target):
-    """Is ``target`` an assert that can actually fail?
-
-    An ``assert`` is defeated, without being removed, if it sits inside a
-    ``try`` whose handler swallows ``AssertionError`` (#280). ``ast.walk`` is
-    scope-blind -- it descends into ``try`` bodies -- so presence-based checks
-    report such an assert as intact while the owning test can no longer fail.
-    Both ``ast.Try`` and ``ast.TryStar`` (``except*``) are matched: they are
-    distinct node types, and matching only the former left ``except*`` an
-    unguarded spelling of the same defeat.
-
-    Scoped to a ``try`` whose body actually contains the assert, not to any
-    handler in the function: a swallowing ``try`` around a *sibling* statement
-    does not disarm an assert outside it, and treating it as though it did
-    would drop real pinned sites. ``_contains`` is what draws that line.
-    """
-    for node in ast.walk(function):
-        if not isinstance(node, (ast.Try, ast.TryStar)):
-            continue
-        if not any(_contains(statement, target) for statement in node.body):
-            continue
-        if any(_swallows_assertion_error(handler) for handler in node.handlers):
-            return False
-    return True
-
-
-def _contains(statement, target):
-    """True if ``target`` is ``statement`` or lies anywhere beneath it."""
-    return statement is target or any(node is target for node in ast.walk(statement))
+    return any(isinstance(value, _DECIDING_OPERANDS) or _may_bypass(value) for value in operands)
 
 
 def guard_rejects_the_deadline_terminal_state():
@@ -706,10 +657,14 @@ def guard_rejects_the_deadline_terminal_state():
     was filed to remove. This asks for the ``!=`` comparison that does the
     rejecting, so a gutted guard body fails.
 
-    The comparison must also be *enforced*. Wrapping it in
-    ``try/except AssertionError: pass`` keeps the node, keeps the operator, and
-    leaves the guard unable to fail -- while satisfying a presence-only check
-    (#280, mutation M6). ``_is_enforced`` is what closes that.
+    A comparison that is merely *present* is not enough either. Wrapping the
+    assert in ``try: ... except AssertionError: pass`` leaves the node in the
+    tree but makes the guard return normally, which would restore the exact
+    confusion above while every structural check stayed green (#280, mutation
+    M6). Nor may the comparison be short-circuited away by a tautological
+    sibling operand, nor sit in a branch the interpreter never enters (#285,
+    #290 mutation M12). ``_is_enforced`` and ``_may_bypass`` are what close
+    those.
     """
     tree = _guard_source_tree()
     for func in tree.body:
@@ -717,6 +672,8 @@ def guard_rejects_the_deadline_terminal_state():
             continue
         for node in ast.walk(func):
             if not isinstance(node, ast.Assert):
+                continue
+            if not _is_enforced(func, node) or _may_bypass(node.test):
                 continue
             for comparison in _comparisons_in(node.test):
                 if not (len(comparison.ops) == 1 and isinstance(comparison.ops[0], ast.NotEq)):
@@ -726,8 +683,6 @@ def guard_rejects_the_deadline_terminal_state():
                     _is_termination_key(comparison.left)
                     and isinstance(right, ast.Constant)
                     and right.value == DEADLINE_TERMINATION
-                    and _is_enforced(func, node)
-                    and not _may_bypass(node.test)
                 ):
                     return True
     return False
