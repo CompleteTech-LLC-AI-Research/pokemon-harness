@@ -15,6 +15,7 @@ quietly delete that contract.
 """
 
 import inspect
+import time
 
 import pytest
 
@@ -145,3 +146,44 @@ def test_real_clock_run_terminates_and_never_exceeds_the_frame_bound(monkeypatch
     assert record["errors"] == []
     assert record["termination"] in {"frame_bound", "cancelled_or_deadline"}
     assert len(record["calls"]) <= FRAME_BOUND
+
+
+def test_teardown_deadline_reads_the_injected_clock():
+    """Every deadline read inside ``_run_owner`` goes through the seam (#267).
+
+    ``_run_owner`` binds ``now = time.monotonic if clock is None else clock`` and
+    then computes most of its deadlines as ``overall - now()``. Two sites on the
+    normal teardown path used ``time.monotonic()`` directly instead, so with an
+    injected clock the teardown subtracted the *real* epoch from an ``overall``
+    built on the *fake* one. ``FakeClock`` starts at 1000.0, so that subtraction
+    is a large negative number and the timeout collapses to its 0.001 floor no
+    matter how much budget was actually left -- the teardown budget stops
+    tracking the run.
+
+    Asserting on the source is deliberate here. A signature or behaviour test
+    cannot distinguish an honoured clock read from a real one on these two lines,
+    because the fake clock is only wrong in a way no assertion on the returned
+    record can observe: the resulting timeout is clamped either way. The defect
+    is "which clock was read", so the guard pins that directly.
+    """
+    source = inspect.getsource(probe._run_owner)
+    # Strip comments so the two explanatory comments about the clock do not
+    # register as reads; only executable code is asserted on.
+    code = [line.split("#", 1)[0] for line in (raw.strip() for raw in source.splitlines()) if line]
+    offenders = [
+        line for line in code if "time.monotonic()" in line and "now = time.monotonic" not in line
+    ]
+    assert not offenders, (
+        "these teardown deadlines read the real clock instead of the injected "
+        f"seam, so an injected clock leaves the teardown budget meaningless: {offenders}"
+    )
+
+    # And the behaviour the fix restores, stated directly so a future edit that
+    # reintroduces a hard-coded ``time.monotonic`` in a helper is visible too.
+    clock = FakeClock(step=SLOW_STEP)
+    overall = clock() + 21
+    for _ in range(5):
+        clock()
+    assert max(0.001, overall - clock()) == pytest.approx(15.0)
+    # The real clock is ~300000, so the unfixed expression collapses to the floor.
+    assert max(0.001, overall - time.monotonic()) == 0.001
