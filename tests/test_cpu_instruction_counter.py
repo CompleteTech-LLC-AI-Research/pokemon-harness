@@ -252,7 +252,9 @@ def test_source_exception_declarations_and_generator_literals():
             assert matches, (filename, name)
             assert all("except *" in line and "noexcept" not in line for line in matches), matches
 
-    pxd = (CORE / "opcodes.pxd").read_text()
+    from pyboy.core._opcodes_runtime import read_sources
+
+    pxd = read_sources(CORE)[1].decode("utf-8")
     declarations = [
         line for line in pxd.splitlines() if line.startswith("cdef ") and "(cpu.CPU" in line
     ]

@@ -55,7 +55,19 @@ def test_project_exposes_the_installed_mcp_entrypoint_and_explicit_package_data(
     }
     assert setuptools["include-package-data"] is False
     assert setuptools["package-data"] == {
-        "pyboy.core": ["bootrom_cgb.bin", "bootrom_dmg.bin"],
+        "pyboy": [
+            "_pyboy_init.pxi",
+            "_pyboy_runtime.pxi",
+            "_pyboy_controls.pxi",
+            "_pyboy_api.pxi",
+            "_pyboy_memory.pxi",
+        ],
+        "pyboy.core": [
+            "bootrom_cgb.bin",
+            "bootrom_dmg.bin",
+            "opcodes.pxd",
+            "opcode_components/*.pxi",
+        ],
         "pyboy.plugins": ["font.txt"],
     }
 

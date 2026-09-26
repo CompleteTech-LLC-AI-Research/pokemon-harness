@@ -421,7 +421,7 @@ jobs:
 
           assert pyboy.__version__ == "2.7.0"
           assert pyboy.__pokered_harness_revision__ == (
-              "acd569fdb5836b58558856ac066102d1e9ccaf96"
+              "b94bf5dfb042c502ff4bc1bcd417599b02a9419b"
           )
           assert utils.cython_compiled is False
           serial = Serial(False)

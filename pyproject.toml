@@ -70,7 +70,7 @@ pyboy = "vendor/pyboy-src/pyboy"
     "_pyboy_api.pxi",
     "_pyboy_memory.pxi",
 ]
-"pyboy.core" = ["bootrom_cgb.bin", "bootrom_dmg.bin"]
+"pyboy.core" = ["bootrom_cgb.bin", "bootrom_dmg.bin", "opcodes.pxd", "opcode_components/*.pxi"]
 "pyboy.plugins" = ["font.txt"]
 
 [tool.pytest.ini_options]

@@ -1,3 +1,14 @@
+# Current combined vendor candidate
+
+The tracked vendor tree now includes the generated opcode layout (#123), the main PyBoy
+source components (#133), and the serial type split (#153). Its recomputed full-manifest
+content identity is `b94bf5dfb042c502ff4bc1bcd417599b02a9419b`. Earlier identities below
+are historical snapshots and do not qualify this combined tree. The native build,
+source/native unit gates, packaging checks, and exact-head review remain required.
+Issue #122 remains open because other file splits are outstanding.
+
+---
+
 # Combined #153 and #133 vendor candidate
 
 The current tracked vendor tree includes the serial type split (#153) and main PyBoy source

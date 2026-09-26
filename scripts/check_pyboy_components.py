@@ -82,7 +82,7 @@ def controlled_importer():
             get_logger=lambda name: logger, log_level=lambda x: None
         ),
         "pyboy.plugins.manager": types.SimpleNamespace(
-            PluginManager=FakeAPI, parser_arguments=lambda: []
+            PluginManager=FakeAPI, parser_arguments=list
         ),
         "pyboy.utils": types.SimpleNamespace(
             IntIOWrapper=lambda obj: obj,
@@ -123,7 +123,7 @@ def load_controlled_module():
     module.__package__ = "pyboy"
     scope = dict(vars(builtins), __import__=controlled_importer())
     module.__dict__["__builtins__"] = scope
-    exec(compile((PACKAGE / "pyboy.py").read_bytes(), module.__file__, "exec"), module.__dict__)
+    exec(compile((PACKAGE / "pyboy.py").read_bytes(), module.__file__, "exec"), module.__dict__)  # noqa: S102
     return module
 
 
@@ -177,16 +177,18 @@ class ComponentChecks(unittest.TestCase):
     def test_setup_stages_instead_of_compiling_the_facade(self):
         setup = (PACKAGE.parent / "setup.py").read_text()
         self.assertIn('source_support["stage_native_source"]', setup)
-        self.assertIn("[str(main_source)] if src == main_path else [src]", setup)
+        self.assertIn("[compiler_source(src)]", setup)
+        self.assertIn("return str(main_source)", setup)
+        self.assertIn("return _opcode_build.prepare_opcode_source(src)", setup)
         self.assertIn("depends=main_dependencies if src == main_path else []", setup)
         self.assertIn("include_path=[os.getcwd()]", setup)
         self.assertIn('"conftest.py", "_source.py"', setup)
 
     def test_public_names_signatures_and_bytecode_are_preserved(self):
         module = load_controlled_module()
-        expected = dict(__name__="pyboy.pyboy", __file__=module.__file__, __package__="pyboy")
+        expected = {"__name__": "pyboy.pyboy", "__file__": module.__file__, "__package__": "pyboy"}
         expected["__builtins__"] = module.__dict__["__builtins__"]
-        exec(
+        exec(  # noqa: S102
             compile(
                 SUPPORT["assemble_source"](PACKAGE), module.__file__, "exec", dont_inherit=True
             ),

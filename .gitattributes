@@ -1,0 +1,2 @@
+# Generated opcode fragments preserve the original source bytes at split boundaries.
+vendor/pyboy-src/pyboy/core/opcode_components/*.pxi whitespace=-blank-at-eof

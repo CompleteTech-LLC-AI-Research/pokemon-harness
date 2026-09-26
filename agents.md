@@ -29,7 +29,7 @@ historical prose. Assign disjoint file ownership before using subagents.
 
 The documented release runtime is the bundled PyBoy source snapshot: PyBoy
 `2.7.0`, harness-local divergence revision
-`acd569fdb5836b58558856ac066102d1e9ccaf96` (pre-divergence harness fork revision
+`b94bf5dfb042c502ff4bc1bcd417599b02a9419b` (pre-divergence harness fork revision
 `c565df66c3731fad2856169a90f6bbec99925915`), with `mcp==1.29.1`. Source mode
 is the default. Cython/native mode is an explicitly selected optional
 diagnostic/runtime path and must prove that the required modules are installed

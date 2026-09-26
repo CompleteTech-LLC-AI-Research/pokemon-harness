@@ -59,7 +59,7 @@ is clean native packaging and lifecycle evidence, not MCP gameplay or the
 fixture-backed acceptance matrix.
 
 The default packaged runtime is the bundled PyBoy `2.7.0` source fork at the
-harness-local divergence revision `acd569fdb5836b58558856ac066102d1e9ccaf96`
+harness-local divergence revision `b94bf5dfb042c502ff4bc1bcd417599b02a9419b`
 (the in-fork tree is no longer byte-identical to the pre-divergence harness fork revision
 `c565df66c3731fad2856169a90f6bbec99925915`; see
 `vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`). Source mode is
@@ -307,7 +307,7 @@ reformatted.
 |---|---|---|
 | Python | `>=3.11` | `pyproject.toml` |
 | NumPy | `2.4.6` on Python 3.11; `2.5.2` on Python 3.12+ | `pyproject.toml`, `uv.lock`, and `scripts/bootstrap_pyboy.py` |
-| PyBoy | `2.7.0` + fork `acd569fdb5836b58558856ac066102d1e9ccaf96` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `vendor/pyboy-src/pyboy/__init__.py` (harness-local divergence revision; pre-divergence harness fork revision `c565df66c3731fad2856169a90f6bbec99925915`) |
+| PyBoy | `2.7.0` + fork `b94bf5dfb042c502ff4bc1bcd417599b02a9419b` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `vendor/pyboy-src/pyboy/__init__.py` (harness-local divergence revision; pre-divergence harness fork revision `c565df66c3731fad2856169a90f6bbec99925915`) |
 | MCP | `1.29.1` | `pyproject.toml` and `uv.lock` |
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
