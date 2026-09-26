@@ -286,3 +286,77 @@ def test_the_pinned_record_subscript_counts_are_still_exact_equalities():
         "the pinned record-subscript retention counts are no longer exact "
         f"equality assertions; expected {expected}, observed {observed}"
     )
+
+
+#: ``(label, module preamble, ``with`` expression, must the teeth check hold?)``
+#:
+#: The enforcement table above only ever spells the context manager
+#: ``contextlib.suppress(...)``. That single spelling is what let the from-import
+#: and aliased-module forms through: each is the same defeat, so a rule that
+#: matches one literal name certifies a guard that a two-character edit has
+#: disarmed. These rows pin the *resolution*, not one spelling.
+#:
+#: ``_alias_sensitive`` builds a whole module rather than a bare function body,
+#: because an import alias only means anything where it is bound -- at module
+#: level. ``#287``'s from-import row is the realistic case: the milestones
+#: module itself uses ``from contextlib import nullcontext``.
+_ALIAS_CASES = (
+    ("qualified", "import contextlib", "contextlib.suppress(AssertionError)", False),
+    ("from_import", "from contextlib import suppress", "suppress(AssertionError)", False),
+    ("aliased_module", "import contextlib as c", "c.suppress(AssertionError)", False),
+    ("suppress_bare", "from contextlib import suppress", "suppress()", False),
+    (
+        "suppress_tuple",
+        "import contextlib",
+        "contextlib.suppress(ValueError, AssertionError)",
+        False,
+    ),
+    # --- must stay live, or name resolution cries wolf on a real regression ---
+    ("control_value_error", "import contextlib", "contextlib.suppress(ValueError)", True),
+    ("control_unrelated", "import contextlib", "contextlib.suppress(TimeoutError)", True),
+    ("control_other_manager", "import contextlib", "contextlib.nullcontext()", True),
+)
+
+
+def _teeth_contract_holds(preamble, expression):
+    """Does the teeth check still hold when the guard is wrapped in ``expression``?
+
+    The alias is bound at module level in ``preamble``, which is the only place
+    an import alias resolves, so the guard module is built as a module rather
+    than as a bare function body.
+    """
+    source = f"{preamble}\n"
+    source += "def assert_not_deadline_truncated(record):\n"
+    source += f"    with {expression}:\n"
+    source += "        assert record['termination'] != 'cancelled_or_deadline'\n"
+    return _holds(source)
+
+
+def _holds(source):
+    tree = ast.parse(source)
+    saved_tree, saved_module = support._guard_source_tree, support.GUARD_MODULE
+    try:
+        support._guard_source_tree = lambda: tree
+        support.GUARD_MODULE = source
+        return support.guard_rejects_the_deadline_terminal_state()
+    finally:
+        support._guard_source_tree, support.GUARD_MODULE = saved_tree, saved_module
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "expression", "holds"),
+    _ALIAS_CASES,
+    ids=[case[0] for case in _ALIAS_CASES],
+)
+def test_suppression_is_matched_by_resolved_name_not_one_spelling(
+    label, preamble, expression, holds
+):
+    """Every spelling of ``suppress`` must be judged the same way.
+
+    A rule that recognises the qualified form alone reports the from-import and
+    aliased forms as an intact contract, so the #261 guard can be disarmed by
+    changing how it is spelled rather than by changing what it does. The control
+    rows matter as much: a resolver that flagged ``suppress(ValueError)`` or
+    ``nullcontext()`` would drop live pinned sites.
+    """
+    assert _teeth_contract_holds(preamble, expression) is holds
