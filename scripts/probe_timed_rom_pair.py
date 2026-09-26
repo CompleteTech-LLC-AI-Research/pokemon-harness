@@ -86,7 +86,12 @@ def _run_owner(
     goal_flag=None,
     goal_stop=None,
     driver_options=None,
+    clock=None,
 ):
+    # ``clock`` is a test seam over the monotonic source. It defaults to the
+    # production clock, so every real run and every existing caller keeps the
+    # exact same deadline arithmetic.
+    now = time.monotonic if clock is None else clock
     record = records[index]
     session = endpoint = None
     bound = False
@@ -205,7 +210,7 @@ def _run_owner(
         record["tcp_nodelay"] = sockets[index].getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
         assets = asset_resolver(version, args.repo_root)
         record["provenance"] = assets["provenance"]
-        if cancelled.is_set() or time.monotonic() >= deadline:
+        if cancelled.is_set() or now() >= deadline:
             raise TimeoutError("diagnostic expired during asset validation")
         session = session_factory(assets["rom"], assets["sym"], **assets["pins"])
         session.load_state(assets["state"])
@@ -254,18 +259,16 @@ def _run_owner(
             endpoints[index] = endpoint
             if cancelled.is_set():
                 endpoint.cancel()
-        with session.locked(timeout_s=max(0.001, deadline - time.monotonic())):
+        with session.locked(timeout_s=max(0.001, deadline - now())):
             endpoint.attach(session._pyboy, deadline=deadline)
-            session.bind_timed_execution(
-                endpoint, timeout_s=max(0.001, deadline - time.monotonic())
-            )
+            session.bind_timed_execution(endpoint, timeout_s=max(0.001, deadline - now()))
             bound = True
         record["attached"] = observed()
         record["metadata"] = _jsonable(endpoint.metadata)
         publish("attached_waiting_peer")
-        barrier.wait(timeout=max(0.001, deadline - time.monotonic()))
+        barrier.wait(timeout=max(0.001, deadline - now()))
         initial = session._pyboy.frame_count
-        while not cancelled.is_set() and time.monotonic() < deadline:
+        while not cancelled.is_set() and now() < deadline:
             offset = session._pyboy.frame_count - initial
             remaining = args.frame_limit - offset
             if remaining <= 0:
@@ -278,7 +281,7 @@ def _run_owner(
             call = {
                 "call_index": call_index,
                 "frame_offset": offset,
-                "started_monotonic": time.monotonic(),
+                "started_monotonic": now(),
                 "requested_frames": min(chunk, remaining),
                 "before": observed(),
             }
@@ -320,7 +323,7 @@ def _run_owner(
                     call["expected_goal_cancellation"] = True
                 raise
             finally:
-                call["elapsed_s"] = time.monotonic() - call["started_monotonic"]
+                call["elapsed_s"] = now() - call["started_monotonic"]
                 try:
                     call["after"] = observed()
                     call["actual_completed_frames"] = (
