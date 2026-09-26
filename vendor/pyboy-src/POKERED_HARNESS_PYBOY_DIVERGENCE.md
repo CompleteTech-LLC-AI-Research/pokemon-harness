@@ -1,3 +1,13 @@
+# Combined #153 and #133 harness-local divergence
+
+Current tracked vendor content identity: `acd569fdb5836b58558856ac066102d1e9ccaf96`. This includes the serial
+type split and main PyBoy source components, calculated from the complete tracked vendor
+manifest. Earlier single-change identity notes below are historical and do not qualify
+this combined tree. The native build, full repository gate and exact-head review remain
+pending.
+
+---
+
 # Unqualified serial-split candidate for #122 / #153
 
 Candidate content identity: `0a0f7f315e58e1c06a8c2cb9a716b8116fdf92ef`. Prior identity: `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`.

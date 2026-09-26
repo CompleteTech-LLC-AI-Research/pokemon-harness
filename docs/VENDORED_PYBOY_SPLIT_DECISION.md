@@ -1,3 +1,10 @@
+# Combined #153 and #133 vendor candidate
+
+The current tracked vendor tree includes the serial type split (#153) and main PyBoy source
+components (#133). Its recomputed content identity is `acd569fdb5836b58558856ac066102d1e9ccaf96`. The separate
+identity notes below describe earlier single-change candidates and are retained as history.
+Full native and repository gate qualification remains pending; #122 remains open.
+
 # Additional unqualified #153 serial split
 
 The candidate based on `3e865d5b0348d0c7c462ed8b40a107ae2b158277` carries vendor content identity
@@ -311,3 +318,12 @@ moved; 3 (Cython ABI) — `#138`'s earlier native rebuild is **not** re-run on t
 native unit lane still requires the quiet, non-root, CPU-allocated runner, so **condition 3 is not
 terminal**; 5 (independent review) pending on the exact head. `#138` and `#142` therefore stay
 **OPEN**, `#122` stays **OPEN**, and release status stays **PARTIAL**.
+
+## Issue #133 candidate: bounded main-module source components
+
+Candidate content identity: `2385be4897e993f2c92418ec6d297425684687d8` (inherited `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`). The main Python
+source is split into five verbatim components, assembled into one namespace
+and one native translation unit with unchanged `pyboy.pxd`. See
+`PYBOY_MAIN_MODULE_SPLIT.md` for design, tradeoffs and pending gates.
+This records implementation and re-pinning, not acceptance: #133 remains
+unqualified until full source/native checks and independent review pass.

@@ -3,6 +3,7 @@ import os
 import platform
 import sys
 from multiprocessing import cpu_count
+from runpy import run_path
 import numpy as np
 
 from setuptools import Extension, setup
@@ -60,11 +61,22 @@ class build_ext(_build_ext):
         if sys.platform == "darwin":
             cflags.append("-DCYTHON_INLINE=inline __attribute__ ((__unused__)) __attribute__((always_inline))")
 
+        # Keep the public extension and its augmenting .pxd in one translation
+        # unit. Never Cythonize the runtime-loading facade, and never overwrite
+        # tracked source with the transient assembled compiler input.
+        source_support = run_path(os.path.join(ROOT_DIR, "_source.py"))
+        main_source = source_support["stage_native_source"](
+            ROOT_DIR, os.path.join("build", "pyboy-components")
+        )
+        main_path = os.path.join(ROOT_DIR, "pyboy.py")
+        main_dependencies = [os.path.join(ROOT_DIR, name) for name in source_support["COMPONENTS"]]
+        main_dependencies.append(os.path.join(ROOT_DIR, "pyboy.pxd"))
         py_pxd_files = prep_pxd_py_files()
         cythonize_files = map(
             lambda src: Extension(
                 src.split(".")[0].replace(os.sep, "."),
-                [src],
+                [str(main_source)] if src == main_path else [src],
+                depends=main_dependencies if src == main_path else [],
                 extra_compile_args=cflags,
                 extra_link_args=[] if DEBUG else ["-s", "-w"],
                 include_dirs=[np.get_include()],
@@ -74,6 +86,7 @@ class build_ext(_build_ext):
         self.distribution.ext_modules = cythonize(
             [*cythonize_files],
             nthreads=thread_count,
+            include_path=[os.getcwd()],
             annotate=False,
             gdb_debug=False,
             language_level=3,
@@ -99,7 +112,10 @@ class build_ext(_build_ext):
 
 
 def prep_pxd_py_files():
-    ignore_py_files = ["__main__.py", "manager_gen.py", "opcodes_gen.py", "opcodes_gen_handlers.py", "conftest.py"]
+    ignore_py_files = [
+        "__main__.py", "manager_gen.py", "opcodes_gen.py",
+        "opcodes_gen_handlers.py", "conftest.py", "_source.py",
+    ]
     # Cython doesn't trigger a recompile on .py files, where only the .pxd file has changed. So we fix this here.
     # We also yield the py_files that have a .pxd file, as we feed these into the cythonize call.
     for root, dirs, files in os.walk(ROOT_DIR):
