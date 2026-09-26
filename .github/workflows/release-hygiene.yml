@@ -77,18 +77,26 @@ jobs:
 
       - name: Check packaging and gate lint/format
         run: |
-          # Boundary decision: the `ruff format --check` lane below covers
-          # `scripts/`, `tests/`, and exactly one `src/` file -- the #242 facade
-          # entry, added so that new source path is format-checked and not
-          # merely checked. The remaining `src/` paths of the runtime/link lane
-          # stay outside the format boundary on purpose and are named in
-          # `tests/test_local_ci_policy.py`. Measured reason: 7 of that lane's
-          # 29 paths are not format-clean today (3 of its 17 `src/` files), so
-          # format-checking the whole lane would fail the gate and belongs in a
-          # separate change that fixes those files first. The narrow boundary is
-          # pre-existing -- 0 of 16 `src/` files were format-checked at
-          # 061fa15c. The two lanes stay in lockstep with
-          # scripts/run_local_ci.sh.
+          # Boundary decision: the two main lanes below cover all of `tests/`
+          # (passed as the directory itself, so a newly added test file cannot
+          # silently escape) plus an explicit list of `scripts/` paths, and the
+          # `ruff format --check` lane additionally covers exactly one `src/`
+          # file -- the #242 facade entry, added so that new source path is
+          # format-checked and not merely checked. The remaining `src/` paths of
+          # the runtime/link lane stay outside the format boundary on purpose
+          # and are named in `tests/test_local_ci_policy.py`. Measured reason: 7
+          # of that lane's 29 paths are not format-clean today (3 of its 17
+          # `src/` files), so format-checking the whole lane would fail the gate
+          # and belongs in a separate change that fixes those files first. The
+          # narrow boundary is pre-existing -- 0 of 16 `src/` files were
+          # format-checked at 061fa15c. `scripts/` and `src/` stay enumerated
+          # rather than globbed because neither tree is lint- or format-clean
+          # yet (measured on the #269 content: 5 `scripts/` check errors, 41
+          # `scripts/` and 19 `src/` files needing reformat), so globbing them
+          # here would fail the gate and is a separate change that fixes those
+          # files first. The two lanes stay in lockstep with
+          # scripts/run_local_ci.sh, and tests/test_local_ci_policy.py enforces
+          # the `tests/` coverage rather than trusting this comment.
           python -m ruff check \
             scripts/_timed_battle_probe.py \
             scripts/_timed_battle_probe_reads.py \
@@ -141,62 +149,7 @@ jobs:
             scripts/timed_frame_window.py \
             scripts/validate_battle_scenarios.py \
             scripts/validate_fixture_manifest.py \
-            tests/_battle_item_evidence.py \
-            tests/_battle_item_evidence_factories.py \
-            tests/_gate_capacity_support.py \
-            tests/_gate_report.py \
-            tests/_qualification_runner_support.py \
-            tests/_rom_assets.py \
-            tests/_tier_config.py \
-            tests/conftest.py \
-            tests/test_battle_coverage_accounting.py \
-            tests/test_battle_coverage_catalog.py \
-            tests/test_battle_coverage_gate_assets.py \
-            tests/test_battle_coverage_identity.py \
-            tests/test_battle_coverage_mechanics.py \
-            tests/test_battle_item_evidence_inventory.py \
-            tests/test_battle_item_evidence_medicine.py \
-            tests/test_battle_item_evidence_targets.py \
-            tests/test_battle_item_evidence_timeline.py \
-            tests/test_battle_scenario_catalog.py \
-            tests/test_battle_scenario_producer_capture.py \
-            tests/test_battle_scenario_producer_run.py \
-            tests/test_battle_scenario_producer_runtime.py \
-            tests/test_battle_scenario_producer_screening.py \
-            tests/test_battle_scenario_validator.py \
-            tests/test_fixture_provenance.py \
-            tests/test_gate_capacity_boundaries.py \
-            tests/test_gate_capacity_interrupts.py \
-            tests/test_gate_capacity_main.py \
-            tests/test_gate_capacity_policy.py \
-            tests/test_gate_early_smoke.py \
-            tests/test_party_record_audit.py \
-            tests/test_production_gate_diagnostics.py \
-            tests/test_production_gate_matrix_manifest.py \
-            tests/test_production_gate_report_loader.py \
-            tests/test_production_gate_run_tier_failures.py \
-            tests/test_production_gate_strict_matrix.py \
-            tests/test_qualification_runner.py \
-            tests/test_qualification_runner_allocation.py \
-            tests/test_qualification_runner_assets.py \
-            tests/test_qualification_runner_command.py \
-            tests/test_qualification_runner_containment.py \
-            tests/test_qualification_runner_lockstate.py \
-            tests/test_qualification_runner_native.py \
-            tests/test_qualification_runner_release.py \
-            tests/test_runtime_packaging_bootstrap.py \
-            tests/test_runtime_packaging_build_contract.py \
-            tests/test_runtime_packaging_dependency_pins.py \
-            tests/test_runtime_packaging_hygiene.py \
-            tests/test_timed_remote.py \
-            tests/test_timed_remote_facade.py \
-            tests/test_timed_frame_admission_invariants.py \
-            tests/test_timed_frame_admission_overrun.py \
-            tests/test_timed_frame_admission_rows.py \
-            tests/test_timed_frame_admission_span.py \
-            tests/test_timed_frame_admission_state_table.py \
-            tests/test_timed_frame_admission_validator.py \
-            tests/test_mcp_server_import_order.py
+            tests
           python -m ruff format --check \
             src/pokered_harness/_mcp_facade_entry.py \
             scripts/_timed_battle_probe.py \
@@ -250,62 +203,7 @@ jobs:
             scripts/timed_frame_window.py \
             scripts/validate_battle_scenarios.py \
             scripts/validate_fixture_manifest.py \
-            tests/_battle_item_evidence.py \
-            tests/_battle_item_evidence_factories.py \
-            tests/_gate_capacity_support.py \
-            tests/_gate_report.py \
-            tests/_qualification_runner_support.py \
-            tests/_rom_assets.py \
-            tests/_tier_config.py \
-            tests/conftest.py \
-            tests/test_battle_coverage_accounting.py \
-            tests/test_battle_coverage_catalog.py \
-            tests/test_battle_coverage_gate_assets.py \
-            tests/test_battle_coverage_identity.py \
-            tests/test_battle_coverage_mechanics.py \
-            tests/test_battle_item_evidence_inventory.py \
-            tests/test_battle_item_evidence_medicine.py \
-            tests/test_battle_item_evidence_targets.py \
-            tests/test_battle_item_evidence_timeline.py \
-            tests/test_battle_scenario_catalog.py \
-            tests/test_battle_scenario_producer_capture.py \
-            tests/test_battle_scenario_producer_run.py \
-            tests/test_battle_scenario_producer_runtime.py \
-            tests/test_battle_scenario_producer_screening.py \
-            tests/test_battle_scenario_validator.py \
-            tests/test_fixture_provenance.py \
-            tests/test_gate_capacity_boundaries.py \
-            tests/test_gate_capacity_interrupts.py \
-            tests/test_gate_capacity_main.py \
-            tests/test_gate_capacity_policy.py \
-            tests/test_gate_early_smoke.py \
-            tests/test_party_record_audit.py \
-            tests/test_production_gate_diagnostics.py \
-            tests/test_production_gate_matrix_manifest.py \
-            tests/test_production_gate_report_loader.py \
-            tests/test_production_gate_run_tier_failures.py \
-            tests/test_production_gate_strict_matrix.py \
-            tests/test_qualification_runner.py \
-            tests/test_qualification_runner_allocation.py \
-            tests/test_qualification_runner_assets.py \
-            tests/test_qualification_runner_command.py \
-            tests/test_qualification_runner_containment.py \
-            tests/test_qualification_runner_lockstate.py \
-            tests/test_qualification_runner_native.py \
-            tests/test_qualification_runner_release.py \
-            tests/test_runtime_packaging_bootstrap.py \
-            tests/test_runtime_packaging_build_contract.py \
-            tests/test_runtime_packaging_dependency_pins.py \
-            tests/test_runtime_packaging_hygiene.py \
-            tests/test_timed_remote.py \
-            tests/test_timed_remote_facade.py \
-            tests/test_timed_frame_admission_invariants.py \
-            tests/test_timed_frame_admission_overrun.py \
-            tests/test_timed_frame_admission_rows.py \
-            tests/test_timed_frame_admission_span.py \
-            tests/test_timed_frame_admission_state_table.py \
-            tests/test_timed_frame_admission_validator.py \
-            tests/test_mcp_server_import_order.py
+            tests
 
       - name: Check runtime and link lane lint
         run: |
