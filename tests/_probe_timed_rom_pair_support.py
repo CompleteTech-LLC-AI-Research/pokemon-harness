@@ -508,6 +508,10 @@ class _MenuSession(FakeSession):
 
 def _run_menu_owner(*extra, behavior="complete", profile="menu", checkpoint=None):
     """One synthetic owner runs production scheduling without a peer CPU or ROM."""
+    from tests.test_timed_menu_frame_bound import FakeClock
+
+    clock = FakeClock(step=0.0)
+    clock_deadline_base = clock()
     args = arguments(
         "--input-profile",
         profile,
@@ -544,12 +548,23 @@ def _run_menu_owner(*extra, behavior="complete", profile="menu", checkpoint=None
                     threading.Barrier(1),
                     [None, None],
                     threading.Lock(),
-                    time.monotonic() + 3,
-                    time.monotonic() + 5,
+                    # The rows using this helper assert exact step counts, exact
+                    # menu-schedule offsets and exact terminal semantics. Against
+                    # the real clock a 3-second deadline makes those assertions a
+                    # measurement of host speed instead of the frame bound (#252).
+                    # `#255` added the `clock` seam for precisely this reason; the
+                    # milestone rows use it and these two helpers still do not.
+                    # A step of 0 models an arbitrarily fast host, so the owner
+                    # terminates on the frame limit and the exact counts hold on
+                    # any machine. The deadline branch is still exercised
+                    # separately by tests/test_timed_menu_frame_bound.py.
+                    clock_deadline_base + 3,
+                    clock_deadline_base + 5,
                     lambda *args, **kwargs: session,
                     harness.endpoint,
                     harness.assets,
                     checkpoint,
+                    clock=clock,
                 )
             finally:
                 accepted.close()
