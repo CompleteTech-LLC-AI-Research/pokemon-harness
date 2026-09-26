@@ -133,8 +133,11 @@ def run_authored_goal_owner(
                     threading.Barrier(1),
                     [None, None],
                     threading.Lock(),
-                    time.monotonic() + 3,
-                    time.monotonic() + 5,
+                    # Exact step/call counts and exact goal-driver milestones are
+                    # asserted by the trade-pair rows, so the owner must reach its
+                    # frame bound rather than be cut off by a wall clock (#252).
+                    float("inf"),
+                    float("inf"),
                     lambda *args, **kwargs: session,
                     harness.endpoint,
                     harness.assets,

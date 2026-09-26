@@ -572,6 +572,16 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
     args = probe_args("--input-profile", "menu", "--connector-chunk", "1", "--frame-limit", "300")
     args.call_retention = "stream" if stream else "inline"
     args.rom_milestones = milestones
+    # These rows assert retention, milestone context and terminal-state semantics.
+    # None of those contracts is about throughput, so the owner must terminate on
+    # the frame bound rather than on a wall clock. A real deadline here would make
+    # the retained-call count a measurement of host speed (this row has produced
+    # 258, 262, 266 and 293 of 300 on one unchanged commit), which silently turns a
+    # retention guarantee into a timing gate. The generous deadlines below are not
+    # a relaxed budget: they are unreachable sentinels, and `test_..._never_reaches_a_clock_deadline`
+    # fails if any row ever terminates on one.
+    unreachable_deadline = float("inf")
+    unreachable_overall = float("inf")
     harness = Harness()
     lifecycle, checkpoints, inputs = [], [], []
     game = SimpleNamespace(
@@ -653,8 +663,8 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
         SimpleNamespace(wait=lambda **kw: None),
         [None],
         threading.Lock(),
-        time.monotonic() + 20,
-        time.monotonic() + 21,
+        unreachable_deadline,
+        unreachable_overall,
         lambda *a, **kw: session,
         lambda *a, **kw: endpoint,
         lambda *a: {
@@ -725,6 +735,53 @@ def test_default_retention_keeps_full_calls_and_installs_no_hooks(monkeypatch, t
     assert len(record["calls"]) == 300
     assert "call_log" not in record and "milestones" not in record
     assert "register" not in lifecycle and not path.exists()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_calls"),
+    [
+        ({}, 300),
+        ({"stream": False, "milestones": False}, 300),
+        ({"terminal": "interrupted"}, 271),
+        ({"terminal": "completed_no_progress"}, 271),
+        ({"terminal": "completed_partial"}, 271),
+        ({"terminal": "observation_error"}, 271),
+    ],
+)
+def test_retention_rows_never_reach_a_clock_deadline(monkeypatch, tmp_path, kwargs, expected_calls):
+    """A retention contract must not be expressible as a throughput measurement.
+
+    The owner loop in ``scripts/probe_timed_rom_pair.py`` is wall-clock bounded, so a
+    finite deadline decides how many frames complete and therefore how many calls are
+    retained. Every row here asserts exact call counts, exact milestone context or
+    exact terminal-state semantics, so all of them must terminate on the frame bound
+    (or on their authored terminal condition) instead.
+
+    This is the regression guard for #252. It fails if the deadline passed to
+    ``_run_owner`` is ever made finite again, and it fails on a slow host even when
+    the count happens to come out right.
+    """
+    record, path, _, _ = run_owner(monkeypatch, tmp_path, **kwargs)
+    # `frame_bound` is set only on the frame-limit branch, which a reachable clock
+    # deadline pre-empts. Any other termination means the clock ended the workload.
+    assert record["termination"] != "cancelled_or_deadline", (
+        "owner stopped on a wall-clock deadline; retention counts are now host-speed dependent"
+    )
+    # The authored workload ran to its own terminal condition, not to a timeout.
+    if "call_log" in record:
+        assert record["call_log"]["record_count"] == expected_calls
+    else:
+        assert len(record["calls"]) == expected_calls
+    # Every retained call must carry the full authored record, with nothing dropped.
+    retained = record["calls"] or []
+    if retained:
+        assert [item["call_index"] for item in retained] == sorted(
+            item["call_index"] for item in retained
+        )
+        assert retained[0]["call_index"] == 0
+    assert record.get("in_flight") is None
+    if path.exists():
+        assert len(path.read_bytes().splitlines()) == expected_calls
 
 
 @pytest.mark.parametrize("status", ["interrupted", "completed_no_progress", "completed_partial"])

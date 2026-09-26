@@ -544,8 +544,14 @@ def _run_menu_owner(*extra, behavior="complete", profile="menu", checkpoint=None
                     threading.Barrier(1),
                     [None, None],
                     threading.Lock(),
-                    time.monotonic() + 3,
-                    time.monotonic() + 5,
+                    # These rows assert exact frame counts, exact menu-schedule
+                    # offsets and exact terminal semantics. None of that is a
+                    # throughput contract, so a reachable wall clock would decide
+                    # the result by host speed instead (see #252). The sentinels
+                    # are unreachable by construction: the owner must terminate on
+                    # the frame limit or on its authored failure.
+                    float("inf"),
+                    float("inf"),
                     lambda *args, **kwargs: session,
                     harness.endpoint,
                     harness.assets,
