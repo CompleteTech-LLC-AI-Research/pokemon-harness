@@ -8,7 +8,9 @@ bounded production gate, which is outside the unit-test tier.
 from __future__ import annotations
 
 import os
-from pathlib import Path, PurePosixPath
+import subprocess
+import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "scripts" / "run_local_ci.sh"
@@ -55,37 +57,54 @@ def _ruff_invocations(text: str) -> list[tuple[str, ...]]:
     return invocations
 
 
-def _ruff_excluded_prefixes() -> tuple[str, ...]:
-    """Read `extend-exclude` from the Ruff config so coverage mirrors the gate."""
+def _ruff_lint_resolved_files() -> set[str]:
+    """Return the repo-relative files Ruff itself resolves for the main lane.
+
+    Re-implementing `extend-exclude` in the test is what made this row lie:
+    the hand-rolled matcher crashed on any tree that declared an
+    `extend-exclude` entry, because `PurePath.match()` takes a *string* pattern
+    and the matcher passed a `PurePosixPath`, so the coverage assertion died
+    with `TypeError` instead of reporting coverage. It also had no way to stay
+    faithful to Ruff's glob dialect, which `pathlib` does not implement the
+    same way.
+
+    Ask Ruff instead. `ruff check <path> --show-files` prints the exact file set
+    it would lint after honouring `extend-exclude`, its default excludes and its
+    directory recursion, so this measures the gate rather than a model of it.
+    """
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "tests", "--show-files", "--no-cache"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    resolved = set()
+    for line in completed.stdout.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        relative = Path(candidate).resolve().relative_to(ROOT).as_posix()
+        # `--show-files` may also report files Ruff pulled in from a config
+        # `src` entry; only the `tests` tree is this row's contract.
+        if relative.startswith("tests/"):
+            resolved.add(relative)
+    return resolved
+
+
+def _ruff_excluded_patterns() -> tuple[str, ...]:
+    """Return `extend-exclude` for the failure message only.
+
+    Exclusion itself is decided by Ruff in ``_ruff_lint_resolved_files``; this
+    is read purely so a failure names the pattern that caused it.
+    """
 
     import tomllib
 
     config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     raw = config.get("tool", {}).get("ruff", {}).get("extend-exclude", [])
     return tuple(raw if isinstance(raw, list) else [raw])
-
-
-def _is_excluded(relative_path: str, excluded: tuple[str, ...]) -> bool:
-    """Return True when Ruff's `extend-exclude` would drop this path.
-
-    `extend-exclude` entries are glob patterns, not just literal prefixes, so
-    match them the way Ruff does.  A prefix-only test would pass for
-    `extend-exclude = ["tests/legacy"]` while silently ignoring
-    `["tests/test_*.py"]`, which drops the great majority of the test suite:
-    measured on this tree, that glob removes 209 of 267 test files from the
-    lanes.  The coverage assertion below is the last line of defence against a
-    silent exclusion, so it must use the same resolution Ruff does.
-    """
-
-    path = PurePosixPath(relative_path)
-    for entry in excluded:
-        pattern = PurePosixPath(entry)
-        if path.match(pattern) or path.match(f"{pattern}/**"):
-            return True
-        # Ruff also treats a bare directory entry as covering its contents.
-        if relative_path == entry or relative_path.startswith(f"{entry}/"):
-            return True
-    return False
 
 
 def _main_lane(invocations: list[tuple[str, ...]], subcommand: str) -> tuple[str, ...]:
@@ -161,15 +180,20 @@ def test_main_ruff_lane_tests_directory_covers_every_test_file_on_disk() -> None
     }
     assert on_disk, "no test files found on disk"
 
-    excluded = _ruff_excluded_prefixes()
-    # Recurse the `tests` directory the way Ruff does, then drop anything
-    # `extend-exclude` would skip. The result must still be the whole tree.
-    covered = {path for path in on_disk if not _is_excluded(path, excluded)}
+    # Resolve the `tests` directory token through Ruff itself, then require the
+    # resolved set to still be the whole tree. An `extend-exclude` entry that
+    # drops a test file now fails here with the offending file, instead of
+    # crashing the row or silently shrinking the gate.
+    covered = _ruff_lint_resolved_files()
     uncovered = on_disk - covered
     assert not uncovered, (
-        "tests/ files are excluded from the Ruff lanes by extend-exclude "
-        f"({sorted(excluded)!r}): {sorted(uncovered)[:5]}"
+        "tests/ files are excluded from the Ruff lanes: "
+        f"{sorted(uncovered)[:5]} (extend-exclude={_ruff_excluded_patterns()!r})"
     )
+    # The directory token must also not *gain* files Ruff would never lint,
+    # which would mean the measured set and the real gate disagree.
+    unexpected = covered - on_disk
+    assert not unexpected, f"Ruff resolved unexpected tests/ files: {sorted(unexpected)[:5]}"
     # Guard against the directory token being satisfied by a stray file named
     # `tests` rather than the directory.
     assert tests_root.is_dir(), "the `tests` directory the lanes pass must exist"
