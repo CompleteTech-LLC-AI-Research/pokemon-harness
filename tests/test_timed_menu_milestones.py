@@ -573,12 +573,19 @@ def run_owner(
     milestones=True,
     terminal=None,
     clock_step=0.0,
+    close_timeouts=None,
 ):
     """Deterministic owner orchestration; only CPU advancement/transport are faked.
 
     The loop runs on an injected clock so the frame bound is exercised as a frame
     bound, not a host-speed statement (#252). ``clock_step=None`` restores the
     real monotonic clock that production uses.
+
+    ``close_timeouts`` is an optional list which, when supplied, is filled in
+    place with the ``timeout_s`` value the owner actually hands to
+    ``session.close`` on the teardown path. That records what production
+    computed, so a test can assert on the deadline the owner really used
+    instead of re-doing the arithmetic itself.
     """
     from tests._timed_menu_frame_bound_support import FakeClock, assert_not_deadline_truncated
 
@@ -627,7 +634,10 @@ def run_owner(
         locked=lambda **kwargs: nullcontext(),
         bind_timed_execution=lambda *a, **kw: lifecycle.append("bind"),
         unbind_timed_execution=lambda *a, **kw: lifecycle.append("unbind"),
-        close=lambda **kw: lifecycle.append("close"),
+        close=lambda **kw: (
+            lifecycle.append("close"),
+            None if close_timeouts is None else close_timeouts.append(kw.get("timeout_s")),
+        )[-1],
         press=lambda button, **kw: inputs.append((button, kw)),
         step=step,
     )
