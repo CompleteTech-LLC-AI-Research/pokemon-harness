@@ -55,10 +55,7 @@ def test_suppress_prompt_wait_flag(mem, symbols):
 def test_text_parser_reads_the_supplied_symbol_addresses(mem):
     # Per-version .sym files are authoritative; neither parser field may
     # silently fall back to the fixture's canonical addresses.
-    sym = load_sym_text(
-        "00:C100 wTextDest\n"
-        "00:C102 wDoNotWaitForButtonPressAfterDisplayingText\n"
-    )
+    sym = load_sym_text("00:C100 wTextDest\n00:C102 wDoNotWaitForButtonPressAfterDisplayingText\n")
     mem.write_word_le(0xC100, 0x9C00)
     mem[0xC102] = 1
     mem.write_word_le(0xCC3A, 0xC000)
@@ -72,9 +69,7 @@ def test_text_parser_reads_the_supplied_symbol_addresses(mem):
 
 
 def test_missing_text_dest_is_unknown_not_a_guessed_value(mem):
-    sym = load_sym_text(
-        "00:CC3C wDoNotWaitForButtonPressAfterDisplayingText\n"
-    )
+    sym = load_sym_text("00:CC3C wDoNotWaitForButtonPressAfterDisplayingText\n")
     # Even if the canonical address happens to contain an active-looking
     # pointer, no wTextDest symbol means that destination state is unknown.
     mem.write_word_le(0xCC3A, 0x9C00)

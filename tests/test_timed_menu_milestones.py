@@ -566,13 +566,7 @@ def probe_args(*extra):
 
 
 def run_owner(
-    monkeypatch,
-    tmp_path,
-    *,
-    stream=True,
-    milestones=True,
-    terminal=None,
-    clock_step=0.0,
+    monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=None, clock_step=0.0
 ):
     """Deterministic owner orchestration; only CPU advancement/transport are faked.
 

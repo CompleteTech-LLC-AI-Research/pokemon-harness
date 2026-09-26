@@ -75,8 +75,13 @@ def _wait_for_settled_battle_evidence(link, counters: dict, *, budget_frames: in
 
 
 def _drive_complete_battle_turn(
-    a, b, link, *, counters: dict,
-    battle_budget_frames: int = 6000, step_frames: int = 20,
+    a,
+    b,
+    link,
+    *,
+    counters: dict,
+    battle_budget_frames: int = 6000,
+    step_frames: int = 20,
     completion: str = "turn",
 ) -> dict:
     """Drive a full link-battle turn from COLOSSEUM warp to damage resolution.
@@ -130,9 +135,7 @@ def _drive_complete_battle_turn(
     if battle_budget_frames < 0:
         raise ValueError("battle_budget_frames must be non-negative")
     if completion not in {"versus", "turn", "damage"}:
-        raise ValueError(
-            "completion must be one of: versus, turn, damage"
-        )
+        raise ValueError("completion must be one of: versus, turn, damage")
 
     phase_frames = 0
     remaining_budget = battle_budget_frames
@@ -234,22 +237,14 @@ def _drive_complete_battle_turn(
             # mon therefore exposes max=5 while valid move cursors remain
             # 1..4.  This mirrors SelectMenuItem_CursorDown in the cartridge
             # code instead of treating wMaxMenuItem as a move count.
-            1 <= current < maximum <= 5
-            and watched_keys & 0x01
+            1 <= current < maximum <= 5 and watched_keys & 0x01
         )
 
     if completion != "versus" and vs[0] > 0 and vs[1] > 0:
         wait_interleaved(
-            lambda: (
-                main[0] > 0
-                and main[1] > 0
-                and battle_menu[0] > 0
-                and battle_menu[1] > 0
-            ),
+            lambda: main[0] > 0 and main[1] > 0 and battle_menu[0] > 0 and battle_menu[1] > 0,
         )
-        wait_interleaved(
-            lambda: battle_menu_input_ready(a) and battle_menu_input_ready(b)
-        )
+        wait_interleaved(lambda: battle_menu_input_ready(a) and battle_menu_input_ready(b))
 
     menu_ready = (
         completion != "versus"
@@ -281,10 +276,7 @@ def _drive_complete_battle_turn(
     if completion != "versus":
         wait_interleaved(
             lambda: (
-                mm[0] > 0
-                and mm[1] > 0
-                and move_menu_input_ready(a)
-                and move_menu_input_ready(b)
+                mm[0] > 0 and mm[1] > 0 and move_menu_input_ready(a) and move_menu_input_ready(b)
             )
         )
 
@@ -327,11 +319,7 @@ def _drive_complete_battle_turn(
             return count
 
         def menu_cursor(session, move_count: int) -> int:
-            cursor = int(
-                session._pyboy.memory[
-                    session.symbols.addr_of("wCurrentMenuItem")
-                ]
-            )
+            cursor = int(session._pyboy.memory[session.symbols.addr_of("wCurrentMenuItem")])
             assert 1 <= cursor <= move_count, (
                 f"invalid move-menu cursor {cursor} for {move_count} moves"
             )
@@ -373,8 +361,7 @@ def _drive_complete_battle_turn(
         next_move_input_frame = [phase_frames, phase_frames]
         move_input_attempts = [0, 0]
         while remaining_budget > 0 and not (
-            select_enemy[0] > select_enemy_before[0]
-            and select_enemy[1] > select_enemy_before[1]
+            select_enemy[0] > select_enemy_before[0] and select_enemy[1] > select_enemy_before[1]
         ):
             for idx, session in enumerate((a, b)):
                 if (
@@ -395,12 +382,7 @@ def _drive_complete_battle_turn(
             return vs[0] > 0 and vs[1] > 0
         if completion == "damage":
             return dmg[0] > 0 and dmg[1] > 0
-        return (
-            lbe[0] > 0
-            and lbe[1] > 0
-            and epm[0] + eem[0] > 0
-            and epm[1] + eem[1] > 0
-        )
+        return lbe[0] > 0 and lbe[1] > 0 and epm[0] + eem[0] > 0 and epm[1] + eem[1] > 0
 
     while remaining_budget > 0 and not completion_reached():
         tick_bounded(step_frames)

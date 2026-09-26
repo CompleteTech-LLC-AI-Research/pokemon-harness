@@ -116,10 +116,7 @@ def test_every_mcp_session_lock_call_has_an_explicit_deadline() -> None:
     ]
 
     assert lock_calls
-    assert all(
-        any(keyword.arg == "timeout_s" for keyword in node.keywords)
-        for node in lock_calls
-    )
+    assert all(any(keyword.arg == "timeout_s" for keyword in node.keywords) for node in lock_calls)
 
 
 def test_cancelled_mcp_request_has_a_bounded_cleanup_and_worker_wait(
@@ -143,22 +140,14 @@ def test_cancelled_mcp_request_has_a_bounded_cleanup_and_worker_wait(
         assert cleanup_release.wait(timeout=2.0)
         cleanup_done.set()
 
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server.dispatch_tool", blocked_dispatch
-    )
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server._disconnect_remote", blocked_cleanup
-    )
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05
-    )
+    monkeypatch.setattr("pokered_harness.mcp_server.dispatch_tool", blocked_dispatch)
+    monkeypatch.setattr("pokered_harness.mcp_server._disconnect_remote", blocked_cleanup)
+    monkeypatch.setattr("pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05)
 
     server = build_server(object())  # type: ignore[arg-type]
     handler = _call_tool_handler(server)
     request = mcp_types.CallToolRequest(
-        params=mcp_types.CallToolRequestParams(
-            name="step", arguments={"count": 1}
-        )
+        params=mcp_types.CallToolRequestParams(name="step", arguments={"count": 1})
     )
 
     async def scenario() -> None:
@@ -208,15 +197,9 @@ def test_cancelled_mcp_resource_has_a_bounded_cleanup_and_worker_wait(
         cleanup_called.set()
         worker_release.set()
 
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server.read_resource", blocked_resource
-    )
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server._disconnect_remote", cancel_remote
-    )
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05
-    )
+    monkeypatch.setattr("pokered_harness.mcp_server.read_resource", blocked_resource)
+    monkeypatch.setattr("pokered_harness.mcp_server._disconnect_remote", cancel_remote)
+    monkeypatch.setattr("pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05)
 
     server = build_server(object())  # type: ignore[arg-type]
     handler = server.request_handlers[mcp_types.ReadResourceRequest]
@@ -273,12 +256,8 @@ def test_stdio_shutdown_bounds_unpair_operation_wait(
         "pokered_harness.mcp_server.build_server",
         lambda *_args, **_kwargs: _FinishedServer(),
     )
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server.stdio_server", fake_stdio_server
-    )
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05
-    )
+    monkeypatch.setattr("pokered_harness.mcp_server.stdio_server", fake_stdio_server)
+    monkeypatch.setattr("pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05)
 
     started = time.monotonic()
     try:

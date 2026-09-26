@@ -34,9 +34,11 @@ def test_group_scope_orders_reversed_inputs_and_rejects_reverse_single_entry() -
             assert peer.current_tick() == 0
 
         lower, higher = sorted((primary, peer), key=lambda item: item._owner.order)
-        with higher.locked(), pytest.raises(
-            EmulatorOwnershipError, match="canonical order"
-        ), lower.locked():
+        with (
+            higher.locked(),
+            pytest.raises(EmulatorOwnershipError, match="canonical order"),
+            lower.locked(),
+        ):
             pass
 
         with locked_sessions(peer, primary):
@@ -53,9 +55,12 @@ def test_mutating_mcp_dispatch_fails_before_operation_lock_from_owner_scope() ->
     peer, _, _ = _session()
     link = mcp_server.LinkState(peer_session=peer)
     try:
-        with primary.locked(), pytest.raises(
-            EmulatorOwnershipError,
-            match="outside an emulator ownership scope",
+        with (
+            primary.locked(),
+            pytest.raises(
+                EmulatorOwnershipError,
+                match="outside an emulator ownership scope",
+            ),
         ):
             mcp_server.dispatch_tool(
                 primary,
@@ -91,6 +96,7 @@ def test_status_and_disconnect_are_safe_from_owner_scope() -> None:
 def test_owner_claim_provider_is_single_writer_and_releases() -> None:
     pyboy = object()
     owner = owner_for(pyboy)
+
     # Plain object instances cannot be weak-referenced, so use a weakrefable
     # provider shell for the metadata claim contract.
     class Provider:
@@ -119,10 +125,13 @@ def test_bounded_owner_scope_rejects_context_only_lock() -> None:
 
     owner.lock = ContextOnlyLock()
     try:
-        with pytest.raises(
-            EmulatorOwnershipError,
-            match="does not support bounded acquisition",
-        ), owner.access(timeout=0.01):
+        with (
+            pytest.raises(
+                EmulatorOwnershipError,
+                match="does not support bounded acquisition",
+            ),
+            owner.access(timeout=0.01),
+        ):
             raise AssertionError("an unbounded compatibility lock was entered")
     finally:
         owner.lock = original_lock
@@ -134,9 +143,7 @@ def test_local_link_step_times_out_before_provider_mutation(monkeypatch) -> None
     link = mcp_server.LinkState(peer_session=peer)
     provider_calls: list[tuple[int, bool]] = []
     link.local_link_session = SimpleNamespace(
-        step_interleaved=lambda count, render: provider_calls.append(
-            (count, render)
-        )
+        step_interleaved=lambda count, render: provider_calls.append((count, render))
     )
     entered = threading.Event()
     release = threading.Event()

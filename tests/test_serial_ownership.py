@@ -147,18 +147,14 @@ def test_dispatch_to_owner_runs_native_core_and_irq_on_owner_thread_only():
     service_result: list[int] = []
 
     try:
-        assert _wait_for(
-            lambda: owner.debug_snapshot()["pending_edge_requests"] == 1
-        )
+        assert _wait_for(lambda: owner.debug_snapshot()["pending_edge_requests"] == 1)
         assert core.edge_events == []
 
         def service_once() -> None:
             owner_thread_id.append(threading.get_ident())
             service_result.append(owner.service_pending_edges(max_edges=1))
 
-        service_thread = threading.Thread(
-            target=service_once, name="test-emulator-owner"
-        )
+        service_thread = threading.Thread(target=service_once, name="test-emulator-owner")
         service_thread.start()
         service_thread.join(timeout=1.0)
         sender.join(timeout=1.0)
@@ -214,14 +210,10 @@ def test_dispatch_to_owner_defers_unarmed_edge_until_owner_rearms():
             core.internal_clock = 0
         service_results.append(owner.service_pending_edges(max_edges=1))
 
-    service_thread = threading.Thread(
-        target=service_and_rearm, name="test-deferred-emulator-owner"
-    )
+    service_thread = threading.Thread(target=service_and_rearm, name="test-deferred-emulator-owner")
 
     try:
-        assert _wait_for(
-            lambda: owner.debug_snapshot()["pending_edge_requests"] == 1
-        )
+        assert _wait_for(lambda: owner.debug_snapshot()["pending_edge_requests"] == 1)
         service_thread.start()
         assert first_service_done.wait(timeout=1.0)
 
@@ -267,9 +259,7 @@ def test_dispatch_to_owner_stop_cleans_response_worker_and_wakes_master():
     sender.start()
 
     try:
-        assert _wait_for(
-            lambda: owner.debug_snapshot()["pending_edge_requests"] == 1
-        )
+        assert _wait_for(lambda: owner.debug_snapshot()["pending_edge_requests"] == 1)
         started = time.monotonic()
         assert owner.stop(timeout_s=1.0)
         assert time.monotonic() - started < 0.5
@@ -489,9 +479,7 @@ def test_network_attach_wraps_source_pyboy_tick_and_services_owner_queue():
         assert callable(getattr(pyboy._tick, "__wrapped__", None))
 
         sender.start()
-        assert _wait_for(
-            lambda: backend.debug_snapshot()["pending_edge_requests"] == 1
-        )
+        assert _wait_for(lambda: backend.debug_snapshot()["pending_edge_requests"] == 1)
         assert core.edge_events == []
         assert pyboy.tick(1, render=False) is True
         sender.join(timeout=1.0)
@@ -499,9 +487,7 @@ def test_network_attach_wraps_source_pyboy_tick_and_services_owner_queue():
         assert not sender.is_alive()
         assert sender_result == [0]
         assert len(pyboy.tick_threads) == 1
-        assert {event[1] for event in core.edge_events} == {
-            pyboy.tick_threads[0]
-        }
+        assert {event[1] for event in core.edge_events} == {pyboy.tick_threads[0]}
     finally:
         link.detach_all()
         peer.stop(timeout_s=1.0)

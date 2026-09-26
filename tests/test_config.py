@@ -99,9 +99,10 @@ def test_repo_versions_selects_hash_by_rom_path():
     assert cfg.sha1_for_path("rom/blue/pokemon-blue.gb") == (
         "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
     )
-    assert cfg.sha1_for_path(
-        "/isolated/worktree/rom/yellow/pokemon-yellow.gbc"
-    ) == "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+    assert (
+        cfg.sha1_for_path("/isolated/worktree/rom/yellow/pokemon-yellow.gbc")
+        == "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+    )
     assert cfg.sha1_for_path("rom/unknown/custom.gb") is None
 
 
@@ -109,12 +110,11 @@ def test_repo_versions_selects_hash_by_rom_path():
 def test_repo_versions_selects_symbol_hash_by_symbol_path(lookup_name):
     cfg = load_versions("VERSIONS.md")
     lookup = getattr(cfg, lookup_name)
-    assert lookup("rom/red/pokemon-red.sym") == (
-        "03783c86a42588bd77f73bd7814cf8d70e590118"
+    assert lookup("rom/red/pokemon-red.sym") == ("03783c86a42588bd77f73bd7814cf8d70e590118")
+    assert (
+        lookup(r"C:\isolated\worktree\rom\yellow\pokemon-yellow.sym")
+        == "7c4205723943e7722230dcf014e5e8a2012474aa"
     )
-    assert lookup(
-        r"C:\isolated\worktree\rom\yellow\pokemon-yellow.sym"
-    ) == "7c4205723943e7722230dcf014e5e8a2012474aa"
     assert lookup("rom/unknown/custom.sym") is None
 
 
@@ -153,9 +153,7 @@ def test_load_peer_env_unset_returns_none_fields(monkeypatch):
 def test_load_peer_env_reads_all_three(monkeypatch):
     monkeypatch.setenv("POKERED_PEER_ROM_PATH", "rom/blue/pokemon-blue.gb")
     monkeypatch.setenv("POKERED_PEER_SYM_PATH", "rom/blue/pokemon-blue.sym")
-    monkeypatch.setenv(
-        "POKERED_PEER_ROM_SHA1", "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
-    )
+    monkeypatch.setenv("POKERED_PEER_ROM_SHA1", "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2")
     monkeypatch.delenv("POKERED_PEER_ROM_VERSION", raising=False)
     env = load_peer_env()
     assert env.rom_path == "rom/blue/pokemon-blue.gb"
@@ -205,8 +203,6 @@ def test_session_env_rejects_partial_or_unknown_configuration(monkeypatch):
 
 def test_session_env_rejects_hash_without_a_peer_asset(monkeypatch):
     _clear_env(monkeypatch, _PEER_VARS)
-    monkeypatch.setenv(
-        "POKERED_PEER_ROM_SHA1", "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
-    )
+    monkeypatch.setenv("POKERED_PEER_ROM_SHA1", "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2")
     with pytest.raises(VersionsConfigError, match="requires a ROM path"):
         load_peer_env().validate(role="peer")

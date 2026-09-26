@@ -139,18 +139,19 @@ def _wait_for_edge_request(
     """
     deadline = time.monotonic() + timeout
     while True:
-        if backend.debug_snapshot()["pending_edge_requests"] > 0 and not backend._edge_queue.empty():
+        if (
+            backend.debug_snapshot()["pending_edge_requests"] > 0
+            and not backend._edge_queue.empty()
+        ):
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise AssertionError(
-                "network reader did not queue EDGE_REQ; "
-                f"snapshot={backend.debug_snapshot()}"
+                f"network reader did not queue EDGE_REQ; snapshot={backend.debug_snapshot()}"
             )
         if not ready.wait(timeout=remaining):
             raise AssertionError(
-                "network reader did not queue EDGE_REQ; "
-                f"snapshot={backend.debug_snapshot()}"
+                f"network reader did not queue EDGE_REQ; snapshot={backend.debug_snapshot()}"
             )
         ready.clear()
         if backend._closed:
@@ -365,9 +366,7 @@ def _run_cpu_case(pyboy, *, internal_clock: bool) -> dict[str, object]:
         assert final["frame"] > 0
         if not internal_clock:
             ready_state = next(
-                state
-                for state in states
-                if state["halt_marker"] == 0xA1 and state["halted"]
+                state for state in states if state["halt_marker"] == 0xA1 and state["halted"]
             )
             assert ready_state["halted"] is True
             assert ready_state["transfer_enabled"] is True

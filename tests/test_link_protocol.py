@@ -66,7 +66,7 @@ def _exchange_byte(
     master.set_SB(master_byte)
     slave.set_SB(slave_byte)
     master.set_SC(0x81)  # transfer enable + internal clock
-    slave.set_SC(0x80)   # transfer enable + external clock
+    slave.set_SC(0x80)  # transfer enable + external clock
     target = master.last_cycles + CYCLES_PER_BYTE_DMG
     completed = master.tick(target)
     assert completed, "master did not complete the byte transfer"
@@ -132,9 +132,19 @@ def test_data_block_with_FE_filler_and_patch_list_terminator():
     0xFE/0xFF in either direction."""
     a, b, _ = _make_pair()
     # Synthetic block: a few payload bytes, some FE fillers, then FF terminator.
-    block = bytes([0x01, 0x02, 0x03, SERIAL_NO_DATA_BYTE, 0x04,
-                   SERIAL_NO_DATA_BYTE, SERIAL_NO_DATA_BYTE, 0x05,
-                   PATCH_LIST_TERMINATOR])
+    block = bytes(
+        [
+            0x01,
+            0x02,
+            0x03,
+            SERIAL_NO_DATA_BYTE,
+            0x04,
+            SERIAL_NO_DATA_BYTE,
+            SERIAL_NO_DATA_BYTE,
+            0x05,
+            PATCH_LIST_TERMINATOR,
+        ]
+    )
     peer_block = bytes(reversed(block))
     recv_a, recv_b = _exchange_stream(a, b, block, peer_block)
     assert recv_a == peer_block
@@ -253,8 +263,10 @@ def test_role_swap_between_bytes_preserves_byte_order():
     assert recv_a == 0x22 and recv_b == 0x11
 
     # Second byte: B master.
-    b.set_SB(0x33); a.set_SB(0x44)
-    b.set_SC(0x81); a.set_SC(0x80)
+    b.set_SB(0x33)
+    a.set_SB(0x44)
+    b.set_SC(0x81)
+    a.set_SC(0x80)
     target = b.last_cycles + CYCLES_PER_BYTE_DMG
     assert b.tick(target)
     assert b.SB == 0x44
@@ -274,10 +286,26 @@ def test_full_synthetic_trade_preamble_block():
     preamble = bytes([SERIAL_PREAMBLE_BYTE] * 7)
     rng_a = bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A])
     rng_b = bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x11, 0x22, 0x33, 0x44, 0x55])
-    data_a = bytes([0x10, 0x11, SERIAL_NO_DATA_BYTE, 0x12, 0x13, 0x14,
-                    SERIAL_NO_DATA_BYTE, 0x15, 0x16, 0x17, 0x18,
-                    SERIAL_NO_DATA_BYTE, 0x19, 0x1A, 0x1B,
-                    PATCH_LIST_TERMINATOR])
+    data_a = bytes(
+        [
+            0x10,
+            0x11,
+            SERIAL_NO_DATA_BYTE,
+            0x12,
+            0x13,
+            0x14,
+            SERIAL_NO_DATA_BYTE,
+            0x15,
+            0x16,
+            0x17,
+            0x18,
+            SERIAL_NO_DATA_BYTE,
+            0x19,
+            0x1A,
+            0x1B,
+            PATCH_LIST_TERMINATOR,
+        ]
+    )
     data_b = bytes(reversed(data_a))
 
     stream_a = preamble + rng_a + data_a

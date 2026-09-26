@@ -108,8 +108,7 @@ def test_remote_endpoint_required_symbols_resolve(version: str):
     table = load_sym_file(path)
     missing = [s for s in _REMOTE_ENDPOINT_REQUIRED_SYMBOLS if s not in table]
     assert not missing, (
-        f"RemoteLinkEndpoint requires these symbols but they are missing "
-        f"on {version}: {missing}"
+        f"RemoteLinkEndpoint requires these symbols but they are missing on {version}: {missing}"
     )
 
 
@@ -166,9 +165,7 @@ def test_bridge_and_handshake_labels_present(version: str):
     assert "exchange_bytes" in resolved
     assert "handshake" in resolved
     bridge_or_handshake = [
-        s
-        for s in LINK_SYMBOLS
-        if s.role in (LinkRole.BRIDGE, LinkRole.HANDSHAKE) and s.required
+        s for s in LINK_SYMBOLS if s.role in (LinkRole.BRIDGE, LinkRole.HANDSHAKE) and s.required
     ]
     for sym in bridge_or_handshake:
         assert sym.key in resolved, (

@@ -90,6 +90,7 @@ existing peer-preload harness approach.
 Gated with ``skipif`` on the canonical ROM/SYM/fixture assets.  The parameter
 ids match the canonical games (``red_color``, ``blue_color``, ``yellow``).
 """
+
 from __future__ import annotations
 
 import asyncio

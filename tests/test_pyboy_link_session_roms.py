@@ -75,7 +75,6 @@ __all__ = [
 # acceptance contract monkeypatches).
 
 
-
 def _drive_two_sessions_to_link_menu(
     a, b, link, *, total_frames: int = 2400, frames_per_attempt: int = 20
 ) -> dict:
@@ -151,9 +150,7 @@ def _drive_two_sessions_to_link_menu(
 
         # Select the phase before injecting either A press and reuse the
         # result for both pair-owner advances below.
-        in_serial_phase = (
-            counters["SaveGameData"][0] > 0 or counters["SaveGameData"][1] > 0
-        )
+        in_serial_phase = counters["SaveGameData"][0] > 0 or counters["SaveGameData"][1] > 0
 
         # Deliberately stagger only the ordinary public input. Endpoint A
         # receives A, then the attached pair owner advances four frames;
@@ -261,8 +258,7 @@ def _drive_past_link_menu_to_trade_center(
     diag = _drive_two_sessions_to_link_menu(a, b, link)
     counters = diag["counters"]
     assert counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0, (
-        "precondition: both sides must have reached LinkMenu before "
-        "attempting TRADE_CENTER warp"
+        "precondition: both sides must have reached LinkMenu before attempting TRADE_CENTER warp"
     )
 
     extra_frames = 0
@@ -277,9 +273,7 @@ def _drive_past_link_menu_to_trade_center(
         # Sub-frame interleaving stays on — still in serial-heavy phase
         # (LinkMenu exchange, then the big trainer-data block exchange
         # during warp setup).
-        link.step_interleaved(
-            frames_per_attempt, chunk_cycles=_LINK_CHUNK_CYCLES
-        )
+        link.step_interleaved(frames_per_attempt, chunk_cycles=_LINK_CHUNK_CYCLES)
         extra_frames += frames_per_attempt
 
     map_a = a.read_game_state().overworld.map_id
@@ -316,9 +310,7 @@ def test_pair_completes_trade_end_to_end(version_a, version_b):
     peer's mon into its own party.
     """
     if not (_fixtures_available(version_a) and _fixtures_available(version_b)):
-        pytest.skip(
-            f"Cable Club fixture(s) missing for {version_a}/{version_b}"
-        )
+        pytest.skip(f"Cable Club fixture(s) missing for {version_a}/{version_b}")
 
     a, b = _open_session_pair(
         lambda: _open_session(version_a),
@@ -350,12 +342,8 @@ def test_pair_completes_trade_end_to_end(version_a, version_b):
         post_b_state = b.read_game_state()
         link_state_a = a._pyboy.memory[a.symbols.addr_of("wLinkState")]
         link_state_b = b._pyboy.memory[b.symbols.addr_of("wLinkState")]
-        ptr_idx_a = a._pyboy.memory[
-            a.symbols.addr_of("wTradeCenterPointerTableIndex")
-        ]
-        ptr_idx_b = b._pyboy.memory[
-            b.symbols.addr_of("wTradeCenterPointerTableIndex")
-        ]
+        ptr_idx_a = a._pyboy.memory[a.symbols.addr_of("wTradeCenterPointerTableIndex")]
+        ptr_idx_b = b._pyboy.memory[b.symbols.addr_of("wTradeCenterPointerTableIndex")]
         # hSerialConnectionStatus lives in HRAM; read via addr.
         conn_a = a._pyboy.memory[a.symbols.addr_of("hSerialConnectionStatus")]
         conn_b = b._pyboy.memory[b.symbols.addr_of("hSerialConnectionStatus")]
@@ -507,9 +495,7 @@ def _drive_past_link_menu_to_colosseum(
     # Sanity: both cursors should now be on item 1 (COLOSSEUM). Keep this
     # strict assertion: a LinkMenu milestone without matching user-visible
     # menu selections is not valid battle setup.
-    assert cur_a == 1 and cur_b == 1, (
-        f"cursor didn't land on COLOSSEUM: a={cur_a}, b={cur_b}"
-    )
+    assert cur_a == 1 and cur_b == 1, f"cursor didn't land on COLOSSEUM: a={cur_a}, b={cur_b}"
 
     extra_frames = 0
     attempts = post_link_menu_frames // frames_per_attempt
@@ -567,17 +553,11 @@ def test_pair_completes_battle_turn(version_a, version_b):
     assert.
     """
     if not (_fixtures_available(version_a) and _fixtures_available(version_b)):
-        pytest.skip(
-            f"Cable Club fixture(s) missing for {version_a}/{version_b}"
-        )
+        pytest.skip(f"Cable Club fixture(s) missing for {version_a}/{version_b}")
 
     a, b = _open_session_pair(
-        lambda: _open_session(
-            version_a, state_path=_battle_state_path(version_a)
-        ),
-        lambda: _open_session(
-            version_b, state_path=_battle_state_path(version_b)
-        ),
+        lambda: _open_session(version_a, state_path=_battle_state_path(version_a)),
+        lambda: _open_session(version_b, state_path=_battle_state_path(version_b)),
     )
     try:
         _assert_battle_fixture_is_legal(a)
@@ -644,9 +624,7 @@ def test_red_yellow_battle_turn_is_resolved():
 
     a, b = _open_session_pair(
         lambda: _open_session("red", state_path=_battle_state_path("red")),
-        lambda: _open_session(
-            "yellow", state_path=_battle_state_path("yellow")
-        ),
+        lambda: _open_session("yellow", state_path=_battle_state_path("yellow")),
     )
     try:
         _assert_battle_fixture_is_legal(a)
@@ -659,9 +637,7 @@ def test_red_yellow_battle_turn_is_resolved():
         warp = _drive_past_link_menu_to_colosseum(a, b, link)
         assert warp["final_map_a"] == COLOSSEUM_MAP_ID
         assert warp["final_map_b"] == COLOSSEUM_MAP_ID
-        _drive_complete_battle_turn(
-            a, b, link, counters=counters, completion="damage"
-        )
+        _drive_complete_battle_turn(a, b, link, counters=counters, completion="damage")
 
         required_hooks = (
             "DisplayLinkBattleVersusTextBox",
@@ -684,7 +660,11 @@ def test_red_yellow_battle_turn_is_resolved():
 
 @pytest.mark.parametrize("version,rom_a,tag_a,rom_b,tag_b", _rom_variant_pairs())
 def test_same_version_variants_reach_link_menu(
-    version, rom_a, tag_a, rom_b, tag_b,
+    version,
+    rom_a,
+    tag_a,
+    rom_b,
+    tag_b,
 ):
     """Prove same-version pairings reach ``LinkMenu`` under every ROM
     variant combo (vanilla×vanilla, vanilla×color, color×color).

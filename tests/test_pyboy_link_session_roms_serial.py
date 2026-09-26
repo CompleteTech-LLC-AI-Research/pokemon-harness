@@ -21,6 +21,7 @@ __all__ = [
     "_require_real_rom_link_runtime",
 ]
 
+
 def test_yellow_pair_installs_serial_core():
     """Attach installs :class:`SerialCore` on both motherboards and
     wires the coordinator once both sides are in."""
@@ -38,6 +39,7 @@ def test_yellow_pair_installs_serial_core():
         assert link.coordinator is not None
         # Each core's backend is the coordinator's CoordinatedBackend.
         from pokered_harness.link.serial_coordinator import CoordinatedBackend
+
         assert isinstance(core_a.backend, CoordinatedBackend)
         assert isinstance(core_b.backend, CoordinatedBackend)
     finally:
@@ -81,9 +83,7 @@ def test_yellow_pair_exchanges_bytes_after_receptionist_A_press():
         total_frames = 600
         step_chunk = 4
         for _ in range(total_frames // step_chunk):
-            link.step_interleaved(
-                step_chunk, chunk_cycles=_LINK_CHUNK_CYCLES
-            )
+            link.step_interleaved(step_chunk, chunk_cycles=_LINK_CHUNK_CYCLES)
 
         # The meaningful assertion: at least *some* serial activity
         # happened. Pokémon's Cable Club state includes the master

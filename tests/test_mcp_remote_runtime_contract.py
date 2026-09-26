@@ -18,7 +18,13 @@ def _arguments(command):
 
 def _forbid_mutation(monkeypatch, session):
     forbidden = Mock(side_effect=AssertionError("unsupported runtime mutated state or opened I/O"))
-    for name in ("_bind_listener", "NetworkBackend", "TcpSerialLink", "RemoteLinkEndpoint", "PyBoyLinkSession"):
+    for name in (
+        "_bind_listener",
+        "NetworkBackend",
+        "TcpSerialLink",
+        "RemoteLinkEndpoint",
+        "PyBoyLinkSession",
+    ):
         replacement = Mock(side_effect=forbidden)
         replacement.connect = forbidden
         replacement.as_connector = forbidden
@@ -32,10 +38,18 @@ def _forbid_mutation(monkeypatch, session):
 
 
 @pytest.mark.parametrize("command", ["link_listen", "link_connect"])
-@pytest.mark.parametrize("defect", [
-    "motherboard", "serial", "backend", "apply_external_edge", "peek_out_bit",
-    "noncallable_apply_external_edge", "noncallable_peek_out_bit",
-])
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "motherboard",
+        "serial",
+        "backend",
+        "apply_external_edge",
+        "peek_out_bit",
+        "noncallable_apply_external_edge",
+        "noncallable_peek_out_bit",
+    ],
+)
 def test_remote_rejects_unsupported_runtime_without_mutation(monkeypatch, command, defect):
     session, pb = _endpoint_session()
     _break_contract(session, defect)
@@ -59,8 +73,9 @@ def test_remote_handler_returns_structured_runtime_error(monkeypatch, command):
     forbidden = _forbid_mutation(monkeypatch, session)
     server = build_server(session, link=LinkState())
     handler = server.request_handlers[mcp_types.CallToolRequest]
-    request = mcp_types.CallToolRequest(params=mcp_types.CallToolRequestParams(
-        name=command, arguments=_arguments(command)))
+    request = mcp_types.CallToolRequest(
+        params=mcp_types.CallToolRequestParams(name=command, arguments=_arguments(command))
+    )
     result = asyncio.run(handler(request)).root
     assert result.isError is True
     assert result.structuredContent["error"]["code"] == "unsupported_runtime"
@@ -68,9 +83,15 @@ def test_remote_handler_returns_structured_runtime_error(monkeypatch, command):
 
 
 @pytest.mark.parametrize("command", ["link_listen", "link_connect"])
-@pytest.mark.parametrize("override", [
-    {"port": 0}, {"host": "example.com"}, {"rom_version": "green"}, {"timeout_s": -1},
-])
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"port": 0},
+        {"host": "example.com"},
+        {"rom_version": "green"},
+        {"timeout_s": -1},
+    ],
+)
 def test_argument_validation_precedes_runtime_guard(monkeypatch, command, override):
     session, _ = _endpoint_session()
     _break_contract(session, "serial")
@@ -94,15 +115,14 @@ def test_supported_serial_runtime_never_constructs_semantic_adapter(monkeypatch)
     monkeypatch.setattr(mcp_server, "RemoteLinkEndpoint", forbidden)
     port = _free_port()
     try:
-        assert dispatch_tool(
-            listener, "link_listen", {"port": port}, link=link
-        )["remote_mode"] == "listening"
+        assert (
+            dispatch_tool(listener, "link_listen", {"port": port}, link=link)["remote_mode"]
+            == "listening"
+        )
     finally:
         dispatch_tool(listener, "link_disconnect", {}, link=link)
 
-    native_connect = Mock(
-        side_effect=AssertionError("native transport path was not reached")
-    )
+    native_connect = Mock(side_effect=AssertionError("native transport path was not reached"))
     monkeypatch.setattr(mcp_server.NetworkBackend, "connect", native_connect)
     with pytest.raises(AssertionError, match="native transport path"):
         dispatch_tool(

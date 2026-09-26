@@ -64,9 +64,7 @@ def test_release_marker_fences_new_frames_and_finishes_admitted_turns(monkeypatc
                     follower_released.set()
 
         monkeypatch.setattr(backend, "announce_sync", announce)
-        backend.start_receiver(
-            Serial(), serial_gate=SerialOperationGate(), dispatch_to_owner=True
-        )
+        backend.start_receiver(Serial(), serial_gate=SerialOperationGate(), dispatch_to_owner=True)
 
     def run(name, backend, is_leader):
         def step(count):

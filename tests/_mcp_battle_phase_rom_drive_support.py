@@ -836,5 +836,3 @@ async def _prelink(client, asset):
         restored["epoch"],
         before[0]["epoch"],
     )
-
-

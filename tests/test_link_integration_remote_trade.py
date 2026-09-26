@@ -3,6 +3,7 @@
 Split from ``tests/test_link_integration_remote.py`` for #137 with no
 behavior change: every assertion and test ID is preserved verbatim.
 """
+
 from __future__ import annotations
 
 import sys
@@ -45,9 +46,7 @@ from tests._link_orchestrator import LockstepOrchestrator
         ("yellow", "yellow"),
     ],
 )
-def test_remote_trade_reaches_link_menu_via_tcp(
-    version_listen: str, version_connect: str
-) -> None:
+def test_remote_trade_reaches_link_menu_via_tcp(version_listen: str, version_connect: str) -> None:
     """Full protocol drive over TCP up to the LinkMenu.
 
     Two sessions at the Cable Club attendant on opposite ends of a
@@ -71,16 +70,11 @@ def test_remote_trade_reaches_link_menu_via_tcp(
     not load at the expected position.
     """
     if not (_roms_present(version_listen) and _roms_present(version_connect)):
-        pytest.skip(
-            f"ROMs not present for {version_listen}/{version_connect}"
-        )
+        pytest.skip(f"ROMs not present for {version_listen}/{version_connect}")
     state_listen = _cable_club_state(version_listen)
     state_connect = _cable_club_state(version_connect)
     if not (state_listen.exists() and state_connect.exists()):
-        pytest.skip(
-            f"Cable Club save states missing for "
-            f"{version_listen}/{version_connect}"
-        )
+        pytest.skip(f"Cable Club save states missing for {version_listen}/{version_connect}")
     if not (
         version_listen in _FIXTURES_WITH_WALKABLE_PLAYER
         and version_connect in _FIXTURES_WITH_WALKABLE_PLAYER
@@ -117,9 +111,7 @@ def test_remote_trade_reaches_link_menu_via_tcp(
             # in two separate MCP processes. The driver waits on emulator
             # frame progress and applies one input only after the previous
             # command has landed.
-            runner_a, runner_b = _start_remote_runners(
-                session_a, endpoint_a, session_b, endpoint_b
-            )
+            runner_a, runner_b = _start_remote_runners(session_a, endpoint_a, session_b, endpoint_b)
             try:
                 _drive_remote_to_link_menu(
                     runner_a,
@@ -137,8 +129,7 @@ def test_remote_trade_reaches_link_menu_via_tcp(
             assert status_a == STATUS_INTERNAL, f"primary status=0x{status_a:02x}"
             assert status_b == STATUS_EXTERNAL, f"peer status=0x{status_b:02x}"
             assert save_game[0] > 0 and save_game[1] > 0, (
-                f"SaveGameData never fired — attendant dialog stalled; "
-                f"save_game={save_game}"
+                f"SaveGameData never fired — attendant dialog stalled; save_game={save_game}"
             )
             assert link_menu[0] > 0 and link_menu[1] > 0, (
                 f"LinkMenu never reached — Serial_SyncAndExchangeNybble "
@@ -208,9 +199,7 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
         _ensure_fixture_is_walkable("blue", session_a)
         _ensure_fixture_is_walkable("blue", session_b)
 
-        link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(
-            session_a, "blue", session_b, "blue"
-        )
+        link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(session_a, "blue", session_b, "blue")
         try:
             # Instrument link.exchange on both sides to record every
             # RPC kind that crosses TCP.
@@ -225,6 +214,7 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
                 def exchange(kind, my_bytes, *, timeout_ms=30000):
                     sink.append(kind)
                     return inner(kind, my_bytes, timeout_ms=timeout_ms)
+
                 return exchange
 
             link_a.exchange = _wrap(kinds_a, link_a.exchange)  # type: ignore[method-assign]
@@ -236,9 +226,7 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
             _install_autoselect_trade_hook(session_a)
             _install_autoselect_trade_hook(session_b)
 
-            ork = LockstepOrchestrator(
-                session_a, endpoint_a, session_b, endpoint_b
-            )
+            ork = LockstepOrchestrator(session_a, endpoint_a, session_b, endpoint_b)
             ork.start()
             try:
                 # Phase 1: settle map script, walk UP to receptionist,
@@ -271,9 +259,7 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
                     session_b.read_game_state().overworld.x,
                     session_b.read_game_state().overworld.y,
                 )
-                sys.stderr.write(
-                    f"\n[trade-center-spawn] a=({px_a},{py_a}) b=({px_b},{py_b})\n"
-                )
+                sys.stderr.write(f"\n[trade-center-spawn] a=({px_a},{py_a}) b=({px_b},{py_b})\n")
 
                 # Phase 3: walk both players toward the trade table
                 # (tiles (4,4) and (5,4) on TRADE_CENTER map). Spawn
@@ -317,18 +303,14 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
             bytes_b = [k for k in kinds_b if k.startswith("exchange_bytes/")]
             map_a = session_a.read_game_state().overworld.map_id
             map_b = session_b.read_game_state().overworld.map_id
-            diag = (
-                f"map_a=0x{map_a:02x} map_b=0x{map_b:02x} "
-                f"bytes_a={bytes_a} bytes_b={bytes_b}"
-            )
+            diag = f"map_a=0x{map_a:02x} map_b=0x{map_b:02x} bytes_a={bytes_a} bytes_b={bytes_b}"
             assert rng_kind in kinds_a, (
                 f"listener never issued RandomNumberListBlock exchange — "
                 f"CableClub_DoBattleOrTradeAgain didn't run over TCP; "
                 f"{diag}"
             )
             assert rng_kind in kinds_b, (
-                f"connector never issued RandomNumberListBlock exchange; "
-                f"{diag}"
+                f"connector never issued RandomNumberListBlock exchange; {diag}"
             )
             sys.stderr.write(f"\n[exchange-bytes blue↔blue] {diag}\n")
         finally:
@@ -462,9 +444,7 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
         _ensure_fixture_is_walkable("blue", session_a)
         _ensure_fixture_is_walkable("blue", session_b)
 
-        link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(
-            session_a, "blue", session_b, "blue"
-        )
+        link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(session_a, "blue", session_b, "blue")
         try:
             # Observe the game-serial RPC stream.
             kinds_a: list[str] = []
@@ -474,6 +454,7 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
                 def exchange(kind, my_bytes, *, timeout_ms=30000):
                     sink.append(kind)
                     return inner(kind, my_bytes, timeout_ms=timeout_ms)
+
                 return exchange
 
             link_a.exchange = _wrap(kinds_a, link_a.exchange)  # type: ignore[method-assign]
@@ -491,9 +472,7 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
                 if menu_loop_label not in sess.symbols:
                     pytest.skip(f"{menu_loop_label} not in symbol table")
                 bank, addr = sess.symbols.bank_addr(menu_loop_label)
-                sess._pyboy.hook_register(
-                    bank, addr, lambda _c, _e=ev: _e.set(), None
-                )
+                sess._pyboy.hook_register(bank, addr, lambda _c, _e=ev: _e.set(), None)
 
             sync_a = AgentSync(link_a)
             sync_b = AgentSync(link_b)

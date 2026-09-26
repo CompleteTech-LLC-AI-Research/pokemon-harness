@@ -158,7 +158,6 @@ def _move_data(session: Any, move: int) -> bytes:
     return data
 
 
-
 def choose_supported_battle_move(session: Any, active_moves: Any) -> tuple[int, int]:
     """Choose an existing move whose single-turn outcome can be verified.
 
@@ -174,6 +173,7 @@ def choose_supported_battle_move(session: Any, active_moves: Any) -> tuple[int, 
         if move in MOVE_EFFECTS and data[1] in SUPPORTED_EFFECTS and data[2] > 0:
             return slot, move
     raise ValueError("no legal supported existing move with PP (effects 0, 6, 44)")
+
 
 def _validate_party(party: dict[str, Any]) -> int:
     count = _integer(party["count"], 1, 6, "party count")
@@ -258,7 +258,9 @@ def validate_turn(baseline: dict[str, Any], turn: dict[str, Any]) -> None:
             raise ValueError("active combatant identity changed during turn")
         move = _integer(turn.get(move_key), 1, 165, "selected move ID")
         effect = _integer(turn.get(f"{side}_move_effect"), 0, 255, "move effect")
-        data = turn.get("move_data", {}).get(side) if isinstance(turn.get("move_data"), dict) else None
+        data = (
+            turn.get("move_data", {}).get(side) if isinstance(turn.get("move_data"), dict) else None
+        )
         if move in UNSUPPORTED_MOVES:
             raise ValueError(UNSUPPORTED_MOVES[move])
         if move not in MOVE_EFFECTS or effect not in SUPPORTED_EFFECTS:
@@ -338,11 +340,17 @@ def _normalise_row(row: dict[str, Any]) -> dict[str, Any] | None:
     # Do not unwrap a complete snapshot's own compatibility ``battle_turn``
     # field: that nested value is only the turn payload and deliberately has
     # no schema or settlement envelope.
-    evidence = row if "schema_version" in row and "turn" in row and "baseline" in row else row.get("battle_turn")
+    evidence = (
+        row
+        if "schema_version" in row and "turn" in row and "baseline" in row
+        else row.get("battle_turn")
+    )
     return evidence if isinstance(evidence, dict) else None
 
 
-def verify_battle_turns(rows: list[dict[str, Any]] | tuple[dict[str, Any], ...], *, require_cleanup: bool = False) -> list[str]:
+def verify_battle_turns(
+    rows: list[dict[str, Any]] | tuple[dict[str, Any], ...], *, require_cleanup: bool = False
+) -> list[str]:
     """Return fail-closed peer errors; never mutate either row."""
     errors: list[str] = []
     if not isinstance(rows, (list, tuple)) or len(rows) != 2:
@@ -365,20 +373,26 @@ def verify_battle_turns(rows: list[dict[str, Any]] | tuple[dict[str, Any], ...],
                 raise ValueError("exchange/settled boundary ordering invalid")
             validate_turn(item["baseline"], item["turn"])
             terminal = item.get("terminal")
-            if (
-                any(item["turn"][side]["hp"] == 0 for side in ("local", "enemy"))
-                and (not isinstance(terminal, dict) or terminal.get("boundary") != "EndOfBattle")
+            if any(item["turn"][side]["hp"] == 0 for side in ("local", "enemy")) and (
+                not isinstance(terminal, dict) or terminal.get("boundary") != "EndOfBattle"
             ):
                 raise ValueError("KO outcome lacks EndOfBattle evidence")
             if terminal is not None:
-                _integer(terminal.get("seq"), item["settled_seq"] + 1, MAX_SEQUENCE, "terminal sequence")
+                _integer(
+                    terminal.get("seq"), item["settled_seq"] + 1, MAX_SEQUENCE, "terminal sequence"
+                )
                 _integer(terminal.get("result"), 0, 255, "battle result")
         for phase in ("baseline", "turn"):
             for side, opposite in (("local", "enemy"), ("enemy", "local")):
                 for field in ("slot", "species", "hp", "max_hp", "status", "moves"):
                     if left[phase][side][field] != right[phase][opposite][field]:
-                        raise ValueError(f"battle peers disagree on settled {phase} combatant state")
-        if left["turn"]["send"] != right["turn"]["receive"] or left["turn"]["receive"] != right["turn"]["send"]:
+                        raise ValueError(
+                            f"battle peers disagree on settled {phase} combatant state"
+                        )
+        if (
+            left["turn"]["send"] != right["turn"]["receive"]
+            or left["turn"]["receive"] != right["turn"]["send"]
+        ):
             raise ValueError("battle peers disagree on exchanged move slots")
         for side in ("local", "enemy"):
             other_side = "enemy" if side == "local" else "local"
@@ -408,7 +422,9 @@ def verify_battle_turns(rows: list[dict[str, Any]] | tuple[dict[str, Any], ...],
     return errors
 
 
-def adjudicate_pair(rows: list[dict[str, Any]] | tuple[dict[str, Any], ...], *, require_cleanup: bool = False) -> dict[str, Any]:
+def adjudicate_pair(
+    rows: list[dict[str, Any]] | tuple[dict[str, Any], ...], *, require_cleanup: bool = False
+) -> dict[str, Any]:
     """Serializable wrapper used by strict parent tests and diagnostics."""
     errors = verify_battle_turns(rows, require_cleanup=require_cleanup)
     return {
@@ -428,7 +444,9 @@ class BattleTurnObserver:
     and TCP counter/history callbacks to remain the sole registration owner.
     """
 
-    def __init__(self, session: Any, *, role: str, version: str, before_party: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, session: Any, *, role: str, version: str, before_party: dict[str, Any] | None = None
+    ) -> None:
         self.session = session
         self.role, self.version = role, version
         self.sequence = 0
@@ -470,13 +488,18 @@ class BattleTurnObserver:
         if self.baseline is None:
             raise ValueError("move exchange observed before battle baseline")
         send = _integer(_read(self.session, "wSerialExchangeNybbleSendData"), 0, 3, "send slot")
-        receive = _integer(_read(self.session, "wSerialExchangeNybbleReceiveData"), 0, 3, "receive slot")
+        receive = _integer(
+            _read(self.session, "wSerialExchangeNybbleReceiveData"), 0, 3, "receive slot"
+        )
         active = _combatants(self.session)
         local_move = _read(self.session, "wPlayerSelectedMove")
         # The verified continuation precedes SelectEnemyMove decoding the
         # received slot into wEnemySelectedMove; that RAM byte is still stale.
         enemy_move = active["enemy"]["moves"][receive]
-        moves = {"local": _integer(local_move, 1, 165, "local move ID"), "enemy": _integer(enemy_move, 1, 165, "enemy move ID")}
+        moves = {
+            "local": _integer(local_move, 1, 165, "local move ID"),
+            "enemy": _integer(enemy_move, 1, 165, "enemy move ID"),
+        }
         data: dict[str, list[int]] = {}
         effects: dict[str, int] = {}
         for side in ("local", "enemy"):
@@ -502,7 +525,10 @@ class BattleTurnObserver:
     def _capture_turn(self, *, boundary: str) -> None:
         if self.turn is not None or self.exchange is None or self.baseline is None:
             return
-        if not all(action["done"] or action["skip_reason"] == "opponent_fainted" for action in self.actions.values()):
+        if not all(
+            action["done"] or action["skip_reason"] == "opponent_fainted"
+            for action in self.actions.values()
+        ):
             return
         combatants = _combatants(self.session)
         turn = {
@@ -572,7 +598,9 @@ class BattleTurnObserver:
                 self.actions[side][field] = True
             elif field == "done":
                 self.actions[side][field] = True
-                self.actions[side]["move_missed"] = _integer(_read(self.session, "wMoveMissed"), 0, 1, "move miss flag")
+                self.actions[side]["move_missed"] = _integer(
+                    _read(self.session, "wMoveMissed"), 0, 1, "move miss flag"
+                )
             return
         if name in ("local_fully_paralyzed", "enemy_fully_paralyzed"):
             side = name.split("_")[0]
@@ -590,7 +618,10 @@ class BattleTurnObserver:
             damage = _read(self.session, "wDamage", 2)
             if self.pending[side] is not None:
                 raise ValueError("overlapping damage application")
-            self.pending[side] = {"before_hp": hp[0] * 256 + hp[1], "damage": damage[0] * 256 + damage[1]}
+            self.pending[side] = {
+                "before_hp": hp[0] * 256 + hp[1],
+                "damage": damage[0] * 256 + damage[1],
+            }
             return
         if name in ("ApplyAttackToEnemyPokemonDone", "ApplyAttackToPlayerPokemonDone"):
             side = "local" if name.endswith("EnemyPokemonDone") else "enemy"
@@ -599,7 +630,11 @@ class BattleTurnObserver:
                 raise ValueError("damage Done without actual application")
             prefix = "wEnemyMon" if side == "local" else "wBattleMon"
             hp = _read(self.session, prefix + "HP", 2)
-            pending = {**pending, "after_hp": hp[0] * 256 + hp[1], "move_missed": _read(self.session, "wMoveMissed")}
+            pending = {
+                **pending,
+                "after_hp": hp[0] * 256 + hp[1],
+                "move_missed": _read(self.session, "wMoveMissed"),
+            }
             if len(self.actions[side]["damage_samples"]) >= 2:
                 raise ValueError("unsupported damage application count")
             self.actions[side]["damage_samples"].append(pending)
@@ -623,6 +658,7 @@ class BattleTurnObserver:
             if self.turn is None:
                 self._capture_turn(boundary=name)
             return
+
     def _record_terminal(self) -> None:
         result = _integer(_read(self.session, "wBattleResult"), 0, 255, "battle result")
         self.terminal = {
@@ -645,22 +681,24 @@ class BattleTurnObserver:
     record = observe
 
     def snapshot(self) -> dict[str, Any]:
-        return deepcopy({
-            "schema_version": SCHEMA_VERSION,
-            "role": self.role,
-            "version": self.version,
-            "settled": self.turn is not None and self.error is None,
-            "baseline": self.baseline,
-            "turn": self.turn,
-            "battle_turn": self.turn,
-            "exchange_seq": self.turn["exchange_seq"] if self.turn else None,
-            "settled_seq": self.turn["settled_seq"] if self.turn else None,
-            "terminal": self.terminal,
-            "cleanup": self.cleanup,
-            "unsupported_reason": self.error,
-            "hook_counts": self.counts,
-            "before_party": self.before_party,
-        })
+        return deepcopy(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "role": self.role,
+                "version": self.version,
+                "settled": self.turn is not None and self.error is None,
+                "baseline": self.baseline,
+                "turn": self.turn,
+                "battle_turn": self.turn,
+                "exchange_seq": self.turn["exchange_seq"] if self.turn else None,
+                "settled_seq": self.turn["settled_seq"] if self.turn else None,
+                "terminal": self.terminal,
+                "cleanup": self.cleanup,
+                "unsupported_reason": self.error,
+                "hook_counts": self.counts,
+                "before_party": self.before_party,
+            }
+        )
 
 
 def continuation_locations(session: Any, version: str) -> tuple[tuple[str, int, int], ...]:
@@ -678,28 +716,44 @@ def continuation_locations(session: Any, version: str) -> tuple[tuple[str, int, 
     load_bank, load = session.symbols.bank_addr("LoadScreenTilesFromBuffer1")
     expected_load = 0x371B if version == "yellow" else 0x3725
     receive = session.symbols.addr_of("wSerialExchangeNybbleReceiveData")
-    expected_bytes = b"\xcd" + target.to_bytes(2, "little") + b"\xcd" + load.to_bytes(2, "little") + b"\xfa" + receive.to_bytes(2, "little")
+    expected_bytes = (
+        b"\xcd"
+        + target.to_bytes(2, "little")
+        + b"\xcd"
+        + load.to_bytes(2, "little")
+        + b"\xfa"
+        + receive.to_bytes(2, "little")
+    )
     actual = bytes(int(session._pyboy.memory[bank, start + 10 + index]) for index in range(9))
     if target_bank != bank or (load_bank, load) != (0, expected_load) or actual != expected_bytes:
         raise ValueError("post-exchange callsite bytes mismatch")
     text = session.symbols.addr_of("FullyParalyzedText")
     printer = session.symbols.addr_of("PrintText")
     locations = [("post_exchange", bank, start + 16)]
-    for side, label in (("local", "CheckPlayerStatusConditions.MonHurtItselfOrFullyParalysed"), ("enemy", "CheckEnemyStatusConditions.monHurtItselfOrFullyParalysed")):
+    for side, label in (
+        ("local", "CheckPlayerStatusConditions.MonHurtItselfOrFullyParalysed"),
+        ("enemy", "CheckEnemyStatusConditions.monHurtItselfOrFullyParalysed"),
+    ):
         branch_bank, branch = session.symbols.bank_addr(label)
         signature = b"\x21" + text.to_bytes(2, "little") + b"\xcd" + printer.to_bytes(2, "little")
-        actual = bytes(int(session._pyboy.memory[branch_bank, branch - 6 + index]) for index in range(6))
+        actual = bytes(
+            int(session._pyboy.memory[branch_bank, branch - 6 + index]) for index in range(6)
+        )
         if actual != signature:
             raise ValueError(f"{side} paralysis branch bytes mismatch")
         locations.append((f"{side}_fully_paralyzed", branch_bank, branch - 6))
     return tuple(locations)
 
 
-def install_continuation_hooks(session: Any, observer: BattleTurnObserver, *, version: str) -> list[tuple[int, int]]:
+def install_continuation_hooks(
+    session: Any, observer: BattleTurnObserver, *, version: str
+) -> list[tuple[int, int]]:
     """Install only the verified continuation hooks, returning owned locations."""
     owned: list[tuple[int, int]] = []
     for name, bank, address in continuation_locations(session, version):
-        session._pyboy.hook_register(bank, address, lambda _ctx, name=name: observer.observe(name), None)
+        session._pyboy.hook_register(
+            bank, address, lambda _ctx, name=name: observer.observe(name), None
+        )
         owned.append((bank, address))
     return owned
 

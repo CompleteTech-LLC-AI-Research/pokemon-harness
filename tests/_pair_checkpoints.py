@@ -82,10 +82,7 @@ def _json_safe(value: object) -> object:
     if isinstance(value, Enum):
         return _json_safe(value.value)
     if isinstance(value, Mapping):
-        return {
-            str(key): _json_safe(item)
-            for key, item in value.items()
-        }
+        return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
         return [_json_safe(item) for item in value]
     # A repr is safer than leaking an object graph (or a ROM-derived buffer)
@@ -136,9 +133,7 @@ def _endpoint_metadata(pyboy: object, physical: tuple[int, int]) -> dict[str, An
 
     pending = getattr(serial, "_owner_boundary_pending", None)
     if isinstance(pending, Mapping):
-        pending_sequences = sorted(
-            int(key) for key in pending if _is_int(key)
-        )
+        pending_sequences = sorted(int(key) for key in pending if _is_int(key))
         pending_count = len(pending)
     else:
         pending_sequences = []
@@ -198,7 +193,9 @@ def _endpoint_metadata(pyboy: object, physical: tuple[int, int]) -> dict[str, An
     }
 
 
-def _validate_local_boundary(link: object, members: tuple[object, object]) -> tuple[tuple[int, int], tuple[int, int]]:
+def _validate_local_boundary(
+    link: object, members: tuple[object, object]
+) -> tuple[tuple[int, int], tuple[int, int]]:
     """Validate a settled local scheduler boundary without changing it."""
 
     network_backend = getattr(link, "_network_backend", None)
@@ -369,7 +366,10 @@ class PairCheckpointWriter:
 
         if not _is_int(frame_ordinal) or frame_ordinal < 0:
             raise ValueError("frame_ordinal must be a non-negative integer")
-        if self.selected_frame_ordinals is not None and frame_ordinal not in self.selected_frame_ordinals:
+        if (
+            self.selected_frame_ordinals is not None
+            and frame_ordinal not in self.selected_frame_ordinals
+        ):
             return None
         caller_metadata = {} if metadata is None else dict(metadata)
         # Validate JSON shape before entering emulator ownership.  This avoids
@@ -416,12 +416,14 @@ class PairCheckpointWriter:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, target)
-            artifacts.append({
-                "side": index,
-                "path": state_name,
-                "bytes": len(blob),
-                "sha256": sha256(blob).hexdigest(),
-            })
+            artifacts.append(
+                {
+                    "side": index,
+                    "path": state_name,
+                    "bytes": len(blob),
+                    "sha256": sha256(blob).hexdigest(),
+                }
+            )
 
         manifest = {
             "schema": 1,
