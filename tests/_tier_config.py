@@ -240,6 +240,7 @@ UNIT_MODULES = frozenset(
         "test_timed_input_observation.py",
         "test_timed_menu_probe.py",
         "test_timed_mcp_matrix.py",
+        "test_timed_menu_frame_bound.py",
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
         "test_timed_remote_facade.py",
