@@ -572,6 +572,16 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
     args = probe_args("--input-profile", "menu", "--connector-chunk", "1", "--frame-limit", "300")
     args.call_retention = "stream" if stream else "inline"
     args.rom_milestones = milestones
+    # The owner loop is wall-clock bounded (`while ... time.monotonic() < deadline`),
+    # so the deadline has to be a bound on the *scenario* rather than on this
+    # host's speed. The authored loop below advances a fake frame counter, so
+    # the only real cost is 300 iterations of in-process bookkeeping; it needs
+    # single-digit seconds at worst. A 20 s budget was short enough that a
+    # loaded runner exited the loop early, and the loop leaves `termination` at
+    # its default when it does, which surfaced as a varying short call list
+    # (`assert 243 == 300` at load1 27, `287` at load1 22, passing at load1 21).
+    # See ledger/FINDING_252_root_cause.md.
+    deadline_s = 600
     harness = Harness()
     lifecycle, checkpoints, inputs = [], [], []
     game = SimpleNamespace(
@@ -653,8 +663,8 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
         SimpleNamespace(wait=lambda **kw: None),
         [None],
         threading.Lock(),
-        time.monotonic() + 20,
-        time.monotonic() + 21,
+        time.monotonic() + deadline_s,
+        time.monotonic() + deadline_s + 1,
         lambda *a, **kw: session,
         lambda *a, **kw: endpoint,
         lambda *a: {
@@ -668,6 +678,13 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
         checkpoint=checkpoint,
         evidence_path=path,
     )
+    # A deadline-truncated run is indistinguishable from a retention bug if the
+    # caller only looks at the call count, because the owner loop leaves
+    # `termination` at its default when it exits on the wall clock. Every
+    # scenario below runs to a specific non-default terminal state, so pin it
+    # here once, in the shared helper, rather than letting each caller
+    # rediscover it from a count mismatch.
+    assert record["termination"] != "cancelled_or_deadline", record["termination"]
     return record, path, lifecycle, checkpoints
 
 
