@@ -58,6 +58,46 @@ def setup_path_literals(setup_path, wanted):
     return values
 
 
+def pxd_declared_members(pxd_path):
+    """Map each declared cdef class to the names its body declares.
+
+    A `.pxd` is Cython declaration syntax, not Python, so it is parsed with
+    Cython's own compiler rather than `ast` (which rejects the `cimport` lines
+    outright) or a hand-rolled regex. Every `cdef`/`cpdef` method inside a
+    `cdef class` body is lifted by Cython into the type's C-level dict rather
+    than bound in the Python class dict -- which is exactly the set of names a
+    split could drop from the source without `vars()` noticing.
+    """
+    from Cython.Compiler import Errors, Main, Nodes, Options
+
+    # Cython keeps its error state in thread-local storage that only
+    # cythonize() initialises, so parsing without this blows up inside the
+    # scanner instead of reporting a real syntax error.
+    Errors.init_thread()
+    options = Options.CompilationOptions(Options.default_options)
+    options.include_path = [str(PACKAGE.parent)]
+    options.language_level = 3
+    context = Main.Context.from_options(options)
+    stem = pxd_path.stem
+    scope = context.find_module(stem, need_pxd=False)
+    tree = context.parse(
+        Main.FileSourceDescriptor(str(pxd_path), stem),
+        scope,
+        pxd=True,
+        full_module_name=stem,
+    )
+    declared = {}
+    for node in tree.body.stats:
+        if isinstance(node, Nodes.CClassDefNode):
+            declared[node.class_name] = {
+                declarator.base.name
+                for item in node.body.stats
+                for declarator in item.declarators
+                if isinstance(declarator, Nodes.CFuncDeclaratorNode)
+            }
+    return declared
+
+
 # The exact pre-split git blobs the components must reassemble to, and the
 # augmenting .pxd each native staging step must reproduce byte for byte.
 BASE_BLOBS = {
@@ -87,6 +127,58 @@ def snapshot(stem, tmp_path):
 
 def names_for(stem, directory=CORE):
     return [name for name, _ in components._manifest(directory, stem)["SOURCE_PARTS"]]
+
+
+@pytest.mark.parametrize("stem", STEMS)
+def test_pxd_declared_members_sees_every_cdef_method(stem):
+    """The native-only branch of the namespace test depends on this helper.
+
+    That branch never runs in pure-Python mode, so a parser that silently
+    returns too little would only surface on the hosted native run -- as the
+    two rows this split is being judged on. Pin it here so the dependency is
+    checked in the always-run tier. The expectations are spelled out literally
+    rather than recomputed from the same `.pxd` text the helper parses, so a
+    parser that quietly drops declarations fails here instead of on the
+    hosted native run.
+    """
+    declared = pxd_declared_members(CORE / f"{stem}.pxd")
+    if stem == "mb":
+        assert set(declared) == {"Motherboard", "HDMA"}
+        # `cdef` and `cpdef` alike, including the `with gil` exception edges.
+        assert {
+            "tick",
+            "save_state",
+            "load_state",
+            "buttonevent",
+            "getitem",
+            "setitem",
+            "transfer_DMA",
+            "breakpoint_add",
+            "breakpoint_remove",
+            "breakpoint_reached",
+            "breakpoint_reinject",
+            "set_execution_governor",
+            "switch_speed",
+            "get_physical_clock",
+            "stop",
+        } <= declared["Motherboard"]
+        assert {"tick", "save_state", "load_state", "set_hdma5"} <= declared["HDMA"]
+    else:
+        assert set(declared) == {
+            "LCD",
+            "PaletteRegister",
+            "STATRegister",
+            "LCDCRegister",
+            "Renderer",
+            "VBKregister",
+            "PaletteIndexRegister",
+            "PaletteColorRegister",
+        }
+        # `cdef inline (int, int) name(self)` -- a parenthesized return type
+        # is the spelling most likely to be missed by a hand-rolled parser.
+        assert {"getviewport", "getwindowpos"} <= declared["LCD"]
+        assert {"set", "get", "getcolor"} <= declared["PaletteRegister"]
+        assert {"scanline", "scanline_sprites", "colorcode", "sort_sprites"} <= declared["Renderer"]
 
 
 @pytest.mark.parametrize("stem", STEMS)
@@ -288,15 +380,20 @@ def test_imported_module_keeps_the_pre_split_namespace_and_source(stem):
             assert set(vars(actual)) == set(vars(value))
             assert inspect.getsource(actual).startswith("class ")
         else:
-            # vars() on a compiled cdef class also exposes C-level slots such
-            # as __pyx_vtable__ and the cdef attributes (ram, lcd, ...), which
-            # have no Python-source counterpart. Compare only the names the
-            # source actually binds, and require the class to be usable.
-            source_attrs = {n for n in vars(value) if not n.startswith("__")}
-            assert source_attrs <= set(vars(actual)), (
-                stem,
-                sorted(source_attrs - set(vars(actual))),
-            )
+            # A compiled cdef class moves every method the .pxd declares into
+            # the type's C-level dict, so those names are absent from vars()
+            # while the C-level slots (__pyx_vtable__, cdef attributes) are
+            # present instead. The asymmetry runs both ways, so no single set
+            # operator expresses it. Subtract the delta that Cython is
+            # entitled to move, then require the rest: every remaining name the
+            # source class body binds must still be reachable on the compiled
+            # type. That residue is what a split could actually have lost.
+            assert actual.__name__ == value.__name__
+            assert [b.__name__ for b in actual.__bases__] == [b.__name__ for b in value.__bases__]
+            declared = pxd_declared_members(CORE / f"{stem}.pxd").get(name, frozenset())
+            required = {attr for attr in vars(value) if not attr.startswith("__")} - declared
+            missing = required - set(vars(actual))
+            assert not missing, (stem, name, sorted(missing))
         assert actual is value or actual.__name__ == value.__name__
 
 
