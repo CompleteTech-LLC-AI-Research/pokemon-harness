@@ -21,6 +21,7 @@ import pytest
 from scripts import probe_timed_rom_pair as probe
 from tests.test_timed_menu_milestones import FRAME_BOUND, run_owner
 
+
 class FakeClock:
     """Monotonic stand-in that advances a fixed amount per read.
 
@@ -46,6 +47,18 @@ STREAM_STEPS = [0.0, 0.001, 0.005]
 SLOW_STEP = 1.0
 
 
+def assert_not_deadline_truncated(record):
+    """A deadline-truncated run must never pass as a retention result.
+
+    The owner loop leaves ``termination`` at its default when it exits on the
+    wall clock, so a short call list is indistinguishable from a dropped record
+    unless the terminal state is checked. Every scenario that is meant to reach
+    the frame bound must therefore assert a non-default terminal state. Carried
+    over from #256, where it was proposed against the shared helper.
+    """
+    assert record["termination"] != "cancelled_or_deadline", record["termination"]
+
+
 @pytest.mark.parametrize("clock_step", INLINE_STEPS)
 def test_frame_bound_evidence_is_independent_of_wall_clock_speed(monkeypatch, tmp_path, clock_step):
     """A full-speed host must retire the whole inline frame bound.
@@ -55,9 +68,10 @@ def test_frame_bound_evidence_is_independent_of_wall_clock_speed(monkeypatch, tm
     contract asserted by the retention test must hold as a property of the
     frame bound and not of machine load.
     """
-    record, path, _, _, clock = run_owner(
+    record, _path, _, _, clock = run_owner(
         monkeypatch, tmp_path, clock_step=clock_step, stream=False, milestones=False
     )
+    assert_not_deadline_truncated(record)
     assert record["errors"] == []
     assert record["termination"] == "frame_bound"
     # Inline retention keeps every call, so the retained list is exact.
@@ -94,7 +108,11 @@ def test_deadline_still_terminates_a_slow_host_before_the_frame_bound(monkeypatc
     is asserted deliberately so the clock seam cannot silently disable it.
     """
     record, _, _, _, _clock = run_owner(
-        monkeypatch, tmp_path, clock_step=SLOW_STEP, stream=False, milestones=False
+        monkeypatch,
+        tmp_path,
+        clock_step=SLOW_STEP,
+        stream=False,
+        milestones=False,
     )
     assert record["errors"] == []
     assert record["termination"] == "cancelled_or_deadline"
@@ -118,7 +136,11 @@ def test_real_clock_still_guards_the_owner_loop(monkeypatch, tmp_path):
     reports a call count beyond the frame bound.
     """
     record, _, _, _, _clock = run_owner(
-        monkeypatch, tmp_path, clock_step=None, stream=False, milestones=False
+        monkeypatch,
+        tmp_path,
+        clock_step=None,
+        stream=False,
+        milestones=False,
     )
     assert record["termination"] in {"frame_bound", "cancelled_or_deadline"}
     assert len(record["calls"]) <= FRAME_BOUND

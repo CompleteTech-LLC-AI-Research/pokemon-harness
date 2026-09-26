@@ -566,12 +566,18 @@ def probe_args(*extra):
     )
 
 
-def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=None, clock_step=0.0):
+def run_owner(
+    monkeypatch, tmp_path, *, stream=True, milestones=True,
+    terminal=None, clock_step=0.0,
+):
     """Deterministic owner orchestration; only CPU advancement/transport are faked.
 
     The loop runs on an injected clock so the frame bound is exercised as a frame
     bound, not a host-speed statement (#252). ``clock_step=None`` restores the
     real monotonic clock that production uses.
+
+    The terminal-state guard lives in ``test_timed_menu_frame_bound`` (see
+    ``assert_not_deadline_truncated``) to keep this file under its line bound.
     """
     from tests.test_timed_menu_frame_bound import FakeClock
 
