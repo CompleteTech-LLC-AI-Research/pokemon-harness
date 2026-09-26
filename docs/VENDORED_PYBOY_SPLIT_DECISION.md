@@ -12,8 +12,11 @@ because other file splits are outstanding.
 
 # Combined #153 and #133 vendor candidate
 
-The current tracked vendor tree includes the serial type split (#153) and main PyBoy source
-components (#133). Its recomputed content identity is `acd569fdb5836b58558856ac066102d1e9ccaf96`. The separate
+This section records the tree that carried the serial type split (#153) and main PyBoy source
+components (#133), whose recomputed content identity was
+`acd569fdb5836b58558856ac066102d1e9ccaf96`. That identity is **historical**: `#123` landed after
+it and moved the pin to `b94bf5df…`, which is the identity of the `master` tree this head is based
+on, and the `#150`/`#155` split moved it again to the current `e91b07c3…`. The separate
 identity notes below describe earlier single-change candidates and are retained as history.
 Full native and repository gate qualification remains pending; #122 remains open.
 
@@ -301,11 +304,16 @@ re-landed, and both pilot leaves were re-landed **together** on the post-`#234` 
   generator and the new handlers module are excluded from Cythonization by `setup.py`, and
   regeneration stays byte-identical (`opcodes.py` `2538898d…`, `opcodes.pxd` `b1c0c5ad…`), so this
   leaf adds no compiled build input and the generated pair is untouched.
-- **Honest re-pin (condition 2) executed, covering both.** On the `master` tree these two splits
-  shared, the vendored manifest hashed to the harness-local divergence revision
-  `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`; the later `#150`/`#155` vendored split moved it again,
-  and the **current** pin on this head is `e91b07c39474e40265ca88684f7ce3d9ea171096`. Every
-  current-identity carrier (`POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py`'s
+- **Honest re-pin (condition 2) executed.** The `#138`/`#142` splits were first re-landed together
+  on one `master` tree, whose vendored manifest hashed to the harness-local divergence revision
+  `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`. That was not the last re-pin: three further splits
+  landed on `master` after it and each moved the pin in turn — `#153`
+  (`0a0f7f315e58e1c06a8c2cb9a716b8116fdf92ef`), `#133`
+  (`acd569fdb5836b58558856ac066102d1e9ccaf96`) and `#123`
+  (`b94bf5dfb042c502ff4bc1bcd417599b02a9419b`) — so the `master` tree this head is based on
+  carries `b94bf5df…`, not `eceaa3bb…`. The `#150`/`#155` split then re-pinned the manifest
+  again, and the **current** pin on this head is `e91b07c39474e40265ca88684f7ce3d9ea171096`.
+  Every current-identity carrier (`POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py`'s
   `__pokered_harness_revision__`, `scripts/bootstrap_pyboy.py::EXPECTED_REVISION`,
   `tests/_runtime_packaging_support.py::EXPECTED_PYBOY_REVISION`,
   `tests/_qualification_runner_support.py`, the CI assertions in

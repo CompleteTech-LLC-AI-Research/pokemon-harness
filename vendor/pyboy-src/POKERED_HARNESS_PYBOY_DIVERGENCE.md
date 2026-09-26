@@ -57,11 +57,13 @@ component at import, in both source and native modes.
 
 # Combined #153 and #133 harness-local divergence
 
-Current tracked vendor content identity: `acd569fdb5836b58558856ac066102d1e9ccaf96`. This includes the serial
-type split and main PyBoy source components, calculated from the complete tracked vendor
-manifest. Earlier single-change identity notes below are historical and do not qualify
-this combined tree. The native build, full repository gate and exact-head review remain
-pending.
+Tracked vendor content identity at that point: `acd569fdb5836b58558856ac066102d1e9ccaf96`. This included the
+serial type split and main PyBoy source components, calculated from the complete tracked
+vendor manifest. **This identity is historical.** `#123` landed after it and moved the pin to
+`b94bf5dfb042c502ff4bc1bcd417599b02a9419b` — the identity of the `master` tree this head is based
+on — and the `#150`/`#155` split moved it again to the current
+`e91b07c39474e40265ca88684f7ce3d9ea171096` recorded at the top of this record. Earlier
+single-change identity notes below are historical too and do not qualify this combined tree.
 
 ---
 
@@ -302,11 +304,12 @@ Status of the two divergences recorded above:
    above: it is a harness-fork revision, not an upstream commit). Both splits were re-landed **together** on the
    post-#234 `master` after the historical-pin guard fix, so the pin advanced `c565df66…` →
    `eceaa3bb…` in one coordinated change rather than through the intermediate steps of the
-   reverted pilot merge (`d78fb725…` was never a pin on this history). A later vendored split
-   (`#150`/`#155`, motherboard and LCD) then moved the manifest again, so the pin advanced
-   `eceaa3bb…` → `e91b07c3…` as a second coordinated re-pin under the same condition. The **current**
-   pin on this head is `e91b07c39474e40265ca88684f7ce3d9ea171096`; `eceaa3bb…` is the prior identity
-   of the `master` tree this head is based on. Every current-identity
+   reverted pilot merge (`d78fb725…` was never a pin on this history). That was **not** the last
+   re-pin. Three further splits landed on `master` after it, each moving the manifest under the
+   same condition: `#153` → `0a0f7f31…`, `#133` → `acd569fd…`, `#123` → `b94bf5df…`. The `master`
+   tree this head is based on therefore carries `b94bf5df…`, **not** `eceaa3bb…`. The `#150`/`#155`
+   split (motherboard and LCD) then re-pinned the manifest again, and the **current** pin on this
+   head is `e91b07c39474e40265ca88684f7ce3d9ea171096`. Every current-identity
    carrier (`POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py`, `scripts/bootstrap_pyboy.py`,
    `tests/_runtime_packaging_support.py`, `tests/_qualification_runner_support.py`, the
    CI/local-runner assertions, and the prose in `README.md` / `VERSIONS.md` / `agents.md` /
