@@ -58,9 +58,7 @@ class _Closable:
         (SCRIPTS / "transplant_stock_cable_club_fixture.py", "_close_sessions"),
     ],
 )
-def test_pair_cleanup_continues_after_first_close_failure(
-    path, helper_name, monkeypatch, capsys
-):
+def test_pair_cleanup_continues_after_first_close_failure(path, helper_name, monkeypatch, capsys):
     module = _load_script(path, monkeypatch)
     first = _Closable(fail=True)
     second = _Closable()
@@ -100,9 +98,7 @@ def test_battle_setup_closes_first_peer_when_second_peer_setup_fails(monkeypatch
 
 
 def test_single_producer_cleanup_failure_is_raised(monkeypatch, capsys):
-    module = _load_script(
-        SCRIPTS / "produce_vanilla_cable_club_after_brock.py", monkeypatch
-    )
+    module = _load_script(SCRIPTS / "produce_vanilla_cable_club_after_brock.py", monkeypatch)
     session = _Closable(fail=True)
 
     with pytest.raises(ExceptionGroup) as raised:

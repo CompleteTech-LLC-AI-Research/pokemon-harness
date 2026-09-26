@@ -8,6 +8,7 @@ diagnostic: it uses the serial scheduler's private countdown field to force
 the overdue-deadline ordering that ordinary public frame stepping cannot
 reach deterministically.
 """
+
 from __future__ import annotations
 
 import io
@@ -80,11 +81,7 @@ def test_native_stop_keeps_overdue_internal_deadline_mapping(tmp_path: Path) -> 
         serial.set_owner_boundary_callbacks(None, posts.append)
         pyboy.tick(1, render=False, sound=False)
 
-        first_edge = next(
-            item
-            for item in posts
-            if item.kind == 3 and item.effective_cycles == 512
-        )
+        first_edge = next(item for item in posts if item.kind == 3 and item.effective_cycles == 512)
         assert first_edge.committed
         assert pyboy.memory[0xFF02] & 0x80 == 0
         assert pyboy.memory[0xFF01] == 0xFF
@@ -287,9 +284,7 @@ def test_native_mmio_boundaries_have_exact_pre_post_pairs(tmp_path: Path) -> Non
             (2, 0xFF02, 0x81),
         ]
         assert len(post) == len(pre) == 2
-        assert [item.boundary_seq for item in post] == [
-            item.boundary_seq for item in pre
-        ]
+        assert [item.boundary_seq for item in post] == [item.boundary_seq for item in pre]
         assert all(item.kind == 2 and item.committed for item in post)
         assert all(item.parent_boundary_seq is None for item in pre + post)
         assert all(item.physical_epoch == 0 for item in pre + post)
@@ -321,9 +316,7 @@ def test_native_internal_transfer_emits_eight_committed_edge_posts(tmp_path: Pat
         edge_pre = [item for item in pre if item.kind == 3]
         edge_post = [item for item in post if item.kind == 3]
         assert len(edge_pre) == len(edge_post) == 8
-        assert [item.boundary_seq for item in edge_pre] == [
-            item.boundary_seq for item in edge_post
-        ]
+        assert [item.boundary_seq for item in edge_pre] == [item.boundary_seq for item in edge_post]
         assert all(item.committed for item in edge_post)
         assert all(item.parent_boundary_seq is None for item in edge_pre + edge_post)
         assert [item.effective_cycles for item in edge_post] == [

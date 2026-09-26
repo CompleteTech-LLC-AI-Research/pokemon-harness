@@ -35,6 +35,7 @@ __all__ = [
     "_require_real_rom_link_runtime",
 ]
 
+
 def test_yellow_pair_warps_to_trade_center():
     """Drive past LinkMenu to the TRADE_CENTER map warp on both sides.
 
@@ -68,12 +69,10 @@ def test_yellow_pair_warps_to_trade_center():
         )
 
         assert diag["final_map_a"] == TRADE_CENTER_MAP_ID, (
-            f"A didn't warp to TRADE_CENTER; "
-            f"final_map_a=0x{diag['final_map_a']:02x}"
+            f"A didn't warp to TRADE_CENTER; final_map_a=0x{diag['final_map_a']:02x}"
         )
         assert diag["final_map_b"] == TRADE_CENTER_MAP_ID, (
-            f"B didn't warp to TRADE_CENTER; "
-            f"final_map_b=0x{diag['final_map_b']:02x}"
+            f"B didn't warp to TRADE_CENTER; final_map_b=0x{diag['final_map_b']:02x}"
         )
     finally:
         _close_linked_pair(locals().get("link"), a, b)
@@ -114,12 +113,10 @@ def test_yellow_pair_warps_to_colosseum():
         )
 
         assert diag["final_map_a"] == COLOSSEUM_MAP_ID, (
-            f"A didn't warp to COLOSSEUM; "
-            f"final_map_a=0x{diag['final_map_a']:02x}"
+            f"A didn't warp to COLOSSEUM; final_map_a=0x{diag['final_map_a']:02x}"
         )
         assert diag["final_map_b"] == COLOSSEUM_MAP_ID, (
-            f"B didn't warp to COLOSSEUM; "
-            f"final_map_b=0x{diag['final_map_b']:02x}"
+            f"B didn't warp to COLOSSEUM; final_map_b=0x{diag['final_map_b']:02x}"
         )
     finally:
         _close_linked_pair(locals().get("link"), a, b)
@@ -168,12 +165,10 @@ def test_yellow_pair_starts_link_battle():
         print(f"  battle_phase_frames: {diag['battle_phase_frames']}")
 
         assert diag["vs"][0] > 0, (
-            f"A never ran DisplayLinkBattleVersusTextBox; "
-            f"battle didn't start. counters={counters}"
+            f"A never ran DisplayLinkBattleVersusTextBox; battle didn't start. counters={counters}"
         )
         assert diag["vs"][1] > 0, (
-            f"B never ran DisplayLinkBattleVersusTextBox; "
-            f"battle didn't start. counters={counters}"
+            f"B never ran DisplayLinkBattleVersusTextBox; battle didn't start. counters={counters}"
         )
     finally:
         _close_linked_pair(locals().get("link"), a, b)

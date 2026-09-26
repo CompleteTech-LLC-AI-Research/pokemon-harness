@@ -3,6 +3,7 @@
 Split from ``tests/test_link_integration_remote.py`` for #137 with no
 behavior change: every assertion and test ID is preserved verbatim.
 """
+
 from __future__ import annotations
 
 import sys
@@ -67,17 +68,12 @@ def test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu(
     state_listen = _cable_club_state(version_listen)
     state_connect = _cable_club_state(version_connect)
     if not (state_listen.exists() and state_connect.exists()):
-        pytest.skip(
-            f"Cable Club save states missing for "
-            f"{version_listen}/{version_connect}"
-        )
+        pytest.skip(f"Cable Club save states missing for {version_listen}/{version_connect}")
     if not (
         version_listen in _FIXTURES_WITH_WALKABLE_PLAYER
         and version_connect in _FIXTURES_WITH_WALKABLE_PLAYER
     ):
-        pytest.skip(
-            f"Fixture walkability gap: {version_listen}/{version_connect}"
-        )
+        pytest.skip(f"Fixture walkability gap: {version_listen}/{version_connect}")
 
     session_a = _open_session(version_listen)
     session_b = _open_session(version_connect)
@@ -110,9 +106,7 @@ def test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu(
             link_a.exchange = _wrap(kinds_a, orig_ex_a)  # type: ignore[method-assign]
             link_b.exchange = _wrap(kinds_b, orig_ex_b)  # type: ignore[method-assign]
 
-            runner_a, runner_b = _start_remote_runners(
-                session_a, endpoint_a, session_b, endpoint_b
-            )
+            runner_a, runner_b = _start_remote_runners(session_a, endpoint_a, session_b, endpoint_b)
             try:
                 # Drive until the nybble RPC has fired at least a
                 # handful of times on each side using frame progress.
@@ -125,23 +119,16 @@ def test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu(
                 _stop_remote_runners(runner_a, runner_b)
             assert runner_a.exc is None, runner_a.exc
             assert runner_b.exc is None, runner_b.exc
-            nybble_kind = (
-                "exchange_nybble/wSerialExchangeNybbleSendData"
-            )
-            assert nybble_kind in kinds_a, (
-                f"primary never issued nybble RPC; kinds_a={kinds_a}"
-            )
-            assert nybble_kind in kinds_b, (
-                f"peer never issued nybble RPC; kinds_b={kinds_b}"
-            )
+            nybble_kind = "exchange_nybble/wSerialExchangeNybbleSendData"
+            assert nybble_kind in kinds_a, f"primary never issued nybble RPC; kinds_a={kinds_a}"
+            assert nybble_kind in kinds_b, f"peer never issued nybble RPC; kinds_b={kinds_b}"
             # And the counts must be roughly balanced — if they diverge
             # by a huge margin, one side is over/under-exchanging and
             # the peer would drift.
             count_a = kinds_a.count(nybble_kind)
             count_b = kinds_b.count(nybble_kind)
             assert abs(count_a - count_b) <= max(count_a, count_b), (
-                f"nybble RPC count wildly unbalanced: "
-                f"count_a={count_a}, count_b={count_b}"
+                f"nybble RPC count wildly unbalanced: count_a={count_a}, count_b={count_b}"
             )
         finally:
             link_a.close()
@@ -170,6 +157,7 @@ def test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu(
 # entered its exchange loop. That's exactly what a cooperating pair
 # of agent policies would produce; it isolates the transport from the
 # input-timing concern.
+
 
 @pytest.mark.parametrize(
     "version_listen,version_connect",
@@ -219,17 +207,12 @@ def test_remote_menu_vote_converges_and_warps_to_trade_center(
     state_listen = _cable_club_state(version_listen)
     state_connect = _cable_club_state(version_connect)
     if not (state_listen.exists() and state_connect.exists()):
-        pytest.skip(
-            f"Cable Club save states missing for "
-            f"{version_listen}/{version_connect}"
-        )
+        pytest.skip(f"Cable Club save states missing for {version_listen}/{version_connect}")
     if not (
         version_listen in _FIXTURES_WITH_WALKABLE_PLAYER
         and version_connect in _FIXTURES_WITH_WALKABLE_PLAYER
     ):
-        pytest.skip(
-            f"Fixture walkability gap: {version_listen}/{version_connect}"
-        )
+        pytest.skip(f"Fixture walkability gap: {version_listen}/{version_connect}")
 
     session_a = _open_session(version_listen)
     session_b = _open_session(version_connect)
@@ -252,6 +235,7 @@ def test_remote_menu_vote_converges_and_warps_to_trade_center(
                 def exchange(kind, my_bytes, *, timeout_ms=5000):
                     sink.append(kind)
                     return inner(kind, my_bytes, timeout_ms=timeout_ms)
+
                 return exchange
 
             link_a.exchange = _wrap(kinds_a, orig_ex_a)  # type: ignore[method-assign]
@@ -263,9 +247,7 @@ def test_remote_menu_vote_converges_and_warps_to_trade_center(
             _install_autoselect_trade_hook(session_a)
             _install_autoselect_trade_hook(session_b)
 
-            runner_a, runner_b = _start_remote_runners(
-                session_a, endpoint_a, session_b, endpoint_b
-            )
+            runner_a, runner_b = _start_remote_runners(session_a, endpoint_a, session_b, endpoint_b)
             try:
                 # Drive to LinkMenu via A-presses.
                 menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
@@ -304,15 +286,13 @@ def test_remote_menu_vote_converges_and_warps_to_trade_center(
                 f"over TCP despite auto-select-TRADE hook"
             )
             assert map_b == TRADE_CENTER, (
-                f"connector didn't warp to TRADE_CENTER "
-                f"(map_b=0x{map_b:02x})"
+                f"connector didn't warp to TRADE_CENTER (map_b=0x{map_b:02x})"
             )
             menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
             count_a = kinds_a.count(menu_kind)
             count_b = kinds_b.count(menu_kind)
             assert abs(count_a - count_b) <= max(count_a, count_b), (
-                f"menu-selection RPC count wildly unbalanced: "
-                f"a={count_a} b={count_b}"
+                f"menu-selection RPC count wildly unbalanced: a={count_a} b={count_b}"
             )
             sys.stderr.write(
                 f"\n[menu-vote-converges {version_listen}↔{version_connect}] "
@@ -335,5 +315,3 @@ def test_remote_menu_vote_converges_and_warps_to_trade_center(
 # CableClubRightGameboy fire, the game enters CableClub_DoBattleOrTrade
 # which runs three Serial_ExchangeBytes blocks — the RPC kinds we're
 # observing end-to-end over TCP.
-
-

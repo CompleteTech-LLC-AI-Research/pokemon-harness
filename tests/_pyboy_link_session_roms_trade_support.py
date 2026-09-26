@@ -35,8 +35,13 @@ def _install_trade_diag_counters(a, b) -> dict:
 
 
 def _drive_complete_trade(
-    a, b, link, *, counters: dict,
-    trade_budget_frames: int = 4000, step_frames: int = 20,
+    a,
+    b,
+    link,
+    *,
+    counters: dict,
+    trade_budget_frames: int = 4000,
+    step_frames: int = 20,
 ) -> dict:
     """Drive a full Pokémon trade from fixture start to completion.
 
@@ -97,8 +102,10 @@ def _drive_complete_trade(
     # sensitive to tick discipline and step_interleaved's singlestep
     # path was losing some inputs.
     for _ in range(4):
-        if (counters["CableClub_DoBattleOrTrade"][0] > 0
-                and counters["CableClub_DoBattleOrTrade"][1] > 0):
+        if (
+            counters["CableClub_DoBattleOrTrade"][0] > 0
+            and counters["CableClub_DoBattleOrTrade"][1] > 0
+        ):
             break
         # Press the walk direction a few times — spawn facing may
         # need the first press to rotate, the second to walk.
@@ -110,7 +117,10 @@ def _drive_complete_trade(
         # first few serial transfers use stale handshake bytes.
         for _ in range(step_frames):
             tick_per_frame(1)
-            if counters["CableClub_DoBattleOrTrade"][0] > 0 or counters["CableClub_DoBattleOrTrade"][1] > 0:
+            if (
+                counters["CableClub_DoBattleOrTrade"][0] > 0
+                or counters["CableClub_DoBattleOrTrade"][1] > 0
+            ):
                 break
 
     # Now A-mash to dismiss "JUST A MOMENT!" dialog on each side,
@@ -118,8 +128,10 @@ def _drive_complete_trade(
     # fire and launch the big pre-trade exchange.
     settle_frames = 0
     while settle_frames < 1800:
-        if (counters["CableClub_DoBattleOrTrade"][0] > 0
-                and counters["CableClub_DoBattleOrTrade"][1] > 0):
+        if (
+            counters["CableClub_DoBattleOrTrade"][0] > 0
+            and counters["CableClub_DoBattleOrTrade"][1] > 0
+        ):
             break
         a.press("a", duration=4)
         b.press("a", duration=4)
@@ -149,10 +161,7 @@ def _drive_complete_trade(
     menu_key = "TradeCenter_SelectMon.playerMonMenu_HandleInput"
     tct_key = "TradeCenter_Trade"
 
-    prev = {
-        k: list(counters[k])
-        for k in (stats_key, trade_key, menu_key, tct_key)
-    }
+    prev = {k: list(counters[k]) for k in (stats_key, trade_key, menu_key, tct_key)}
     # Per-side "press RIGHT for N more iterations" counter. Set when
     # selectStatsMenuItem ticks; decremented each tick. Reset when
     # selectTradeMenuItem ticks (cursor already moved).
@@ -181,6 +190,7 @@ def _drive_complete_trade(
 
         now = {k: list(counters[k]) for k in (stats_key, trade_key, menu_key, tct_key)}
         for idx, sess in enumerate((a, b)):
+
             def ticked(key, *, _now=now, _idx=idx, _prev=prev):
                 return _now[key][_idx] > _prev[key][_idx]
 

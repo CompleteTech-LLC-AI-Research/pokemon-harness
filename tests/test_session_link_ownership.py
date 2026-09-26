@@ -103,8 +103,14 @@ def test_allowing_guard_runs_before_operation_changes(operation):
         SimpleNamespace(serial=SimpleNamespace()),
         SimpleNamespace(serial=SimpleNamespace(backend=None)),
         SimpleNamespace(serial=SimpleNamespace(backend=object())),
-        SimpleNamespace(serial=SimpleNamespace(backend=SimpleNamespace(validate_session_operation=None))),
-        SimpleNamespace(serial=SimpleNamespace(backend=SimpleNamespace(validate_session_operation="not callable"))),
+        SimpleNamespace(
+            serial=SimpleNamespace(backend=SimpleNamespace(validate_session_operation=None))
+        ),
+        SimpleNamespace(
+            serial=SimpleNamespace(
+                backend=SimpleNamespace(validate_session_operation="not callable")
+            )
+        ),
     ],
 )
 def test_absent_or_noncallable_backend_hook_preserves_operations(motherboard):

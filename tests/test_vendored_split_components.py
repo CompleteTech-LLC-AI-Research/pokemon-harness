@@ -307,9 +307,11 @@ def test_edited_blanked_or_symlinked_component_fails_closed(stem, case, tmp_path
                 raise
             # Windows without Developer Mode cannot create a real symlink.
             # Exercise the loader's refusal branch without skipping the test.
-            with patch.object(Path, "is_symlink", lambda path: path == target):
-                with pytest.raises(ValueError, match="symbolic links"):
-                    components.assemble(copy, stem)
+            with (
+                patch.object(Path, "is_symlink", lambda path: path == target),
+                pytest.raises(ValueError, match="symbolic links"),
+            ):
+                components.assemble(copy, stem)
             return
     with pytest.raises(ValueError):
         components.assemble(copy, stem)
@@ -402,7 +404,14 @@ def test_imported_module_keeps_the_pre_split_namespace_and_source(stem):
         "__package__": module.__package__,
         "__builtins__": __builtins__,
     }
-    exec(compile(original, module.__file__, "exec", dont_inherit=True), namespace, namespace)
+    # `exec` is the point of this check: it re-runs the on-disk component source
+    # in a fresh namespace so the split's public surface can be compared against
+    # what the module actually exports. There is no import-free equivalent --
+    # importing would resolve the already-assembled module instead of the raw
+    # component text, which is precisely what must be verified.
+    exec(  # noqa: S102 - load-bearing; see comment above
+        compile(original, module.__file__, "exec", dont_inherit=True), namespace, namespace
+    )
     source_names = {n for n in namespace if not n.startswith("__")}
     module_names = {n for n in vars(module) if not n.startswith("__")}
     if from_source:

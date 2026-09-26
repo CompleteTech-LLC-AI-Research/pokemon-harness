@@ -1,4 +1,5 @@
 """Asset-free fault-boundary checks; synthetic program is authored here."""
+
 import io
 
 import pytest
@@ -30,17 +31,27 @@ class BrokenIndex:
 
 
 def serial_state(serial):
-    return (serial.SB, serial.SC, serial._shift_register,
-            serial._bits_remaining, serial.transfer_enabled,
-            serial.clock, serial.last_cycles, serial.clock_target)
+    return (
+        serial.SB,
+        serial.SC,
+        serial._shift_register,
+        serial._bits_remaining,
+        serial.transfer_enabled,
+        serial.clock,
+        serial.last_cycles,
+        serial.clock_target,
+    )
 
 
-@pytest.mark.parametrize("backend, cause_type", [
-    (BrokenBackend(error=RuntimeError("callback failure")), RuntimeError),
-    (BrokenBackend(error=KeyboardInterrupt("cancel edge")), KeyboardInterrupt),
-    (BrokenBackend(result=None), TypeError),
-    (BrokenBackend(result=BrokenIndex()), ValueError),
-])
+@pytest.mark.parametrize(
+    "backend, cause_type",
+    [
+        (BrokenBackend(error=RuntimeError("callback failure")), RuntimeError),
+        (BrokenBackend(error=KeyboardInterrupt("cancel edge")), KeyboardInterrupt),
+        (BrokenBackend(result=None), TypeError),
+        (BrokenBackend(result=BrokenIndex()), ValueError),
+    ],
+)
 def test_latched_error_is_first_cause_and_never_retries(backend, cause_type):
     serial = Serial(backend=backend)
     serial.set_SB(0xA5)
@@ -65,9 +76,11 @@ def test_latched_error_is_first_cause_and_never_retries(backend, cause_type):
     with pytest.raises(SerialBackendError) as repeated:
         serial.check_error()
     assert repeated.value.__cause__ is first.value.__cause__
-    for operation in (lambda: serial.apply_external_edge(1),
-                      lambda: serial.save_state(None),
-                      lambda: serial.load_state(None, 99)):
+    for operation in (
+        lambda: serial.apply_external_edge(1),
+        lambda: serial.save_state(None),
+        lambda: serial.load_state(None, 99),
+    ):
         with pytest.raises(SerialBackendError):
             operation()
     fresh = Serial()
@@ -95,7 +108,9 @@ def emulator(tmp_path):
     pyboy.stop(save=False)
 
 
-@pytest.mark.parametrize("owner", ["tick", "motherboard", "memory_read", "memory_write", "slice_read", "slice_write"])
+@pytest.mark.parametrize(
+    "owner", ["tick", "motherboard", "memory_read", "memory_write", "slice_read", "slice_write"]
+)
 def test_owner_raises_and_quarantines(emulator, owner):
     pyboy = emulator
     if owner not in ("tick", "motherboard"):
@@ -130,10 +145,13 @@ def test_owner_raises_and_quarantines(emulator, owner):
     pc = pyboy.register_file.PC
     state = serial_state(serial)
     serial.backend = NullBackend()
-    for action in (lambda: pyboy.tick(2, False, False), pyboy.mb.tick,
-                   lambda: pyboy.tick(0, False, False),
-                   lambda: pyboy.memory[0xC000],
-                   lambda: pyboy.memory.__setitem__(0xC000, 42)):
+    for action in (
+        lambda: pyboy.tick(2, False, False),
+        pyboy.mb.tick,
+        lambda: pyboy.tick(0, False, False),
+        lambda: pyboy.memory[0xC000],
+        lambda: pyboy.memory.__setitem__(0xC000, 42),
+    ):
         with pytest.raises(SerialBackendError):
             action()
         assert pyboy.register_file.PC == pc

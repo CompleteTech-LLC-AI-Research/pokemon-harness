@@ -147,7 +147,7 @@ def test_real_clock_run_terminates_and_never_exceeds_the_frame_bound(monkeypatch
     assert len(record["calls"]) <= FRAME_BOUND
 
 
-def test_teardown_deadline_reads_the_injected_clock():
+def test_teardown_deadline_reads_the_injected_clock(monkeypatch, tmp_path):
     """Every deadline read inside ``_run_owner`` goes through the seam (#267).
 
     ``_run_owner`` binds ``now = time.monotonic if clock is None else clock`` and
@@ -159,11 +159,12 @@ def test_teardown_deadline_reads_the_injected_clock():
     matter how much budget was actually left -- the teardown budget stops
     tracking the run.
 
-    Asserting on the source is deliberate here. A signature or behaviour test
-    cannot distinguish an honoured clock read from a real one on these two lines,
-    because the fake clock is only wrong in a way no assertion on the returned
-    record can observe: the resulting timeout is clamped either way. The defect
-    is "which clock was read", so the guard pins that directly.
+    Two independent guards. The first asserts on the source, because the defect
+    is literally "which clock was read" and that is the cheapest thing to pin
+    exactly. The second drives the real teardown path and asserts on the
+    ``timeout_s`` the owner actually computed, so the source guard cannot be
+    satisfied by a cosmetic edit that leaves the arithmetic broken. Neither
+    consults the real clock's absolute value, so both hold on any host.
     """
     source = inspect.getsource(probe._run_owner)
     # Strip comments so the two explanatory comments about the clock do not
@@ -177,23 +178,38 @@ def test_teardown_deadline_reads_the_injected_clock():
         f"seam, so an injected clock leaves the teardown budget meaningless: {offenders}"
     )
 
-    # And the behaviour the fix restores, stated directly so a future edit that
-    # reintroduces a hard-coded ``time.monotonic`` in a helper is visible too.
-    clock = FakeClock(step=SLOW_STEP)
-    overall = clock() + 21
-    for _ in range(5):
-        clock()
-    assert max(0.001, overall - clock()) == pytest.approx(15.0)
-
-    # Mixing the two clocks is the defect, so demonstrate the mix with an
-    # *arbitrary* real-clock reading rather than the live one. Comparing against
-    # the live ``time.monotonic()`` asserts a property of the runner -- that its
-    # monotonic epoch is far above ``FakeClock``'s 1000.0 start -- which is not
-    # a property of this code and is not true on a short-lived host. That is
-    # exactly how this test failed on the hosted runner, whose
-    # ``time.monotonic()`` was ~567s: ``overall`` (1026.0) minus 567 is
-    # *positive*, so the clamped timeout was 458.75 rather than the 0.001 floor.
-    # The property under test is "the two clocks are not interchangeable", which
-    # holds for any real reading outside the fake's own range.
-    for real_reading in (567.0, 303_300.0, 1e9):
-        assert max(0.001, overall - real_reading) != pytest.approx(15.0)
+    # And the behaviour the fix restores, observed on the real teardown path.
+    # ``run_owner`` drives ``_run_owner`` end to end on an injected clock and
+    # hands us the ``timeout_s`` it passed to ``session.close``. The owner is
+    # given a 21 s budget, so a seam-honouring teardown must be left with a
+    # positive budget -- never the 0.001 s floor, which is what the unfixed
+    # ``time.monotonic()`` read produced because it subtracted the real epoch
+    # from an ``overall`` built on the fake one.
+    #
+    # This asserts against the injected clock only. The real clock is not
+    # consulted, so the result is the same on a long-lived host and on a
+    # container that booted seconds ago; an earlier revision of this test
+    # hard-coded the floor and only held on hosts whose uptime exceeded the
+    # fake epoch.
+    #
+    # The first attempt at fixing the host-coupling did not observe the code at
+    # all: it compared a local ``overall`` against literal readings like
+    # ``567.0``, so no mutation of `_run_owner` could change the outcome. With
+    # the production fix reverted and only the source guard neutralised, that
+    # version still passed. Asserting on the teardown path keeps the check
+    # load-bearing.
+    #
+    # ``clock_step=0.0`` is the fast-host case, so the owner never spends the
+    # 21 s budget and the whole of it must still be available at teardown. A
+    # slow clock would legitimately exhaust the budget and collapse to the
+    # floor, which is the deadline contract, not the seam contract, so it
+    # cannot distinguish the two.
+    close_timeouts = []
+    run_owner(monkeypatch, tmp_path, close_timeouts=close_timeouts)
+    assert len(close_timeouts) == 1
+    # Exactly 21.0, not "at least something": the fake clock never advances, so
+    # a seam-honouring teardown is handed the untouched budget. The unfixed
+    # expression is ``max(0.001, 1021.0 - time.monotonic())``, which equals
+    # 0.001 on a long-lived host and roughly 458 on a freshly booted one --
+    # never 21.0 -- so this discriminates on any host.
+    assert close_timeouts[0] == pytest.approx(21.0)

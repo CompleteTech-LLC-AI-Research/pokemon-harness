@@ -124,8 +124,15 @@ def test_local_step_holds_both_locks_through_bookkeeping(monkeypatch, side, oper
     if pause_at == "bookkeeping":
         monkeypatch.setattr(primary, "_advance_tick", paused_advance)
     link.local_link_session = SimpleNamespace(step_interleaved=step)
-    result = _contend(primary, peer, side, operation,
-        lambda: dispatch_tool(primary, "link_step", {"count": 2}, link=link), entered, release)
+    result = _contend(
+        primary,
+        peer,
+        side,
+        operation,
+        lambda: dispatch_tool(primary, "link_step", {"count": 2}, link=link),
+        entered,
+        release,
+    )
     assert result == {"primary_tick": 2, "peer_tick": 2}
     expected = [2, 2]
     if operation == "step":
@@ -146,8 +153,15 @@ def test_local_unpair_holds_both_locks(monkeypatch, side, operation):
 
     provider = SimpleNamespace(detach_all=detach)
     link.local_link_session = provider
-    result = _contend(primary, peer, side, operation,
-        lambda: dispatch_tool(primary, "link_unpair", {}, link=link), entered, release)
+    result = _contend(
+        primary,
+        peer,
+        side,
+        operation,
+        lambda: dispatch_tool(primary, "link_unpair", {}, link=link),
+        entered,
+        release,
+    )
     assert result == {"paired": False}
     assert link.local_link_session is None
 

@@ -13,13 +13,20 @@ from tests.test_mcp_local_locking import TrackedRLock
 from tests.test_mcp_local_runtime_contract import _forbid_pair_mutation, _sessions
 
 
-@pytest.mark.parametrize("field,value", [
-    ("remote_mode", "listening"), ("remote_mode", "connecting"),
-    ("remote_mode", "connected"), ("_disconnecting", True),
-    ("remote_link", object()), ("remote_endpoint", object()),
-    ("network_session", object()), ("_listener_socket", object()),
-    ("_listener_thread", object()),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_mode", "listening"),
+        ("remote_mode", "connecting"),
+        ("remote_mode", "connected"),
+        ("_disconnecting", True),
+        ("remote_link", object()),
+        ("remote_endpoint", object()),
+        ("network_session", object()),
+        ("_listener_socket", object()),
+        ("_listener_thread", object()),
+    ],
+)
 def test_local_pair_rejects_remote_ownership_without_mutation(monkeypatch, field, value):
     primary, peer, link = _sessions()
     setattr(link, field, value)
@@ -42,7 +49,9 @@ def test_live_remote_mode_rejects_local_until_disconnect(connected):
     try:
         dispatch_tool(primary, "link_listen", {"port": port}, link=link)
         if connected:
-            dispatch_tool(other, "link_connect", {"host": "127.0.0.1", "port": port}, link=other_link)
+            dispatch_tool(
+                other, "link_connect", {"host": "127.0.0.1", "port": port}, link=other_link
+            )
             _wait_remote_mode(link, "connected")
         with pytest.raises(McpHarnessError) as raised:
             dispatch_tool(primary, "link_pair", {}, link=link)
@@ -77,7 +86,9 @@ def test_pair_queued_behind_real_connect_rejects_after_connection(monkeypatch):
             errors.append(exc)
 
     monkeypatch.setattr(mcp_server.NetworkBackend, "connect", pause_connect)
-    connector = threading.Thread(target=run, args=("link_connect", {"host": "127.0.0.1", "port": port}))
+    connector = threading.Thread(
+        target=run, args=("link_connect", {"host": "127.0.0.1", "port": port})
+    )
     pairer = threading.Thread(target=run, args=("link_pair", {}))
     try:
         dispatch_tool(other, "link_listen", {"port": port}, link=other_link)
@@ -132,7 +143,9 @@ def test_disconnect_during_attach_rolls_back_real_backends_once(monkeypatch):
             errors.append(exc)
 
     pairer = threading.Thread(target=pair)
-    disconnector = threading.Thread(target=lambda: dispatch_tool(primary, "link_disconnect", {}, link=link))
+    disconnector = threading.Thread(
+        target=lambda: dispatch_tool(primary, "link_disconnect", {}, link=link)
+    )
     pairer.start()
     try:
         assert entered.wait(5)
@@ -270,8 +283,9 @@ def test_disconnect_cancels_injected_pair_without_discarding_preseed(monkeypatch
     primary, _ = _make_session()
     peer, _ = _make_session()
     link = LinkState(peer_session=peer, peer_version="blue")
-    pair = LinkPair(primary, peer, version_primary="red", version_peer="blue",
-                    bridge_factory=FakeFactory())
+    pair = LinkPair(
+        primary, peer, version_primary="red", version_peer="blue", bridge_factory=FakeFactory()
+    )
     link.pair = pair
     pair_method = pair.pair
 
@@ -296,7 +310,10 @@ def test_disconnect_after_injected_pair_lock_release_still_rolls_back(monkeypatc
     peer, _ = _make_session()
     link = LinkState(peer_session=peer, peer_version="blue")
     pair = LinkPair(
-        primary, peer, version_primary="red", version_peer="blue",
+        primary,
+        peer,
+        version_primary="red",
+        version_peer="blue",
         bridge_factory=FakeFactory(),
     )
     link.pair = pair

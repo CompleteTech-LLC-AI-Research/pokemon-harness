@@ -26,9 +26,7 @@ def tmp_path(tmp_path):
         return
     for root in (Path("/tmp"), Path("/var/tmp"), Path.home()):
         root = root.resolve()
-        if not root.is_dir() or any(
-            (parent / ".git").exists() for parent in (root, *root.parents)
-        ):
+        if not root.is_dir() or any((parent / ".git").exists() for parent in (root, *root.parents)):
             continue
         try:
             directory = tempfile.TemporaryDirectory(prefix="battle-probe-tests-", dir=root)

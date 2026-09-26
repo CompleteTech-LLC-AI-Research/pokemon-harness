@@ -132,9 +132,7 @@ def _battle_state_path(version: str):
     return fixture_path(version).parent / "cable_club-battle.state"
 
 
-_fixtures_ready = (
-    _YELLOW_ROM.is_file() and _YELLOW_SYM.is_file() and _YELLOW_STATE.is_file()
-)
+_fixtures_ready = _YELLOW_ROM.is_file() and _YELLOW_SYM.is_file() and _YELLOW_STATE.is_file()
 
 
 def _pyboy_mb_swappable() -> bool:
@@ -347,9 +345,7 @@ def _party_raw_summary(session) -> dict[str, object]:
     species_addr = addr_of("wPartySpecies")
     mons_addr = addr_of("wPartyMons")
     species = [int(pb.memory[species_addr + slot]) for slot in range(count + 1)]
-    mon_species = [
-        int(pb.memory[mons_addr + slot * PARTY_MON_SIZE]) for slot in range(count)
-    ]
+    mon_species = [int(pb.memory[mons_addr + slot * PARTY_MON_SIZE]) for slot in range(count)]
     mon_records = [
         bytes(
             pb.memory[mons_addr + slot * PARTY_MON_SIZE + offset]
@@ -400,8 +396,7 @@ def _assert_battle_fixture_is_legal(session) -> None:
                 )
                 assert move_id < 0xFF
                 assert pp > 0, (
-                    f"{session!r} party slot {slot} move {move_idx} "
-                    f"({move_id}) has no PP"
+                    f"{session!r} party slot {slot} move {move_idx} ({move_id}) has no PP"
                 )
 
     lead_addr = mons_addr
@@ -444,8 +439,7 @@ def _assert_active_battle_state_is_legal(session) -> tuple[int, int]:
     party_species = int(pb.memory[addr_of("wPartySpecies")])
     active_species = int(pb.memory[addr_of("wBattleMonSpecies")])
     assert active_species == party_species, (
-        f"active battle species {active_species} does not match lead "
-        f"party species {party_species}"
+        f"active battle species {active_species} does not match lead party species {party_species}"
     )
     hp_addr = addr_of("wBattleMonHP")
     max_hp_addr = addr_of("wBattleMonMaxHP")
@@ -459,13 +453,9 @@ def _assert_active_battle_state_is_legal(session) -> tuple[int, int]:
     for move_idx, (move_id, pp) in enumerate(active_moves):
         if move_id == 0:
             saw_empty_move = True
-            assert pp == 0, (
-                f"active move slot {move_idx} is empty but has PP {pp}"
-            )
+            assert pp == 0, f"active move slot {move_idx} is empty but has PP {pp}"
             continue
-        assert not saw_empty_move, (
-            f"active move slot {move_idx} is populated after an empty slot"
-        )
+        assert not saw_empty_move, f"active move slot {move_idx} is populated after an empty slot"
         assert move_id < 0xFF
         if pp > 0:
             usable_slots.append(move_idx)
@@ -597,7 +587,11 @@ def _rom_variant_pairs():
             for rom_b, tag_b in variants:
                 pairs.append(
                     pytest.param(
-                        version, rom_a, tag_a, rom_b, tag_b,
+                        version,
+                        rom_a,
+                        tag_a,
+                        rom_b,
+                        tag_b,
                         id=f"{version}-{tag_a}-x-{tag_b}",
                     )
                 )

@@ -138,8 +138,7 @@ def _send_and_service(
             if primary_error is not None:
                 for operation, error in stop_failures:
                     primary_error.add_note(
-                        f"nested cleanup {operation} failed: "
-                        f"{type(error).__name__}: {error}"
+                        f"nested cleanup {operation} failed: {type(error).__name__}: {error}"
                     )
             elif stop_failures:
                 # This branch is defensive: the sender should only still be
@@ -565,7 +564,9 @@ def test_owner_dispatch_internal_clock_uses_keepalive_without_native_mutation() 
 
 
 @pytest.mark.parametrize("error_type", [ValueError, KeyboardInterrupt])
-def test_owner_dispatch_irq_failure_closes_transport_without_replaying_native_edge(error_type) -> None:
+def test_owner_dispatch_irq_failure_closes_transport_without_replaying_native_edge(
+    error_type,
+) -> None:
     """An owner callback failure is terminal and the edge is applied once.
 
     ``Serial`` itself latches this failure when it is the callback owner.  A
@@ -667,6 +668,7 @@ def test_public_network_step_surfaces_owner_irq_failure() -> None:
 @pytest.mark.parametrize("deferrals", [1, 2, 3])
 def test_malformed_multiple_pending_edges_preserve_fifo_after_rearm(deferrals) -> None:
     """Document FIFO ordering if a peer violates one-edge-at-a-time admission."""
+
     class ArmedCore(_Core):
         transfer_enabled = 0
 

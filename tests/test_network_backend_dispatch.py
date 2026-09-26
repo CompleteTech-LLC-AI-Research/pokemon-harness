@@ -786,7 +786,11 @@ def test_edge_admission_and_write_waits_reduce_original_response_budget(monkeypa
             patch.setattr(a, "_queue_get", receive)
             assert a.on_edge(our_bit=1, our_role=1) == 0
             assert [name for name, _ in waits] == [
-                "call", "admission-response", "write", "send", "response"
+                "call",
+                "admission-response",
+                "write",
+                "send",
+                "response",
             ]
             assert [timeout for _, timeout in waits] == pytest.approx(
                 [network_module._SEND_POLL_SECONDS, 0.02, 0.01, 0.006, 0.003]

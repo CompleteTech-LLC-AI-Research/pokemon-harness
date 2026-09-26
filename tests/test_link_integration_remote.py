@@ -60,9 +60,7 @@ from tests._link_integration_remote_support import (
         ("yellow", "yellow"),
     ],
 )
-def test_remote_handshake_writes_status_on_both_sides(
-    version_a: str, version_b: str
-) -> None:
+def test_remote_handshake_writes_status_on_both_sides(version_a: str, version_b: str) -> None:
     """Two-process equivalent of the single-process handshake check.
 
     On the Cerulean Pokemon Center map the game's overworld script calls
@@ -85,8 +83,7 @@ def test_remote_handshake_writes_status_on_both_sides(
     state_b = _cable_club_state(version_b)
     if not (state_a.exists() and state_b.exists()):
         pytest.skip(
-            f"Cable Club save states missing; see README for how to "
-            f"produce {state_a} and {state_b}"
+            f"Cable Club save states missing; see README for how to produce {state_a} and {state_b}"
         )
 
     session_a = _open_session(version_a)
@@ -101,9 +98,7 @@ def test_remote_handshake_writes_status_on_both_sides(
         try:
             status_addr = session_a.symbols.addr_of("hSerialConnectionStatus")
 
-            runner_a, runner_b = _start_remote_runners(
-                session_a, endpoint_a, session_b, endpoint_b
-            )
+            runner_a, runner_b = _start_remote_runners(session_a, endpoint_a, session_b, endpoint_b)
             try:
                 # The map script fires the hook every frame. Waiting on
                 # runner progress keeps this bounded without polling sleeps.
@@ -154,9 +149,7 @@ def test_remote_handshake_writes_status_on_both_sides(
         ("yellow", "yellow"),
     ],
 )
-def test_remote_rpc_flow_past_link_menu_over_tcp(
-    version_listen: str, version_connect: str
-) -> None:
+def test_remote_rpc_flow_past_link_menu_over_tcp(version_listen: str, version_connect: str) -> None:
     """Drive past the LinkMenu A-press and observe the
     Serial_ExchangeLinkMenuSelection RPC flowing over TCP.
 
@@ -190,17 +183,12 @@ def test_remote_rpc_flow_past_link_menu_over_tcp(
     state_listen = _cable_club_state(version_listen)
     state_connect = _cable_club_state(version_connect)
     if not (state_listen.exists() and state_connect.exists()):
-        pytest.skip(
-            f"Cable Club save states missing for "
-            f"{version_listen}/{version_connect}"
-        )
+        pytest.skip(f"Cable Club save states missing for {version_listen}/{version_connect}")
     if not (
         version_listen in _FIXTURES_WITH_WALKABLE_PLAYER
         and version_connect in _FIXTURES_WITH_WALKABLE_PLAYER
     ):
-        pytest.skip(
-            f"Fixture walkability gap: {version_listen}/{version_connect}"
-        )
+        pytest.skip(f"Fixture walkability gap: {version_listen}/{version_connect}")
 
     session_a = _open_session(version_listen)
     session_b = _open_session(version_connect)
@@ -237,6 +225,7 @@ def test_remote_rpc_flow_past_link_menu_over_tcp(
                         my_bytes,
                         timeout_ms=effective_timeout_ms,
                     )
+
                 return exchange
 
             link_a.exchange = _wrap(kinds_a, orig_ex_a)  # type: ignore[method-assign]
@@ -249,9 +238,7 @@ def test_remote_rpc_flow_past_link_menu_over_tcp(
             _install_autoselect_trade_hook(session_a)
             _install_autoselect_trade_hook(session_b)
 
-            runner_a, runner_b = _start_remote_runners(
-                session_a, endpoint_a, session_b, endpoint_b
-            )
+            runner_a, runner_b = _start_remote_runners(session_a, endpoint_a, session_b, endpoint_b)
             try:
                 menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
                 _drive_remote_to_link_menu(
@@ -277,17 +264,14 @@ def test_remote_rpc_flow_past_link_menu_over_tcp(
                 f"kinds_a tail={kinds_a[-10:]}"
             )
             assert menu_kind in kinds_b, (
-                f"connector never issued menu-selection RPC. "
-                f"kinds_b tail={kinds_b[-10:]}"
+                f"connector never issued menu-selection RPC. kinds_b tail={kinds_b[-10:]}"
             )
             # Bonus: if the menu vote converged, the three post-menu
             # Serial_ExchangeBytes blocks would show up as
             # exchange_bytes/* kinds. Record whether we got that
             # deep — not required, because sub-frame A-press timing
             # between independent threads is racey.
-            reached_post_menu = any(
-                k.startswith("exchange_bytes/") for k in kinds_a
-            )
+            reached_post_menu = any(k.startswith("exchange_bytes/") for k in kinds_a)
             # Stash on the test for pytest-level reporting via -rP.
             sys.stderr.write(
                 f"\n[past-LinkMenu {version_listen}↔{version_connect}] "

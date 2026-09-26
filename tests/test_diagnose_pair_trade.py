@@ -178,9 +178,7 @@ def test_driver_preserves_natural_input_schedule_and_capture_frames(tmp_path, mo
         "press",
         "press",
     ]
-    assert [
-        (method, frames) for method, frames, _args, _kwargs in link.calls
-    ] == [
+    assert [(method, frames) for method, frames, _args, _kwargs in link.calls] == [
         ("step_interleaved", 1),
         ("step_interleaved", 1),
         ("step_interleaved", 1),
@@ -306,9 +304,7 @@ def test_invalid_output_is_rejected_without_creating_files(tmp_path):
 
 
 @pytest.mark.parametrize("signum", (signal.SIGINT, signal.SIGTERM))
-def test_signal_cancellation_restores_handlers_and_writes_terminal(
-    tmp_path, monkeypatch, signum
-):
+def test_signal_cancellation_restores_handlers_and_writes_terminal(tmp_path, monkeypatch, signum):
     _RecordingWriter.instances.clear()
     _RecordingWriter.fail_frame = None
     sessions: list[_FakeSession] = []
@@ -364,9 +360,7 @@ def test_signal_during_metadata_is_reported_and_handlers_restore(tmp_path, monke
         return _FakeSession(0)
 
     before = signal.getsignal(signal.SIGINT)
-    monkeypatch.setattr(
-        diagnose, "_safe_import_real_helpers", helper_that_swallows_signal
-    )
+    monkeypatch.setattr(diagnose, "_safe_import_real_helpers", helper_that_swallows_signal)
     result = diagnose.run_pair_trade(
         tmp_path,
         max_captures=1,
@@ -385,10 +379,7 @@ def test_signal_during_metadata_is_reported_and_handlers_restore(tmp_path, monke
 
 
 def test_signal_handlers_are_not_installed_from_worker_thread():
-    before = {
-        signum: signal.getsignal(signum)
-        for signum in (signal.SIGINT, signal.SIGTERM)
-    }
+    before = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
     cancellation = diagnose._SignalCancellation()
     completed = threading.Event()
 
@@ -403,14 +394,11 @@ def test_signal_handlers_are_not_installed_from_worker_thread():
 
     assert completed.is_set()
     assert {
-        signum: signal.getsignal(signum)
-        for signum in (signal.SIGINT, signal.SIGTERM)
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
     } == before
 
 
-def test_signal_handlers_restore_when_terminal_report_building_fails(
-    tmp_path, monkeypatch
-):
+def test_signal_handlers_restore_when_terminal_report_building_fails(tmp_path, monkeypatch):
     sessions: list[_FakeSession] = []
     link = _FakeLink()
     cancellations: list[object] = []
@@ -428,10 +416,7 @@ def test_signal_handlers_restore_when_terminal_report_building_fails(
             super().install()
             cancellations.append(self)
 
-    before = {
-        signum: signal.getsignal(signum)
-        for signum in (signal.SIGINT, signal.SIGTERM)
-    }
+    before = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
     monkeypatch.setattr(diagnose, "_SignalCancellation", InvalidReportSignum)
     monkeypatch.setattr(diagnose, "_version_and_asset_metadata", dict)
 
@@ -454,8 +439,7 @@ def test_signal_handlers_restore_when_terminal_report_building_fails(
     assert link.closed == 1
     assert [session.closed for session in sessions] == [1, 1]
     assert {
-        signum: signal.getsignal(signum)
-        for signum in (signal.SIGINT, signal.SIGTERM)
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
     } == before
 
 
@@ -559,7 +543,9 @@ def test_provisional_terminal_precedes_cleanup_failure(tmp_path, monkeypatch):
     assert result["cleanup_errors"]
     assert link.terminal_during_close is not None
     assert link.terminal_during_close["terminal_phase"] == "cleanup_pending"
-    assert json.loads((tmp_path / diagnose.TERMINAL_FILENAME).read_text())["terminal_phase"] == "final"
+    assert (
+        json.loads((tmp_path / diagnose.TERMINAL_FILENAME).read_text())["terminal_phase"] == "final"
+    )
 
 
 def test_cleanup_runs_when_provisional_report_assembly_fails(tmp_path, monkeypatch):

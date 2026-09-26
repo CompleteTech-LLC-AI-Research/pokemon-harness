@@ -1,4 +1,5 @@
 """Adversarial instruction-owner tests, without ROM assets."""
+
 import threading
 from types import SimpleNamespace
 
@@ -21,11 +22,14 @@ class Endpoint:
         serial = SerialCore(cgb)
         serial.clock = origin
         self.mb = SimpleNamespace(
-            serial=serial, cgb_mode=cgb,
+            serial=serial,
+            cgb_mode=cgb,
             lcd=SimpleNamespace(frame_done=False, disable_renderer=True),
             sound=SimpleNamespace(disable_sampling=False, clear_buffer=lambda: None),
-            breakpoint_singlestep=7, breakpoint_singlestep_latch=0,
-            tick=self.instruction, breakpoint_reinject=lambda: None,
+            breakpoint_singlestep=7,
+            breakpoint_singlestep_latch=0,
+            tick=self.instruction,
+            breakpoint_reinject=lambda: None,
             breakpoint_reached=lambda: (-1, -1, -1),
         )
 
@@ -172,8 +176,14 @@ def test_completed_frame_peer_rearm_is_line_idle_without_next_frame_tick():
     link.step()
     assert results == [False, False, False, False]
     assert trace == [
-        ("a", 0), ("b", 0), ("a", 4), ("b", 4),
-        ("a", 8), ("b", 8), ("a", 12), ("b", 12),
+        ("a", 0),
+        ("b", 0),
+        ("a", 4),
+        ("b", 4),
+        ("a", 8),
+        ("b", 8),
+        ("a", 12),
+        ("b", 12),
     ]
     assert a.frame_count == b.frame_count == 2
     assert a.setup == a.finalize == b.setup == b.finalize == 2
@@ -196,9 +206,11 @@ def test_completed_frame_peer_edge_is_pullup_without_peer_tick():
     b.mb.lcd.frame_done = True
     calls = []
     original_tick = b.mb.tick
+
     def forbidden_tick():
         calls.append(None)
         return original_tick()
+
     b.mb.tick = forbidden_tick
     link._step_active = True
     try:
@@ -214,9 +226,11 @@ def test_rearm_progress_accounted_and_both_flags_reread():
     link, a, b, trace = pair(instructions=3)
     progress = link._make_owned_peer_progressor(b)
     called = []
+
     def advance_peer_once():
         if not called:
             called.append(progress())
+
     a.on_instruction = advance_peer_once
     link.step()
     assert called == [True]
@@ -283,13 +297,17 @@ def test_backwards_clock_faults_before_next_instruction():
 def test_wall_budget_fault_restores_stepping(monkeypatch):
     link, a, b, _ = pair()
     values = iter((0, 100))
-    monkeypatch.setattr("pokered_harness.link.pyboy_link_session.time.monotonic", lambda: next(values))
+    monkeypatch.setattr(
+        "pokered_harness.link.pyboy_link_session.time.monotonic", lambda: next(values)
+    )
     with pytest.raises(RuntimeError, match="wall deadline"):
         link.step()
     assert a.mb.breakpoint_singlestep == b.mb.breakpoint_singlestep == 7
 
 
-@pytest.mark.parametrize("value,error_type", [(0, ValueError), (-1, ValueError), (True, TypeError), (1.5, TypeError)])
+@pytest.mark.parametrize(
+    "value,error_type", [(0, ValueError), (-1, ValueError), (True, TypeError), (1.5, TypeError)]
+)
 def test_invalid_frame_count(value, error_type):
     link, *_ = pair()
     with pytest.raises(error_type):
@@ -304,6 +322,7 @@ def test_public_boundary_validation_is_inside_operation_lock():
     errors = []
     original = link._check_epoch
     first = True
+
     def check(*, boundary=False):
         nonlocal first
         if boundary and first:
@@ -311,7 +330,9 @@ def test_public_boundary_validation_is_inside_operation_lock():
             entered.set()
             assert release.wait(3)
         return original(boundary=boundary)
+
     link._check_epoch = check
+
     def run(second=False):
         try:
             if second:
@@ -319,6 +340,7 @@ def test_public_boundary_validation_is_inside_operation_lock():
             link.step()
         except BaseException as error:  # noqa: BLE001 - capture thread failure
             errors.append(error)
+
     t1 = threading.Thread(target=run)
     t2 = threading.Thread(target=run, args=(True,))
     t1.start()

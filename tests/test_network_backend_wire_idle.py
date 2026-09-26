@@ -316,9 +316,9 @@ def test_next_edge_waits_for_response_accounting_to_finish(monkeypatch):
         # before asserting the pending count is still one.
         reader_attempted_admission.clear()
         second_sender.start()
-        assert reader_attempted_admission.wait(
-            timeout=10.0
-        ), "reader never attempted inbound EDGE_REQ admission"
+        assert reader_attempted_admission.wait(timeout=10.0), (
+            "reader never attempted inbound EDGE_REQ admission"
+        )
         assert slave.debug_snapshot()["pending_edge_requests"] == 1
 
         release_response_decrement.set()
@@ -640,10 +640,7 @@ def test_owner_real_edge_resets_keepalive_byte_boundary():
         )
         sender.start()
         deadline = time.monotonic() + 1.0
-        while (
-            time.monotonic() < deadline
-            and b.debug_snapshot()["pending_edge_requests"] == 0
-        ):
+        while time.monotonic() < deadline and b.debug_snapshot()["pending_edge_requests"] == 0:
             time.sleep(0.005)
         assert b.debug_snapshot()["pending_edge_requests"] == 1
         applied = 0

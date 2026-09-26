@@ -5,6 +5,7 @@ behavior change. Holds the ROM/fixture probing, session opening, TCP
 pair wiring, remote-runner supervision and link-menu driving helpers
 shared by the split test modules.
 """
+
 from __future__ import annotations
 
 import queue
@@ -169,9 +170,7 @@ class _SessionRunner:
 # --- hook-counter helper -------------------------------------------------
 
 
-def _install_hook_counter(
-    session: Session, symbol: str, bucket: list[int], slot: int
-) -> None:
+def _install_hook_counter(session: Session, symbol: str, bucket: list[int], slot: int) -> None:
     """Install a PyBoy execution hook on ``symbol`` that bumps
     ``bucket[slot]`` every time the label is reached. Skips silently
     when the symbol isn't in this version's table so the same test
@@ -198,6 +197,7 @@ def _wait_for(predicate, timeout: float, *, poll: float = 0.05) -> bool:
             return True
         time.sleep(poll)
     return False
+
 
 def _tcp_pair(
     session_a: Session,
@@ -268,9 +268,7 @@ def _start_remote_runners(
     return runner_a, runner_b
 
 
-def _stop_remote_runners(
-    runner_a: _SessionRunner, runner_b: _SessionRunner
-) -> None:
+def _stop_remote_runners(runner_a: _SessionRunner, runner_b: _SessionRunner) -> None:
     """Stop both emulator drivers and leave their exceptions inspectable."""
     runner_a.stop()
     runner_b.stop()
@@ -420,4 +418,3 @@ def _install_autoselect_trade_hook(session: Session) -> None:
         _mem[_addr + 1] = 0xD4
 
     session._pyboy.hook_register(bank, addr + 3, _force, None)
-

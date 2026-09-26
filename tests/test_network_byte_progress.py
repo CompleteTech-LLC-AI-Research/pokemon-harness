@@ -36,17 +36,40 @@ def _receiver_program():
     """Author a receiver which rearms in its IRQ before consuming its mailbox."""
     code = [
         0xF3,  # DI
-        0x31, 0xFE, 0xFF,  # LD SP,$FFFE
-        0xAF, 0xE0, 0x0F,  # IF = 0
-        0x3E, 0x08, 0xE0, 0xFF,  # IE = serial only
+        0x31,
+        0xFE,
+        0xFF,  # LD SP,$FFFE
+        0xAF,
+        0xE0,
+        0x0F,  # IF = 0
+        0x3E,
+        0x08,
+        0xE0,
+        0xFF,  # IE = serial only
         # A running timer provides normal, short motherboard scheduling
         # boundaries. Timer interrupts remain masked; no CPU stepping hook
         # or execution-governor override is installed by this regression.
-        0x3E, 0xFF, 0xE0, 0x06, 0xE0, 0x05,  # TMA = TIMA = $FF
-        0x3E, 0x05, 0xE0, 0x07,  # TAC: enabled, 16 T-cycle period
-        0x21, 0x10, 0xC1,  # output pointer
-        0x3E, 0x3C, 0xE0, 0x01,  # outgoing byte
-        0x3E, 0x80, 0xE0, 0x02,  # external clock, transfer armed
+        0x3E,
+        0xFF,
+        0xE0,
+        0x06,
+        0xE0,
+        0x05,  # TMA = TIMA = $FF
+        0x3E,
+        0x05,
+        0xE0,
+        0x07,  # TAC: enabled, 16 T-cycle period
+        0x21,
+        0x10,
+        0xC1,  # output pointer
+        0x3E,
+        0x3C,
+        0xE0,
+        0x01,  # outgoing byte
+        0x3E,
+        0x80,
+        0xE0,
+        0x02,  # external clock, transfer armed
         0xFB,  # EI
     ]
     labels = {}
@@ -67,12 +90,23 @@ def _receiver_program():
     labels["delay"] = len(code)
     code.append(0x05)  # DEC B
     jump(0x20, "delay")
-    code.extend((
-        0xFA, 0x00, 0xC1,  # LD A,[mailbox]
-        0x22,  # LD [HL+],A
-        0xFA, 0x02, 0xC1, 0x3C, 0xEA, 0x02, 0xC1,  # increment count
-        0xFE, 0x02,  # CP 2
-    ))
+    code.extend(
+        (
+            0xFA,
+            0x00,
+            0xC1,  # LD A,[mailbox]
+            0x22,  # LD [HL+],A
+            0xFA,
+            0x02,
+            0xC1,
+            0x3C,
+            0xEA,
+            0x02,
+            0xC1,  # increment count
+            0xFE,
+            0x02,  # CP 2
+        )
+    )
     jump(0x20, "wait")
     labels["done"] = len(code)
     code.append(0x76)
@@ -114,11 +148,26 @@ def test_successive_tcp_bytes_preserve_the_rom_mailbox(
     pyboy.memory[0, 0x150 : 0x150 + len(program)] = program
     handler = [
         0xF5,  # preserve A/F
-        0xF0, 0x01, 0xEA, 0x00, 0xC1,  # SB -> mailbox
-        0x3E, 0x3C, 0xE0, 0x01,  # next outgoing byte
-        0x3E, 0x80, 0xE0, 0x02,  # rearm before notification/consumption
-        0x3E, 0x01, 0xEA, 0x01, 0xC1,  # ready = 1
-        0xF1, 0xD9,  # restore A/F; RETI
+        0xF0,
+        0x01,
+        0xEA,
+        0x00,
+        0xC1,  # SB -> mailbox
+        0x3E,
+        0x3C,
+        0xE0,
+        0x01,  # next outgoing byte
+        0x3E,
+        0x80,
+        0xE0,
+        0x02,  # rearm before notification/consumption
+        0x3E,
+        0x01,
+        0xEA,
+        0x01,
+        0xC1,  # ready = 1
+        0xF1,
+        0xD9,  # restore A/F; RETI
     ]
     pyboy.memory[0, 0x58 : 0x58 + len(handler)] = handler
     pyboy.memory[_MAILBOX : _OUTPUT + 2] = [0] * (_OUTPUT + 2 - _MAILBOX)
@@ -429,13 +478,37 @@ def test_clock_role_change_sends_held_response_before_new_master_request(
     # main loop. The second IRQ leaves the port idle after receiving 0x16.
     handler = [
         0xF5,
-        0xF0, 0x01, 0xEA, 0x00, 0xC1,  # SB -> mailbox
-        0xFA, 0x03, 0xC1, 0x3C, 0xEA, 0x03, 0xC1,  # increment IRQ count
-        0xFE, 0x01, 0x20, 0x08,  # only the first IRQ changes clock role
-        0x3E, 0xA5, 0xE0, 0x01,  # outgoing byte for local master
-        0x3E, 0x81, 0xE0, 0x02,
-        0x3E, 0x01, 0xEA, 0x01, 0xC1,  # notify main loop
-        0xF1, 0xD9,
+        0xF0,
+        0x01,
+        0xEA,
+        0x00,
+        0xC1,  # SB -> mailbox
+        0xFA,
+        0x03,
+        0xC1,
+        0x3C,
+        0xEA,
+        0x03,
+        0xC1,  # increment IRQ count
+        0xFE,
+        0x01,
+        0x20,
+        0x08,  # only the first IRQ changes clock role
+        0x3E,
+        0xA5,
+        0xE0,
+        0x01,  # outgoing byte for local master
+        0x3E,
+        0x81,
+        0xE0,
+        0x02,
+        0x3E,
+        0x01,
+        0xEA,
+        0x01,
+        0xC1,  # notify main loop
+        0xF1,
+        0xD9,
     ]
     pyboy.memory[0, 0x58 : 0x58 + len(handler)] = handler
     pyboy.memory[_MAILBOX : _OUTPUT + 2] = [0] * (_OUTPUT + 2 - _MAILBOX)
@@ -445,9 +518,7 @@ def test_clock_role_change_sends_held_response_before_new_master_request(
     peer._sock.settimeout(3.0)
     edge_ready = threading.Event()
     backend._edge_queue = _ObservedEdgeQueue(edge_ready, maxsize=256)
-    backend._completed_edge_queue = _ResponseHandoffQueue(
-        backend, edge_ready, expected_requests=8
-    )
+    backend._completed_edge_queue = _ResponseHandoffQueue(backend, edge_ready, expected_requests=8)
     provider = PyBoyLinkSession(network_backend=backend)
     errors, received = [], []
 

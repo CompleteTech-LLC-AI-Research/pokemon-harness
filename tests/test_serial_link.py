@@ -717,6 +717,7 @@ def test_tcp_terminal_error_publishes_after_inbound_budget_cleanup():
             + serial_link_module._pack_lp_str(f"forced-{index}")
             + serial_link_module._pack_lp_bytes(b"x")
         )
+
     try:
         assert server.peer_rom_version == "blue"
         for index in range(serial_link_module._MAX_INBOUND_FRAMES):

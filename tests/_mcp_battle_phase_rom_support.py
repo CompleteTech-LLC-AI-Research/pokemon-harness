@@ -706,5 +706,3 @@ def _at_command_boundary(state):
         and type(menu.get("max_item")) is int
         and menu["max_item"] <= COMMAND_MENU_MAX_ITEM
     )
-
-

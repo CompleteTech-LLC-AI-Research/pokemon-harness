@@ -155,9 +155,7 @@ def test_session_close_serializes_stop_after_an_inflight_tick() -> None:
 def test_session_close_can_retry_after_inflight_operation_timeout() -> None:
     pyboy = _BlockingPyBoy()
     session, _ = _session(pyboy=pyboy)
-    step_thread = threading.Thread(
-        target=session.step, name="test-session-step-retry"
-    )
+    step_thread = threading.Thread(target=session.step, name="test-session-step-retry")
     step_thread.start()
     assert pyboy.tick_entered.wait(timeout=1.0)
 
@@ -229,9 +227,7 @@ def test_session_locked_timeout_is_bounded() -> None:
     assert entered.wait(timeout=1.0)
 
     started = time.monotonic()
-    with pytest.raises(SessionLockTimeout, match="deadline"), session.locked(
-        timeout_s=0.05
-    ):
+    with pytest.raises(SessionLockTimeout, match="deadline"), session.locked(timeout_s=0.05):
         raise AssertionError("the bounded lock should not be acquired")
     assert time.monotonic() - started < 0.5
 
@@ -310,9 +306,7 @@ def test_peer_startup_state_reader_fails_closed(tmp_path, monkeypatch) -> None:
         _peer_startup_state_from_env()
 
 
-def test_mcp_entrypoint_rejects_peer_state_without_peer_session(
-    tmp_path, monkeypatch
-) -> None:
+def test_mcp_entrypoint_rejects_peer_state_without_peer_session(tmp_path, monkeypatch) -> None:
     _clear_peer_state_env(monkeypatch)
     monkeypatch.delenv("POKERED_SKIP_SHA1", raising=False)
     fixture = tmp_path / "peer.state"
@@ -346,9 +340,7 @@ def test_asset_and_hash_failures_have_stable_mcp_codes(tmp_path) -> None:
             pyboy_factory=lambda _path: FakePyBoy(DictMemory()),
         )
     assert _error_code(missing_rom.value) == "rom_not_found"
-    assert _error_reply(missing_rom.value).structuredContent["error"]["code"] == (
-        "rom_not_found"
-    )
+    assert _error_reply(missing_rom.value).structuredContent["error"]["code"] == ("rom_not_found")
 
     with pytest.raises(SymbolNotFoundError) as missing_sym:
         Session.from_files(
@@ -401,9 +393,7 @@ def test_failed_remote_teardown_retains_worker_and_requires_retry(monkeypatch) -
     link.remote_mode = "connected"
     link.remote_link = remote  # type: ignore[assignment]
     link.remote_endpoint = object()  # type: ignore[assignment]
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.01
-    )
+    monkeypatch.setattr("pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.01)
 
     try:
         with pytest.raises(McpHarnessError) as teardown_error:
@@ -429,9 +419,7 @@ def test_failed_remote_teardown_retains_worker_and_requires_retry(monkeypatch) -
         worker_release.set()
         worker.join(timeout=1.0)
         assert not worker.is_alive()
-        assert dispatch_tool(session, "link_disconnect", {}, link=link) == {
-            "remote_mode": "idle"
-        }
+        assert dispatch_tool(session, "link_disconnect", {}, link=link) == {"remote_mode": "idle"}
         assert link._pending_remote_link is None
         assert remote.close_calls >= 2
     finally:
@@ -458,9 +446,7 @@ def test_failed_network_session_detach_is_retriable(monkeypatch) -> None:
     link.remote_mode = "connected"
     link.network_session = network_session  # type: ignore[assignment]
     link.remote_endpoint = object()  # type: ignore[assignment]
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05
-    )
+    monkeypatch.setattr("pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05)
 
     with pytest.raises(McpHarnessError) as teardown_error:
         dispatch_tool(session, "link_disconnect", {}, link=link)
@@ -470,9 +456,7 @@ def test_failed_network_session_detach_is_retriable(monkeypatch) -> None:
     assert pyboy._hooks == {}
 
     network_session.fail = False
-    assert dispatch_tool(session, "link_disconnect", {}, link=link) == {
-        "remote_mode": "idle"
-    }
+    assert dispatch_tool(session, "link_disconnect", {}, link=link) == {"remote_mode": "idle"}
     assert network_session.calls == 2
     assert link._pending_network_session is None
 
@@ -494,9 +478,7 @@ def test_remote_hook_cleanup_uses_one_total_deadline(monkeypatch) -> None:
     holder = threading.Thread(target=hold_session, name="test-hook-lock-owner")
     holder.start()
     assert entered.wait(timeout=1.0)
-    monkeypatch.setattr(
-        "pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05
-    )
+    monkeypatch.setattr("pokered_harness.mcp_server._DEFAULT_CLEANUP_TIMEOUT_S", 0.05)
 
     started = time.monotonic()
     try:
@@ -511,6 +493,4 @@ def test_remote_hook_cleanup_uses_one_total_deadline(monkeypatch) -> None:
         holder.join(timeout=1.0)
 
     assert not holder.is_alive()
-    assert dispatch_tool(session, "link_disconnect", {}, link=link) == {
-        "remote_mode": "idle"
-    }
+    assert dispatch_tool(session, "link_disconnect", {}, link=link) == {"remote_mode": "idle"}

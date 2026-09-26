@@ -62,9 +62,7 @@ class _Worker:
         self._pending_press: _PendingPress | None = None
         self._chunk_frames: int = 1
         self.exc: BaseException | None = None
-        self._thread = threading.Thread(
-            target=self._run, name=f"lockstep-{name}", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name=f"lockstep-{name}", daemon=True)
 
     def start(self) -> None:
         self._thread.start()
@@ -196,13 +194,9 @@ class LockstepOrchestrator:
         self._worker_b.fire(frames)
         barrier = timeout_per_frame * frames
         if not self._worker_a.wait_done(timeout=barrier):
-            raise TimeoutError(
-                f"side A didn't finish {frames} frames within {barrier:.1f}s"
-            )
+            raise TimeoutError(f"side A didn't finish {frames} frames within {barrier:.1f}s")
         if not self._worker_b.wait_done(timeout=barrier):
-            raise TimeoutError(
-                f"side B didn't finish {frames} frames within {barrier:.1f}s"
-            )
+            raise TimeoutError(f"side B didn't finish {frames} frames within {barrier:.1f}s")
         if self._worker_a.exc is not None:
             raise self._worker_a.exc
         if self._worker_b.exc is not None:
@@ -244,8 +238,11 @@ def walk_a_toward(
     tile / NPC). Side B just idles — useful when only one player needs
     to move."""
     return _walk_toward(
-        ork=ork, target_xy=target_xy, side="a",
-        max_tiles=max_tiles, tile_frames=tile_frames,
+        ork=ork,
+        target_xy=target_xy,
+        side="a",
+        max_tiles=max_tiles,
+        tile_frames=tile_frames,
     )
 
 
@@ -257,8 +254,11 @@ def walk_b_toward(
     tile_frames: int = 20,
 ) -> bool:
     return _walk_toward(
-        ork=ork, target_xy=target_xy, side="b",
-        max_tiles=max_tiles, tile_frames=tile_frames,
+        ork=ork,
+        target_xy=target_xy,
+        side="b",
+        max_tiles=max_tiles,
+        tile_frames=tile_frames,
     )
 
 

@@ -170,7 +170,9 @@ def test_network_callback_failure_isolated_after_one_native_application() -> Non
     core = Core()
     master, slave = NetworkBackend.pair()
     master.start_receiver(local_core=None)
-    slave.start_receiver(local_core=core, irq_callback=lambda: (_ for _ in ()).throw(ValueError("fault")))
+    slave.start_receiver(
+        local_core=core, irq_callback=lambda: (_ for _ in ()).throw(ValueError("fault"))
+    )
     result: list[object] = []
 
     def send() -> None:

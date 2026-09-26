@@ -171,6 +171,7 @@ def _write_enemy(
 
 # --- phase truth table ------------------------------------------------------
 
+
 def _session(*, observe: bool = True) -> Session:
     mem = DictMemory()
     session = Session(
@@ -183,4 +184,3 @@ def _session(*, observe: bool = True) -> Session:
         assert session.enable_battle_resolution_observation() is True
         assert session.enable_battle_end_observation() is True
     return session
-

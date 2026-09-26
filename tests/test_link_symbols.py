@@ -147,9 +147,7 @@ def test_resolve_works_for_all_three_versions() -> None:
 
 def test_resolve_skips_optional_labels_silently() -> None:
     # Only the two required labels are present in the table.
-    required_labels = {
-        s.per_version["red"] for s in LINK_SYMBOLS if s.required
-    }
+    required_labels = {s.per_version["red"] for s in LINK_SYMBOLS if s.required}
     mapping = {lbl: (0, 0x5000 + i) for i, lbl in enumerate(required_labels)}
     table = FakeSymbolTable(mapping)
 

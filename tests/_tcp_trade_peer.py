@@ -90,12 +90,26 @@ _PRE_LINK_MENU_PROFILES = {
     ("listen", "blue_color"): (
         "5f4b05725a860e04077045462176d3e2771c5022",
         "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6",
-        0x71C5, 0x7263, 0x227F, 0x223F, 0x72A8, 1, 0x5C0A, 0x72D7,
+        0x71C5,
+        0x7263,
+        0x227F,
+        0x223F,
+        0x72A8,
+        1,
+        0x5C0A,
+        0x72D7,
     ),
     ("connect", "yellow"): (
         "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
         "7c4205723943e7722230dcf014e5e8a2012474aa",
-        0x7035, 0x70D8, 0x20DB, 0x209B, 0x711D, 0x3D, 0x580C, 0x71AC,
+        0x7035,
+        0x70D8,
+        0x20DB,
+        0x209B,
+        0x711D,
+        0x3D,
+        0x580C,
+        0x71AC,
     ),
 }
 
@@ -119,10 +133,16 @@ def _resolve_pre_link_menu(*, enabled, role, version, rom_bytes, symbol_bytes):
         history = _PreLinkMenuHistory(enabled=True, role=role, version=version, pins=pins)
         history.reason = "invalid_asset_bytes"
         return history
-    observed = (("rom_sha1", hashlib.sha1(rom_bytes).hexdigest()),
-                ("symbol_sha1", hashlib.sha1(symbol_bytes).hexdigest()))
+    observed = (
+        ("rom_sha1", hashlib.sha1(rom_bytes).hexdigest()),
+        ("symbol_sha1", hashlib.sha1(symbol_bytes).hexdigest()),
+    )
     history = _PreLinkMenuHistory(
-        enabled=True, role=role, version=version, pins=pins, observed_pins=observed,
+        enabled=True,
+        role=role,
+        version=version,
+        pins=pins,
+        observed_pins=observed,
     )
     if history.reason.startswith("pin_mismatch:"):
         return history
@@ -174,42 +194,59 @@ def _resolve_pre_link_menu(*, enabled, role, version, rom_bytes, symbol_bytes):
         ("CableClubNPC.counterExpired", 1, call + 14, bytes.fromhex("060a")),
         ("CableClubNPC.connected", 1, connected, bytes.fromhex("af3277")),
         ("Serial_SyncAndExchangeNybble", 0, sync, bytes.fromhex("3effea3ecc")),
-        ("Serial_SyncAndExchangeNybble.timeoutJump", 0, sync + 0x1C,
-         bytes((0xAF, 0xC3, timeout & 0xFF, timeout >> 8))),
+        (
+            "Serial_SyncAndExchangeNybble.timeoutJump",
+            0,
+            sync + 0x1C,
+            bytes((0xAF, 0xC3, timeout & 0xFF, timeout >> 8)),
+        ),
         ("Serial_SyncAndExchangeNybble.return", 0, sync + 0x43, b"\xc9"),
         ("Serial_SyncAndExchangeNybble.publish60", 0, sync + 0x4A, bytes.fromhex("c660")),
-        ("Serial_SyncAndExchangeNybble.receiveCompare", 0, sync + 0x5F,
-         bytes.fromhex("fe60c0")),
-        ("CableClubNPC.inactivityCloseCall", 1, call + 25,
-         bytes((0xCD, close & 0xFF, close >> 8))),
-        ("CableClubNPC.inactivityCloseReturn", 1, call + 28,
-         bytes((0x21, (close - 15) & 0xFF, (close - 15) >> 8))),
-        ("CableClubNPC.choseNoCloseCall", 1, call + 44,
-         bytes((0xCD, close & 0xFF, close >> 8))),
-        ("CableClubNPC.choseNoCloseReturn", 1, call + 47,
-         bytes((0x21, (close - 10) & 0xFF, (close - 10) >> 8))),
+        ("Serial_SyncAndExchangeNybble.receiveCompare", 0, sync + 0x5F, bytes.fromhex("fe60c0")),
+        ("CableClubNPC.inactivityCloseCall", 1, call + 25, bytes((0xCD, close & 0xFF, close >> 8))),
+        (
+            "CableClubNPC.inactivityCloseReturn",
+            1,
+            call + 28,
+            bytes((0x21, (close - 15) & 0xFF, (close - 15) >> 8)),
+        ),
+        ("CableClubNPC.choseNoCloseCall", 1, call + 44, bytes((0xCD, close & 0xFF, close >> 8))),
+        (
+            "CableClubNPC.choseNoCloseReturn",
+            1,
+            call + 47,
+            bytes((0x21, (close - 10) & 0xFF, (close - 10) >> 8)),
+        ),
         ("SetUnknownCounterToFFFF", 0, timeout, bytes.fromhex("3dea47ccea48ccc9")),
-        ("LinkMenu", menu_bank, menu,
-         bytes.fromhex("afea58" if version == "blue_color" else "afea57")),
+        (
+            "LinkMenu",
+            menu_bank,
+            menu,
+            bytes.fromhex("afea58" if version == "blue_color" else "afea57"),
+        ),
     )
     for event, bank, address, signature in specs:
-        valid = (bank == 0 and 0 <= address < 0x4000) or (
-            bank > 0 and 0x4000 <= address < 0x8000
-        )
+        valid = (bank == 0 and 0 <= address < 0x4000) or (bank > 0 and 0x4000 <= address < 0x8000)
         bank_end = 0x4000 if bank == 0 else 0x8000
         if not valid or address + len(signature) > bank_end:
             history.reason = "invalid_site:" + event
             return history
         offset = address if bank == 0 else bank * 0x4000 + address - 0x4000
-        if rom_bytes[offset:offset + len(signature)] != signature:
+        if rom_bytes[offset : offset + len(signature)] != signature:
             history.reason = "signature_mismatch:" + event
             return history
-    if any(call + offset + 2 + displacement != connected
-           for offset, displacement in ((8, 0x3B), (12, 0x37))):
+    if any(
+        call + offset + 2 + displacement != connected
+        for offset, displacement in ((8, 0x3B), (12, 0x37))
+    ):
         history.reason = "branch_target_mismatch"
         return history
     return _PreLinkMenuHistory(
-        enabled=True, role=role, version=version, pins=pins, observed_pins=observed,
+        enabled=True,
+        role=role,
+        version=version,
+        pins=pins,
+        observed_pins=observed,
         sites=tuple((event, bank, address) for event, bank, address, _ in specs),
     )
 

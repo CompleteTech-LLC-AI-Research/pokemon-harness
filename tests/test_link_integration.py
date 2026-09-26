@@ -189,18 +189,17 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
                 session_a.press("a", duration=4)
                 session_b.press("a", duration=4)
                 pair.step(20)
-                if (session_a.read_game_state().overworld.map_id == TRADE_CENTER
-                        and session_b.read_game_state().overworld.map_id == TRADE_CENTER):
+                if (
+                    session_a.read_game_state().overworld.map_id == TRADE_CENTER
+                    and session_b.read_game_state().overworld.map_id == TRADE_CENTER
+                ):
                     reached_trade_center = True
                     break
-            assert (counters["SaveGameData"][0] > 0
-                    and counters["SaveGameData"][1] > 0), (
-                f"attendant dialog never reached SaveGameData — "
-                f"counters={counters}"
+            assert counters["SaveGameData"][0] > 0 and counters["SaveGameData"][1] > 0, (
+                f"attendant dialog never reached SaveGameData — counters={counters}"
             )
-            assert (counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0), (
-                f"nybble sync didn't converge; LinkMenu not reached — "
-                f"counters={counters}."
+            assert counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0, (
+                f"nybble sync didn't converge; LinkMenu not reached — counters={counters}."
             )
             assert reached_trade_center, (
                 f"LinkMenu's auto-trade selection didn't warp peers to "
@@ -232,9 +231,7 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
                     return _cb
 
                 try:
-                    session._pyboy.hook_register(
-                        bank, addr, _make_cb(cabble_trade_fired), None
-                    )
+                    session._pyboy.hook_register(bank, addr, _make_cb(cabble_trade_fired), None)
                 except ValueError:
                     pass
 
@@ -260,9 +257,7 @@ def test_link_trade_roundtrip(version_a: str, version_b: str):
             for idx, session in enumerate((session_a, session_b)):
                 if "TradeCenter_DrawPartyLists" not in session.symbols:
                     continue
-                bank, addr = session.symbols.bank_addr(
-                    "TradeCenter_DrawPartyLists"
-                )
+                bank, addr = session.symbols.bank_addr("TradeCenter_DrawPartyLists")
 
                 def _mk(b, i=idx):
                     def _cb(_ctx):

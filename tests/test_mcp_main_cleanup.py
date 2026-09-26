@@ -134,14 +134,11 @@ def _assert_cleanup_result(raised, operation_error, *error_names):
     else:
         assert raised.value is operation_error
         assert any(
-            "MCP session cleanup failed" in note
-            for note in getattr(raised.value, "__notes__", ())
+            "MCP session cleanup failed" in note for note in getattr(raised.value, "__notes__", ())
         )
 
 
-def test_configure_main_isolates_inherited_symbol_pin_overrides(
-    monkeypatch, tmp_path
-):
+def test_configure_main_isolates_inherited_symbol_pin_overrides(monkeypatch, tmp_path):
     """The fixture must not inherit unrelated primary/peer symbol pins."""
     monkeypatch.setenv("POKERED_SYM_SHA1", "a" * 40)
     monkeypatch.setenv("POKERED_PEER_SYM_SHA1", "b" * 40)
@@ -191,7 +188,10 @@ def test_peer_close_failure_still_closes_primary_and_preserves_operation_context
     operation_error = OperationFailure(fail_at) if fail_at is not None else None
     peer_error = PeerCloseFailure("peer stop failed")
     calls = _configure_main(
-        monkeypatch, tmp_path, fail_at=fail_at, operation_error=operation_error,
+        monkeypatch,
+        tmp_path,
+        fail_at=fail_at,
+        operation_error=operation_error,
         peer_error=peer_error,
     )
     with pytest.raises(Exception) as raised:
@@ -208,8 +208,12 @@ def test_both_close_failures_preserve_peer_and_operation_exception_context(
     peer_error = PeerCloseFailure("peer stop failed")
     primary_error = PrimaryCloseFailure("primary stop failed")
     calls = _configure_main(
-        monkeypatch, tmp_path, fail_at=fail_at, operation_error=operation_error,
-        peer_error=peer_error, primary_error=primary_error,
+        monkeypatch,
+        tmp_path,
+        fail_at=fail_at,
+        operation_error=operation_error,
+        peer_error=peer_error,
+        primary_error=primary_error,
     )
     with pytest.raises(Exception) as raised:
         mcp_server.main()
@@ -226,8 +230,12 @@ def test_primary_close_failure_preserves_serve_failure_without_peer(monkeypatch,
     operation_error = OperationFailure("serve failed")
     primary_error = PrimaryCloseFailure("primary stop failed")
     calls = _configure_main(
-        monkeypatch, tmp_path, fail_at="serve", operation_error=operation_error,
-        primary_error=primary_error, with_peer=False,
+        monkeypatch,
+        tmp_path,
+        fail_at="serve",
+        operation_error=operation_error,
+        primary_error=primary_error,
+        with_peer=False,
     )
     with pytest.raises(Exception) as raised:
         mcp_server.main()
