@@ -1,3 +1,12 @@
+# Candidate update — generated opcode split #123
+
+Candidate vendor identity: `2d7a89d80468d17f7fa55c7c72404acc2aa80f1d`. The new source-component layout and
+its exact-byte reconstruction are described in `OPCODE_LAYOUT.md`.
+The actual PyBoy source/native lanes, packaging acceptance, and independent
+review remain outstanding. No leaf or release gate is closed by this update.
+
+## Existing decision and historical measurements (base `3e865d5b0348d0c7c462ed8b40a107ae2b158277`)
+
 # Decision: handling the eight vendored PyBoy split leaves (#123, #133, #138, #142, #150, #153, #155, #161)
 
 Status: **DECIDED — explicit in-fork divergence; execution has started (see the "Update" sections

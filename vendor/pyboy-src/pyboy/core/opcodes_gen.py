@@ -3,10 +3,21 @@
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
 
+import argparse
 import re
 import sys
+from io import StringIO
+from pathlib import Path
 from html.parser import HTMLParser
 from urllib.request import urlopen
+
+if __package__:
+    from .opcodes_layout import emit_layout
+    from ._opcodes_runtime import read_sources
+else:
+    from opcodes_layout import emit_layout
+    from _opcodes_runtime import read_sources
+
 
 destination = "opcodes.py"
 pxd_destination = "opcodes.pxd"
@@ -489,7 +500,7 @@ def update():
 
     opcodefunctions = map(lambda x: (None, None) if x is None else x.createfunction(), opcodes)
 
-    with open(destination, "w") as f, open(pxd_destination, "w") as f_pxd:
+    with StringIO() as f, StringIO() as f_pxd:
         f.write(warning)
         f.write(imports)
         f_pxd.write(warning)
@@ -553,6 +564,33 @@ def execute_opcode(cpu, opcode, v):
             f.write(f'"{t[2]}",\n' + " " * 4)
 
         f.write("]\n")
+        _emit_layout(f.getvalue(), f_pxd.getvalue())
+
+
+def _emit_layout(source, declarations):
+    """Keep generated instructions intact; only change the output layout."""
+    output = Path(destination)
+    pxd = Path(pxd_destination)
+    if output.name != "opcodes.py" or pxd.name != "opcodes.pxd" or output.parent != pxd.parent:
+        raise ValueError("opcode components require sibling opcodes.py and opcodes.pxd destinations")
+    return emit_layout(source, declarations, output.parent)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Generate the bounded PyBoy opcode source layout.")
+    parser.add_argument(
+        "--from-existing", action="store_true",
+        help="Partition the current generated pair offline, preserving every original byte.",
+    )
+    args = parser.parse_args(argv)
+    if args.from_existing:
+        core = Path(destination).parent
+        if (core / "_opcodes_manifest.py").exists():
+            _emit_layout(*read_sources(core))
+        else:
+            _emit_layout(Path(destination).read_bytes(), Path(pxd_destination).read_bytes())
+    else:
+        load()
 
 
 def load():
@@ -562,4 +600,4 @@ def load():
 
 
 if __name__ == "__main__":
-    load()
+    main()

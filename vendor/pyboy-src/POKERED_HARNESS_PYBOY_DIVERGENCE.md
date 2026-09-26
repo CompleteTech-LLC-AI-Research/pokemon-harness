@@ -1,3 +1,23 @@
+# Current candidate divergence — issue #123
+
+Candidate content identity: `2d7a89d80468d17f7fa55c7c72404acc2aa80f1d`. Inherited vendor identity: `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`.
+
+The opcode generator now emits bounded, losslessly reassembled source
+components; see `docs/OPCODE_LAYOUT.md`. Every original Python and Cython
+declaration byte is retained. The identity includes all new tracked source
+components and build/generator changes. This is a content identity, not a
+Git commit or a claim that the full native gate and independent review pass.
+Those acceptance steps remain required; issue #123 remains open.
+
+The definition is the existing algorithm reproduced in the historical
+record below: exclude this record and the marker file; normalize 40-hex
+strings in pyboy/__init__.py; hash sorted tracked vendor paths and bytes.
+
+## Historical record at `3e865d5b0348d0c7c462ed8b40a107ae2b158277` (retained verbatim)
+
+All counts, pins, observations and phrases such as 'this head' below apply
+to that earlier snapshot, not this candidate. No prior evidence is upgraded.
+
 # Harness-local divergence record — vendored PyBoy
 
 Status: **RE-PINNED — harness-local divergence revision.** The vendored tree has diverged from the
