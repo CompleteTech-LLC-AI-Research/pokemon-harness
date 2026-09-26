@@ -19,16 +19,106 @@ assertions in the milestones module remain the contract; this file is the
 backstop that keeps them from being quietly removed.
 """
 
+import ast
+
+import pytest
+
 from tests._timed_menu_milestone_sentinel_support import (
     DEADLINE_TERMINATION,
     GUARD_FUNCTION,
     RETENTION_COUNT_SITES,
     RUN_OWNER,
+    _is_enforced,
+    _may_bypass,
     count_sites_that_bypass_the_guard,
     guard_is_wired_on_the_fast_clock_path,
     guard_rejects_the_deadline_terminal_state,
     retention_sites_observed,
 )
+
+#: ``(label, body, live)`` -- does an assert in this body actually propagate?
+#: These are the shapes #280 is about. The sentinel tests below prove the
+#: sentinels *use* this logic; this table proves the logic itself is right, so a
+#: future refactor cannot quietly widen or narrow what counts as enforced.
+ENFORCEMENT_SHAPES = (
+    ("plain", "assert x == 1", True),
+    ("and of two comparisons", "assert len(a) == 1 and len(b) == 2", True),
+    ("double negative", "assert not (x != 1)", True),
+    ("try-except AssertionError", "try:\n assert x == 1\nexcept AssertionError:\n pass", False),
+    ("bare except", "try:\n assert x == 1\nexcept:\n pass", False),
+    ("except BaseException", "try:\n assert x == 1\nexcept BaseException:\n pass", False),
+    ("except Exception", "try:\n assert x == 1\nexcept Exception:\n pass", False),
+    ("tuple handler", "try:\n assert x == 1\nexcept (KeyError, AssertionError):\n pass", False),
+    ("try-except-star", "try:\n assert x == 1\nexcept* AssertionError:\n pass", False),
+    (
+        "nested swallow",
+        (
+            "try:\n pass\nexcept AssertionError:\n try:\n  assert x == 1\n"
+            " except AssertionError:\n  pass"
+        ),
+        False,
+    ),
+    (
+        "contextlib suppress AssertionError",
+        "with contextlib.suppress(AssertionError):\n assert x == 1",
+        False,
+    ),
+    (
+        "contextlib suppress Exception",
+        "with contextlib.suppress(Exception):\n assert x == 1",
+        False,
+    ),
+    ("static if False", "if False:\n assert x == 1", False),
+    ("comparison or True", "assert x != 1 or True", False),
+    ("True or comparison", "assert True or x != 1", False),
+    ("comparison and flag", "assert x != 1 and flag", False),
+    (
+        "local AssertionError subclass",
+        "class T(AssertionError):\n pass\ntry:\n assert x == 1\nexcept T:\n pass",
+        False,
+    ),
+    # Shapes that must NOT be reported as defused, or the check would cry wolf
+    # and a real regression would be waved through as a known shape.
+    ("unrelated handler", "try:\n assert x == 1\nexcept ValueError:\n pass", True),
+    (
+        "else branch",
+        "try:\n assert x == 1\nexcept ValueError:\n pass\nelse:\n assert x == 2",
+        True,
+    ),
+    ("finally branch", "try:\n pass\nexcept ValueError:\n pass\nfinally:\n assert x == 1", True),
+    ("handler body", "try:\n pass\nexcept AssertionError:\n assert x == 1", True),
+    (
+        "later handler only",
+        "try:\n pass\nexcept AssertionError:\n assert x == 1\nexcept ValueError:\n pass",
+        True,
+    ),
+    ("if True", "if True:\n assert x == 1", True),
+    ("runtime condition", "if flag:\n assert x == 1", True),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    ENFORCEMENT_SHAPES,
+    ids=[shape[0] for shape in ENFORCEMENT_SHAPES],
+)
+def test_the_enforcement_check_separates_live_asserts_from_inert_ones(label, body, live):
+    """An assert counts as enforced only when its failure actually propagates.
+
+    #280 exists because a structural sentinel is only as trustworthy as the
+    shape it inspects. A handler that swallows the failure, a suppression
+    context, a statically dead branch, or a short-circuiting ``or`` all leave the
+    assert present in the tree while removing its ability to fail -- which is
+    exactly what a presence-only check cannot see.
+    """
+    source = "def probe(x, flag):\n" + "\n".join(f"    {line}" for line in body.splitlines())
+    function = ast.parse(source).body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    enforced = [_is_enforced(function, node) and not _may_bypass(node.test) for node in asserts]
+    assert all(enforced) is live, (
+        f"{label}: expected every assert to be {'enforced' if live else 'defused'}, got {enforced}"
+    )
 
 
 def test_the_261_guard_is_still_wired_to_the_fast_clock_path():
