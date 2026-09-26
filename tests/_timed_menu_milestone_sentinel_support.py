@@ -50,6 +50,55 @@ def _module_tree():
     return ast.parse(inspect.getsource(milestones))
 
 
+def _owning_module(function):
+    """The parsed module that ``function`` belongs to, for import resolution.
+
+    The bound names must come from the module that actually *contains* the assert
+    being judged, not from whichever module the sentinel happens to be inspecting.
+    Reading them from the milestones tree alone would make the rule correct for
+    that one file and silently wrong for any other, which is how a spelling slips
+    through: the aliases that matter are the ones in the file being edited.
+
+    A function from a tree the sentinel has not seen -- a probe built by a test --
+    falls back to the milestones module, which is correct for every real call site
+    because those asserts live in that file. Probes that need a different set of
+    bindings pass their own tree via ``_is_enforced(..., tree=...)``.
+    """
+    for tree in (milestones_tree(), _module_tree()):
+        if any(node is function for node in ast.walk(tree)):
+            return tree
+    return _module_tree()
+
+
+def milestones_tree():
+    """The parsed milestones module, cached for repeated name resolution."""
+    global _MILESTONES_TREE
+    if _MILESTONES_TREE is None:
+        _MILESTONES_TREE = _module_tree()
+    return _MILESTONES_TREE
+
+
+_MILESTONES_TREE = None
+
+
+def _name_catches_assertion_error(name):
+    """Does a caught *name* also catch ``AssertionError``?
+
+    Shared by the handler rule and the suppression rule so the two agree on what
+    counts. ``ValueError`` and friends are the false case: they cannot swallow an
+    ``assert``, and treating them as if they could would cry wolf on real code.
+    A name that is not a known exception type is reported as swallowing, because
+    an assert that cannot be proven live must not be counted as enforced.
+    """
+    if name in {"AssertionError", "Exception", "BaseException"}:
+        return True
+    builtins = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
+    candidate = builtins.get(name)
+    if isinstance(candidate, type):
+        return issubclass(candidate, AssertionError)
+    return True
+
+
 def _is_zero_float_compare(node):
     """True for a comparison of a name against the float ``0.0``."""
     return (
@@ -333,7 +382,102 @@ def _swallows_assertion_error(handler):
     return bool({"AssertionError", "Exception", "BaseException"} & set(names))
 
 
-def _is_enforced(function, target):
+#: ``contextlib.suppress`` is the stdlib suppression context that silently
+#: discards an exception class the caller names. #287 measured it defeating every
+#: sentinel on landed master, because an ``ast.With`` is not an ``ast.Try`` and the
+#: try-shaped rule walked straight past it.
+SUPPRESSING_CONTEXTS = ("contextlib.suppress", "suppress")
+
+
+def _bound_names(tree):
+    """Map every module-level name in ``tree`` to the dotted path it is bound to.
+
+    A name bound by ``from contextlib import suppress as sq`` resolves to
+    ``contextlib.suppress``; ``import contextlib as c`` binds ``c`` to
+    ``contextlib``; ``from contextlib import nullcontext`` binds ``nullcontext``
+    to ``contextlib.nullcontext``.
+    """
+    bound = {}
+    for node in getattr(tree, "body", []):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bound
+
+
+def _resolved_dotted(expression, bound):
+    """The dotted path ``expression`` refers to, with every alias expanded.
+
+    ``c.suppress`` where ``c`` is bound to ``contextlib`` resolves to
+    ``contextlib.suppress``; ``sq`` bound that way resolves to the same thing.
+    Comparing the *resolved* form is what lets one rule cover the qualified
+    spelling, the from-import and both alias forms at once.
+    """
+    if isinstance(expression, ast.Name):
+        return bound.get(expression.id, expression.id)
+    if isinstance(expression, ast.Attribute):
+        prefix = _resolved_dotted(expression.value, bound)
+        return f"{prefix}.{expression.attr}" if prefix else None
+    return None
+
+
+def _resolves_to(expression, dotted, bound):
+    """Does ``expression`` name ``dotted``, however this module spelled it?
+
+    Matching the *resolved* name rather than one literal spelling is the whole
+    point. Checking only ``contextlib.suppress`` leaves ``suppress(...)`` after a
+    from-import open, and the module under sentinel already uses the from-import
+    form -- ``tests/test_timed_menu_milestones.py`` does
+    ``from contextlib import nullcontext``. Matching one concrete spelling and
+    leaving the family open is what #288 did with ``except*``.
+    """
+    return _resolved_dotted(expression, bound) == dotted
+
+
+def _suppression_names(call):
+    """The exception names passed to a ``suppress(...)`` call.
+
+    Anything that is not a plain name is reported as universal, so an argument
+    the check cannot read is never assumed to be harmless.
+    """
+    return [
+        argument.id if isinstance(argument, ast.Name) else "BaseException" for argument in call.args
+    ] or ["BaseException"]
+
+
+def _is_suppressing_with(node, bound):
+    """Is this ``with`` a suppression context that can eat an assertion failure?"""
+    for item in node.items:
+        call = item.context_expr
+        if not isinstance(call, ast.Call):
+            continue
+        if not any(_resolves_to(call.func, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
+            continue
+        if any(_name_catches_assertion_error(name) for name in _suppression_names(call)):
+            return True
+    return False
+
+
+def _under_dead_branch(function, target):
+    """Is ``target`` nested under an ``if`` whose condition is a false literal?
+
+    Only literal conditions count, so a guard nested under a genuine runtime
+    condition is never mistaken for a dead one.
+    """
+    for node in ast.walk(function):
+        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Constant):
+            continue
+        if node.test.value:
+            continue
+        if any(_contains(statement, target) for statement in node.body):
+            return True
+    return False
+
+
+def _is_enforced(function, target, tree=None):
     """Is ``target`` an assert that can actually fail?
 
     An ``assert`` is defeated, without being removed, if it sits inside a
@@ -348,15 +492,36 @@ def _is_enforced(function, target):
     handler in the function: a swallowing ``try`` around a *sibling* statement
     does not disarm an assert outside it, and treating it as though it did
     would drop real pinned sites. ``_contains`` is what draws that line.
+
+    Two further shapes are decided here rather than by a caller, because each is
+    the same defect under a different spelling:
+
+    * ``with contextlib.suppress(AssertionError):`` (#287). It is an ``ast.With``,
+      not an ``ast.Try``, so the try-shaped rule never saw it. The assert runs and
+      raises; the raise is what gets discarded, so no behavioural test can catch
+      it either -- the retention counts have no behavioural counterpart.
+    * a statically dead ``if False:`` branch, which keeps the assert present in the
+      tree while never executing it.
+
+    Suppression is matched by *resolved* name, so the from-import and aliased
+    spellings are covered alongside ``contextlib.suppress``.
+
+    ``tree`` supplies the module whose import bindings to resolve. It defaults to
+    the module that owns ``function``; a caller judging a function from a tree this
+    module has not parsed passes it explicitly, so the bindings always come from
+    the file the assert actually lives in.
     """
+    bound = _bound_names(tree if tree is not None else _owning_module(function))
     for node in ast.walk(function):
-        if not isinstance(node, (ast.Try, ast.TryStar)):
-            continue
-        if not any(_contains(statement, target) for statement in node.body):
-            continue
-        if any(_swallows_assertion_error(handler) for handler in node.handlers):
-            return False
-    return True
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            if not any(_contains(statement, target) for statement in node.body):
+                continue
+            if any(_swallows_assertion_error(handler) for handler in node.handlers):
+                return False
+        elif isinstance(node, (ast.With, ast.AsyncWith)) and _is_suppressing_with(node, bound):
+            if any(_contains(statement, target) for statement in node.body):
+                return False
+    return not _under_dead_branch(function, target)
 
 
 def _contains(statement, target):

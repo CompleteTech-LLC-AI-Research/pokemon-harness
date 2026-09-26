@@ -19,12 +19,18 @@ assertions in the milestones module remain the contract; this file is the
 backstop that keeps them from being quietly removed.
 """
 
+import ast
+
+import pytest
+
 from tests._timed_menu_milestone_sentinel_support import (
     DEADLINE_TERMINATION,
     GUARD_FUNCTION,
     RETENTION_COUNT_SITES,
     RETENTION_SUBSCRIPT_COUNT_SITES,
     RUN_OWNER,
+    _bound_names,
+    _is_enforced,
     count_sites_that_bypass_the_guard,
     guard_is_wired_on_the_fast_clock_path,
     guard_rejects_the_deadline_terminal_state,
@@ -123,4 +129,151 @@ def test_the_pinned_record_subscript_counts_are_still_exact_equalities():
     assert observed == expected, (
         "the pinned record-subscript retention counts are no longer exact "
         f"equality assertions; expected {expected}, observed {observed}"
+    )
+
+
+#: ``(label, imports, body, live)`` -- can the assert in ``body`` actually fail?
+#: ``imports`` is prepended so each row can spell ``suppress`` the way a real edit
+#: might. ``live`` is what ``_is_enforced`` must report for every assert in the body.
+#:
+#: These rows exist because the suppression rule is only as good as its coverage of
+#: spellings. #287 was defeated by the *from-import* form while the qualified form
+#: was already handled, which is the same one-spelling gap #288 had with ``except*``.
+SUPPRESSION_SHAPES = (
+    (
+        "qualified contextlib.suppress",
+        "import contextlib",
+        "with contextlib.suppress(AssertionError):\n assert x == 1",
+        False,
+    ),
+    (
+        "from-import suppress",
+        "from contextlib import suppress",
+        "with suppress(AssertionError):\n assert x == 1",
+        False,
+    ),
+    (
+        "aliased module",
+        "import contextlib as c",
+        "with c.suppress(AssertionError):\n assert x == 1",
+        False,
+    ),
+    (
+        "aliased name",
+        "from contextlib import suppress as sq",
+        "with sq(AssertionError):\n assert x == 1",
+        False,
+    ),
+    (
+        "suppress Exception",
+        "from contextlib import suppress",
+        "with suppress(Exception):\n assert x == 1",
+        False,
+    ),
+    (
+        "suppress BaseException",
+        "from contextlib import suppress",
+        "with suppress(BaseException):\n assert x == 1",
+        False,
+    ),
+    (
+        "suppress tuple naming AssertionError",
+        "from contextlib import suppress",
+        "with suppress((KeyError, AssertionError)):\n assert x == 1",
+        False,
+    ),
+    ("static if False", "", "if False:\n assert x == 1", False),
+    # Must stay live, or the check would cry wolf and a real regression would be
+    # waved through as a known shape.
+    (
+        "CONTROL suppress ValueError",
+        "from contextlib import suppress",
+        "with suppress(ValueError):\n assert x == 1",
+        True,
+    ),
+    (
+        "CONTROL aliased suppress KeyError",
+        "from contextlib import suppress as sq",
+        "with sq(KeyError):\n assert x == 1",
+        True,
+    ),
+    (
+        "CONTROL unrelated context manager",
+        "from contextlib import nullcontext",
+        "with nullcontext():\n assert x == 1",
+        True,
+    ),
+    ("CONTROL if True", "", "if True:\n assert x == 1", True),
+    ("CONTROL runtime condition", "", "if flag:\n assert x == 1", True),
+    ("CONTROL plain assert", "", "assert x == 1", True),
+    (
+        "CONTROL handler for ValueError",
+        "",
+        "try:\n assert x == 1\nexcept ValueError:\n pass",
+        True,
+    ),
+    (
+        "CONTROL except* for ValueError",
+        "",
+        "try:\n assert x == 1\nexcept* ValueError:\n pass",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "imports", "body", "live"),
+    SUPPRESSION_SHAPES,
+    ids=[shape[0] for shape in SUPPRESSION_SHAPES],
+)
+def test_the_enforcement_check_separates_live_asserts_from_suppressed_ones(
+    label, imports, body, live
+):
+    """A suppression context or a dead branch must read as unenforced.
+
+    #287 measured ``with contextlib.suppress(AssertionError):`` leaving every
+    sentinel green while the owning test could not fail, so a wrong retention count
+    reported as a pass. The assert does run and does raise there -- the raise is
+    what gets discarded -- which is why no behavioural test can stand in for this
+    one. The retention counts have no behavioural counterpart; this is the check.
+
+    The false rows matter as much as the true ones: a rule that flagged
+    ``suppress(ValueError)`` would report real pinned sites as unenforced and train
+    the reader to ignore it.
+    """
+    header = "".join(f"{line}\n" for line in ([imports] if imports else []))
+    source = f"{header}def probe():\n" + "\n".join(f"    {line}" for line in body.splitlines())
+    module = ast.parse(source)
+    function = module.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    enforced = [_is_enforced(function, node, tree=module) for node in asserts]
+    assert all(enforced) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'suppressed'}, got {enforced}"
+    )
+
+
+def test_the_suppression_rule_resolves_names_rather_than_matching_text():
+    """Import bindings must be read, so aliases and from-imports resolve alike.
+
+    A rule that compared the literal text ``contextlib.suppress`` would pass every
+    mutation in the table above except the first, and would still be wrong. This
+    asserts the resolution step directly, so the *reason* the aliases are covered
+    is pinned rather than just its current outcome.
+    """
+    module = ast.parse(
+        "import contextlib\n"
+        "import contextlib as c\n"
+        "from contextlib import suppress\n"
+        "from contextlib import suppress as sq\n"
+    )
+    bound = _bound_names(module)
+    assert bound["contextlib"] == "contextlib"
+    assert bound["c"] == "contextlib"
+    assert bound["suppress"] == "contextlib.suppress"
+    assert bound["sq"] == "contextlib.suppress"
+    assert bound["sq"] == bound["suppress"], (
+        "an alias must resolve to the same dotted path as the plain name, or the "
+        "suppression rule silently misses aliased imports"
     )
