@@ -21,7 +21,11 @@ from pokered_harness.link.network_backend import (
 )
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_coordinator import SerialOperationGate
-from tests.test_network_cpu_owner import _ObservedEdgeQueue, _wait_for_edge_request
+from tests.test_network_cpu_owner import (
+    _ObservedEdgeQueue,
+    _wait_for_edge_request,
+    _wait_for_edge_requests_retired,
+)
 from tests.test_serial_backend_boundary import emulator as _emulator_fixture  # noqa: F401
 
 pytestmark = [pytest.mark.unit, pytest.mark.timing_sensitive]
@@ -163,6 +167,9 @@ def test_successive_tcp_bytes_preserve_the_rom_mailbox(
         assert responses == [0x3C, 0x3C]
         assert handoffs.responses == 16
         assert backend.debug_snapshot()["edge_req_received"] == 16
+        # The sixteenth response is written by the response worker, so retire
+        # it before sampling the counter that reports the write.
+        _wait_for_edge_requests_retired(backend)
         assert backend.debug_snapshot()["pending_edge_requests"] == 0
         assert list(pyboy.memory[_OUTPUT : _OUTPUT + 2]) == [0x2D, 0x16]
         assert pyboy.memory[_COUNT] == 2
@@ -254,6 +261,9 @@ def test_rearming_alone_does_not_release_held_byte():
         assert not case.sender.is_alive()
         assert case.errors == []
         assert case.responses == [0x3C]
+        # finish_owner_frame releases the held byte; the response worker still
+        # has to write it before the admitted edge is retired.
+        _wait_for_edge_requests_retired(case.backend)
         assert case.backend.debug_snapshot()["pending_edge_requests"] == 0
 
 
