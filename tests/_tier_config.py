@@ -155,6 +155,8 @@ UNIT_MODULES = frozenset(
         "test_network_owner_execution.py",
         "test_network_public_backpressure.py",
         "test_network_write_deadlines.py",
+        "test_opcode_layout.py",
+        "test_opcode_layout_integration.py",
         "test_owner_boundary_runtime.py",
         "test_physical_clock_runtime.py",
         "test_probe_timed_rom_pair_assets.py",

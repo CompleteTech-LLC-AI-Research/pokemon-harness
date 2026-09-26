@@ -62,7 +62,15 @@ packages = [
 pyboy = "vendor/pyboy-src/pyboy"
 
 [tool.setuptools.package-data]
-"pyboy.core" = ["bootrom_cgb.bin", "bootrom_dmg.bin"]
+# Hand-authored components used by the public PyBoy source module.
+"pyboy" = [
+    "_pyboy_init.pxi",
+    "_pyboy_runtime.pxi",
+    "_pyboy_controls.pxi",
+    "_pyboy_api.pxi",
+    "_pyboy_memory.pxi",
+]
+"pyboy.core" = ["bootrom_cgb.bin", "bootrom_dmg.bin", "opcodes.pxd", "opcode_components/*.pxi"]
 "pyboy.plugins" = ["font.txt"]
 
 [tool.pytest.ini_options]

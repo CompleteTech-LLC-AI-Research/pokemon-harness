@@ -1,8 +1,12 @@
+import importlib.util
 import multiprocessing
 import os
 import platform
 import sys
 from multiprocessing import cpu_count
+from pathlib import Path
+from runpy import run_path
+
 import numpy as np
 
 from setuptools import Extension, setup
@@ -18,6 +22,13 @@ if not CYTHON:
 from Cython.Build import cythonize  # noqa
 from Cython.Compiler import DebugFlags, Errors  # noqa
 from Cython.Distutils import build_ext as _build_ext  # noqa
+
+# Loading this helper must not import PyBoy while its native modules are absent.
+_opcode_spec = importlib.util.spec_from_file_location(
+    "_pyboy_opcode_build", Path(__file__).parent / "pyboy/core/_opcodes_runtime.py"
+)
+_opcode_build = importlib.util.module_from_spec(_opcode_spec)
+_opcode_spec.loader.exec_module(_opcode_build)
 
 
 def patched_error(position, message):
@@ -60,11 +71,27 @@ class build_ext(_build_ext):
         if sys.platform == "darwin":
             cflags.append("-DCYTHON_INLINE=inline __attribute__ ((__unused__)) __attribute__((always_inline))")
 
+        # Keep the public extension and its augmenting .pxd in one translation
+        # unit. Never Cythonize the runtime-loading facade, and never overwrite
+        # tracked source with the transient assembled compiler input.
+        source_support = run_path(os.path.join(ROOT_DIR, "_source.py"))
+        main_source = source_support["stage_native_source"](
+            ROOT_DIR, os.path.join("build", "pyboy-components")
+        )
+        main_path = os.path.join(ROOT_DIR, "pyboy.py")
+        main_dependencies = [os.path.join(ROOT_DIR, name) for name in source_support["COMPONENTS"]]
+        main_dependencies.append(os.path.join(ROOT_DIR, "pyboy.pxd"))
         py_pxd_files = prep_pxd_py_files()
+        def compiler_source(src):
+            if src == main_path:
+                return str(main_source)
+            return _opcode_build.prepare_opcode_source(src)
+
         cythonize_files = map(
             lambda src: Extension(
                 src.split(".")[0].replace(os.sep, "."),
-                [src],
+                [compiler_source(src)],
+                depends=main_dependencies if src == main_path else [],
                 extra_compile_args=cflags,
                 extra_link_args=[] if DEBUG else ["-s", "-w"],
                 include_dirs=[np.get_include()],
@@ -74,6 +101,7 @@ class build_ext(_build_ext):
         self.distribution.ext_modules = cythonize(
             [*cythonize_files],
             nthreads=thread_count,
+            include_path=[os.getcwd()],
             annotate=False,
             gdb_debug=False,
             language_level=3,
@@ -99,7 +127,11 @@ class build_ext(_build_ext):
 
 
 def prep_pxd_py_files():
-    ignore_py_files = ["__main__.py", "manager_gen.py", "opcodes_gen.py", "opcodes_gen_handlers.py", "conftest.py"]
+    ignore_py_files = [
+        "__main__.py", "manager_gen.py", "opcodes_gen.py",
+        "opcodes_gen_handlers.py", "conftest.py", "_source.py",
+        "opcodes_layout.py", "_opcodes_runtime.py", "_opcodes_manifest.py",
+    ]
     # Cython doesn't trigger a recompile on .py files, where only the .pxd file has changed. So we fix this here.
     # We also yield the py_files that have a .pxd file, as we feed these into the cythonize call.
     for root, dirs, files in os.walk(ROOT_DIR):

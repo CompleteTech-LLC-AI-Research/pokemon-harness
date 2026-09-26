@@ -1,3 +1,42 @@
+# Current combined harness-local divergence
+
+The tracked vendor tree now includes the generated opcode layout (#123), the main PyBoy
+source components (#133), and the serial type split (#153). Its recomputed full-manifest
+content identity is `b94bf5dfb042c502ff4bc1bcd417599b02a9419b`. Earlier identities below
+are historical snapshots and do not qualify this combined tree. The native build,
+source/native unit gates, packaging checks, and exact-head review remain required.
+Issue #122 remains open because other file splits are outstanding.
+
+---
+
+# Combined #153 and #133 harness-local divergence
+
+Current tracked vendor content identity: `acd569fdb5836b58558856ac066102d1e9ccaf96`. This includes the serial
+type split and main PyBoy source components, calculated from the complete tracked vendor
+manifest. Earlier single-change identity notes below are historical and do not qualify
+this combined tree. The native build, full repository gate and exact-head review remain
+pending.
+
+---
+
+# Unqualified serial-split candidate for #122 / #153
+
+Candidate content identity: `0a0f7f315e58e1c06a8c2cb9a716b8116fdf92ef`. Prior identity: `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`.
+Base harness commit: `3e865d5b0348d0c7c462ed8b40a107ae2b158277`. This is a content digest, not a Git commit.
+
+`pyboy/core/serial.py` is split from 1117 to 996 lines; the new
+`serial_types.py` is 168 lines. Eight class definitions move verbatim.
+The complete Serial implementation and serial.pxd remain unchanged.
+Historical facade class/pickle paths are preserved. The existing digest
+algorithm is unchanged and includes the added helper in the tracked manifest.
+
+Status: PARTIAL / UNQUALIFIED. Isolated serial checks are not a complete
+PyBoy build, the pinned-toolchain gate, packaging acceptance, full pytest,
+production-gate equivalence, or independent review. No historical passing
+result below is transferred to this new identity. Other #122 leaves remain open.
+
+## Previous two-split identity record — historical, retained verbatim
+
 # Harness-local divergence record — vendored PyBoy
 
 Status: **RE-PINNED — harness-local divergence revision.** The vendored tree has diverged from the

@@ -120,7 +120,7 @@ def native_identity() -> dict:
     return {
         "python": "3.11.9",
         "version": "2.7.0",
-        "revision": "eceaa3bb15dedd6847a3a37d3400421e3024cb5c",
+        "revision": "b94bf5dfb042c502ff4bc1bcd417599b02a9419b",
         "cython_compiled": True,
         "modules": {
             name: {
