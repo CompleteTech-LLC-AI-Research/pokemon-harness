@@ -1,0 +1,51 @@
+name: Native unit validation
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-unit:
+    name: Native build and complete unit tier (Python 3.12)
+    # Match CI_POLICY.md: standard public hosted execution only, never paid runners.
+    if: ${{ github.event.repository.private == false && github.event.repository.visibility == 'public' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHON: python
+      NATIVE_UNIT_OUTPUT: ${{ runner.temp }}/pokered-native-unit-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential libsdl2-dev
+
+      - name: Check shell syntax
+        run: bash -n scripts/run_native_unit_ci.sh
+
+      - name: Build, prove native pinball imports, and run the full unit tier
+        run: bash scripts/run_native_unit_ci.sh
+
+      - name: Retain evidence even when prerequisites or tests fail
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-unit-evidence-py312-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NATIVE_UNIT_OUTPUT }}/evidence/
+          if-no-files-found: warn
+          retention-days: 14
