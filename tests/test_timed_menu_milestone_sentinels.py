@@ -157,6 +157,17 @@ BYPASS_SHAPES = (
     ("tautology len > -5", "assert x != 1 or len(y) > -5", False),
     ("tautology call compare", 'assert x != 1 or len(y.get("e", [])) >= 0', False),
     ("tautology on the left", "assert len(y) >= 0 or x != 1", False),
+    # A comparison built only from literals is decidable without reading any
+    # state, so it short-circuits the `or` exactly as a bare `True` does. Its
+    # left operand is a constant rather than a call, so the count heuristic
+    # cannot see it and these were previously reported as enforced.
+    ("literal compare eq", "assert x != 1 or (1 == 1)", False),
+    ("literal compare zero eq", "assert x != 1 or (0 == 0)", False),
+    ("literal compare string eq", "assert x != 1 or ('' == '')", False),
+    ("literal compare lt", "assert x != 1 or (1 < 2)", False),
+    ("literal compare gt", "assert x != 1 or (2 > 1)", False),
+    ("literal container", "assert x != 1 or [1, 2]", False),
+    ("literal arithmetic", "assert x != 1 or (1 + 1 == 2)", False),
     # Real comparisons that must stay enforced, or the rule would cry wolf and
     # a genuine regression would be waved through as a known shape.
     ("real count comparison", "assert x != 1 or len(y) == 300", True),
@@ -167,6 +178,12 @@ BYPASS_SHAPES = (
     ("subscript left operand", 'assert x != 1 or record["n"] >= 0', True),
     ("bool is not a number", "assert x != 1 or len(y) >= True", True),
     ("arithmetic left operand", "assert x != 1 or a - b >= 0", True),
+    # Reads a Name, so it is not constant-foldable and stays enforced. This is
+    # the safe direction: a wrong answer reports a live assert as dead.
+    ("self compare", "assert x != 1 or (x == x)", True),
+    ("runtime value compare", "assert x != 1 or (a == b)", True),
+    ("call compare", "assert x != 1 or f(a) == f(a)", True),
+    ("subscript compare", 'assert x != 1 or record["k"] == record["k"]', True),
     ("runtime condition on count", "if len(y) > 0:\n assert x == 1", True),
 )
 
@@ -211,6 +228,14 @@ def test_the_bypass_check_separates_live_comparisons_from_short_circuited_ones(l
         ("a - b >= 0", False),
         ("len(y) >= True", False),
         ("len(y) >= 0.0", True),
+        ("1 == 1", True),
+        ("0 == 0", True),
+        ("'' == ''", True),
+        ("1 < 2", True),
+        ("2 > 1", True),
+        ("1 + 1 == 2", True),
+        ("x == x", False),
+        ("a == b", False),
         ("True", True),
         ("False", False),
         ("flag", False),
