@@ -21,6 +21,7 @@ import pytest
 from scripts import probe_timed_rom_pair as probe
 from tests.test_timed_menu_milestones import FRAME_BOUND, run_owner
 
+
 class FakeClock:
     """Monotonic stand-in that advances a fixed amount per read.
 
@@ -55,7 +56,7 @@ def test_frame_bound_evidence_is_independent_of_wall_clock_speed(monkeypatch, tm
     contract asserted by the retention test must hold as a property of the
     frame bound and not of machine load.
     """
-    record, path, _, _, clock = run_owner(
+    record, _, _, _, clock = run_owner(
         monkeypatch, tmp_path, clock_step=clock_step, stream=False, milestones=False
     )
     assert record["errors"] == []
