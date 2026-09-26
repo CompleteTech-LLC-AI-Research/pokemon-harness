@@ -83,6 +83,18 @@ def run_authored_goal_owner(
     # Reuse existing authored session/endpoint models without changing old tests.
     from tests._probe_timed_rom_pair_support import Harness, _MenuSession, arguments
 
+    # Exact step counts, goal-driver offsets and milestone counts are asserted by
+    # the trade-pair rows, so the owner must reach its frame bound rather than be
+    # cut off by a wall clock (#252). `#255` added the `clock` seam for this; the
+    # milestone and menu rows use it and this helper still did not. A step of 0
+    # models an arbitrarily fast host, so the counts hold on any machine.
+    # `FakeClock` lives in the shared frame-bound support module (#262), not in
+    # either test module, so importing it here cannot re-introduce a cycle
+    # between this helper and the two timed-menu test modules.
+    from tests._timed_menu_frame_bound_support import FakeClock
+
+    clock = FakeClock(step=0.0)
+    clock_deadline_base = clock()
     args = arguments(
         "--input-profile=menu", "--listener-chunk=1", "--connector-chunk=1", "--frame-limit=4"
     )
@@ -133,8 +145,8 @@ def run_authored_goal_owner(
                     threading.Barrier(1),
                     [None, None],
                     threading.Lock(),
-                    time.monotonic() + 3,
-                    time.monotonic() + 5,
+                    clock_deadline_base + 3,
+                    clock_deadline_base + 5,
                     lambda *args, **kwargs: session,
                     harness.endpoint,
                     harness.assets,
@@ -148,6 +160,7 @@ def run_authored_goal_owner(
                         "outgoing_slot": 0,
                         "checkpoint": "select-mon",
                     },
+                    clock=clock,
                 )
             finally:
                 accepted.close()
