@@ -219,6 +219,13 @@ def _swallows_assertion_error(handler):
     to keep the rule from depending on the reader knowing the exception
     hierarchy. Handlers for anything else -- ``except ValueError`` and friends
     -- cannot swallow an ``assert`` and are not counted.
+
+    A re-raising handler (``except AssertionError: raise``) is conservatively
+    counted as swallowing. The failure does propagate, so the assert is in fact
+    enforced; deciding that needs real control-flow analysis, and this is a
+    structural sentinel, so it asks only whether a handler *can* swallow. The
+    error is toward reporting a live assert as unenforced, never toward missing
+    a dead one.
     """
     caught = handler.type
     if caught is None:
@@ -239,11 +246,17 @@ def _is_enforced(function, target):
     ``try`` whose handler swallows ``AssertionError`` (#280). ``ast.walk`` is
     scope-blind -- it descends into ``try`` bodies -- so presence-based checks
     report such an assert as intact while the owning test can no longer fail.
-    This rejects the assert if *any* handler anywhere in the same function is
-    capable of swallowing it.
+    Both ``ast.Try`` and ``ast.TryStar`` (``except*``) are matched: they are
+    distinct node types, and matching only the former left ``except*`` an
+    unguarded spelling of the same defeat.
+
+    Scoped to a ``try`` whose body actually contains the assert, not to any
+    handler in the function: a swallowing ``try`` around a *sibling* statement
+    does not disarm an assert outside it, and treating it as though it did
+    would drop real pinned sites. ``_contains`` is what draws that line.
     """
     for node in ast.walk(function):
-        if not isinstance(node, ast.Try):
+        if not isinstance(node, (ast.Try, ast.TryStar)):
             continue
         if not any(_contains(statement, target) for statement in node.body):
             continue
