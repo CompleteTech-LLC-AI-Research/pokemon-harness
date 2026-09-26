@@ -1,3 +1,18 @@
+# Issue #133 candidate identity update
+
+Current candidate content identity: `2385be4897e993f2c92418ec6d297425684687d8`. Inherited candidate identity: `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`.
+The prior record below is retained as historical evidence for its own tree; its
+old current-head statements do not qualify this candidate. The same hashing
+recipe applies, and the new value is recomputed from the entire tracked vendor
+manifest, including the five components, source loader and native build change.
+
+See `docs/PYBOY_MAIN_MODULE_SPLIT.md`. Source/native full suites, fresh native
+identity checks and independent final-head review remain required. This is not
+a completed issue or a production-release approval. No historical release-evidence
+record is rewritten.
+
+---
+
 # Harness-local divergence record — vendored PyBoy
 
 Status: **RE-PINNED — harness-local divergence revision.** The vendored tree has diverged from the

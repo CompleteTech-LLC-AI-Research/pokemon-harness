@@ -304,3 +304,12 @@ moved; 3 (Cython ABI) — `#138`'s earlier native rebuild is **not** re-run on t
 native unit lane still requires the quiet, non-root, CPU-allocated runner, so **condition 3 is not
 terminal**; 5 (independent review) pending on the exact head. `#138` and `#142` therefore stay
 **OPEN**, `#122` stays **OPEN**, and release status stays **PARTIAL**.
+
+## Issue #133 candidate: bounded main-module source components
+
+Candidate content identity: `2385be4897e993f2c92418ec6d297425684687d8` (inherited `eceaa3bb15dedd6847a3a37d3400421e3024cb5c`). The main Python
+source is split into five verbatim components, assembled into one namespace
+and one native translation unit with unchanged `pyboy.pxd`. See
+`PYBOY_MAIN_MODULE_SPLIT.md` for design, tradeoffs and pending gates.
+This records implementation and re-pinning, not acceptance: #133 remains
+unqualified until full source/native checks and independent review pass.

@@ -62,6 +62,14 @@ packages = [
 pyboy = "vendor/pyboy-src/pyboy"
 
 [tool.setuptools.package-data]
+# Hand-authored components used by the public PyBoy source module.
+"pyboy" = [
+    "_pyboy_init.pxi",
+    "_pyboy_runtime.pxi",
+    "_pyboy_controls.pxi",
+    "_pyboy_api.pxi",
+    "_pyboy_memory.pxi",
+]
 "pyboy.core" = ["bootrom_cgb.bin", "bootrom_dmg.bin"]
 "pyboy.plugins" = ["font.txt"]
 
