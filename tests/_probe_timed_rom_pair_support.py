@@ -508,7 +508,10 @@ class _MenuSession(FakeSession):
 
 def _run_menu_owner(*extra, behavior="complete", profile="menu", checkpoint=None):
     """One synthetic owner runs production scheduling without a peer CPU or ROM."""
-    from tests.test_timed_menu_frame_bound import FakeClock
+    # `FakeClock` lives in the shared frame-bound support module (#262), not in
+    # either test module, so importing it here cannot re-introduce a cycle
+    # between this helper and the two timed-menu test modules.
+    from tests._timed_menu_frame_bound_support import FakeClock
 
     clock = FakeClock(step=0.0)
     clock_deadline_base = clock()
