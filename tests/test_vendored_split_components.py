@@ -221,7 +221,13 @@ def test_native_stage_refuses_to_write_into_the_source_package(stem):
 @pytest.mark.parametrize("stem", STEMS)
 def test_imported_module_keeps_the_pre_split_namespace_and_source(stem):
     module = importlib.import_module(f"pyboy.core.{stem}")
-    assert Path(module.__file__).resolve() == (CORE / f"{stem}.py").resolve()
+    # Under the source runtime the module reports the facade; under the native
+    # runtime it reports the compiled extension, where __file__ is a .so and
+    # linecache/inspect have no Python source to read. The namespace and class
+    # shape below hold in both runtimes; the source-text assertions are scoped
+    # to the source runtime, which is the only one that has text to check.
+    assert Path(module.__file__).name.split(".")[0] == stem
+    from_source = module.__file__.endswith(".py")
     original = components.assemble(CORE, stem)
     namespace = {
         "__file__": module.__file__,
@@ -233,8 +239,9 @@ def test_imported_module_keeps_the_pre_split_namespace_and_source(stem):
     assert {n for n in namespace if not n.startswith("__")} == {
         n for n in vars(module) if not n.startswith("__")
     }
-    linecache.checkcache()
-    assert "".join(linecache.getlines(module.__file__)).encode() == original
+    if from_source:
+        linecache.checkcache()
+        assert "".join(linecache.getlines(module.__file__)).encode() == original
     for name, value in namespace.items():
         if name.startswith("_") or not inspect.isclass(value):
             continue
@@ -242,14 +249,18 @@ def test_imported_module_keeps_the_pre_split_namespace_and_source(stem):
             continue
         actual = getattr(module, name)
         assert set(vars(actual)) == set(vars(value))
-        assert inspect.getsource(actual).startswith("class ")
+        if from_source:
+            assert inspect.getsource(actual).startswith("class ")
         assert actual is value or actual.__name__ == value.__name__
 
 
 def test_setup_stages_the_split_modules_rather_than_their_facades():
     setup = (CORE.parent.parent / "setup.py").read_text()
-    assert '"pyboy/core/mb.py": ("mb", "mb.pxd")' in setup
-    assert '"pyboy/core/lcd.py": ("lcd", "lcd.pxd")' in setup
+    # Keys are package-relative because the lookup compares them against
+    # os.path.relpath(src, ROOT_DIR), which yields "core/mb.py". A key carrying
+    # the pyboy/ prefix never matches and silently cythonizes the facade.
+    assert '"core/mb.py": ("mb", "mb.pxd")' in setup
+    assert '"core/lcd.py": ("lcd", "lcd.pxd")' in setup
     assert "if relative in staged_components:" in setup
     assert "return str(staged_components[relative])" in setup
     for name in (
