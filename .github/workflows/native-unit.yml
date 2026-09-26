@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 60
     env:
       PYTHON: python
-      NATIVE_UNIT_OUTPUT: ${{ runner.temp }}/pokered-native-unit-${{ github.run_id }}-${{ github.run_attempt }}
+      NATIVE_UNIT_OUTPUT: /tmp/pokered-native-unit-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check out the candidate
         uses: actions/checkout@v4
