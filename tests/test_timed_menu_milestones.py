@@ -26,6 +26,7 @@ SITES = {
     "LinkMenu": (3, 0x4300),
 }
 NAMES = ("save_request", "yes_no", "save_game", "link_menu")
+FRAME_BOUND = 300
 
 
 class Symbols:
@@ -565,8 +566,16 @@ def probe_args(*extra):
     )
 
 
-def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=None):
-    """Deterministic owner orchestration; only CPU advancement/transport are faked."""
+def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=None, clock_step=0.0):
+    """Deterministic owner orchestration; only CPU advancement/transport are faked.
+
+    The loop runs on an injected clock so the frame bound is exercised as a frame
+    bound, not a host-speed statement (#252). ``clock_step=None`` restores the
+    real monotonic clock that production uses.
+    """
+    from tests.test_timed_menu_frame_bound import FakeClock
+
+    clock = None if clock_step is None else FakeClock(step=clock_step)
     from scripts import probe_timed_rom_pair as probe
 
     args = probe_args("--input-profile", "menu", "--connector-chunk", "1", "--frame-limit", "300")
@@ -653,8 +662,8 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
         SimpleNamespace(wait=lambda **kw: None),
         [None],
         threading.Lock(),
-        time.monotonic() + 20,
-        time.monotonic() + 21,
+        (clock() if clock is not None else time.monotonic()) + 20,
+        (clock() if clock is not None else time.monotonic()) + 21,
         lambda *a, **kw: session,
         lambda *a, **kw: endpoint,
         lambda *a: {
@@ -667,12 +676,13 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
         },
         checkpoint=checkpoint,
         evidence_path=path,
+        clock=clock,
     )
-    return record, path, lifecycle, checkpoints
+    return record, path, lifecycle, checkpoints, clock
 
 
 def test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context(monkeypatch, tmp_path):
-    record, path, lifecycle, checkpoints = run_owner(monkeypatch, tmp_path)
+    record, path, lifecycle, checkpoints, _clock = run_owner(monkeypatch, tmp_path)
     assert record["errors"] == []
     assert record["termination"] == "frame_bound"
     raw = path.read_bytes()
@@ -720,7 +730,7 @@ def test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context(mon
 def test_default_retention_keeps_full_calls_and_installs_no_hooks(monkeypatch, tmp_path):
     baseline = probe_args()
     assert baseline.call_retention == "inline" and baseline.rom_milestones is False
-    record, path, lifecycle, _ = run_owner(monkeypatch, tmp_path, stream=False, milestones=False)
+    record, path, lifecycle, _, _clock = run_owner(monkeypatch, tmp_path, stream=False, milestones=False)
     assert record["errors"] == []
     assert len(record["calls"]) == 300
     assert "call_log" not in record and "milestones" not in record
@@ -729,7 +739,7 @@ def test_default_retention_keeps_full_calls_and_installs_no_hooks(monkeypatch, t
 
 @pytest.mark.parametrize("status", ["interrupted", "completed_no_progress", "completed_partial"])
 def test_late_noncompleted_calls_have_exact_counts_and_full_evidence(monkeypatch, tmp_path, status):
-    record, path, _, _ = run_owner(monkeypatch, tmp_path, terminal=status)
+    record, path, _, _, _clock = run_owner(monkeypatch, tmp_path, terminal=status)
     calls = [json.loads(line) for line in path.read_bytes().splitlines()]
     assert len(calls) == 271 and calls[-1]["call_index"] == 270
     assert calls[-1]["status"] == status
@@ -750,7 +760,7 @@ def test_cap_failure_preserves_unspooled_call_and_incomplete_artifact(monkeypatc
 
     real_log = probe.CallEvidenceLog
     monkeypatch.setattr(probe, "CallEvidenceLog", lambda path: real_log(path, byte_limit=1200))
-    record, path, _, _ = run_owner(monkeypatch, tmp_path)
+    record, path, _, _, _clock = run_owner(monkeypatch, tmp_path)
     assert record["termination"] == "owner_failure" and record["errors"]
     assert len(path.read_bytes()) <= 1200
     assert record["call_log"]["complete"] is False
@@ -907,7 +917,7 @@ def test_main_fails_from_aggregate_or_incomplete_evidence_despite_completed_inli
 def test_owner_log_open_failure_is_terminal_before_session_creation(monkeypatch, tmp_path):
     path = tmp_path / "calls.jsonl"
     path.write_bytes(b"preexisting")
-    record, _, lifecycle, _ = run_owner(monkeypatch, tmp_path)
+    record, _, lifecycle, _, _clock = run_owner(monkeypatch, tmp_path)
     assert record["termination"] == "owner_failure"
     assert any("FileExistsError" in error for error in record["errors"])
     assert lifecycle == []
@@ -945,7 +955,7 @@ def test_final_artifact_validation_rejects_missing_partial_or_inconsistent_log(t
 
 
 def test_unknown_actual_progress_is_counted_and_retained_as_interruption(monkeypatch, tmp_path):
-    record, path, _, _ = run_owner(monkeypatch, tmp_path, terminal="observation_error")
+    record, path, _, _, _clock = run_owner(monkeypatch, tmp_path, terminal="observation_error")
     calls = [json.loads(line) for line in path.read_bytes().splitlines()]
     assert len(calls) == 271 and calls[-1]["status"] == "interrupted"
     assert "actual_completed_frames" not in calls[-1]
@@ -967,7 +977,7 @@ def test_owner_partial_write_failure_retains_unspooled_evidence(monkeypatch, tmp
         return log
 
     monkeypatch.setattr(probe, "CallEvidenceLog", faulty_log)
-    record, path, _, _ = run_owner(monkeypatch, tmp_path)
+    record, path, _, _, _clock = run_owner(monkeypatch, tmp_path)
     raw = path.read_bytes()
     assert record["termination"] == "owner_failure"
     assert record["call_log"]["complete"] is False
