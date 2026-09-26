@@ -57,6 +57,7 @@ def setup_path_literals(setup_path, wanted):
     assert wanted <= set(values), sorted(wanted - set(values))
     return values
 
+
 # The exact pre-split git blobs the components must reassemble to, and the
 # augmenting .pxd each native staging step must reproduce byte for byte.
 BASE_BLOBS = {
@@ -385,13 +386,16 @@ def test_native_build_stages_components_from_the_real_source_root():
     assert len(statements) == 1, statements
     for relative, (stem, declarations) in tables["COMPONENT_SOURCES"].items():
         namespace["relative"] = relative
-        directory = eval(statements[0], namespace)  # noqa: S307
+        directory = eval(statements[0], namespace)
         # ROOT_ABS is the vendored package root and ROOT_DIR is "pyboy" inside
         # it, so "<vendor-root>/pyboy/core" is the correct staging directory and
         # legitimately contains "pyboy" once. The defect this guards against is
         # resolving a relative ROOT_DIR against a CWD that is already the
         # package, which yields a manifest that does not exist. Assert the
         # manifest is really there rather than matching a legitimate prefix.
+        # The doubled form is caught by the is_file() assert below, and also
+        # named here so the failure message points at the real cause.
+        assert f"{root_dir}/{root_dir}" not in directory.replace(os.sep, "/"), directory
         manifest = Path(directory) / f"{stem}_components_manifest.py"
         assert manifest.is_file(), f"{stem}: staging would read missing {manifest}"
         assert Path(directory, declarations).is_file(), stem
