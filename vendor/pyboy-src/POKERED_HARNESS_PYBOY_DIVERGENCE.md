@@ -3,7 +3,7 @@
 The tracked vendor tree now includes the generated opcode layout (#123), the main PyBoy
 source components (#133), the serial type split (#153), and the bounded motherboard and
 LCD component splits (#150, #155). Its recomputed full-manifest content identity is
-`e91b07c39474e40265ca88684f7ce3d9ea171096`. Earlier identities below are historical
+`fd765b1808ac9cb192b42ae971987158ff36ae48`. Earlier identities below are historical
 snapshots and do not qualify this combined tree. The native build, source/native unit
 gates, packaging checks, and exact-head review remain required. Issue #122 remains open
 because other file splits are outstanding.
@@ -62,7 +62,7 @@ serial type split and main PyBoy source components, calculated from the complete
 vendor manifest. **This identity is historical.** `#123` landed after it and moved the pin to
 `b94bf5dfb042c502ff4bc1bcd417599b02a9419b` — the identity of the `master` tree this head is based
 on — and the `#150`/`#155` split moved it again to the current
-`e91b07c39474e40265ca88684f7ce3d9ea171096` recorded at the top of this record. Earlier
+`fd765b1808ac9cb192b42ae971987158ff36ae48` recorded at the top of this record. Earlier
 single-change identity notes below are historical too and do not qualify this combined tree.
 
 ---
@@ -92,7 +92,7 @@ Status: **RE-PINNED — harness-local divergence revision.** The vendored tree h
 115 paths it shares with that revision, 98 are byte-identical and the rest carry harness patches
 (measured figures and how to reproduce them are under "Provenance of the pre-divergence revision").
 The revision pins now carry the harness-local divergence revision
-`e91b07c39474e40265ca88684f7ce3d9ea171096`, and the
+`fd765b1808ac9cb192b42ae971987158ff36ae48`, and the
 fork revision is recorded below rather than reused as the pin. The pin is a content identity, not
 a git object; its exact definition and recomputation are given under "Harness-local divergence
 revision".
@@ -136,7 +136,7 @@ vendored tree moves, so re-measure them per head rather than copying the numbers
 
 ## Harness-local divergence revision
 
-- Value: `e91b07c39474e40265ca88684f7ce3d9ea171096`, carried by `POKERED_HARNESS_PYBOY_REVISION`,
+- Value: `fd765b1808ac9cb192b42ae971987158ff36ae48`, carried by `POKERED_HARNESS_PYBOY_REVISION`,
   `pyboy/__init__.py::__pokered_harness_revision__`, `scripts/bootstrap_pyboy.py::EXPECTED_REVISION`
   and `tests/_runtime_packaging_support.py::EXPECTED_PYBOY_REVISION`, plus the CI assertion in
   `.github/workflows/release-hygiene.yml` / `scripts/run_local_ci.sh`.
@@ -165,7 +165,7 @@ vendored tree moves, so re-measure them per head rather than copying the numbers
   print(h.hexdigest())
   ```
 
-  It prints `e91b07c39474e40265ca88684f7ce3d9ea171096` for this head. The digest deliberately
+  It prints `fd765b1808ac9cb192b42ae971987158ff36ae48` for this head. The digest deliberately
   excludes the marker file and this record, so a later in-fork split changes the revision and
   requires the pins above to be refreshed together (decision-doc condition 2).
 
@@ -308,19 +308,21 @@ Status of the two divergences recorded above:
    re-pin. Three further splits landed on `master` after it, each moving the manifest under the
    same condition: `#153` → `0a0f7f31…`, `#133` → `acd569fd…`, `#123` → `b94bf5df…`. The `master`
    tree this head is based on therefore carries `b94bf5df…`, **not** `eceaa3bb…`. The `#150`/`#155`
-   split (motherboard and LCD) then re-pinned the manifest again, and the **current** pin on this
-   head is `e91b07c39474e40265ca88684f7ce3d9ea171096`. Every current-identity
+   split (motherboard and LCD) then re-pinned the manifest to `e91b07c3…`. The later generator
+   portability and fork-attribution correction moved the **current** pin on this head to
+   `fd765b1808ac9cb192b42ae971987158ff36ae48`. Every current-identity
    carrier (`POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py`, `scripts/bootstrap_pyboy.py`,
    `tests/_runtime_packaging_support.py`, `tests/_qualification_runner_support.py`, the
    CI/local-runner assertions, and the prose in `README.md` / `VERSIONS.md` / `agents.md` /
-   `docs/RELEASE_CHECKLIST.md` / `docs/LINUX_RESUME_PROMPT.md`) carries `e91b07c3…` together; the
+   `docs/RELEASE_CHECKLIST.md` / `docs/LINUX_RESUME_PROMPT.md`) carries `fd765b18…` together; the
    recomputation snippet above prints it for this head. Historical `release-evidence/` records and
    the earlier prose that names `c565df66…` are left untouched on purpose — they record what ran
    under the identity of their time, and they are not current-identity statements.
 2. **Native ABI re-verification (condition 3).** `#138`'s native ABI was verified on the loaded
    artifacts at the **pilot** pin `d78fb725…` (the two changed modules recompiled inside an
    existing native tree, plus an independent `Enum`-shadowing control). A from-scratch rebuild and
-   `--mode cython --check` **on this head** (pin `e91b07c3…`) remain owed — see item 4; note the
+   `--mode cython --check` **on this head** (pin `fd765b18…`) remain required for qualification;
+   note the
    head asserts its own `EXPECTED_REVISION` and fails closed until the stage is rebuilt against it,
    so the pilot's `rc=0 --check` cannot be carried onto this pin. `#142` does not touch the
    generated pair or any compiled module: `opcodes_gen.py` and the new handlers module are both
@@ -341,12 +343,9 @@ Status of the two divergences recorded above:
    `.sav` assets); a synthetic substitute is not acceptable evidence.
 6. **Historical records re-qualified under this pin.** #90.3's Yellow registration and #170's
    runtime record were validated at their own heads and do **not** qualify this one; re-qualifying
-   them under this head's pin `e91b07c3…` is tracked by #235 and stated in the decision doc's
+   them under this head's pin `fd765b18…` is tracked by #235 and stated in the decision doc's
    "a historical record is validated at its own head" update.
-7. **One pin-covered comment still says "upstream base".** `pyboy/__init__.py`'s revision comment
-   ends with *"it replaced the upstream base revision `c565df66…`"*, which is the same mis-attribution
-   corrected everywhere else in this record: `c565df66…` is a **harness-fork** revision, not an
-   upstream `Baekalfen/PyBoy` commit (see "Provenance of the pre-divergence revision"). It is left
-   in place deliberately because that comment is **inside the content identity** — rewording it
-   moves the pin and would re-open #235's re-qualification target for a prose fix. Fold it into the
-   **next** pin-moving change rather than triggering a re-pin for it alone.
+7. **Pin-covered attribution corrected with the generator portability re-pin.** The
+   `pyboy/__init__.py` comment now calls `c565df66…` the pre-divergence harness-fork revision,
+   rather than an upstream PyBoy commit. The correction moved together with the content identity, and
+   `tests/test_vendored_provenance_wording.py` rejects the old attribution in every carrier.

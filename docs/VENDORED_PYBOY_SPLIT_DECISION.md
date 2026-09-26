@@ -3,7 +3,7 @@
 The tracked vendor tree now includes the generated opcode layout (#123), the main PyBoy
 source components (#133), the serial type split (#153), and the bounded motherboard and
 LCD component splits (#150, #155). Its recomputed full-manifest content identity is
-`e91b07c39474e40265ca88684f7ce3d9ea171096`. Earlier identities below are historical
+`fd765b1808ac9cb192b42ae971987158ff36ae48`. Earlier identities below are historical
 snapshots and do not qualify this combined tree. The native build, source/native unit
 gates, packaging checks, and exact-head review remain required. Issue #122 remains open
 because other file splits are outstanding.
@@ -16,7 +16,8 @@ This section records the tree that carried the serial type split (#153) and main
 components (#133), whose recomputed content identity was
 `acd569fdb5836b58558856ac066102d1e9ccaf96`. That identity is **historical**: `#123` landed after
 it and moved the pin to `b94bf5df…`, which is the identity of the `master` tree this head is based
-on, and the `#150`/`#155` split moved it again to the current `e91b07c3…`. The separate
+on, and the `#150`/`#155` split moved it to `e91b07c3…`. The subsequent generator
+portability fix and fork-attribution correction moved the current pin to `fd765b18…`. The separate
 identity notes below describe earlier single-change candidates and are retained as history.
 Full native and repository gate qualification remains pending; #122 remains open.
 
@@ -312,7 +313,7 @@ re-landed, and both pilot leaves were re-landed **together** on the post-`#234` 
   (`acd569fdb5836b58558856ac066102d1e9ccaf96`) and `#123`
   (`b94bf5dfb042c502ff4bc1bcd417599b02a9419b`) — so the `master` tree this head is based on
   carries `b94bf5df…`, not `eceaa3bb…`. The `#150`/`#155` split then re-pinned the manifest
-  again, and the **current** pin on this head is `e91b07c39474e40265ca88684f7ce3d9ea171096`.
+  again, and the **current** pin on this head is `fd765b1808ac9cb192b42ae971987158ff36ae48`.
   Every current-identity carrier (`POKERED_HARNESS_PYBOY_REVISION`, `pyboy/__init__.py`'s
   `__pokered_harness_revision__`, `scripts/bootstrap_pyboy.py::EXPECTED_REVISION`,
   `tests/_runtime_packaging_support.py::EXPECTED_PYBOY_REVISION`,
@@ -324,15 +325,10 @@ re-landed, and both pilot leaves were re-landed **together** on the post-`#234` 
   commit; upstream `v2.7.0` is `4627b90b…`). Historical `release-evidence/` records and earlier prose
   that names `c565df66…` are left untouched — they describe runs under the identity of their time.
 
-  One pin-covered comment is deliberately left mis-attributed in this pass: `pyboy/__init__.py`'s
-  revision comment still ends *"it replaced the upstream base revision `c565df66…`"*. That comment is
-  **inside the content identity**, so rewording it moves the pin and would reopen #235's
-  re-qualification target for a prose-only change. The correction is folded into the **next
-  pin-moving** vendored change instead; the residual is recorded as open item 7 in
-  `vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`.
-  A guard pins the residual rather than trusting it: `tests/test_vendored_provenance_wording.py`
-  fails if that comment is reworded without a matching re-pin, or if any of the corrected carriers
-  regress to "upstream base".
+  The later generator portability fix moved the vendored identity again. That pin-moving change
+  also corrected `pyboy/__init__.py`'s comment: `c565df66…` is the pre-divergence harness-fork
+  revision. `tests/test_vendored_provenance_wording.py` now rejects the old attribution in every
+  carrier, including the pin-covered init module.
 
 Condition status for the two re-landed leaves: 1 (generation) satisfied byte-identically; 2
 (re-pin) executed; 4 (public API) preserved — no public symbol, module path, or `cdef` surface

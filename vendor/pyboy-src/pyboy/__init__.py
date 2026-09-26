@@ -16,10 +16,10 @@ __all__ = ["PyBoy", "PyBoyMemoryView", "PyBoyRegisterFile"]
 # the version visible to Session's optional runtime-pin check; upstream's
 # package does not expose it from ``pyboy.__init__``. This is the harness-local
 # divergence revision, not a git object: it is the SHA-1 of the vendored source
-# manifest and it replaced the upstream base revision
+# manifest and it superseded the pre-divergence harness-fork revision
 # c565df66c3731fad2856169a90f6bbec99925915 once the tree diverged. See
 # POKERED_HARNESS_PYBOY_DIVERGENCE.md.
 __version__ = "2.7.0"
-__pokered_harness_revision__ = "e91b07c39474e40265ca88684f7ce3d9ea171096"
+__pokered_harness_revision__ = "fd765b1808ac9cb192b42ae971987158ff36ae48"
 
 from .pyboy import PyBoy, PyBoyMemoryView, PyBoyRegisterFile
