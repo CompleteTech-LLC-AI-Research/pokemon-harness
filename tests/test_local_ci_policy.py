@@ -196,52 +196,6 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "scripts/tcp_link_matrix.py",
         "scripts/validate_battle_scenarios.py",
         "scripts/validate_fixture_manifest.py",
-        "tests/_battle_item_evidence.py",
-        "tests/_battle_item_evidence_factories.py",
-        "tests/_gate_capacity_support.py",
-        "tests/_gate_report.py",
-        "tests/_qualification_runner_support.py",
-        "tests/_rom_assets.py",
-        "tests/_tier_config.py",
-        "tests/conftest.py",
-        "tests/test_battle_coverage_accounting.py",
-        "tests/test_battle_coverage_catalog.py",
-        "tests/test_battle_coverage_gate_assets.py",
-        "tests/test_battle_coverage_identity.py",
-        "tests/test_battle_coverage_mechanics.py",
-        "tests/test_battle_item_evidence_inventory.py",
-        "tests/test_battle_item_evidence_medicine.py",
-        "tests/test_battle_item_evidence_targets.py",
-        "tests/test_battle_item_evidence_timeline.py",
-        "tests/test_battle_scenario_catalog.py",
-        "tests/test_battle_scenario_producer_capture.py",
-        "tests/test_battle_scenario_producer_run.py",
-        "tests/test_battle_scenario_producer_runtime.py",
-        "tests/test_battle_scenario_producer_screening.py",
-        "tests/test_battle_scenario_validator.py",
-        "tests/test_fixture_provenance.py",
-        "tests/test_gate_capacity_boundaries.py",
-        "tests/test_gate_capacity_interrupts.py",
-        "tests/test_gate_capacity_main.py",
-        "tests/test_gate_capacity_policy.py",
-        "tests/test_party_record_audit.py",
-        "tests/test_production_gate_diagnostics.py",
-        "tests/test_production_gate_matrix_manifest.py",
-        "tests/test_production_gate_report_loader.py",
-        "tests/test_production_gate_run_tier_failures.py",
-        "tests/test_production_gate_strict_matrix.py",
-        "tests/test_qualification_runner.py",
-        "tests/test_qualification_runner_allocation.py",
-        "tests/test_qualification_runner_assets.py",
-        "tests/test_qualification_runner_command.py",
-        "tests/test_qualification_runner_containment.py",
-        "tests/test_qualification_runner_lockstate.py",
-        "tests/test_qualification_runner_native.py",
-        "tests/test_qualification_runner_release.py",
-        "tests/test_runtime_packaging_bootstrap.py",
-        "tests/test_runtime_packaging_build_contract.py",
-        "tests/test_runtime_packaging_dependency_pins.py",
-        "tests/test_runtime_packaging_hygiene.py",
         "src/pokered_harness/_mcp_facade_entry.py",
         "src/pokered_harness/link/network_backend.py",
         "src/pokered_harness/link/pyboy_link_session.py",
@@ -249,21 +203,41 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "src/pokered_harness/link/serial_bridge.py",
         "src/pokered_harness/link/serial_coordinator.py",
         "src/pokered_harness/link/serial_link.py",
-        "tests/test_network_backend_dispatch.py",
-        "tests/test_network_backend_rearm.py",
-        "tests/test_network_backend_serial_transcript.py",
-        "tests/test_network_backend_transport.py",
-        "tests/test_network_backend_wire_idle.py",
-        "tests/test_pyboy_link_session.py",
-        "tests/test_link_pair.py",
-        "tests/test_link_serial_bridge.py",
-        "tests/test_mcp_server_import_order.py",
-        "tests/test_serial_coordinator.py",
-        "tests/test_serial_link.py",
     )
     for path in workflow_paths:
         assert path in workflow
         assert path in runner
+
+    # Every `tests/*.py` file must be inside the Ruff boundary, and the only
+    # thing that makes that true without a hand-maintained list is that both
+    # wide lanes name the `tests/` directory itself. Assert the directory
+    # token, so a file added tomorrow is covered because it lands in a
+    # directory the lanes already name -- not because someone remembered to
+    # edit the membership tuple above (which is how #255 shipped a new test
+    # file with two lint failures that no gate would have caught).
+    #
+    # The lanes are selected by how many `scripts/` paths they carry, NOT by
+    # whether they mention `tests/`: selecting on the property under test would
+    # make this assertion unable to fail. The two wide lanes cover all 51
+    # script helpers; the third lane is the narrow runtime/link `src/` check,
+    # which names one script helper and no tests at all.
+    for label, text in (("workflow", workflow), ("local runner", runner)):
+        ruff_invocations = _ruff_invocations(text)
+        assert ruff_invocations, f"{label} declares no Ruff invocations"
+        script_counts = sorted(
+            (sum(1 for token in invocation if token.startswith("scripts/")), invocation)
+            for invocation in ruff_invocations
+        )
+        tests_lanes = script_counts[-2:]
+        assert script_counts[-1][0] >= 50, (
+            f"{label} no longer has two wide Ruff lanes; the widest covers "
+            f"{script_counts[-1][0]} scripts/ paths, expected at least 50"
+        )
+        for _script_count, invocation in tests_lanes:
+            assert "tests/" in invocation, (
+                f"{label} Ruff lane {' '.join(invocation[2:4])} does not name the tests/ "
+                "directory, so a new test file can escape the lint boundary"
+            )
 
     # The tuple above is membership-only, so it cannot see *which lane* holds a
     # path. That gap is what let `src/pokered_harness/_mcp_facade_entry.py` be
