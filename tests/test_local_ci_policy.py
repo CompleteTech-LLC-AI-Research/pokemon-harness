@@ -8,7 +8,7 @@ bounded production gate, which is outside the unit-test tier.
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "scripts" / "run_local_ci.sh"
@@ -53,6 +53,132 @@ def _ruff_invocations(text: str) -> list[tuple[str, ...]]:
         invocations.append(tuple(arguments))
         index = cursor + 1
     return invocations
+
+
+def _ruff_excluded_prefixes() -> tuple[str, ...]:
+    """Read `extend-exclude` from the Ruff config so coverage mirrors the gate."""
+
+    import tomllib
+
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    raw = config.get("tool", {}).get("ruff", {}).get("extend-exclude", [])
+    return tuple(raw if isinstance(raw, list) else [raw])
+
+
+def _is_excluded(relative_path: str, excluded: tuple[str, ...]) -> bool:
+    """Return True when Ruff's `extend-exclude` would drop this path.
+
+    `extend-exclude` entries are glob patterns, not just literal prefixes, so
+    match them the way Ruff does.  A prefix-only test would pass for
+    `extend-exclude = ["tests/legacy"]` while silently ignoring
+    `["tests/test_*.py"]`, which drops the great majority of the test suite:
+    measured on this tree, that glob removes 209 of 267 test files from the
+    lanes.  The coverage assertion below is the last line of defence against a
+    silent exclusion, so it must use the same resolution Ruff does.
+    """
+
+    path = PurePosixPath(relative_path)
+    for entry in excluded:
+        pattern = PurePosixPath(entry)
+        if path.match(pattern) or path.match(f"{pattern}/**"):
+            return True
+        # Ruff also treats a bare directory entry as covering its contents.
+        if relative_path == entry or relative_path.startswith(f"{entry}/"):
+            return True
+    return False
+
+
+def _main_lane(invocations: list[tuple[str, ...]], subcommand: str) -> tuple[str, ...]:
+    """Return the single main `tests/`-wide lane for `subcommand`.
+
+    There are three Ruff lanes: two main ones that cover all of `tests/` plus
+    an explicit `scripts/` list, and one narrower runtime/link lane that keeps
+    a deliberately small explicit boundary. Only the main lanes glob `tests/`,
+    so this selects the lane by that marker rather than by position, which keeps
+    the test honest if a lane is ever reordered.
+    """
+
+    # `ruff check <paths>` puts paths straight after the subcommand, while
+    # `ruff format --check <paths>` carries an extra flag, so match the mode
+    # token itself and the path list that follows it.
+    mode = ("check",) if subcommand == "check" else ("format", "--check")
+    candidates = [
+        invocation
+        for invocation in invocations
+        if invocation[:3] == ("python", "-m", "ruff")
+        and invocation[3 : 3 + len(mode)] == mode
+        and "tests" in invocation
+    ]
+    assert len(candidates) == 1, (
+        f"expected exactly one `ruff {subcommand}` lane covering all of tests/, "
+        f"found {len(candidates)}"
+    )
+    return candidates[0]
+
+
+def test_main_ruff_lanes_cover_every_test_file() -> None:
+    """Both main lanes must take the whole `tests/` directory, not a subset.
+
+    Issue #259 was filed because the lanes enumerated 56 of 264 test files, so
+    a newly added test could ship lint or format violations that no gate would
+    catch. Widening the lanes to the directory itself is only meaningful if the
+    directory token is actually present, so assert the token rather than trust
+    the comment that describes the boundary.
+    """
+
+    invocations = _ruff_invocations(RUNNER.read_text(encoding="utf-8"))
+    workflow_invocations = _ruff_invocations(WORKFLOW.read_text(encoding="utf-8"))
+
+    for subcommand in ("check", "format"):
+        for source, lanes in (("runner", invocations), ("workflow", workflow_invocations)):
+            lane = _main_lane(lanes, subcommand)
+            assert "tests" in lane, (
+                f"{source} `ruff {subcommand}` lane must pass the `tests` directory "
+                f"so a new test file cannot escape the gate; got: {lane}"
+            )
+            # A leftover enumerated `tests/...` entry alongside the directory
+            # token would let a future edit shrink the effective set, so the
+            # glob must be the only `tests` reference in the lane.
+            assert not [token for token in lane if token.startswith("tests/")], (
+                f"{source} `ruff {subcommand}` lane still enumerates individual test files"
+            )
+
+
+def test_main_ruff_lane_tests_directory_covers_every_test_file_on_disk() -> None:
+    """The `tests` directory token must actually match every test file.
+
+    Asserting the token is present is necessary but not sufficient: a future
+    edit could add an `extend-exclude` entry that silently drops test files
+    from the directory glob. Resolve the token the way Ruff does and confirm no
+    test file is excluded, so the coverage claim is measured rather than
+    assumed. This is the assertion that fails if someone later excludes, say,
+    `tests/legacy` without noticing the gate stopped checking it.
+    """
+
+    tests_root = ROOT / "tests"
+    on_disk = {
+        path.relative_to(ROOT).as_posix() for path in tests_root.rglob("*.py") if path.is_file()
+    }
+    assert on_disk, "no test files found on disk"
+
+    excluded = _ruff_excluded_prefixes()
+    # Recurse the `tests` directory the way Ruff does, then drop anything
+    # `extend-exclude` would skip. The result must still be the whole tree.
+    covered = {path for path in on_disk if not _is_excluded(path, excluded)}
+    uncovered = on_disk - covered
+    assert not uncovered, (
+        "tests/ files are excluded from the Ruff lanes by extend-exclude "
+        f"({sorted(excluded)!r}): {sorted(uncovered)[:5]}"
+    )
+    # Guard against the directory token being satisfied by a stray file named
+    # `tests` rather than the directory.
+    assert tests_root.is_dir(), "the `tests` directory the lanes pass must exist"
+
+    invocations = _ruff_invocations(RUNNER.read_text(encoding="utf-8"))
+    for subcommand in ("check", "format"):
+        assert _main_lane(invocations, subcommand).count("tests") == 1, (
+            f"`ruff {subcommand}` lane must name the tests directory exactly once"
+        )
 
 
 def test_runner_ruff_file_lists_match_the_workflow_exactly() -> None:
@@ -154,6 +280,13 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     # Spot-check a declared core of the Ruff file boundaries, not only the
     # command prefixes, so a local run cannot silently lint a smaller set.
     #
+    # Since #259 the two main lanes take the `tests` directory itself, so this
+    # floor names that token plus the narrower runtime/link lane's explicit
+    # `tests/` entries, which stay enumerated. Individual main-lane test files
+    # are intentionally absent: their coverage is now enforced by
+    # `test_main_ruff_lanes_cover_every_test_file` above, which fails if the
+    # directory token is dropped or reintroduced as a partial list.
+    #
     # This is a *subset floor*, not the full contract: every path it names is
     # in a lane, but the lanes carry more entries than it lists, and they did
     # before #242 too (38 lane paths were absent from it at 061fa15c; the two
@@ -196,52 +329,8 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "scripts/tcp_link_matrix.py",
         "scripts/validate_battle_scenarios.py",
         "scripts/validate_fixture_manifest.py",
-        "tests/_battle_item_evidence.py",
-        "tests/_battle_item_evidence_factories.py",
-        "tests/_gate_capacity_support.py",
-        "tests/_gate_report.py",
-        "tests/_qualification_runner_support.py",
-        "tests/_rom_assets.py",
-        "tests/_tier_config.py",
-        "tests/conftest.py",
-        "tests/test_battle_coverage_accounting.py",
-        "tests/test_battle_coverage_catalog.py",
-        "tests/test_battle_coverage_gate_assets.py",
-        "tests/test_battle_coverage_identity.py",
-        "tests/test_battle_coverage_mechanics.py",
-        "tests/test_battle_item_evidence_inventory.py",
-        "tests/test_battle_item_evidence_medicine.py",
-        "tests/test_battle_item_evidence_targets.py",
-        "tests/test_battle_item_evidence_timeline.py",
-        "tests/test_battle_scenario_catalog.py",
-        "tests/test_battle_scenario_producer_capture.py",
-        "tests/test_battle_scenario_producer_run.py",
-        "tests/test_battle_scenario_producer_runtime.py",
-        "tests/test_battle_scenario_producer_screening.py",
-        "tests/test_battle_scenario_validator.py",
+        "tests",
         "tests/test_fixture_provenance.py",
-        "tests/test_gate_capacity_boundaries.py",
-        "tests/test_gate_capacity_interrupts.py",
-        "tests/test_gate_capacity_main.py",
-        "tests/test_gate_capacity_policy.py",
-        "tests/test_party_record_audit.py",
-        "tests/test_production_gate_diagnostics.py",
-        "tests/test_production_gate_matrix_manifest.py",
-        "tests/test_production_gate_report_loader.py",
-        "tests/test_production_gate_run_tier_failures.py",
-        "tests/test_production_gate_strict_matrix.py",
-        "tests/test_qualification_runner.py",
-        "tests/test_qualification_runner_allocation.py",
-        "tests/test_qualification_runner_assets.py",
-        "tests/test_qualification_runner_command.py",
-        "tests/test_qualification_runner_containment.py",
-        "tests/test_qualification_runner_lockstate.py",
-        "tests/test_qualification_runner_native.py",
-        "tests/test_qualification_runner_release.py",
-        "tests/test_runtime_packaging_bootstrap.py",
-        "tests/test_runtime_packaging_build_contract.py",
-        "tests/test_runtime_packaging_dependency_pins.py",
-        "tests/test_runtime_packaging_hygiene.py",
         "src/pokered_harness/_mcp_facade_entry.py",
         "src/pokered_harness/link/network_backend.py",
         "src/pokered_harness/link/pyboy_link_session.py",
@@ -257,7 +346,6 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
         "tests/test_pyboy_link_session.py",
         "tests/test_link_pair.py",
         "tests/test_link_serial_bridge.py",
-        "tests/test_mcp_server_import_order.py",
         "tests/test_serial_coordinator.py",
         "tests/test_serial_link.py",
     )
