@@ -566,14 +566,16 @@ def probe_args(*extra):
     )
 
 
-def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=None, clock_step=0.0):
+def run_owner(
+    monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=None, clock_step=0.0
+):
     """Deterministic owner orchestration; only CPU advancement/transport are faked.
 
     The loop runs on an injected clock so the frame bound is exercised as a frame
     bound, not a host-speed statement (#252). ``clock_step=None`` restores the
     real monotonic clock that production uses.
     """
-    from tests.test_timed_menu_frame_bound import FakeClock
+    from tests.test_timed_menu_frame_bound import FakeClock, assert_fast_clock_hits_frame_bound
 
     clock = None if clock_step is None else FakeClock(step=clock_step)
     from scripts import probe_timed_rom_pair as probe
@@ -678,6 +680,8 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
         evidence_path=path,
         clock=clock,
     )
+    if clock_step == 0.0:
+        assert_fast_clock_hits_frame_bound(record)
     return record, path, lifecycle, checkpoints, clock
 
 
@@ -730,7 +734,9 @@ def test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context(mon
 def test_default_retention_keeps_full_calls_and_installs_no_hooks(monkeypatch, tmp_path):
     baseline = probe_args()
     assert baseline.call_retention == "inline" and baseline.rom_milestones is False
-    record, path, lifecycle, _, _clock = run_owner(monkeypatch, tmp_path, stream=False, milestones=False)
+    record, path, lifecycle, _, _clock = run_owner(
+        monkeypatch, tmp_path, stream=False, milestones=False
+    )
     assert record["errors"] == []
     assert len(record["calls"]) == 300
     assert "call_log" not in record and "milestones" not in record
