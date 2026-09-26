@@ -243,6 +243,7 @@ UNIT_MODULES = frozenset(
         "test_timed_menu_frame_bound.py",
         "test_timed_menu_milestone_sentinels.py",
         "test_timed_menu_milestones.py",
+        "test_timed_menu_retention_sentinels.py",
         "test_timed_remote.py",
         "test_timed_remote_facade.py",
         "test_timed_wire_admission.py",
