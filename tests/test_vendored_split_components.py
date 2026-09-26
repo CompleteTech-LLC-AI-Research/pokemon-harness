@@ -19,6 +19,7 @@ import sys
 import tomllib
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 
 import pytest
 
@@ -120,9 +121,9 @@ def assert_exported_class_surface(module, name, source_class, *, from_source, de
         # cdef methods may disappear and native descriptors may appear, but
         # plain def AND cpdef methods must survive the split. Never exempt a
         # whole public class merely because its module is compiled.
-        required = {attr for attr in vars(source_class) if not attr.startswith("__")} - set(
-            declared
-        )
+        required = {
+            attr for attr in vars(source_class) if not attr.startswith("__") or attr == "__init__"
+        } - set(declared)
         missing = required - set(vars(actual))
         assert not missing, (module.__name__, name, sorted(missing))
 
@@ -299,8 +300,18 @@ def test_edited_blanked_or_symlinked_component_fails_closed(stem, case, tmp_path
         target.write_bytes(b"")
     else:
         target.unlink()
-        target.symlink_to(CORE / f"{stem}.pxd")
-    with pytest.raises((OSError, ValueError)):
+        try:
+            target.symlink_to(CORE / f"{stem}.pxd")
+        except OSError as error:
+            if os.name != "nt" or getattr(error, "winerror", None) != 1314:
+                raise
+            # Windows without Developer Mode cannot create a real symlink.
+            # Exercise the loader's refusal branch without skipping the test.
+            with patch.object(Path, "is_symlink", lambda path: path == target):
+                with pytest.raises(ValueError, match="symbolic links"):
+                    components.assemble(copy, stem)
+            return
+    with pytest.raises(ValueError):
         components.assemble(copy, stem)
 
 
@@ -473,6 +484,16 @@ def test_generator_needs_no_git_history(stem, tmp_path):
     copy = tmp_path / "pyboy"
     shutil.copytree(PACKAGE, copy)
     core = copy / "core"
+
+    def generated_bytes():
+        paths = [
+            core / f"{stem}.py",
+            core / f"{stem}_components_manifest.py",
+            *(core / f"{stem}_components").glob("*.pxi"),
+        ]
+        return {path.relative_to(core): path.read_bytes() for path in paths}
+
+    expected_bytes = generated_bytes()
     # A deliberately bare environment: tmp_path is not inside any git worktree.
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
     for mode in (["--check"], []):
@@ -487,6 +508,7 @@ def test_generator_needs_no_git_history(stem, tmp_path):
         assert result.returncode == 0, (mode, result.stdout + result.stderr)
         assert f"{stem}:" in result.stdout
     assert components.assemble(core, stem) == components.assemble(CORE, stem)
+    assert generated_bytes() == expected_bytes
 
 
 def test_native_build_stages_components_from_the_real_source_root():
@@ -555,7 +577,9 @@ def test_pxd_hidden_members_distinguishes_python_wrappers(tmp_path, body, expect
     assert pxd_declared_members(declaration) == {"Probe": expected}
 
 
-@pytest.mark.parametrize("missing", [None, "visible", "_visible", "plain", "class", "not-class"])
+@pytest.mark.parametrize(
+    "missing", [None, "visible", "_visible", "plain", "__init__", "class", "not-class"]
+)
 def test_native_class_surface_rejects_missing_python_exports(tmp_path, missing):
     """Authored controls exercise the real assertion used by the native lane.
 
@@ -571,7 +595,9 @@ def test_native_class_surface_rejects_missing_python_exports(tmp_path, missing):
         encoding="utf-8",
     )
     hidden = pxd_declared_members(declaration)["Probe"]
-    source_attrs = {name: (lambda self: 1) for name in ("hidden", "visible", "_visible", "plain")}
+    source_attrs = {
+        name: (lambda self: 1) for name in ("hidden", "visible", "_visible", "plain", "__init__")
+    }
     source_class = type("Probe", (), source_attrs)
     native_attrs = {name: value for name, value in source_attrs.items() if name != "hidden"}
     # Native-only public descriptors are legitimate extras, not a failure.

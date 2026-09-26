@@ -90,7 +90,7 @@ def test_repo_versions_md_parses():
     regression that prevents silent drift between docs and the loader."""
     cfg = load_versions("VERSIONS.md")
     assert cfg.pyboy_version == "2.7.0"
-    assert cfg.pyboy_revision == "e91b07c39474e40265ca88684f7ce3d9ea171096"
+    assert cfg.pyboy_revision == "fd765b1808ac9cb192b42ae971987158ff36ae48"
     assert cfg.rom_sha1 == "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
 
 

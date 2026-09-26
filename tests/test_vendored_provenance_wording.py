@@ -1,4 +1,4 @@
-"""Guard the vendored-tree provenance wording and its one recorded residual.
+"""Guard the vendored-tree provenance wording and current content identity.
 
 The vendored PyBoy tree descends from a *harness fork* revision, not from an
 upstream ``Baekalfen/PyBoy`` commit. #237 corrected that wording across every
@@ -6,10 +6,8 @@ carrier outside the content identity. Two things must stay true, and both are
 cheap to break with a later prose edit:
 
 1. No carrier may call ``c565df66...`` the "upstream base" again.
-2. ``pyboy/__init__.py``'s revision comment is *inside* the content identity, so
-   its wording is frozen together with the pin. Fixing it without re-pinning
-   would falsify the identity; re-pinning without intending to is a release
-   event. This test fails on either, and points at the documented procedure.
+2. ``pyboy/__init__.py``'s revision comment is *inside* the content identity.
+   Its corrected fork attribution and the pin must move together.
 """
 
 from __future__ import annotations
@@ -31,15 +29,14 @@ VENDOR_ROOT = PROJECT_ROOT / "vendor" / "pyboy-src"
 
 FORK_REVISION = "c565df66c3731fad2856169a90f6bbec99925915"
 UPSTREAM_TAG_REVISION = "4627b90b878e91faff443b3acd6d4e4be09a4387"
-PIN = "e91b07c39474e40265ca88684f7ce3d9ea171096"
+PIN = "fd765b1808ac9cb192b42ae971987158ff36ae48"
 
 REVISION_MARKER = VENDOR_ROOT / "POKERED_HARNESS_PYBOY_REVISION"
 DIVERGENCE_RECORD = VENDOR_ROOT / "POKERED_HARNESS_PYBOY_DIVERGENCE.md"
 INIT_MODULE = VENDOR_ROOT / "pyboy" / "__init__.py"
 
-# Carriers corrected by #237, plus the divergence record that owns the residual.
-# Every file here is outside the content identity, which is why the wording
-# could be fixed without a re-pin.
+# Carriers corrected by #237 and the subsequent pin-moving change. The init
+# module is inside the content identity; the other wording carriers are not.
 CORRECTED_CARRIERS = (
     "README.md",
     "VERSIONS.md",
@@ -48,17 +45,8 @@ CORRECTED_CARRIERS = (
     "docs/RELEASE_CHECKLIST.md",
     "docs/VENDORED_PYBOY_SPLIT_DECISION.md",
     "vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md",
+    "vendor/pyboy-src/pyboy/__init__.py",
 )
-
-# The one *recorded residual*: the pin-covered comment in `pyboy/__init__.py`
-# cannot be reworded without moving the content identity, so it is quoted on
-# purpose in these two documents. Each entry must still contain the quoted
-# needle, so editing the residual forces a matching edit here instead of
-# silently widening the exemption.
-RECORDED_RESIDUALS = {
-    "vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md": "it replaced the upstream base revision",
-    "docs/VENDORED_PYBOY_SPLIT_DECISION.md": "it replaced the upstream base revision",
-}
 
 # How close the fork revision and the phrase must be for the co-occurrence to
 # count as an attribution. Markdown wraps prose across lines, so matching is
@@ -129,22 +117,13 @@ def test_corrected_carriers_reject_the_upstream_base_attribution() -> None:
     """
 
     offenders: list[str] = []
-    residual_seen: set[str] = set()
     for relative_path in CORRECTED_CARRIERS:
         for block in _attribution_paragraphs(_text(relative_path)):
-            needle = RECORDED_RESIDUALS.get(relative_path)
-            if needle and needle in block:
-                residual_seen.add(relative_path)
-                continue
             offenders.append(f"{relative_path}: {block[:200]}")
     assert not offenders, (
         "these passages describe the vendored fork revision as an 'upstream base'; it is a "
         "commit of CompleteDotTech/pyboy-link-cable-fork, not of Baekalfen/PyBoy: "
         f"{offenders}"
-    )
-    assert residual_seen == set(RECORDED_RESIDUALS), (
-        "the recorded residual moved or was reworded; update RECORDED_RESIDUALS in "
-        f"step with the carrier: missing={sorted(set(RECORDED_RESIDUALS) - residual_seen)}"
     )
 
 
@@ -154,8 +133,7 @@ def test_divergence_record_names_the_fork_and_the_upstream_tag() -> None:
     assert UPSTREAM_TAG_REVISION in record
     assert "CompleteDotTech/pyboy-link-cable-fork" in record
     assert "not** an upstream `Baekalfen/PyBoy` commit" in record
-    # The record owns the residual, so a later edit cannot silently drop it.
-    assert "upstream base" in record
+    assert "pre-divergence harness-fork revision" in record
 
 
 def test_pin_is_a_content_identity_over_the_vendored_manifest() -> None:
@@ -216,16 +194,11 @@ def test_pin_is_a_content_identity_over_the_vendored_manifest() -> None:
     )
 
 
-def test_init_comment_wording_is_still_the_recorded_residual() -> None:
-    """The in-identity comment is frozen until the next pin-moving change.
-
-    Rewording it here would move the content identity without a re-pin, which is
-    exactly the falsified-identity failure the decision doc's condition 2
-    prohibits. When it *is* fixed, that must happen together with the pin, so
-    this test is expected to change in the same commit.
-    """
-
-    assert "it replaced the upstream base revision" in INIT_MODULE.read_text(encoding="utf-8")
+def test_init_comment_names_the_pre_divergence_fork_revision() -> None:
+    """The pin-covered comment must retain the corrected fork attribution."""
+    comment = INIT_MODULE.read_text(encoding="utf-8")
+    assert "superseded the pre-divergence harness-fork revision" in comment
+    assert "replaced the upstream base revision" not in comment
 
 
 # Native-lane tooling controls. These use authored doubles, not ROMs or a native
