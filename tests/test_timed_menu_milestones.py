@@ -565,8 +565,14 @@ def probe_args(*extra):
     )
 
 
-def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=None):
-    """Deterministic owner orchestration; only CPU advancement/transport are faked."""
+def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=None, clock=None):
+    """Deterministic owner orchestration; only CPU advancement/transport are faked.
+
+    ``clock`` is an optional monotonic stand-in, defaulting to the real clock so
+    existing callers keep their semantics. It rebinds the owner's own module
+    global, so no production signature changes (#252).
+    """
+    now = time.monotonic if clock is None else clock
     from scripts import probe_timed_rom_pair as probe
 
     args = probe_args("--input-profile", "menu", "--connector-chunk", "1", "--frame-limit", "300")
@@ -640,6 +646,8 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
             raise RuntimeError("authored observation failure")
         return {"frame_count": game.frame_count}
 
+    if clock is not None:
+        monkeypatch.setattr(probe, "time", SimpleNamespace(monotonic=clock))
     monkeypatch.setattr(probe, "observe", observe)
     monkeypatch.setattr(helper, "read_menu_snapshot", lambda **kw: {"menu": 0})
     monkeypatch.setattr(helper, "read_input_snapshot", lambda **kw: {"PC": 0x1200})
@@ -653,8 +661,8 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
         SimpleNamespace(wait=lambda **kw: None),
         [None],
         threading.Lock(),
-        time.monotonic() + 20,
-        time.monotonic() + 21,
+        now() + 20,
+        now() + 21,
         lambda *a, **kw: session,
         lambda *a, **kw: endpoint,
         lambda *a: {
@@ -672,7 +680,8 @@ def run_owner(monkeypatch, tmp_path, *, stream=True, milestones=True, terminal=N
 
 
 def test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context(monkeypatch, tmp_path):
-    record, path, lifecycle, checkpoints = run_owner(monkeypatch, tmp_path)
+    # Exact call counts are a frame-bound property, not a host-speed one (#252).
+    record, path, lifecycle, checkpoints = run_owner(monkeypatch, tmp_path, clock=lambda: 1000.0)
     assert record["errors"] == []
     assert record["termination"] == "frame_bound"
     raw = path.read_bytes()
@@ -720,7 +729,10 @@ def test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context(mon
 def test_default_retention_keeps_full_calls_and_installs_no_hooks(monkeypatch, tmp_path):
     baseline = probe_args()
     assert baseline.call_retention == "inline" and baseline.rom_milestones is False
-    record, path, lifecycle, _ = run_owner(monkeypatch, tmp_path, stream=False, milestones=False)
+    # A retention contract is a frame-bound property, not a host-speed one (#252).
+    record, path, lifecycle, _ = run_owner(
+        monkeypatch, tmp_path, stream=False, milestones=False, clock=lambda: 1000.0
+    )
     assert record["errors"] == []
     assert len(record["calls"]) == 300
     assert "call_log" not in record and "milestones" not in record
@@ -729,7 +741,8 @@ def test_default_retention_keeps_full_calls_and_installs_no_hooks(monkeypatch, t
 
 @pytest.mark.parametrize("status", ["interrupted", "completed_no_progress", "completed_partial"])
 def test_late_noncompleted_calls_have_exact_counts_and_full_evidence(monkeypatch, tmp_path, status):
-    record, path, _, _ = run_owner(monkeypatch, tmp_path, terminal=status)
+    # 271 is fixed by the authored terminal call, not by the clock (#252).
+    record, path, _, _ = run_owner(monkeypatch, tmp_path, terminal=status, clock=lambda: 1000.0)
     calls = [json.loads(line) for line in path.read_bytes().splitlines()]
     assert len(calls) == 271 and calls[-1]["call_index"] == 270
     assert calls[-1]["status"] == status
@@ -945,7 +958,10 @@ def test_final_artifact_validation_rejects_missing_partial_or_inconsistent_log(t
 
 
 def test_unknown_actual_progress_is_counted_and_retained_as_interruption(monkeypatch, tmp_path):
-    record, path, _, _ = run_owner(monkeypatch, tmp_path, terminal="observation_error")
+    # 271 is fixed by the authored observation failure, not by the clock (#252).
+    record, path, _, _ = run_owner(
+        monkeypatch, tmp_path, terminal="observation_error", clock=lambda: 1000.0
+    )
     calls = [json.loads(line) for line in path.read_bytes().splitlines()]
     assert len(calls) == 271 and calls[-1]["status"] == "interrupted"
     assert "actual_completed_frames" not in calls[-1]
