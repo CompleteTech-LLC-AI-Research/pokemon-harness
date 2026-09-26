@@ -178,6 +178,100 @@ RETENTION_COUNT_SITES = {
 }
 
 
+# --- #270 Finding 2, remaining half: the *subscript* 271 counts ---
+#
+# ``RETENTION_COUNT_SITES`` is enforced by ``count_comparisons()``, which only
+# yields comparisons whose left side is a ``len(...)`` call. The same test also
+# pins its counts through record subscripts, which that mechanism never sees:
+#
+#     assert record["call_log"]["record_count"] == 271
+#     assert record["call_counts"]["requested_frames"] == 271
+#     assert record["call_counts"]["total"] == 271
+#
+# Relaxing any of those to ``>= 1`` leaves all four retention sentinels green,
+# so the "at least one call was retained" contract could be restored while every
+# backstop reported the site intact. These are recorded as (path, operator,
+# literal) triples and compared as a set, for the same reason the ``len(...)``
+# sites are: relaxing, deleting, duplicating or neutralising a site all change
+# the observed set.
+
+#: The record subscripts whose value is a retained-call count, keyed by the test
+#: function that owns them. Each entry is ``(key path, literal, operator)``.
+RETENTION_SUBSCRIPT_COUNT_SITES = {
+    "test_late_noncompleted_calls_have_exact_counts_and_full_evidence": (
+        (("call_log", "record_count"), 271, "=="),
+        (("call_counts", "requested_frames"), 271, "=="),
+        (("call_counts", "total"), 271, "=="),
+    ),
+}
+
+
+def _subscript_path(node):
+    """Return ``(base_name, key_path)`` for a chained subscript, or ``None``.
+
+    ``record["call_log"]["record_count"]`` is two nested ``Subscript`` nodes over
+    a ``Name``; every slice must be a ``Constant`` string for the key path to be
+    meaningful. The base ``Name`` is returned separately so callers can require
+    the comparison to be rooted at ``record`` specifically -- ``state["record_
+    count"]`` elsewhere in this module must not be mistaken for the same site.
+    """
+    keys = []
+    current = node
+    while isinstance(current, ast.Subscript):
+        if not isinstance(current.slice, ast.Constant) or not isinstance(current.slice.value, str):
+            return None
+        keys.append(current.slice.value)
+        current = current.value
+    if not isinstance(current, ast.Name) or not keys:
+        return None
+    return (current.id, tuple(reversed(keys)))
+
+
+def subscript_count_comparisons():
+    """Yield ``(function_name, path, operator, literal)`` for pinned record subscripts.
+
+    The counterpart to :func:`count_comparisons` for ``record[...]`` counts.
+    Every operator is recorded, not just ``==``, so a site relaxed to ``>=``
+    changes the observed set instead of merely ceasing to be found. Asserts that
+    cannot fail are excluded via the shared ``_is_enforced``, the same rule
+    #280 introduced for the ``len(...)`` sites.
+    """
+    tree = _module_tree()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert):
+            continue
+        for comparison in _comparisons_in(node.test):
+            if len(comparison.ops) != 1:
+                continue
+            op = _OPERATORS.get(type(comparison.ops[0]))
+            if op is None:
+                continue
+            resolved = _subscript_path(comparison.left)
+            if resolved is None:
+                continue
+            base, path = resolved
+            if base != "record":
+                continue
+            right = comparison.comparators[0]
+            if not (isinstance(right, ast.Constant) and isinstance(right.value, int)):
+                continue
+            owner = _enclosing_function_node(tree, node)
+            if owner is not None and not _is_enforced(owner, node):
+                continue
+            yield (_enclosing_function(tree, node), path, op, right.value)
+
+
+def retention_subscript_sites_observed():
+    """Sorted ``(function, path, operator, literal)`` for the pinned subscript sites only."""
+    expected_paths = {
+        function: {path for path, _, _ in sites}
+        for function, sites in RETENTION_SUBSCRIPT_COUNT_SITES.items()
+    }
+    return sorted(
+        quad for quad in subscript_count_comparisons() if quad[1] in expected_paths.get(quad[0], ())
+    )
+
+
 def retention_sites_observed():
     """The ``(function, operator, literal)`` triples for the pinned sites only."""
     return sorted(triple for triple in count_comparisons() if triple[0] in RETENTION_COUNT_SITES)
