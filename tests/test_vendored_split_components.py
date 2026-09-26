@@ -284,9 +284,19 @@ def test_imported_module_keeps_the_pre_split_namespace_and_source(stem):
             assert not from_source, name
             continue
         actual = getattr(module, name)
-        assert set(vars(actual)) == set(vars(value))
         if from_source:
+            assert set(vars(actual)) == set(vars(value))
             assert inspect.getsource(actual).startswith("class ")
+        else:
+            # vars() on a compiled cdef class also exposes C-level slots such
+            # as __pyx_vtable__ and the cdef attributes (ram, lcd, ...), which
+            # have no Python-source counterpart. Compare only the names the
+            # source actually binds, and require the class to be usable.
+            source_attrs = {n for n in vars(value) if not n.startswith("__")}
+            assert source_attrs <= set(vars(actual)), (
+                stem,
+                sorted(source_attrs - set(vars(actual))),
+            )
         assert actual is value or actual.__name__ == value.__name__
 
 
