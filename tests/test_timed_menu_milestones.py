@@ -26,7 +26,6 @@ SITES = {
     "LinkMenu": (3, 0x4300),
 }
 NAMES = ("save_request", "yes_no", "save_game", "link_menu")
-FRAME_BOUND = 300
 
 
 class Symbols:
@@ -576,10 +575,11 @@ def run_owner(
     bound, not a host-speed statement (#252). ``clock_step=None`` restores the
     real monotonic clock that production uses.
 
-    The terminal-state guard lives in ``test_timed_menu_frame_bound`` (see
-    ``assert_not_deadline_truncated``) to keep this file under its line bound.
+    ``FakeClock`` and the terminal-state guard live in
+    ``tests/_timed_menu_frame_bound_support``, which both frame-bound test
+    modules share.
     """
-    from tests.test_timed_menu_frame_bound import FakeClock
+    from tests._timed_menu_frame_bound_support import FakeClock
 
     clock = None if clock_step is None else FakeClock(step=clock_step)
     from scripts import probe_timed_rom_pair as probe
