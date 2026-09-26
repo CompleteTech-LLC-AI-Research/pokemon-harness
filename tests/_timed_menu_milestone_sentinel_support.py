@@ -22,6 +22,7 @@ behavioural assertions remain the load-bearing contract.
 import ast
 import inspect
 
+import tests._timed_menu_frame_bound_support as frame_bound_support
 import tests.test_timed_menu_milestones as milestones
 
 _OPERATORS = {
@@ -41,6 +42,23 @@ _OPERATORS = {
 def _module_tree():
     """Return the parsed AST of the milestones test module."""
     return ast.parse(inspect.getsource(milestones))
+
+
+def _frame_bound_support_tree():
+    """Return the parsed AST of the frame-bound support module.
+
+    The #261 guard itself lives there rather than in the milestones module, so
+    the "does it still have teeth" check has to read that file's source.
+    """
+    return ast.parse(inspect.getsource(frame_bound_support))
+
+
+def _find_function(tree, name):
+    """Return the top-level function definition called ``name``."""
+    for func in tree.body:
+        if isinstance(func, ast.FunctionDef) and func.name == name:
+            return func
+    return None
 
 
 def _is_zero_float_compare(node):
@@ -158,3 +176,69 @@ RETENTION_COUNT_SITES = {
 def retention_sites_observed():
     """The ``(function, operator, literal)`` triples for the pinned sites only."""
     return sorted(triple for triple in count_comparisons() if triple[0] in RETENTION_COUNT_SITES)
+
+
+def _is_deadline_termination_compare(comparison):
+    """True for ``record["termination"] != "cancelled_or_deadline"``."""
+    left, right = comparison.left, comparison.comparators[0]
+    return (
+        isinstance(left, ast.Subscript)
+        and isinstance(left.slice, ast.Constant)
+        and left.slice.value == "termination"
+        and isinstance(right, ast.Constant)
+        and right.value == "cancelled_or_deadline"
+    )
+
+
+def guard_rejects_the_deadline_terminal_state():
+    """Does the #261 guard still *reject* a truncated run, not merely get called?
+
+    Being wired is not the same as having teeth. The guard earns its name from
+    exactly one assertion, so replacing its body with ``pass`` leaves the whole
+    behavioural suite green while the guard stops rejecting anything.
+    ``guard_is_wired_on_the_fast_clock_path`` cannot see this: the call is
+    still there either way.
+    """
+    tree = _frame_bound_support_tree()
+    guard = _find_function(tree, "assert_not_deadline_truncated")
+    if guard is None:
+        return False
+    return any(
+        isinstance(node, ast.Assert)
+        and any(
+            len(comparison.ops) == 1
+            and isinstance(comparison.ops[0], ast.NotEq)
+            and _is_deadline_termination_compare(comparison)
+            for comparison in _comparisons_in(node.test)
+        )
+        for node in ast.walk(guard)
+    )
+
+
+def overridden_clock_steps_in_protected_sites():
+    """Pinned count sites that pass a ``clock_step`` other than the default ``0.0``.
+
+    ``run_owner`` applies the terminal-state guard only on the default
+    ``clock_step == 0.0`` path. A pinned site that supplies its own
+    ``clock_step`` opts out of that precondition, so its exact count stops
+    being evidence that the run reached the frame bound instead of the wall
+    clock. ``retention_sites_observed`` cannot see this: the ``== 300``
+    assertion is still present, it has just stopped meaning anything.
+    """
+    tree = _module_tree()
+    offenders = []
+    for function_name in sorted(RETENTION_COUNT_SITES):
+        func = _find_function(tree, function_name)
+        if func is None:
+            offenders.append((function_name, "<function missing>"))
+            continue
+        for call in ast.walk(func):
+            if not (isinstance(call, ast.Call) and getattr(call.func, "id", None) == "run_owner"):
+                continue
+            for keyword in call.keywords:
+                if keyword.arg != "clock_step":
+                    continue
+                is_default = isinstance(keyword.value, ast.Constant) and keyword.value.value == 0.0
+                if not is_default:
+                    offenders.append((function_name, ast.unparse(keyword.value)))
+    return sorted(offenders)
