@@ -19,16 +19,66 @@ assertions in the milestones module remain the contract; this file is the
 backstop that keeps them from being quietly removed.
 """
 
+import ast
+
+import pytest
+
 from tests._timed_menu_milestone_sentinel_support import (
     DEADLINE_TERMINATION,
     GUARD_FUNCTION,
     RETENTION_COUNT_SITES,
     RUN_OWNER,
+    _is_enforced,
+    _may_bypass,
     count_sites_that_bypass_the_guard,
     guard_is_wired_on_the_fast_clock_path,
     guard_rejects_the_deadline_terminal_state,
     retention_sites_observed,
 )
+
+#: ``(label, body, live)`` -- can the assert in this body actually fail?
+#: #288 covers the ``try``/handler half. These rows pin the other half: a
+#: comparison a ``BoolOp`` can short-circuit around is present in the AST and
+#: still unchecked, which no handler rule can see.
+BYPASS_SHAPES = (
+    ("plain assert", "assert x == 1", True),
+    ("and of two comparisons", "assert len(a) == 1 and len(b) == 2", True),
+    ("double negative", "assert not (x != 1)", True),
+    ("comparison or True", "assert x != 1 or True", False),
+    ("True or comparison", "assert True or x != 1", False),
+    ("comparison and flag", "assert x != 1 and flag", False),
+    ("flag and comparison", "assert flag and x != 1", False),
+    ("nested or", "assert x != 1 or (y or True)", False),
+    ("runtime condition", "if flag:\n assert x == 1", True),
+    # A lone call cannot short-circuit on its own, so this stays enforced.
+    ("lone call operand", "assert x != 1 or len(y) > 0", True),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    BYPASS_SHAPES,
+    ids=[shape[0] for shape in BYPASS_SHAPES],
+)
+def test_the_bypass_check_separates_live_comparisons_from_short_circuited_ones(label, body, live):
+    """A comparison counts as enforced unless a ``BoolOp`` can skip checking it.
+
+    ``assert x != 1 or True`` keeps the comparison in the AST and keeps the
+    operator, so a presence-only check still calls the contract intact while the
+    assert is incapable of failing. This was confirmed to survive on
+    ``aef56d6`` before this check existed.
+    """
+    source = "def probe(x, flag, y, a, b):\n" + "\n".join(
+        f"    {line}" for line in body.splitlines()
+    )
+    function = ast.parse(source).body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    live_results = [_is_enforced(function, node) and not _may_bypass(node.test) for node in asserts]
+    assert all(live_results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'short-circuited'}, got {live_results}"
+    )
 
 
 def test_the_261_guard_is_still_wired_to_the_fast_clock_path():

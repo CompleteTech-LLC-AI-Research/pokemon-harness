@@ -130,6 +130,34 @@ def _comparisons_in(expression):
     return []
 
 
+def _may_bypass(expression):
+    """Can a comparison nested in this expression still go unchecked?
+
+    ``assert x != y or True`` and ``assert True or x != y`` both parse to a
+    ``BoolOp``, and both leave the comparison unchecked: the ``or`` decides the
+    assert on its own when the short-circuiting operand is truthy. The
+    comparison node is still present, so a presence-only check -- and the
+    ``_is_enforced`` handler rule, which only looks at ``try`` -- reports the
+    contract as intact. Verified to survive on ``aef56d6``:
+
+        assert record["termination"] != "cancelled_or_deadline" or True
+        -> tests/test_timed_menu_milestone_sentinels.py still exits 0
+
+    Only value positions are considered. Under ``or`` any operand that decides
+    the result alone decides the whole assert; under ``and`` the same holds of
+    the operands' combined truth, so a single traversal covers both. A bare
+    ``Compare`` has no bypass, and a lone call operand cannot short-circuit by
+    itself, so ``assert x != 1 or len(y) > 0`` stays enforced.
+    """
+    if not isinstance(expression, ast.BoolOp):
+        return False
+    return any(
+        isinstance(value, (ast.Name, ast.Attribute, ast.Call, ast.Subscript, ast.Constant))
+        or _may_bypass(value)
+        for value in expression.values
+    )
+
+
 def _count_comparison(tree, node, comparison):
     if len(comparison.ops) != 1:
         return
@@ -141,7 +169,7 @@ def _count_comparison(tree, node, comparison):
         return
     if isinstance(right, ast.Constant) and isinstance(right.value, int):
         owner = _enclosing_function_node(tree, node)
-        if owner is not None and not _is_enforced(owner, node):
+        if owner is not None and (not _is_enforced(owner, node) or _may_bypass(node.test)):
             return
         yield (_enclosing_function(tree, node), op, right.value)
 
@@ -301,6 +329,7 @@ def guard_rejects_the_deadline_terminal_state():
                     and isinstance(right, ast.Constant)
                     and right.value == DEADLINE_TERMINATION
                     and _is_enforced(func, node)
+                    and not _may_bypass(node.test)
                 ):
                     return True
     return False
