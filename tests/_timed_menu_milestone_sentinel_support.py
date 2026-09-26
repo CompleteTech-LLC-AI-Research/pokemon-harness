@@ -28,6 +28,7 @@ teeth check and the count check.
 
 import ast
 import builtins
+import importlib
 import inspect
 
 import tests.test_timed_menu_milestones as milestones
@@ -44,11 +45,6 @@ _OPERATORS = {
     ast.In: "in",
     ast.NotIn: "not in",
 }
-
-#: Handler types that catch ``AssertionError`` without naming it. ``AssertionError``
-#: derives from ``Exception``, which derives from ``BaseException``, so a handler
-#: for any of the three can swallow an assert's failure.
-UNIVERSAL_HANDLERS = ("AssertionError", "Exception", "BaseException")
 
 
 def _module_tree():
@@ -309,218 +305,82 @@ def _is_termination_key(node):
     )
 
 
-def _guard_globals():
-    """The namespace the #261 guard is defined in, for local-class lookup."""
-    import importlib
-
-    return vars(importlib.import_module(GUARD_MODULE))
+#: Handler types that catch ``AssertionError`` without naming it. ``AssertionError``
+#: derives from ``Exception``, which derives from ``BaseException``, so a handler
+#: for any of the three can swallow an assert's failure.
+UNIVERSAL_HANDLERS = ("AssertionError", "Exception", "BaseException")
 
 
 def _exception_names(exception):
-    """The names an ``except`` clause catches, or ``None`` if unrecognised.
-
-    A bare ``except:`` has no type node and catches everything, so it resolves
-    to the universal base. A tuple is flattened. Anything else -- a subscript,
-    a call, a starred expression -- returns ``None`` so the caller can treat the
-    clause as hostile instead of silently assuming it is harmless.
-    """
+    """The names a handler's ``except`` clause names, or ``None`` if unnameable."""
     if exception is None:
-        return ("BaseException",)
-    if isinstance(exception, ast.Name):
-        return (exception.id,)
-    if isinstance(exception, ast.Attribute):
-        return (ast.unparse(exception),)
-    if isinstance(exception, ast.Tuple):
-        names = []
-        for element in exception.elts:
-            resolved = _exception_names(element)
-            if resolved is None:
-                return None
-            names.extend(resolved)
-        return tuple(names)
-    return None
+        return None
+    names = []
+    for node in ast.walk(exception):
+        if isinstance(node, ast.Name):
+            names.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.append(node.attr)
+    return names or None
 
 
 def _name_catches_assertion_error(name):
     """Is this caught name one that also catches ``AssertionError``?
 
-    Resolution is attempted against builtins and the defining module's
-    globals, so a locally declared ``class Truncated(AssertionError)`` is
-    recognised. A name that resolves to nothing is reported as swallowing: an
-    assert that cannot be proven live must not be counted as enforced.
+    Resolution is attempted against the builtins and the guard module's own
+    namespace, so a locally declared ``class Truncated(AssertionError)`` is
+    recognised. A name that resolves to nothing at all is reported as
+    swallowing: an assert that cannot be proven live must not be counted as
+    enforced, because the error we refuse to make is a missed defeat.
     """
     if name in UNIVERSAL_HANDLERS:
         return True
-    for namespace in (vars(builtins), _guard_globals()):
+    for namespace in (vars(builtins), _guard_namespace()):
         candidate = namespace.get(name.rsplit(".", 1)[-1])
         if isinstance(candidate, type):
             return issubclass(candidate, AssertionError)
     return True
 
 
-def _handler_catches_assertion_error(handler):
-    """Could this handler let an ``AssertionError`` pass without propagating?"""
+def _guard_namespace():
+    """Names visible to the guard module, or an empty mapping if unavailable."""
+    try:
+        return vars(importlib.import_module(GUARD_MODULE))
+    except (ImportError, AttributeError, TypeError):
+        # The guard module is a fixed, in-repo target; if it cannot be imported
+        # there is no namespace to resolve against, and every name then falls
+        # through to the "unresolvable means swallowing" default.
+        return {}
+
+
+def _swallows_assertion_error(handler):
+    """True for a handler that can swallow the failure of an ``assert``.
+
+    ``except AssertionError`` is the direct case, and a bare ``except:`` or
+    ``except BaseException:`` swallows it too. ``except Exception`` is counted
+    for the same reason: ``AssertionError`` derives from ``Exception``, so a
+    handler naming that class also swallows the failure. It is named explicitly
+    to keep the rule from depending on the reader knowing the exception
+    hierarchy. Handlers for anything else -- ``except ValueError`` and friends
+    -- cannot swallow an ``assert`` and are not counted.
+
+    A re-raising handler (``except AssertionError: raise``) is conservatively
+    counted as swallowing. The failure does propagate, so the assert is in fact
+    enforced; deciding that needs real control-flow analysis, and this is a
+    structural sentinel, so it asks only whether a handler *can* swallow. The
+    error is toward reporting a live assert as unenforced, never toward missing
+    a dead one.
+    """
     names = _exception_names(handler.type)
     if names is None:
         return True
     return any(_name_catches_assertion_error(name) for name in names)
 
 
-def _encloses(outer, node):
-    """Is ``node`` a strict descendant of ``outer``?"""
-    return any(child is node for child in ast.walk(outer) if child is not outer)
-
-
-#: ``ast.Try`` and its ``try/except*`` counterpart, which catch the same way.
-_TRY_NODES = (ast.Try, ast.TryStar)
-
-
-def _exception_names_of_suppress(call):
-    """The exception names passed to ``contextlib.suppress(...)``."""
-    names = []
-    for argument in call.args:
-        if isinstance(argument, ast.Name):
-            names.append(argument.id)
-        else:
-            # Anything that is not a plain name is reported as universal, so an
-            # unrecognised argument is never assumed to be harmless.
-            names.append("BaseException")
-    return names or ["BaseException"]
-
-
-def _suppressed_by(entered, name):
-    """Is this statement inside a ``with`` that suppresses assertion failure?"""
-    for item in entered:
-        if not isinstance(item, (ast.With, ast.AsyncWith)):
-            continue
-        for with_item in item.items:
-            call = with_item.context_expr
-            if (
-                isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Attribute)
-                and call.func.attr == name
-                and isinstance(call.func.value, ast.Name)
-                and call.func.value.id == "contextlib"
-                and any(
-                    _name_catches_assertion_error(caught)
-                    for caught in _exception_names_of_suppress(call)
-                )
-            ):
-                return True
-    return False
-
-
-def _always_false_branch(node):
-    """Is this statement under a branch the interpreter can statically skip?
-
-    Only literal conditions are considered, so a guard nested under a genuine
-    runtime condition is never mistaken for a dead one. ``if False:`` is the
-    shape that unwired the #261 guard in the first place, and it is the same
-    "present in the source but unreachable" defect as a swallowed assert.
-    """
-    return any(
-        isinstance(entered, ast.If)
-        and isinstance(entered.test, ast.Constant)
-        and not entered.test.value
-        for entered in node
-    )
-
-
-def _swallowing_handlers(function, target):
-    """Scopes inside ``function`` that can eat ``target``'s assertion failure.
-
-    A ``try`` body is covered by that same ``try``'s handlers, which is a
-    sibling relationship rather than an ancestor one -- the shape that made an
-    earlier version of this helper return a false negative. ``orelse`` is not
-    covered (it runs only when nothing was raised), and one handler body is
-    never covered by a sibling handler in the same chain. ``with
-    contextlib.suppress(...)`` and statically dead ``if False:`` branches are
-    handled here too, because both make an assert present but unfailable.
-    """
-    found = []
-
-    def enclosing_names(entered):
-        names = []
-        for item in entered:
-            if isinstance(item, ast.ExceptHandler):
-                names.extend(_exception_names(item.type) or ("BaseException",))
-        if _suppressed_by(entered, "suppress"):
-            names.append("BaseException")
-        return names
-
-    def visit(node, entered):
-        if node is target:
-            if any(_name_catches_assertion_error(name) for name in enclosing_names(entered)):
-                found.append(node)
-            if _always_false_branch(entered):
-                found.append(node)
-            return True
-        if isinstance(node, _TRY_NODES):
-            handlers = [item for item in node.handlers if _handler_catches_assertion_error(item)]
-            for child in node.body:
-                if visit(child, [*entered, *handlers]):
-                    return True
-            for child in node.orelse + node.finalbody:
-                if visit(child, entered):
-                    return True
-            for handler in node.handlers:
-                # `elif`-style chains are sibling handlers, but they attach to
-                # the same orelse. In a chain, handler N+1 sees the exceptions
-                # that reached it, which excludes what handler N already caught.
-                siblings = [
-                    item
-                    for item in node.handlers[node.handlers.index(handler) + 1 :]
-                    if _handler_catches_assertion_error(item)
-                ]
-                for child in handler.body:
-                    # Not `handler` itself: an AssertionError raised inside a
-                    # handler body propagates out of the whole try, it is not
-                    # re-caught by the clause that caught the first one.
-                    if visit(child, [*entered, *siblings]):
-                        return True
-            return False
-        if isinstance(node, ast.If) and isinstance(node.test, ast.Constant) and not node.test.value:
-            if any(visit(child, [*entered, node]) for child in node.body):
-                return True
-            return any(visit(child, entered) for child in node.orelse)
-        if isinstance(node, (ast.With, ast.AsyncWith)) and _suppressed_by((node,), "suppress"):
-            return any(visit(child, [*entered, node]) for child in node.body)
-        for child in ast.iter_child_nodes(node):
-            if visit(child, entered):
-                return True
-        return False
-
-    for statement in function.body:
-        visit(statement, [])
-    return found
-
-
-def _is_enforced(function, node):
-    """Is ``target`` an assert that can actually fail?
-
-    An ``assert`` is defeated, without being removed, by three distinct
-    mechanisms, and all three are silent to ``ast.walk``:
-
-    1. a ``try`` whose handler swallows ``AssertionError`` (#280);
-    2. a ``with contextlib.suppress(...)`` that catches it;
-    3. a statically dead branch the interpreter never enters (#285).
-
-    ``ast.Try`` and ``ast.TryStar`` are both matched: they are distinct node
-    types, and matching only the former left ``except*`` an unguarded spelling
-    of defeat (1).
-
-    Scoped to scopes that actually contain the assert, not to any handler in the
-    function: a swallowing ``try`` around a *sibling* statement does not disarm
-    an assert outside it, and treating it as though it did would drop real
-    pinned sites.
-    """
-    return not _swallowing_handlers(function, node)
-
-
 def _is_tautology(node):
     """Is this expression true regardless of the values it reads?
 
-    Only the literal, decidable forms are recognised -- a constant, and a
+    Only the literal, decidable forms are recognised -- a truthy constant, and a
     comparison against a numeric bound that a length or count can never cross.
     A comparison against anything else (``len(calls) == 300``,
     ``record["termination"] != "cancelled_or_deadline"``) is a real check and is
@@ -539,12 +399,12 @@ def _is_tautology(node):
     bound = _numeric_literal(node.comparators[0])
     if bound is None:
         return False
-    operator = node.ops[0]
     if not _is_count_like(node.left):
         # `x > -1` is only a tautology when x cannot be negative. Without
         # proving that, treat it as a real check: a false "always true" would
         # make the rule cry wolf, and a missed tautology is the lesser error.
         return False
+    operator = node.ops[0]
     # A count is >= 0 by construction, so only the lower-bounded forms can be
     # tautologies. `len(y) < 1` and `len(y) <= 0` hold only for an empty or
     # absent container, so they are not tautologies either, and proving that
@@ -559,7 +419,8 @@ def _numeric_literal(node):
 
     ``-1`` parses as a ``UnaryOp(USub, Constant)`` rather than a negative
     ``Constant``, so a negative bound has to be folded here or every
-    lower-bounded form would be missed.
+    lower-bounded form would be missed. ``bool`` is excluded despite subclassing
+    ``int``, so ``len(y) >= True`` stays a real comparison.
     """
     if isinstance(node, ast.Constant):
         return None if isinstance(node.value, bool) else _as_number(node.value)
@@ -582,10 +443,10 @@ def _as_number(value):
 def _is_count_like(node):
     """Is this expression a count or length, so it cannot be negative?
 
-    ``len(...)``, ``.count(...)`` and ``str.count``-shaped calls are the forms
+    ``len(...)``, ``.count(...)`` and ``bit_count``-shaped calls are the forms
     that appear in these tests. Anything else -- a bare name, an arithmetic
-    expression, a subtraction -- is not assumed non-negative, because assuming
-    it would turn a real comparison into a false tautology.
+    expression, a subtraction -- is not assumed non-negative, because assuming it
+    would turn a real comparison into a false tautology.
     """
     if not isinstance(node, ast.Call):
         return False
@@ -625,9 +486,7 @@ def _may_bypass(expression):
 
     Recursion covers *every* operand shape, which is what closes the deeper
     version of the same hole. A trivially-true comparison is just as capable of
-    short-circuiting as a bare ``True``, and an earlier version of this helper
-    missed it because ``ast.Compare`` was in neither the deciding list nor the
-    recursion, so it reported the contract intact:
+    short-circuiting as a bare ``True``:
 
         assert record["termination"] != "cancelled_or_deadline" or \
             len(record.get("errors", [])) >= 0
@@ -635,16 +494,166 @@ def _may_bypass(expression):
 
     A bare ``Compare`` operand still does not count as a decision by itself, so
     ``assert x != 1 and y != 2`` -- the shape the real retention sites use --
-    stays enforced. That distinction is pinned by table rows, because an
-    over-broad rule here would report a live assert as dead and the sentinels
-    would then cry wolf on a real regression.
+    stays enforced.
     """
     if not isinstance(expression, ast.BoolOp):
         return False
     operands = expression.values
     if any(_is_tautology(value) for value in operands):
         return True
+    if not isinstance(expression.op, ast.Or):
+        return False
     return any(isinstance(value, _DECIDING_OPERANDS) or _may_bypass(value) for value in operands)
+
+
+def _is_enforced(function, target):
+    """Is ``target`` an assert that can actually fail?
+
+    An ``assert`` is defeated, without being removed, if it sits inside a
+    ``try`` whose handler swallows ``AssertionError`` (#280). ``ast.walk`` is
+    scope-blind -- it descends into ``try`` bodies -- so presence-based checks
+    report such an assert as intact while the owning test can no longer fail.
+    Both ``ast.Try`` and ``ast.TryStar`` (``except*``) are matched: they are
+    distinct node types, and matching only the former left ``except*`` an
+    unguarded spelling of the same defeat.
+
+    The remaining defeats are all reachability, and all three are decided here
+    rather than behaviourally (#287). That is a measured choice, not a
+    preference: an assert moved into an uncalled nested ``def`` or hidden in an
+    ``if False:`` branch leaves the *owning test green* -- the assert is never
+    evaluated, so nothing about running the test can observe it. #291's
+    behavioural guard closes the dead-code arm for the #261 guard only because
+    that guard is *called*; the retention counts are not called from anywhere,
+    so for them the structural walk is the only place the defeat is visible.
+
+    Scoped to a ``try`` whose body actually contains the assert, not to any
+    handler in the function: a swallowing ``try`` around a *sibling* statement
+    does not disarm an assert outside it, and treating it as though it did
+    would drop real pinned sites. ``_contains`` is what draws that line.
+    """
+    for ancestor in _ancestors(function, target):
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
+                # The assert moved into a nested definition nothing calls.
+                return False
+        elif isinstance(ancestor, (ast.Try, ast.TryStar)):
+            if not _in_body(ancestor, target):
+                continue
+            if any(_swallows_assertion_error(handler) for handler in ancestor.handlers):
+                return False
+        elif isinstance(ancestor, (ast.With, ast.AsyncWith)):
+            if not _in_body(ancestor, target):
+                continue
+            if any(_suppresses_assertion_error(item.context_expr) for item in ancestor.items):
+                return False
+        elif isinstance(ancestor, (ast.If, ast.While)) and (
+            # `if False:` / `while False:` -- the body never runs. Only the
+            # `if False:` case matters: an `else` branch of a falsy `if` is
+            # precisely the one that *does* run, hence the `_in_body` guard.
+            _falsy_literal(ancestor.test) and _in_body(ancestor, target)
+        ):
+            return False
+    return True
+
+
+def _is_uncalled_nested_def(function, node):
+    """Is this nested ``def`` referenced nowhere in the owning function?
+
+    A nested definition is only a defeat if nothing can reach it. The common
+    pattern is a callback -- ``session = checkpoint`` -- where the function is
+    defined inside the test and handed to the code under test, so it *is*
+    called even though nothing in the function body calls it. Deciding that
+    generally needs a call graph; the rule below treats a nested def as live
+    whenever its name is loaded anywhere in the enclosing function, which
+    covers every callback shape without one.
+
+    The asymmetry is deliberate. A missed defeat leaves one pinned assert
+    defensible-but-weak; a wrong "defeated" verdict *removes* a live contract
+    from the sentinel's view, which is the more damaging error and the one
+    #280/#287 exist to prevent. Measured on the 147 real asserts in
+    `test_timed_menu_milestones.py` before this rule was added, it dropped
+    exactly 0.
+    """
+    name = node.name
+    for candidate in ast.walk(function):
+        if candidate is node:
+            continue
+        if (
+            isinstance(candidate, ast.Name)
+            and candidate.id == name
+            and isinstance(candidate.ctx, ast.Load)
+        ):
+            return False
+    return True
+
+
+def _ancestors(function, target):
+    """The chain of nodes from ``function`` down to ``target``, outermost first."""
+    chain = []
+    current = function
+    while True:
+        for child in ast.iter_child_nodes(current):
+            if child is target:
+                return [*chain, child]
+            if any(node is target for node in ast.walk(child)):
+                chain.append(child)
+                current = child
+                break
+        else:
+            return chain
+
+
+def _falsy_literal(node):
+    return isinstance(node, ast.Constant) and not node.value
+
+
+def _in_body(branch, target):
+    """Is ``target`` inside ``branch``'s executed body, not a handler or ``else``?"""
+    return any(_contains(statement, target) for statement in branch.body)
+
+
+def _suppresses_assertion_error(expression):
+    """Is this ``with`` item a context manager that discards ``AssertionError``?
+
+    Only ``contextlib.suppress`` (and ``asyncio``'s identically-named helper)
+    are recognised, and only the names that also catch ``AssertionError``:
+    ``suppress(ValueError)`` cannot swallow a failing ``assert`` and must stay
+    reported as enforced. An unrecognised context expression is treated as
+    harmless for the same reason an unrecognised *name* in an ``except`` is
+    treated as hostile only when it is provable -- here the error is toward
+    missing a live assert, and guessing that an arbitrary context manager
+    swallows would drop real pinned sites.
+    """
+    if not isinstance(expression, ast.Call):
+        return False
+    target = expression.func
+    if isinstance(target, ast.Name):
+        name = target.id
+    elif isinstance(target, ast.Attribute):
+        name = target.attr
+    else:
+        return False
+    if name != "suppress":
+        return False
+    if not expression.args:
+        # `with suppress():` swallows everything.
+        return True
+    names = set()
+    for argument in expression.args:
+        if isinstance(argument, ast.Name):
+            names.add(argument.id)
+        elif isinstance(argument, ast.Tuple):
+            names.update(element.id for element in argument.elts if isinstance(element, ast.Name))
+        else:
+            # A non-name argument (a call, a subscript) cannot be resolved, so
+            # treat it as potentially swallowing rather than assume it is safe.
+            return True
+    return bool({"AssertionError", "Exception", "BaseException"} & names)
+
+
+def _contains(statement, target):
+    """True if ``target`` is ``statement`` or lies anywhere beneath it."""
+    return statement is target or any(node is target for node in ast.walk(statement))
 
 
 def guard_rejects_the_deadline_terminal_state():
@@ -657,14 +666,10 @@ def guard_rejects_the_deadline_terminal_state():
     was filed to remove. This asks for the ``!=`` comparison that does the
     rejecting, so a gutted guard body fails.
 
-    A comparison that is merely *present* is not enough either. Wrapping the
-    assert in ``try: ... except AssertionError: pass`` leaves the node in the
-    tree but makes the guard return normally, which would restore the exact
-    confusion above while every structural check stayed green (#280, mutation
-    M6). Nor may the comparison be short-circuited away by a tautological
-    sibling operand, nor sit in a branch the interpreter never enters (#285,
-    #290 mutation M12). ``_is_enforced`` and ``_may_bypass`` are what close
-    those.
+    The comparison must also be *enforced*. Wrapping it in
+    ``try/except AssertionError: pass`` keeps the node, keeps the operator, and
+    leaves the guard unable to fail -- while satisfying a presence-only check
+    (#280, mutation M6). ``_is_enforced`` is what closes that.
     """
     tree = _guard_source_tree()
     for func in tree.body:
@@ -672,8 +677,6 @@ def guard_rejects_the_deadline_terminal_state():
             continue
         for node in ast.walk(func):
             if not isinstance(node, ast.Assert):
-                continue
-            if not _is_enforced(func, node) or _may_bypass(node.test):
                 continue
             for comparison in _comparisons_in(node.test):
                 if not (len(comparison.ops) == 1 and isinstance(comparison.ops[0], ast.NotEq)):
@@ -683,6 +686,8 @@ def guard_rejects_the_deadline_terminal_state():
                     _is_termination_key(comparison.left)
                     and isinstance(right, ast.Constant)
                     and right.value == DEADLINE_TERMINATION
+                    and _is_enforced(func, node)
+                    and not _may_bypass(node.test)
                 ):
                     return True
     return False

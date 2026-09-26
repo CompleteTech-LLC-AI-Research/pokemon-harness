@@ -187,7 +187,6 @@ def test_an_assert_that_cannot_fail_is_never_counted_as_the_teeth_check(
     function = _guard_tree_for(body)
     monkeypatch.setattr(support, "_guard_source_tree", lambda: ast.Module(body=[function]))
     monkeypatch.setattr(support, "GUARD_FUNCTION", "assert_not_deadline_truncated")
-    monkeypatch.setattr(support, "_guard_globals", lambda: {"contextlib": __import__("contextlib")})
 
     assert support.guard_rejects_the_deadline_terminal_state() is expected, (
         f"{label}: expected the teeth check to report "
