@@ -173,11 +173,25 @@ def inspect_pinball(root: Path) -> dict[str, Any]:
             elif getattr(facade, name) is not getattr(data, name):
                 problems.append(f"pinball export identity changed: {name}")
     wrapper = getattr(facade, "GameWrapperPokemonPinball", None)
-    if (
-        not isinstance(wrapper, type)
-        or getattr(manager, "GameWrapperPokemonPinball", None) is not wrapper
-    ):
-        problems.append("plugin manager no longer exposes the public pinball wrapper class")
+    manager_type = getattr(manager, "PluginManager", None)
+    manager_origin = str(getattr(manager, "__file__", "") or "")
+    if not manager_origin.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)):
+        problems.append("plugin manager is not an installed native extension")
+    if not isinstance(wrapper, type) or not isinstance(manager_type, type):
+        problems.append("public Pinball wrapper or plugin manager class is missing")
+    else:
+        # Cython may keep the imported wrapper class private to the manager
+        # extension. Its typed instance slot is the actual integration path.
+        try:
+            manager_probe = manager_type.__new__(manager_type)
+            wrapper_probe = wrapper.__new__(wrapper)
+            manager_probe.game_wrapper_pokemon_pinball = wrapper_probe
+            if manager_probe.game_wrapper_pokemon_pinball is not wrapper_probe:
+                problems.append("plugin manager Pinball slot changed wrapper identity")
+        except (AttributeError, TypeError, ValueError) as exc:
+            problems.append(
+                f"plugin manager Pinball slot rejected the wrapper: {type(exc).__name__}"
+            )
     return {
         "schema_version": 1,
         "scope": "native-pinball-import-proof-not-gameplay",

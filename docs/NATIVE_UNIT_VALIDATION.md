@@ -44,7 +44,7 @@ is not a passing gate.
    digest and build record. Runs `pip check` and the native bootstrap check.
 4. Verifies the current pin, the compiled-runtime flag, both pinball modules'
    extension origins, their 1000-line limit, explicit data exports, facade/data
-   object identity, and the plugin manager's wrapper-class identity.
+   object identity, and the compiled plugin manager's typed Pinball wrapper slot.
 5. Runs the existing `production_gate.py --runtime-mode cython --tier unit`
    unchanged, retaining the gate report and raw output. No selected test is
    omitted, no assertion or timeout is relaxed, and there is no retry-until-green

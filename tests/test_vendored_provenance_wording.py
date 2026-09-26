@@ -252,12 +252,19 @@ def native_ci_modules(native_ci, tmp_path, monkeypatch):
     extension = native_ci.importlib.machinery.EXTENSION_SUFFIXES[0]
     marker = object()
     wrapper = type("GameWrapperPokemonPinball", (), {})
+
+    class NativeManager:
+        __slots__ = ("game_wrapper_pokemon_pinball",)
+
     facade = SimpleNamespace(ADDR_BALLS_LEFT=marker, GameWrapperPokemonPinball=wrapper)
     data = SimpleNamespace(__all__=["ADDR_BALLS_LEFT"], ADDR_BALLS_LEFT=marker)
     modules = {
         "pyboy": SimpleNamespace(__pokered_harness_revision__=PIN),
         "pyboy.utils": SimpleNamespace(cython_compiled=True),
-        "pyboy.plugins.manager": SimpleNamespace(GameWrapperPokemonPinball=wrapper),
+        "pyboy.plugins.manager": SimpleNamespace(
+            PluginManager=NativeManager,
+            __file__=str(tmp_path / "installed" / ("manager" + extension)),
+        ),
     }
     for name, module in zip(native_ci.PINBALL_MODULES, (facade, data), strict=True):
         source = vendor / (name.replace(".", "/") + ".py")
@@ -296,7 +303,7 @@ def test_native_ci_rejects_identity_drift(native_ci, native_ci_modules, change):
     elif change == "utils":
         modules["pyboy.utils"].cython_compiled = False
     elif change == "manager":
-        modules["pyboy.plugins.manager"].GameWrapperPokemonPinball = object()
+        modules["pyboy.plugins.manager"].PluginManager = object()
     elif change == "data_identity":
         facade.ADDR_BALLS_LEFT = object()
     else:
