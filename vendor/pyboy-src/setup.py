@@ -45,10 +45,14 @@ _component_build = importlib.util.module_from_spec(_component_spec)
 _component_spec.loader.exec_module(_component_build)
 
 # Split modules whose compiler input is the checksum-verified reassembly of their
-# .pxi components. Maps the tracked source path to (component stem, .pxd name).
+# .pxi components. Maps the package-relative source path, as produced by
+# os.path.relpath(src, ROOT_DIR), to (component stem, .pxd name). These keys
+# must NOT carry the `pyboy/` prefix: the lookup below compares against that
+# relpath, and a mismatched key silently falls through to cythonizing the
+# runtime-loading facade, whose body defines none of the .pxd's C methods.
 COMPONENT_SOURCES = {
-    "pyboy/core/mb.py": ("mb", "mb.pxd"),
-    "pyboy/core/lcd.py": ("lcd", "lcd.pxd"),
+    "core/mb.py": ("mb", "mb.pxd"),
+    "core/lcd.py": ("lcd", "lcd.pxd"),
 }
 
 
@@ -111,7 +115,7 @@ class build_ext(_build_ext):
             # relative ROOT_DIR onto the package directory gave
             # `pyboy/pyboy/core`, whose missing manifest aborted metadata
             # generation with "No such file or directory".
-            directory = os.path.join(ROOT_ABS, os.path.dirname(relative))
+            directory = os.path.join(ROOT_ABS, "pyboy", os.path.dirname(relative))
             staged_components[relative] = _component_build.stage_native_source(
                 directory, stem, relative.replace(os.sep, "/"),
                 declarations=declarations,

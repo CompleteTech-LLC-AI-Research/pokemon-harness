@@ -285,7 +285,7 @@ release readiness.
   3.11 and 3.12+. Historical Python 3.12 gate results do not establish a
   complete Python 3.11 release gate.
 - [x] The distribution bundles source PyBoy `2.7.0` at the harness-local
-  divergence revision `5cf09a639cbddf92978dac96a663df0f41926cde` (pre-divergence
+  divergence revision `d9b9648ab865080ac0e8404c8f1cdfb9c08b5b47` (pre-divergence
   harness fork revision `c565df66c3731fad2856169a90f6bbec99925915`).
 - [x] `mcp==1.29.1` is pinned in `pyproject.toml`.
 - [x] The asset-free source gate resolves the bundled source runtime and the
