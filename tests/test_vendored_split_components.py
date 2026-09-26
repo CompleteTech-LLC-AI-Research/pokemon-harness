@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -59,14 +60,12 @@ def setup_path_literals(setup_path, wanted):
 
 
 def pxd_declared_members(pxd_path):
-    """Map each declared cdef class to the names its body declares.
+    """Map cdef classes to methods that are legitimately Python-invisible.
 
-    A `.pxd` is Cython declaration syntax, not Python, so it is parsed with
-    Cython's own compiler rather than `ast` (which rejects the `cimport` lines
-    outright) or a hand-rolled regex. Every `cdef`/`cpdef` method inside a
-    `cdef class` body is lifted by Cython into the type's C-level dict rather
-    than bound in the Python class dict -- which is exactly the set of names a
-    split could drop from the source without `vars()` noticing.
+    Parse declarations with Cython's compiler, not Python's AST or a regex.
+    Only plain `cdef` methods lack Python wrappers. `cpdef` methods have both
+    C and Python entry points and MUST remain in the required Python surface.
+    Public/readonly fields are not methods and must not enter this exemption.
     """
     from Cython.Compiler import Errors, Main, Nodes, Options
 
@@ -86,16 +85,46 @@ def pxd_declared_members(pxd_path):
         pxd=True,
         full_module_name=stem,
     )
+
+    def statements(node):
+        # Cython elides StatListNode around a singleton statement, and an
+        # empty extension class has a PassStatNode rather than declarations.
+        return node.stats if isinstance(node, Nodes.StatListNode) else (node,)
+
     declared = {}
-    for node in tree.body.stats:
+    for node in statements(tree.body):
         if isinstance(node, Nodes.CClassDefNode):
             declared[node.class_name] = {
                 declarator.base.name
-                for item in node.body.stats
+                for item in statements(node.body)
+                if isinstance(item, Nodes.CVarDefNode) and not item.overridable
                 for declarator in item.declarators
                 if isinstance(declarator, Nodes.CFuncDeclaratorNode)
             }
     return declared
+
+
+def assert_exported_class_surface(module, name, source_class, *, from_source, declared=()):
+    """Require the public class and its Python-visible members in both modes."""
+    assert hasattr(module, name), (module.__name__, name, "missing public class")
+    actual = getattr(module, name)
+    assert inspect.isclass(actual), (module.__name__, name, "export is not a class")
+    assert actual.__name__ == source_class.__name__
+    if from_source:
+        assert set(vars(actual)) == set(vars(source_class))
+        assert inspect.getsource(actual).startswith("class ")
+    else:
+        assert [b.__name__ for b in actual.__bases__] == [
+            b.__name__ for b in source_class.__bases__
+        ]
+        # cdef methods may disappear and native descriptors may appear, but
+        # plain def AND cpdef methods must survive the split. Never exempt a
+        # whole public class merely because its module is compiled.
+        required = {attr for attr in vars(source_class) if not attr.startswith("__")} - set(
+            declared
+        )
+        missing = required - set(vars(actual))
+        assert not missing, (module.__name__, name, sorted(missing))
 
 
 # The exact pre-split git blobs the components must reassemble to, and the
@@ -144,24 +173,35 @@ def test_pxd_declared_members_sees_every_cdef_method(stem):
     declared = pxd_declared_members(CORE / f"{stem}.pxd")
     if stem == "mb":
         assert set(declared) == {"Motherboard", "HDMA"}
-        # `cdef` and `cpdef` alike, including the `with gil` exception edges.
-        assert {
-            "tick",
+        assert declared["Motherboard"] == {
             "save_state",
             "load_state",
             "buttonevent",
             "getitem",
             "setitem",
+            "getitem_io_ports",
+            "setitem_io_ports",
             "transfer_DMA",
-            "breakpoint_add",
-            "breakpoint_remove",
-            "breakpoint_reached",
-            "breakpoint_reinject",
-            "set_execution_governor",
             "switch_speed",
-            "get_physical_clock",
+            "_sync_physical_clock",
             "stop",
-        } <= declared["Motherboard"]
+        }
+        # These cpdef methods are Python-visible, including private-looking
+        # names and methods declared with exception/with-gil specifications.
+        assert declared["Motherboard"].isdisjoint(
+            {
+                "tick",
+                "breakpoint_add",
+                "breakpoint_remove",
+                "breakpoint_reached",
+                "breakpoint_reinject",
+                "set_execution_governor",
+                "_execution_step",
+                "_prune_serial_time_segments",
+                "_map_serial_boundary_time",
+                "get_physical_clock",
+            }
+        )
         assert {"tick", "save_state", "load_state", "set_hdma5"} <= declared["HDMA"]
     else:
         assert set(declared) == {
@@ -365,36 +405,19 @@ def test_imported_module_keeps_the_pre_split_namespace_and_source(stem):
     if from_source:
         linecache.checkcache()
         assert "".join(linecache.getlines(module.__file__)).encode() == original
+    declared = {} if from_source else pxd_declared_members(CORE / f"{stem}.pxd")
     for name, value in namespace.items():
         if name.startswith("_") or not inspect.isclass(value):
             continue
         if value.__module__ != module.__name__:
             continue
-        if not hasattr(module, name):
-            # Same native-runtime caveat as above: a compiled module may not
-            # re-export a name. Source mode is the strict check.
-            assert not from_source, name
-            continue
-        actual = getattr(module, name)
-        if from_source:
-            assert set(vars(actual)) == set(vars(value))
-            assert inspect.getsource(actual).startswith("class ")
-        else:
-            # A compiled cdef class moves every method the .pxd declares into
-            # the type's C-level dict, so those names are absent from vars()
-            # while the C-level slots (__pyx_vtable__, cdef attributes) are
-            # present instead. The asymmetry runs both ways, so no single set
-            # operator expresses it. Subtract the delta that Cython is
-            # entitled to move, then require the rest: every remaining name the
-            # source class body binds must still be reachable on the compiled
-            # type. That residue is what a split could actually have lost.
-            assert actual.__name__ == value.__name__
-            assert [b.__name__ for b in actual.__bases__] == [b.__name__ for b in value.__bases__]
-            declared = pxd_declared_members(CORE / f"{stem}.pxd").get(name, frozenset())
-            required = {attr for attr in vars(value) if not attr.startswith("__")} - declared
-            missing = required - set(vars(actual))
-            assert not missing, (stem, name, sorted(missing))
-        assert actual is value or actual.__name__ == value.__name__
+        assert_exported_class_surface(
+            module,
+            name,
+            value,
+            from_source=from_source,
+            declared=declared.get(name, ()),
+        )
 
 
 def test_setup_stages_the_split_modules_rather_than_their_facades():
@@ -506,3 +529,68 @@ def test_native_build_stages_components_from_the_real_source_root():
         manifest = Path(directory) / f"{stem}_components_manifest.py"
         assert manifest.is_file(), f"{stem}: staging would read missing {manifest}"
         assert Path(directory, declarations).is_file(), stem
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ("    pass\n", set()),
+        ("    cdef int hidden(self)\n", {"hidden"}),
+        ("    cpdef int visible(self)\n", set()),
+        (
+            """    cdef int hidden(self)
+    cpdef int visible(self) except * with gil
+    cdef inline (int, int) position(self) noexcept nogil
+    cdef public int value
+    cdef readonly int count
+""",
+            {"hidden", "position"},
+        ),
+    ],
+    ids=["empty", "single-cdef", "single-cpdef", "mixed"],
+)
+def test_pxd_hidden_members_distinguishes_python_wrappers(tmp_path, body, expected):
+    declaration = tmp_path / "surface_probe.pxd"
+    declaration.write_text("cdef class Probe:\n" + body, encoding="utf-8")
+    assert pxd_declared_members(declaration) == {"Probe": expected}
+
+
+@pytest.mark.parametrize("missing", [None, "visible", "_visible", "plain", "class", "not-class"])
+def test_native_class_surface_rejects_missing_python_exports(tmp_path, missing):
+    """Authored controls exercise the real assertion used by the native lane.
+
+    These are negative controls, not native-runtime or real-ROM acceptance.
+    The actual imported mb/lcd classes are checked by the namespace test.
+    """
+    declaration = tmp_path / "surface_probe.pxd"
+    declaration.write_text(
+        "cdef class Probe:\n"
+        "    cdef int hidden(self)\n"
+        "    cpdef int visible(self)\n"
+        "    cpdef int _visible(self)\n",
+        encoding="utf-8",
+    )
+    hidden = pxd_declared_members(declaration)["Probe"]
+    source_attrs = {name: (lambda self: 1) for name in ("hidden", "visible", "_visible", "plain")}
+    source_class = type("Probe", (), source_attrs)
+    native_attrs = {name: value for name, value in source_attrs.items() if name != "hidden"}
+    # Native-only public descriptors are legitimate extras, not a failure.
+    native_attrs["public_field"] = 0
+    native_attrs.pop(missing, None)
+    module = ModuleType("surface_probe")
+    if missing != "class":
+        module.Probe = object() if missing == "not-class" else type("Probe", (), native_attrs)
+    if missing is None:
+        assert_exported_class_surface(
+            module, "Probe", source_class, from_source=False, declared=hidden
+        )
+    else:
+        expected = (
+            "missing public class"
+            if missing == "class"
+            else ("export is not a class" if missing == "not-class" else missing)
+        )
+        with pytest.raises(AssertionError, match=expected):
+            assert_exported_class_surface(
+                module, "Probe", source_class, from_source=False, declared=hidden
+            )
