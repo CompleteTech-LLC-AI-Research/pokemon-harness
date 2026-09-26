@@ -440,7 +440,7 @@ Requirements:
 
 - Python 3.11 or newer.
 - The bundled PyBoy runtime (`2.7.0`, harness-local divergence revision
-  `b94bf5dfb042c502ff4bc1bcd417599b02a9419b`; pre-divergence harness fork revision
+  `e91b07c39474e40265ca88684f7ce3d9ea171096`; pre-divergence harness fork revision
   `c565df66c3731fad2856169a90f6bbec99925915`). Earlier recorded runs below name
   that fork revision because they predate the in-fork divergence.
 - `mcp==1.29.1`, the certified runtime API used by the server.

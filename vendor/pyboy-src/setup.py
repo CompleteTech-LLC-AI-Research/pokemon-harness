@@ -12,7 +12,13 @@ import numpy as np
 from setuptools import Extension, setup
 
 CYTHON = platform.python_implementation() == "CPython" and not os.getenv("PYBOY_NO_CYTHON")
+# Relative on purpose: Cython derives each extension's module name from this
+# path, so an absolute ROOT_DIR yields module names like
+# `.home.runner.work...pyboy.api.constants`, which is not a valid module name.
+# Metadata-only steps run with a different CWD, so the component staging below
+# anchors its own paths against the file location instead (see ROOT_ABS).
 ROOT_DIR = "pyboy"
+ROOT_ABS = os.path.dirname(os.path.abspath(__file__))
 DEBUG = bool(os.getenv("GITHUB_ACTIONS"))
 
 if not CYTHON:
@@ -29,6 +35,25 @@ _opcode_spec = importlib.util.spec_from_file_location(
 )
 _opcode_build = importlib.util.module_from_spec(_opcode_spec)
 _opcode_spec.loader.exec_module(_opcode_build)
+
+# Same constraint for the bounded .pxi component loader used by pyboy.py,
+# pyboy/core/mb.py and pyboy/core/lcd.py.
+_component_spec = importlib.util.spec_from_file_location(
+    "_pyboy_component_build", Path(__file__).parent / "pyboy/_components.py"
+)
+_component_build = importlib.util.module_from_spec(_component_spec)
+_component_spec.loader.exec_module(_component_build)
+
+# Split modules whose compiler input is the checksum-verified reassembly of their
+# .pxi components. Maps the package-relative source path, as produced by
+# os.path.relpath(src, ROOT_DIR), to (component stem, .pxd name). These keys
+# must NOT carry the `pyboy/` prefix: the lookup below compares against that
+# relpath, and a mismatched key silently falls through to cythonizing the
+# runtime-loading facade, whose body defines none of the .pxd's C methods.
+COMPONENT_SOURCES = {
+    "core/mb.py": ("mb", "mb.pxd"),
+    "core/lcd.py": ("lcd", "lcd.pxd"),
+}
 
 
 def patched_error(position, message):
@@ -82,9 +107,27 @@ class build_ext(_build_ext):
         main_dependencies = [os.path.join(ROOT_DIR, name) for name in source_support["COMPONENTS"]]
         main_dependencies.append(os.path.join(ROOT_DIR, "pyboy.pxd"))
         py_pxd_files = prep_pxd_py_files()
+        staged_components = {}
+        for relative, (stem, declarations) in COMPONENT_SOURCES.items():
+            # setuptools builds this command object for metadata-only steps too,
+            # where the process CWD is not the source root. Anchoring these
+            # staging paths to ROOT_ABS keeps them CWD-independent: joining the
+            # relative ROOT_DIR onto the package directory gave
+            # `pyboy/pyboy/core`, whose missing manifest aborted metadata
+            # generation with "No such file or directory".
+            directory = os.path.join(ROOT_ABS, ROOT_DIR, os.path.dirname(relative))
+            staged_components[relative] = _component_build.stage_native_source(
+                directory, stem, relative.replace(os.sep, "/"),
+                declarations=declarations,
+                build_root=os.path.join(ROOT_ABS, "build", "components"),
+            )
+
         def compiler_source(src):
             if src == main_path:
                 return str(main_source)
+            relative = os.path.relpath(src, ROOT_DIR).replace(os.sep, "/")
+            if relative in staged_components:
+                return str(staged_components[relative])
             return _opcode_build.prepare_opcode_source(src)
 
         cythonize_files = map(
@@ -131,6 +174,8 @@ def prep_pxd_py_files():
         "__main__.py", "manager_gen.py", "opcodes_gen.py",
         "opcodes_gen_handlers.py", "conftest.py", "_source.py",
         "opcodes_layout.py", "_opcodes_runtime.py", "_opcodes_manifest.py",
+        "_components.py", "mb_components_manifest.py", "lcd_components_manifest.py",
+        "components_layout.py",
     ]
     # Cython doesn't trigger a recompile on .py files, where only the .pxd file has changed. So we fix this here.
     # We also yield the py_files that have a .pxd file, as we feed these into the cythonize call.

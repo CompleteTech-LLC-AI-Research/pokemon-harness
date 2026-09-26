@@ -66,8 +66,17 @@ packages = ["pyboy", "pyboy.api", "pyboy.core", "pyboy.core.cartridge", "pyboy.l
     "**/*.pyx",
     "**/*.pxd",
     "**/bootrom*.bin",
-    "**/font.txt"
+    "**/font.txt",
 ]
+
+# Literal-only component manifests for the bounded mb/lcd splits, plus the
+# loader that reads them. They are plain Python data modules read at import
+# time, so they must ship with the package exactly as the .pxi components do.
+# They are listed as exact paths rather than a `**` glob: a recursive pattern is
+# expanded against the package directory and then prefixed again, producing a
+# doubled `pyboy/pyboy/...` path that fails metadata generation.
+"pyboy" = ["_components.py"]
+"pyboy.core" = ["mb_components_manifest.py", "lcd_components_manifest.py"]
 
 [tool.pytest.ini_options]
 addopts = "--benchmark-disable"

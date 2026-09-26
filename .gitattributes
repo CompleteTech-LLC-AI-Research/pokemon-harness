@@ -1,2 +1,7 @@
 # Generated opcode fragments preserve the original source bytes at split boundaries.
 vendor/pyboy-src/pyboy/core/opcode_components/*.pxi whitespace=-blank-at-eof
+
+# The bounded mb/lcd components are verbatim slices of the pre-split sources;
+# they must never gain or lose trailing whitespace at a split boundary.
+vendor/pyboy-src/pyboy/core/mb_components/*.pxi whitespace=-blank-at-eol
+vendor/pyboy-src/pyboy/core/lcd_components/*.pxi whitespace=-blank-at-eol
