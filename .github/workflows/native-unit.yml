@@ -24,6 +24,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # The unit tier verifies a retained historical evidence commit.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
