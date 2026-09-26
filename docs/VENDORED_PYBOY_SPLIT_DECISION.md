@@ -1,3 +1,10 @@
+# Additional unqualified #153 serial split
+
+The candidate based on `3e865d5b0348d0c7c462ed8b40a107ae2b158277` carries vendor content identity
+`0a0f7f315e58e1c06a8c2cb9a716b8116fdf92ef`. This is not an acceptance decision. All native,
+runtime, public-surface, and independent-review gates below remain required.
+The prior dated decisions and identity records below are retained as history.
+
 # Decision: handling the eight vendored PyBoy split leaves (#123, #133, #138, #142, #150, #153, #155, #161)
 
 Status: **DECIDED — explicit in-fork divergence; execution has started (see the "Update" sections
