@@ -1408,6 +1408,33 @@ REBINDS_INSIDE_A_HEADER = {
     "with-as-inside-the-walrus-statement": (
         "with helper.make() as cs:\n    pass"
     ),  # True (measured)
+    # A name bound by `import ... as` rides on an `ast.alias`, and a name
+    # bound by a `match` capture rides on a `MatchAs`/`MatchStar`/
+    # `MatchMapping` string field. Neither is an `ast.Name` with a `Store`
+    # ctx, so before this fix every row below was a live assert reported as
+    # swallowed -- a regression against base `87a90da`, which gets all of
+    # them right. Verdicts measured by executing each fixture.
+    "import-as": "import os as cs",  # True (measured)
+    "import-from-as": "from os import path as cs",  # True (measured)
+    "match-as-capture": ("match [helper.make()]:\n    case [cs]:\n        pass"),  # True (measured)
+    "match-as-on-another-name": (
+        "match [helper.make()]:\n    case [other] as cs:\n        pass"
+    ),  # True (measured)
+    "match-star-capture": (
+        "match [helper.make(), 2]:\n    case [_, *cs]:\n        pass"
+    ),  # True (measured)
+    "match-mapping-rest": (
+        "match {'k': helper.make()}:\n    case {'k': _, **cs}:\n        pass"
+    ),  # True (measured)
+    "match-class-attribute": (
+        "match helper.Pt():\n    case helper.Pt(cs):\n        pass"
+    ),  # True (measured)
+    "match-class-nested-capture": (
+        "match [helper.Pt()]:\n    case [helper.Pt(inner=cs)]:\n        pass"
+    ),  # True (measured)
+    "match-inside-a-block": (
+        "if x:\n    match [helper.make()]:\n        case [cs]:\n            pass"
+    ),  # True (measured)
 }
 
 
@@ -1524,6 +1551,45 @@ def _verdicts(source):
             True,
         ),
         ("with-as-tuple", "with helper.make() as (other, cs):\n    pass", True),
+        # A name bound by `import ... as` rides on an `ast.alias`; a name bound
+        # by a `match` capture rides on a `MatchAs`/`MatchStar`/`MatchMapping`
+        # string field. Neither is an `ast.Name` with a `Store` ctx, so before
+        # this fix every row below was a LIVE assert reported as swallowed --
+        # a regression against base `87a90da`, which gets all of them right.
+        # Every `live` value here is measured by executing the fixture.
+        ("import-as", "import os as cs", True),
+        ("import-from-as", "from os import path as cs", True),
+        ("match-as-capture", "match [helper.make()]:\n    case [cs]:\n        pass", True),
+        (
+            "match-as-on-another-name",
+            "match [helper.make()]:\n    case [other] as cs:\n        pass",
+            True,
+        ),
+        (
+            "match-star-capture",
+            "match [helper.make(), 2]:\n    case [_, *cs]:\n        pass",
+            True,
+        ),
+        (
+            "match-mapping-rest",
+            "match {'k': helper.make()}:\n    case {'k': _, **cs}:\n        pass",
+            True,
+        ),
+        (
+            "match-class-attribute",
+            "match helper.Pt():\n    case helper.Pt(cs):\n        pass",
+            True,
+        ),
+        (
+            "match-class-nested-capture",
+            "match [helper.Pt()]:\n    case [helper.Pt(inner=cs)]:\n        pass",
+            True,
+        ),
+        (
+            "match-inside-a-block",
+            "if x:\n    match [helper.make()]:\n        case [cs]:\n            pass",
+            True,
+        ),
     ],
     ids=[
         "annassign",
@@ -1558,6 +1624,15 @@ def _verdicts(source):
         "with-as-inside-a-loop",
         "with-as-inside-a-try",
         "with-as-tuple",
+        "import-as",
+        "import-from-as",
+        "match-as-capture",
+        "match-as-on-another-name",
+        "match-star-capture",
+        "match-mapping-rest",
+        "match-class-attribute",
+        "match-class-nested-capture",
+        "match-inside-a-block",
     ],
 )
 def test_every_binding_form_retires_a_carried_walrus(label, body, live):

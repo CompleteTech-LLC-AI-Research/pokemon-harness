@@ -962,6 +962,26 @@ def _bound_targets(node):
         targets = [node.name] if node.name is not None else []
     elif isinstance(node, ast.withitem):
         targets = [node.optional_vars] if node.optional_vars is not None else []
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        # `import os as cs` binds `cs`, but the name rides on an `ast.alias`
+        # (`alias.asname`) rather than an `ast.Name` with a `Store` ctx, so
+        # neither the walk nor any other branch above could see it. A carried
+        # walrus therefore survived into the following `with cs:`, and since
+        # a module is not a context manager the assert inside is live.
+        targets = [
+            ast.Name(id=alias.asname, ctx=ast.Store())
+            for alias in node.names
+            if alias.asname is not None
+        ]
+    elif isinstance(node, (ast.MatchAs, ast.MatchStar, ast.MatchMapping)):
+        # A `match` capture pattern binds through `MatchAs.name` (a capture
+        # and a `... as name` alike), `MatchStar.name` (a starred capture) and
+        # `MatchMapping.rest` (a `**rest` capture). All three are plain `str`
+        # fields, never an `ast.Name`, so the same gap as `alias.asname`
+        # applied. Synthesising a `Name` lets the shared `_flatten_target`
+        # tail below pick all of them up.
+        bound = node.name if isinstance(node, (ast.MatchAs, ast.MatchStar)) else node.rest
+        targets = [ast.Name(id=bound, ctx=ast.Store())] if bound is not None else []
     else:
         targets = []
     return [
