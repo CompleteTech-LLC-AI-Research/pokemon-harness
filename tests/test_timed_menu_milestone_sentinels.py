@@ -1798,6 +1798,13 @@ def test_a_walrus_alias_is_retired_by_every_binding_form(label, rebind):
     ``nullcontext`` in a different syntactic form, then enters it. The first
     assert is swallowed by the walrus-bound suppressor; the second is entered
     through the ``nullcontext`` and is **live**.
+
+    The ``del`` row is the exception to that description. ``del cs`` leaves the
+    name unbound, so the later ``with cs:`` raises ``NameError`` in real
+    Python and the second assert never executes -- there is no runtime verdict
+    to agree with. The row still earns its place: the carried suppressor must
+    be retired either way, and an unbound name is reported *enforced*, which is
+    the same contract a name that was never bound at all gets.
     """
     source = (
         "def outer(x, flag, helper):\n"
@@ -1878,3 +1885,138 @@ def test_a_walrus_bound_outside_an_assignment_still_reaches_a_later_header(label
         f"{label}: expected verdicts {expected}, got {results}. The walrus "
         f"binds `cs` before the `with` is reached, so the assert is swallowed."
     )
+
+
+#: #324: a ``match`` capture is a store, and it is not reachable from any
+#: statement's target list -- ``case [cs]:`` parses to an ``ast.MatchAs`` whose
+#: ``name`` is a plain string, not an ``ast`` target, so the target walk that
+#: covers tuple, list and starred unpacking never sees it.
+#:
+#: A capture rebinds the name to the value that was matched. Left unmodelled,
+#: the suppressor carried in by the earlier walrus survived the clause and
+#: reached the later ``with cs:``, which reported the assert under it as
+#: swallowed. Executing the fixture confirms the opposite: the capture puts a
+#: non-suppressor in ``cs``, so the second assert is **live** and its
+#: ``AssertionError`` propagates.
+MATCH_CAPTURE_SHAPES = (
+    (
+        "a sequence-pattern capture",
+        "    match flag:\n        case [cs]:\n            pass",
+    ),
+    (
+        "an as-pattern capture",
+        "    match flag:\n        case [other] as cs:\n            pass",
+    ),
+    (
+        "a mapping-pattern capture",
+        "    match flag:\n        case {'key': cs}:\n            pass",
+    ),
+    (
+        "a starred capture",
+        "    match flag:\n        case [other, *cs]:\n            pass",
+    ),
+    (
+        "an irrefutable as-pattern capture",
+        "    match flag:\n        case _ as cs:\n            pass",
+    ),
+    (
+        "a mapping rest capture",
+        "    match flag:\n        case {'key': 1, **cs}:\n            pass",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "capture"),
+    MATCH_CAPTURE_SHAPES,
+    ids=[shape[0] for shape in MATCH_CAPTURE_SHAPES],
+)
+def test_a_walrus_alias_is_retired_by_a_match_capture(label, capture):
+    """A ``match`` capture must retire a carried suppressor like any store.
+    +
+    +    The first assert is swallowed by the walrus-bound suppressor. The capture
+    +    then rebinds ``cs`` to the matched value, so the ``with cs:`` that follows
+    +    enters something that does not suppress and the second assert is live.
+    +"""
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + capture + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False, True]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. The capture "
+        f"rebinds `cs` to the matched value, so the second assert is live and "
+        f"must be reported enforced."
+    )
+
+
+#: Two over-fix guards. The capture rules must not retire a binding they did
+#: not make, in either direction -- the first is a *missed* retirement and the
+#: second is a *spurious* one, and both were live bugs while this was written.
+MATCH_CAPTURE_SCOPE_ROWS = (
+    (
+        "a capture in a nested function does not retire the outer binding",
+        ("    def inner():\n        match flag:\n            case [cs]:\n                pass\n"),
+        [False, False],
+    ),
+    (
+        "a capture of a different name does not retire this one",
+        "    match flag:\n        case [other]:\n            pass\n",
+        [False, False],
+    ),
+    (
+        "a capture after the header does not retire it retroactively",
+        None,  # the capture is appended after the header instead
+        [False, False],
+    ),
+    (
+        "a capture before the header does retire it",
+        "    match flag:\n        case [cs]:\n            pass\n",
+        [False, True],
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "extra", "expected"),
+    MATCH_CAPTURE_SCOPE_ROWS,
+    ids=[row[0] for row in MATCH_CAPTURE_SCOPE_ROWS],
+)
+def test_a_match_capture_respects_its_own_scope_and_position(label, extra, expected):
+    """A capture retires the carried suppressor, and only where it really binds.
+
+    A ``match`` inside a nested ``def`` binds in *that* scope, so it must not
+    retire the outer function's name -- that would report a swallowed assert as
+    live. A capture of some other name must not retire this one. And a capture
+    written *after* the ``with`` header cannot have run when the header is
+    read, so it must not retire it either.
+    """
+    capture_after = (
+        "    match flag:\n        case [cs]:\n            pass\n" if extra is None else extra
+    )
+    after = "    match flag:\n        case [cs]:\n            pass\n" if extra is None else ""
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + capture_after + "    with cs:\n        assert x != 1\n" + after
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == expected, f"{label}: expected verdicts {expected}, got {results}."
