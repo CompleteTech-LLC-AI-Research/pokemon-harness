@@ -477,9 +477,18 @@ def _under_dead_branch(function, target):
     return False
 
 
-#: Operand kinds whose truthiness can decide a ``BoolOp`` on its own. A nested
+#: Operand kinds whose truthiness can decide an ``or`` on its own. A nested
 #: ``Compare`` is deliberately absent: it is not a decision on its own, and
 #: treating it as one would flag a legitimate ``and`` of two comparisons.
+#:
+#: This applies to ``or`` only. In ``A or B`` a truthy ``A`` means ``B`` is
+#: never evaluated, so the comparison in ``B`` goes unchecked. In ``A and B``
+#: the opposite holds: ``B`` is skipped when ``A`` is *falsy*, and a truthy
+#: runtime value in ``A`` -- a ``Name``, ``Call`` or ``Subscript`` -- carries no
+#: information about whether ``B`` runs. Applying this tuple to ``and`` too
+#: reported the live contract
+#: ``assert len(errors) == 1 and isinstance(errors[0], RuntimeError)`` as
+#: bypassed, silently dropping it from the pinned count set.
 _DECIDING_OPERANDS = (
     ast.Name,
     ast.Attribute,
@@ -760,6 +769,15 @@ def _may_bypass(expression):
     ``Name/Attribute/Call/Subscript/Constant`` and missed a ``Compare`` operand
     that was trivially true.
 
+    The two operators are handled separately, because they bypass in opposite
+    conditions. Under ``or`` any deciding operand skips its sibling when
+    truthy, so every operand is a candidate. Under ``and`` a sibling is skipped
+    only when the other side is *falsy*, which no decidable-true operand can
+    establish, so a runtime value is not a bypass there. Only a tautology
+    remains a bypass under ``and``, and only in the operand positions that
+    decide the result: a leading tautology short-circuits to true and the rest
+    never runs.
+
     A bare ``Compare`` operand does not count as a decision by itself, so
     ``assert x != 1 and y != 2`` -- the shape the real retention sites use --
     stays enforced. That distinction is pinned by table rows, because an
@@ -768,9 +786,27 @@ def _may_bypass(expression):
     if not isinstance(expression, ast.BoolOp):
         return False
     operands = expression.values
-    if any(_is_tautology(value) for value in operands):
+    tautologies = [_is_tautology(value) for value in operands]
+    if any(tautologies):
+        if isinstance(expression.op, ast.Or):
+            return True
+        # Under `and`, a tautology only decides the result when it is the
+        # first operand: `True and <comparison>` never evaluates the
+        # comparison. In any later position it is only decisive when every
+        # operand before it is itself truthy -- `a and True and <comparison>`
+        # still short-circuits to true without reaching the comparison, while
+        # `<comparison> and True` evaluates the comparison first and so is not
+        # a bypass. An earlier operand that could be falsy leaves the
+        # comparison reachable, so the tautology is not the deciding one.
+        return any(
+            tautology and all(_is_literal_true(operand) for operand in operands[:position])
+            for position, tautology in enumerate(tautologies)
+        )
+    if isinstance(expression.op, ast.And):
+        return False
+    if any(isinstance(value, _DECIDING_OPERANDS) for value in operands):
         return True
-    return any(isinstance(value, _DECIDING_OPERANDS) or _may_bypass(value) for value in operands)
+    return any(_may_bypass(value) for value in operands)
 
 
 def _is_enforced(function, target, tree=None):
