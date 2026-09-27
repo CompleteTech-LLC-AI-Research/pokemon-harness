@@ -143,8 +143,24 @@ BYPASS_SHAPES = (
     ("double negative", "assert not (x != 1)", True),
     ("comparison or True", "assert x != 1 or True", False),
     ("True or comparison", "assert True or x != 1", False),
-    ("comparison and flag", "assert x != 1 and flag", False),
-    ("flag and comparison", "assert flag and x != 1", False),
+    # `and` skips its right operand only when the left is *falsy*, so a truthy
+    # runtime value does not make the comparison unchecked. These two rows were
+    # previously pinned as bypasses, which was wrong: it silently dropped the
+    # live contract `len(errors) == 1 and isinstance(errors[0], RuntimeError)`
+    # out of the pinned count set. `or` is the operator that does bypass on a
+    # truthy sibling, and it is pinned above.
+    ("comparison and flag", "assert x != 1 and flag", True),
+    ("flag and comparison", "assert flag and x != 1", True),
+    # A tautology in the leading position does decide an `and`, because
+    # `True and <comparison>` never evaluates the comparison at all.
+    ("tautology and comparison", "assert (1 == 1) and x != 1", False),
+    ("truthy literal and comparison", "assert True and x != 1", False),
+    # ...but not in a trailing position: the comparison is evaluated first.
+    ("comparison and tautology", "assert x != 1 and (1 == 1)", True),
+    # A preceding operand that could be falsy leaves the comparison reachable.
+    ("flag and tautology and comparison", "assert flag and True and x != 1", True),
+    # ...and one that is provably falsy never reaches the tautology at all.
+    ("falsy literal and tautology and comparison", "assert 0 and True and x != 1", True),
     ("nested or", "assert x != 1 or (y or True)", False),
     ("runtime condition", "if flag:\n assert x == 1", True),
     # A lone call cannot short-circuit on its own, so this stays enforced.
