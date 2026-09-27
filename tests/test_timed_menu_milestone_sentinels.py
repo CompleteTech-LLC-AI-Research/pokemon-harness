@@ -1034,6 +1034,94 @@ WALRUS_SHAPES = (
 )
 
 
+#: #324: a walrus binds its name for the rest of the scope, so a *later* header
+#: that re-enters that name is the same silent defeat. ``WALRUS_SHAPES`` above
+#: only covers the header that performs the binding; this table covers the
+#: header that consumes it, which was untracked and reported the second assert
+#: as live.
+#:
+#: Every row below mixes a defeated assert and a live one, and the expected
+#: verdict is given per assert rather than as a single ``live`` flag. The live
+#: rows are the half that a naive repair loses: carrying the walrus value
+#: forward *without* supersession reports all of them defeated, which is the
+#: #308 superseded-alias defect reappearing. ``verdicts`` is ordered by source
+#: position, so each row states the whole answer and a rule that simply
+#: reported everything defeated, or everything live, fails it.
+WALRUS_REENTRY_SHAPES = (
+    (
+        "re-enter the walrus directly",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        (False, False),
+    ),
+    (
+        "re-enter after a superseding store to a context manager",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        assert x != 1\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        (False, True),
+    ),
+    (
+        "re-enter after a superseding store to a helper result",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        assert x != 1\n"
+            "    cs = helper.make()\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        (False, True),
+    ),
+    (
+        "superseding store nested in a block",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        assert x != 1\n"
+            "    if flag:\n"
+            "        cs = contextlib.nullcontext()\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        (False, True),
+    ),
+    # Nothing rebinds `cs`, so a suppressor value must never attach to it. This
+    # is the cleanest canary for the carry-forward rule: the only wrong answer
+    # available is the walrus's own value leaking onto a name it never bound.
+    (
+        "re-enter a walrus that is not a suppressor",
+        (
+            "    with (cs := contextlib.nullcontext()):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        (True, True),
+    ),
+    # The binding is conditional, so the re-entering header may run on a path
+    # where the walrus never did. `NameError` on entry is loud, so this stays a
+    # live contract; the suppressor value must not be reported as winning.
+    (
+        "re-enter a walrus bound in a block",
+        (
+            "    if flag:\n"
+            "        with (cs := contextlib.suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        (False, False),
+    ),
+)
+
+
 #: #310: the ``.__enter__()`` dunder spelling, which shipped in #309 with no
 #: test at all. Reverting the rule left the suite green, so these rows exist
 #: first and foremost to make that impossible.
@@ -1170,6 +1258,44 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
     assert all(results) is live, (
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "verdicts"),
+    WALRUS_REENTRY_SHAPES,
+    ids=[shape[0] for shape in WALRUS_REENTRY_SHAPES],
+)
+def test_a_walrus_bound_alias_reaches_the_headers_that_re_enter_it(label, body, verdicts):
+    """#324: the binding outlives its own header, but not a later store.
+
+    ``with (cs := suppress(...)):`` binds ``cs`` for the rest of the scope, so
+    a following ``with cs:`` enters the same suppressor and swallows the assert
+    too. Reading bindings only from the header that encloses the queried assert
+    reported that second assert as live -- a disarmed contract certified as
+    load-bearing.
+
+    The repair is constrained from both sides. Carrying the value forward
+    *without* supersession reports the live half of every row as defeated,
+    which is the #308 superseded-alias defect coming back, so each row states
+    the verdict per assert and the live ones are the regression test.
+    """
+    source = (
+        "def outer(x, helper, flag=True):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = sorted(
+        (node for node in ast.walk(function) if isinstance(node, ast.Assert)),
+        key=lambda node: (node.lineno, node.col_offset),
+    )
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert tuple(results) == verdicts, (
+        f"{label}: expected {verdicts} in source order, got {tuple(results)}"
     )
 
 

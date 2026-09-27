@@ -722,6 +722,11 @@ def _assigned_suppressors(function, bound):
     resolves to "not an alias" instead of leaving the first binding as the sole
     known one. Recording only the suppressor bindings would make that
     sequence look like a lone alias and report the live assert as dead.
+
+    A walrus in a ``with`` header is one of these bindings, ordered at its own
+    statement, so a later store of the same name supersedes it the same way an
+    ``Assign`` does. Carrying such a value forward without that supersession
+    reported a live assert as dead (#324).
     """
     # Every binding of every name, tagged with whether that store can compete
     # with another, so that supersession and ambiguity stay told apart.
@@ -735,6 +740,38 @@ def _assigned_suppressors(function, bound):
         elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
             targets = [statement.target]
             value = statement.value
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            # A walrus in a `with` header binds its name for the rest of the
+            # enclosing scope, exactly like an ordinary store:
+            #
+            #     with (cs := contextlib.suppress(AssertionError)):
+            #         assert 1 == 2
+            #     with cs:                    # `cs` is still the suppressor
+            #         assert 1 == 2            # really swallowed
+            #
+            # Recording the binding here rather than only where the header that
+            # made it encloses the queried assert is what lets a *later* header
+            # see it. It is recorded as a store of the `with` statement itself,
+            # so it orders at that statement's index and -- like every other
+            # store here -- is superseded by any later store of the same name.
+            # A naive carry-forward that outlived later rebinds reintroduced the
+            # #308 superseded-alias defect (#324), so the binding goes through
+            # the same ordering and supersession path as an `Assign`.
+            #
+            # The name is bound whether or not the right-hand side is readable;
+            # recording a non-suppressor value is what lets a later
+            # `cs = helper.make()` supersede it, the same reason every ordinary
+            # store is recorded.
+            walruses = [
+                item.context_expr
+                for item in statement.items
+                if isinstance(item.context_expr, ast.NamedExpr)
+            ]
+            for walrus in walruses:
+                target = walrus.target
+                if isinstance(target, ast.Name):
+                    bindings.setdefault(target.id, []).append((statement, walrus.value, False))
+            continue
         else:
             continue
         # A store written directly in the function body runs on every path;
