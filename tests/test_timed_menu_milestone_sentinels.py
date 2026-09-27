@@ -1089,18 +1089,23 @@ DUNDER_SPELLING_SHAPES = (
         ),
         False,
     ),
-    # --- controls: the exception must actually catch AssertionError ---
-    # These are the rows that were wrong before the argument-reading fix. Each
-    # suppresses nothing relevant, so the assert is live and must stay enforced.
+    # --- the argument is irrelevant: `__enter__` is `pass` ---
+    # `contextlib.suppress.__enter__` is `def __enter__(self): pass`, so it
+    # returns `None` for every instantiation and `with None:` raises TypeError
+    # before the body runs -- measured for every one of these arguments, and
+    # for the no-argument form. The family is therefore answered uniformly:
+    # an argument-reading split here would report byte-identical runtimes
+    # differently. These rows are not "controls" any more; they are the
+    # evidence that the exception list earns no distinction.
     (
         "suppressor dunder over ValueError",
         "    with contextlib.suppress(ValueError).__enter__():\n        assert x != 1",
-        True,
+        False,
     ),
     (
         "suppressor dunder over RuntimeError",
         "    with contextlib.suppress(RuntimeError).__enter__():\n        assert x != 1",
-        True,
+        False,
     ),
     (
         "aliased suppressor dunder over ValueError",
@@ -1108,7 +1113,7 @@ DUNDER_SPELLING_SHAPES = (
             "    cs = contextlib.suppress(ValueError)\n"
             "    with cs.__enter__():\n        assert x != 1"
         ),
-        True,
+        False,
     ),
     # A different dunder is not this spelling, and an unrelated object that
     # happens to define `__enter__` is never a suppressor.
@@ -1127,10 +1132,9 @@ DUNDER_SPELLING_SHAPES = (
         "    with contextlib.suppress(AssertionError).__exit__():\n        assert x != 1",
         True,
     ),
-    # `suppress()` with empty parens suppresses nothing, and the assert does
-    # fail at runtime. The shared "unreadable argument" fallback reports it as
-    # unenforced anyway -- stricter than runtime, and deliberately the same in
-    # the plain and dunder spellings.
+    # `suppress()` with empty parens raises TypeError on `__enter__()` just
+    # like the rest of the family, so this row agrees with them rather than
+    # standing out from them.
     (
         "empty-parens suppressor dunder",
         "    with contextlib.suppress().__enter__():\n        assert x != 1",
@@ -1327,3 +1331,139 @@ def test_plain_assignment_aliasing_needs_no_import_node():
         asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
         results = [_is_enforced(function, node, tree) for node in asserts]
         assert all(results) is expected, f"{label}: expected {expected}, got {results}"
+
+
+#: ``async with`` shapes. A suppressor reached through the *async* header is
+#: loud at runtime -- neither ``contextlib.suppress`` nor ``pytest.raises``
+#: implements ``__aenter__``, so entry raises ``TypeError`` before the body
+#: runs. A *sync* ``with`` nested inside one is a different matter and is
+#: still read, so the guard has to be scoped to the async header itself.
+ASYNC_CONTEXT_SHAPES = (
+    (
+        "async with a suppressor",
+        "    async with contextlib.suppress(AssertionError):\n        assert x != 1",
+        True,
+    ),
+    (
+        "async with pytest.raises",
+        "    async with pytest.raises(AssertionError):\n        assert x != 1",
+        True,
+    ),
+    (
+        "async with a bare suppressor alias",
+        ("    cs = contextlib.suppress(AssertionError)\n    async with cs:\n        assert x != 1"),
+        True,
+    ),
+    (
+        "sync with a suppressor nested in an async with",
+        (
+            "    async with helper.mgr():\n"
+            "        with contextlib.suppress(AssertionError):\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "sync with a suppressor alias nested in an async with",
+        (
+            "    async with helper.mgr():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    ASYNC_CONTEXT_SHAPES,
+    ids=[row[0] for row in ASYNC_CONTEXT_SHAPES],
+)
+def test_async_with_is_loud_but_a_sync_suppressor_inside_it_is_not(label, body, live):
+    """``async with`` needs an async context manager, and suppressors are not.
+
+    Measured on the pinned interpreter::
+
+        async with contextlib.suppress(AssertionError):
+            assert 1 == 2
+        # TypeError: 'suppress' object does not support the asynchronous
+        # context manager protocol
+
+    The body never runs, so the assert is a live contract. Reading the async
+    form as a suppression would drop a real assert from the sentinel's view.
+
+    A *sync* ``with`` nested inside the ``async with`` is unaffected and must
+    still be read, so the guard is scoped to the async header rather than to
+    the enclosing function.
+    """
+    imports = "    import contextlib\n    import pytest\n    from contextlib import suppress\n"
+    source = "async def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
+
+
+#: One block holding a ``with`` *before* the store and another *after* it. The
+#: two asserts are opposite cases that sit under one top-level statement, so
+#: they are pinned separately -- a rule that reports every ``with`` in the
+#: block, or that reads the block's bindings before the position of the header,
+#: gives both the same answer, and each of those answers is wrong in one
+#: direction or the other.
+SAME_BLOCK_ORDER_SHAPES = (
+    (
+        "if body holds both orders",
+        (
+            "    if p:\n        with cs:\n            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+    ),
+    (
+        "nested with holds both orders",
+        (
+            "    with a():\n        with cs:\n            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+    ),
+    (
+        "for body holds both orders",
+        (
+            "    for a in L:\n        with cs:\n            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    SAME_BLOCK_ORDER_SHAPES,
+    ids=[row[0] for row in SAME_BLOCK_ORDER_SHAPES],
+)
+def test_both_orders_in_one_block_keep_their_own_verdict(label, body):
+    """A ``with`` before the store and one after it must not share a verdict.
+
+    The first raises `NameError` on entry, so its assert is a live contract.
+    The second really is swallowed. Reporting the block uniformly gets one of
+    the two wrong no matter which way, and both wrong answers are damaging --
+    certifying a defeated assert, or dropping a live one.
+    """
+    imports = "    import contextlib\n    from contextlib import suppress\n"
+    source = "def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 2, f"{label}: expected two asserts to tell apart"
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [True, False], (
+        f"{label}: the assert before the store must stay enforced and the one "
+        f"after it must be reported defeated, got {results}"
+    )
