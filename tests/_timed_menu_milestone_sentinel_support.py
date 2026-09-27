@@ -860,16 +860,50 @@ def _aliased_suppressions(node, function, bound):
     """
     by_index = _assigned_suppressors(function, bound)
     # A name is bound only by the assignments that run *before* the `with`.
-    # Walking `function.body` in order and carrying the bindings forward keeps
-    # that ordering explicit; a merged view of every assignment would claim a
-    # name is already bound when the `with` is the statement that has not run
-    # yet, and `with cs:` there raises NameError rather than swallowing.
+    # Each `with` header is therefore read against the bindings in force at
+    # ITS OWN position, not against the bindings that were live when the
+    # enclosing top-level statement began.
+    #
+    # The distinction is the same-block defeat:
+    #
+    #     for a in rows:
+    #         cs = contextlib.suppress(AssertionError)
+    #         with cs:                  # really does swallow
+    #             assert 1 == 2
+    #
+    # The store and the `with` share one top-level statement, so reading the
+    # header before applying the statement's bindings reported that assert as
+    # load-bearing. Executed, the failure is swallowed and the test stays
+    # green -- the one direction this module must never get wrong.
+    #
+    # The converse must keep working, and it is the reason the position is
+    # compared rather than just "after the statement":
+    #
+    #     if flag:
+    #         with cs:                  # NameError: `cs` is not bound yet
+    #             assert 1 == 2
+    #         cs = contextlib.suppress(AssertionError)
+    #
+    # That block raises on entry, so it is a live contract.
     bound_so_far = {}
     entered = []
     for index, statement in enumerate(function.body):
         for header in ast.walk(statement):
             if not isinstance(header, (ast.With, ast.AsyncWith)):
                 continue
+            if not _encloses(header, node):
+                # A `with` that does not enclose the queried assert says
+                # nothing about the context that assert runs under. Collecting
+                # every header in the function would answer for a later `with`
+                # while being asked about an earlier one, and two asserts in
+                # the same block -- one before the store and one after it --
+                # would both be reported defeated.
+                continue
+            live = (
+                bound_so_far
+                if header is statement
+                else _bindings_before(header, statement, bound_so_far, by_index.get(index, {}))
+            )
             for item in header.items:
                 expression = item.context_expr
                 # `with (cs := contextlib.suppress(AssertionError)):` binds the
@@ -886,8 +920,8 @@ def _aliased_suppressions(node, function, bound):
                     and _is_suppression_call(walrus.value, bound)
                 ):
                     entered.append(walrus.value)
-                if isinstance(expression, ast.Name) and expression.id in bound_so_far:
-                    entered.append(bound_so_far[expression.id])
+                if isinstance(expression, ast.Name) and expression.id in live:
+                    entered.append(live[expression.id])
                 if not isinstance(expression, ast.Call) or not isinstance(
                     expression.func, ast.Attribute
                 ):
@@ -895,8 +929,8 @@ def _aliased_suppressions(node, function, bound):
                 if expression.func.attr != "__enter__":
                     continue
                 value = expression.func.value
-                if isinstance(value, ast.Name) and value.id in bound_so_far:
-                    entered.append(bound_so_far[value.id])
+                if isinstance(value, ast.Name) and value.id in live:
+                    entered.append(live[value.id])
         # Bindings take effect only *after* the statement that makes them, and
         # each index is the COMPLETE set in force there rather than a delta.
         # Merging would leave a superseded alias live: a suppressor bound in an
@@ -905,6 +939,38 @@ def _aliased_suppressions(node, function, bound):
         # assert as swallowed.
         bound_so_far = dict(by_index.get(index, {}))
     return entered
+
+
+def _encloses(header, node):
+    """Is ``node`` the header itself, or somewhere inside its body?"""
+    if header is node:
+        return True
+    return any(child is node for child in ast.walk(header))
+
+
+def _bindings_before(header, statement, bound_so_far, own):
+    """The bindings in force at a nested ``with`` inside ``statement``.
+
+    A store that appears *before* the nested header in the same block has run
+    by the time the header is read, so this statement's bindings apply. A store
+    that appears *after* it has not, and ``with cs:`` there raises `NameError`
+    on entry -- loudly, not silently -- so the outer bindings stand.
+    """
+    for block in ast.walk(statement):
+        body = getattr(block, "body", None)
+        if not isinstance(body, list):
+            continue
+        seen_store = False
+        for node in body:
+            if node is header:
+                # Nothing in this block has been stored before the header, so
+                # only the bindings carried in from earlier statements apply.
+                return dict(own) if seen_store else bound_so_far
+            if isinstance(node, ast.Assign) or (
+                isinstance(node, ast.AnnAssign) and node.value is not None
+            ):
+                seen_store = True
+    return bound_so_far
 
 
 def _unreadable_suppressor(call, bound):

@@ -979,6 +979,78 @@ RESIDUAL_DEFEAT_SHAPES = (
         ("    with contextlib.suppress(AssertionError).__exit__():\n        assert x != 1"),
         True,
     ),
+    # A suppressor bound and entered inside the SAME top-level statement. The
+    # store and the `with` share one statement, so reading the header before
+    # applying that statement's bindings reported these as LOAD-BEARING.
+    # Executed, every one of them really is swallowed and the test stays green
+    # -- the one direction this module must never get wrong.
+    (
+        "alias bound and entered in the same if body",
+        (
+            "    if p:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "alias bound and entered in the same for body",
+        (
+            "    for a in L:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "alias bound and entered in the same while body",
+        (
+            "    while True:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "alias bound and entered in the same try body",
+        (
+            "    try:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1\n    except E:\n        pass"
+        ),
+        False,
+    ),
+    (
+        "alias bound and entered in a nested with",
+        (
+            "    with outer():\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "alias bound and entered two withs deep",
+        (
+            "    with a():\n        with b():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "            with cs:\n                assert x != 1"
+        ),
+        False,
+    ),
+    # The converse, in the SAME block: the `with` is written BEFORE the store,
+    # so the name is not bound yet and entry raises NameError. Loud, so live.
+    (
+        "with before the store in the same block",
+        (
+            "    if p:\n        with cs:\n            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    (
+        "with before the store inside a nested with",
+        (
+            "    with a():\n        with cs:\n            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
     # A literal container that is empty never enters its body. The loop
     # spelling of the `if False:` defeat.
     ("for over empty list", "    for _ in []:\n        assert x != 1", False),
@@ -1291,6 +1363,66 @@ def test_a_name_bound_to_different_suppressors_is_ambiguous_not_ordered():
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     results = [_is_enforced(function, node, tree) for node in asserts]
     assert not any(results), f"ambiguous alias resolved by order, got {results}"
+
+
+#: One block holding a ``with`` *before* the store and another *after* it. The
+#: two asserts are opposite cases that sit under one top-level statement, so
+#: they are pinned separately -- a rule that reports every ``with`` in the
+#: block, or that reads the block's bindings before the position of the header,
+#: gives both the same answer, and each of those answers is wrong in one
+#: direction or the other.
+SAME_BLOCK_ORDER_SHAPES = (
+    (
+        "if body holds both orders",
+        (
+            "    if p:\n        with cs:\n            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+    ),
+    (
+        "nested with holds both orders",
+        (
+            "    with a():\n        with cs:\n            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+    ),
+    (
+        "for body holds both orders",
+        (
+            "    for a in L:\n        with cs:\n            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    SAME_BLOCK_ORDER_SHAPES,
+    ids=[row[0] for row in SAME_BLOCK_ORDER_SHAPES],
+)
+def test_both_orders_in_one_block_keep_their_own_verdict(label, body):
+    """A ``with`` before the store and one after it must not share a verdict.
+
+    The first raises `NameError` on entry, so its assert is a live contract.
+    The second really is swallowed. Reporting the block uniformly gets one of
+    the two wrong no matter which way, and both wrong answers are damaging --
+    certifying a defeated assert, or dropping a live one.
+    """
+    imports = "    import contextlib\n    from contextlib import suppress\n"
+    source = "def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 2, f"{label}: expected two asserts to tell apart"
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [True, False], (
+        f"{label}: the assert before the store must stay enforced and the one "
+        f"after it must be reported defeated, got {results}"
+    )
 
 
 def test_plain_assignment_aliasing_needs_no_import_node():
