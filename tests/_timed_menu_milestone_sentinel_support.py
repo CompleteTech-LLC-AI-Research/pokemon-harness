@@ -51,6 +51,17 @@ SUPPRESSING_CONTEXTS = ("contextlib.suppress", "asyncio.suppress")
 #: the only spelling that can stand in for one.
 SUPPRESSOR_SPELLINGS = frozenset(dotted.rsplit(".", 1)[-1] for dotted in SUPPRESSING_CONTEXTS)
 
+#: Sentinel recorded for a name bound to *more than one* readable suppressor, so
+#: that which one applies depends on the runtime path taken.
+#:
+#: #308 criterion 1 requires such a name to be treated as unreadable and
+#: reported as a defeat, rather than resolved by source order. It is a distinct
+#: object rather than a boolean so that the ambiguity can be told apart from a
+#: known alias when the exception names are inspected -- an ambiguous binding
+#: suppresses *any* exception, because the rule cannot know which target was
+#: applied.
+AMBIGUOUS_SUPPRESSOR = object()
+
 #: Dotted paths whose call turns a caught exception into a *pass*. This is a
 #: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
 #: load-bearing, so the two sets stay separate rather than being merged:
@@ -615,9 +626,28 @@ def _assigned_suppressors(function, bound):
     fails loudly rather than passing quietly -- so it is not a defeat, and a
     single merged dict would have called it one. Only the assignments that
     precede the ``with`` are visible to it.
+
+    Assignments are collected from the whole function body rather than from
+    ``function.body`` alone, so a suppressor bound inside an ``if``, a loop, a
+    ``try`` or a nested ``with`` is still found. Restricting the walk to the
+    top level is the escape recorded in #308: a suppressor's reach does not
+    depend on the indentation it was written at, and reading only the
+    outermost statements reports a swallowed assert as *enforced*.
+
+    A name bound to suppressors in **more than one** place is dropped entirely
+    rather than resolved by source order. Two branches of the same ``if`` may
+    bind the same name to different targets, and whichever one is written
+    first would then decide the verdict for the whole function -- the rule
+    would report a live assert as enforced in one ordering and unenforced in
+    the other. Per #308 criterion 1 such a name is *unreadable*, and the safe
+    direction is to treat it as a defeat: reporting a suppression that was not
+    applied costs a false alarm on a construct the pinned file does not use,
+    while resolving it wrongly certifies a disarmed assert as load-bearing.
     """
-    assigned = {}
-    for index, statement in enumerate(function.body):
+    # Every readable suppressor call a name is bound to, so that a name bound
+    # more than once can be recognised as ambiguous below.
+    bound_to = {}
+    for statement in ast.walk(function):
         targets = []
         value = None
         if isinstance(statement, ast.Assign):
@@ -631,8 +661,74 @@ def _assigned_suppressors(function, bound):
         if isinstance(value, ast.Call) and _is_suppression_call(value, bound):
             for target in targets:
                 if isinstance(target, ast.Name):
-                    assigned.setdefault(index, {})[target.id] = value
+                    bound_to.setdefault(target.id, []).append(value)
+    # A name bound by exactly one readable suppressor is a known alias. A name
+    # bound by several is ambiguous -- see the docstring (#308 criterion 1) --
+    # and must NOT be resolved by source order. It is recorded as an
+    # `AMBIGUOUS` marker instead of being dropped: dropping it would fall back
+    # to "this name is not a known suppressor", which reports the assert as
+    # *enforced*, and that is the damaging direction. On the ambiguous path the
+    # rule genuinely cannot tell which target was applied, so it treats the
+    # name as a suppression and says so (#308 criterion 1: over-reporting is the
+    # safe direction here).
+    #
+    # Ambiguity is judged over the whole function: a nested binding and a
+    # top-level one are the same name, and a rule that let the source order
+    # pick between them would report the verdict for one path only.
+    aliases = {
+        name: (values[0] if len(values) == 1 else AMBIGUOUS_SUPPRESSOR)
+        for name, values in bound_to.items()
+    }
+    if not aliases:
+        return {}
+    # The order walk in `_aliased_suppressions` keys off `function.body`
+    # indexes, so each surviving alias is registered at the index of the
+    # statement that binds it. An alias written inside a nested block has no
+    # index of its own; it is registered at every top-level statement that
+    # *contains* it, which is the earliest point at which it can possibly have
+    # run. A `with cs:` on an earlier top-level statement than its binder
+    # therefore still raises NameError, and stays correctly reported live.
+    assigned = {}
+    for index, statement in enumerate(function.body):
+        for name, value in aliases.items():
+            binders = _binders_of(function, name, value)
+            if not binders:
+                continue
+            if any(
+                binder is statement or any(child is binder for child in ast.walk(statement))
+                for binder in binders
+            ):
+                assigned.setdefault(index, {})[name] = value
     return assigned
+
+
+def _binders_of(function, name, value):
+    """The statements that bind ``name``, for a known or ambiguous alias.
+
+    For a known alias the match is on the identity of the *call node*, so a name
+    bound to the same call more than once still resolves to every statement that
+    writes it. For ``AMBIGUOUS_SUPPRESSOR`` there is no call to match on, so
+    every statement binding the name matches -- the alias is registered at the
+    earliest point any of its bindings could have run, which is the only
+    position that is true on every path.
+    """
+    binders = []
+    for statement in ast.walk(function):
+        targets = []
+        candidate = None
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            candidate = statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets = [statement.target]
+            candidate = statement.value
+        else:
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            continue
+        if value is AMBIGUOUS_SUPPRESSOR or candidate is value:
+            binders.append(statement)
+    return binders
 
 
 def _aliased_suppressions(node, function, bound):
@@ -710,11 +806,12 @@ def _unreadable_suppressor(call, bound):
     Scoped deliberately to a bare ``Name``, and only when that name is one of the
     documented suppressor spellings. Every context manager wrapping a real pinned
     assert in ``test_timed_menu_milestones.py`` is called on an ``Attribute``
-    (``pytest.raises(...)``, ``harness.observe()``, ...), measured: 48 of 48. A
-    bare name is therefore a shape the real file never uses, so widening the
-    check to it cannot manufacture a false "unenforced" verdict on pinned sites.
-    An ``Attribute`` this function cannot resolve is left alone, because
-    ``pytest.raises(AssertionError)`` legitimately wraps 17 of the real asserts.
+    (``pytest.raises(...)``, ``harness.observe()``, ...) -- measured: 40 of the
+    40 ``with``-items in that file, with no other shape present. A bare name is
+    therefore a shape the real file never uses, so widening the check to it
+    cannot manufacture a false "unenforced" verdict on pinned sites. An
+    ``Attribute`` this function cannot resolve is left alone, because
+    ``pytest.raises(...)`` legitimately wraps many of the real asserts.
     """
     func = call.func
     if not isinstance(func, ast.Name):
@@ -784,6 +881,10 @@ def _is_suppressing_with(node, bound, function=None):
     if function is None:
         return False
     for argument in _aliased_suppressions(node, function, bound):
+        # An ambiguous binding may be *any* suppressor, so the rule cannot claim
+        # the exception is harmless and reports the assert as defeated (#308).
+        if argument is AMBIGUOUS_SUPPRESSOR:
+            return True
         if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
             return True
     return False

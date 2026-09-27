@@ -710,6 +710,68 @@ RESIDUAL_DEFEAT_SHAPES = (
         ),
         False,
     ),
+    # #308: an alias binds its name wherever it is written. Restricting the
+    # walk to the function's top level reports each of these as *enforced*,
+    # which is the damaging direction -- a swallowed assert certified as
+    # load-bearing.
+    (
+        "suppressor alias bound in an if branch",
+        (
+            "    if flag:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound in a loop",
+        (
+            "    for item in items:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound in a try body",
+        (
+            "    try:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    except Exception:\n        pass\n    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound in a nested with",
+        (
+            "    with helper.make():\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    # #308 criterion 1: two branches bind ONE name to DIFFERENT targets, so
+    # which suppressor applies depends on the path taken. Resolving by source
+    # order gives a verdict for one branch only; the name is unreadable and must
+    # be reported as a defeat.
+    (
+        "same alias bound to different suppressors in two branches",
+        (
+            "    if flag:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    else:\n        cs = contextlib.suppress(ValueError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    # The ambiguity is between two *harmless* targets, so nothing on either
+    # path swallows an assert. The rule still cannot prove that from the source
+    # alone, and #308 accepts over-reporting as the safe direction -- but this
+    # row pins that decision so the direction cannot be flipped silently.
+    (
+        "same alias bound to two unrelated suppressors in two branches",
+        (
+            "    if flag:\n        cs = contextlib.suppress(ValueError)\n"
+            "    else:\n        cs = contextlib.suppress(TypeError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
     # A literal container that is empty never enters its body. The loop
     # spelling of the `if False:` defeat.
     ("for over empty list", "    for _ in []:\n        assert x != 1", False),
@@ -816,7 +878,7 @@ def test_the_residual_defeats_of_287_are_rejected(label, body, live):
     # Each body is already indented for a function body, so only the header is
     # added -- re-indenting the whole body is what has produced spurious
     # IndentationErrors in this repo's own probes.
-    source = "def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    source = "def outer(x, cm, items, record, helper, flag):\n" + imports + body + "\n"
     tree = ast.parse(source)
     outer = tree.body[0]
     for statement in outer.body:
