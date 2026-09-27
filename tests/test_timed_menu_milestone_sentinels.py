@@ -782,6 +782,45 @@ RESIDUAL_DEFEAT_SHAPES = (
         ),
         False,
     ),
+    # A straight-line rebinding is NOT ambiguous: the last assignment is the one
+    # that runs. Reading two suppressor bindings out of these sequences and
+    # calling them competing would report a live assert as dead.
+    (
+        "suppressor alias superseded by an ordinary call",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n    cs = helper.make()\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        True,
+    ),
+    (
+        "suppressor alias superseded by an unrelated suppressor",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = contextlib.suppress(ValueError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        True,
+    ),
+    # ...but the reverse order IS a live defeat: the suppressor is what is
+    # bound when the `with` is entered. #308's safe direction keeps this
+    # reported, so the row pins that it is not "fixed" by the supersede rule.
+    (
+        "suppressor alias that supersedes an ordinary call",
+        (
+            "    cs = helper.make()\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    # A name bound only to ordinary calls is never an alias, however it is
+    # rebound.
+    (
+        "name rebound between two ordinary calls",
+        "    cs = helper.make()\n    cs = helper.other()\n    with cs:\n        assert x != 1",
+        True,
+    ),
     # A literal container that is empty never enters its body. The loop
     # spelling of the `if False:` defeat.
     ("for over empty list", "    for _ in []:\n        assert x != 1", False),
