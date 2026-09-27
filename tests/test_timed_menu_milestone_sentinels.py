@@ -84,6 +84,17 @@ def _sentinel_uses(name, owner_name):
             ),
         ),
         (
+            "_is_enforced",
+            "guard_rejects_the_deadline_terminal_state",
+            (
+                "the teeth check would certify a guard that can no longer "
+                "fail: wrapping its assert in try/except AssertionError or "
+                "contextlib.suppress keeps the node and the operator, so only "
+                "_is_enforced closes the #280 defect this function exists to "
+                "catch"
+            ),
+        ),
+        (
             "_may_bypass",
             "subscript_count_comparisons",
             (
@@ -97,6 +108,7 @@ def _sentinel_uses(name, owner_name):
         "count-uses-bypass",
         "guard-uses-bypass",
         "count-uses-enforced",
+        "guard-uses-enforced",
         "subscript-counts-use-bypass",
     ),
 )
@@ -260,6 +272,29 @@ def test_every_clock_step_spelling_is_classified(label, arguments, bypasses):
     source = f"def {site}():\n    return run_owner(m, p, {arguments})\n"
     offenders = _bypassing_sites(ast.parse(source))
     assert bool(offenders) is bypasses, f"{label}: reported {offenders}"
+
+
+def test_a_bypass_in_any_pinned_site_is_reported_not_just_the_first():
+    """The site walk must cover every pinned function, not only the first.
+
+    Every row in the spellings table mounts a single-function tree, so a walk
+    narrowed to one function -- ``milestones_tree.body[:1]`` -- still reports
+    every row correctly and leaves the suite green. Measured on this head with
+    the narrowing applied in memory: 1 bypassing site is reported either way,
+    but 2, 3 and 4 bypassing sites all collapse to 1. The real tree is clean
+    today, so this would only under-report once a bypass lands in a pinned site
+    that is not the first one walked.
+
+    A bypass in the *last* pinned function is the discriminating case, so this
+    mounts every pinned site and puts the override in the final one.
+    """
+    sites = list(RETENTION_COUNT_SITES)
+    assert len(sites) > 1, "this row is only meaningful with more than one pinned site"
+    guarded = f"def {sites[0]}():\n    return run_owner(m, p)\n"
+    last = sites[-1]
+    overriding = f"def {last}():\n    return run_owner(m, p, **{{'clock_step': 0.5}})\n"
+    offenders = _bypassing_sites(ast.parse(guarded + overriding))
+    assert [name for name, _spelling in offenders] == [last], f"reported {offenders}"
 
 
 def test_the_production_entry_point_is_what_actually_reports_a_bypass():
