@@ -62,6 +62,13 @@ SUPPRESSOR_SPELLINGS = frozenset(dotted.rsplit(".", 1)[-1] for dotted in SUPPRES
 #: applied.
 AMBIGUOUS_SUPPRESSOR = object()
 
+#: Sentinel for a suppressor reached through ``name.__enter__()``. The dunder
+#: is ``pass`` on every suppressor, so the entry raises ``TypeError`` before the
+#: body runs whatever exception list it was built with. The argument is
+#: therefore irrelevant and cannot be read off the binding, so the shape gets
+#: its own marker instead of being classified from the suppressor's arguments.
+LOUD_DUNDER = object()
+
 #: Dotted paths whose call turns a caught exception into a *pass*. This is a
 #: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
 #: load-bearing, so the two sets stay separate rather than being merged:
@@ -619,32 +626,39 @@ def _suppressed_by_dunder(call, bound):
     cannot match a suppressor stored under a different attribute name. A
     non-suppressor that happens to define ``__enter__`` is not matched: the
     underlying call still has to resolve to a real suppressor.
+
+    Note this reports the family as *unable to leave the test green* rather
+    than as a silent swallow, and the runtime agrees: ``__enter__`` is
+    ``pass``, so entry raises ``TypeError`` before the body runs. The same
+    reasoning already covers ``pytest.raises()`` with no expected type in
+    :func:`_raises_without_an_expected_type`. "Defeated" here means the owning
+    test cannot go green, which is the property the sentinel is asserting.
     """
     func = call.func
-    if not (isinstance(func, ast.Attribute) and func.attr == "__enter__"):
-        return False
-    if not any(_resolves_to(func.value, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
-        return False
-    # `func.value` is the `suppress(...)` call itself, resolved above.
-    suppressor = func.value
-    if not isinstance(suppressor, ast.Call):
-        return False
-    # The exception types live on the *suppressor*, one level down from the
-    # `__enter__()` call, which carries no arguments of its own. Reading
-    # `call.args` therefore returns the empty fallback `BaseException` for
-    # *every* dunder spelling, and since `BaseException` catches
-    # `AssertionError` that reported `suppress(ValueError).__enter__()` --
-    # which suppresses nothing relevant -- as a defeat of the assert. Read the
-    # suppressor's own arguments instead (#310).
+    # The whole dunder family is answered uniformly, and the runtime agrees.
+    # `contextlib.suppress.__enter__` is `def __enter__(self): pass`, so it
+    # returns `None` for *every* instantiation, and
+    # `with None:` raises `TypeError: 'NoneType' object does not support the
+    # context manager protocol` -- the body is never reached, for every
+    # exception argument and for the no-argument form alike. Measured for
+    # `AssertionError`, `ValueError`, `RuntimeError`, `Exception`,
+    # `BaseException` and `suppress()`.
     #
-    # `_suppression_names` reports the unreadable case for an argument it
-    # cannot read, which includes *no* argument at all. `suppress()` with empty
-    # parens therefore reads as universal here, as it already does in the plain
-    # `with suppress():` form. That is the conservative direction: a bare
-    # `suppress()` suppresses nothing and the assert does fail, so the verdict
-    # is stricter than runtime. It is shared with the non-dunder path on
-    # purpose rather than special-cased in only one of the two.
-    return _suppression_names(suppressor)
+    # So the exception list is irrelevant here and no argument-reading
+    # distinction can be earned: splitting the family by argument would report
+    # two shapes with byte-identical runtime differently. This matches the
+    # existing treatment of `pytest.raises()` with no expected type, which is
+    # also loud *before* the body and is likewise read as unable to leave the
+    # test green.
+    if not (isinstance(func, ast.Attribute) and func.attr == "__enter__"):
+        return []
+    if not any(_resolves_to(func.value, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
+        return []
+    # Every member of the family is loud before the body, so the whole family is
+    # reported as unable to leave the test green. `BaseException` is the
+    # caller's "catches anything" marker and is deliberately *not* a claim
+    # about this suppressor's arguments -- there are none that matter.
+    return ["BaseException"]
 
 
 def _assigned_suppressors(function, bound):
@@ -959,7 +973,7 @@ def _aliased_suppressions(node, function, bound):
                     continue
                 value = expression.func.value
                 if isinstance(value, ast.Name) and value.id in live:
-                    entered.append(live[value.id])
+                    entered.append(LOUD_DUNDER)
         # Bindings take effect only *after* the statement that makes them, and
         # each index is the COMPLETE set in force there rather than a delta.
         # Merging would leave a superseded alias live: a suppressor bound in an
@@ -1138,6 +1152,10 @@ def _is_suppressing_with(node, bound, function=None):
         # An ambiguous binding may be *any* suppressor, so the rule cannot claim
         # the exception is harmless and reports the assert as defeated (#308).
         if argument is AMBIGUOUS_SUPPRESSOR:
+            return True
+        if argument is LOUD_DUNDER:
+            # `cs.__enter__()` raises before the body whatever `cs` holds, so
+            # the argument is not what decides this and must not be read.
             return True
         if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
             return True

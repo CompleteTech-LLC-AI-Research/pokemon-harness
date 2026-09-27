@@ -1089,18 +1089,23 @@ DUNDER_SPELLING_SHAPES = (
         ),
         False,
     ),
-    # --- controls: the exception must actually catch AssertionError ---
-    # These are the rows that were wrong before the argument-reading fix. Each
-    # suppresses nothing relevant, so the assert is live and must stay enforced.
+    # --- the argument is irrelevant: `__enter__` is `pass` ---
+    # `contextlib.suppress.__enter__` is `def __enter__(self): pass`, so it
+    # returns `None` for every instantiation and `with None:` raises TypeError
+    # before the body runs -- measured for every one of these arguments, and
+    # for the no-argument form. The family is therefore answered uniformly:
+    # an argument-reading split here would report byte-identical runtimes
+    # differently. These rows are not "controls" any more; they are the
+    # evidence that the exception list earns no distinction.
     (
         "suppressor dunder over ValueError",
         "    with contextlib.suppress(ValueError).__enter__():\n        assert x != 1",
-        True,
+        False,
     ),
     (
         "suppressor dunder over RuntimeError",
         "    with contextlib.suppress(RuntimeError).__enter__():\n        assert x != 1",
-        True,
+        False,
     ),
     (
         "aliased suppressor dunder over ValueError",
@@ -1108,7 +1113,7 @@ DUNDER_SPELLING_SHAPES = (
             "    cs = contextlib.suppress(ValueError)\n"
             "    with cs.__enter__():\n        assert x != 1"
         ),
-        True,
+        False,
     ),
     # A different dunder is not this spelling, and an unrelated object that
     # happens to define `__enter__` is never a suppressor.
@@ -1127,10 +1132,9 @@ DUNDER_SPELLING_SHAPES = (
         "    with contextlib.suppress(AssertionError).__exit__():\n        assert x != 1",
         True,
     ),
-    # `suppress()` with empty parens suppresses nothing, and the assert does
-    # fail at runtime. The shared "unreadable argument" fallback reports it as
-    # unenforced anyway -- stricter than runtime, and deliberately the same in
-    # the plain and dunder spellings.
+    # `suppress()` with empty parens raises TypeError on `__enter__()` just
+    # like the rest of the family, so this row agrees with them rather than
+    # standing out from them.
     (
         "empty-parens suppressor dunder",
         "    with contextlib.suppress().__enter__():\n        assert x != 1",
