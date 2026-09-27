@@ -1052,6 +1052,312 @@ def _unreadable_suppressor(call, bound):
     return func.id in SUPPRESSOR_SPELLINGS
 
 
+def _swallowing_exit_class(expression, bound, tree=None, function=None):
+    """The class of ``expression`` whose ``__exit__`` provably eats the failure.
+
+    #316. A user-defined context manager swallows an ``assert`` exactly when
+    its ``__exit__`` returns truthy for the ``AssertionError``, and that is a
+    different mechanism from every rule above: none of them reads a return
+    value, because none of them can. ``contextlib.suppress`` and
+    ``pytest.raises`` are known by name; this is recognised by what its own
+    ``__exit__`` *does*.
+
+    Executed, the shape in the issue really is silent::
+
+        >>> probe(1)          # with helper: inside
+        >>> # returns normally, rc=0
+
+    so reporting the assert as ``enforced`` certifies a disarmed contract as
+    load-bearing. That is the damaging direction, which is the one this module
+    must never get wrong.
+
+    **Scope is the whole difficulty.** Matching any class that merely *has* an
+    ``__exit__`` would fire on every legitimate context manager -- ``pytest``'s,
+    ``harness``'s -- and report all 147 real pinned asserts as defeated. The
+    rule is therefore gated on three things at once, and the mutation matrix in
+    the sentinel suite pins each:
+
+    1. the name must resolve to a class **defined in the file being judged**,
+       so ``pytest.raises`` and every imported context manager is unreachable;
+    2. that class must define ``__exit__`` in the same file, rather than
+       inheriting one;
+    3. the body must **provably** return truthy -- a bare ``return`` of a
+       constant, or a ``return <bool expr>`` this can evaluate statically.
+
+    An ``__exit__`` that returns ``None`` or ``False``, or that raises, does not
+    swallow anything and must stay ``enforced``; criterion 3 is what keeps
+    ordinary managers on the live side of the line.
+    """
+    name = _dotted_class_name(expression)
+    if name is None:
+        return None
+    module = tree if tree is not None else _module_tree()
+    classes = _locally_defined_classes(module)
+    node = classes.get(name)
+    if node is None:
+        # The header usually names an *instance*, not the class:
+        #
+        #     helper = Suppressor()
+        #     with helper:
+        #
+        # so a name that is not itself a class is followed one step through the
+        # binding to the class it was constructed from. One step only -- a name
+        # built by an unreadable call (a factory, a parameter) is not followed,
+        # because assuming an arbitrary constructor returns a swallowing class
+        # is the over-breadth this rule exists to avoid.
+        constructor = _constructed_class_of(expression, module, classes, function)
+        if constructor is None:
+            return None
+        node = classes.get(constructor)
+        if node is None:
+            return None
+    for child in node.body:
+        if not isinstance(child, ast.FunctionDef) or child.name != "__exit__":
+            continue
+        if _provably_truthy_exit(child):
+            return node
+    return None
+
+
+def _constructed_class_of(expression, tree, classes, function=None):
+    """The class an instance-valued ``expression`` was constructed from.
+
+    Reads the ``helper = Suppressor()`` that the ``with`` header names, and
+    returns ``"Suppressor"`` when that class is one this file defines. Anything
+    else -- a factory call, a parameter, a subscript -- is ``None``, which
+    leaves the assert ``enforced`` rather than guessing.
+
+    The assignment is read straight off the tree rather than from ``bound``,
+    because that mapping is deliberately import-only -- it answers "which
+    dotted path does this name resolve to", a question about ``import``
+    statements -- and ``helper = Suppressor()`` is an ``Assign``, not an
+    import.
+
+    Both the module and the enclosing function are read, because #316's
+    criterion 4 requires the local-alias spelling
+
+    .. code-block:: python
+
+        def probe(x):
+            cs = Suppressor()
+            with cs:
+
+    and the module-level one. The *function's own* bindings are consulted
+    first, for the same reason :func:`_bound_names` prefers a function-local
+    import: an inner name shadows an outer one of the same spelling. The
+    search is still one step -- only a direct ``Name(...)`` constructor call
+    is followed, never a factory that returns an instance indirectly.
+    """
+    if not isinstance(expression, ast.Name):
+        return None
+    value = _assigned_value(expression.id, function)
+    if value is None:
+        value = _assigned_value(expression.id, tree)
+    if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)):
+        return None
+    if value.func.id not in classes:
+        return None
+    return value.func.id
+
+
+def _assigned_value(name, scope):
+    """The right-hand side ``name`` is assigned in ``scope``, or ``None``.
+
+    The *last* assignment wins, matching what a reader meets last, and a
+    function-scope lookup is offered before a module one by the caller so an
+    inner binding shadows an outer one of the same name.
+
+    ``ast.walk`` is deliberately *not* used on a module: it descends into every
+    function body, so a module lookup would silently find a function-local
+    assignment and the two scopes would not be distinguishable. The module
+    scope is therefore its own top-level statement list, which is what makes
+    the function-first lookup in :func:`_constructed_class_of` meaningful.
+    """
+    if scope is None:
+        return None
+    if isinstance(scope, ast.Module):
+        nodes = iter(scope.body)
+    elif isinstance(scope, ast.AST):
+        nodes = ast.walk(scope)
+    else:
+        nodes = iter(())
+    value = None
+    for node in nodes:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            continue
+        value = node.value
+    return value
+
+
+def _dotted_class_name(expression):
+    """The dotted name of a class reference, or ``None`` if it is not one.
+
+    Only a plain ``Name`` or an ``Attribute`` chain qualifies. A subscript or a
+    call is not statically readable as a class, and guessing would put the
+    over-breadth risk back.
+    """
+    if isinstance(expression, ast.Name):
+        return expression.id
+    if isinstance(expression, ast.Attribute):
+        return ast.unparse(expression)
+    return None
+
+
+def _locally_defined_classes(tree):
+    """``{name: ClassDef}`` for every class defined at module level in ``tree``.
+
+    A class imported from elsewhere is deliberately absent, which is what keeps
+    the rule off ``pytest``'s and the harness's own context managers. Only a
+    module-level ``class`` counts. A class *nested* inside another is excluded
+    too, and that is a measured limit rather than an oversight: such a class is
+    spelled ``Outer.Inner()`` in a ``with`` header, and matching the inner name
+    alone would fire on a bare ``Inner`` that is a different object in a
+    different scope. Widening this collection to every scope was tried and left
+    the suite green, so the narrow rule is the one doing the work.
+    """
+    found = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            found[node.name] = node
+    return found
+
+
+def _provably_truthy_exit(exit_function):
+    """Does this ``__exit__`` provably return a truthy value?
+
+    Three shapes are decided, and nothing else:
+
+    * ``return True`` / ``return 1`` -- a truthy constant.
+    * ``return False`` / ``return None`` / ``return 0`` -- falsy, so the assert
+      propagates and stays a live contract.
+    * ``return <expression>`` where the expression is a name, attribute, or call
+      already bound to a truthy constant *in this file*.
+
+    A ``return`` whose value cannot be decided statically is treated as **not**
+    swallowing. That is the conservative choice for a *silent* defeat only in
+    the sense that it avoids false alarms on the 147 real pinned asserts; the
+    issue's over-breadth criterion is explicit that a rule firing on every
+    ``__exit__`` does not count, so an undecidable return is left alone rather
+    than guessed at.
+    """
+    for node in ast.walk(exit_function):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        verdict = _statically_truthy(node.value)
+        if verdict is True:
+            return True
+        if verdict is False:
+            return False
+    # No `return` at all means the function falls off the end and yields None,
+    # which does not swallow.
+    return False
+
+
+def _statically_truthy(node):
+    """``True``/``False`` when ``node``'s truth value is decidable here.
+
+    A ``Compare`` is decided by reading its operands as literals, so the shape
+    in #316 -- ``return exc[0] is AssertionError`` -- is decided by
+    :func:`_exit_swallows_assertion_error`, which knows what the second
+    argument to ``__exit__`` actually is at runtime.
+
+    Nothing here evaluates a general expression. A ``Compare`` is only
+    decidable when it is *literally* the "is this the AssertionError?" test
+    that ``__exit__`` receives, and everything else returns ``None`` so the
+    assert stays ``enforced`` rather than being reported on a guess.
+    """
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, ast.NameConstant):  # pragma: no cover - py<3.8 shape
+        return bool(node.value)
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+        return bool(getattr(node, "elts", None) or getattr(node, "keys", None))
+    if _exit_swallows_assertion_error(node):
+        return True
+    return None
+
+
+#: The parameter names ``contextlib`` and the stdlib use for the raised
+#: exception in ``__exit__``. Any of them means the same thing at runtime, and
+#: a user-written manager picks whichever reads best, so all are accepted.
+_EXIT_EXCEPTION_PARAMS = frozenset({"exc", "exc_type", "et", "e", "err", "exc_info"})
+
+
+def _exit_swallows_assertion_error(node):
+    """Is ``node`` the "the exception being handled is AssertionError" test?
+
+    This is the shape #316 is filed against, verbatim::
+
+        def __exit__(self, *exc):
+            return exc[0] is AssertionError
+
+    At runtime ``__exit__`` receives the exception type as its first argument
+    after ``self``, so ``exc[0]`` is the raised type and comparing it to
+    ``AssertionError`` is true exactly when an assert was swallowed. The three
+    spellings accepted are the ones that say that and nothing more:
+
+    * ``<param>[0] is AssertionError``  -- the filed shape
+    * ``<param> is AssertionError``     -- a named first parameter
+    * ``issubclass(<param>[0], AssertionError)`` -- the ``except*`` style
+
+    Anything else -- a bare name, a call, a different exception, a negated
+    test -- is not this shape and is declined, which leaves the assert
+    ``enforced``. That is the direction the issue's over-breadth criterion
+    requires: an ordinary manager whose ``__exit__`` inspects the exception in
+    some other way must not have its asserts reported.
+    """
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id != "issubclass" or len(node.args) != 2:
+            return False
+        return _is_exception_argument(node.args[0]) and _is_assertion_error_ref(node.args[1])
+    if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+        return False
+    if not isinstance(node.ops[0], ast.Is):
+        return False
+    if not _is_exception_argument(node.left):
+        return False
+    return len(node.comparators) == 1 and _is_assertion_error_ref(node.comparators[0])
+
+
+def _is_exception_argument(node):
+    """Is ``node`` a read of ``__exit__``'s raised-exception argument?"""
+    if isinstance(node, ast.Subscript):
+        index = node.slice
+        if not (isinstance(index, ast.Constant) and index.value == 0):
+            return False
+        return _is_exception_name(node.value)
+    return _is_exception_name(node)
+
+
+def _is_exception_name(node):
+    return isinstance(node, ast.Name) and node.id in _EXIT_EXCEPTION_PARAMS
+
+
+def _is_assertion_error_ref(node):
+    """Is ``node`` a reference to the builtin ``AssertionError``?
+
+    A bare ``Name`` is enough. The name is not resolved against a binding, so
+    a local that *shadows* ``AssertionError`` would be misread -- which is the
+    safe direction here, because a shadowed name almost certainly is not the
+    builtin and reporting the assert as swallowed then costs a false alarm
+    rather than certifying a disarmed contract. The cost is a rare false
+    positive in a file that rebinds the builtin, which the mutation matrix
+    keeps visible.
+    """
+    return isinstance(node, ast.Name) and node.id == "AssertionError"
+
+
+def _is_user_defined_swallowing_with(node, bound, function, tree=None):
+    """Does this ``with`` enter a user class that provably eats the failure?"""
+    for item in node.items:
+        found = _swallowing_exit_class(item.context_expr, bound, tree, function)
+        if found is not None:
+            return True
+    return False
+
+
 def _is_suppression_call(call, bound):
     """Is this call a suppression context that can eat an assertion failure?"""
     if any(_resolves_to(call.func, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
@@ -1620,7 +1926,8 @@ def _is_enforced(function, target, tree=None):
     ``tree`` supplies the module whose import bindings to resolve, so the
     bindings always come from the file the assert actually lives in.
     """
-    bound = _bound_names(tree if tree is not None else _owning_module(function), function)
+    owning = tree if tree is not None else _owning_module(function)
+    bound = _bound_names(owning, function)
     for ancestor in _ancestors(function, target):
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
@@ -1635,6 +1942,8 @@ def _is_enforced(function, target, tree=None):
             if not _in_body(ancestor, target):
                 continue
             if _is_suppressing_with(ancestor, bound, function):
+                return False
+            if _is_user_defined_swallowing_with(ancestor, bound, function, owning):
                 return False
         elif (
             isinstance(ancestor, (ast.If, ast.While))

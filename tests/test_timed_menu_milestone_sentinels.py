@@ -1467,3 +1467,231 @@ def test_both_orders_in_one_block_keep_their_own_verdict(label, body):
         f"{label}: the assert before the store must stay enforced and the one "
         f"after it must be reported defeated, got {results}"
     )
+
+
+#: #316: a user-defined context manager swallows an assert exactly when its
+#: ``__exit__`` returns truthy for the raised ``AssertionError``. That is a
+#: different mechanism from every named suppressor -- none of the other rules
+#: reads a return value, because none of them can.
+#:
+#: Executed, each of these really is silent::
+#:
+#:     >>> probe(1)          # returns normally, rc=0
+#:
+#: so reporting the assert as ``enforced`` would certify a disarmed contract as
+#: load-bearing. The rows are paired with the loud controls below, because the
+#: failure mode of a rule like this is firing on an ordinary context manager
+#: rather than missing a suppressor.
+USER_EXIT_SWALLOW_SHAPES = (
+    # --- the filed shape, in the three bindings #316's criterion 4 names ---
+    (
+        "module-level instance",
+        "def __exit__(self, *exc):\n    return exc[0] is AssertionError",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "instance bound in a nested if",
+        "def __exit__(self, *exc):\n    return exc[0] is AssertionError",
+        (
+            "    if flag:\n"
+            "        helper = Suppressor()\n"
+            "        with helper:\n"
+            "            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "local alias",
+        "def __exit__(self, *exc):\n    return exc[0] is AssertionError",
+        "    cs = Suppressor()\n    with cs:\n        assert x != 1",
+        False,
+    ),
+    # The other two spellings of the same runtime test.
+    (
+        "named exception parameter",
+        ("def __exit__(self, exc_type, exc, tb):\n    return exc_type is AssertionError"),
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "issubclass spelling",
+        "def __exit__(self, *exc):\n    return issubclass(exc[0], AssertionError)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    # --- loud controls: an __exit__ that does not swallow ---
+    (
+        "returns False",
+        "def __exit__(self, *exc):\n    return False",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    (
+        "returns None",
+        "def __exit__(self, *exc):\n    return None",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    (
+        "no return at all",
+        "def __exit__(self, *exc):\n    pass",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    (
+        "tests for a different exception",
+        "def __exit__(self, *exc):\n    return exc[0] is ValueError",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    (
+        "raises instead of returning",
+        "def __exit__(self, *exc):\n    raise RuntimeError",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "exit_body", "body", "enforced"),
+    USER_EXIT_SWALLOW_SHAPES,
+    ids=[row[0] for row in USER_EXIT_SWALLOW_SHAPES],
+)
+def test_a_user_exit_that_swallows_assertion_error_is_a_defeat(label, exit_body, body, enforced):
+    """#316: the ``__exit__`` return value is the mechanism, not the name.
+
+    The named suppressors are known by what they are called. A user-defined
+    manager is knowable only by what its ``__exit__`` *does*, and a return that
+    is truthy precisely for ``AssertionError`` swallows the failure silently.
+
+    Both halves of that are pinned here. The swallowing rows must be reported
+    defeated, and the loud rows -- ``False``, ``None``, no return, a different
+    exception, a raise -- must stay enforced, because an ``__exit__`` that does
+    not swallow leaves a real contract in place and reporting it defeated
+    would drop a live assert.
+    """
+    # Every line of `exit_body` needs the class-body indent, not just the first:
+    # the table stores the `def` line and its body unindented so each row reads
+    # as the method alone.
+    indented_exit = "\n".join("    " + line for line in exit_body.splitlines())
+    source = (
+        "class Suppressor:\n"
+        "    def __enter__(self):\n"
+        "        return self\n" + indented_exit + "\ndef outer(x, flag):\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    outer = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [enforced], (
+        f"{label}: expected the assert to be "
+        f"{'enforced' if enforced else 'unenforced'}, got {results}"
+    )
+
+
+def test_the_user_exit_rule_does_not_fire_on_an_ordinary_context_manager():
+    """#316 criterion 2: no over-breadth on the real pinned file.
+
+    A rule that reported every class with an ``__exit__`` as a defeat would
+    pass every row above and still be worthless, because ``pytest``'s and the
+    harness's own managers all have one. The budget is stated as a number: the
+    real file must measure the same asserts walked and the same zero unenforced
+    as it does on master. Measured on both trees, not asserted from memory.
+    """
+    tree = support.milestones_tree()
+    walked = 0
+    unenforced = 0
+    for function in tree.body:
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Assert):
+                continue
+            walked += 1
+            if not _is_enforced(function, node, tree):
+                unenforced += 1
+    assert unenforced == 0, (
+        f"the #316 rule reported {unenforced} of {walked} real pinned asserts "
+        f"as defeated; it must not fire on an ordinary context manager"
+    )
+    assert walked == 143, (
+        f"the pinned file now walks {walked} asserts, expected 143 -- either "
+        f"the file changed or the walk lost sites"
+    )
+
+
+def test_an_unreadable_constructor_is_not_assumed_to_suppress():
+    """A factory or a parameter is not followed, so nothing is invented.
+
+    Following one hop from ``make()`` to whatever it returns would mean
+    assuming that an arbitrary call produces a swallowing context manager,
+    which is the over-breadth #316's criterion 2 rules out. The class below
+    *is* a suppressor -- only the binding is unreadable -- so this row
+    separates "cannot see it" from "it is not one".
+    """
+    source = (
+        "class Suppressor:\n"
+        "    def __enter__(self):\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        return exc[0] is AssertionError\n"
+        "def make():\n"
+        "    return Suppressor()\n"
+        "def outer(x):\n"
+        "    with make():\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    outer = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(outer) if isinstance(node, ast.Assert))
+    assert _is_enforced(outer, target, tree), (
+        "an unreadable constructor was assumed to produce a swallowing context "
+        "manager; the rule must decline rather than assume"
+    )
+
+
+def test_only_a_module_level_class_counts():
+    """#316 criterion 2, the scope half: a nested class is not matched.
+
+    A class nested inside another is reached as ``Outer.Inner()`` in a ``with``
+    header. Collecting class definitions from every scope would match the inner
+    *name* alone, so a bare ``Inner`` meaning something else entirely would be
+    reported as a defeat. The limit is deliberate, and it is only a real limit
+    if something pins it -- an earlier version of this rule collected classes
+    from any scope and the whole suite stayed green, which is exactly the
+    no-op mutation the #310 dunder rule shipped as.
+
+    The class below really is a swallowing context manager; only its nesting
+    puts it out of reach. That is what separates "cannot see it" from "it is
+    not one".
+    """
+    source = (
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        def __enter__(self):\n"
+        "            return self\n"
+        "        def __exit__(self, *exc):\n"
+        "            return exc[0] is AssertionError\n"
+        "def outer(x):\n"
+        "    with Outer.Inner():\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    outer = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(outer) if isinstance(node, ast.Assert))
+    assert "Inner" not in support._locally_defined_classes(tree), (
+        "a nested class leaked into the module-level class table; the rule "
+        "would then match a bare `Inner` that is a different object"
+    )
+    assert _is_enforced(outer, target, tree), (
+        "a class nested inside another was matched by its bare inner name"
+    )
