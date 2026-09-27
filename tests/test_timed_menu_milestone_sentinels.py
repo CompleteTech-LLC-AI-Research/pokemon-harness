@@ -1520,6 +1520,18 @@ USER_EXIT_SWALLOW_SHAPES = (
         "    helper = Suppressor()\n    with helper:\n        assert x != 1",
         False,
     ),
+    # The same test spelled `==`. At runtime `exc_type == AssertionError` is
+    # true exactly when an assert was swallowed, so declining it left a real
+    # swallow reported as `enforced`. Only `Is` was accepted, and the operator
+    # guard was not pinned by any row, so both sides of that operator were
+    # unpinned: dropping the guard let a *negated* test through, and adding `Eq`
+    # closes the missed detection.
+    (
+        "equality spelling",
+        "def __exit__(self, *exc):\n    return exc[0] == AssertionError",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
     # --- loud controls: an __exit__ that does not swallow ---
     (
         "returns False",
@@ -1542,6 +1554,26 @@ USER_EXIT_SWALLOW_SHAPES = (
     (
         "tests for a different exception",
         "def __exit__(self, *exc):\n    return exc[0] is ValueError",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    # The `issubclass` form tested against a *different* exception. The only
+    # `issubclass` row above spells the operand `AssertionError`, so dropping
+    # that operand check left the whole suite green while the rule started
+    # reporting this live assert as defeated.
+    (
+        "issubclass against a different exception",
+        "def __exit__(self, *exc):\n    return issubclass(exc[0], ValueError)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    # The negated test. `is not AssertionError` is false when an assert was
+    # swallowed, so this `__exit__` propagates and the assert stays live --
+    # reading it as a swallow would be the damaging direction. This row is what
+    # makes the operator guard non-vacuous: removing it lets this through.
+    (
+        "negated test",
+        "def __exit__(self, *exc):\n    return exc[0] is not AssertionError",
         "    helper = Suppressor()\n    with helper:\n        assert x != 1",
         True,
     ),

@@ -1300,6 +1300,7 @@ def _exit_swallows_assertion_error(node):
 
     * ``<param>[0] is AssertionError``  -- the filed shape
     * ``<param> is AssertionError``     -- a named first parameter
+    * ``<param>[0] == AssertionError``  -- the same test spelled ``==``
     * ``issubclass(<param>[0], AssertionError)`` -- the ``except*`` style
 
     Anything else -- a bare name, a call, a different exception, a negated
@@ -1314,7 +1315,7 @@ def _exit_swallows_assertion_error(node):
         return _is_exception_argument(node.args[0]) and _is_assertion_error_ref(node.args[1])
     if not isinstance(node, ast.Compare) or len(node.ops) != 1:
         return False
-    if not isinstance(node.ops[0], ast.Is):
+    if not isinstance(node.ops[0], (ast.Is, ast.Eq)):
         return False
     if not _is_exception_argument(node.left):
         return False
