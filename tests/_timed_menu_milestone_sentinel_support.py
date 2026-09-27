@@ -661,6 +661,40 @@ def _suppressed_by_dunder(call, bound):
     return ["BaseException"]
 
 
+def _store_target_names(targets):
+    """Every name a single store statement binds.
+
+    An ``ast.Name`` is the easy case, but Python lets a store target be a
+    tuple, a list, or a starred expression, and any of those can name a
+    variable:
+
+        cs, other = (contextlib.nullcontext(), 2)
+        [cs] = [contextlib.nullcontext()]
+        cs, *rest = (contextlib.nullcontext(), 2, 3)
+
+    Reading only ``ast.Name`` targets made those stores invisible, so a name
+    carried by an earlier walrus was never retired and a live assert under the
+    later ``with`` was reported defeated. Unwrapping the nested forms is what
+    makes the supersession rule above apply to every binding form the language
+    actually has.
+
+    A subscript or attribute target (``obj.cs = ...``) is deliberately not
+    followed: it binds an attribute, not a local name, so it cannot retire a
+    local binding.
+    """
+    names = []
+    pending = list(targets)
+    while pending:
+        target = pending.pop()
+        if isinstance(target, ast.Name):
+            names.append(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            pending.extend(target.elts)
+        elif isinstance(target, ast.Starred):
+            pending.append(target.value)
+    return names
+
+
 def _assigned_suppressors(function, bound):
     """Map each statement index to the suppressor names bound *by* it.
 
@@ -764,6 +798,35 @@ def _assigned_suppressors(function, bound):
             # inheriting the carried suppressor (#308).
             targets = [statement.target]
             value = statement.value
+        elif isinstance(statement, (ast.For, ast.AsyncFor)):
+            # #324: a loop target is a store like any other. `for cs in ():`
+            # rebinds the name on every path that reaches the loop, so a
+            # carried suppressor must not survive it. Recording only
+            # `ast.Name` targets left this invisible and let a stale
+            # suppressor outrank the loop's own binding.
+            targets = [statement.target]
+            value = None
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            # #324: `with ... as cs:` is a store too, and the item expression
+            # is what the `with` would evaluate. A walrus carried in from
+            # earlier must be retired by it.
+            for item in statement.items:
+                if item.optional_vars is not None:
+                    targets.append(item.optional_vars)
+                    value = None
+        elif isinstance(statement, ast.ExceptHandler):
+            # #324: `except E as cs:` binds `cs`, and CPython deletes the name
+            # when the handler exits, so a carried suppressor must not outlive
+            # it either.
+            if statement.name is not None:
+                targets = [ast.Name(id=statement.name, ctx=ast.Store())]
+                value = None
+        elif isinstance(statement, ast.Delete):
+            # #324: `del cs` unbinds the name outright. Recording it as a store
+            # of `None` is what makes the existing supersession rule retire any
+            # earlier binding of that name.
+            targets = list(statement.targets)
+            value = None
         else:
             continue
         # A store written directly in the function body runs on every path;
@@ -778,9 +841,8 @@ def _assigned_suppressors(function, bound):
             conditional = _walrus_is_conditional(function, statement)
         else:
             conditional = statement not in function.body
-        for target in targets:
-            if isinstance(target, ast.Name):
-                bindings.setdefault(target.id, []).append((statement, value, conditional))
+        for name in _store_target_names(targets):
+            bindings.setdefault(name, []).append((statement, value, conditional))
     # A name bound by exactly one readable suppressor is a known alias. A name
     # bound by several is ambiguous -- see the docstring (#308 criterion 1) --
     # and must NOT be resolved by source order. It is recorded as an

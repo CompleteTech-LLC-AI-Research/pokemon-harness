@@ -1735,3 +1735,146 @@ def test_a_walrus_bound_alias_reaches_the_headers_that_re_enter_it(label, body, 
         f"is compared individually -- `all()` would collapse this fixture to "
         f"its first verdict and hide a wrong later one."
     )
+
+
+#: #324: every binding form Python has must retire a carried walrus, not just
+#: ``ast.Name`` targets.
+#:
+#: A walrus-bound suppressor is only correct while it is the *live* binding of
+#: the name. Rebinding that name to a ``nullcontext`` on every path makes the
+#: later ``with cs:`` enter something that does not suppress, so the assert
+#: under it is live and must be reported enforced. Reading only ``ast.Name``
+#: targets left every nested and non-``Assign`` store invisible, so a stale
+#: suppressor outranked the rebinding and a **live** assert was reported
+#: defeated -- the damaging direction.
+#:
+#: ``expected`` is the exact per-assert verdict list, not ``all(...)``:
+#: collapsing to the first verdict is what hid this defect in the first place.
+WALRUS_REBINDING_SHAPES = (
+    (
+        "a plain store retires the walrus",
+        "    cs = contextlib.nullcontext()",
+    ),
+    (
+        "a tuple-unpack store retires the walrus",
+        "    cs, other = (contextlib.nullcontext(), 2)",
+    ),
+    (
+        "a starred-unpack store retires the walrus",
+        "    cs, *rest = (contextlib.nullcontext(), 2, 3)",
+    ),
+    (
+        "a list-target store retires the walrus",
+        "    [cs] = [contextlib.nullcontext()]",
+    ),
+    (
+        "an annotated store retires the walrus",
+        "    cs: object = contextlib.nullcontext()",
+    ),
+    (
+        "a loop target retires the walrus",
+        "    for cs in (contextlib.nullcontext(),):\n        pass",
+    ),
+    (
+        "a with-as target retires the walrus",
+        "    with nullcontext() as cs:\n        pass",
+    ),
+    (
+        "a del retires the walrus",
+        "    del cs",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind"),
+    WALRUS_REBINDING_SHAPES,
+    ids=[shape[0] for shape in WALRUS_REBINDING_SHAPES],
+)
+def test_a_walrus_alias_is_retired_by_every_binding_form(label, rebind):
+    """A carried suppressor must not outlive the name being rebound.
+
+    Each row binds a suppressor through a walrus, then rebinds that name to a
+    ``nullcontext`` in a different syntactic form, then enters it. The first
+    assert is swallowed by the walrus-bound suppressor; the second is entered
+    through the ``nullcontext`` and is **live**.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + rebind + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False, True]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. The second "
+        f"assert is under a `with cs:` entered after `cs` was rebound to a "
+        f"nullcontext, so it is live and must be reported enforced."
+    )
+
+
+#: #324: a walrus bound in a comprehension is a binding like any other.
+#:
+#: The comprehension's condition expression runs and leaves ``cs`` bound, so a
+#: later ``with cs:`` really does enter the suppressor. Recording only
+#: ``ast.Assign`` made this invisible and reported a swallowed assert as live.
+WALRUS_NON_ASSIGN_SHAPES = (
+    (
+        "a walrus in a comprehension condition",
+        "    [y for y in (0,) if (cs := contextlib.suppress(AssertionError))]",
+    ),
+    (
+        "a walrus in a list comprehension filter",
+        "    [y for y in (0, 1) if y and (cs := contextlib.suppress(AssertionError))]",
+    ),
+    (
+        "a walrus in a generator expression filter",
+        "    list(y for y in (0,) if (cs := contextlib.suppress(AssertionError)))",
+    ),
+    (
+        "a walrus in a call argument",
+        "    helper.consume((cs := contextlib.suppress(AssertionError)))",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "binder"),
+    WALRUS_NON_ASSIGN_SHAPES,
+    ids=[shape[0] for shape in WALRUS_NON_ASSIGN_SHAPES],
+)
+def test_a_walrus_bound_outside_an_assignment_still_reaches_a_later_header(label, binder):
+    """A walrus is a binding wherever it is written.
+
+    The walrus does not have to sit in an assignment statement's right-hand
+    side. A comprehension condition, a generator filter and a call argument all
+    bind the name, and all of them are evaluated before the ``with`` that
+    follows.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n" + binder + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. The walrus "
+        f"binds `cs` before the `with` is reached, so the assert is swallowed."
+    )
