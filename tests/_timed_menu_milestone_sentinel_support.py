@@ -949,8 +949,16 @@ def _aliased_suppressions(node, function, bound):
             # certified as load-bearing.
             for item in header.items:
                 expression = item.context_expr
-                if isinstance(expression, ast.NamedExpr) and isinstance(
-                    expression.target, ast.Name
+                # Only a *call* is carried. A walrus whose value is not a call
+                # (`with (cs := 1):`) fails loudly on a later `with cs:` with
+                # `TypeError`, so re-entering it is a live contract and must
+                # not be carried into the suppressor set. See
+                # `_is_suppressing_with`, whose consumer applies the same
+                # guard for the same reason.
+                if (
+                    isinstance(expression, ast.NamedExpr)
+                    and isinstance(expression.target, ast.Name)
+                    and isinstance(expression.value, ast.Call)
                 ):
                     walrus_bindings[expression.target.id] = expression.value
             if not _encloses(header, node):
@@ -1187,6 +1195,15 @@ def _is_suppressing_with(node, bound, function=None):
             # `cs.__enter__()` raises before the body whatever `cs` holds, so
             # the argument is not what decides this and must not be read.
             return True
+        # A carried walrus value reaches this loop too, and it is not
+        # necessarily a suppression: `with (cs := nullcontext()):` followed by
+        # `with cs:` genuinely raises, so reading it as one would report a live
+        # contract as defeated. `_suppression_names` would also raise on a
+        # non-call. This mirrors the guards on `_entered_suppressions` above.
+        if not isinstance(argument, ast.Call):
+            continue
+        if not _is_suppression_call(argument, bound):
+            continue
         if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
             return True
     return False

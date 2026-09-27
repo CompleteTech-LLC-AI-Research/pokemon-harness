@@ -1034,6 +1034,38 @@ WALRUS_SHAPES = (
         ),
         False,
     ),
+    # Carrying a walrus forward must carry the *suppression* forward, not the
+    # name. The rows above re-enter a real suppressor and must read defeated;
+    # these re-enter a walrus that was never a suppression, and re-entering it
+    # genuinely raises, so they must stay live.
+    #
+    # These are the regression test for a defect the carry-forward itself
+    # introduced: the binding was carried whatever its value, so a later
+    # `with cs:` resolved a `nullcontext()`/non-call alias as a suppressor and
+    # reported a live contract as defeated -- the damaging direction again, and
+    # a `TypeError` crash for a non-call value. The single-statement controls
+    # further down the table cannot catch this, because there the carried value
+    # is never re-entered by a later header.
+    (
+        "non-suppressor walrus re-entered by a later header stays live",
+        (
+            "    with (cs := nullcontext()):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        True,
+    ),
+    (
+        "non-call walrus re-entered by a later header stays live",
+        ("    with (cs := 1):\n        pass\n    with cs:\n        assert x != 1"),
+        True,
+    ),
+    (
+        "non-suppressor helper walrus re-entered by a later header stays live",
+        ("    with (cs := helper.make()):\n        pass\n    with cs:\n        assert x != 1"),
+        True,
+    ),
     # --- controls -----------------------------------------------------------
     # A zero-argument call reads as the unreadable case `BaseException` in
     # `_suppression_names`, and `BaseException` *does* catch `AssertionError`.
