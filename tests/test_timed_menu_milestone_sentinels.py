@@ -26,6 +26,7 @@ import pytest
 from tests._timed_menu_milestone_sentinel_support import (
     DEADLINE_TERMINATION,
     GUARD_FUNCTION,
+    PINNED_COUNT_COMPARISONS,
     RETENTION_COUNT_SITES,
     RETENTION_SUBSCRIPT_COUNT_SITES,
     RUN_OWNER,
@@ -35,6 +36,7 @@ from tests._timed_menu_milestone_sentinel_support import (
     count_sites_that_bypass_the_guard,
     guard_is_wired_on_the_fast_clock_path,
     guard_rejects_the_deadline_terminal_state,
+    observed_count_comparisons,
     retention_sites_observed,
     retention_subscript_sites_observed,
 )
@@ -69,6 +71,29 @@ def test_the_four_retention_counts_are_still_exact_equalities():
     assert observed == expected, (
         "the frame-bound retention counts are no longer exact equality "
         f"assertions at the pinned sites; expected {expected}, observed {observed}"
+    )
+
+
+def test_the_full_set_of_pinned_count_comparisons_has_not_shrunk():
+    """No exact-count assertion may leave the observed set without failing.
+
+    ``test_the_four_retention_counts_are_still_exact_equalities`` covers the
+    #261 retention contract. This covers the *wider* set, and it is pinned as a
+    literal rather than recomputed, because a backstop that derives its
+    expectation from the code it polices cannot notice that expectation
+    shrinking. Measured: #294 began applying its bypass rule to ``and`` as well
+    as ``or``, the live contract at ``test_timed_menu_milestones.py:155``
+    (``assert len(errors) == 1 and isinstance(errors[0], RuntimeError)``) was
+    reported as bypassed, and the observed count went 11 -> 10 with this file
+    entirely green.
+    """
+    observed = observed_count_comparisons()
+    expected = sorted(PINNED_COUNT_COMPARISONS)
+    assert observed == expected, (
+        "the set of pinned exact-count comparisons changed; a site was "
+        f"deleted, relaxed, duplicated or neutralised. missing="
+        f"{sorted(set(expected) - set(observed))} unexpected="
+        f"{sorted(set(observed) - set(expected))}"
     )
 
 
@@ -265,3 +290,130 @@ def test_tautology_detection_only_fires_on_provably_always_true_forms(source, ta
     weight as the positive ones.
     """
     assert _is_tautology(ast.parse(source, mode="eval").body) is tautology
+
+
+#: Every spelling that disarms an assert without removing it, and the matching
+#: live control that must stay enforced. The controls are not padding: a rule
+#: that flags everything is indistinguishable from a rule that works, and this
+#: repo has already recorded three probes that reported a confident "caught"
+#: verdict because the mutation never applied.
+UNREACHABLE_SHAPES = (
+    # `except*` parses to ast.TryStar, which is not a subclass of ast.Try.
+    # Matching only the latter left it an unguarded spelling of the defeat.
+    (
+        "try star",
+        "    try:\n        assert x != 1\n    except* AssertionError:\n        pass",
+        False,
+    ),
+    ("bare except", "    try:\n        assert x != 1\n    except:\n        pass", False),
+    (
+        "except Exception",
+        "    try:\n        assert x != 1\n    except Exception:\n        pass",
+        False,
+    ),
+    # A swallowing `try` around a *sibling* does not disarm an assert outside
+    # it; treating it as though it did would drop real pinned sites.
+    (
+        "try on sibling",
+        "    try:\n        helper()\n    except AssertionError:\n        pass\n    assert x != 1",
+        True,
+    ),
+    # The suppression family. Matched by resolved name, so all four spellings
+    # collapse to the same value before the comparison.
+    (
+        "suppress qualified",
+        "    with contextlib.suppress(AssertionError):\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppress from import",
+        "    with suppress(AssertionError):\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppress aliased module",
+        "    with c.suppress(AssertionError):\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppress aliased name",
+        "    with sq(AssertionError):\n        assert x != 1",
+        False,
+    ),
+    # Cannot swallow a failing assert, so it must stay enforced.
+    (
+        "suppress other error",
+        "    with contextlib.suppress(ValueError):\n        assert x != 1",
+        True,
+    ),
+    (
+        "suppress other error from import",
+        "    with suppress(KeyError):\n        assert x != 1",
+        True,
+    ),
+    # A context manager that is not a suppressor.
+    (
+        "unrelated context",
+        "    with open('f') as fh:\n        assert x != 1",
+        True,
+    ),
+    # Statically dead: the body never runs, so the assert is never evaluated.
+    ("if False", "    if False:\n        assert x != 1", False),
+    ("while False", "    while False:\n        assert x != 1", False),
+    # The `else` of a falsy `if` is precisely the branch that *does* run.
+    (
+        "if False else",
+        "    if False:\n        helper()\n    else:\n        assert x != 1",
+        True,
+    ),
+    # A genuine runtime condition is not statically dead.
+    ("runtime condition", "    if flag:\n        assert x != 1", True),
+    # An assert moved into a nested def nothing calls never evaluates. A nested
+    # def whose name is *loaded* is the callback shape and stays enforced.
+    (
+        "uncalled nested def",
+        "    def inner():\n        assert x != 1",
+        False,
+    ),
+    (
+        "nested def used",
+        "    def inner():\n        assert x != 1\n    return inner",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    UNREACHABLE_SHAPES,
+    ids=[shape[0] for shape in UNREACHABLE_SHAPES],
+)
+def test_reachability_rejects_exactly_the_shapes_that_cannot_fail(label, body, live):
+    """An assert the interpreter can never fail is not an enforced contract.
+
+    ``try/except``, ``with suppress(...)`` and a statically dead branch all keep
+    the assert in the AST while making it incapable of failing, so a
+    presence-based check certifies a contract that no longer exists (#287). The
+    live controls carry equal weight: a wrong "defeated" verdict *removes* a
+    real contract from the sentinel's view, which is the more damaging error.
+    """
+    # The body lines are already written with the indentation they need
+    # relative to the function, so the header is the only line added here.
+    # Indenting the whole body again is what produces the IndentationError this
+    # repo has already mistaken for a caught mutation once.
+    imports = (
+        "    import contextlib\n"
+        "    from contextlib import suppress\n"
+        "    import contextlib as c\n"
+        "    from contextlib import suppress as sq\n"
+    )
+    source = "def probe(x, flag, record, helper):\n" + imports + body + "\n"
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
