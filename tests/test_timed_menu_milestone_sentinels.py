@@ -1708,6 +1708,13 @@ def test_a_walrus_in_a_class_body_does_not_escape_the_class():
         ("bare-dotted-import", "xml", "import xml.etree", True),
         ("bare-from-import", "path", "from os import path", True),
         ("bare-from-dotted-import", "etree", "from xml import etree", True),
+        # A single import statement binds every alias it names, not just the
+        # first. Nothing pinned that: the round-5 ALT's M19 sliced
+        # `node.names[:1]`, which left the *second* alias's carried walrus
+        # alive and passed the whole 448-test lane green.
+        ("multi-alias-second-import", "sys", "import os, sys", True),
+        ("multi-alias-second-from-import", "sep", "from os import path, sep", True),
+        ("multi-alias-first-still-binds", "os", "import os, sys", True),
         # The negative case, and the reason the bound name is resolved per
         # alias rather than "any import retires anything": an aliased import
         # binds a *different* name, so it must leave this walrus alone and the
