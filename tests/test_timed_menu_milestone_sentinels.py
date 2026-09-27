@@ -978,7 +978,6 @@ def test_the_residual_defeats_of_287_are_rejected(label, body, live):
     )
 
 
-<<<<<<< b9988dc3
 #: #308 named two escapes and a third that only appeared once #309 landed. Each
 #: row is one *behavioural* claim about the interpreter, established by running
 #: the shape rather than by reading the checker: a suppressor bound inline in the
@@ -1032,7 +1031,9 @@ WALRUS_SHAPES = (
     ("walrus of a non-call value", "    with (cs := 1):\n        assert x != 1", True),
     # A bare name in the header is the already-closed alias case, not a walrus.
     ("bare name in the header", "    with cs:\n        assert x != 1", True),
-=======
+)
+
+
 #: #310: the ``.__enter__()`` dunder spelling, which shipped in #309 with no
 #: test at all. Reverting the rule left the suite green, so these rows exist
 #: first and foremost to make that impossible.
@@ -1135,13 +1136,11 @@ DUNDER_SPELLING_SHAPES = (
         "    with contextlib.suppress().__enter__():\n        assert x != 1",
         False,
     ),
->>>>>>> 4ab6f1b7
 )
 
 
 @pytest.mark.parametrize(
     ("label", "body", "live"),
-<<<<<<< b9988dc3
     WALRUS_SHAPES,
     ids=[shape[0] for shape in WALRUS_SHAPES],
 )
@@ -1161,7 +1160,17 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
     )
     tree = ast.parse(source)
     function = tree.body[0]
-=======
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
     DUNDER_SPELLING_SHAPES,
     ids=[shape[0] for shape in DUNDER_SPELLING_SHAPES],
 )
@@ -1192,7 +1201,6 @@ def test_the_dunder_spelling_is_covered_and_scoped_to_real_suppression(label, bo
             break
     else:
         function = outer
->>>>>>> 4ab6f1b7
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     assert asserts, f"{label}: fixture declared no assert to check"
     results = [_is_enforced(function, node, tree) for node in asserts]
@@ -1200,7 +1208,13 @@ def test_the_dunder_spelling_is_covered_and_scoped_to_real_suppression(label, bo
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
     )
-<<<<<<< b9988dc3
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
 
 
 #: #308 criterion 1 asks that branch order never decide the verdict. Asserting a
@@ -1313,5 +1327,3 @@ def test_plain_assignment_aliasing_needs_no_import_node():
         asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
         results = [_is_enforced(function, node, tree) for node in asserts]
         assert all(results) is expected, f"{label}: expected {expected}, got {results}"
-=======
->>>>>>> 4ab6f1b7
