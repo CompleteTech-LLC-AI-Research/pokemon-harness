@@ -599,6 +599,42 @@ def _nonlocal_rebind_exceptions(function, enclosing=None):
     }
     if not declared:
         return frozenset()
+    # A `nonlocal` store only reaches the enclosing name if the function that
+    # declares it is ever *called*. A definition nothing names in any form
+    # never runs, so its body cannot rebind the enclosing cell and the carried
+    # suppressor survives it:
+    #
+    #     def inner():
+    #         nonlocal cs
+    #         cs = contextlib.nullcontext()   # `inner` is never called
+    #     with cs:                            # still the original suppressor
+    #         assert 1 == 2                   # swallowed, not live
+    #
+    # Letting that store through reported the swallowed assert as live, which
+    # is the same damaging direction as an uncalled definition header, from
+    # the same cause: a rebind counted in a region that never executes. The
+    # reachability rule is `_def_is_reachable`, which sees both spellings a
+    # call can take: the name loaded, and the name reached as an attribute.
+    if enclosing is not None and not _def_is_reachable(enclosing, function):
+        return frozenset()
+    # A `nonlocal` store only reaches the enclosing name if the function that
+    # declares it is ever *called*. A definition nothing loads never runs, so
+    # its body cannot rebind the enclosing cell and the carried suppressor
+    # survives it:
+    #
+    #     def inner():
+    #         nonlocal cs
+    #         cs = contextlib.nullcontext()   # `inner` is never called
+    #     with cs:                            # still the original suppressor
+    #         assert 1 == 2                   # swallowed, not live
+    #
+    # Letting that store through reported the swallowed assert as live, which
+    # is the same damaging direction as an uncalled definition header, from
+    # the same cause: a rebind counted in a region that never executes. The
+    # reachability rule is the existing one, widened to see a method called as
+    # an attribute: a nested definition counts as reachable as soon as its
+    # name is loaded, or appears as an attribute, anywhere in the enclosing
+    # function. See `_def_is_reachable`.
     # The cell `nonlocal` writes is the one the *enclosing* function bound, so
     # the declared names are resolved against that scope rather than against
     # `function` itself. Without an enclosing function there is no such cell,
@@ -1164,26 +1200,35 @@ def _binding_targets_by_name(statement, enclosing=None):
     #     with cs:                                       # TypeError on entry
     #         assert x != 1                              # live
     #
-    # so the carried suppressor has to be retired. This first pass collects
-    # those regions so the walk below can include exactly them; the body
-    # keeps its own scope and stays excluded. Collected before the walk
-    # because `ast.walk` reaches a default only *through* the excluded
-    # definition, and the exclusion test is made per node as it is reached.
+    # so the carried suppressor has to be retired. The walk below collects
+    # those regions so it can include exactly them; the body keeps its own
+    # scope and stays excluded. A default is reached only *through* the
+    # excluded definition, and the exclusion test is made per node as it is
+    # reached.
     # See `ledger/LEAD_329_FUNCTION_DEFAULT_FINDING.md`.
     #
     # `enclosing` is threaded through to `_nested_scope_nodes` for #332, which
     # needs it to resolve a `nonlocal`; the header regions below do not need
     # it, because a default or a decorator is evaluated in the scope the
     # `def` appears in whatever that scope is.
-    evaluated_in_enclosing_scope = set()
-    for node in ast.walk(statement):
-        if id(node) in excluded and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            evaluated_in_enclosing_scope.update(
-                id(inner) for inner in _definition_header_nodes(node)
-            )
     bindings = {}
-    for node in ast.walk(statement):
-        if id(node) in evaluated_in_enclosing_scope:
+    # One walk, and it yields each node together with whether that node is a
+    # header region reached back through a definition. The walk stops at an
+    # excluded node, so both passes below agree on what this statement
+    # *reaches*:
+    #
+    #     def other():
+    #         def deep(arg=(cs := helper.make())): pass   # never runs
+    #     with cs:                                       # still the
+    #         assert x != 1                              # suppressor
+    #
+    # `deep` is inside an excluded definition, so the walk stops there and its
+    # header is never collected. Collecting it anyway reported the swallowed
+    # assert as live, which is the damaging direction for a row that never
+    # executes. `ast.walk` cannot do this on its own: it is scope-blind and
+    # descends into the body of every definition it meets.
+    for node, is_header in _walk_with_definition_headers(statement, excluded):
+        if is_header:
             # Reached back through a definition's own header, which
             # `_nested_scope_nodes` excluded wholesale. The store is real and
             # lands in *this* scope, so it is recorded. The test comes first
@@ -1208,6 +1253,89 @@ def _binding_targets_by_name(statement, enclosing=None):
         for name, target in _bound_targets(node):
             bindings.setdefault(name, []).append(target)
     return bindings
+
+
+def _walk_with_definition_headers(statement, excluded):
+    """Walk ``statement``, marking the nodes reached through a definition header.
+
+    ``ast.walk`` is scope-blind: it descends into the body of every nested
+    ``def`` and ``lambda`` it meets. The definition-header pass needs the
+    opposite behaviour, and it cannot reuse ``ast.walk`` and filter afterwards
+    -- a node reached as a *header* is indistinguishable from the same node
+    reached as a *body*.
+
+    Yielding ``(node, is_header)`` keeps the two questions apart. An excluded
+    definition is itself yielded, with ``is_header`` false, so the caller that
+    wants the name it binds in the enclosing scope (``def cs()`` really does
+    rebind ``cs``) still sees it. Its header follows as ``is_header`` true, and
+    its body is not walked at all.
+
+    A definition's body is not uniformly abandoned, though. A ``nonlocal``
+    store is a bind of the *enclosing* cell, and #332 leaves those nodes
+    deliberately out of ``excluded``. So an excluded definition that declares
+    a ``nonlocal`` is descended into, to reach the store that declaration
+    authorises, and one that does not is not. #334 adds the same rule one
+    level down: a *method* reaches the enclosing cell straight through a class
+    body, so a method declaring a ``nonlocal`` is entered even though its own
+    body is excluded.
+
+    A definition buried in another definition's body is entered under neither
+    rule. It is the F2 shape, it never executes, and its header is not
+    evaluated -- which is exactly what the walk stopping at the exclusion
+    gives.
+
+    Each descent skips the header nodes, because a header is emitted above and
+    re-collecting it here would recurse: ``_definition_header_nodes`` reaches
+    a lambda default through ``_scope_free_nodes``, which is this same
+    traversal.
+    """
+    out = []
+    stack = [statement]
+    while stack:
+        node = stack.pop()
+        if id(node) not in excluded:
+            out.append((node, False))
+            stack.extend(ast.iter_child_nodes(node))
+            continue
+        out.append((node, False))
+        if isinstance(node, ast.ClassDef):
+            # A class body is a scope, but #334 showed it is not a barrier to
+            # a method's `nonlocal`, which reaches the enclosing cell straight
+            # through it. The class's own stores stay excluded, so the walk
+            # continues only into a method that declares a `nonlocal` and is
+            # reachable.
+            stack.extend(
+                child
+                for child in ast.iter_child_nodes(node)
+                if id(child) not in excluded or _declares_nonlocal(child)
+            )
+            continue
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        header = _definition_header_nodes(node)
+        out.extend((inner, True) for inner in header)
+        if not _declares_nonlocal(node):
+            continue
+        if node is not statement and not _def_is_reachable(statement, node):
+            continue
+        skip = frozenset(id(inner) for inner in header)
+        stack.extend(
+            child for child in ast.iter_child_nodes(node) if not _is_within_any(child, skip)
+        )
+    return out
+
+
+def _is_within_any(node, ids):
+    """Is ``node``, or anything under it, one of the node ids in ``ids``?"""
+    return any(id(inner) in ids for inner in ast.walk(node))
+
+
+def _declares_nonlocal(node):
+    """Does this function body declare any name ``nonlocal``?"""
+    nonlocal_node = getattr(ast, "Nonlocal", None)
+    if nonlocal_node is None:
+        return False
+    return any(isinstance(inner, nonlocal_node) for inner in ast.walk(node))
 
 
 def _definition_header_nodes(definition):
@@ -1996,6 +2124,38 @@ def _is_uncalled_nested_def(function, node):
         ):
             return False
     return True
+
+
+def _def_is_reachable(function, node):
+    """Can this nested definition's body ever run, as far as this file knows?
+
+    ``_is_uncalled_nested_def`` answers this for an assert, and its rule is
+    deliberately one-sided: treat a nested ``def`` as live whenever its *name*
+    is loaded. That is right for an assert, where a missed defeat only leaves
+    one pinned site defensible-but-weak.
+
+    A rebind needs the same question asked the other way round, because here a
+    false "reachable" retires a carried suppressor the interpreter keeps. So
+    the check is widened to the two spellings a call can take:
+
+    * ``inner()`` and ``inner`` -- the name is loaded;
+    * ``C().method()`` -- the name is only ever an *attribute*, and the
+      receiver is built on the spot. #334 is exactly this shape, and a
+      name-only rule reads that method as uncalled and drops its ``nonlocal``
+      store, which broke the row it had just added.
+
+    Anything else -- a definition nothing names in any form -- is still
+    treated as unreachable, which is the case this rule exists for.
+    """
+    if not _is_uncalled_nested_def(function, node):
+        return True
+    name = node.name
+    for candidate in ast.walk(function):
+        if candidate is node:
+            continue
+        if isinstance(candidate, ast.Attribute) and candidate.attr == name:
+            return True
+    return False
 
 
 #: Operand kinds whose truthiness can decide an ``or`` on its own. A nested

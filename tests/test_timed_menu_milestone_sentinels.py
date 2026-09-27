@@ -20,6 +20,7 @@ backstop that keeps them from being quietly removed.
 """
 
 import ast
+import asyncio
 import inspect
 import textwrap
 
@@ -1959,6 +1960,47 @@ def test_a_definition_binds_its_name_and_retires_the_carried_walrus(label, defin
         # The body is still the function's own scope. Already pinned by
         # `a-body-bind-does-not-escape`; repeated here so this repair cannot
         # quietly widen the walk.
+        # A `lambda` has a body scope and a *header* that is not, exactly as a
+        # `def` does. Its defaults are evaluated where the lambda is written,
+        # so a walrus there binds the enclosing name. #333.
+        (
+            "lambda-positional-default",
+            "def other(a=(lambda b=(cs := helper.make()): b)): pass",
+            True,
+        ),
+        (
+            "lambda-keyword-only-default",
+            "def other(*, a=(lambda *, b=(cs := helper.make()): b)): pass",
+            True,
+        ),
+        # The lambda's *body* is still its own scope, pinned separately so a
+        # repair to one cannot quietly widen the other.
+        ("lambda-body-still-excluded", "def other(a=(lambda: (cs := m()))): pass", False),
+        # A definition buried in another definition's body never runs, so its
+        # header is never evaluated either. Collecting it anyway counted a
+        # rebind that does not happen and reported the swallowed assert as
+        # live -- the damaging direction again, from a region not reached.
+        (
+            "header-in-an-uncalled-def",
+            "def other():\n    def deep(arg=(cs := helper.make())): pass",
+            False,
+        ),
+        # The same shape one level deeper, pinning that the reachability rule
+        # is the *containing* definition and not just the first one.
+        (
+            "header-in-an-uncalled-def-two-deep",
+            ("def other():\n    def deep():\n        def deeper(arg=(cs := helper.make())): pass"),
+            False,
+        ),
+        # Calling the outer function does not help: `cs` in `deep`'s default
+        # binds `other`'s local, not `outer`'s cell, so the enclosing
+        # suppressor survives. Measured rather than assumed -- the first draft
+        # of this row expected `True` and was wrong.
+        (
+            "header-in-a-called-def",
+            "def other():\n    def deep(arg=(cs := helper.make())): pass\nother()",
+            False,
+        ),
         ("body-still-excluded", "def other():\n    cs = helper.make()", False),
     ],
     ids=lambda value: value if isinstance(value, str) else "",
@@ -2000,6 +2042,81 @@ def test_a_definition_header_binds_in_the_enclosing_scope(label, definition, liv
     assert results == [live], (
         f"{label}: the interpreter says this form is "
         f"{'live' if live else 'defeated'}; got {results}"
+    )
+
+
+#: Executing a fixture is the only way to know which direction a row is in, and
+#: two rows in this file were first written with the wrong expectation: a
+#: ``lambda`` annotation spelled as invalid Python, and a called outer function
+#: whose nested default binds the *outer function's* local rather than the cell
+#: under test. Both were caught by running the fixture, not by reading it. These
+#: rows run every header fixture and assert the table agrees with CPython, so a
+#: future row cannot be added on a guess.
+def _runtime_swallows(source, helper):
+    """Run ``source`` and report whether the final assert is swallowed.
+
+    ``helper.make()`` returns a plain ``object()``, so a ``with`` on it raises
+    ``TypeError`` on entry and the assert never runs. Anything else that escapes
+    is a genuine failure of the assert, and a clean return means the original
+    ``contextlib.suppress(AssertionError)`` caught it.
+    """
+    namespace = {}
+    # Running the fixture *is* the check: it is the only way to know which
+    # direction a row is in, and two rows in this table were first written
+    # with the wrong expectation. No input is untrusted here -- the source
+    # is assembled a few lines above, in this file, from literals.
+    exec(compile(source, "<runtime-check>", "exec"), namespace)  # noqa: S102
+    try:
+        asyncio.run(namespace["outer"](1, helper))
+    except TypeError:
+        return False
+    except AssertionError:
+        return False
+    return True
+
+
+class _ObjectHelper:
+    """The fixture's ``helper``: every ``make()`` is an unusable context manager."""
+
+    def make(self):
+        return object()
+
+
+#: Rows the interpreter cannot be asked about. ``def-in-a-default`` iterates
+#: ``x``, which the fixture passes as ``1``, so the fixture dies on
+#: ``TypeError: 'int' object is not iterable`` long before the assert -- a
+#: failure that says nothing about whether the assert is swallowed. The row is
+#: still worth pinning for the checker; it just cannot be ground truth, and
+#: this harness says so rather than reading the unrelated ``TypeError`` as
+#: "live".
+_NOT_EXECUTABLE = frozenset({"def-in-a-default"})
+
+
+@pytest.mark.parametrize(
+    ("label", "definition", "live"),
+    [
+        row
+        for row in test_a_definition_header_binds_in_the_enclosing_scope.pytestmark[0].args[1]
+        if row[0] not in _NOT_EXECUTABLE
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_each_definition_header_row_matches_the_interpreter(label, definition, live):
+    """The header table's own expectations are checked against CPython."""
+    source = (
+        "async def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n" + textwrap.indent(definition, "    ") + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    swallowed = _runtime_swallows(source, _ObjectHelper())
+    assert swallowed is (not live), (
+        f"{label}: the table says this form is "
+        f"{'live' if live else 'defeated'}, but executing it says "
+        f"{'swallowed' if swallowed else 'live'}. The table is the wrong one."
     )
 
 
@@ -2323,6 +2440,58 @@ def test_a_nonlocal_store_of_an_undeclared_name_does_not_reach_the_enclosing_sco
         f"{results}. A store that is not a readable suppressor would also not "
         "show up in `_assigned_suppressors`, so a second bind of the same kind "
         "in a nested body is the shape that actually pins the exclusion."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "call", "live"),
+    [
+        # A `nonlocal` store only reaches the enclosing cell if the function
+        # declaring it is ever *called*. The #332 rows above all await
+        # `inner()`, so they pin the called case; the uncalled case was never
+        # measured, and the repair reported the swallowed assert as live:
+        #
+        #     def inner():
+        #         nonlocal cs
+        #         cs = nullcontext()   # `inner` is never called
+        #     with cs:                 # still the original suppressor
+        #         assert 1 == 2        # swallowed, so defeated
+        ("uncalled", "", False),
+        # ...and the positive control, so the fix cannot be satisfied by
+        # dropping every `nonlocal` exception.
+        ("called", "    await inner()\n", True),
+        # A definition whose name is *loaded* is reachable even when the body
+        # never calls it: a callback handed to the code under test is called
+        # by someone else. `_is_uncalled_nested_def` already encodes that, and
+        # the store really does rebind the cell, so this stays live.
+        ("name-loaded-only", "    _keep = inner\n", True),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_an_uncalled_nested_nonlocal_does_not_reach_the_enclosing_cell(label, call, live):
+    """A ``nonlocal`` store in a function nothing calls rebinds nothing.
+
+    The same reachability rule that keeps a definition header buried in an
+    uncalled function's body out of the binding walk applies here. Both are
+    the same defect in the same direction: a rebind counted in a region that
+    never executes, which retires a carried suppressor the interpreter keeps
+    and reports a swallowed assert as live.
+    """
+    source = (
+        "async def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n"
+        "    async def inner():\n"
+        "        nonlocal cs\n"
+        "        cs = nullcontext()\n" + call + "    with cs:\n"
+        "        assert 1 == 2\n"
+    )
+    results = _verdicts(source)
+    assert results == [live], (
+        f"{label}: the interpreter says this form is "
+        f"{'live' if live else 'defeated'}; got {results}"
     )
 
 
