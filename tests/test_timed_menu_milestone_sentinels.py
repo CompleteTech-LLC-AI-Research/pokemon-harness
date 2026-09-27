@@ -1585,6 +1585,38 @@ WALRUS_REENTRY_SHAPES = (
         ),
         [False, True, True],
     ),
+    # The bind does not have to be written in a `with` header. An assignment
+    # expression is a binding wherever it appears, and the three rows below
+    # are what separates recording a `NamedExpr` from harvesting the walruses
+    # out of `with` headers specifically. Executed, each of these really does
+    # swallow, so reporting them live is the damaging direction.
+    (
+        "a walrus in a plain assignment is re-entered by a later header",
+        ("    y = (cs := suppress(AssertionError))\n    with cs:\n        assert x != 1"),
+        [False],
+    ),
+    (
+        "a walrus in a comprehension is re-entered by a later header",
+        (
+            "    rows = [(cs, v) for v in items if (cs := suppress(AssertionError))]\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        [False],
+    ),
+    # A rebind in the *same* block as the walrus supersedes it. Executed, the
+    # first assert is swallowed by the suppressor that was current when the
+    # `with` was entered, and the second runs under the rebound
+    # `nullcontext` and is live.
+    (
+        "a rebind in the same block supersedes a walrus of the same name",
+        (
+            "    with (cs := suppress(AssertionError)):\n"
+            "        cs = nullcontext()\n"
+            "        assert x != 1\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, True],
+    ),
 )
 
 
@@ -1605,7 +1637,7 @@ def test_a_walrus_bound_alias_reaches_the_headers_that_re_enter_it(label, body, 
     once.
     """
     source = (
-        "def outer(x, flag, helper):\n"
+        "def outer(x, flag, helper, items):\n"
         "    import contextlib\n"
         "    from contextlib import suppress, nullcontext\n" + body + "\n"
     )
