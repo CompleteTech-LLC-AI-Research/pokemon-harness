@@ -843,6 +843,34 @@ def _assigned_suppressors(function, bound):
     """
     # Every binding of every name, tagged with whether that store can compete
     # with another, so that supersession and ambiguity stay told apart.
+    bindings = _store_bindings(function, bound)
+    orders = {
+        id(statement): _binding_order(function, statement)
+        for entries in bindings.values()
+        for statement, _, _ in entries
+    }
+    assigned = {}
+    for index in range(len(function.body)):
+        for name, entries in bindings.items():
+            seen = [entry for entry in entries if orders[id(entry[0])] <= index]
+            if not seen:
+                continue
+            value = _resolve_bindings(seen, bound, orders)
+            if value is not None:
+                assigned.setdefault(index, {})[name] = value
+    return assigned
+
+
+def _store_bindings(function, bound):
+    """Map every name ``function`` binds to its ``(stmt, value, cond)`` stores.
+
+    The raw per-name store lists, before any resolution to a suppressor. Rules
+    that need to know *what value* a name received -- rather than whether that
+    value is a known suppressor -- read this instead, because
+    :func:`_assigned_suppressors` resolves a non-suppressor to ``None`` and the
+    two meanings of that ``None`` are exactly what :func:`_entry_is_dead`
+    needs to tell apart.
+    """
     bindings = {}
     for statement in ast.walk(function):
         targets = []
@@ -949,21 +977,7 @@ def _assigned_suppressors(function, bound):
     # Resolving once for the function would answer that `with` with the *last*
     # store and certify a disarmed assert as load-bearing. So each index
     # resolves from the bindings that precede it alone.
-    orders = {
-        id(statement): _binding_order(function, statement)
-        for entries in bindings.values()
-        for statement, _, _ in entries
-    }
-    assigned = {}
-    for index in range(len(function.body)):
-        for name, entries in bindings.items():
-            seen = [entry for entry in entries if orders[id(entry[0])] <= index]
-            if not seen:
-                continue
-            value = _resolve_bindings(seen, bound, orders)
-            if value is not None:
-                assigned.setdefault(index, {})[name] = value
-    return assigned
+    return bindings
 
 
 def _resolve_bindings(entries, bound, orders):
@@ -1665,6 +1679,215 @@ def _entered_suppressions(node, bound):
     return entered
 
 
+#: Runtime types a store's value is pinned to when the right-hand side is a
+#: literal, and which therefore cannot implement the context manager protocol
+#: whatever the surrounding code intends. Entering one raises `TypeError` on the
+#: header, before the body runs, so an assert in that body is unreachable
+#: (#336).
+NON_CONTEXT_MANAGER_TYPES = frozenset(
+    {"NoneType", "bool", "int", "float", "complex", "str", "bytes", "list", "tuple", "set", "dict"}
+)
+
+
+def _entry_is_dead(expression, by_index, index, function, bound):
+    """Is the value this ``with`` header binds to ``expression`` unenterable?
+
+    #336. Every other rule in this module answers "does this context *suppress*
+    the assertion". This one answers the question those rules silently assume
+    the answer to: is the entered value a context manager *at all*.
+
+    ``with contextlib.nullcontext() as cs:`` binds ``cs`` to ``None``, because
+    an ``as`` target receives ``__enter__``'s return value and ``nullcontext``
+    returns ``None``. A later ``with cs:`` then raises ``TypeError: 'NoneType'
+    object does not support the context manager protocol`` while entering, so
+    the assert under it never runs. The store rules correctly retire the carried
+    suppressor at that rebind; what they cannot see is that the name now holds
+    something that cannot be entered at all, so the assert is unreachable and is
+    reported *enforced*.
+
+    The same holds for the other shapes #336 lists: ``except E as cs:`` unbinds
+    the name when the handler exits, ``*cs, = (...)`` binds a list, and ``del
+    cs`` removes it outright. Each is a store that cannot produce an enterable
+    value.
+
+    Direction: this reports something that looks live as dead. That is the mild
+    direction -- the opposite of certifying a swallowed assert as load-bearing
+    -- and it is why the rule is scoped as tightly as it is. It fires only when
+    the rebinding statement is read directly in the function body (so it really
+    does run) and the value is a *literal* whose type is fixed by the syntax. A
+    call, an attribute, a parameter, or any store the rule cannot read is left
+    alone, because a wrong answer here drops a real pinned assert.
+    """
+    if not isinstance(expression, ast.Name):
+        return False
+    name = expression.id
+    stores = _stores_of(name, by_index, index, function)
+    if stores is None:
+        return False
+    kinds = set()
+    for statement, value, _conditional in stores:
+        if value is None:
+            # A store with no readable right-hand side. Which store it is
+            # decides the answer, and each of these cannot leave a usable
+            # context manager bound to the name:
+            #
+            #   `with nullcontext() as cs:`  -> binds `__enter__`'s return
+            #                                   value, i.e. `None`
+            #   `del cs`                     -> unbinds the name outright
+            #   `except E as cs:`            -> unbinds it when the handler
+            #                                   exits
+            #
+            # A loop target is NOT one of these. It binds the next element, and
+            # the rule cannot read that element without running the loop, so
+            # it is declined below rather than assumed.
+            #
+            # A `match` capture is excluded outright. It is recorded with no
+            # value because the capture is not reachable from a target list at
+            # all, but the name it binds is whatever was *matched* -- arbitrary,
+            # and very often a real context manager. Reading its missing value
+            # as `None` would claim the later `with cs:` always raises, when the
+            # shipped tests pin the opposite (a capture retires the carried
+            # suppressor and leaves the assert live). That direction is the
+            # safe one, so the rule declines to touch captures.
+            if isinstance(statement, ast.Match):
+                return False
+            if isinstance(statement, (ast.For, ast.AsyncFor)):
+                # A loop target binds the *next element* of the iterable, and
+                # the rule cannot read that element without running the loop.
+                # `#336` measured `for cs in (contextlib.nullcontext(),):` and
+                # found the second assert genuinely **live** -- the element
+                # is a real context manager. Claiming otherwise would drop a
+                # live assert, so a loop target is declined outright rather
+                # than guessed at. This is a *narrower* rule than the issue
+                # filed, and deliberately so: the shipped tests below execute
+                # every row to pin the direction.
+                return False
+            kinds.add("NoneType")
+            continue
+        if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
+            # A call is a call: `nullcontext()` returns a real context manager
+            # and must not be read as a non-manager here.
+            return False
+        if _binds_element_of(statement, name):
+            # `cs, other = (contextlib.nullcontext(), 2)` binds `cs` to the
+            # tuple's *first element*, not to the tuple. Reading the right-hand
+            # side's type would call the name a tuple and report a live assert
+            # as unreachable -- the damaging direction, and exactly the error
+            # `#336` was filed to prevent. The element's type is not readable
+            # from the container's syntax, so a destructuring target is
+            # declined. (Measured: `cs, other = (contextlib.nullcontext(), 2)`
+            # leaves the second assert genuinely **live**.)
+            return False
+        kind = _literal_runtime_type(value)
+        if kind is None:
+            return False
+        kinds.add(kind)
+    kinds.discard("element")
+    return bool(kinds) and kinds <= NON_CONTEXT_MANAGER_TYPES
+
+
+def _literal_runtime_type(value):
+    """The runtime type name a literal expression is pinned to, or ``None``."""
+    if isinstance(value, ast.Starred):
+        # `cs, *rest = ...` and `*cs, = ...` build a list. `#336` measured
+        # `*cs, = [...]`: the name is bound to a list, entering it raises
+        # `TypeError`, so the assert below is unreachable. A starred target is
+        # recorded as an `ast.Starred` inside the target list, so the runtime
+        # type of the *name* is the list the unpacking produces.
+        return "list"
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        return {ast.List: "list", ast.Tuple: "tuple", ast.Set: "set"}[type(value)]
+    if isinstance(value, ast.Dict):
+        return "dict"
+    if isinstance(value, ast.Constant):
+        return type(value.value).__name__
+    return None
+
+
+def _binds_element_of(statement, name):
+    """Does this store bind ``name`` to an *element* of the right-hand side?
+
+    ``cs, other = (a, b)`` and ``[cs] = [a]`` give the name one element of the
+    right-hand side; only a bare ``cs = ...`` target gives it the whole value.
+    """
+    if not isinstance(statement, ast.Assign):
+        return False
+    return any(
+        isinstance(target, (ast.Tuple, ast.List)) and name in _store_target_names([target])
+        for target in statement.targets
+    )
+
+
+def _stores_of(name, by_index, index, function):
+    """The ``(statement, value, conditional)`` stores binding ``name`` here.
+
+    Only the index that *is* the queried ``with`` is consulted, so a later
+    store cannot be read backwards into an earlier header. Returns ``None``
+    when the name is not bound at this point at all, which is a `NameError` on
+    entry and a different defect (#334's family), not this one.
+    """
+    orders = by_index["orders"]
+    entries = [
+        entry for entry in by_index["bindings"].get(name, ()) if orders[id(entry[0])] <= index
+    ]
+    if not entries:
+        return None
+    # Only an unconditional store settles the value. A store nested in a block
+    # may not have run, so a literal type read off one of those would claim a
+    # certainty the source does not have. An `except ... as cs:` handler is
+    # marked conditional for exactly that reason, yet it is still decidable
+    # here: whether the handler runs or not, the name it binds cannot hold a
+    # usable context manager afterwards -- if the handler ran, CPython deleted
+    # the name when the handler exited, and if it did not run, the previous
+    # binding is still in force and is settled by an unconditional store.
+    decidable = [
+        entry for entry in entries if not entry[2] or isinstance(entry[0], ast.ExceptHandler)
+    ]
+    latest = max((orders[id(entry[0])] for entry in decidable), default=None)
+    if latest is None:
+        return None
+    return [entry for entry in decidable if orders[id(entry[0])] == latest]
+
+
+def _entered_name_is_dead(header, function, bound):
+    """Does this ``with`` enter a name whose value cannot be a context manager?
+
+    Locates the ``with`` among the function's top-level statements, rebuilds the
+    per-index store map exactly as :func:`_aliased_suppressions` does, and asks
+    :func:`_entry_is_dead` about each bare-``Name`` item in the header. The map
+    is rebuilt per call rather than cached because it is cheap next to the AST
+    walk that produced it, and a cache here would have to be keyed on the
+    function object as well as the index.
+
+    An ``async with`` is excluded for the same reason
+    :func:`_is_suppressing_with` excludes it: the async protocol is a different
+    question, and every async entry already raises on a sync-shaped value, so
+    the rule would fire on shapes it cannot reason about.
+    """
+    if isinstance(header, ast.AsyncWith):
+        return False
+    # `_assigned_suppressors` resolves each name to a *suppressor* or `None`,
+    # which is exactly the information this rule needs discarded: the value
+    # `None` here means "not a known suppressor", not "the value is None". So
+    # the raw per-name store lists and their orderings are rebuilt instead.
+    bindings = _store_bindings(function, bound)
+    orders = {
+        id(statement): _binding_order(function, statement)
+        for entries in bindings.values()
+        for statement, _, _ in entries
+    }
+    by_index = {"bindings": bindings, "orders": orders}
+    for index, statement in enumerate(function.body):
+        for candidate in ast.walk(statement):
+            if candidate is not header:
+                continue
+            return any(
+                _entry_is_dead(item.context_expr, by_index, index, function, bound)
+                for item in header.items
+            )
+    return False
+
+
 def _is_suppressing_with(node, bound, function=None):
     """Is this ``with`` a suppression context that can eat an assertion failure?"""
     if isinstance(node, ast.AsyncWith):
@@ -2188,6 +2411,8 @@ def _is_enforced(function, target, tree=None):
             if _is_suppressing_with(ancestor, bound, function):
                 return False
             if _is_user_defined_swallowing_with(ancestor, bound, function, owning):
+                return False
+            if function is not None and _entered_name_is_dead(ancestor, function, bound):
                 return False
         elif (
             isinstance(ancestor, (ast.If, ast.While))
