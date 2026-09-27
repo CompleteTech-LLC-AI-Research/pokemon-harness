@@ -1617,6 +1617,87 @@ WALRUS_REENTRY_SHAPES = (
         ),
         [False, True],
     ),
+    # #324 criterion 4, and the three rows that actually pin
+    # `_walrus_is_conditional`.
+    #
+    # Every row above reaches the re-entry through a walrus in a *top-level*
+    # `with` header, so a walrus's conditionality never has to be decided: it
+    # is unconditional on every path, and the two competing walruses in the
+    # supersession row are settled by source order before ambiguity is ever
+    # consulted. The mutation "force every walrus unconditional" therefore
+    # leaves this whole table green.
+    #
+    # These three do decide it. Here the walrus is under an `if`, so it binds
+    # `cs` on some paths only -- exactly the case
+    # `_walrus_skipped_by_a_branch` exists to recognise. The competing
+    # `cs = nullcontext()` is under its own `if`, so it too is conditional.
+    # Two conditional bindings of one name cannot be ordered: on the `flag`
+    # path the `nullcontext` wins and the assert is live, and on the `not
+    # flag` path the suppressor is still bound. Which one is in force is
+    # undecidable, so the name is ambiguous and the safe reading is "a
+    # suppressor may be in force" -- the middle assert is reported defeated.
+    #
+    # Read the mutation the other way and it is the whole point: force the
+    # walrus unconditional and source order picks the `nullcontext` as the
+    # winner, so the live assert flips to enforced. That is the damaging
+    # direction -- a real contract dropped from the sentinel's view -- and it
+    # is the defect #324 is filed about, reached by a different road.
+    #
+    # Executed with `flag=True` the middle assert raises `AssertionError`
+    # (nullcontext does not suppress) while the first is swallowed; with
+    # `flag=False` neither `if` body runs and the assert does not execute at
+    # all. Both were run, unmodified, before these rows were written.
+    (
+        "a conditional walrus does not outrank a later conditional store",
+        (
+            "    if flag:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    if flag:\n"
+            "        cs = nullcontext()\n"
+            "        assert x != 2\n"
+            "    with cs:\n"
+            "        assert x != 3"
+        ),
+        [True, False, False],
+    ),
+    # ... the same with the conditional walrus written as a loop rather than
+    # an `if`. `for` is in `_walrus_skipped_by_a_branch`'s set for the same
+    # reason `if` is, and a rule that recognised only one of the two would be
+    # half a rule.
+    (
+        "a walrus under a loop does not outrank a later conditional store",
+        (
+            "    for item in items:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    if flag:\n"
+            "        cs = nullcontext()\n"
+            "        assert x != 2\n"
+            "    with cs:\n"
+            "        assert x != 3"
+        ),
+        [True, False, False],
+    ),
+    # ... and under a `try`. The three blocks are the complete set that can
+    # skip a walrus, so all three are pinned: dropping any one of them from
+    # `_walrus_skipped_by_a_branch` turns exactly the matching row red.
+    (
+        "a walrus under a try does not outrank a later conditional store",
+        (
+            "    try:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    if flag:\n"
+            "        cs = nullcontext()\n"
+            "        assert x != 2\n"
+            "    with cs:\n"
+            "        assert x != 3"
+        ),
+        [True, False, False],
+    ),
 )
 
 
