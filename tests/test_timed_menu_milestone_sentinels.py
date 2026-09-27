@@ -674,6 +674,16 @@ RESIDUAL_DEFEAT_SHAPES = (
         "    with pytest.raises((TypeError, AssertionError)):\n        assert x != 1",
         False,
     ),
+    # `match=` is undecidable, not loud: whether the block ends green depends
+    # on the assertion's own message at runtime. Measured with match="", ".*"
+    # (both green) and match="1 == 2" (pytest re-raises). The conservative
+    # reading is taken -- an assert that is *sometimes* unenforceable is not a
+    # contract that can be relied on.
+    (
+        "pytest.raises AssertionError with a matching regex",
+        "    with pytest.raises(AssertionError, match=''):\n        assert x != 1",
+        False,
+    ),
     # The alias form. This is the *silent* one: entering the object directly
     # swallows, whereas the __enter__ dunder returns None and raises TypeError.
     (
@@ -808,6 +818,26 @@ RESIDUAL_DEFEAT_SHAPES = (
         "    with pytest.raises(BaseExceptionGroup):\n        assert x != 1",
         True,
     ),
+    # With no expected type at all, pytest raises ValueError while building the
+    # context object -- before the body runs. No assert is evaluated, so this is
+    # not a silent defeat and must not be counted as one.
+    (
+        "pytest.raises with no expected type",
+        "    with pytest.raises():\n        assert x != 1",
+        True,
+    ),
+    (
+        "pytest.raises with only a regex",
+        "    with pytest.raises(match='nomatch'):\n        assert x != 1",
+        True,
+    ),
+    # `contextlib.suppress()` with no argument is legal and suppresses
+    # everything, unlike pytest.raises()'s empty call above.
+    (
+        "suppress with no exception type",
+        "    with contextlib.suppress():\n        assert x != 1",
+        False,
+    ),
     # An unrelated enter_context on the same stack is not a suppression.
     (
         "unrelated enter_context",
@@ -899,3 +929,201 @@ def test_the_residual_defeats_of_287_are_rejected(label, body, live):
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
     )
+
+
+#: #308 named two escapes and a third that only appeared once #309 landed. Each
+#: row is one *behavioural* claim about the interpreter, established by running
+#: the shape rather than by reading the checker: a suppressor bound inline in the
+#: header really does swallow the failure, so the assert is dead.
+WALRUS_SHAPES = (
+    # The binding and the entry are the same node, so nothing that tracks
+    # `ast.Assign` ever sees the name and the header holds no bare `Name` to
+    # resolve. Executed, the failure is swallowed.
+    (
+        "walrus binds and enters a suppressor",
+        "    with (cs := contextlib.suppress(AssertionError)):\n        assert x != 1",
+        False,
+    ),
+    (
+        "walrus binds a broad suppressor",
+        "    with (cs := contextlib.suppress(Exception)):\n        assert x != 1",
+        False,
+    ),
+    (
+        "walrus binds an assertion-capturing context",
+        "    with (cs := pytest.raises(AssertionError)):\n        assert x != 1",
+        False,
+    ),
+    (
+        "walrus binds a suppressor by from-import",
+        "    with (cs := suppress(AssertionError)):\n        assert x != 1",
+        False,
+    ),
+    # --- controls -----------------------------------------------------------
+    # A zero-argument call reads as the unreadable case `BaseException` in
+    # `_suppression_names`, and `BaseException` *does* catch `AssertionError`.
+    # Classifying every walrus as a suppression therefore reports these two live
+    # context managers as defeats, which is why the rule is gated on
+    # `_is_suppression_call` rather than applied to any inline binding.
+    (
+        "walrus of a zero-argument context manager",
+        "    with (cs := nullcontext()):\n        assert x != 1",
+        True,
+    ),
+    (
+        "walrus of a zero-argument helper",
+        "    with (cs := helper.make()):\n        assert x != 1",
+        True,
+    ),
+    (
+        "walrus of an unrelated error",
+        "    with (cs := contextlib.suppress(ValueError)):\n        assert x != 1",
+        True,
+    ),
+    # A walrus whose value is not even a call cannot be a suppressor.
+    ("walrus of a non-call value", "    with (cs := 1):\n        assert x != 1", True),
+    # A bare name in the header is the already-closed alias case, not a walrus.
+    ("bare name in the header", "    with cs:\n        assert x != 1", True),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    WALRUS_SHAPES,
+    ids=[shape[0] for shape in WALRUS_SHAPES],
+)
+def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, live):
+    """A suppressor bound *in* the header is the same defeat, still missed.
+
+    ``cs = suppress(...)`` and ``with (cs := suppress(...)):`` differ only in
+    where the binding is written, and both swallow the assertion failure. The
+    gap was real and silent: on master this shape reported a live defeat as
+    *enforced*, certifying a disarmed contract as load-bearing.
+    """
+    source = (
+        "def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
+
+
+#: #308 criterion 1 asks that branch order never decide the verdict. Asserting a
+#: single source order would not catch a rule that resolved by order and
+#: happened to be right for that order, so both are pinned and required to
+#: agree.
+DISAGREEING_BRANCH_ORDERS = (
+    (
+        "import in the if branch",
+        (
+            "    if flag:\n"
+            "        from contextlib import suppress\n"
+            "    else:\n"
+            "        suppress = contextlib.suppress\n"
+            "    with suppress(AssertionError):\n"
+            "        assert x != 1"
+        ),
+    ),
+    (
+        "import in the else branch",
+        (
+            "    if flag:\n"
+            "        suppress = contextlib.suppress\n"
+            "    else:\n"
+            "        from contextlib import suppress\n"
+            "    with suppress(AssertionError):\n"
+            "        assert x != 1"
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    DISAGREEING_BRANCH_ORDERS,
+    ids=[shape[0] for shape in DISAGREEING_BRANCH_ORDERS],
+)
+def test_branch_order_never_decides_the_alias_verdict(label, body):
+    """A name bound to different targets in two branches must be unreadable.
+
+    ``_own_imports`` collects bindings with a LIFO ``stack.pop()``, so with two
+    branches binding the same alias the surviving binding depends on source
+    order and one of the two orders reaches the wrong verdict. Treating the
+    ambiguous name as suppressing is what makes the answer order-independent --
+    and over-reporting is the safe direction, since the alternative is
+    certifying a disarmed assert as load-bearing.
+    """
+    source = "def outer(x, flag):\n    import contextlib\n" + body + "\n"
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert not any(results), f"{label}: a swallowed assert was reported enforced, got {results}"
+
+
+def test_a_name_bound_to_different_suppressors_is_ambiguous_not_ordered():
+    """Two readable suppressors under one name cannot be resolved by order.
+
+    A single merged dict would keep whichever binding was collected last and
+    report a verdict for one path only. The alias is therefore recorded as
+    ambiguous, which is read as suppressing -- the over-reporting direction
+    #308 criterion 1 accepts.
+    """
+    source = (
+        "def outer(x, flag):\n"
+        "    import contextlib\n"
+        "    if flag:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(ValueError)\n"
+        "    with cs:\n"
+        "        assert x != 1"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert not any(results), f"ambiguous alias resolved by order, got {results}"
+
+
+def test_plain_assignment_aliasing_needs_no_import_node():
+    """``cs = contextlib.suppress(...)`` is an alias with no import to resolve.
+
+    #308 criterion 2. The assignment produces no ``Import``/``ImportFrom`` node,
+    so a resolver that only reads imports has nothing to match and the swallowed
+    assert reads as enforced. The control proves the rule keys on the
+    right-hand side rather than on the name.
+    """
+    defeat = (
+        "def outer(x):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1"
+    )
+    control = (
+        "def outer(x):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.json\n"
+        "    with cs:\n"
+        "        assert x != 1"
+    )
+    for label, source, expected in (
+        ("suppressor alias", defeat, False),
+        ("non-suppressor", control, True),
+    ):
+        tree = ast.parse(source)
+        function = tree.body[0]
+        asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+        results = [_is_enforced(function, node, tree) for node in asserts]
+        assert all(results) is expected, f"{label}: expected {expected}, got {results}"

@@ -561,6 +561,22 @@ def _suppression_names(call):
 
     An element that is not a plain name is still reported as universal, so an
     argument the check cannot read is never assumed to be harmless.
+
+    The *no positional argument at all* case is the one place where the two
+    families must be told apart, and the difference is measured rather than
+    assumed:
+
+    * ``contextlib.suppress()`` is legal and suppresses *everything*, so it is
+      a genuine defeat and the universal reading is right.
+    * ``pytest.raises()`` with no expected type raises ``ValueError: You must
+      specify at least one parameter`` while the context object is being
+      constructed -- before the body is entered at all. The test fails loudly
+      and no assert is ever evaluated, so calling it a defeat would report a
+      live contract as dead.
+
+    ``pytest.raises(match=...)`` stays universal on purpose; see
+    ``_raises_without_an_expected_type`` for why that case is undecidable
+    rather than loud.
     """
     names = []
     for argument in call.args:
@@ -753,10 +769,28 @@ def _aliased_suppressions(node, function, bound):
     name from an outer scope is deliberately not followed: assuming an
     arbitrary call returns a suppressor would report live asserts as dead on
     every context manager this check cannot trace.
+
+    An assignment expression in the header is the same defeat with the binding
+    folded into the ``with`` itself:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            assert 1 == 2
+
+    A ``NamedExpr`` is not an ``ast.Assign``, so ``_assigned_suppressors`` never
+    records it, and the header no longer holds a bare ``Name`` for the
+    resolution rule to read -- the suppressor sits in a node shape nothing else
+    inspects. Executed, the assertion failure really is swallowed, so this is
+    the damaging direction: a live defeat reported as enforced.
+
+    The right-hand side is still gated on :func:`_is_suppression_call`, and that
+    guard is load-bearing rather than a redundancy. A zero-argument call such as
+    ``nullcontext()`` or ``helper.make()`` reads as the unreadable case
+    ``BaseException`` in :func:`_suppression_names`, and ``BaseException`` *does*
+    catch ``AssertionError`` -- so appending every walrus unconditionally would
+    report both of those live context managers as defeats. The mutation matrix
+    in the sentinel suite pins that difference.
     """
     by_index = _assigned_suppressors(function, bound)
-    if not by_index:
-        return []
     # A name is bound only by the assignments that run *before* the `with`.
     # Walking `function.body` in order and carrying the bindings forward keeps
     # that ordering explicit; a merged view of every assignment would claim a
@@ -770,6 +804,20 @@ def _aliased_suppressions(node, function, bound):
                 continue
             for item in header.items:
                 expression = item.context_expr
+                # `with (cs := contextlib.suppress(AssertionError)):` binds the
+                # name and enters it in one node, so the alias is classified
+                # from its right-hand side rather than from `bound_so_far`. The
+                # right-hand side need not be a call at all -- `with (cs := 1):`
+                # is legal and fails loudly on entry with `TypeError` -- so the
+                # node type is checked before the suppressor predicate, which
+                # reads `call.func` and would otherwise raise.
+                walrus = expression if isinstance(expression, ast.NamedExpr) else None
+                if (
+                    walrus is not None
+                    and isinstance(walrus.value, ast.Call)
+                    and _is_suppression_call(walrus.value, bound)
+                ):
+                    entered.append(walrus.value)
                 if isinstance(expression, ast.Name) and expression.id in bound_so_far:
                     entered.append(bound_so_far[expression.id])
                 if not isinstance(expression, ast.Call) or not isinstance(
@@ -824,12 +872,39 @@ def _unreadable_suppressor(call, bound):
 
 def _is_suppression_call(call, bound):
     """Is this call a suppression context that can eat an assertion failure?"""
-    if any(
-        _resolves_to(call.func, dotted, bound)
-        for dotted in (*SUPPRESSING_CONTEXTS, *ASSERTION_CAPTURING_CONTEXTS)
-    ):
+    if any(_resolves_to(call.func, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
         return True
+    if any(_resolves_to(call.func, dotted, bound) for dotted in ASSERTION_CAPTURING_CONTEXTS):
+        return not _raises_without_an_expected_type(call)
     return _unreadable_suppressor(call, bound)
+
+
+def _raises_without_an_expected_type(call):
+    """Is this ``pytest.raises`` call one that cannot leave the test green?
+
+    ``pytest.raises`` requires the expected exception type to be given
+    positionally. With *no* argument at all it raises ``ValueError: You must
+    specify at least one parameter`` while building the context object, before
+    the body is ever entered -- so no assert is evaluated and the test fails
+    loudly for an unrelated reason. That case is decidable and excluded.
+
+    ``match=`` is deliberately *not* excluded, and the reason is that it is
+    undecidable rather than loud. Whether the block ends green depends on the
+    assertion's own message at runtime: with ``pytest.raises(AssertionError,
+    match="1 == 2")`` the empty message of a bare ``assert`` fails the regex and
+    pytest re-raises -- loud -- but with ``match=""`` or ``match=".*"`` the
+    failure is caught, matches, and the test passes green. Measured across
+    all three. A static check cannot know which, so the two defensible answers
+    are "always a defeat" and "never a defeat", and this picks the first: an
+    assert that is *sometimes* unenforceable is not a contract that can be
+    relied on, whereas calling it enforced would certify a shape that has
+    already been measured to go green.
+
+    The no-argument case is different in kind: there the failure is raised
+    before the body runs, so the assert is never evaluated and *no* runtime
+    value can rescue it.
+    """
+    return not call.args
 
 
 def _entered_suppressions(node, bound):
