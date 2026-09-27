@@ -1006,6 +1006,34 @@ WALRUS_SHAPES = (
         "    with (cs := suppress(AssertionError)):\n        assert x != 1",
         False,
     ),
+    # A walrus binds its name for the rest of the enclosing scope, not just for
+    # its own header, so a *later* `with cs:` re-enters the same suppressor.
+    # Both asserts are really swallowed. These rows are the regression test for
+    # the defect found in review of `b712beb`: the binding was recorded only for
+    # headers enclosing the queried assert, so the second header never saw it and
+    # the second assert was certified load-bearing -- a defeated assert reported
+    # live, which is the damaging direction.
+    (
+        "walrus binding is re-entered by a later header",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "walrus binding re-entered after an intervening statement",
+        (
+            "    with (cs := suppress(AssertionError)):\n"
+            "        assert x != 1\n"
+            "    record.append(1)\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        False,
+    ),
     # --- controls -----------------------------------------------------------
     # A zero-argument call reads as the unreadable case `BaseException` in
     # `_suppression_names`, and `BaseException` *does* catch `AssertionError`.
@@ -1167,7 +1195,13 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     assert asserts, f"{label}: fixture declared no assert to check"
     results = [_is_enforced(function, node, tree) for node in asserts]
-    assert all(results) is live, (
+    # `all()` would collapse a two-assert fixture to its *first* verdict, which
+    # is exactly what the re-entry rows need: their first assert is correctly
+    # dead and their second is the one that was mis-reported live, so
+    # `all(results) is False` would pass even with the second verdict wrong.
+    # Every assert in a row shares one expected verdict, so equality is exact
+    # and a single divergent row cannot hide behind another.
+    assert results == [live] * len(results), (
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
     )

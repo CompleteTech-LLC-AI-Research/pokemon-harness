@@ -929,11 +929,30 @@ def _aliased_suppressions(node, function, bound):
     #
     # That block raises on entry, so it is a live contract.
     bound_so_far = {}
+    walrus_bindings = {}
     entered = []
     for index, statement in enumerate(function.body):
         for header in ast.walk(statement):
             if not isinstance(header, (ast.With, ast.AsyncWith)):
                 continue
+            # A walrus header binds its name for the rest of the scope, so the
+            # binding has to be recorded even when this header does not enclose
+            # the assert being queried. Recording it only for enclosing headers
+            # lost it exactly when a later `with cs:` re-entered the name:
+            #
+            #     with (cs := contextlib.suppress(AssertionError)):
+            #         assert 1 == 2
+            #     with cs:                  # `cs` is still the suppressor
+            #         assert 1 == 2          # really swallowed
+            #
+            # and the second assert was reported live -- a defeated assert
+            # certified as load-bearing.
+            for item in header.items:
+                expression = item.context_expr
+                if isinstance(expression, ast.NamedExpr) and isinstance(
+                    expression.target, ast.Name
+                ):
+                    walrus_bindings[expression.target.id] = expression.value
             if not _encloses(header, node):
                 # A `with` that does not enclose the queried assert says
                 # nothing about the context that assert runs under. Collecting
@@ -981,6 +1000,17 @@ def _aliased_suppressions(node, function, bound):
         # still resolve `cs` to the suppressor at index 2, reporting a live
         # assert as swallowed.
         bound_so_far = dict(by_index.get(index, {}))
+        # A walrus binds its name for the rest of the enclosing scope, so the
+        # binding is merged in and *kept*, rather than folded into this
+        # statement's `by_index` entry and then cleared. Clearing it at the end
+        # of the walrus's own statement loses it before any later header can
+        # read it, which is what left a re-entering `with cs:` reported live.
+        #
+        # A store in *this* statement still wins: `by_index` is applied first,
+        # so only a name the statement did not rebind keeps its walrus value.
+        for name, value in walrus_bindings.items():
+            if name not in by_index.get(index, {}):
+                bound_so_far[name] = value
     return entered
 
 
