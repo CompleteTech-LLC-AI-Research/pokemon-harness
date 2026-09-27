@@ -978,6 +978,7 @@ def test_the_residual_defeats_of_287_are_rejected(label, body, live):
     )
 
 
+<<<<<<< b9988dc3
 #: #308 named two escapes and a third that only appeared once #309 landed. Each
 #: row is one *behavioural* claim about the interpreter, established by running
 #: the shape rather than by reading the checker: a suppressor bound inline in the
@@ -1031,11 +1032,116 @@ WALRUS_SHAPES = (
     ("walrus of a non-call value", "    with (cs := 1):\n        assert x != 1", True),
     # A bare name in the header is the already-closed alias case, not a walrus.
     ("bare name in the header", "    with cs:\n        assert x != 1", True),
+=======
+#: #310: the ``.__enter__()`` dunder spelling, which shipped in #309 with no
+#: test at all. Reverting the rule left the suite green, so these rows exist
+#: first and foremost to make that impossible.
+#:
+#: The rule had a second defect, found by running it: it read the exception
+#: types from the *``__enter__()``* call's arguments instead of the suppressor's.
+#: The outer call has none, so every dunder spelling fell back to the unreadable
+#: case ``BaseException`` -- which catches ``AssertionError`` -- and reported
+#: ``suppress(ValueError).__enter__()`` as a defeat of the assert. The
+#: ``ValueError``/``RuntimeError`` rows below are that defect's regression test.
+#:
+#: The loud-vs-silent question is settled by measurement, not taste: *any*
+#: ``X.__enter__()`` returns ``None``, so the ``with`` body never runs and
+#: ``TypeError`` is raised. The dunder form is therefore never a silent defeat.
+#: The rule still flags it, and that is a deliberate conservative choice --
+#: the shape is broken, and reporting a broken contract as not-load-bearing is
+#: the safe direction. It is recorded here so the choice is visible rather
+#: than implied.
+DUNDER_SPELLING_SHAPES = (
+    (
+        "qualified suppressor dunder",
+        "    with contextlib.suppress(AssertionError).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "bare suppressor dunder",
+        "    with suppress(AssertionError).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over Exception",
+        "    with suppress(Exception).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over BaseException",
+        "    with suppress(BaseException).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over a tuple naming AssertionError",
+        (
+            "    with contextlib.suppress((ValueError, AssertionError)).__enter__():\n"
+            "        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "aliased suppressor dunder",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with cs.__enter__():\n        assert x != 1"
+        ),
+        False,
+    ),
+    # --- controls: the exception must actually catch AssertionError ---
+    # These are the rows that were wrong before the argument-reading fix. Each
+    # suppresses nothing relevant, so the assert is live and must stay enforced.
+    (
+        "suppressor dunder over ValueError",
+        "    with contextlib.suppress(ValueError).__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "suppressor dunder over RuntimeError",
+        "    with contextlib.suppress(RuntimeError).__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "aliased suppressor dunder over ValueError",
+        (
+            "    cs = contextlib.suppress(ValueError)\n"
+            "    with cs.__enter__():\n        assert x != 1"
+        ),
+        True,
+    ),
+    # A different dunder is not this spelling, and an unrelated object that
+    # happens to define `__enter__` is never a suppressor.
+    (
+        "unrelated object dunder",
+        "    with helper.make().__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "nullcontext dunder",
+        "    with contextlib.nullcontext().__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "a different dunder on a real suppressor",
+        "    with contextlib.suppress(AssertionError).__exit__():\n        assert x != 1",
+        True,
+    ),
+    # `suppress()` with empty parens suppresses nothing, and the assert does
+    # fail at runtime. The shared "unreadable argument" fallback reports it as
+    # unenforced anyway -- stricter than runtime, and deliberately the same in
+    # the plain and dunder spellings.
+    (
+        "empty-parens suppressor dunder",
+        "    with contextlib.suppress().__enter__():\n        assert x != 1",
+        False,
+    ),
+>>>>>>> 4ab6f1b7
 )
 
 
 @pytest.mark.parametrize(
     ("label", "body", "live"),
+<<<<<<< b9988dc3
     WALRUS_SHAPES,
     ids=[shape[0] for shape in WALRUS_SHAPES],
 )
@@ -1055,6 +1161,38 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
     )
     tree = ast.parse(source)
     function = tree.body[0]
+=======
+    DUNDER_SPELLING_SHAPES,
+    ids=[shape[0] for shape in DUNDER_SPELLING_SHAPES],
+)
+def test_the_dunder_spelling_is_covered_and_scoped_to_real_suppression(label, body, live):
+    """#310: the dunder rule must be exercised, and must key on the exception.
+
+    The rule shipped untested, so it could be deleted without any test going
+    red. These rows fix that, and they also pin the scope: a suppressor dunder
+    over an exception that does *not* catch ``AssertionError`` is a live
+    contract, and flagging it would drop a real assert from the sentinel's
+    view.
+    """
+    imports = (
+        "    import contextlib\n"
+        "    import pytest\n"
+        "    from contextlib import suppress\n"
+        "    from contextlib import ExitStack\n"
+    )
+    source = "def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    for statement in outer.body:
+        if (
+            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement is not outer
+        ):
+            function = statement
+            break
+    else:
+        function = outer
+>>>>>>> 4ab6f1b7
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     assert asserts, f"{label}: fixture declared no assert to check"
     results = [_is_enforced(function, node, tree) for node in asserts]
@@ -1062,6 +1200,7 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
     )
+<<<<<<< b9988dc3
 
 
 #: #308 criterion 1 asks that branch order never decide the verdict. Asserting a
@@ -1174,3 +1313,5 @@ def test_plain_assignment_aliasing_needs_no_import_node():
         asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
         results = [_is_enforced(function, node, tree) for node in asserts]
         assert all(results) is expected, f"{label}: expected {expected}, got {results}"
+=======
+>>>>>>> 4ab6f1b7
