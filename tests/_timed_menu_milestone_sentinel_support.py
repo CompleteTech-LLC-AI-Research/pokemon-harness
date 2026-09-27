@@ -1239,11 +1239,15 @@ def _is_suppressing_with(node, bound, function=None):
             # `cs.__enter__()` raises before the body whatever `cs` holds, so
             # the argument is not what decides this and must not be read.
             return True
-        # A carried walrus value reaches this loop too, and it is not
-        # necessarily a suppression: `with (cs := nullcontext()):` followed by
-        # `with cs:` genuinely raises, so reading it as one would report a live
-        # contract as defeated. `_suppression_names` would also raise on a
-        # non-call. This mirrors the guards on `_entered_suppressions` above.
+        # A carried walrus value reaches this loop too, and nothing upstream
+        # guarantees it is a suppression. `with (cs := nullcontext()):`
+        # followed by `with cs:` genuinely raises, so reading it as one would
+        # report a live contract as defeated, and `_suppression_names` raises on
+        # a non-call. These guards mirror `_entered_suppressions` above. The
+        # recorder already gates on both, so today they are defence in depth
+        # rather than load-bearing -- removing either leaves every verdict
+        # unchanged. They stay so a future recorder change cannot silently
+        # reintroduce the crash.
         if not isinstance(argument, ast.Call):
             continue
         if not _is_suppression_call(argument, bound):
