@@ -262,6 +262,39 @@ def test_every_clock_step_spelling_is_classified(label, arguments, bypasses):
     assert bool(offenders) is bypasses, f"{label}: reported {offenders}"
 
 
+def test_the_production_entry_point_is_what_actually_reports_a_bypass():
+    """The spellings table must not be satisfiable while production is inert.
+
+    The rows above drive ``_bypassing_sites()`` directly, so they stay green if
+    ``count_sites_that_bypass_the_guard()`` stops consulting it altogether.
+    Measured on this head: replacing that function's body with ``return []``
+    left the whole sentinel file green. A table that cannot fail when the
+    production entry point is stubbed out is not pinning the entry point.
+
+    The production function reads the real module through ``_module_tree()``,
+    so the way to pin it is to make it report something. ``_module_tree`` is
+    temporarily pointed at a tree carrying a real bypass: the entry point must
+    report it. Combined with the ``== []`` assertion already in
+    ``test_the_pinned_counts_are_reached_with_the_261_precondition_active``,
+    that pins the entry point from both directions — it must fire, and it must
+    not fire spuriously.
+    """
+    site = next(iter(RETENTION_COUNT_SITES))
+    mutant = ast.parse(f"def {site}():\n    return run_owner(m, p, **{{'clock_step': 0.5}})\n")
+    assert _bypassing_sites(mutant), "sanity: the mutant tree must contain a bypass"
+
+    real_tree = support._module_tree
+    support._module_tree = lambda: mutant
+    try:
+        offenders = count_sites_that_bypass_the_guard()
+    finally:
+        support._module_tree = real_tree
+    assert offenders, (
+        "count_sites_that_bypass_the_guard() did not report a bypass that is "
+        "demonstrably present, so it is not actually reading the tree"
+    )
+
+
 def test_the_pinned_record_subscript_counts_are_still_exact_equalities():
     """The ``record[...]`` retention counts must keep using ``==`` against their literals.
 
