@@ -634,10 +634,12 @@ def _may_bypass(expression):
     decide the result: a leading tautology short-circuits to true and the rest
     never runs.
 
-    A bare ``Compare`` operand does not count as a decision by itself, so
-    ``assert x != 1 and y != 2`` -- the shape the real retention sites use --
-    stays enforced. That distinction is pinned by table rows, because an
-    over-broad rule here would report a live assert as dead.
+    A bare ``Compare`` is therefore a decision under ``or`` but not under
+    ``and``, so ``assert x != 1 and y != 2`` -- the shape the real retention
+    sites use -- stays enforced. A nested ``BoolOp`` is checked for every
+    operand under both operators, because it neutralises a comparison wherever
+    it sits. Both directions are pinned by table rows, because an over-broad
+    rule here would report a live assert as dead.
     """
     if not isinstance(expression, ast.BoolOp):
         return False
@@ -659,8 +661,27 @@ def _may_bypass(expression):
             for position, tautology in enumerate(tautologies)
         )
     if isinstance(expression.op, ast.And):
-        return False
-    if any(isinstance(value, _DECIDING_OPERANDS) for value in operands):
+        # No bare operand can decide an `and`: A is always evaluated, and a
+        # false A already fails the assert. A *nested* BoolOp is the exception,
+        # because it neutralises a comparison wherever it sits. In
+        # `(x != 1 or True) and y != 2` the right-hand comparison is still
+        # evaluated but the left one never is, so the assert is reported even
+        # though part of it is live.
+        return any(_may_bypass(value) for value in operands)
+    # Under `or`, a `Compare` decides the assert just as a bare `True` does. In
+    # `A or B` the assert holds whenever `B` is true, whatever `A` says, so a
+    # right-hand comparison is a decision the contract depends on:
+    #
+    #     assert record["termination"] != "cancelled_or_deadline" \
+    #         or len(record.get("errors", [])) < 99
+    #
+    # `B` is true for every record, so `A` is never evaluated -- the same
+    # neutralisation as `or True`, one comparison and one literal away. This is
+    # deliberately broad: deciding whether `B` is *provably* true would need
+    # the record, and the two errors are not symmetric. Reporting a live assert
+    # as bypassed is a red test somebody investigates, while missing a real
+    # bypass is a silently unenforceable contract.
+    if any(isinstance(value, (*_DECIDING_OPERANDS, ast.Compare)) for value in operands):
         return True
     return any(_may_bypass(value) for value in operands)
 

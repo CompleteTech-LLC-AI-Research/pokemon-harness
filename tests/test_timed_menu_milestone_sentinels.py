@@ -164,7 +164,9 @@ BYPASS_SHAPES = (
     ("nested or", "assert x != 1 or (y or True)", False),
     ("runtime condition", "if flag:\n assert x == 1", True),
     # A lone call cannot short-circuit on its own, so this stays enforced.
-    ("lone call operand", "assert x != 1 or len(y) > 0", True),
+    # A bare call is already a deciding operand, so the `or` rule catches this
+    # one without the new `Compare` clause. The row is kept as a control.
+    ("lone call operand", "assert x != 1 or len(y) > 0", False),
     # Tautological operands decide the `or` whatever the record says, so the
     # comparison beside them is never evaluated. These are the shapes an
     # earlier version of _may_bypass missed by not recursing into Compare.
@@ -186,20 +188,96 @@ BYPASS_SHAPES = (
     ("literal arithmetic", "assert x != 1 or (1 + 1 == 2)", False),
     # Real comparisons that must stay enforced, or the rule would cry wolf and
     # a genuine regression would be waved through as a known shape.
-    ("real count comparison", "assert x != 1 or len(y) == 300", True),
+    #
+    # The four `or` rows below were `True` on master and are now `False`. In
+    # `A or B` the assert holds whenever `B` is true, whatever `A` says, so a
+    # right-hand comparison decides the assert exactly as `or True` does.
+    # Whether `B` is *provably* true cannot be decided without the record, and
+    # the two errors are not symmetric: a false report is a red test somebody
+    # investigates, while a false negative is a silently unenforceable
+    # contract. `x > 5` decides the assert for a real record as surely as `or
+    # True` does. The `and` row below is unaffected and stays `True`.
+    ("real count comparison", "assert x != 1 or len(y) == 300", False),
     ("real count and", "assert len(y) == 300 and len(z) == 271", True),
-    ("real upper bound", "assert x != 1 or len(y) <= 100", True),
-    ("empty-only bound", "assert x != 1 or len(y) < 1", True),
-    ("non-numeric bound", 'assert x != 1 or len(y) > "a"', True),
-    ("subscript left operand", 'assert x != 1 or record["n"] >= 0', True),
-    ("bool is not a number", "assert x != 1 or len(y) >= True", True),
-    ("arithmetic left operand", "assert x != 1 or a - b >= 0", True),
+    ("real upper bound", "assert x != 1 or len(y) <= 100", False),
+    ("empty-only bound", "assert x != 1 or len(y) < 1", False),
+    ("non-numeric bound", 'assert x != 1 or len(y) > "a"', False),
+    ("subscript left operand", 'assert x != 1 or record["n"] >= 0', False),
+    ("bool is not a number", "assert x != 1 or len(y) >= True", False),
+    ("arithmetic left operand", "assert x != 1 or a - b >= 0", False),
     # Reads a Name, so it is not constant-foldable and stays enforced. This is
     # the safe direction: a wrong answer reports a live assert as dead.
-    ("self compare", "assert x != 1 or (x == x)", True),
-    ("runtime value compare", "assert x != 1 or (a == b)", True),
-    ("call compare", "assert x != 1 or f(a) == f(a)", True),
-    ("subscript compare", 'assert x != 1 or record["k"] == record["k"]', True),
+    ("self compare", "assert x != 1 or (x == x)", False),
+    ("runtime value compare", "assert x != 1 or (a == b)", False),
+    ("call compare", "assert x != 1 or f(a) == f(a)", False),
+    ("subscript compare", 'assert x != 1 or record["k"] == record["k"]', False),
+    # The exact shape #294 review reported, spelled out. `errors` is empty on
+    # every successful run, so the right operand is true for the record the
+    # contract is about and the left comparison is never evaluated.
+    (
+        "deadline guard or count bound",
+        (
+            'assert record["termination"] != "cancelled_or_deadline" or '
+            'len(record.get("errors", [])) < 99'
+        ),
+        False,
+    ),
+    # A nested `BoolOp` neutralises a comparison wherever it sits, so these are
+    # reported even where a sibling comparison in the same assert is live.
+    # `x != 1` is never evaluated, which is what the rule exists to catch; the
+    # false report is the safe direction.
+    ("nested bypass left of and", "assert (x != 1 or True) and y != 2", False),
+    ("nested bypass left of and count", "assert (x != 1 or True) and y == 300", False),
+    ("nested tautology left of and", "assert (len(y) >= 0 or True) and z != 1", False),
+    ("nested bypass right of and", "assert y != 2 and (x != 1 or True)", False),
+    ("nested compare right of and", "assert y != 2 and (x != 1 or len(y) == 300)", False),
+    # These two are why the `or` rule scans *every* operand and not only the
+    # right-hand ones. A decider on the left of an `or` skips the whole right
+    # side, including an `and` nested there, and the nested `and` is itself not
+    # a bypass. Scanning the right operand alone would report each of these
+    # enforced, which is the same false negative one level down.
+    ("decider left of or over and", "assert True or (x != 1 and y != 2)", False),
+    (
+        "tautology left of or over and",
+        "assert len(y) >= 0 or (x != 1 and z != 2)",
+        False,
+    ),
+    # Same shape with a *runtime* decider on the left, which the `_is_tautology`
+    # clause cannot see. These three are the rows that fail if the `or` rule is
+    # narrowed to the right-hand operands.
+    ("name left of or over and", "assert flag or (x != 1 and y != 2)", False),
+    ("subscript left of or over and", "assert record['k'] or (x != 1 and y != 2)", False),
+    ("call left of or over and", "assert f(a) or (x != 1 and y != 2)", False),
+    # A tautology on the LEFT of an `or` is caught by the `_is_tautology`
+    # clause rather than the operator rule, because the `or` rule scans the
+    # right-hand operands. These rows keep that clause pinned.
+    ("true left of or", "assert True or x != 1", False),
+    ("literal compare left of or", "assert (1 == 1) or x != 1", False),
+    ("list left of or", "assert [1, 2] or x != 1", False),
+    ("tautology count left of or", "assert len(y) >= 0 or x != 1", False),
+    # The one shape that separates the tautology clause from the `or` rule: a
+    # tautology on the left of an `and` makes the right comparison unreachable.
+    ("true left of and", "assert True and x != 1", False),
+    # The `and` rows carrying a bare decider on the right are the ones that
+    # would fail if the rule regressed to scanning every `and` operand. Each is
+    # live -- the left operand is evaluated first -- and each is spelled from
+    # test_timed_menu_milestones.py rather than invented.
+    (
+        "real errors and isinstance",
+        "assert len(errors) == 1 and isinstance(errors[0], RuntimeError)",
+        True,
+    ),
+    (
+        "queued and all",
+        "assert queued and all(item['in_flight']['input']['status'] == 'queued' for item in queued)",
+        True,
+    ),
+    (
+        "termination and errors",
+        "assert record['termination'] == 'owner_failure' and record['errors']",
+        True,
+    ),
+    ("count and call index", "assert len(calls) == 271 and calls[-1]['call_index'] == 270", True),
     ("runtime condition on count", "if len(y) > 0:\n assert x == 1", True),
 )
 
@@ -217,7 +295,7 @@ def test_the_bypass_check_separates_live_comparisons_from_short_circuited_ones(l
     assert is incapable of failing. The tautology form is the same hole spelled
     differently, and it survived an earlier version of this rule.
     """
-    source = "def probe(x, flag, y, a, b, record):\n" + "\n".join(
+    source = "def probe(x, flag, y, z, a, b, record, errors, calls, queued, item):\n" + "\n".join(
         f"    {line}" for line in body.splitlines()
     )
     function = ast.parse(source).body[0]
