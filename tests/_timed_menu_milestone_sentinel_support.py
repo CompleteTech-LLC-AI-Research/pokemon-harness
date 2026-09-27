@@ -51,6 +51,17 @@ SUPPRESSING_CONTEXTS = ("contextlib.suppress", "asyncio.suppress")
 #: the only spelling that can stand in for one.
 SUPPRESSOR_SPELLINGS = frozenset(dotted.rsplit(".", 1)[-1] for dotted in SUPPRESSING_CONTEXTS)
 
+#: Sentinel recorded for a name bound to *more than one* readable suppressor, so
+#: that which one applies depends on the runtime path taken.
+#:
+#: #308 criterion 1 requires such a name to be treated as unreadable and
+#: reported as a defeat, rather than resolved by source order. It is a distinct
+#: object rather than a boolean so that the ambiguity can be told apart from a
+#: known alias when the exception names are inspected -- an ambiguous binding
+#: suppresses *any* exception, because the rule cannot know which target was
+#: applied.
+AMBIGUOUS_SUPPRESSOR = object()
+
 #: Dotted paths whose call turns a caught exception into a *pass*. This is a
 #: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
 #: load-bearing, so the two sets stay separate rather than being merged:
@@ -550,6 +561,27 @@ def _suppression_names(call):
 
     An element that is not a plain name is still reported as universal, so an
     argument the check cannot read is never assumed to be harmless.
+
+    The *no positional argument at all* case is the one place where the two
+    families must be told apart, and the difference is measured rather than
+    assumed:
+
+    * ``contextlib.suppress()`` is legal but suppresses *nothing*. Its
+      ``__exit__`` calls ``issubclass(exctype, self._exceptions)`` with
+      ``self._exceptions == ()``, which is false for every exception, so
+      ``AssertionError`` propagates and the assert is live at runtime. Reading
+      it as universal reports the assert DEAD anyway: stricter than runtime,
+      which is the safe direction, and the conservative choice when the check
+      cannot read the argument.
+    * ``pytest.raises()`` with no expected type raises ``ValueError: You must
+      specify at least one parameter`` while the context object is being
+      constructed -- before the body is entered at all. The test fails loudly
+      and no assert is ever evaluated, so calling it a defeat would report a
+      live contract as dead.
+
+    ``pytest.raises(match=...)`` stays universal on purpose; see
+    ``_raises_without_an_expected_type`` for why that case is undecidable
+    rather than loud.
     """
     names = []
     for argument in call.args:
@@ -582,13 +614,34 @@ def _suppressed_by_dunder(call, bound):
     cannot match a suppressor stored under a different attribute name. A
     non-suppressor that happens to define ``__enter__`` is not matched: the
     underlying call still has to resolve to a real suppressor.
+
+    The exception types are read from the *suppressor's* arguments, not from
+    the ``__enter__()`` call's. ``contextlib.suppress(ValueError).__enter__()``
+    is ``Call(func=Attribute(value=Call(func=Attribute(...suppress),
+    args=[ValueError]), attr=__enter__), args=[])``: the types live one level
+    down, and the outer call has none at all. Reading ``call.args`` therefore
+    returns the empty fallback ``BaseException`` for *every* dunder spelling,
+    and since ``BaseException`` catches ``AssertionError`` that reported
+    ``suppress(ValueError).__enter__()`` -- which suppresses nothing relevant --
+    as a defeat of the assert.
     """
     func = call.func
     if not (isinstance(func, ast.Attribute) and func.attr == "__enter__"):
         return False
     if not any(_resolves_to(func.value, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
         return False
-    return [name for name in call.args if isinstance(name, ast.Name)] or ["BaseException"]
+    # `func.value` is the `suppress(...)` call itself, resolved above.
+    suppressor = func.value
+    if not isinstance(suppressor, ast.Call):
+        return False
+    # `_suppression_names` reports the unreadable case for an argument it
+    # cannot read, which includes *no* argument at all. `suppress()` with empty
+    # parens therefore reads as universal here, as it already does in the plain
+    # `with suppress():` form. That is the conservative direction: a bare
+    # `suppress()` suppresses nothing and the assert does fail, so the verdict
+    # is stricter than runtime. It is shared with the non-dunder path on
+    # purpose rather than special-cased in only one of the two.
+    return _suppression_names(suppressor)
 
 
 def _assigned_suppressors(function, bound):
@@ -615,9 +668,28 @@ def _assigned_suppressors(function, bound):
     fails loudly rather than passing quietly -- so it is not a defeat, and a
     single merged dict would have called it one. Only the assignments that
     precede the ``with`` are visible to it.
+
+    Assignments are collected from the whole function body rather than from
+    ``function.body`` alone, so a suppressor bound inside an ``if``, a loop, a
+    ``try`` or a nested ``with`` is still found. Restricting the walk to the
+    top level is the escape recorded in #308: a suppressor's reach does not
+    depend on the indentation it was written at, and reading only the
+    outermost statements reports a swallowed assert as *enforced*.
+
+    A name bound to suppressors in **more than one** place is dropped entirely
+    rather than resolved by source order. Two branches of the same ``if`` may
+    bind the same name to different targets, and whichever one is written
+    first would then decide the verdict for the whole function -- the rule
+    would report a live assert as enforced in one ordering and unenforced in
+    the other. Per #308 criterion 1 such a name is *unreadable*, and the safe
+    direction is to treat it as a defeat: reporting a suppression that was not
+    applied costs a false alarm on a construct the pinned file does not use,
+    while resolving it wrongly certifies a disarmed assert as load-bearing.
     """
-    assigned = {}
-    for index, statement in enumerate(function.body):
+    # Every readable suppressor call a name is bound to, so that a name bound
+    # more than once can be recognised as ambiguous below.
+    bound_to = {}
+    for statement in ast.walk(function):
         targets = []
         value = None
         if isinstance(statement, ast.Assign):
@@ -631,8 +703,120 @@ def _assigned_suppressors(function, bound):
         if isinstance(value, ast.Call) and _is_suppression_call(value, bound):
             for target in targets:
                 if isinstance(target, ast.Name):
-                    assigned.setdefault(index, {})[target.id] = value
+                    bound_to.setdefault(target.id, []).append(value)
+    # A name bound by exactly one readable suppressor is a known alias. A name
+    # bound by several is ambiguous -- see the docstring (#308 criterion 1) --
+    # and must NOT be resolved by source order. It is recorded as an
+    # `AMBIGUOUS` marker instead of being dropped: dropping it would fall back
+    # to "this name is not a known suppressor", which reports the assert as
+    # *enforced*, and that is the damaging direction. On the ambiguous path the
+    # rule genuinely cannot tell which target was applied, so it treats the
+    # name as a suppression and says so (#308 criterion 1: over-reporting is the
+    # safe direction here).
+    #
+    # Ambiguity is judged over the whole function: a nested binding and a
+    # top-level one are the same name, and a rule that let the source order
+    # pick between them would report the verdict for one path only.
+    aliases = {
+        name: (values[0] if len(values) == 1 else AMBIGUOUS_SUPPRESSOR)
+        for name, values in bound_to.items()
+    }
+    if not aliases:
+        return {}
+    # Keyed by *source position* rather than by index into `function.body`. A
+    # statement index is too coarse: one top-level statement can both bind an
+    # alias and enter it, and a `with cs:` written after the assignment but
+    # inside the same `if` is the same shape as one written a statement later
+    # -- yet deferring the binding to the end of the enclosing statement hides
+    # it from the header that follows it in source order. That is a real
+    # escape, recorded in the #311 review: the swallow executes green while the
+    # rule reports the assert enforced.
+    #
+    # Position is the correct granularity because "is the name bound yet?" is
+    # a question about the order the two are *written* in. A `with cs:` ahead
+    # of its binder still raises UnboundLocalError on entry, and stays
+    # correctly reported live, because its position precedes the binder's.
+    # Control flow is deliberately not consulted: a binder inside a branch may
+    # not have run when a later header is entered, but resolving that needs a
+    # path analysis this check does not have, and over-reporting is the safe
+    # direction for an ambiguity (#308 criterion 1).
+    ranks = _source_order_ranks(function)
+    assigned = {}
+    for name, value in aliases.items():
+        binders = _binders_of(function, name, value)
+        positions = [ranks[binder] for binder in binders if binder in ranks]
+        if not positions:
+            continue
+        # The earliest position any binder can be reached from, so a header
+        # that follows *some* binding sees the alias on that path.
+        assigned.setdefault(min(positions), {})[name] = value
     return assigned
+
+
+def _source_order_ranks(function):
+    """Map every statement inside ``function`` to its position in source order.
+
+    The key is the statement's ``(lineno, col_offset)``, which is the order a
+    reader -- and the interpreter -- meets it. ``ast.walk`` cannot supply this:
+    it yields a parent before its children, so in
+
+        if flag:
+            cs = suppress(AssertionError)   # written 2nd
+        with cs:                            # written 3rd
+
+    the ``with`` is visited *before* the assignment nested inside the ``if``,
+    and ranking the walk would place the later-written header ahead of the
+    earlier-written binder. Line and column are what actually order the two,
+    so they are what this returns.
+
+    Only nodes that carry a position are ranked; every ``stmt`` does, and a
+    ``with`` header is one, so the two kinds compared here are always
+    comparable. Expressions are not ranked: a ``with`` header and the
+    assignment binding the name it enters are ordered by the statements that
+    contain them.
+    """
+    ranks = {}
+    for node in ast.walk(function):
+        position = _source_position(node)
+        if position is not None:
+            ranks.setdefault(node, position)
+    return ranks
+
+
+def _source_position(node):
+    """``(lineno, col_offset)`` for a statement, or ``None`` for anything else."""
+    if not isinstance(node, ast.stmt):
+        return None
+    return (node.lineno, node.col_offset)
+
+
+def _binders_of(function, name, value):
+    """The statements that bind ``name``, for a known or ambiguous alias.
+
+    For a known alias the match is on the identity of the *call node*, so a name
+    bound to the same call more than once still resolves to every statement that
+    writes it. For ``AMBIGUOUS_SUPPRESSOR`` there is no call to match on, so
+    every statement binding the name matches -- the alias is registered at the
+    earliest point any of its bindings could have run, which is the only
+    position that is true on every path.
+    """
+    binders = []
+    for statement in ast.walk(function):
+        targets = []
+        candidate = None
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            candidate = statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets = [statement.target]
+            candidate = statement.value
+        else:
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            continue
+        if value is AMBIGUOUS_SUPPRESSOR or candidate is value:
+            binders.append(statement)
+    return binders
 
 
 def _aliased_suppressions(node, function, bound):
@@ -657,37 +841,92 @@ def _aliased_suppressions(node, function, bound):
     name from an outer scope is deliberately not followed: assuming an
     arbitrary call returns a suppressor would report live asserts as dead on
     every context manager this check cannot trace.
+
+    An assignment expression in the header is the same defeat with the binding
+    folded into the ``with`` itself:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            assert 1 == 2
+
+    A ``NamedExpr`` is not an ``ast.Assign``, so ``_assigned_suppressors`` never
+    records it, and the header no longer holds a bare ``Name`` for the
+    resolution rule to read -- the suppressor sits in a node shape nothing else
+    inspects. Executed, the assertion failure really is swallowed, so this is
+    the damaging direction: a live defeat reported as enforced.
+
+    The right-hand side is still gated on :func:`_is_suppression_call`, and that
+    guard is load-bearing rather than a redundancy. A zero-argument call such as
+    ``nullcontext()`` or ``helper.make()`` reads as the unreadable case
+    ``BaseException`` in :func:`_suppression_names`, and ``BaseException`` *does*
+    catch ``AssertionError`` -- so appending every walrus unconditionally would
+    report both of those live context managers as defeats. The mutation matrix
+    in the sentinel suite pins that difference.
     """
-    by_index = _assigned_suppressors(function, bound)
-    if not by_index:
-        return []
-    # A name is bound only by the assignments that run *before* the `with`.
-    # Walking `function.body` in order and carrying the bindings forward keeps
-    # that ordering explicit; a merged view of every assignment would claim a
-    # name is already bound when the `with` is the statement that has not run
-    # yet, and `with cs:` there raises NameError rather than swallowing.
+    by_position = _assigned_suppressors(function, bound)
+    ranks = _source_order_ranks(function)
+    # A name is bound only by the assignments written *before* the `with`.
+    # Headers and binders are visited in one merged source-order walk rather
+    # than statement-by-statement, because a single top-level statement can
+    # contain both: `if flag:` then `cs = suppress(...)` then `with cs:` is one
+    # statement to `function.body` but three positions to a reader. Deferring
+    # the binding to the end of the enclosing statement hid the alias from the
+    # very header that follows it, and the swallowed assert was reported
+    # enforced (the #311 review). A `with cs:` *ahead* of its binder still
+    # raises UnboundLocalError on entry, so it is still reported live.
+    pending = sorted(by_position.items())
+    cursor = 0
     bound_so_far = {}
     entered = []
-    for index, statement in enumerate(function.body):
-        for header in ast.walk(statement):
-            if not isinstance(header, (ast.With, ast.AsyncWith)):
+    for header in _with_headers_in_source_order(function, ranks):
+        # Apply every binding that precedes this header before reading it.
+        while cursor < len(pending) and pending[cursor][0] < ranks[header]:
+            bound_so_far.update(pending[cursor][1])
+            cursor += 1
+        for item in header.items:
+            expression = item.context_expr
+            # `with (cs := contextlib.suppress(AssertionError)):` binds the
+            # name and enters it in one node, so the alias is classified
+            # from its right-hand side rather than from `bound_so_far`. The
+            # right-hand side need not be a call at all -- `with (cs := 1):`
+            # is legal and fails loudly on entry with `TypeError` -- so the
+            # node type is checked before the suppressor predicate, which
+            # reads `call.func` and would otherwise raise.
+            walrus = expression if isinstance(expression, ast.NamedExpr) else None
+            if (
+                walrus is not None
+                and isinstance(walrus.value, ast.Call)
+                and _is_suppression_call(walrus.value, bound)
+            ):
+                entered.append(walrus.value)
+            if isinstance(expression, ast.Name) and expression.id in bound_so_far:
+                entered.append(bound_so_far[expression.id])
+            if not isinstance(expression, ast.Call) or not isinstance(
+                expression.func, ast.Attribute
+            ):
                 continue
-            for item in header.items:
-                expression = item.context_expr
-                if isinstance(expression, ast.Name) and expression.id in bound_so_far:
-                    entered.append(bound_so_far[expression.id])
-                if not isinstance(expression, ast.Call) or not isinstance(
-                    expression.func, ast.Attribute
-                ):
-                    continue
-                if expression.func.attr != "__enter__":
-                    continue
-                value = expression.func.value
-                if isinstance(value, ast.Name) and value.id in bound_so_far:
-                    entered.append(bound_so_far[value.id])
-        # Bindings take effect only *after* the statement that makes them.
-        bound_so_far.update(by_index.get(index, {}))
+            if expression.func.attr != "__enter__":
+                continue
+            value = expression.func.value
+            if isinstance(value, ast.Name) and value.id in bound_so_far:
+                entered.append(bound_so_far[value.id])
     return entered
+
+
+def _with_headers_in_source_order(function, ranks):
+    """Every ``with`` / ``async with`` in ``function``, in source order.
+
+    A nested pair is two separate nodes and both are visited; the outer header
+    simply ranks first, which is the order a reader meets them in. Nothing is
+    deduplicated, because two distinct headers are two distinct chances to
+    enter a suppressor.
+    """
+    headers = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, (ast.With, ast.AsyncWith)) and node in ranks
+    ]
+    headers.sort(key=lambda node: ranks[node])
+    return headers
 
 
 def _unreadable_suppressor(call, bound):
@@ -710,11 +949,12 @@ def _unreadable_suppressor(call, bound):
     Scoped deliberately to a bare ``Name``, and only when that name is one of the
     documented suppressor spellings. Every context manager wrapping a real pinned
     assert in ``test_timed_menu_milestones.py`` is called on an ``Attribute``
-    (``pytest.raises(...)``, ``harness.observe()``, ...), measured: 48 of 48. A
-    bare name is therefore a shape the real file never uses, so widening the
-    check to it cannot manufacture a false "unenforced" verdict on pinned sites.
-    An ``Attribute`` this function cannot resolve is left alone, because
-    ``pytest.raises(AssertionError)`` legitimately wraps 17 of the real asserts.
+    (``pytest.raises(...)``, ``harness.observe()``, ...) -- measured: 40 of the
+    40 ``with``-items in that file, with no other shape present. A bare name is
+    therefore a shape the real file never uses, so widening the check to it
+    cannot manufacture a false "unenforced" verdict on pinned sites. An
+    ``Attribute`` this function cannot resolve is left alone, because
+    ``pytest.raises(...)`` legitimately wraps many of the real asserts.
     """
     func = call.func
     if not isinstance(func, ast.Name):
@@ -727,12 +967,39 @@ def _unreadable_suppressor(call, bound):
 
 def _is_suppression_call(call, bound):
     """Is this call a suppression context that can eat an assertion failure?"""
-    if any(
-        _resolves_to(call.func, dotted, bound)
-        for dotted in (*SUPPRESSING_CONTEXTS, *ASSERTION_CAPTURING_CONTEXTS)
-    ):
+    if any(_resolves_to(call.func, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
         return True
+    if any(_resolves_to(call.func, dotted, bound) for dotted in ASSERTION_CAPTURING_CONTEXTS):
+        return not _raises_without_an_expected_type(call)
     return _unreadable_suppressor(call, bound)
+
+
+def _raises_without_an_expected_type(call):
+    """Is this ``pytest.raises`` call one that cannot leave the test green?
+
+    ``pytest.raises`` requires the expected exception type to be given
+    positionally. With *no* argument at all it raises ``ValueError: You must
+    specify at least one parameter`` while building the context object, before
+    the body is ever entered -- so no assert is evaluated and the test fails
+    loudly for an unrelated reason. That case is decidable and excluded.
+
+    ``match=`` is deliberately *not* excluded, and the reason is that it is
+    undecidable rather than loud. Whether the block ends green depends on the
+    assertion's own message at runtime: with ``pytest.raises(AssertionError,
+    match="1 == 2")`` the empty message of a bare ``assert`` fails the regex and
+    pytest re-raises -- loud -- but with ``match=""`` or ``match=".*"`` the
+    failure is caught, matches, and the test passes green. Measured across
+    all three. A static check cannot know which, so the two defensible answers
+    are "always a defeat" and "never a defeat", and this picks the first: an
+    assert that is *sometimes* unenforceable is not a contract that can be
+    relied on, whereas calling it enforced would certify a shape that has
+    already been measured to go green.
+
+    The no-argument case is different in kind: there the failure is raised
+    before the body runs, so the assert is never evaluated and *no* runtime
+    value can rescue it.
+    """
+    return not call.args
 
 
 def _entered_suppressions(node, bound):
@@ -784,6 +1051,10 @@ def _is_suppressing_with(node, bound, function=None):
     if function is None:
         return False
     for argument in _aliased_suppressions(node, function, bound):
+        # An ambiguous binding may be *any* suppressor, so the rule cannot claim
+        # the exception is harmless and reports the assert as defeated (#308).
+        if argument is AMBIGUOUS_SUPPRESSOR:
+            return True
         if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
             return True
     return False

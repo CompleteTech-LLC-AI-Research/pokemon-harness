@@ -674,6 +674,16 @@ RESIDUAL_DEFEAT_SHAPES = (
         "    with pytest.raises((TypeError, AssertionError)):\n        assert x != 1",
         False,
     ),
+    # `match=` is undecidable, not loud: whether the block ends green depends
+    # on the assertion's own message at runtime. Measured with match="", ".*"
+    # (both green) and match="1 == 2" (pytest re-raises). The conservative
+    # reading is taken -- an assert that is *sometimes* unenforceable is not a
+    # contract that can be relied on.
+    (
+        "pytest.raises AssertionError with a matching regex",
+        "    with pytest.raises(AssertionError, match=''):\n        assert x != 1",
+        False,
+    ),
     # The alias form. This is the *silent* one: entering the object directly
     # swallows, whereas the __enter__ dunder returns None and raises TypeError.
     (
@@ -707,6 +717,115 @@ RESIDUAL_DEFEAT_SHAPES = (
         (
             "    cs: object = contextlib.suppress(BaseException)\n    with cs:\n"
             "        assert x != 1"
+        ),
+        False,
+    ),
+    # #308: an alias binds its name wherever it is written. Restricting the
+    # walk to the function's top level reports each of these as *enforced*,
+    # which is the damaging direction -- a swallowed assert certified as
+    # load-bearing.
+    (
+        "suppressor alias bound in an if branch",
+        (
+            "    if flag:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    # The three rows below differ from the one above in exactly one way: the
+    # `with cs:` is written INSIDE the block that binds it, so the assignment
+    # and the entry are part of a *single* top-level statement. The swallow is
+    # identical -- executed, the assert never fails -- but to `function.body`
+    # the binder and the header share one index, and a walk that applied
+    # bindings only at the end of each top-level statement read the header
+    # before the name existed. All three execute green and were reported
+    # enforced; see the #311 review. `items` and `flag` are the enclosing
+    # function's parameters, so the binder really is reachable.
+    (
+        "suppressor alias bound and entered inside the same if",
+        (
+            "    if flag:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound and entered inside the same for",
+        (
+            "    for _ in items:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound and entered inside the same try",
+        (
+            "    try:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1\n    finally:\n        pass"
+        ),
+        False,
+    ),
+    # The control for the three rows above, and the reason the fix orders by
+    # source position rather than by statement. Moving the `with` back to the
+    # top level leaves the swallow intact, so it must still be reported a
+    # defeat; the existing "bound in an if branch" row already covers that,
+    # and this pins the direction of the *same* block from the other side.
+    (
+        "suppressor alias entered after an if that may not have run",
+        (
+            "    if flag:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        helper()\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound in a loop",
+        (
+            "    for item in items:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound in a try body",
+        (
+            "    try:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    except Exception:\n        pass\n    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound in a nested with",
+        (
+            "    with helper.make():\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    # #308 criterion 1: two branches bind ONE name to DIFFERENT targets, so
+    # which suppressor applies depends on the path taken. Resolving by source
+    # order gives a verdict for one branch only; the name is unreadable and must
+    # be reported as a defeat.
+    (
+        "same alias bound to different suppressors in two branches",
+        (
+            "    if flag:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    else:\n        cs = contextlib.suppress(ValueError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    # The ambiguity is between two *harmless* targets, so nothing on either
+    # path swallows an assert. The rule still cannot prove that from the source
+    # alone, and #308 accepts over-reporting as the safe direction -- but this
+    # row pins that decision so the direction cannot be flipped silently.
+    (
+        "same alias bound to two unrelated suppressors in two branches",
+        (
+            "    if flag:\n        cs = contextlib.suppress(ValueError)\n"
+            "    else:\n        cs = contextlib.suppress(TypeError)\n"
+            "    with cs:\n        assert x != 1"
         ),
         False,
     ),
@@ -745,6 +864,26 @@ RESIDUAL_DEFEAT_SHAPES = (
         "pytest.raises BaseExceptionGroup",
         "    with pytest.raises(BaseExceptionGroup):\n        assert x != 1",
         True,
+    ),
+    # With no expected type at all, pytest raises ValueError while building the
+    # context object -- before the body runs. No assert is evaluated, so this is
+    # not a silent defeat and must not be counted as one.
+    (
+        "pytest.raises with no expected type",
+        "    with pytest.raises():\n        assert x != 1",
+        True,
+    ),
+    (
+        "pytest.raises with only a regex",
+        "    with pytest.raises(match='nomatch'):\n        assert x != 1",
+        True,
+    ),
+    # `contextlib.suppress()` with no argument is legal and suppresses
+    # everything, unlike pytest.raises()'s empty call above.
+    (
+        "suppress with no exception type",
+        "    with contextlib.suppress():\n        assert x != 1",
+        False,
     ),
     # An unrelated enter_context on the same stack is not a suppression.
     (
@@ -816,7 +955,7 @@ def test_the_residual_defeats_of_287_are_rejected(label, body, live):
     # Each body is already indented for a function body, so only the header is
     # added -- re-indenting the whole body is what has produced spurious
     # IndentationErrors in this repo's own probes.
-    source = "def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    source = "def outer(x, cm, items, record, helper, flag):\n" + imports + body + "\n"
     tree = ast.parse(source)
     outer = tree.body[0]
     for statement in outer.body:
@@ -837,3 +976,354 @@ def test_the_residual_defeats_of_287_are_rejected(label, body, live):
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
     )
+
+
+#: #308 named two escapes and a third that only appeared once #309 landed. Each
+#: row is one *behavioural* claim about the interpreter, established by running
+#: the shape rather than by reading the checker: a suppressor bound inline in the
+#: header really does swallow the failure, so the assert is dead.
+WALRUS_SHAPES = (
+    # The binding and the entry are the same node, so nothing that tracks
+    # `ast.Assign` ever sees the name and the header holds no bare `Name` to
+    # resolve. Executed, the failure is swallowed.
+    (
+        "walrus binds and enters a suppressor",
+        "    with (cs := contextlib.suppress(AssertionError)):\n        assert x != 1",
+        False,
+    ),
+    (
+        "walrus binds a broad suppressor",
+        "    with (cs := contextlib.suppress(Exception)):\n        assert x != 1",
+        False,
+    ),
+    (
+        "walrus binds an assertion-capturing context",
+        "    with (cs := pytest.raises(AssertionError)):\n        assert x != 1",
+        False,
+    ),
+    (
+        "walrus binds a suppressor by from-import",
+        "    with (cs := suppress(AssertionError)):\n        assert x != 1",
+        False,
+    ),
+    # --- controls -----------------------------------------------------------
+    # A zero-argument call reads as the unreadable case `BaseException` in
+    # `_suppression_names`, and `BaseException` *does* catch `AssertionError`.
+    # Classifying every walrus as a suppression therefore reports these two live
+    # context managers as defeats, which is why the rule is gated on
+    # `_is_suppression_call` rather than applied to any inline binding.
+    (
+        "walrus of a zero-argument context manager",
+        "    with (cs := nullcontext()):\n        assert x != 1",
+        True,
+    ),
+    (
+        "walrus of a zero-argument helper",
+        "    with (cs := helper.make()):\n        assert x != 1",
+        True,
+    ),
+    (
+        "walrus of an unrelated error",
+        "    with (cs := contextlib.suppress(ValueError)):\n        assert x != 1",
+        True,
+    ),
+    # A walrus whose value is not even a call cannot be a suppressor.
+    ("walrus of a non-call value", "    with (cs := 1):\n        assert x != 1", True),
+    # A bare name in the header is the already-closed alias case, not a walrus.
+    ("bare name in the header", "    with cs:\n        assert x != 1", True),
+)
+
+
+#: #310: the ``.__enter__()`` dunder spelling, which shipped in #309 with no
+#: test at all. Reverting the rule left the suite green, so these rows exist
+#: first and foremost to make that impossible.
+#:
+#: The rule had a second defect, found by running it: it read the exception
+#: types from the *``__enter__()``* call's arguments instead of the suppressor's.
+#: The outer call has none, so every dunder spelling fell back to the unreadable
+#: case ``BaseException`` -- which catches ``AssertionError`` -- and reported
+#: ``suppress(ValueError).__enter__()`` as a defeat of the assert. The
+#: ``ValueError``/``RuntimeError`` rows below are that defect's regression test.
+#:
+#: The loud-vs-silent question is settled by measurement, not taste: *any*
+#: ``X.__enter__()`` returns ``None``, so the ``with`` body never runs and
+#: ``TypeError`` is raised. The dunder form is therefore never a silent defeat.
+#: The rule still flags it, and that is a deliberate conservative choice --
+#: the shape is broken, and reporting a broken contract as not-load-bearing is
+#: the safe direction. It is recorded here so the choice is visible rather
+#: than implied.
+DUNDER_SPELLING_SHAPES = (
+    (
+        "qualified suppressor dunder",
+        "    with contextlib.suppress(AssertionError).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "bare suppressor dunder",
+        "    with suppress(AssertionError).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over Exception",
+        "    with suppress(Exception).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over BaseException",
+        "    with suppress(BaseException).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over a tuple naming AssertionError",
+        (
+            "    with contextlib.suppress((ValueError, AssertionError)).__enter__():\n"
+            "        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "aliased suppressor dunder",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with cs.__enter__():\n        assert x != 1"
+        ),
+        False,
+    ),
+    # --- controls: the exception must actually catch AssertionError ---
+    # These are the rows that were wrong before the argument-reading fix. Each
+    # suppresses nothing relevant, so the assert is live and must stay enforced.
+    (
+        "suppressor dunder over ValueError",
+        "    with contextlib.suppress(ValueError).__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "suppressor dunder over RuntimeError",
+        "    with contextlib.suppress(RuntimeError).__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "aliased suppressor dunder over ValueError",
+        (
+            "    cs = contextlib.suppress(ValueError)\n"
+            "    with cs.__enter__():\n        assert x != 1"
+        ),
+        True,
+    ),
+    # A different dunder is not this spelling, and an unrelated object that
+    # happens to define `__enter__` is never a suppressor.
+    (
+        "unrelated object dunder",
+        "    with helper.make().__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "nullcontext dunder",
+        "    with contextlib.nullcontext().__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "a different dunder on a real suppressor",
+        "    with contextlib.suppress(AssertionError).__exit__():\n        assert x != 1",
+        True,
+    ),
+    # `suppress()` with empty parens suppresses nothing, and the assert does
+    # fail at runtime. The shared "unreadable argument" fallback reports it as
+    # unenforced anyway -- stricter than runtime, and deliberately the same in
+    # the plain and dunder spellings.
+    (
+        "empty-parens suppressor dunder",
+        "    with contextlib.suppress().__enter__():\n        assert x != 1",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    WALRUS_SHAPES,
+    ids=[shape[0] for shape in WALRUS_SHAPES],
+)
+def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, live):
+    """A suppressor bound *in* the header is the same defeat, still missed.
+
+    ``cs = suppress(...)`` and ``with (cs := suppress(...)):`` differ only in
+    where the binding is written, and both swallow the assertion failure. The
+    gap was real and silent: on master this shape reported a live defeat as
+    *enforced*, certifying a disarmed contract as load-bearing.
+    """
+    source = (
+        "def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    DUNDER_SPELLING_SHAPES,
+    ids=[shape[0] for shape in DUNDER_SPELLING_SHAPES],
+)
+def test_the_dunder_spelling_is_covered_and_scoped_to_real_suppression(label, body, live):
+    """#310: the dunder rule must be exercised, and must key on the exception.
+
+    The rule shipped untested, so it could be deleted without any test going
+    red. These rows fix that, and they also pin the scope: a suppressor dunder
+    over an exception that does *not* catch ``AssertionError`` is a live
+    contract, and flagging it would drop a real assert from the sentinel's
+    view.
+    """
+    imports = (
+        "    import contextlib\n"
+        "    import pytest\n"
+        "    from contextlib import suppress\n"
+        "    from contextlib import ExitStack\n"
+    )
+    source = "def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    for statement in outer.body:
+        if (
+            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement is not outer
+        ):
+            function = statement
+            break
+    else:
+        function = outer
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
+
+
+#: #308 criterion 1 asks that branch order never decide the verdict. Asserting a
+#: single source order would not catch a rule that resolved by order and
+#: happened to be right for that order, so both are pinned and required to
+#: agree.
+DISAGREEING_BRANCH_ORDERS = (
+    (
+        "import in the if branch",
+        (
+            "    if flag:\n"
+            "        from contextlib import suppress\n"
+            "    else:\n"
+            "        suppress = contextlib.suppress\n"
+            "    with suppress(AssertionError):\n"
+            "        assert x != 1"
+        ),
+    ),
+    (
+        "import in the else branch",
+        (
+            "    if flag:\n"
+            "        suppress = contextlib.suppress\n"
+            "    else:\n"
+            "        from contextlib import suppress\n"
+            "    with suppress(AssertionError):\n"
+            "        assert x != 1"
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    DISAGREEING_BRANCH_ORDERS,
+    ids=[shape[0] for shape in DISAGREEING_BRANCH_ORDERS],
+)
+def test_branch_order_never_decides_the_alias_verdict(label, body):
+    """A name bound to different targets in two branches must be unreadable.
+
+    ``_own_imports`` collects bindings with a LIFO ``stack.pop()``, so with two
+    branches binding the same alias the surviving binding depends on source
+    order and one of the two orders reaches the wrong verdict. Treating the
+    ambiguous name as suppressing is what makes the answer order-independent --
+    and over-reporting is the safe direction, since the alternative is
+    certifying a disarmed assert as load-bearing.
+    """
+    source = "def outer(x, flag):\n    import contextlib\n" + body + "\n"
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert not any(results), f"{label}: a swallowed assert was reported enforced, got {results}"
+
+
+def test_a_name_bound_to_different_suppressors_is_ambiguous_not_ordered():
+    """Two readable suppressors under one name cannot be resolved by order.
+
+    A single merged dict would keep whichever binding was collected last and
+    report a verdict for one path only. The alias is therefore recorded as
+    ambiguous, which is read as suppressing -- the over-reporting direction
+    #308 criterion 1 accepts.
+    """
+    source = (
+        "def outer(x, flag):\n"
+        "    import contextlib\n"
+        "    if flag:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(ValueError)\n"
+        "    with cs:\n"
+        "        assert x != 1"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert not any(results), f"ambiguous alias resolved by order, got {results}"
+
+
+def test_plain_assignment_aliasing_needs_no_import_node():
+    """``cs = contextlib.suppress(...)`` is an alias with no import to resolve.
+
+    #308 criterion 2. The assignment produces no ``Import``/``ImportFrom`` node,
+    so a resolver that only reads imports has nothing to match and the swallowed
+    assert reads as enforced. The control proves the rule keys on the
+    right-hand side rather than on the name.
+    """
+    defeat = (
+        "def outer(x):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1"
+    )
+    control = (
+        "def outer(x):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.json\n"
+        "    with cs:\n"
+        "        assert x != 1"
+    )
+    for label, source, expected in (
+        ("suppressor alias", defeat, False),
+        ("non-suppressor", control, True),
+    ):
+        tree = ast.parse(source)
+        function = tree.body[0]
+        asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+        results = [_is_enforced(function, node, tree) for node in asserts]
+        assert all(results) is expected, f"{label}: expected {expected}, got {results}"
