@@ -1119,6 +1119,38 @@ WALRUS_REENTRY_SHAPES = (
         ),
         (False, False),
     ),
+    # An `async with` header binds its walrus for the rest of the scope exactly
+    # as a sync header does, and the rule records the binding from either node
+    # type. Dropping `ast.AsyncWith` from that check changed both verdicts below
+    # and left the whole suite green, so nothing pinned the async path until
+    # these rows existed. The first row is the direct re-entry: the suppressor
+    # reaches the second header, so both asserts are swallowed.
+    (
+        "re-enter a walrus bound by an async with",
+        (
+            "    async with (cs := contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        (False,),
+    ),
+    # A suppressor is not an async context manager, so the async header itself
+    # raises `TypeError` before its body runs. The assert inside that body never
+    # executes, so it is a live contract; the assert under the *later* sync
+    # `with cs:` is entered for real and is swallowed. The two sit under one
+    # parameterised row precisely because they are opposite: reading the async
+    # header as a suppression would answer `False, False` and drop the first.
+    (
+        "async with walrus: loud body, swallowed re-entry",
+        (
+            "    async with (cs := contextlib.suppress(AssertionError)):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        (True, False),
+    ),
 )
 
 
@@ -1280,8 +1312,12 @@ def test_a_walrus_bound_alias_reaches_the_headers_that_re_enter_it(label, body, 
     which is the #308 superseded-alias defect coming back, so each row states
     the verdict per assert and the live ones are the regression test.
     """
+    # An `async with` header is only parseable inside an async function, and
+    # the binding rule treats the two node types identically, so the wrapper
+    # follows the shape under test rather than forcing every row sync.
+    wrapper = "async def" if "async with" in body else "def"
     source = (
-        "def outer(x, helper, flag=True):\n"
+        wrapper + " outer(x, helper, flag=True):\n"
         "    import contextlib\n"
         "    from contextlib import suppress, nullcontext\n"
         "    import pytest\n" + body + "\n"
