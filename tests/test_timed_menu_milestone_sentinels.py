@@ -22,6 +22,7 @@ backstop that keeps them from being quietly removed.
 import ast
 import asyncio
 import inspect
+import textwrap
 
 import pytest
 
@@ -2106,6 +2107,114 @@ def test_a_walrus_bound_alias_reaches_the_headers_that_re_enter_it(label, body, 
         f"{label}: expected verdicts {expected}, got {results}. Every assert "
         f"is compared individually -- `all()` would collapse this fixture to "
         f"its first verdict and hide a wrong later one."
+    )
+
+
+#: #324/#327: the carrier class crossed with *both* positions.
+#:
+#: The tables above pin one form per position. That is what let this defect
+#: through: the five forms that carry their name on a **string field** of a
+#: non-`Name` node were never paired with a position, so no row could see them
+#: fail. Every rebind here retires the carried suppressor, so the later
+#: `with cs:` enters a module, a class or a function -- none of which is a
+#: context manager, so entry raises `TypeError` before the assert and the
+#: assert is **live**. The correct verdict is therefore `True` in every row.
+#:
+#: The two positions are both load-bearing and neither is a superset of the
+#: other. "After the walrus" is decided by source order in
+#: `_resolve_bindings`; "inside the walrus's own header" is decided by
+#: containment in the header. A carrier recorded as a *synthesised* `ast.Name`
+#: has no parent chain, so a containment test cannot see it at all.
+CARRIER_REBINDING_SHAPES = (
+    ("import-as", "import os as cs"),
+    ("import-from-as", "from os import path as cs"),
+    ("match-capture", "match [1]:\n    case [cs]:\n        pass"),
+    ("def", "def cs():\n    pass"),
+    ("class", "class cs:\n    pass"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind"),
+    CARRIER_REBINDING_SHAPES,
+    ids=[row[0] for row in CARRIER_REBINDING_SHAPES],
+)
+@pytest.mark.parametrize("position", ["after", "inside-header"])
+def test_a_carrier_rebind_retires_a_carried_walrus_in_both_positions(label, rebind, position):
+    """A string-field carrier retires the carried suppressor wherever it sits.
+
+    ``import os as cs`` binds `cs` to the `os` **module**. The later
+    ``with cs:`` then raises `TypeError` on entry, before the assert is even
+    reached, so the assert can still fail and must be reported enforced. The
+    head reported it swallowed, because the rebind was recorded as a detached
+    `ast.Name` that neither the ordering nor the containment test could find.
+
+    The inside-header position is the sharper one: it is decided purely by
+    containment, and a synthesised node is a child of nothing, so the check
+    answers "no" for every carrier forever. Base `87a90da` gets both positions
+    right for all five forms, so every row here is also a regression guard.
+    """
+    if position == "after":
+        walrus_block = (
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n" + textwrap.indent(rebind, "    ")
+        )
+    else:
+        walrus_block = "    with (cs := suppress(AssertionError)):\n" + textwrap.indent(
+            rebind, "        "
+        )
+    source = (
+        "def outer(x, flag, helper, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n" + walrus_block + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [True], (
+        f"{label}/{position}: entering a module, class or function raises "
+        f"TypeError before the assert, so it is live and must be enforced; "
+        f"got {results}"
+    )
+
+
+#: #324/#327: a carrier must not reach *past* the scope that binds it.
+CARRIER_NESTED_ROWS = (
+    ("def", "def inner():\n    def cs():\n        pass"),
+    ("class", "def inner():\n    class cs:\n        pass"),
+)
+
+
+@pytest.mark.parametrize(("label", "nested"), CARRIER_NESTED_ROWS)
+def test_a_nested_carrier_does_not_retire_an_outer_binding(label, nested):
+    """A carrier in a nested scope binds that scope's name, not the outer one.
+
+    This is the other direction of the same rule, and the reason
+    `_carrier_bound_names` walks `_scope_body_nodes` rather than `ast.walk`:
+    retiring the outer suppressor on a nested `def cs` would report a
+    **swallowed** assert as live, which is damaging for the opposite reason --
+    it disarms a real defeat rather than hiding one.
+    """
+    source = (
+        "def outer(x, flag, helper, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := suppress(AssertionError)):\n"
+        "        pass\n" + textwrap.indent(nested, "    ") + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [False], (
+        f"{label}: a nested carrier binds the nested scope's name, so the "
+        f"outer `with cs:` still enters the suppressor and swallows the assert; "
+        f"got {results}"
     )
 
 
