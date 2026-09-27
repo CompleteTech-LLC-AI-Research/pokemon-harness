@@ -732,6 +732,53 @@ RESIDUAL_DEFEAT_SHAPES = (
         ),
         False,
     ),
+    # The three rows below differ from the one above in exactly one way: the
+    # `with cs:` is written INSIDE the block that binds it, so the assignment
+    # and the entry are part of a *single* top-level statement. The swallow is
+    # identical -- executed, the assert never fails -- but to `function.body`
+    # the binder and the header share one index, and a walk that applied
+    # bindings only at the end of each top-level statement read the header
+    # before the name existed. All three execute green and were reported
+    # enforced; see the #311 review. `items` and `flag` are the enclosing
+    # function's parameters, so the binder really is reachable.
+    (
+        "suppressor alias bound and entered inside the same if",
+        (
+            "    if flag:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound and entered inside the same for",
+        (
+            "    for _ in items:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "suppressor alias bound and entered inside the same try",
+        (
+            "    try:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1\n    finally:\n        pass"
+        ),
+        False,
+    ),
+    # The control for the three rows above, and the reason the fix orders by
+    # source position rather than by statement. Moving the `with` back to the
+    # top level leaves the swallow intact, so it must still be reported a
+    # defeat; the existing "bound in an if branch" row already covers that,
+    # and this pins the direction of the *same* block from the other side.
+    (
+        "suppressor alias entered after an if that may not have run",
+        (
+            "    if flag:\n        cs = contextlib.suppress(AssertionError)\n"
+            "        helper()\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
     (
         "suppressor alias bound in a loop",
         (

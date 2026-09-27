@@ -697,25 +697,71 @@ def _assigned_suppressors(function, bound):
     }
     if not aliases:
         return {}
-    # The order walk in `_aliased_suppressions` keys off `function.body`
-    # indexes, so each surviving alias is registered at the index of the
-    # statement that binds it. An alias written inside a nested block has no
-    # index of its own; it is registered at every top-level statement that
-    # *contains* it, which is the earliest point at which it can possibly have
-    # run. A `with cs:` on an earlier top-level statement than its binder
-    # therefore still raises NameError, and stays correctly reported live.
+    # Keyed by *source position* rather than by index into `function.body`. A
+    # statement index is too coarse: one top-level statement can both bind an
+    # alias and enter it, and a `with cs:` written after the assignment but
+    # inside the same `if` is the same shape as one written a statement later
+    # -- yet deferring the binding to the end of the enclosing statement hides
+    # it from the header that follows it in source order. That is a real
+    # escape, recorded in the #311 review: the swallow executes green while the
+    # rule reports the assert enforced.
+    #
+    # Position is the correct granularity because "is the name bound yet?" is
+    # a question about the order the two are *written* in. A `with cs:` ahead
+    # of its binder still raises UnboundLocalError on entry, and stays
+    # correctly reported live, because its position precedes the binder's.
+    # Control flow is deliberately not consulted: a binder inside a branch may
+    # not have run when a later header is entered, but resolving that needs a
+    # path analysis this check does not have, and over-reporting is the safe
+    # direction for an ambiguity (#308 criterion 1).
+    ranks = _source_order_ranks(function)
     assigned = {}
-    for index, statement in enumerate(function.body):
-        for name, value in aliases.items():
-            binders = _binders_of(function, name, value)
-            if not binders:
-                continue
-            if any(
-                binder is statement or any(child is binder for child in ast.walk(statement))
-                for binder in binders
-            ):
-                assigned.setdefault(index, {})[name] = value
+    for name, value in aliases.items():
+        binders = _binders_of(function, name, value)
+        positions = [ranks[binder] for binder in binders if binder in ranks]
+        if not positions:
+            continue
+        # The earliest position any binder can be reached from, so a header
+        # that follows *some* binding sees the alias on that path.
+        assigned.setdefault(min(positions), {})[name] = value
     return assigned
+
+
+def _source_order_ranks(function):
+    """Map every statement inside ``function`` to its position in source order.
+
+    The key is the statement's ``(lineno, col_offset)``, which is the order a
+    reader -- and the interpreter -- meets it. ``ast.walk`` cannot supply this:
+    it yields a parent before its children, so in
+
+        if flag:
+            cs = suppress(AssertionError)   # written 2nd
+        with cs:                            # written 3rd
+
+    the ``with`` is visited *before* the assignment nested inside the ``if``,
+    and ranking the walk would place the later-written header ahead of the
+    earlier-written binder. Line and column are what actually order the two,
+    so they are what this returns.
+
+    Only nodes that carry a position are ranked; every ``stmt`` does, and a
+    ``with`` header is one, so the two kinds compared here are always
+    comparable. Expressions are not ranked: a ``with`` header and the
+    assignment binding the name it enters are ordered by the statements that
+    contain them.
+    """
+    ranks = {}
+    for node in ast.walk(function):
+        position = _source_position(node)
+        if position is not None:
+            ranks.setdefault(node, position)
+    return ranks
+
+
+def _source_position(node):
+    """``(lineno, col_offset)`` for a statement, or ``None`` for anything else."""
+    if not isinstance(node, ast.stmt):
+        return None
+    return (node.lineno, node.col_offset)
 
 
 def _binders_of(function, name, value):
@@ -790,48 +836,71 @@ def _aliased_suppressions(node, function, bound):
     report both of those live context managers as defeats. The mutation matrix
     in the sentinel suite pins that difference.
     """
-    by_index = _assigned_suppressors(function, bound)
-    # A name is bound only by the assignments that run *before* the `with`.
-    # Walking `function.body` in order and carrying the bindings forward keeps
-    # that ordering explicit; a merged view of every assignment would claim a
-    # name is already bound when the `with` is the statement that has not run
-    # yet, and `with cs:` there raises NameError rather than swallowing.
+    by_position = _assigned_suppressors(function, bound)
+    ranks = _source_order_ranks(function)
+    # A name is bound only by the assignments written *before* the `with`.
+    # Headers and binders are visited in one merged source-order walk rather
+    # than statement-by-statement, because a single top-level statement can
+    # contain both: `if flag:` then `cs = suppress(...)` then `with cs:` is one
+    # statement to `function.body` but three positions to a reader. Deferring
+    # the binding to the end of the enclosing statement hid the alias from the
+    # very header that follows it, and the swallowed assert was reported
+    # enforced (the #311 review). A `with cs:` *ahead* of its binder still
+    # raises UnboundLocalError on entry, so it is still reported live.
+    pending = sorted(by_position.items())
+    cursor = 0
     bound_so_far = {}
     entered = []
-    for index, statement in enumerate(function.body):
-        for header in ast.walk(statement):
-            if not isinstance(header, (ast.With, ast.AsyncWith)):
+    for header in _with_headers_in_source_order(function, ranks):
+        # Apply every binding that precedes this header before reading it.
+        while cursor < len(pending) and pending[cursor][0] < ranks[header]:
+            bound_so_far.update(pending[cursor][1])
+            cursor += 1
+        for item in header.items:
+            expression = item.context_expr
+            # `with (cs := contextlib.suppress(AssertionError)):` binds the
+            # name and enters it in one node, so the alias is classified
+            # from its right-hand side rather than from `bound_so_far`. The
+            # right-hand side need not be a call at all -- `with (cs := 1):`
+            # is legal and fails loudly on entry with `TypeError` -- so the
+            # node type is checked before the suppressor predicate, which
+            # reads `call.func` and would otherwise raise.
+            walrus = expression if isinstance(expression, ast.NamedExpr) else None
+            if (
+                walrus is not None
+                and isinstance(walrus.value, ast.Call)
+                and _is_suppression_call(walrus.value, bound)
+            ):
+                entered.append(walrus.value)
+            if isinstance(expression, ast.Name) and expression.id in bound_so_far:
+                entered.append(bound_so_far[expression.id])
+            if not isinstance(expression, ast.Call) or not isinstance(
+                expression.func, ast.Attribute
+            ):
                 continue
-            for item in header.items:
-                expression = item.context_expr
-                # `with (cs := contextlib.suppress(AssertionError)):` binds the
-                # name and enters it in one node, so the alias is classified
-                # from its right-hand side rather than from `bound_so_far`. The
-                # right-hand side need not be a call at all -- `with (cs := 1):`
-                # is legal and fails loudly on entry with `TypeError` -- so the
-                # node type is checked before the suppressor predicate, which
-                # reads `call.func` and would otherwise raise.
-                walrus = expression if isinstance(expression, ast.NamedExpr) else None
-                if (
-                    walrus is not None
-                    and isinstance(walrus.value, ast.Call)
-                    and _is_suppression_call(walrus.value, bound)
-                ):
-                    entered.append(walrus.value)
-                if isinstance(expression, ast.Name) and expression.id in bound_so_far:
-                    entered.append(bound_so_far[expression.id])
-                if not isinstance(expression, ast.Call) or not isinstance(
-                    expression.func, ast.Attribute
-                ):
-                    continue
-                if expression.func.attr != "__enter__":
-                    continue
-                value = expression.func.value
-                if isinstance(value, ast.Name) and value.id in bound_so_far:
-                    entered.append(bound_so_far[value.id])
-        # Bindings take effect only *after* the statement that makes them.
-        bound_so_far.update(by_index.get(index, {}))
+            if expression.func.attr != "__enter__":
+                continue
+            value = expression.func.value
+            if isinstance(value, ast.Name) and value.id in bound_so_far:
+                entered.append(bound_so_far[value.id])
     return entered
+
+
+def _with_headers_in_source_order(function, ranks):
+    """Every ``with`` / ``async with`` in ``function``, in source order.
+
+    A nested pair is two separate nodes and both are visited; the outer header
+    simply ranks first, which is the order a reader meets them in. Nothing is
+    deduplicated, because two distinct headers are two distinct chances to
+    enter a suppressor.
+    """
+    headers = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, (ast.With, ast.AsyncWith)) and node in ranks
+    ]
+    headers.sort(key=lambda node: ranks[node])
+    return headers
 
 
 def _unreadable_suppressor(call, bound):
