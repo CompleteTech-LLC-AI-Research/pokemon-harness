@@ -37,6 +37,7 @@ from tests._timed_menu_milestone_sentinel_support import (
     _is_enforced,
     _is_tautology,
     _may_bypass,
+    _names_bound_by,
     count_sites_that_bypass_the_guard,
     guard_is_wired_on_the_fast_clock_path,
     guard_rejects_the_deadline_terminal_state,
@@ -44,6 +45,15 @@ from tests._timed_menu_milestone_sentinel_support import (
     retention_sites_observed,
     retention_subscript_sites_observed,
 )
+
+#: PEP 695's node type, read through the module rather than imported by name.
+#: Importing it directly would make this file uncollectable against any
+#: support module that predates the definition-carrier repair, which is exactly
+#: the configuration the "do these new rows actually fail before the fix?"
+#: check runs in. Reading it through `getattr` keeps that check a *test
+#: failure* rather than a collection error, so the count of failing rows stays
+#: readable instead of collapsing to a single error.
+_TYPE_ALIAS = getattr(support, "_TYPE_ALIAS", None)
 
 
 def _sentinel_uses(name, owner_name):
@@ -1759,6 +1769,67 @@ def test_a_bare_import_binds_a_name_and_retires_the_carried_walrus(label, name, 
     assert results == [live], (
         f"{label}: the interpreter says this form is "
         f"{'live' if live else 'defeated'}; got {results}"
+    )
+
+
+def test_every_binding_node_type_is_reachable_from_the_walk():
+    """No AST node that binds a name may be invisible to the walk.
+
+    Three review rounds on this branch each found a *new* binding carrier the
+    walk could not see, because each repair enumerated only the forms its
+    author happened to think of:
+
+    * round 3, `082ceae` — `alias.asname` and the `match` capture fields
+    * round 4, `70f3b8a` — bare imports, where `asname is None`
+    * round 5, `8de286c` — `def`/`async def`/`class`/`type X = ...`
+
+    That pattern does not stop by patching one more form, so this test closes
+    it by construction: it samples one statement per node type that binds a
+    name and fails if any of them binds nothing the walk can see. A new
+    binding form in the language, or a new one added here, cannot be added
+    without coverage. That is precisely the defect class of the three heads
+    above.
+
+    Two forms are deliberately absent, each with a reason rather than a
+    silent omission:
+
+    * `ExceptHandler` — a documented accepted exception. The compiler unbinds
+      the name when the handler exits, so it cannot survive to a later `with`.
+      The walk still *reports* it, so listing it here would assert the opposite
+      of what the language does.
+    * `AsyncFor` — `async for` is only legal inside an `async def`, so its
+      target always binds in a nested scope that the walk correctly excludes.
+      It is covered from the other direction by the `async-for-target` row of
+      `test_every_binding_form_retires_a_carried_walrus`.
+    """
+    samples = {
+        "Assign": "cs = 1",
+        "AnnAssign": "cs: int = 1",
+        "AugAssign": "cs += 1",
+        "NamedExpr": "(cs := 1)",
+        "Delete": "del cs",
+        "For": "for cs in []:\n    pass",
+        "withitem": "with helper.make() as cs:\n    pass",
+        "Import": "import os as cs",
+        "ImportFrom": "from os import path as cs",
+        "MatchAs": "match [1]:\n    case [cs]:\n        pass",
+        "MatchStar": "match [1]:\n    case [*cs]:\n        pass",
+        "MatchMapping": "match {}:\n    case {**cs}:\n        pass",
+        "FunctionDef": "def cs(): pass",
+        "AsyncFunctionDef": "async def cs(): pass",
+        "ClassDef": "class cs: pass",
+    }
+    if _TYPE_ALIAS is not None:
+        samples["TypeAlias"] = "type cs = int"
+
+    invisible = [
+        label
+        for label, sample in samples.items()
+        if "cs" not in _names_bound_by(ast.parse(textwrap.dedent(sample)).body[0])
+    ]
+    assert not invisible, (
+        "these binding forms bind `cs` but the walk cannot see it, so a carried "
+        f"walrus would survive them: {invisible}"
     )
 
 
