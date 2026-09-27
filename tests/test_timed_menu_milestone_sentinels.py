@@ -1365,6 +1365,82 @@ def test_a_name_bound_to_different_suppressors_is_ambiguous_not_ordered():
     assert not any(results), f"ambiguous alias resolved by order, got {results}"
 
 
+#: ``async with`` shapes. A suppressor reached through the *async* header is
+#: loud at runtime -- neither ``contextlib.suppress`` nor ``pytest.raises``
+#: implements ``__aenter__``, so entry raises ``TypeError`` before the body
+#: runs. A *sync* ``with`` nested inside one is a different matter and is
+#: still read, so the guard has to be scoped to the async header itself.
+ASYNC_CONTEXT_SHAPES = (
+    (
+        "async with a suppressor",
+        "    async with contextlib.suppress(AssertionError):\n        assert x != 1",
+        True,
+    ),
+    (
+        "async with pytest.raises",
+        "    async with pytest.raises(AssertionError):\n        assert x != 1",
+        True,
+    ),
+    (
+        "async with a bare suppressor alias",
+        ("    cs = contextlib.suppress(AssertionError)\n    async with cs:\n        assert x != 1"),
+        True,
+    ),
+    (
+        "sync with a suppressor nested in an async with",
+        (
+            "    async with helper.mgr():\n"
+            "        with contextlib.suppress(AssertionError):\n            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "sync with a suppressor alias nested in an async with",
+        (
+            "    async with helper.mgr():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n            assert x != 1"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    ASYNC_CONTEXT_SHAPES,
+    ids=[row[0] for row in ASYNC_CONTEXT_SHAPES],
+)
+def test_async_with_is_loud_but_a_sync_suppressor_inside_it_is_not(label, body, live):
+    """``async with`` needs an async context manager, and suppressors are not.
+
+    Measured on the pinned interpreter::
+
+        async with contextlib.suppress(AssertionError):
+            assert 1 == 2
+        # TypeError: 'suppress' object does not support the asynchronous
+        # context manager protocol
+
+    The body never runs, so the assert is a live contract. Reading the async
+    form as a suppression would drop a real assert from the sentinel's view.
+
+    A *sync* ``with`` nested inside the ``async with`` is unaffected and must
+    still be read, so the guard is scoped to the async header rather than to
+    the enclosing function.
+    """
+    imports = "    import contextlib\n    import pytest\n    from contextlib import suppress\n"
+    source = "async def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
+
+
 #: One block holding a ``with`` *before* the store and another *after* it. The
 #: two asserts are opposite cases that sit under one top-level statement, so
 #: they are pinned separately -- a rule that reports every ``with`` in the

@@ -566,8 +566,18 @@ def _suppression_names(call):
     families must be told apart, and the difference is measured rather than
     assumed:
 
-    * ``contextlib.suppress()`` is legal and suppresses *everything*, so it is
-      a genuine defeat and the universal reading is right.
+    * ``contextlib.suppress()`` is legal, and the no-argument reading here is
+      ``BaseException`` -- but that is *stricter than the interpreter*, not a
+      description of it. Measured: ``contextlib.suppress()`` stores
+      ``_exceptions == ()``, and ``issubclass(AssertionError, ())`` is
+      ``False``, so it suppresses **nothing** and an assert inside it fails
+      loudly. Reading it as universal therefore over-reports.
+      That direction is chosen on purpose: the argument the check *can* read
+      is absent, and an absent argument is not evidence of a harmless one.
+      The cost is a false alarm on a spelling the pinned file does not use; the
+      alternative would be to treat "no argument" as "no suppression", which
+      cannot be told apart here from a call whose arguments are simply
+      unreadable.
     * ``pytest.raises()`` with no expected type raises ``ValueError: You must
       specify at least one parameter`` while the context object is being
       constructed -- before the body is entered at all. The test fails loudly
@@ -1074,6 +1084,17 @@ def _entered_suppressions(node, bound):
 
 def _is_suppressing_with(node, bound, function=None):
     """Is this ``with`` a suppression context that can eat an assertion failure?"""
+    if isinstance(node, ast.AsyncWith):
+        # `async with` demands an *asynchronous* context manager. Neither
+        # `contextlib.suppress` nor `pytest.raises` provides one -- each returns
+        # `None` from `__enter__` and has no `__aenter__` at all -- so
+        # `async with suppress(AssertionError):` raises `TypeError: 'suppress'
+        # object does not support the asynchronous context manager protocol`
+        # while entering. The body never runs and the test fails loudly, so this
+        # is a live contract, not a defeat. Measured on the pinned interpreter.
+        # Reading it as a suppression would drop a real assert from the
+        # sentinel's view, so the async form is left alone entirely.
+        return False
     for item in node.items:
         call = item.context_expr
         if not isinstance(call, ast.Call):
