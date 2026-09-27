@@ -686,6 +686,22 @@ RESIDUAL_DEFEAT_SHAPES = (
         "    cs = suppress(Exception)\n    with cs:\n        assert x != 1",
         False,
     ),
+    # Order decides whether the alias is bound *yet*. Entering `cs` before the
+    # assignment that defines it raises NameError on entry, so the test fails
+    # loudly rather than passing quietly -- not a defeat. A rule that collects
+    # every assignment in the function and ignores position would call this
+    # dead and drop a live contract.
+    (
+        "with cs before the assignment binds it",
+        ("    with cs:\n        assert x != 1\n    cs = contextlib.suppress(AssertionError)"),
+        True,
+    ),
+    # The same alias with the assignment first is the silent defeat.
+    (
+        "with cs after the assignment binds it",
+        ("    cs = contextlib.suppress(AssertionError)\n    with cs:\n        assert x != 1"),
+        False,
+    ),
     (
         "annotated suppressor alias",
         (

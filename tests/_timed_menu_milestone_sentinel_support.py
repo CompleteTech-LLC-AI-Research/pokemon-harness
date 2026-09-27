@@ -592,7 +592,7 @@ def _suppressed_by_dunder(call, bound):
 
 
 def _assigned_suppressors(function, bound):
-    """Names bound to a readable suppressor earlier in this function.
+    """Map each statement index to the suppressor names bound *by* it.
 
     ``contextlib.suppress(AssertionError)`` is an expression, and an expression
     can be given a name and entered later:
@@ -608,9 +608,16 @@ def _assigned_suppressors(function, bound):
     assumed to suppress. ``isinstance`` on a class attribute is deliberately
     not matched: that is an ``Attribute`` chain, not a bare name, and reaching
     through a class to a descriptor needs a runtime this check does not have.
+
+    The result is keyed by statement index rather than merged into one dict,
+    because *order* decides whether the alias is bound yet. ``with cs:`` placed
+    **before** ``cs = suppress(...)`` raises ``NameError`` on entry -- the test
+    fails loudly rather than passing quietly -- so it is not a defeat, and a
+    single merged dict would have called it one. Only the assignments that
+    precede the ``with`` are visible to it.
     """
     assigned = {}
-    for statement in function.body:
+    for index, statement in enumerate(function.body):
         targets = []
         value = None
         if isinstance(statement, ast.Assign):
@@ -624,7 +631,7 @@ def _assigned_suppressors(function, bound):
         if isinstance(value, ast.Call) and _is_suppression_call(value, bound):
             for target in targets:
                 if isinstance(target, ast.Name):
-                    assigned[target.id] = value
+                    assigned.setdefault(index, {})[target.id] = value
     return assigned
 
 
@@ -645,31 +652,41 @@ def _aliased_suppressions(node, function, bound):
     damaging of the two, and matching only the dunder would have left the worse
     spelling open.
 
-    Only names bound by an assignment in the owning function qualify, and only
-    when that assignment's right-hand side is a *readable* suppressor. A name
-    from an outer scope is deliberately not followed: assuming an arbitrary
-    call returns a suppressor would report live asserts as dead on every
-    context manager this check cannot trace.
+    Only names bound by an assignment that *precedes* the ``with`` qualify, and
+    only when that assignment's right-hand side is a *readable* suppressor. A
+    name from an outer scope is deliberately not followed: assuming an
+    arbitrary call returns a suppressor would report live asserts as dead on
+    every context manager this check cannot trace.
     """
-    assigned = _assigned_suppressors(function, bound)
-    if not assigned:
+    by_index = _assigned_suppressors(function, bound)
+    if not by_index:
         return []
+    # A name is bound only by the assignments that run *before* the `with`.
+    # Walking `function.body` in order and carrying the bindings forward keeps
+    # that ordering explicit; a merged view of every assignment would claim a
+    # name is already bound when the `with` is the statement that has not run
+    # yet, and `with cs:` there raises NameError rather than swallowing.
+    bound_so_far = {}
     entered = []
-    for header in ast.walk(node):
-        if not isinstance(header, (ast.With, ast.AsyncWith)):
-            continue
-        for item in header.items:
-            expression = item.context_expr
-            if isinstance(expression, ast.Name) and expression.id in assigned:
-                entered.append(assigned[expression.id])
-            if not isinstance(expression, ast.Call) or not isinstance(
-                expression.func, ast.Attribute
-            ):
+    for index, statement in enumerate(function.body):
+        for header in ast.walk(statement):
+            if not isinstance(header, (ast.With, ast.AsyncWith)):
                 continue
-            if expression.func.attr != "__enter__":
-                continue
-            if isinstance(expression.func.value, ast.Name) and expression.func.value.id in assigned:
-                entered.append(assigned[expression.func.value.id])
+            for item in header.items:
+                expression = item.context_expr
+                if isinstance(expression, ast.Name) and expression.id in bound_so_far:
+                    entered.append(bound_so_far[expression.id])
+                if not isinstance(expression, ast.Call) or not isinstance(
+                    expression.func, ast.Attribute
+                ):
+                    continue
+                if expression.func.attr != "__enter__":
+                    continue
+                value = expression.func.value
+                if isinstance(value, ast.Name) and value.id in bound_so_far:
+                    entered.append(bound_so_far[value.id])
+        # Bindings take effect only *after* the statement that makes them.
+        bound_so_far.update(by_index.get(index, {}))
     return entered
 
 
