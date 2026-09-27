@@ -1467,3 +1467,641 @@ def test_both_orders_in_one_block_keep_their_own_verdict(label, body):
         f"{label}: the assert before the store must stay enforced and the one "
         f"after it must be reported defeated, got {results}"
     )
+
+
+#: #324: a walrus in a ``with`` header binds the name for the rest of the
+#: enclosing scope, so a *later* header that re-enters that name enters the
+#: same suppressor. ``NamedExpr`` is not an ``ast.Assign``, so the binding was
+#: never recorded and the re-entering assert was reported live -- a defeated
+#: assert certified as load-bearing, which is the damaging direction.
+#:
+#: The rows below compare the full list of verdicts rather than reducing it
+#: with ``all()``. Each fixture holds more than one assert whose verdicts are
+#: *not* all the same, and ``all()`` collapses such a fixture to its first
+#: verdict -- so a wrong second verdict passed the shipped table. That harness
+#: bug is itself fixed here; the exact comparison is what keeps these rows
+#: honest.
+#
+#: Every fixture is two- or three-assert on purpose: the first assert is the
+#: one already covered by the single-header walrus rows, and the later
+#: assert(s) are the ones this issue is about.
+WALRUS_REENTRY_SHAPES = (
+    # The defect itself. `cs` is still the suppressor at the second header, so
+    # its assert is swallowed too. Both are defeated; the first assert being
+    # already correct means `all()` would have passed while the second was
+    # wrong.
+    (
+        "a walrus-bound suppressor is re-entered by a later header",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # #324 criterion 1: the same must hold when the walrus is not written at
+    # the top level. Inside an `if` the bind happens on one path only, but the
+    # later header re-enters whatever was bound, and executed that is the
+    # suppressor.
+    (
+        "a walrus inside an if is re-entered by a later header",
+        (
+            "    if flag:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # ... and inside a `try`.
+    (
+        "a walrus inside a try is re-entered by a later header",
+        (
+            "    try:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # #324 criterion 2: a later rebind must WIN over the carried walrus
+    # value. `nullcontext()` does not suppress, so the second assert really is
+    # live and must be reported enforced. This is the row that a naive
+    # "record every walrus" repair gets wrong -- it is exactly the
+    # over-breadth that blocked #323.
+    (
+        "a later nullcontext rebind wins over a carried walrus value",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    cs = nullcontext()\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # ... the same through a helper, which is the `#308` rebind family.
+    (
+        "a later helper rebind wins over a carried walrus value",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    cs = helper.make()\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # ... and a rebind nested in an `if`, which is conditional.
+    (
+        "a later rebind inside an if wins over a carried walrus value",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    if flag:\n"
+            "        cs = nullcontext()\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # #324 criterion 3: a walrus whose value is not a suppressor never yields
+    # a defeated verdict, even when the name is re-entered. This is the
+    # cleanest canary -- nothing rebinds `cs`, so the suppressor value simply
+    # must never have been attached to it.
+    (
+        "a walrus of a non-suppressor is never reported defeated when re-entered",
+        (
+            "    with (cs := nullcontext()):\n        assert x != 1\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [True, True],
+    ),
+    # Two walruses of the same name in sequence: the later one supersedes the
+    # earlier, so the third assert runs under a `nullcontext` and is live.
+    (
+        "a later walrus of the same name supersedes the earlier one",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    with (cs := nullcontext()):\n        assert x != 2\n"
+            "    with cs:\n        assert x != 3"
+        ),
+        [False, True, True],
+    ),
+    # The bind does not have to be written in a `with` header. An assignment
+    # expression is a binding wherever it appears, and the three rows below
+    # are what separates recording a `NamedExpr` from harvesting the walruses
+    # out of `with` headers specifically. Executed, each of these really does
+    # swallow, so reporting them live is the damaging direction.
+    (
+        "a walrus in a plain assignment is re-entered by a later header",
+        ("    y = (cs := suppress(AssertionError))\n    with cs:\n        assert x != 1"),
+        [False],
+    ),
+    (
+        "a walrus in a comprehension is re-entered by a later header",
+        (
+            "    rows = [(cs, v) for v in items if (cs := suppress(AssertionError))]\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        [False],
+    ),
+    # A rebind in the *same* block as the walrus supersedes it. Executed, the
+    # first assert is swallowed by the suppressor that was current when the
+    # `with` was entered, and the second runs under the rebound
+    # `nullcontext` and is live.
+    (
+        "a rebind in the same block supersedes a walrus of the same name",
+        (
+            "    with (cs := suppress(AssertionError)):\n"
+            "        cs = nullcontext()\n"
+            "        assert x != 1\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # #324 criterion 4, and the three rows that actually pin
+    # `_walrus_is_conditional`.
+    #
+    # Every row above reaches the re-entry through a walrus in a *top-level*
+    # `with` header, so a walrus's conditionality never has to be decided: it
+    # is unconditional on every path, and the two competing walruses in the
+    # supersession row are settled by source order before ambiguity is ever
+    # consulted. The mutation "force every walrus unconditional" therefore
+    # leaves this whole table green.
+    #
+    # These three do decide it. Here the walrus is under an `if`, so it binds
+    # `cs` on some paths only -- exactly the case
+    # `_walrus_skipped_by_a_branch` exists to recognise. The competing
+    # `cs = nullcontext()` is under its own `if`, so it too is conditional.
+    # Two conditional bindings of one name cannot be ordered: on the `flag`
+    # path the `nullcontext` wins and the assert is live, and on the `not
+    # flag` path the suppressor is still bound. Which one is in force is
+    # undecidable, so the name is ambiguous and the safe reading is "a
+    # suppressor may be in force" -- the middle assert is reported defeated.
+    #
+    # Read the mutation the other way and it is the whole point: force the
+    # walrus unconditional and source order picks the `nullcontext` as the
+    # winner, so the live assert flips to enforced. That is the damaging
+    # direction -- a real contract dropped from the sentinel's view -- and it
+    # is the defect #324 is filed about, reached by a different road.
+    #
+    # Executed with `flag=True` the middle assert raises `AssertionError`
+    # (nullcontext does not suppress) while the first is swallowed; with
+    # `flag=False` neither `if` body runs and the assert does not execute at
+    # all. Both were run, unmodified, before these rows were written.
+    (
+        "a conditional walrus does not outrank a later conditional store",
+        (
+            "    if flag:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    if flag:\n"
+            "        cs = nullcontext()\n"
+            "        assert x != 2\n"
+            "    with cs:\n"
+            "        assert x != 3"
+        ),
+        [True, False, False],
+    ),
+    # ... the same with the conditional walrus written as a loop rather than
+    # an `if`. `for` is in `_walrus_skipped_by_a_branch`'s set for the same
+    # reason `if` is, and a rule that recognised only one of the two would be
+    # half a rule.
+    (
+        "a walrus under a loop does not outrank a later conditional store",
+        (
+            "    for item in items:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    if flag:\n"
+            "        cs = nullcontext()\n"
+            "        assert x != 2\n"
+            "    with cs:\n"
+            "        assert x != 3"
+        ),
+        [True, False, False],
+    ),
+    # ... and under a `try`. The three blocks are the complete set that can
+    # skip a walrus, so all three are pinned: dropping any one of them from
+    # `_walrus_skipped_by_a_branch` turns exactly the matching row red.
+    (
+        "a walrus under a try does not outrank a later conditional store",
+        (
+            "    try:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    if flag:\n"
+            "        cs = nullcontext()\n"
+            "        assert x != 2\n"
+            "    with cs:\n"
+            "        assert x != 3"
+        ),
+        [True, False, False],
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    WALRUS_REENTRY_SHAPES,
+    ids=[row[0] for row in WALRUS_REENTRY_SHAPES],
+)
+def test_a_walrus_bound_alias_reaches_the_headers_that_re_enter_it(label, body, expected):
+    """A walrus bind is a real binding, and a later rebind still supersedes it.
+
+    #323 tried to close the re-entry half of this and could not without
+    re-opening the supersession half: carrying the walrus value forward
+    unconditionally made a stale suppressor outlive a later ``cs =
+    nullcontext()``, so a *live* assert was reported defeated on three
+    separate rows. The shipped rule records a ``NamedExpr`` through the same
+    per-index binding machinery as an ordinary store, so both halves hold at
+    once.
+    """
+    source = (
+        "def outer(x, flag, helper, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == len(expected), (
+        f"{label}: fixture declared {len(asserts)} asserts but the row "
+        f"expects {len(expected)} verdicts"
+    )
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. Every assert "
+        f"is compared individually -- `all()` would collapse this fixture to "
+        f"its first verdict and hide a wrong later one."
+    )
+
+
+#: #324: every binding form Python has must retire a carried walrus, not just
+#: ``ast.Name`` targets.
+#:
+#: A walrus-bound suppressor is only correct while it is the *live* binding of
+#: the name. Rebinding that name to a ``nullcontext`` on every path makes the
+#: later ``with cs:`` enter something that does not suppress, so the assert
+#: under it is live and must be reported enforced. Reading only ``ast.Name``
+#: targets left every nested and non-``Assign`` store invisible, so a stale
+#: suppressor outranked the rebinding and a **live** assert was reported
+#: defeated -- the damaging direction.
+#:
+#: ``expected`` is the exact per-assert verdict list, not ``all(...)``:
+#: collapsing to the first verdict is what hid this defect in the first place.
+WALRUS_REBINDING_SHAPES = (
+    (
+        "a plain store retires the walrus",
+        "    cs = contextlib.nullcontext()",
+    ),
+    (
+        "a tuple-unpack store retires the walrus",
+        "    cs, other = (contextlib.nullcontext(), 2)",
+    ),
+    (
+        "a starred-unpack store retires the walrus",
+        "    cs, *rest = (contextlib.nullcontext(), 2, 3)",
+    ),
+    (
+        "a list-target store retires the walrus",
+        "    [cs] = [contextlib.nullcontext()]",
+    ),
+    (
+        "an annotated store retires the walrus",
+        "    cs: object = contextlib.nullcontext()",
+    ),
+    (
+        "a loop target retires the walrus",
+        "    for cs in (contextlib.nullcontext(),):\n        pass",
+    ),
+    (
+        "a with-as target retires the walrus",
+        "    with nullcontext() as cs:\n        pass",
+    ),
+    (
+        "an async with-as target retires the walrus",
+        "    async with nullcontext() as cs:\n        pass",
+    ),
+    (
+        "an async loop target retires the walrus",
+        "    async for cs in gen():\n        pass",
+    ),
+    (
+        "an except-as target retires the walrus",
+        "    try:\n        raise ValueError()\n    except ValueError as cs:\n        pass",
+    ),
+    (
+        "a del retires the walrus",
+        "    del cs",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind"),
+    WALRUS_REBINDING_SHAPES,
+    ids=[shape[0] for shape in WALRUS_REBINDING_SHAPES],
+)
+def test_a_walrus_alias_is_retired_by_every_binding_form(label, rebind):
+    """A carried suppressor must not outlive the name being rebound.
+
+    Each row binds a suppressor through a walrus, then rebinds that name to a
+    ``nullcontext`` in a different syntactic form, then enters it. The first
+    assert is swallowed by the walrus-bound suppressor; the second is entered
+    through the ``nullcontext`` and is **live**.
+
+    The ``del`` row is the exception to that description. ``del cs`` leaves the
+    name unbound, so the later ``with cs:`` raises ``NameError`` in real
+    Python and the second assert never executes -- there is no runtime verdict
+    to agree with. The row still earns its place: the carried suppressor must
+    be retired either way, and an unbound name is reported *enforced*, which is
+    the same contract a name that was never bound at all gets.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + rebind + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False, True]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. The second "
+        f"assert is under a `with cs:` entered after `cs` was rebound to a "
+        f"nullcontext, so it is live and must be reported enforced."
+    )
+
+
+#: #324: a walrus bound in a comprehension is a binding like any other.
+#:
+#: The comprehension's condition expression runs and leaves ``cs`` bound, so a
+#: later ``with cs:`` really does enter the suppressor. Recording only
+#: ``ast.Assign`` made this invisible and reported a swallowed assert as live.
+WALRUS_NON_ASSIGN_SHAPES = (
+    (
+        "a walrus in a comprehension condition",
+        "    [y for y in (0,) if (cs := contextlib.suppress(AssertionError))]",
+    ),
+    (
+        "a walrus in a list comprehension filter",
+        "    [y for y in (0, 1) if y and (cs := contextlib.suppress(AssertionError))]",
+    ),
+    (
+        "a walrus in a generator expression filter",
+        "    list(y for y in (0,) if (cs := contextlib.suppress(AssertionError)))",
+    ),
+    (
+        "a walrus in a call argument",
+        "    helper.consume((cs := contextlib.suppress(AssertionError)))",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "binder"),
+    WALRUS_NON_ASSIGN_SHAPES,
+    ids=[shape[0] for shape in WALRUS_NON_ASSIGN_SHAPES],
+)
+def test_a_walrus_bound_outside_an_assignment_still_reaches_a_later_header(label, binder):
+    """A walrus is a binding wherever it is written.
+
+    The walrus does not have to sit in an assignment statement's right-hand
+    side. A comprehension condition, a generator filter and a call argument all
+    bind the name, and all of them are evaluated before the ``with`` that
+    follows.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n" + binder + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. The walrus "
+        f"binds `cs` before the `with` is reached, so the assert is swallowed."
+    )
+
+
+#: #324: a ``match`` capture is a store, and it is not reachable from any
+#: statement's target list -- ``case [cs]:`` parses to an ``ast.MatchAs`` whose
+#: ``name`` is a plain string, not an ``ast`` target, so the target walk that
+#: covers tuple, list and starred unpacking never sees it.
+#:
+#: A capture rebinds the name to the value that was matched. Left unmodelled,
+#: the suppressor carried in by the earlier walrus survived the clause and
+#: reached the later ``with cs:``, which reported the assert under it as
+#: swallowed. Executing the fixture confirms the opposite: the capture puts a
+#: non-suppressor in ``cs``, so the second assert is **live** and its
+#: ``AssertionError`` propagates.
+MATCH_CAPTURE_SHAPES = (
+    (
+        "a sequence-pattern capture",
+        "    match flag:\n        case [cs]:\n            pass",
+    ),
+    (
+        "an as-pattern capture",
+        "    match flag:\n        case [other] as cs:\n            pass",
+    ),
+    (
+        "a mapping-pattern capture",
+        "    match flag:\n        case {'key': cs}:\n            pass",
+    ),
+    (
+        "a starred capture",
+        "    match flag:\n        case [other, *cs]:\n            pass",
+    ),
+    (
+        "an irrefutable as-pattern capture",
+        "    match flag:\n        case _ as cs:\n            pass",
+    ),
+    (
+        "a mapping rest capture",
+        "    match flag:\n        case {'key': 1, **cs}:\n            pass",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "capture"),
+    MATCH_CAPTURE_SHAPES,
+    ids=[shape[0] for shape in MATCH_CAPTURE_SHAPES],
+)
+def test_a_walrus_alias_is_retired_by_a_match_capture(label, capture):
+    """A ``match`` capture must retire a carried suppressor like any store.
+
+    The first assert is swallowed by the walrus-bound suppressor. The capture
+    then rebinds ``cs`` to the matched value, so the ``with cs:`` that follows
+    enters something that does not suppress and the second assert is live.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + capture + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False, True]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. The capture "
+        f"rebinds `cs` to the matched value, so the second assert is live and "
+        f"must be reported enforced."
+    )
+
+
+#: Two over-fix guards. The capture rules must not retire a binding they did
+#: not make, in either direction -- the first is a *missed* retirement and the
+#: second is a *spurious* one, and both were live bugs while this was written.
+MATCH_CAPTURE_SCOPE_ROWS = (
+    (
+        "a capture in a nested function does not retire the outer binding",
+        ("    def inner():\n        match flag:\n            case [cs]:\n                pass\n"),
+        [False, False],
+    ),
+    (
+        "a capture of a different name does not retire this one",
+        "    match flag:\n        case [other]:\n            pass\n",
+        [False, False],
+    ),
+    (
+        "a capture after the header does not retire it retroactively",
+        None,  # the capture is appended after the header instead
+        [False, False],
+    ),
+    (
+        "a capture before the header does retire it",
+        "    match flag:\n        case [cs]:\n            pass\n",
+        [False, True],
+    ),
+)
+
+
+#: A capture is not a *statement*, so nothing in the block that holds a header
+#: can be found by looking for a store statement -- but a header written inside
+#: the capturing ``case`` body has still had the capture run by the time it is
+#: reached.  These rows are what makes that block in ``_bindings_before``
+#: load-bearing rather than dead: without it every row below reports the
+#: second assert as swallowed.
+MATCH_CAPTURE_OWNS_NESTED_HEADER_ROWS = (
+    (
+        "a header in the capturing clause body reads the capture",
+        (
+            "    match flag:\n"
+            "        case [cs]:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "a header in a second clause body reads that clause's capture",
+        (
+            "    match flag:\n"
+            "        case [other]:\n"
+            "            pass\n"
+            "        case [cs]:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "a header in a clause that captures nothing still reads the suppressor",
+        (
+            "    match flag:\n"
+            "        case [other]:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "enforced"),
+    MATCH_CAPTURE_OWNS_NESTED_HEADER_ROWS,
+    ids=[row[0] for row in MATCH_CAPTURE_OWNS_NESTED_HEADER_ROWS],
+)
+def test_a_capture_reaches_a_header_nested_in_its_own_clause_body(label, body, enforced):
+    """The capture is not a store *statement*, so the block holding a header
+    sees no store at all and would fall back to the carried suppressor.
+
+    A header written inside the capturing ``case`` body must instead read the
+    capture, so that assert is reported enforced. A header in a clause that
+    captures nothing must still read the carried suppressor, so that one is
+    reported swallowed.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + body
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 2, f"{label}: fixture declared {len(asserts)} asserts, expected 2"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False, enforced], (
+        f"{label}: expected verdicts [False, {enforced}], got {results}. "
+        f"The capture binds `cs` before the nested header is reached."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "extra", "expected"),
+    MATCH_CAPTURE_SCOPE_ROWS,
+    ids=[row[0] for row in MATCH_CAPTURE_SCOPE_ROWS],
+)
+def test_a_match_capture_respects_its_own_scope_and_position(label, extra, expected):
+    """A capture retires the carried suppressor, and only where it really binds.
+
+    A ``match`` inside a nested ``def`` binds in *that* scope, so it must not
+    retire the outer function's name -- that would report a swallowed assert as
+    live. A capture of some other name must not retire this one. And a capture
+    written *after* the ``with`` header cannot have run when the header is
+    read, so it must not retire it either.
+    """
+    capture_after = (
+        "    match flag:\n        case [cs]:\n            pass\n" if extra is None else extra
+    )
+    after = "    match flag:\n        case [cs]:\n            pass\n" if extra is None else ""
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + capture_after + "    with cs:\n        assert x != 1\n" + after
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == expected, f"{label}: expected verdicts {expected}, got {results}."

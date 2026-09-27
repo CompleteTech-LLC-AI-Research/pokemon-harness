@@ -661,6 +661,107 @@ def _suppressed_by_dunder(call, bound):
     return ["BaseException"]
 
 
+def _store_target_names(targets):
+    """Every name a single store statement binds.
+
+    An ``ast.Name`` is the easy case, but Python lets a store target be a
+    tuple, a list, or a starred expression, and any of those can name a
+    variable:
+
+        cs, other = (contextlib.nullcontext(), 2)
+        [cs] = [contextlib.nullcontext()]
+        cs, *rest = (contextlib.nullcontext(), 2, 3)
+
+    Reading only ``ast.Name`` targets made those stores invisible, so a name
+    carried by an earlier walrus was never retired and a live assert under the
+    later ``with`` was reported defeated. Unwrapping the nested forms is what
+    makes the supersession rule above apply to those binding forms too.
+
+    Two store forms are still not modelled here. ``ast.AugAssign`` (``cs += 1``)
+    is not unwrapped, and it cannot retire a carried suppressor. It is benign
+    today only because ``contextlib.suppress`` defines no ``__iadd__`` and no
+    ``__add__``, so ``cs += 1`` on a carried suppressor raises ``TypeError``
+    before any assert can be reached -- the later ``with cs:`` is unreachable
+    for the same reason it is after ``del cs``. That safety is incidental to
+    the type, not a property this rule guarantees, so do not read the absence
+    of an ``AugAssign`` branch as a decision.
+
+    A subscript or attribute target (``obj.cs = ...``) is deliberately not
+    followed: it binds an attribute, not a local name, so it cannot retire a
+    local binding.
+
+    A ``match`` capture is a store too, and it is not a target node at all --
+    ``case [cs]:`` parses to an ``ast.MatchAs`` whose ``name`` is a plain string
+    rather than an ``ast`` target. ``MatchStar`` (``case [other, *cs]:``) and
+    ``MatchMapping.rest`` (``case {'a': 1, **cs}:``) bind the same way, so
+    ``_match_capture_names`` handles them rather than inventing fake targets
+    here.
+    """
+    names = []
+    pending = list(targets)
+    while pending:
+        target = pending.pop()
+        if isinstance(target, ast.Name):
+            names.append(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            pending.extend(target.elts)
+        elif isinstance(target, ast.Starred):
+            pending.append(target.value)
+    return names
+
+
+def _scope_body_nodes(function):
+    """Walk `function`'s own scope, stopping at nested function boundaries.
+
+    ``ast.walk`` descends into a nested ``def``/``lambda``, whose body binds
+    names in a different scope. A rule about which store is live *in this
+    function* must not see those. Comprehensions are left in: a walrus inside a
+    comprehension binds in the enclosing scope, which is exactly why
+    ``_walrus_is_conditional`` has to reason about them at all.
+    """
+    stack = list(ast.iter_child_nodes(function))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _match_capture_names(function):
+    """Every ``(name, owning statement)`` bound by a ``match`` capture.
+
+    A capture rebinds the name to the value that was matched, so a name
+    carrying a suppressor from an earlier walrus must not survive the clause
+    that captures it. Left unmodelled, the stale suppressor reached a later
+    ``with cs:`` and certified a **live** assert as swallowed.
+
+    These nodes carry a name string instead of a target, and they are not
+    reachable from an enclosing statement's target list, so they need their own
+    walk. ``MatchAs`` with ``pattern=None`` is the bare ``case _ as cs:`` form;
+    a ``MatchAs`` with ``name=None`` is a wildcard or a group and binds nothing.
+
+    The owning ``ast.stmt`` is returned alongside each name because
+    ``_binding_order`` positions every store by the top-level statement that
+    contains it; a bare pattern node is not in that chain.
+
+    Only captures in `function`'s own scope count. A ``match`` inside a nested
+    ``def`` or ``lambda`` binds a name in *that* scope, which has nothing to do
+    with the outer binding, and walking into it retired the outer name -- the
+    opposite error, turning a swallowed assert into a reported-live one.
+    """
+    owners = {}
+    for statement in _scope_body_nodes(function):
+        if not isinstance(statement, ast.Match):
+            continue
+        for node in ast.walk(statement):
+            if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
+                owners.setdefault(node.name, statement)
+            elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+                owners.setdefault(node.rest, statement)
+    return owners
+
+
 def _assigned_suppressors(function, bound):
     """Map each statement index to the suppressor names bound *by* it.
 
@@ -722,6 +823,23 @@ def _assigned_suppressors(function, bound):
     resolves to "not an alias" instead of leaving the first binding as the sole
     known one. Recording only the suppressor bindings would make that
     sequence look like a lone alias and report the live assert as dead.
+
+    An assignment *expression* is a binding too, and is collected here for the
+    same reason:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            assert 1 == 2
+        with cs:
+            assert 1 == 2          # also swallowed -- `cs` is still bound
+
+    A ``NamedExpr`` is not an ``ast.Assign``, so before #324 it was invisible
+    to this walk entirely and that second assert was reported enforced -- the
+    damaging direction. Recording it here rather than in the header logic is
+    what makes the supersession above apply to it unchanged: a later
+    ``cs = nullcontext()`` is an ordinary store, it wins on order, and the
+    carried suppressor does not outlive it. Recording the binding *only* where
+    the header is read -- the approach #323 took -- gets the re-entry case and
+    loses the supersession case, because nothing ever retires the value.
     """
     # Every binding of every name, tagged with whether that store can compete
     # with another, so that supersession and ambiguity stay told apart.
@@ -735,14 +853,76 @@ def _assigned_suppressors(function, bound):
         elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
             targets = [statement.target]
             value = statement.value
+        elif isinstance(statement, ast.NamedExpr):
+            # #324: an assignment expression is a binding like any other store.
+            # It is not an `ast.Assign`, so before this it was invisible here
+            # and a `with (cs := suppress(...)):` header left `cs` bound for
+            # the rest of the scope without any later `with cs:` seeing it --
+            # a swallowed assert reported live. Recording it through the same
+            # machinery means the per-index resolution, the supersession by a
+            # later store, and the non-suppressor rule below all apply to it
+            # unchanged, which is what keeps a later `cs = nullcontext()` from
+            # inheriting the carried suppressor (#308).
+            targets = [statement.target]
+            value = statement.value
+        elif isinstance(statement, (ast.For, ast.AsyncFor)):
+            # #324: a loop target is a store like any other. `for cs in ():`
+            # rebinds the name on every path that reaches the loop, so a
+            # carried suppressor must not survive it. Recording only
+            # `ast.Name` targets left this invisible and let a stale
+            # suppressor outrank the loop's own binding.
+            targets = [statement.target]
+            value = None
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            # #324: `with ... as cs:` is a store too, and the item expression
+            # is what the `with` would evaluate. A walrus carried in from
+            # earlier must be retired by it.
+            for item in statement.items:
+                if item.optional_vars is not None:
+                    targets.append(item.optional_vars)
+                    value = None
+        elif isinstance(statement, ast.ExceptHandler):
+            # #324: `except E as cs:` binds `cs`, and CPython deletes the name
+            # when the handler exits, so a carried suppressor must not outlive
+            # it either.
+            if statement.name is not None:
+                targets = [ast.Name(id=statement.name, ctx=ast.Store())]
+                value = None
+        elif isinstance(statement, ast.Delete):
+            # #324: `del cs` unbinds the name outright. Recording it as a store
+            # of `None` is what makes the existing supersession rule retire any
+            # earlier binding of that name.
+            targets = list(statement.targets)
+            value = None
         else:
             continue
         # A store written directly in the function body runs on every path;
         # one nested inside a block runs on some paths only.
-        conditional = statement not in function.body
-        for target in targets:
-            if isinstance(target, ast.Name):
-                bindings.setdefault(target.id, []).append((statement, value, conditional))
+        # A `NamedExpr` never sits directly in the function body, so for it the
+        # question is whether the *top-level statement that contains it* is
+        # written directly in the body. A walrus in a top-level `with` header
+        # therefore runs on every path (it is evaluated whenever that `with`
+        # is reached), while a walrus inside an `if` or a loop still runs on
+        # some paths only.
+        if isinstance(statement, ast.NamedExpr):
+            conditional = _walrus_is_conditional(function, statement)
+        else:
+            conditional = statement not in function.body
+        for name in _store_target_names(targets):
+            bindings.setdefault(name, []).append((statement, value, conditional))
+    # A `match` capture is the one store form that is not reachable from a
+    # statement's target list, so it cannot ride along in the loop above.
+    #
+    # `conditional` is False, not True. A `match` clause that matches always
+    # binds the captured name, and a clause that does not match leaves the
+    # previous binding in force -- so from the point of view of "which store
+    # runs last and retires the carried suppressor", a capture is exactly the
+    # unconditional store the supersession rule is built around. Marking it
+    # conditional made it merely *compete* with the earlier walrus instead of
+    # superseding it, so `_resolve_bindings` still resolved the name to the
+    # carried suppressor and a live assert was reported as swallowed.
+    for name, statement in _match_capture_names(function).items():
+        bindings.setdefault(name, []).append((statement, None, False))
     # A name bound by exactly one readable suppressor is a known alias. A name
     # bound by several is ambiguous -- see the docstring (#308 criterion 1) --
     # and must NOT be resolved by source order. It is recorded as an
@@ -847,6 +1027,42 @@ def _binding_order(function, statement):
     )
 
 
+def _walrus_is_conditional(function, walrus):
+    """Is this assignment expression reachable on only some paths?
+
+    An ``ast.NamedExpr`` never appears directly in the function body, so
+    ``statement not in function.body`` would classify every walrus as
+    conditional. That is right for ``if flag: (cs := suppress(...))`` and
+    wrong for a walrus written in a top-level ``with`` header, which is
+    evaluated on every path that reaches that ``with``.
+
+    The question is therefore asked of the blocks *inside* the top-level
+    statement that contains the walrus. Only the blocks that can *skip* the
+    walrus count: ``if``, the loops, ``try`` and a conditional expression. A
+    ``with`` header is not one of them -- its item expressions are evaluated
+    to build the context manager before the body is entered, so a walrus in
+    one runs on every path that reaches the header.
+
+    That keeps two successive top-level ``with`` headers from looking like two
+    *competing* bindings of one name, which would make the second header's
+    value ambiguous (#308) instead of letting it supersede the first.
+    """
+    for top in function.body:
+        if top is walrus or any(child is walrus for child in ast.walk(top)):
+            return _walrus_skipped_by_a_branch(top, walrus)
+    return True
+
+
+def _walrus_skipped_by_a_branch(statement, walrus):
+    """Is ``walrus`` inside a block of ``statement`` that can skip it?"""
+    for block in ast.walk(statement):
+        if not isinstance(block, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.IfExp)):
+            continue
+        if any(child is walrus for child in ast.walk(block)):
+            return True
+    return False
+
+
 def _is_readable_suppressor(value, bound):
     """Is ``value`` a right-hand side this check can read as a suppressor?
 
@@ -887,11 +1103,14 @@ def _aliased_suppressions(node, function, bound):
         with (cs := contextlib.suppress(AssertionError)):
             assert 1 == 2
 
-    A ``NamedExpr`` is not an ``ast.Assign``, so ``_assigned_suppressors`` never
-    records it, and the header no longer holds a bare ``Name`` for the
-    resolution rule to read -- the suppressor sits in a node shape nothing else
-    inspects. Executed, the assertion failure really is swallowed, so this is
-    the damaging direction: a live defeat reported as enforced.
+    A ``NamedExpr`` is not an ``ast.Assign``, so ``_assigned_suppressors`` used
+    to skip it entirely, and the header no longer holds a bare ``Name`` for the
+    resolution rule to read -- the suppressor sat in a node shape nothing else
+    inspected. Executed, the assertion failure really is swallowed, so this
+    was the damaging direction: a live defeat reported as enforced. #324
+    records the ``NamedExpr`` in :func:`_assigned_suppressors` so the *later*
+    header that re-enters the name resolves it too; the inline classification
+    below is what handles the header that performs the binding.
 
     The right-hand side is still gated on :func:`_is_suppression_call`, and that
     guard is load-bearing rather than a redundancy. A zero-argument call such as
@@ -945,7 +1164,9 @@ def _aliased_suppressions(node, function, bound):
             live = (
                 bound_so_far
                 if header is statement
-                else _bindings_before(header, statement, bound_so_far, by_index.get(index, {}))
+                else _bindings_before(
+                    header, statement, bound_so_far, by_index.get(index, {}), function
+                )
             )
             for item in header.items:
                 expression = item.context_expr
@@ -991,24 +1212,46 @@ def _encloses(header, node):
     return any(child is node for child in ast.walk(header))
 
 
-def _bindings_before(header, statement, bound_so_far, own):
+def _bindings_before(header, statement, bound_so_far, own, function=None):
     """The bindings in force at a nested ``with`` inside ``statement``.
 
     A store that appears *before* the nested header in the same block has run
     by the time the header is read, so this statement's bindings apply. A store
     that appears *after* it has not, and ``with cs:`` there raises `NameError`
     on entry -- loudly, not silently -- so the outer bindings stand.
+
+    The "has a store run here" test is deliberately not a list of statement
+    types. A ``match`` capture binds the name as a side effect of its clause
+    matching, and the capture is not itself a statement in the block, so a
+    ``with cs:`` written inside a ``case`` body has to see it:
+
+        with (cs := suppress(AssertionError)): ...
+        match flag:
+            case nullcontext() as cs:   # retires the carried suppressor
+                with cs:               # must read the capture, not the walrus
+                    assert x != 1      # live
     """
     for block in ast.walk(statement):
         body = getattr(block, "body", None)
         if not isinstance(body, list):
             continue
         seen_store = False
+        # Captures owned by this block have run by the time a header inside the
+        # same clause body is reached, even though no store *statement* does.
+        # The owner is the `ast.Match`; the block holding the header is the
+        # `match_case` nested under it, so the test runs the other way round --
+        # does the capturing `match` enclose this block?
+        captures_scope = function if function is not None else statement
+        captures = {
+            name
+            for name, owner in _match_capture_names(captures_scope).items()
+            if any(child is block for child in ast.walk(owner))
+        }
         for node in body:
             if node is header:
                 # Nothing in this block has been stored before the header, so
                 # only the bindings carried in from earlier statements apply.
-                return dict(own) if seen_store else bound_so_far
+                return dict(own) if seen_store or captures else bound_so_far
             if isinstance(node, ast.Assign) or (
                 isinstance(node, ast.AnnAssign) and node.value is not None
             ):
