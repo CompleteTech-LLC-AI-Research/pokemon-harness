@@ -31,6 +31,12 @@ import inspect
 
 import tests.test_timed_menu_milestones as milestones
 
+#: ``ast.TypeAlias`` (``type X = ...``) only exists on Python 3.12+, and this
+#: package supports 3.11, so it is resolved once here and every reference goes
+#: through this name. On 3.11 it is ``None`` and the isinstance check simply
+#: never matches, which is the right behaviour for a syntax that cannot parse.
+_TYPE_ALIAS = getattr(ast, "TypeAlias", None)
+
 #: Dotted paths whose call is a suppression context. Matched by *resolved*
 #: name rather than by spelling, so the qualified, from-import and both alias
 #: forms all collapse to the same value before the comparison. Matching one
@@ -955,6 +961,16 @@ def _binding_targets_by_name(statement):
     bindings = {}
     for node in ast.walk(statement):
         if id(node) in excluded:
+            # A `def`/`async def` is excluded as a nested scope, but the name
+            # it binds belongs to the *enclosing* scope: `def cs(): ...` after
+            # `with (cs := suppress(...))` really does rebind `cs` there, and
+            # the later `with cs:` raises TypeError before the assert. The
+            # exclusion is right for the body and wrong for the name, so the
+            # name is recorded from the excluded node itself. A `class` is not
+            # in `_nested_scope_nodes` and arrives here through the normal
+            # path.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                bindings.setdefault(node.name, []).append(ast.Name(id=node.name, ctx=ast.Store()))
             continue
         for name, target in _bound_targets(node):
             bindings.setdefault(name, []).append(target)
@@ -1049,6 +1065,31 @@ def _bound_targets(node):
         # tail below pick all of them up.
         bound = node.name if isinstance(node, (ast.MatchAs, ast.MatchStar)) else node.rest
         targets = [ast.Name(id=bound, ctx=ast.Store())] if bound is not None else []
+    elif isinstance(node, ast.ClassDef):
+        # `class cs: ...` binds `cs` in the enclosing scope, overwriting a
+        # carried suppressor. The later `with cs:` then raises TypeError on
+        # entry -- a class is not a context manager -- before the assert runs,
+        # so the assert is live and the checker was calling it defeated. Base
+        # `87a90da` gets this right.
+        # `def`/`async def` bind a name the same way, but `_nested_scope_nodes`
+        # excludes that subtree, so they are recorded by
+        # `_binding_targets_by_name` before the exclusion applies. Both are in
+        # `ledger/ROUND5_DEFINITION_BINDING_FINDING_20260927T1950Z.md`.
+        #
+        # The *body* of the definition is a nested scope and its binds stay
+        # excluded by `_nested_scope_nodes`; only the name the definition
+        # itself binds in the enclosing scope belongs here. That is also what
+        # keeps the pinned "a with-as target in a class body" ceiling row
+        # reading `[True]`: a class body does not bind the function's name.
+        #
+        targets = [ast.Name(id=node.name, ctx=ast.Store())]
+    elif _TYPE_ALIAS is not None and isinstance(node, _TYPE_ALIAS):
+        # `type cs = int` (3.12+) binds `cs` the same way, and its bound name
+        # is an `ast.Name` node rather than a `str`, so it needs unwrapping
+        # here for the shared `_flatten_target` tail to see it. `ast.TypeAlias`
+        # does not exist before 3.12 and this package supports 3.11, so the
+        # node type is resolved once at import rather than referenced bare.
+        targets = [node.name]
     else:
         targets = []
     return [

@@ -1756,6 +1756,72 @@ def test_a_bare_import_binds_a_name_and_retires_the_carried_walrus(label, name, 
 
 
 @pytest.mark.parametrize(
+    ("label", "definition", "live"),
+    [
+        ("def", "def cs(): pass", True),
+        ("async-def", "async def cs(): pass", True),
+        ("class", "class cs: pass", True),
+        ("type-alias", "type cs = int", True),
+        # The negative cases, and the reason the name is read off the
+        # definition itself rather than assuming any definition retires
+        # anything: these bind a *different* name, so the carried suppressor
+        # must survive and the assert stays swallowed.
+        ("def-binds-another-name", "def other(): pass", False),
+        ("class-binds-another-name", "class other: pass", False),
+        (
+            "a-body-bind-does-not-escape",
+            "def other():\n        cs = helper.make()",
+            False,
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_a_definition_binds_its_name_and_retires_the_carried_walrus(label, definition, live):
+    """A `def`/`class`/`type` statement binds a name and must retire that walrus.
+
+    A definition binds its name in the *enclosing* scope, so a carried
+    suppressor it names is overwritten. None of the three is a context
+    manager, so the later ``with cs:`` raises ``TypeError`` before the assert,
+    and the assert is live:
+
+        async def outer(x):
+            with (cs := contextlib.suppress(AssertionError)):
+                pass
+            def cs(): pass    # `cs` is now a function
+            with cs:           # TypeError, the assert never runs
+                assert x != 1  # live
+
+    ``def`` and ``async def`` are also nested *scopes*, and that exclusion is
+    why this took a second fix: ``_nested_scope_nodes`` drops the whole
+    subtree, the name included, so the branch in ``_bound_targets`` was never
+    reached for them. The name is recorded from the excluded node in
+    ``_binding_targets_by_name`` instead. The definition's *body* stays
+    excluded, which the last row pins -- a bind inside the body is that
+    scope's, not the enclosing function's.
+
+    ``type cs = int`` is 3.12+ and this package supports 3.11, so its node
+    type is resolved through a ``getattr`` guard rather than referenced bare.
+    """
+    if label == "type-alias" and not hasattr(ast, "TypeAlias"):
+        pytest.skip("`type X = ...` syntax and ast.TypeAlias need Python 3.12")
+    source = (
+        "async def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n" + textwrap.indent(definition, "    ") + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    results = _verdicts(source)
+    assert results == [live], (
+        f"{label}: the interpreter says this form is "
+        f"{'live' if live else 'defeated'}; got {results}"
+    )
+
+
+@pytest.mark.parametrize(
     ("label", "body", "live"),
     [
         ("assign-inside-the-walrus-statement", "__INSIDE_HEADER__cs = helper.make()", True),
