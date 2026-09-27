@@ -961,6 +961,30 @@ def _binding_targets_by_name(statement):
     return bindings
 
 
+def _import_bound_name(node, alias):
+    """The single name one `ast.alias` of an import binds, or ``None``.
+
+    An alias with an explicit ``as`` binds that name. A bare one binds a name
+    too, and the name depends on the statement form:
+
+    - ``ast.Import`` binds the **head** of the dotted name, so ``import a.b``
+      binds ``a`` -- the submodules are attributes of the bound package.
+    - ``ast.ImportFrom`` binds the **last** component, so ``from a import b``
+      binds ``b``.
+
+    Returning the wrong one is a real defect, not a style point. A carried
+    walrus on ``os`` must be retired by ``import os`` and must survive
+    ``import os as os2``, which binds a different name entirely.
+    """
+    if alias.asname is not None:
+        return alias.asname
+    if not alias.name:
+        return None
+    if isinstance(node, ast.Import):
+        return alias.name.split(".")[0]
+    return alias.name.rsplit(".", 1)[-1]
+
+
 def _bound_targets(node):
     """The ``(name, target)`` pairs a single node binds, unpacking containers.
 
@@ -997,11 +1021,25 @@ def _bound_targets(node):
         # neither the walk nor any other branch above could see it. A carried
         # walrus therefore survived into the following `with cs:`, and since
         # a module is not a context manager the assert inside is live.
-        targets = [
-            ast.Name(id=alias.asname, ctx=ast.Store())
-            for alias in node.names
-            if alias.asname is not None
-        ]
+        #
+        # The bound name is NOT always `alias.asname`. A *bare* import binds a
+        # name too, and reading only the asname missed it, which left a live
+        # assert reported as defeated: `import a.b` binds `a`, and
+        # `from a import b` binds `b`, both with `asname is None`. Measured
+        # against base `87a90da`, which gets those rows right, in
+        # `ledger/ROUND4_BARE_IMPORT_FINDING_20260927T1910Z.md`.
+        #
+        # So resolve the bound name per alias: an `asname` wins when present,
+        # otherwise an `ast.Import` binds the head of the dotted name
+        # (`import a.b` -> `a`) and an `ast.ImportFrom` binds the last
+        # component (`from a import b.c` -> `c`). The distinction is
+        # load-bearing in both directions: `import os as os2` binds `os2`
+        # and must leave a walrus on `os` alone.
+        targets = []
+        for alias in node.names:
+            bound = _import_bound_name(node, alias)
+            if bound is not None:
+                targets.append(ast.Name(id=bound, ctx=ast.Store()))
     elif isinstance(node, (ast.MatchAs, ast.MatchStar, ast.MatchMapping)):
         # A `match` capture pattern binds through `MatchAs.name` (a capture
         # and a `... as name` alike), `MatchStar.name` (a starred capture) and

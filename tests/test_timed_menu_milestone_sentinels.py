@@ -1697,6 +1697,65 @@ def test_a_walrus_in_a_class_body_does_not_escape_the_class():
 
 
 @pytest.mark.parametrize(
+    ("label", "name", "statement", "live"),
+    [
+        # A bare `import a.b` binds `a`, not `b`, and a bare `from a import b`
+        # binds `b`. Both with `asname is None`, so reading only the asname
+        # left the carried walrus in place and a live assert was reported as
+        # defeated. Base `87a90da` gets all of these right.
+        # See `ledger/ROUND4_BARE_IMPORT_FINDING_20260927T1910Z.md`.
+        ("bare-import", "os", "import os", True),
+        ("bare-dotted-import", "xml", "import xml.etree", True),
+        ("bare-from-import", "path", "from os import path", True),
+        ("bare-from-dotted-import", "etree", "from xml import etree", True),
+        # The negative case, and the reason the bound name is resolved per
+        # alias rather than "any import retires anything": an aliased import
+        # binds a *different* name, so it must leave this walrus alone and the
+        # assert stays swallowed.
+        ("aliased-import-binds-another-name", "os", "import os as os2", False),
+        ("aliased-from-import-binds-another-name", "os", "from os import path as p", False),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_a_bare_import_binds_a_name_and_retires_the_carried_walrus(label, name, statement, live):
+    """An import binds a name even without `as`, and must retire that walrus.
+
+    ``_bound_targets``' import branch collected only aliases carrying an
+    explicit ``asname``, so a *bare* import -- which also binds a name -- was
+    invisible. The module object then overwrote the suppressor alias, ``with
+    <name>:`` raised ``TypeError`` before the assert, and the checker called
+    the live assert defeated:
+
+        async def outer(x, helper):
+            with (os := contextlib.suppress(AssertionError)):
+                pass
+            import os          # `os` is now the module
+            with os:           # TypeError, assert never runs
+                assert x != 1  # live
+
+    The bound name depends on the form: ``import a.b`` binds the head `a``
+    because the submodules are attributes of the bound package, while
+    ``from a import b`` binds `b`. An ``as`` overrides both.
+    """
+    source = (
+        "async def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        f"    with ({name} := contextlib.suppress(AssertionError)):\n"
+        "        pass\n"
+        f"    {statement}\n"
+        f"    with {name}:\n"
+        "        assert x != 1\n"
+    )
+    results = _verdicts(source)
+    assert results == [live], (
+        f"{label}: the interpreter says this form is "
+        f"{'live' if live else 'defeated'}; got {results}"
+    )
+
+
+@pytest.mark.parametrize(
     ("label", "body", "live"),
     [
         ("assign-inside-the-walrus-statement", "__INSIDE_HEADER__cs = helper.make()", True),
