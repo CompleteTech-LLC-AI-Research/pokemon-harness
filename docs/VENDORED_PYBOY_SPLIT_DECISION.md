@@ -152,6 +152,34 @@ reproducibility requirement is now met (see the second bullet); conditions 2 and
     missing `Python.h` above.
   Condition 3 (native/Cython ABI verified on the split tree) therefore cannot be exercised, and
   source-only success is explicitly insufficient.
+
+  **Re-verified 2026-09-27 — the two sub-claims above are stale, and the real blocker is the
+  vendored source, not the host.** The CPython development headers *are* available for the
+  interpreter this work uses, at
+  `/home/agent/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/include/python3.12`, and
+  `/dev/shm` is made writable by the private-mount pattern the repo already documents
+  (`docs/VENDORED_PYBOY_SPLIT_DECISION.md` "Unblocking", `README.md:24`). With headers, Cython
+  `3.0.12`, and a writable `/dev/shm` all in place, the chain **Cython -> C -> gcc -> loadable
+  `.so`** was exercised end to end and succeeded: `pyboy/core/serial.py` cythonizes to
+  `1,618,512` bytes of C and compiles to a `373,088`-byte shared object (`gcc` exit 0).
+
+  The vendored modules nevertheless do not cythonize, and the failures are per-file and
+  code-specific — the same pipeline succeeding on `serial.py` and failing on three other
+  modules in the same run is what rules out a host defect:
+
+  | File | `cython -3` exit | `nogil` violations | C emitted |
+  |---|:--:|--:|---|
+  | `pyboy/pyboy.py` (#133) | 1 | 0 | none |
+  | `pyboy/core/mb.py` (#150) | 1 | 6 | none |
+  | `pyboy/core/lcd.py` (#155) | 1 | 36 | none |
+  | `pyboy/core/serial.py` (#153) | **0** | 0 | 1,618,512 bytes |
+
+  `pyboy.py` fails with `Python object cannot be passed as a varargs parameter` (lines 1261,
+  1291, 1295, 1387) — distinct from the `Operation not allowed without gil` failures in `mb.py`
+  and `lcd.py`. Condition 3 therefore remains unmet, but because of a source/toolchain-version
+  incompatibility in the vendored code rather than a missing environment. Unblocking it requires
+  either upstream work or an in-fork divergence onto a revision that cythonizes on Cython 3.x;
+  it is not a mechanical split and cannot be engineered around on this host.
 - **Generator determinism — proven (condition 1's reproducibility requirement met).** The prior
   claim that regeneration "cannot be established reliably here" is **withdrawn as stale**. Re-run
   2026-09-23 from a clean scratch directory: `opcodes_gen.py` fetches
@@ -180,10 +208,18 @@ remains "decision recorded, execution blocked".
 ## Unblocking
 
 Requirement (ii) — reproducible `opcodes_gen.py` output against the pinned upstream tables — is now
-**satisfied** (byte-identical regeneration proved above). The group therefore reduces to one
-remaining external prerequisite: **(i) an environment with the Cython build toolchain plus the
-CPython development headers and a writable shared-memory/temp device**, so `build_ext` can build
-and condition 3 (native ABI) can be verified. With that, a single pilot leaf — expected **#138
+**satisfied** (byte-identical regeneration proved above). Requirement (i) is **also now
+satisfied** and should no longer be treated as the blocker: as of 2026-09-27 the Cython
+toolchain, the CPython development headers, and a writable shared-memory device under the private
+mount pattern are all available on this host, and a full Cython -> C -> gcc -> `.so` build
+succeeds on `pyboy/core/serial.py`.
+
+What remains is therefore **not** an environment prerequisite. Condition 3 is blocked because
+`pyboy/pyboy.py`, `pyboy/core/mb.py` and `pyboy/core/lcd.py` do not cythonize under Cython
+`3.0.12` at all (see the per-file table above). That is a source/toolchain-version
+incompatibility in the vendored code, and clearing it means either upstream work or an in-fork
+divergence onto a revision that cythonizes — not a mechanical split. A single pilot leaf —
+expected **#138
 `plugins/game_wrapper_pokemon_pinball.py`**, whose Python-only plugin surface has no Cython `.pxd`
 sibling — can be split and reviewed first, followed by the `.pxd`-backed cores and finally the
 generated opcode pair.
