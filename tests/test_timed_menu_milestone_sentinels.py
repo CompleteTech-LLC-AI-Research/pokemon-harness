@@ -1066,6 +1066,23 @@ WALRUS_SHAPES = (
         ("    with (cs := helper.make()):\n        pass\n    with cs:\n        assert x != 1"),
         True,
     ),
+    # The carry-forward is scoped to the function that performs the binding.
+    # A walrus inside a nested `def` binds a name in *that* scope, so an outer
+    # `with cs:` never receives the suppressor and raises `NameError`. This is
+    # the regression test for a defect the carry-forward introduced:
+    # `ast.walk` descends into the nested body, so the binding escaped its
+    # scope and the outer assert was reported swallowed -- damaging direction.
+    (
+        "walrus bound in a nested def does not leak to the outer scope",
+        (
+            "    def inner():\n"
+            "        with (cs := contextlib.suppress(AssertionError)):\n"
+            "            pass\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        True,
+    ),
     # --- controls -----------------------------------------------------------
     # A zero-argument call reads as the unreadable case `BaseException` in
     # `_suppression_names`, and `BaseException` *does* catch `AssertionError`.

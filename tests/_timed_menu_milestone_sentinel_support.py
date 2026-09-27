@@ -514,6 +514,29 @@ def _own_imports(function):
     return found
 
 
+def _nested_scope_nodes(statement):
+    """The ids of nodes inside ``statement`` that belong to a nested scope.
+
+    A walrus inside a nested ``def``, ``async def`` or ``lambda`` binds a name
+    in *that* scope, so attributing it to the enclosing statement would let a
+    nested helper's alias decide whether the enclosing function's assert counts
+    as suppressed -- a false "unenforced" verdict, which is the damaging
+    direction. Mirrors ``_own_imports``, which excludes the same scopes for the
+    same reason.
+    """
+    excluded = set()
+    stack = list(ast.iter_child_nodes(statement))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            excluded.update(id(inner) for inner in ast.walk(node))
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        excluded.update(id(inner) for inner in ast.walk(statement))
+    return excluded
+
+
 def _resolved_dotted(expression, bound):
     """The dotted path ``expression`` refers to, with every alias expanded."""
     if isinstance(expression, ast.Name):
@@ -932,8 +955,23 @@ def _aliased_suppressions(node, function, bound):
     walrus_bindings = {}
     entered = []
     for index, statement in enumerate(function.body):
+        # `ast.walk` descends into nested function bodies, but a walrus inside a
+        # nested `def` binds a name in *that* scope. Carrying it out would make
+        # an outer `with cs:` read a suppressor it never gets:
+        #
+        #     def inner():
+        #         with (cs := contextlib.suppress(AssertionError)):
+        #             pass
+        #     with cs:                  # NameError: `cs` is `inner`'s local
+        #         assert 1 == 2
+        #
+        # so every node belonging to a nested scope is excluded from both the
+        # walk and the binding it would contribute.
+        nested = _nested_scope_nodes(statement)
         for header in ast.walk(statement):
             if not isinstance(header, (ast.With, ast.AsyncWith)):
+                continue
+            if id(header) in nested:
                 continue
             # A walrus header binds its name for the rest of the scope, so the
             # binding has to be recorded even when this header does not enclose
@@ -949,16 +987,22 @@ def _aliased_suppressions(node, function, bound):
             # certified as load-bearing.
             for item in header.items:
                 expression = item.context_expr
-                # Only a *call* is carried. A walrus whose value is not a call
-                # (`with (cs := 1):`) fails loudly on a later `with cs:` with
-                # `TypeError`, so re-entering it is a live contract and must
-                # not be carried into the suppressor set. See
-                # `_is_suppressing_with`, whose consumer applies the same
-                # guard for the same reason.
+                # Only a *suppression call* is carried, gated exactly as the
+                # same-statement path below gates the identical value. A
+                # walrus whose value is not a suppressor re-entering a later
+                # `with cs:` raises for real -- `TypeError` for a non-call, and
+                # a plain propagated `AssertionError` for a live context
+                # manager such as `nullcontext()` -- so carrying it would
+                # certify a live contract as swallowed. A zero-argument call
+                # reads as the unreadable case `BaseException` in
+                # `_suppression_names`, and `BaseException` does catch
+                # `AssertionError`, so the `ast.Call` guard alone is not
+                # enough.
                 if (
                     isinstance(expression, ast.NamedExpr)
                     and isinstance(expression.target, ast.Name)
                     and isinstance(expression.value, ast.Call)
+                    and _is_suppression_call(expression.value, bound)
                 ):
                     walrus_bindings[expression.target.id] = expression.value
             if not _encloses(header, node):
