@@ -697,7 +697,7 @@ RESIDUAL_DEFEAT_SHAPES = (
         False,
     ),
     # Order decides whether the alias is bound *yet*. Entering `cs` before the
-    # assignment that defines it raises NameError on entry, so the test fails
+    # assignment that defines it raises UnboundLocalError on entry, so the test
     # loudly rather than passing quietly -- not a defeat. A rule that collects
     # every assignment in the function and ignores position would call this
     # dead and drop a live contract.
@@ -1320,6 +1320,109 @@ def test_a_name_bound_to_different_suppressors_is_ambiguous_not_ordered():
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     results = [_is_enforced(function, node, tree) for node in asserts]
     assert not any(results), f"ambiguous alias resolved by order, got {results}"
+
+
+#: Whether an alias is bound yet is a question about the order two things are
+#: *written* in, so both directions of the question are pinned. Each row is a
+#: whole function body; the expected value is the verdict for every assert in
+#: it, in source order.
+#:
+#: Both defects were measured on the merged tree: each one reported a *live*
+#: contract as swallowed, which is the damaging direction -- a real assert
+#: disappears from the sentinel's view.
+ORDERING_SHAPES = (
+    # `with cs:` is written before its binder, so on entry the name is unbound
+    # and Python raises UnboundLocalError. Executed:
+    #
+    #     >>> mixed(True)
+    #     ['h1:UnboundLocalError', 'body2']
+    #
+    # -- the first block fails loudly and the second is swallowed. Resolving
+    # the alias at its *earliest* binder position made the first header see a
+    # binding that has not happened yet, and called it a silent defeat.
+    (
+        "a with written ahead of its binder stays live",
+        (
+            "    if flag:\n"
+            "        with cs:\n"
+            "            assert 1 == 2\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            "        assert 1 == 2"
+        ),
+        [True, False],
+    ),
+    # A rebinding to an ordinary call *supersedes* the earlier suppressor
+    # rather than competing with it: only the last unconditional store can be
+    # live at the `with`. Executed, the AssertionError propagates.
+    #
+    #     >>> seq()
+    #     'seq:AssertionError'
+    #
+    # Recording only readable-suppressor bindings left the first one as the
+    # sole known binding for the name, so the swallowed reading won.
+    (
+        "an ordinary rebinding supersedes an earlier suppressor",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = helper.make()\n"
+            "    with cs:\n"
+            "        assert 1 == 2"
+        ),
+        [True],
+    ),
+    # The control: with nothing rebinding it, the same alias is swallowed.
+    (
+        "an unrebound alias is still swallowed",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            "        assert 1 == 2"
+        ),
+        [False],
+    ),
+    # A `with` *between* two stores sees the earlier one, so this assert is
+    # swallowed even though a later store would have superseded it.
+    (
+        "a with between two stores sees the earlier one",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            "        assert 1 == 2\n"
+            "    cs = helper.make()"
+        ),
+        [False],
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    ORDERING_SHAPES,
+    ids=[shape[0] for shape in ORDERING_SHAPES],
+)
+def test_alias_resolution_follows_binding_order_in_both_directions(label, body, expected):
+    """A binding supersedes by order, and a header ahead of it stays live.
+
+    Both halves are the same question -- "is the name bound at this header?" --
+    and both halves were measured wrong on the merged tree, each reporting a
+    live contract as swallowed. The rows are asserted per-assert in source
+    order because the first two shapes carry two asserts each with *different*
+    verdicts, which is exactly the distinction a single ``any()``/``all()``
+    over the function would erase.
+    """
+    source = "def outer(flag, helper):\n    import contextlib\n" + body + "\n"
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = sorted(
+        (node for node in ast.walk(function) if isinstance(node, ast.Assert)),
+        key=lambda node: (node.lineno, node.col_offset),
+    )
+    assert len(asserts) == len(expected), (
+        f"{label}: fixture declared {len(asserts)} asserts, expected {len(expected)}"
+    )
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == expected, f"{label}: got {results}, expected {expected}"
 
 
 def test_plain_assignment_aliasing_needs_no_import_node():
